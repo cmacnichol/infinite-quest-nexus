@@ -125,17 +125,17 @@ integration("durable Story Engine integration", () => {
       expectedTurnNumber: 2,
       useRpgStats: true,
       suppressEventTriggers: false,
-      rpgStats: [{ id: "finesse", name: "Finesse", value: 99, note: "delicate locks and careful movement" }],
+      rpgStats: [{ id: "test_stat", name: "Test Stat", value: 99, note: "synthetic fixture value" }],
       eventTriggers: [],
       pendingEventTriggers: []
     });
     replies.push(
       { content: JSON.stringify({
-        stat_id: "finesse",
+        stat_id: "test_stat",
         difficulty_modifier: 0,
-        rationale: "The lock calls for a delicate touch.",
-        favorable_outcome: "The catch yields, but the hinges announce the character's arrival.",
-        setback_outcome: "The catch jams, and the hinges announce the character's arrival."
+        rationale: "Synthetic assessment rationale.",
+        favorable_outcome: "Marker Five becomes active.",
+        setback_outcome: "Marker Five remains inactive."
       }) },
       { content: validStory("Location Gamma opens and Marker Three appears.") }
     );
@@ -144,11 +144,15 @@ integration("durable Story Engine integration", () => {
     await runGenerationJob(pool, "story-worker-guidance", 30, credentialSecret);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
     const turnResult = await getGenerationResult(pool, job.id);
-    expect(turnResult.mechanics.roll).toMatchObject({ statId: "finesse", target: 99 });
+    expect(turnResult.mechanics.roll).toMatchObject({ statId: "test_stat", target: 99 });
     const storyRequest = requests.slice(requestOffset).find((request) => JSON.stringify(request).includes("fiction writer for Infinite Quest"));
-    const serialized = JSON.stringify(storyRequest);
-    expect(serialized).toContain("hinges announce");
-    expect(serialized).not.toMatch(/d20|\broll(?:s|ed|ing)?\b|\bdice?\b|finesse|difficulty_modifier|target.{0,10}99/i);
+    const storyUserMessage = storyRequest?.messages?.find((message: any) => message.role === "user");
+    const storyPayload = JSON.parse(storyUserMessage?.content || "{}");
+    const outcomeGuidance = JSON.stringify(storyPayload.fiction_only_outcome_guidance || []);
+    expect(outcomeGuidance).toContain("Marker Five becomes active");
+    expect(outcomeGuidance).not.toMatch(/d20|\broll(?:s|ed|ing)?\b|\bdice?\b|test_stat|difficulty_modifier|target/i);
+    expect(storyPayload).not.toHaveProperty("mechanics");
+    expect(storyPayload).not.toHaveProperty("rpgStats");
   });
 
   it("evaluates before and after triggers privately and commits deferred trigger state", async () => {
@@ -228,17 +232,17 @@ integration("durable Story Engine integration", () => {
       expectedTurnNumber: 2,
       useRpgStats: true,
       suppressEventTriggers: false,
-      rpgStats: [{ id: "finesse", name: "Finesse", value: 70, note: "delicate locks" }],
+      rpgStats: [{ id: "test_stat", name: "Test Stat", value: 70, note: "synthetic fixture value" }],
       eventTriggers: [],
       pendingEventTriggers: []
     });
     replies.push(
       { content: JSON.stringify({
-        stat_id: "finesse",
+        stat_id: "test_stat",
         difficulty_modifier: 0,
-        rationale: "The mechanism requires a careful touch.",
-        favorable_outcome: "The lock yields quietly.",
-        setback_outcome: "The lock jams and draws attention."
+        rationale: "Synthetic assessment rationale.",
+        favorable_outcome: "Marker Five becomes active.",
+        setback_outcome: "Marker Five remains inactive."
       }) },
       { content: '{"narration":"First partial', finishReason: "length" },
       { content: '{"narration":"Second partial', finishReason: "length" }
