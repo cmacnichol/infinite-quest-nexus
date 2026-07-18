@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Infinite Quest Nexus Migration</title>
+  <link rel="stylesheet" href="/nexus/nexus.css">
+</head>
+<body>
+  <header class="site-header">
+    <div>
+      <p class="eyebrow">Infinite Quest Nexus</p>
+      <h1>Chronicle migration</h1>
+      <p>Import a portable Infinite Quest story into authoritative PostgreSQL storage and inspect the fiction-only memory context.</p>
+    </div>
+    <a class="button secondary" href="/">Return to Infinite Quest</a>
+  </header>
+
+  <main>
+    <section class="card provider-card" aria-labelledby="provider-title">
+      <div>
+        <p class="eyebrow">Story Engine</p>
+        <h2 id="provider-title">Provider endpoints</h2>
+        <p>Provider requests run through the backend. API keys are encrypted before storage and are never returned to this browser.</p>
+      </div>
+      <form id="providerForm" class="provider-form">
+        <label>Profile name<input id="providerName" required maxlength="120" value="Local LM Studio"></label>
+        <label>Provider
+          <select id="providerType">
+            <option value="lmstudio">LM Studio native</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="manifest">Manifest</option>
+            <option value="openai_compatible">OpenAI-compatible</option>
+          </select>
+        </label>
+        <label>Role
+          <select id="providerRole">
+            <option value="text">Story text</option>
+            <option value="embedding">Chronicle embeddings</option>
+            <option value="image">Illustrations (future)</option>
+          </select>
+        </label>
+        <label>Base URL<input id="providerBaseUrl" required type="url" value="http://host.docker.internal:1234"></label>
+        <label>API key (optional for local endpoints)<input id="providerApiKey" type="password" autocomplete="off"></label>
+        <label>Default model<input id="providerDefaultModel" placeholder="May be selected after discovery"></label>
+        <label>Context window<input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768"></label>
+        <label>Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
+        <button class="button primary" type="submit">Save provider</button>
+      </form>
+      <div class="provider-select-row">
+        <label>Active text provider<select id="providerSelect"><option value="">No text provider configured</option></select></label>
+        <button id="discoverModels" class="button secondary" type="button" disabled>Discover models</button>
+        <label>Model<select id="modelSelect" disabled><option value="">Discover models or use the profile default</option></select></label>
+      </div>
+      <div id="providerStatus" class="status" role="status" aria-live="polite">LM Studio and compatible provider calls are server-side, so browser CORS does not apply.</div>
+    </section>
+
+    <section class="card import-card" aria-labelledby="import-title">
+      <div>
+        <h2 id="import-title">Import a saved story</h2>
+        <p>The import is idempotent. Importing the same file again returns the existing campaign instead of duplicating it.</p>
+      </div>
+      <label class="file-field">
+        <span>Infinite Quest <code>.story</code> or JSON file</span>
+        <input id="storyFile" type="file" accept=".story,.json,application/json">
+      </label>
+      <div class="import-actions">
+        <button id="importStory" class="button primary" type="button" disabled>Import selected file</button>
+        <button id="importBrowserState" class="button secondary" type="button" disabled>Import current browser story</button>
+      </div>
+      <div id="importStatus" class="status" role="status" aria-live="polite">Choose a story file to begin.</div>
+    </section>
+
+    <section class="workspace">
+      <aside class="card campaign-list-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Database</p>
+            <h2>Campaigns</h2>
+          </div>
+          <button id="refreshCampaigns" class="icon-button" type="button" aria-label="Refresh campaigns">↻</button>
+        </div>
+        <div id="campaignList" class="campaign-list"><p class="muted">Loading campaigns…</p></div>
+      </aside>
+
+      <section class="card memory-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Chronicle</p>
+            <h2 id="memoryTitle">Select a campaign</h2>
+          </div>
+          <button id="reindexMemory" class="button secondary" type="button" disabled>Rebuild memory</button>
+        </div>
+
+        <div id="memoryMetrics" class="metrics" aria-live="polite"></div>
+
+        <form id="embeddingForm" class="embedding-controls">
+          <label class="toggle-field"><input id="embeddingEnabled" type="checkbox"> Enable hybrid semantic memory for this campaign</label>
+          <label>Embedding provider<select id="embeddingProvider"><option value="">No embedding provider configured</option></select></label>
+          <label>Embedding model<input id="embeddingModel" maxlength="500" list="embeddingModels" placeholder="e.g. text-embedding-nomic-embed-text-v1.5"><datalist id="embeddingModels"></datalist></label>
+          <label>Batch size<input id="embeddingBatchSize" type="number" min="1" max="128" value="16"></label>
+          <button id="discoverEmbeddingModels" class="button secondary" type="button" disabled>Discover embedding models</button>
+          <button id="saveEmbeddingConfig" class="button primary" type="submit" disabled>Save &amp; index</button>
+        </form>
+        <div id="embeddingStatus" class="status">Semantic retrieval is optional. Without it, Chronicle uses full-text, entity, chronology, and recency retrieval.</div>
+
+        <form id="contextForm" class="context-controls">
+          <label>
+            Context budget
+            <input id="budgetTokens" type="number" min="512" max="1000000" step="1024" value="32000">
+          </label>
+          <label>
+            Compression
+            <select id="compression">
+              <option value="auto">Automatic</option>
+              <option value="full">Full history</option>
+              <option value="balanced">Balanced</option>
+              <option value="compact">Compact</option>
+              <option value="summary">Summary + recent</option>
+            </select>
+          </label>
+          <label class="query-field">
+            Current action or retrieval query
+            <input id="memoryQuery" type="text" maxlength="4000" placeholder="Optional: name, location, event, or intended action">
+          </label>
+          <button class="button primary" type="submit" disabled id="previewContext">Build context preview</button>
+        </form>
+
+        <div id="contextSummary" class="status hidden"></div>
+        <pre id="contextPreview" class="context-preview" tabindex="0">The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.</pre>
+
+        <form id="generationForm" class="generation-form">
+          <label>
+            Next action
+            <textarea id="storyAction" required maxlength="12000" rows="3" placeholder="What do you do next?"></textarea>
+          </label>
+          <button id="generateTurn" class="button primary" type="submit" disabled>Generate next turn</button>
+        </form>
+        <div id="generationStatus" class="status hidden" role="status" aria-live="polite"></div>
+        <article id="generatedTurn" class="generated-turn hidden"></article>
+      </section>
+    </section>
+  </main>
+
+  <script type="module" src="/nexus/nexus.js"></script>
+</body>
+</html>

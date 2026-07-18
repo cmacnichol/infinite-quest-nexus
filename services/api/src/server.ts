@@ -1,0 +1,253 @@
+import { readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
+import Fastify, { type FastifyInstance } from "fastify";
+import fastifyStatic from "@fastify/static";
+import { z } from "zod";
+import type { RuntimeConfig } from "../../../packages/database/src/config.js";
+import type { DatabasePool } from "../../../packages/database/src/pool.js";
+import { initialOwnerId } from "../../../packages/database/src/pool.js";
+import { storyImportRequestSchema } from "../../../packages/contracts/src/imports.js";
+import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
+import { generationRequestSchema, playerCampaignConfigSchema, providerProfileInputSchema } from "../../../packages/contracts/src/generation.js";
+import { importLegacyStory } from "./import-service.js";
+import {
+  buildContextPreview,
+  enqueueChronicleReindex,
+  enqueueEmbeddingReindex,
+  getCampaignEmbeddingConfig,
+  getChronicleMetrics,
+  setCampaignEmbeddingConfig
+} from "./memory-service.js";
+import { readAsset, type FilesystemAssetStore } from "./asset-service.js";
+import { createProvider, listProviders, providerModels } from "./provider-service.js";
+import { enqueueGeneration, getGenerationJob, getGenerationResult, retryGeneration, syncPlayerCampaignConfig } from "./generation-service.js";
+
+type BuildServerOptions = {
+  config: RuntimeConfig;
+  pool: DatabasePool;
+};
+
+const uuidSchema = z.uuid();
+
+function statusCode(error: unknown): number {
+  if (typeof error === "object" && error !== null && "statusCode" in error) {
+    const value = Number((error as { statusCode: unknown }).statusCode);
+    if (Number.isInteger(value) && value >= 400 && value <= 599) return value;
+  }
+  if (typeof error === "object" && error !== null && "issues" in error) return 400;
+  return 500;
+}
+
+function errorDetails(error: unknown): { name: string; message: string; issues?: unknown } {
+  if (error instanceof Error) {
+    const issues = "issues" in error ? (error as Error & { issues?: unknown }).issues : undefined;
+    return { name: error.name || "Error", message: error.message, ...(issues === undefined ? {} : { issues }) };
+  }
+  return { name: "Error", message: String(error) };
+}
+
+export async function buildServer({ config, pool }: BuildServerOptions): Promise<FastifyInstance> {
+  const app = Fastify({
+    logger: { level: process.env.LOG_LEVEL?.trim() || "info" },
+    bodyLimit: 64 * 1024 * 1024,
+    requestIdHeader: "x-correlation-id",
+    genReqId: () => crypto.randomUUID()
+  });
+  await mkdir(config.assetStorageRoot, { recursive: true });
+  const assetStore: FilesystemAssetStore = { root: config.assetStorageRoot };
+  await app.register(fastifyStatic, {
+    root: config.webRoot,
+    prefix: "/nexus/",
+    index: ["index.html"],
+    decorateReply: true
+  });
+
+  let legacyIndexCache: string | null = null;
+  const legacyIndex = async () => {
+    legacyIndexCache ??= await readFile(config.legacyIndexPath, "utf8");
+    return legacyIndexCache;
+  };
+
+  app.setErrorHandler((error, request, reply) => {
+    const code = statusCode(error);
+    const details = errorDetails(error);
+    request.log.error({ err: error, code }, "request_failed");
+    void reply.code(code).send({
+      error: code >= 500 ? "Internal server error" : details.name || "Invalid request",
+      message: code >= 500 ? "The request failed. Use the correlation ID to locate server diagnostics." : details.message,
+      correlationId: request.id,
+      ...(details.issues === undefined ? {} : { issues: details.issues })
+    });
+  });
+
+  app.get("/", async (_request, reply) => reply.type("text/html; charset=utf-8").send(await legacyIndex()));
+  app.get("/index.html", async (_request, reply) => reply.type("text/html; charset=utf-8").send(await legacyIndex()));
+  app.get("/health/live", async () => ({ status: "ok", role: config.role }));
+  app.get("/health/ready", async (_request, reply) => {
+    try {
+      const result = await pool.query<{ database_version: string; vector_version: string | null }>(
+        `SELECT current_setting('server_version') AS database_version,
+                (SELECT extversion FROM pg_extension WHERE extname = 'vector') AS vector_version`
+      );
+      const row = result.rows[0];
+      if (!row?.vector_version) return reply.code(503).send({ status: "not_ready", reason: "pgvector extension is unavailable" });
+      return { status: "ready", databaseVersion: row.database_version, pgvectorVersion: row.vector_version };
+    } catch (error) {
+      requestLogError(reply, error);
+      return reply.code(503).send({ status: "not_ready", reason: "database unavailable" });
+    }
+  });
+
+  app.get("/api/v1/session", async () => {
+    const userId = await initialOwnerId(pool);
+    return { user: { id: userId, systemKey: "initial-owner", displayName: "Initial Owner" }, authentication: "deferred" };
+  });
+
+  app.get("/api/v1/providers", async () => ({ providers: await listProviders(pool) }));
+
+  app.post("/api/v1/providers", async (request, reply) => {
+    const input = providerProfileInputSchema.parse(request.body);
+    const provider = await createProvider(pool, input, config.credentialEncryptionKey);
+    return reply.code(201).send(provider);
+  });
+
+  app.get<{ Params: { providerId: string } }>("/api/v1/providers/:providerId/models", async (request) => ({
+    models: await providerModels(pool, uuidSchema.parse(request.params.providerId), config.credentialEncryptionKey)
+  }));
+
+  app.post("/api/v1/imports/legacy-story", async (request, reply) => {
+    const body = storyImportRequestSchema.parse(request.body);
+    const result = await importLegacyStory(pool, body, assetStore);
+    return reply.code(result.duplicate ? 200 : 201).send(result);
+  });
+
+  app.get("/api/v1/campaigns", async () => {
+    const ownerUserId = await initialOwnerId(pool);
+    const result = await pool.query(
+      `SELECT c.id, c.title, c.status, c.active_turn_number AS "activeTurnNumber",
+              c.created_at AS "createdAt", c.updated_at AS "updatedAt",
+              w.id AS "worldId", w.title AS "worldTitle", c.world_version_id AS "worldVersionId"
+         FROM campaigns c
+         JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
+         JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
+        WHERE c.owner_user_id = $1
+        ORDER BY c.updated_at DESC`,
+      [ownerUserId]
+    );
+    return { campaigns: result.rows };
+  });
+
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/turns", async (request) => {
+    const ownerUserId = await initialOwnerId(pool);
+    const campaignId = uuidSchema.parse(request.params.campaignId);
+    const result = await pool.query(
+      `SELECT id, turn_number AS "turnNumber", action, narration, choices,
+              custom_action_suggestion AS "customActionSuggestion", image_prompt AS "imagePrompt",
+              image_url AS "imageUrl", accepted_at AS "acceptedAt"
+         FROM turns
+        WHERE owner_user_id = $1 AND campaign_id = $2
+        ORDER BY turn_number`,
+      [ownerUserId, campaignId]
+    );
+    return { turns: result.rows };
+  });
+
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/sync-status", async (request, reply) => {
+    const ownerUserId = await initialOwnerId(pool);
+    const result = await pool.query(
+      `SELECT id, title, active_turn_number AS "activeTurnNumber", world_version_id AS "worldVersionId", updated_at AS "updatedAt"
+         FROM campaigns WHERE id = $1 AND owner_user_id = $2`,
+      [uuidSchema.parse(request.params.campaignId), ownerUserId]
+    );
+    return result.rows[0] || reply.code(404).send({ error: "Not found", message: "Campaign not found." });
+  });
+
+  app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/player-config", async (request) => (
+    syncPlayerCampaignConfig(
+      pool,
+      uuidSchema.parse(request.params.campaignId),
+      playerCampaignConfigSchema.parse(request.body)
+    )
+  ));
+
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations", async (request, reply) => {
+    const body = generationRequestSchema.parse(request.body);
+    const job = await enqueueGeneration(pool, uuidSchema.parse(request.params.campaignId), body);
+    return reply.code(job.duplicate ? 200 : 202).send(job);
+  });
+
+  app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId", async (request) => (
+    getGenerationJob(pool, uuidSchema.parse(request.params.jobId))
+  ));
+
+  app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/result", async (request) => (
+    getGenerationResult(pool, uuidSchema.parse(request.params.jobId))
+  ));
+
+  app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/retry", async (request, reply) => (
+    reply.code(202).send(await retryGeneration(pool, uuidSchema.parse(request.params.jobId)))
+  ));
+
+  app.get<{ Params: { assetId: string } }>("/api/v1/assets/:assetId", async (request, reply) => {
+    const ownerUserId = await initialOwnerId(pool);
+    const asset = await readAsset(pool, assetStore, ownerUserId, uuidSchema.parse(request.params.assetId));
+    return reply
+      .type(asset.mimeType)
+      .header("cache-control", "private, max-age=31536000, immutable")
+      .header("etag", `\"${asset.contentHash}\"`)
+      .send(asset.bytes);
+  });
+
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/metrics", async (request) => {
+    return getChronicleMetrics(pool, uuidSchema.parse(request.params.campaignId));
+  });
+
+  app.get<{ Params: { campaignId: string }; Querystring: Record<string, unknown> }>(
+    "/api/v1/campaigns/:campaignId/memory/context-preview",
+    async (request) => {
+      const query = memoryContextQuerySchema.parse(request.query);
+      return buildContextPreview(pool, uuidSchema.parse(request.params.campaignId), query, config.credentialEncryptionKey);
+    }
+  );
+
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/reindex", async (request, reply) => {
+    const jobId = await enqueueChronicleReindex(pool, uuidSchema.parse(request.params.campaignId));
+    return reply.code(202).send({ jobId, status: "queued" });
+  });
+
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/embedding-config", async (request) => (
+    getCampaignEmbeddingConfig(pool, uuidSchema.parse(request.params.campaignId))
+  ));
+
+  app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/embedding-config", async (request) => {
+    const campaignId = uuidSchema.parse(request.params.campaignId);
+    const saved = await setCampaignEmbeddingConfig(pool, campaignId, campaignEmbeddingConfigSchema.parse(request.body));
+    const jobId = saved.enabled ? await enqueueEmbeddingReindex(pool, campaignId) : null;
+    return { ...saved, jobId };
+  });
+
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/embeddings/reindex", async (request, reply) => {
+    const jobId = await enqueueEmbeddingReindex(pool, uuidSchema.parse(request.params.campaignId));
+    if (!jobId) return reply.code(409).send({ error: "Not configured", message: "Enable semantic memory and select an embedding provider first." });
+    return reply.code(202).send({ jobId, status: "queued" });
+  });
+
+  app.get<{ Params: { jobId: string } }>("/api/v1/jobs/:jobId", async (request, reply) => {
+    const ownerUserId = await initialOwnerId(pool);
+    const result = await pool.query(
+      `SELECT id, campaign_id AS "campaignId", job_type AS "jobType", status, attempts,
+              progress, error_message AS "errorMessage", created_at AS "createdAt", updated_at AS "updatedAt",
+              completed_at AS "completedAt"
+         FROM chronicle_jobs WHERE id = $1 AND owner_user_id = $2`,
+      [uuidSchema.parse(request.params.jobId), ownerUserId]
+    );
+    const job = result.rows[0];
+    return job ? job : reply.code(404).send({ error: "Not found", message: "Job not found." });
+  });
+
+  return app;
+}
+
+function requestLogError(reply: { log: { error: (value: unknown, message?: string) => void } }, error: unknown): void {
+  reply.log.error({ err: error }, "readiness_check_failed");
+}

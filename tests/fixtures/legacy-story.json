@@ -1,0 +1,53 @@
+{
+  "settings": {
+    "aiProvider": "openrouter",
+    "apiKey": "test-credential-placeholder",
+    "memoryManagementMode": "full_reload",
+    "storyHistoryTokenLimit": 128000
+  },
+  "world": {
+    "title": "Synthetic Test World",
+    "genre": "test",
+    "tone": "neutral",
+    "backgroundStory": "Location Alpha contains Object Beta.",
+    "character": "Test Character is present.",
+    "premise": "Verify that imported state remains consistent.",
+    "firstAction": "Inspect Object Beta.",
+    "rules": "Use synthetic fixture markers only."
+  },
+  "turns": [
+    {
+      "id": "legacy-turn-1",
+      "turnNumber": 1,
+      "action": "Inspect Object Beta.",
+      "narration": "Test Character records Marker One at Location Alpha.",
+      "choices": ["Check Marker One", "Move to Location Beta", "Review Object Beta", "Wait"],
+      "scratchpadSnapshot": "Private synthetic state that must not enter Chronicle memory.",
+      "trackersSnapshot": []
+    },
+    {
+      "id": "legacy-turn-2",
+      "turnNumber": 2,
+      "action": "Move to Location Beta.",
+      "narration": "Marker Two becomes visible. The d100 roll was 42 and the target was 65%. Object Gamma remains at Location Beta.",
+      "choices": ["Inspect Object Gamma", "Return to Location Alpha", "Record Marker Two", "Wait"],
+      "roll": {
+        "statName": "Investigation",
+        "roll": 42,
+        "target": 65,
+        "success": true
+      },
+      "scratchpadSnapshot": "Private synthetic continuity marker.",
+      "trackersSnapshot": []
+    }
+  ],
+  "scratchpad": "Private synthetic continuity marker.",
+  "trackers": [],
+  "fullHistory": {
+    "characters": "Test Character remains present.",
+    "settingDetails": "Location Alpha and Location Beta are fixture locations.",
+    "plotDetails": "Marker One and Marker Two were recorded.",
+    "otherImportantNotes": "Object Gamma remains unresolved."
+  },
+  "fullHistoryCompressedThroughTurn": 2
+}

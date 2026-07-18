@@ -1,0 +1,13 @@
+node_modules/
+.pnpm-store/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.story
+*.log
+.DS_Store
+Thumbs.db
+compose.override.yaml
+local-data/

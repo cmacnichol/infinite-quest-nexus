@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.5-pg18-trixie
+        env:
+          POSTGRES_DB: infinitequest_test
+          POSTGRES_USER: infinitequest
+          POSTGRES_PASSWORD: integration-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U infinitequest -d infinitequest_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgresql://infinitequest:integration-test-only@127.0.0.1:5432/infinitequest_test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Reject story exports and sensitive data
+        run: pnpm check:data
+
+      - name: Type check
+        run: pnpm check
+
+      - name: Test with PostgreSQL and pgvector
+        run: pnpm test
+
+      - name: Build application
+        run: pnpm build
+
+      - name: Validate Compose configuration
+        env:
+          POSTGRES_PASSWORD: compose-validation-only
+        run: docker compose config --quiet
+
+      - name: Validate Swarm configuration
+        run: docker stack config -c deploy/swarm/stack.yaml >/dev/null
+
+      - name: Build container image
+        run: docker build --tag infinitequest-nexus:ci .

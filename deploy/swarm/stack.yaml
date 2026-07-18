@@ -1,0 +1,118 @@
+version: "3.9"
+
+services:
+  infinitequest-api:
+    image: ${NEXUS_IMAGE:-ghcr.io/cmacnichol/infinite-quest-nexus:latest}
+    command: ["node", "dist/services/runtime/src/main.js", "api"]
+    environment:
+      APP_ROLE: api
+      APP_PORT: 8080
+      DATABASE_URL_FILE: /run/secrets/infinitequest_database_url
+      CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/infinitequest_credential_encryption_key
+      ASSET_STORAGE_DRIVER: filesystem
+      ASSET_STORAGE_ROOT: /var/lib/infinitequest/assets
+    secrets:
+      - infinitequest_database_url
+      - infinitequest_credential_encryption_key
+    volumes:
+      - type: bind
+        source: /srv/docker/appdata/infinite-quest-nexus/assets
+        target: /var/lib/infinitequest/assets
+    ports:
+      - target: 8080
+        published: ${NEXUS_PORT:-8080}
+        protocol: tcp
+        mode: ingress
+    networks:
+      - infinitequest-backend
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+    deploy:
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+        monitor: 30s
+      rollback_config:
+        parallelism: 1
+        order: stop-first
+        monitor: 30s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+        window: 60s
+      resources:
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+        limits:
+          cpus: "1.00"
+          memory: 1G
+      placement:
+        preferences:
+          - spread: node.id
+
+  infinitequest-worker:
+    image: ${NEXUS_IMAGE:-ghcr.io/cmacnichol/infinite-quest-nexus:latest}
+    command: ["node", "dist/services/runtime/src/main.js", "worker"]
+    environment:
+      APP_ROLE: worker
+      DATABASE_URL_FILE: /run/secrets/infinitequest_database_url
+      CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/infinitequest_credential_encryption_key
+      ASSET_STORAGE_DRIVER: filesystem
+      ASSET_STORAGE_ROOT: /var/lib/infinitequest/assets
+      WORKER_POLL_INTERVAL_MS: 2000
+    secrets:
+      - infinitequest_database_url
+      - infinitequest_credential_encryption_key
+    volumes:
+      - type: bind
+        source: /srv/docker/appdata/infinite-quest-nexus/assets
+        target: /var/lib/infinitequest/assets
+    networks:
+      - infinitequest-backend
+    deploy:
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+        failure_action: rollback
+        monitor: 30s
+      rollback_config:
+        parallelism: 1
+        order: stop-first
+        monitor: 30s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+        window: 60s
+      resources:
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+        limits:
+          cpus: "2.00"
+          memory: 2G
+      placement:
+        preferences:
+          - spread: node.id
+
+networks:
+  infinitequest-backend:
+    driver: overlay
+    attachable: true
+
+secrets:
+  infinitequest_database_url:
+    external: true
+  infinitequest_credential_encryption_key:
+    external: true
