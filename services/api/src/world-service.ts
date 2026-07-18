@@ -5,6 +5,7 @@ import {
   type CampaignCreateRequest,
   type CampaignUpdateRequest,
   type CampaignWorldMigrationRequest,
+  type ResourceDeleteRequest,
   type WorldContent,
   type WorldCreateRequest,
   type WorldDraftUpdateRequest,
@@ -460,6 +461,92 @@ export async function updateCampaign(pool: DatabasePool, campaignId: string, req
   );
   if (!result.rows[0]) throw httpError(404, "Campaign not found.");
   return result.rows[0];
+}
+
+export async function deleteCampaign(pool: DatabasePool, campaignId: string, request: ResourceDeleteRequest) {
+  return withTransaction(pool, async (client) => {
+    const ownerUserId = await initialOwnerId(client);
+    const campaign = await client.query<{ title: string }>(
+      "SELECT title FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE",
+      [campaignId, ownerUserId]
+    );
+    const row = campaign.rows[0];
+    if (!row) throw httpError(404, "Campaign not found.");
+    if (row.title !== request.expectedTitle) throw httpError(409, "Campaign title changed. Refresh before deleting it.");
+
+    const activeWork = await client.query(
+      `SELECT 'generation' AS kind FROM generation_jobs
+        WHERE campaign_id = $1 AND owner_user_id = $2
+          AND status IN ('queued','assessing','generating','validating','committing','indexing')
+       UNION ALL
+       SELECT 'illustration' AS kind FROM image_jobs
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND status IN ('queued','generating')
+       UNION ALL
+       SELECT 'memory' AS kind FROM chronicle_jobs
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND status IN ('queued','running')
+       LIMIT 1`,
+      [campaignId, ownerUserId]
+    );
+    if (activeWork.rowCount) throw httpError(409, "Wait for active generation, illustration, or memory work before deleting this campaign.");
+
+    await client.query("DELETE FROM imports WHERE campaign_id = $1 AND owner_user_id = $2", [campaignId, ownerUserId]);
+    await client.query("DELETE FROM campaigns WHERE id = $1 AND owner_user_id = $2", [campaignId, ownerUserId]);
+    return { deleted: true, id: campaignId, title: row.title };
+  });
+}
+
+export async function deleteWorld(pool: DatabasePool, worldId: string, request: ResourceDeleteRequest) {
+  return withTransaction(pool, async (client) => {
+    const ownerUserId = await initialOwnerId(client);
+    const world = await client.query<{ title: string }>(
+      "SELECT title FROM worlds WHERE id = $1 AND owner_user_id = $2 FOR UPDATE",
+      [worldId, ownerUserId]
+    );
+    const row = world.rows[0];
+    if (!row) throw httpError(404, "World not found.");
+    if (row.title !== request.expectedTitle) throw httpError(409, "World title changed. Refresh before deleting it.");
+
+    const campaigns = await client.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM campaigns c
+         JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
+        WHERE wv.world_id = $1 AND c.owner_user_id = $2`,
+      [worldId, ownerUserId]
+    );
+    const campaignCount = Number(campaigns.rows[0]?.count || 0);
+    if (campaignCount) {
+      throw httpError(409, `Delete the ${campaignCount} campaign${campaignCount === 1 ? "" : "s"} using this world before deleting the world.`);
+    }
+
+    await client.query(
+      `DELETE FROM imports
+        WHERE owner_user_id = $2
+          AND (world_id = $1 OR world_version_id IN (
+            SELECT id FROM world_versions WHERE world_id = $1 AND owner_user_id = $2
+          ))`,
+      [worldId, ownerUserId]
+    );
+    await client.query(
+      `UPDATE worlds SET forked_from_world_id = NULL, forked_from_world_version_id = NULL, updated_at = now()
+        WHERE owner_user_id = $2 AND (
+          forked_from_world_id = $1 OR forked_from_world_version_id IN (
+            SELECT id FROM world_versions WHERE world_id = $1 AND owner_user_id = $2
+          )
+        )`,
+      [worldId, ownerUserId]
+    );
+    await client.query(
+      `UPDATE world_drafts SET based_on_world_version_id = NULL, updated_at = now()
+        WHERE owner_user_id = $2 AND based_on_world_version_id IN (
+          SELECT id FROM world_versions WHERE world_id = $1 AND owner_user_id = $2
+        )`,
+      [worldId, ownerUserId]
+    );
+    await client.query("DELETE FROM world_drafts WHERE world_id = $1 AND owner_user_id = $2", [worldId, ownerUserId]);
+    await client.query("DELETE FROM world_versions WHERE world_id = $1 AND owner_user_id = $2", [worldId, ownerUserId]);
+    await client.query("DELETE FROM worlds WHERE id = $1 AND owner_user_id = $2", [worldId, ownerUserId]);
+    return { deleted: true, id: worldId, title: row.title };
+  });
 }
 
 export async function migrateCampaignWorld(pool: DatabasePool, campaignId: string, request: CampaignWorldMigrationRequest) {

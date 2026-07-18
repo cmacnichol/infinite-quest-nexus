@@ -33,15 +33,16 @@ The current implementation is a production-shaped vertical slice. It serves the 
 - Typed before/after event evaluation, trigger counters, deferred events, and validated fiction-only after-scene extensions.
 - A migration, provider, generation, and memory-inspection UI at `/nexus/`.
 - A database-backed World Library for editable drafts, immutable publication, version history, fork provenance, archive/restore, and portable world export/import.
-- Campaign creation from selected world versions, campaign switching and archive controls, explicit audited upgrades to newer versions, and credential-free portable campaign exports.
+- Campaign creation from selected world versions, campaign switching, latest-turn resume into the player view, archive and guarded deletion controls, explicit audited upgrades to newer versions, and credential-free portable campaign exports.
+- Guarded world deletion that refuses to remove canon still referenced by a campaign and clears only the deleted world's import/fork provenance after confirmation.
 - Independently configured image-provider profiles and optional post-commit illustration jobs.
 - OpenRouter's dedicated image API and generic OpenAI-compatible image endpoints with separate credentials and model discovery.
 - Replica-safe image retries, base64 raster validation, content-addressed shared asset storage, and failure isolation from accepted story turns.
 - Docker Swarm definitions for replicated API and worker services using CephFS assets.
 
-The player UI can now use the Nexus Story Engine for main story turns from **Model Settings**, including campaigns with RPG stats and before/after event triggers. Referee responses, random values, targets, trigger reasons, and orchestration diagnostics remain private. The narrative request receives only selected fictional consequences and authoritative trigger effects after independent sanitization. Illustrations are configured separately in Nexus and run only after accepted story completion.
+The player UI can now use the Nexus Story Engine for main story turns from **Active Text Provider & Context**, including campaigns with RPG stats and before/after event triggers. Referee responses, random values, targets, trigger reasons, and orchestration diagnostics remain private. The narrative request receives only selected fictional consequences and authoritative trigger effects after independent sanitization. Illustrations are configured separately in Nexus and run only after accepted story completion.
 
-The Nexus interface at `/nexus/` is the Phase 2 management surface. World drafts use optimistic revisions; publication creates immutable numbered versions. Creating or editing a world never alters an existing campaign. When a newer version is available, the campaign panel offers an explicit migration that preserves its append-only accepted-turn ledger and starts the next generation from a fresh database-backed model chain.
+The Nexus interface at `/nexus/` is the World Management surface. World drafts use optimistic revisions; publication creates immutable numbered versions. Creating or editing a world never alters an existing campaign. When a newer version is available, the campaign panel offers an explicit migration that preserves its append-only accepted-turn ledger and starts the next generation from a fresh database-backed model chain. Selecting **Load story** passes the server-generated accepted ledger through one-time session storage, reconnects the same campaign ID, and opens the player view at the latest accepted turn without persisting provider credentials in the handoff.
 
 ## Requirements
 
@@ -74,11 +75,13 @@ The first startup downloads `pgvector/pgvector:0.8.5-pg18-trixie`, builds the ap
 
 Open `/nexus/`, save a text-provider profile, discover models, select a campaign, and enter the next action. For LM Studio running on the Docker Desktop host, the default endpoint is `http://host.docker.internal:1234`. Swarm deployments must use stable private-network DNS instead.
 
+Model discovery uses an advertised context length as the provider and prompt-budget default. The context field becomes read-only while that API-supplied value is active; it remains editable when the endpoint omits context metadata. Hover text and the expandable help panel describe every Chronicle compression level.
+
 For semantic Chronicle retrieval, save a separate provider profile with the **Chronicle embeddings** role. Select the campaign, enable hybrid semantic memory, choose an embedding-capable model, and save the configuration. LM Studio exposes embeddings through its OpenAI-compatible `/v1/embeddings` endpoint. Indexing runs as a durable worker job; story context continues with lexical retrieval while vectors are incomplete or the embedding endpoint is unavailable.
 
 For optional artwork, save a separate provider profile with the **Illustrations** role. Select a campaign, choose the image profile and model, configure the render options, and enable automatic illustrations. OpenRouter uses its dedicated Image API; other profiles use a compatible `/v1/images/generations` endpoint. Nexus accepts base64 PNG, JPEG, or WebP output and stores it in shared asset storage. Illustration retries and failures never rerun or reject the story turn.
 
-To connect the player experience, open Infinite Quest **Model Settings**, enable **Use the database-backed Nexus Story Engine**, select the saved backend provider and model, and generate the next turn. The client imports the current story on first use, synchronizes edited RPG stats and event triggers at the current accepted-turn boundary, records its campaign and idempotency linkage in the browser save, and resumes the same durable job after a reload. A model switch changes the next provider request but does not change the authoritative campaign snapshot sent to it. When that campaign enables Nexus illustrations, the player follows the independent image child job and displays the stored asset without calling the legacy browser image provider.
+To connect the player experience, open Infinite Quest **Active Text Provider & Context**, enable **Use the database-backed Nexus Story Engine**, select the saved backend provider and model, and generate the next turn. The client imports the current story on first use, synchronizes edited RPG stats and event triggers at the current accepted-turn boundary, records its campaign and idempotency linkage in the browser save, and resumes the same durable job after a reload. A model switch changes the next provider request but does not change the authoritative campaign snapshot sent to it. When that campaign enables Nexus illustrations, the player follows the independent image child job and displays the stored asset without calling the legacy browser image provider.
 
 Stop the containers without deleting data:
 
@@ -134,6 +137,7 @@ Useful endpoints:
 
 ```text
 GET  /api/v1/campaigns
+DELETE /api/v1/campaigns/:campaignId
 GET  /api/v1/campaigns/:campaignId/turns
 GET  /api/v1/campaigns/:campaignId/memory/metrics
 GET  /api/v1/campaigns/:campaignId/memory/context-preview
@@ -146,6 +150,7 @@ POST /api/v1/imports/legacy-story
 GET  /api/v1/providers
 POST /api/v1/providers
 GET  /api/v1/providers/:providerId/models
+DELETE /api/v1/worlds/:worldId
 POST /api/v1/campaigns/:campaignId/generations
 GET  /api/v1/campaigns/:campaignId/sync-status
 PUT  /api/v1/campaigns/:campaignId/player-config

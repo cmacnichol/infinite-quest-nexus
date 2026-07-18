@@ -5,6 +5,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import {
   campaignCreateSchema,
   campaignWorldMigrationSchema,
+  resourceDeleteSchema,
   worldContentSchema,
   worldCreateSchema,
   worldDraftUpdateSchema,
@@ -15,6 +16,8 @@ import {
 import {
   createCampaign,
   createWorld,
+  deleteCampaign,
+  deleteWorld,
   exportCampaign,
   exportWorld,
   forkWorld,
@@ -216,5 +219,37 @@ integration("World Library and campaign version integration", () => {
     }));
     await expect(migrateCampaignWorld(pool, campaign.id, campaignWorldMigrationSchema.parse({ worldVersionId: second.version.worldVersionId })))
       .rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("deletes campaigns before safely deleting their world", async () => {
+    const world = await publishedWorld("Delete");
+    const campaignTitle = `Synthetic Delete Campaign ${crypto.randomUUID()}`;
+    const campaign = await createCampaign(pool, campaignCreateSchema.parse({
+      title: campaignTitle,
+      worldVersionId: world.version.worldVersionId
+    }));
+
+    await expect(deleteWorld(pool, world.created.id, resourceDeleteSchema.parse({
+      confirmation: "DELETE",
+      expectedTitle: world.title
+    }))).rejects.toMatchObject({ statusCode: 409 });
+
+    await expect(deleteCampaign(pool, campaign.id, resourceDeleteSchema.parse({
+      confirmation: "DELETE",
+      expectedTitle: "Wrong title"
+    }))).rejects.toMatchObject({ statusCode: 409 });
+
+    await deleteCampaign(pool, campaign.id, resourceDeleteSchema.parse({
+      confirmation: "DELETE",
+      expectedTitle: campaignTitle
+    }));
+    await deleteWorld(pool, world.created.id, resourceDeleteSchema.parse({
+      confirmation: "DELETE",
+      expectedTitle: world.title
+    }));
+
+    expect((await pool.query("SELECT id FROM campaigns WHERE id = $1", [campaign.id])).rows).toHaveLength(0);
+    expect((await pool.query("SELECT id FROM worlds WHERE id = $1", [world.created.id])).rows).toHaveLength(0);
+    expect((await pool.query("SELECT id FROM world_versions WHERE world_id = $1", [world.created.id])).rows).toHaveLength(0);
   });
 });

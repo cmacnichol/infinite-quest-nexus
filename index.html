@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Infinite Quest - AI CYOA Engine</title>
+  <title>Infinite Quest Nexus</title>
   <style>
     :root {
       --bg: #07131d;
@@ -1049,24 +1049,25 @@
       <div class="brand">
         <div class="sigil" aria-hidden="true">📖</div>
         <div>
-          <h1>Infinite Quest</h1>
-          <p class="subtitle">A single-page AI-powered choose-your-own-adventure story engine.</p>
+          <h1>Infinite Quest Nexus</h1>
+          <p class="subtitle">Create reusable worlds, run persistent AI-assisted campaigns, and carry their Chronicle memory across models and sessions.</p>
         </div>
       </div>
       <div class="menu-wrap">
         <span class="pill" id="autosaveStatus">Autosaved</span>
         <button id="btnMenu" class="menu-button primary" type="button" aria-expanded="false" aria-controls="menuDropdown">☰ Menu</button>
         <div id="menuDropdown" class="menu-dropdown hidden" role="menu" aria-label="Main menu">
-          <button id="btnOpenWorldSetup" type="button" role="menuitem">World Set Up</button>
-          <button id="btnExportJson" type="button" role="menuitem">Save Full Story</button>
-          <button id="btnOpenNexusImport" type="button" role="menuitem">Import Story into Nexus Database</button>
+          <button id="btnOpenNexusImport" type="button" role="menuitem">World Management</button>
+          <button id="btnOpenProviderManagement" type="button" role="menuitem">Provider Management</button>
+          <button id="btnOpenWorldSetup" type="button" role="menuitem">Current World Setup</button>
+          <button id="btnOpenModelSettings" type="button" role="menuitem">Active Text Provider &amp; Context</button>
+          <button id="btnExportJson" type="button" role="menuitem">Save Story File</button>
           <label class="buttonish menu-file" role="menuitem">
             <input id="importFile" type="file" class="hidden" />
-            <span>Load Story</span>
+            <span>Load Story File</span>
           </label>
           <button id="btnExportMarkdown" type="button" role="menuitem">Export to Markdown</button>
           <button id="btnExportHtml" type="button" role="menuitem">Export to HTML</button>
-          <button id="btnOpenModelSettings" type="button" role="menuitem">Model Settings</button>
           <button id="btnOpenEditState" type="button" role="menuitem">Edit State</button>
           <button id="btnOpenActivityLog" type="button" role="menuitem">Activity Log</button>
           <button id="btnRestartGettingStarted" type="button" role="menuitem">Restart Getting Started Dialogue</button>
@@ -1121,7 +1122,7 @@
       </section>
     </main>
 
-    <p class="footer-note">Tip: this file is portable. Save it anywhere, open it in a browser, configure an AI provider, and use Save Full Story and Load Story to continue later.</p>
+    <p class="footer-note">Nexus campaigns are stored in PostgreSQL. Portable story files remain available for backup and migration.</p>
   </div>
 
   <div class="toast" id="toast"></div>
@@ -1166,8 +1167,8 @@
     <div class="world-gen-card">
       <div class="dialog-header">
         <div>
-          <h3 id="modelSettingsTitle">Model Settings</h3>
-          <p class="mini" id="modelSettingsSubtitle">Set your AI provider, model preferences, and image generation options.</p>
+          <h3 id="modelSettingsTitle">Active Text Provider &amp; Context</h3>
+          <p class="mini" id="modelSettingsSubtitle">Choose how this story connects to text generation and how much context it can use.</p>
         </div>
         <button id="btnCloseModelSettings" class="small ghost" type="button" aria-label="Close model settings">✕</button>
       </div>
@@ -1186,6 +1187,11 @@
               <option value="lmstudio">LM Studio — Stateful</option>
             </select>
           </label>
+          <div class="world-gen-box stack provider-option-help" aria-label="Text provider option explanations">
+            <p><strong>OpenRouter:</strong> hosted model access using your own browser-supplied API key.</p>
+            <p><strong>Custom OpenAI-compatible:</strong> stateless chat completions from a compatible endpoint you control.</p>
+            <p><strong>LM Studio — Stateful:</strong> local generation with short-term response chaining; Nexus still reloads authoritative campaign memory when the chain changes.</p>
+          </div>
           <div id="openRouterConnectionSettings" class="stack">
             <label>OpenRouter API key
               <input id="apiKey" type="password" autocomplete="off" placeholder="sk-or-..." />
@@ -1394,14 +1400,18 @@
               <input id="storyHistoryTokenLimit" type="number" min="1000" max="262144" step="1000" />
             </label>
             <label>Full-reload compression
-              <select id="storyHistoryCompression">
-                <option value="auto">Automatic — full detail when it fits</option>
-                <option value="full">Full detail preferred</option>
-                <option value="detailed">Detailed per-turn compression</option>
-                <option value="compact">Compact per-turn compression</option>
+              <select id="storyHistoryCompression" title="Choose how accepted story history is packed into a full model reload.">
+                <option value="auto" title="Selects the most detailed format that fits the configured history budget.">Automatic — full detail when it fits</option>
+                <option value="full" title="Sends complete accepted turns until the history budget is reached.">Full detail preferred</option>
+                <option value="detailed" title="Shortens each accepted turn while retaining actions, narration, choices, and continuity.">Detailed per-turn compression</option>
+                <option value="compact" title="Uses a concise record per accepted turn so more chronology fits.">Compact per-turn compression</option>
               </select>
             </label>
           </div>
+          <details class="world-gen-box compression-help">
+            <summary>Full-reload compression details</summary>
+            <p><strong>Automatic</strong> chooses the richest format that fits. <strong>Full</strong> prefers verbatim accepted turns. <strong>Detailed</strong> shortens older turns but keeps scene continuity. <strong>Compact</strong> favors chronological coverage.</p>
+          </details>
           <p class="mini">Used when LM Studio must rebuild story context, including after switching models or losing a saved response. The limit applies only to story history; world state, the current action, output tokens, scratchpad, and trackers also require context space.</p>
           <p id="fullReloadHistoryStatus" class="mini"></p>
           <div class="row wrap">
@@ -1819,9 +1829,8 @@
 
 
   <script>
-    // The Nexus namespace intentionally does not restore legacy browser campaigns.
-    // Existing stories can be imported later through the versioned migration path.
     const STORAGE_KEY = "infiniteQuestNexusClientState.v1";
+    const NEXUS_CAMPAIGN_RESUME_KEY = "infiniteQuestNexusCampaignResume.v1";
     const PROVIDER_OPENROUTER = "openrouter";
     const PROVIDER_CUSTOM = "custom";
     const PROVIDER_LM_STUDIO = "lmstudio";
@@ -2836,6 +2845,7 @@
     }
 
     function loadState() {
+      let resumedCampaignTitle = "";
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (raw) {
@@ -2846,15 +2856,53 @@
           normalizeDefaultTriggerState();
           normalizePerTurnSnapshots();
         }
+        const resumeRaw = sessionStorage.getItem(NEXUS_CAMPAIGN_RESUME_KEY);
+        if (resumeRaw) {
+          sessionStorage.removeItem(NEXUS_CAMPAIGN_RESUME_KEY);
+          const stateBeforeResume = deepClone(state);
+          try {
+            const resume = JSON.parse(resumeRaw);
+            const imported = resume?.story;
+            const campaignId = String(resume?.campaignId || "");
+            if (!imported || typeof imported !== "object" || !campaignId) throw new Error("The campaign resume handoff was incomplete.");
+            const preservedSettings = deepClone(state.settings || DEFAULT_STATE.settings);
+            imported.settings = {
+              ...preservedSettings,
+              ...(imported.settings && typeof imported.settings === "object" ? imported.settings : {}),
+              useNexusStoryEngine: true,
+              nexusCampaignId: campaignId,
+              nexusCampaignTurnCount: Math.max(0, Number(resume.activeTurnNumber || imported.turns?.length || 0)),
+              nexusPendingGeneration: null
+            };
+            imported.turns = (Array.isArray(imported.turns) ? imported.turns : []).map(turn => ({
+              ...turn,
+              nexusTurnId: String(turn.nexusTurnId || turn.id || ""),
+              nexusCampaignId: campaignId
+            }));
+            imported.viewIndex = imported.turns.length - 1;
+            migrateMemoryManagementSetting(imported);
+            state = cleanupDeprecatedState(mergeDefaults(deepClone(DEFAULT_STATE), imported));
+            resetLmStudioStatefulConversation("nexus_campaign_resumed");
+            state.unsavedFullExport = false;
+            resumedCampaignTitle = String(imported.world?.title || "campaign");
+          } catch (error) {
+            state = stateBeforeResume;
+            throw error;
+          }
+        }
       } catch (err) {
         console.warn(err);
-        toast("Could not load saved browser state; using defaults.");
+        toast("Could not load saved browser or campaign state; using the last valid local state.");
       }
       normalizeDefaultTriggerState();
       normalizePerTurnSnapshots();
       syncStateToForm();
       renderAll();
       dirtySinceFullExport = !!state.unsavedFullExport;
+      if (resumedCampaignTitle) {
+        saveState();
+        toast(`Loaded ${resumedCampaignTitle} from its latest accepted Nexus turn.`, 6500);
+      }
     }
 
     function mergeDefaults(base, incoming) {
@@ -3070,15 +3118,26 @@
     }
 
     function applySelectedLmStudioLoadedContext() {
-      if (selectedAiProvider() !== PROVIDER_LM_STUDIO) return false;
+      const contextInput = $("contextWindowTokens");
+      if (selectedAiProvider() !== PROVIDER_LM_STUDIO) {
+        if (contextInput) contextInput.readOnly = false;
+        return false;
+      }
       const endpoint = normalizeLmStudioEndpoint(state.settings?.lmStudioEndpoint || "");
       const modelKey = String(state.settings?.llmModel || "").trim().toLowerCase();
       const capability = lmStudioRuntimeCapabilityIndexes.get(endpoint)?.[modelKey] || null;
       const loadedContextLength = Math.round(Number(capability?.loadedContextLength || 0));
-      if (!capability?.loaded || loadedContextLength <= 0) return false;
+      if (!capability?.loaded || loadedContextLength <= 0) {
+        if (contextInput) contextInput.readOnly = false;
+        return false;
+      }
       state.settings.contextWindowTokens = configuredContextWindowTokens({ contextWindowTokens: loadedContextLength });
       state.settings.maxOutputTokens = configuredMaxOutputTokens(state.settings);
-      if ($("contextWindowTokens")) $("contextWindowTokens").value = String(state.settings.contextWindowTokens);
+      if (contextInput) {
+        contextInput.value = String(state.settings.contextWindowTokens);
+        contextInput.readOnly = true;
+        contextInput.title = "Locked to the context length advertised by the loaded LM Studio model instance.";
+      }
       if ($("maxOutputTokens")) $("maxOutputTokens").value = String(state.settings.maxOutputTokens);
       renderStoryOutputSettings();
       return true;
@@ -4468,12 +4527,12 @@
         next.textContent = ctaText;
       }
       if (nextInline) nextInline.textContent = ctaText;
-      if (title) title.textContent = enabled ? "Getting Started: Model Settings" : "Model Settings";
+      if (title) title.textContent = enabled ? "Getting Started: Active Text Provider" : "Active Text Provider & Context";
       if (subtitle) subtitle.textContent = enabled
         ? (sharedWorldStart
           ? "Choose a provider, confirm model settings, then start the loaded shared world."
           : "Choose a provider, confirm model settings, then continue to world setup.")
-        : "Set your AI provider, model preferences, and image generation options.";
+        : "Choose the active text provider, model, context budget, and image preferences.";
       if (noteEl) noteEl.textContent = note || (sharedWorldStart ? "Shared world loaded. Confirm your key and model settings, then start the adventure." : "");
     }
 
@@ -4696,8 +4755,18 @@
       renderLmStudioModelCapabilityStatus();
       renderLmStudioStatefulStatus();
       const contextHelp = $("contextWindowHelp");
+      const loadedCapability = lmStudio ? selectedLmStudioModelCapability() : null;
+      const advertisedContext = Math.round(Number(loadedCapability?.loadedContextLength || 0));
+      if ($("contextWindowTokens")) {
+        $("contextWindowTokens").readOnly = !!(loadedCapability?.loaded && advertisedContext > 0);
+        $("contextWindowTokens").title = loadedCapability?.loaded && advertisedContext > 0
+          ? "Locked to the context length advertised by the loaded LM Studio model instance."
+          : "Editable because the selected provider did not advertise a loaded context length.";
+      }
       if (contextHelp) contextHelp.textContent = lmStudio
-        ? "Controls the app’s prompt budget and the desired context for an initial model load. Requests pinned to an already-loaded instance use its advertised context without reloading it."
+        ? (loadedCapability?.loaded && advertisedContext > 0
+          ? `LM Studio reports a ${advertisedContext.toLocaleString()}-token loaded context. The field is locked to that model instance.`
+          : "LM Studio did not advertise a loaded context length for this model, so the context field remains editable.")
         : "Controls how much history, scratchpad, and compressed memory Infinite Quest sends. Set this at or below the context length with which the selected model is loaded.";
       const modelNote = $("modelSettingsSubtitle");
       if (modelNote && !transientUi.modelSettingsGettingStarted) {
@@ -5854,15 +5923,15 @@
         return "The model answered with malformed JSON. No automatic retry was performed unless that operation explicitly enables retries.\n\nWhat to try:\n• Use a model with stronger JSON/structured-output support.\n• Check the response finish reason and content ending.\n• Reduce prompt details if the response was cut off.";
       }
       if (err?.isModelNoContentError || /returned no .*content/i.test(message)) {
-        return `${providerName()} returned an empty world setup response. The app could not find any text to turn into the setup fields.\n\nWhat to try:\n• Press Generate and fill setup again.\n• Pick a different story model in Model Settings.\n• Check that the selected provider is running and the model is loaded.`;
+        return `${providerName()} returned an empty world setup response. The app could not find any text to turn into the setup fields.\n\nWhat to try:\n• Press Generate and fill setup again.\n• Pick a different story model in Active Text Provider & Context.\n• Check that the selected provider is running and the model is loaded.`;
       }
       if (/(?:OpenRouter|Custom endpoint) .*request failed/i.test(message)) {
         return `${message}\n\nCheck that your API key is valid, the selected model is available, and your account has access to that provider.`;
       }
       if (/api key|endpoint base URL/i.test(message)) {
-        return `${message}\n\nOpen Model Settings from the Menu and check the selected provider's connection settings.`;
+        return `${message}\n\nOpen Active Text Provider & Context from the Menu and check the selected provider's connection settings.`;
       }
-      return `${message}\n\nTry again, or choose a different model in Model Settings if this keeps happening.`;
+      return `${message}\n\nTry again, or choose a different model in Active Text Provider & Context if this keeps happening.`;
     }
 
     const unsupportedJsonResponseFormatTargets = new Set();
@@ -6339,15 +6408,15 @@ Character option requirements:
         return "The model answered with malformed JSON instead of usable character options. The app silently retried before showing this message. Try Generate Character Select again, or choose a model with stronger JSON support.";
       }
       if (err?.isModelNoContentError || /returned no .*content/i.test(message)) {
-        return `${providerName()} returned an empty character-selection response. Try again, or pick a different story model in Model Settings.`;
+        return `${providerName()} returned an empty character-selection response. Try again, or pick a different story model in Active Text Provider & Context.`;
       }
       if (/(?:OpenRouter|Custom endpoint) .*request failed/i.test(message)) {
         return `${message}\n\nCheck that your API key is valid, the selected model is available, and your account has access to that provider.`;
       }
       if (/api key|endpoint base URL/i.test(message)) {
-        return `${message}\n\nOpen Model Settings from the Menu and check the selected provider's connection settings.`;
+        return `${message}\n\nOpen Active Text Provider & Context from the Menu and check the selected provider's connection settings.`;
       }
-      return `${message}\n\nTry again, or choose a different story model in Model Settings if this keeps happening.`;
+      return `${message}\n\nTry again, or choose a different story model in Active Text Provider & Context if this keeps happening.`;
     }
 
     async function generateCharacterSelect(target = "worldSetup") {
@@ -8293,13 +8362,13 @@ ${addition}`.trim();
     async function callNexusStoryEngine(action, rollResult = null, eventTriggerResults = [], options = {}) {
       let pending = state.settings.nexusPendingGeneration;
       let providerProfileId = String(pending?.jobId ? pending.providerProfileId : state.settings.nexusProviderProfileId || "");
-      if (!providerProfileId) throw new Error("Choose a Nexus backend text provider in Model Settings.");
+      if (!providerProfileId) throw new Error("Choose a Nexus backend text provider in Active Text Provider & Context.");
       const campaignId = await ensureNexusCampaignForCurrentStory();
       if (!campaignId) throw new Error("Nexus did not return a campaign ID for the current story.");
 
       pending = state.settings.nexusPendingGeneration;
       providerProfileId = String(pending?.jobId ? pending.providerProfileId : state.settings.nexusProviderProfileId || "");
-      if (!providerProfileId) throw new Error("Choose a Nexus backend text provider in Model Settings.");
+      if (!providerProfileId) throw new Error("Choose a Nexus backend text provider in Active Text Provider & Context.");
       if (!pendingNexusGenerationMatches(pending, campaignId, action)) {
         pending = {
           campaignId,
@@ -11908,6 +11977,7 @@ ${imageRule}- Update only the trackers provided in the prompt unless a tracker n
       });
       addClick("btnOpenWorldSetup", () => { closeMenu(); openWorldSetupDialog(); });
       addClick("btnOpenModelSettings", () => { closeMenu(); openModelSettingsDialog(); });
+      addClick("btnOpenProviderManagement", () => { closeMenu(); window.location.assign("/nexus/#providers"); });
       addClick("btnOpenEditState", () => { closeMenu(); openEditStateDialog(); });
       addClick("btnOpenActivityLog", openActivityLogDialog);
       addClick("btnCloseActivityLog", closeActivityLogDialog);
@@ -11985,7 +12055,7 @@ ${imageRule}- Update only the trackers provided in the prompt unless a tracker n
       });
       addClick("btnSkipGettingStartedToStory", () => {
         closeDialog("gettingStartedDialog");
-        toast(hasConfiguredProvider() ? "Closed Getting Started." : "Provider setup skipped for now. You can open Model Settings from the Menu when you are ready.");
+        toast(hasConfiguredProvider() ? "Closed Getting Started." : "Provider setup skipped for now. You can open Active Text Provider & Context from the Menu when you are ready.");
       });
       $("aiProvider")?.addEventListener("change", () => {
         syncFormToState();
@@ -12100,10 +12170,13 @@ ${imageRule}- Update only the trackers provided in the prompt unless a tracker n
       $("btnAddDefaultTrigger").addEventListener("click", addDefaultTrigger);
       addClick("btnRefreshStorySummary", refreshStorySummaryNow);
       $("btnExportJson").addEventListener("click", () => { closeMenu(); exportJson(); });
-      $("btnOpenNexusImport")?.addEventListener("click", () => { closeMenu(); window.location.assign("/nexus/"); });
+      $("btnOpenNexusImport")?.addEventListener("click", () => { closeMenu(); window.location.assign("/nexus/#world-library"); });
       $("btnExportMarkdown").addEventListener("click", () => { closeMenu(); exportMarkdown(); });
       $("btnExportHtml").addEventListener("click", () => { closeMenu(); exportHtml().catch(err => showMessagePopup("HTML export failed", err?.message || String(err || "Something went wrong."))); });
       $("importFile").addEventListener("change", e => { if (e.target.files?.[0]) loadStory(e.target.files[0]); e.target.value = ""; });
+      $("storyHistoryCompression")?.addEventListener("change", event => {
+        event.target.title = event.target.selectedOptions[0]?.title || "Choose how accepted story history is packed into a full model reload.";
+      });
       $("btnSaveWorld").addEventListener("click", exportWorld);
       $("btnCopyWorld").addEventListener("click", copyWorldToClipboard);
       $("btnGenerateWorldUrl")?.addEventListener("click", generateWorldUrl);

@@ -10,14 +10,19 @@
   <header class="site-header">
     <div>
       <p class="eyebrow">Infinite Quest Nexus</p>
-      <h1>World Library &amp; Chronicle</h1>
+      <h1>World Management</h1>
       <p>Author reusable versioned worlds, run persistent campaigns, and inspect the fiction-only memory selected for generation.</p>
     </div>
-    <a class="button secondary" href="/">Return to Infinite Quest</a>
+    <nav class="header-actions" aria-label="Nexus sections">
+      <a class="button secondary" href="#providers">Providers</a>
+      <a class="button secondary" href="#world-library">Worlds</a>
+      <a class="button secondary" href="#campaigns">Campaigns</a>
+      <a class="button primary" href="/">Story view</a>
+    </nav>
   </header>
 
   <main>
-    <section class="card provider-card" aria-labelledby="provider-title">
+    <section id="providers" class="card provider-card anchor-section" aria-labelledby="provider-title">
       <div>
         <p class="eyebrow">Story Engine</p>
         <h2 id="provider-title">Provider endpoints</h2>
@@ -43,7 +48,10 @@
         <label>Base URL<input id="providerBaseUrl" required type="url" value="http://host.docker.internal:1234"></label>
         <label>API key (optional for local endpoints)<input id="providerApiKey" type="password" autocomplete="off"></label>
         <label>Default model<input id="providerDefaultModel" placeholder="May be selected after discovery"></label>
-        <label>Context window<input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768"></label>
+        <label>Context window
+          <input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768" aria-describedby="providerContextSource">
+          <span id="providerContextSource" class="field-note">Editable until model discovery supplies a context length.</span>
+        </label>
         <label>Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
         <button class="button primary" type="submit">Save provider</button>
       </form>
@@ -55,7 +63,7 @@
       <div id="providerStatus" class="status" role="status" aria-live="polite">LM Studio and compatible provider calls are server-side, so browser CORS does not apply.</div>
     </section>
 
-    <section class="card world-library-card" aria-labelledby="world-library-title">
+    <section id="world-library" class="card world-library-card anchor-section" aria-labelledby="world-library-title">
       <div class="section-heading">
         <div>
           <p class="eyebrow">World Library</p>
@@ -102,6 +110,7 @@
             <button id="createCampaign" class="button secondary" type="button" disabled>Create campaign</button>
             <button id="exportWorld" class="button secondary" type="button" disabled>Export version</button>
             <button id="archiveWorld" class="button danger" type="button" disabled>Archive</button>
+            <button id="deleteWorld" class="button danger" type="button" disabled>Delete world</button>
           </div>
           <div id="worldStatus" class="status" role="status" aria-live="polite">World content is stored in PostgreSQL, never embedded in this client.</div>
         </form>
@@ -125,7 +134,7 @@
       <div id="importStatus" class="status" role="status" aria-live="polite">Choose a story file to begin.</div>
     </section>
 
-    <section class="workspace">
+    <section id="campaigns" class="workspace anchor-section">
       <aside class="card campaign-list-card">
         <div class="section-heading">
           <div>
@@ -152,7 +161,9 @@
           <label>World version<select id="campaignWorldVersion" disabled><option value="">Select a campaign</option></select></label>
           <button id="saveCampaign" class="button secondary" type="submit" disabled>Save campaign</button>
           <button id="migrateCampaign" class="button secondary" type="button" disabled>Migrate version</button>
+          <button id="loadCampaign" class="button primary" type="button" disabled>Load story</button>
           <button id="exportCampaign" class="button secondary" type="button" disabled>Export campaign</button>
+          <button id="deleteCampaign" class="button danger" type="button" disabled>Delete campaign</button>
         </form>
         <div id="campaignStatusMessage" class="status hidden" role="status" aria-live="polite"></div>
 
@@ -189,12 +200,12 @@
           </label>
           <label>
             Compression
-            <select id="compression">
-              <option value="auto">Automatic</option>
-              <option value="full">Full history</option>
-              <option value="balanced">Balanced</option>
-              <option value="compact">Compact</option>
-              <option value="summary">Summary + recent</option>
+            <select id="compression" title="Choose how Chronicle fits story history into the context budget.">
+              <option value="auto" title="Selects the richest level that fits the current context budget.">Automatic</option>
+              <option value="full" title="Includes complete accepted narration and actions until the budget is exhausted.">Full history</option>
+              <option value="balanced" title="Keeps important scene detail while shortening older accepted turns.">Balanced</option>
+              <option value="compact" title="Uses concise per-turn memory so more chronology fits in the same budget.">Compact</option>
+              <option value="summary" title="Uses campaign summaries plus the most recent verbatim turns.">Summary + recent</option>
             </select>
           </label>
           <label class="query-field">
@@ -203,6 +214,16 @@
           </label>
           <button class="button primary" type="submit" disabled id="previewContext">Build context preview</button>
         </form>
+        <details class="field-help">
+          <summary>What do the compression options include?</summary>
+          <dl>
+            <dt>Automatic</dt><dd>Selects the richest representation that fits.</dd>
+            <dt>Full history</dt><dd>Prefers complete accepted narration and actions.</dd>
+            <dt>Balanced</dt><dd>Shortens older turns while preserving important scene detail.</dd>
+            <dt>Compact</dt><dd>Uses concise per-turn memory to retain more chronology.</dd>
+            <dt>Summary + recent</dt><dd>Uses campaign summaries with recent verbatim turns.</dd>
+          </dl>
+        </details>
 
         <div id="contextSummary" class="status hidden"></div>
         <pre id="contextPreview" class="context-preview" tabindex="0">The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.</pre>
@@ -219,6 +240,20 @@
       </section>
     </section>
   </main>
+
+  <dialog id="deleteDialog" class="confirm-dialog" aria-labelledby="deleteDialogTitle">
+    <form id="deleteForm" method="dialog">
+      <h2 id="deleteDialogTitle">Confirm permanent deletion</h2>
+      <p id="deleteDialogMessage"></p>
+      <label>Type <strong id="deleteExpectedTitle"></strong> to confirm
+        <input id="deleteConfirmationInput" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="button-row confirm-actions">
+        <button class="button secondary" type="submit" value="cancel">Cancel</button>
+        <button id="confirmDelete" class="button danger" type="submit" value="confirm" disabled>Permanently delete</button>
+      </div>
+    </form>
+  </dialog>
 
   <script type="module" src="/nexus/nexus.js"></script>
 </body>

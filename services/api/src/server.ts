@@ -19,6 +19,7 @@ import {
   campaignCreateSchema,
   campaignUpdateSchema,
   campaignWorldMigrationSchema,
+  resourceDeleteSchema,
   worldCreateSchema,
   worldDraftUpdateSchema,
   worldForkSchema,
@@ -49,6 +50,8 @@ import {
 import {
   createCampaign,
   createWorld,
+  deleteCampaign,
+  deleteWorld,
   exportCampaign,
   exportWorld,
   forkWorld,
@@ -198,6 +201,10 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     updateWorld(pool, uuidSchema.parse(request.params.worldId), worldStatusUpdateSchema.parse(request.body))
   ));
 
+  app.delete<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId", async (request) => (
+    deleteWorld(pool, uuidSchema.parse(request.params.worldId), resourceDeleteSchema.parse(request.body))
+  ));
+
   app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/fork", async (request, reply) => (
     reply.code(201).send(await forkWorld(pool, uuidSchema.parse(request.params.worldId), worldForkSchema.parse(request.body)))
   ));
@@ -219,6 +226,10 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.patch<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId", async (request) => (
     updateCampaign(pool, uuidSchema.parse(request.params.campaignId), campaignUpdateSchema.parse(request.body))
+  ));
+
+  app.delete<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId", async (request) => (
+    deleteCampaign(pool, uuidSchema.parse(request.params.campaignId), resourceDeleteSchema.parse(request.body))
   ));
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/migrate-world", async (request) => (

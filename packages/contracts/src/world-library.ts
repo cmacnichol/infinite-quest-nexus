@@ -80,6 +80,11 @@ export const campaignWorldMigrationSchema = z.object({
   note: z.string().trim().max(10_000).default("")
 });
 
+export const resourceDeleteSchema = z.object({
+  confirmation: z.literal("DELETE"),
+  expectedTitle: title
+});
+
 export type WorldContent = z.infer<typeof worldContentSchema>;
 export type WorldCreateRequest = z.infer<typeof worldCreateSchema>;
 export type WorldDraftUpdateRequest = z.infer<typeof worldDraftUpdateSchema>;
@@ -90,3 +95,4 @@ export type WorldImportRequest = z.infer<typeof worldImportRequestSchema>;
 export type CampaignCreateRequest = z.infer<typeof campaignCreateSchema>;
 export type CampaignUpdateRequest = z.infer<typeof campaignUpdateSchema>;
 export type CampaignWorldMigrationRequest = z.infer<typeof campaignWorldMigrationSchema>;
+export type ResourceDeleteRequest = z.infer<typeof resourceDeleteSchema>;

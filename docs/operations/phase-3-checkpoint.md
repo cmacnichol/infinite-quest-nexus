@@ -35,3 +35,16 @@ Phase 3 adds the optional independent illustration pipeline while preserving the
 - Nexus and the player page rendered without horizontal overflow at the tested browser viewport.
 
 Runtime images, generated content, provider responses, credentials, test databases, and local assets remain outside the repository.
+
+## Management and player lifecycle completion
+
+The Phase 3 usability pass also completes the database-backed campaign lifecycle:
+
+- Infinite Quest Nexus branding and a focused main menu link directly to World Management, Provider Management, current-world setup, and active text/context settings.
+- Provider model discovery locks context length to API-advertised metadata and restores manual editing when the inventory omits that value.
+- Chronicle and full-reload compression choices include per-option hover descriptions and expanded plain-language help.
+- Existing campaigns can be selected and resumed in the player view through a one-time, credential-free session handoff of the server-generated accepted ledger.
+- Campaigns and unreferenced worlds support typed permanent-deletion confirmation. The API rejects active campaign jobs, title races, and deletion of a world that still owns campaigns.
+- Campaign metadata controls use minimum-width grid tracks so Status and World Version remain legible at desktop widths and collapse to responsive rows on smaller screens.
+
+Verification used a fresh isolated PostgreSQL 18.4/pgvector 0.8.5 Compose stack. All 24 database integration tests passed. Browser checks covered navigation, provider context lock and fallback, campaign creation and resume, typed campaign/world deletion, desktop layout, a 520-pixel responsive breakpoint, and a clean final console. The synthetic stack and its volumes were removed afterward.

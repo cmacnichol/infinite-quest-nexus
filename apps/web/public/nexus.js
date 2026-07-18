@@ -5,6 +5,7 @@ let selectedCampaign = null;
 let worlds = [];
 let selectedWorld = null;
 const legacyStorageKey = "infiniteQuestNexusClientState.v1";
+const campaignResumeStorageKey = "infiniteQuestNexusCampaignResume.v1";
 let detectedBrowserStory = null;
 let providers = [];
 let selectedProvider = null;
@@ -12,6 +13,9 @@ let embeddingConfig = null;
 let illustrationConfig = null;
 let latestDisplayedTurn = null;
 let contextPreviewSequence = 0;
+let discoveredProviderModels = [];
+let pendingDeleteTitle = "";
+let pendingDeleteResolve = null;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -43,6 +47,18 @@ function campaignMessage(message, type = "") {
   elements.campaignStatusMessage.classList.remove("hidden");
 }
 
+function requestTypedDelete(title, message) {
+  if (pendingDeleteResolve) pendingDeleteResolve(false);
+  pendingDeleteTitle = title;
+  elements.deleteDialogMessage.textContent = message;
+  elements.deleteExpectedTitle.textContent = title;
+  elements.deleteConfirmationInput.value = "";
+  elements.confirmDelete.disabled = true;
+  elements.deleteDialog.showModal();
+  elements.deleteConfirmationInput.focus();
+  return new Promise((resolve) => { pendingDeleteResolve = resolve; });
+}
+
 function setWorldEditorDisabled(disabled) {
   [
     elements.worldTitle,
@@ -61,7 +77,8 @@ function setWorldEditorDisabled(disabled) {
     elements.forkWorld,
     elements.createCampaign,
     elements.exportWorld,
-    elements.archiveWorld
+    elements.archiveWorld,
+    elements.deleteWorld
   ].forEach((element) => { element.disabled = disabled; });
 }
 
@@ -148,6 +165,7 @@ async function selectWorld(worldId) {
   elements.createCampaign.disabled = !selectedWorld.versions.length;
   elements.exportWorld.disabled = !selectedWorld.versions.length;
   elements.forkWorld.disabled = !selectedWorld.versions.length;
+  elements.deleteWorld.disabled = false;
   worldMessage(archived ? "This world is archived. Restore it before editing or publishing." : "Draft loaded from authoritative PostgreSQL storage.");
 }
 
@@ -250,6 +268,30 @@ async function toggleWorldArchive() {
   }
 }
 
+async function deleteSelectedWorld() {
+  if (!selectedWorld) return;
+  if (Number(selectedWorld.campaignCount || worlds.find((world) => world.id === selectedWorld.id)?.campaignCount || 0)) {
+    worldMessage("Delete every campaign using this world before deleting the world.", "error");
+    return;
+  }
+  const expectedTitle = selectedWorld.title;
+  const confirmed = await requestTypedDelete(expectedTitle, `This permanently deletes “${expectedTitle}”, its draft, and all published versions. This cannot be undone.`);
+  if (!confirmed) return;
+  elements.deleteWorld.disabled = true;
+  try {
+    await api(`/api/v1/worlds/${selectedWorld.id}`, {
+      method: "DELETE",
+      body: JSON.stringify({ confirmation: "DELETE", expectedTitle })
+    });
+    selectedWorld = null;
+    await loadWorlds();
+    worldMessage(`World “${expectedTitle}” was permanently deleted.`, "success");
+  } catch (error) {
+    worldMessage(error.message || String(error), "error");
+    elements.deleteWorld.disabled = !selectedWorld;
+  }
+}
+
 async function downloadJson(path, filename) {
   const response = await fetch(path, { headers: { accept: "application/json" } });
   if (!response.ok) {
@@ -302,7 +344,7 @@ async function loadCampaigns(preselectId = "") {
   if (!campaigns.length) {
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
     selectedCampaign = null;
-    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.saveCampaign, elements.migrateCampaign, elements.exportCampaign].forEach((element) => { element.disabled = true; });
+    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.saveCampaign, elements.migrateCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign].forEach((element) => { element.disabled = true; });
     return;
   }
   for (const campaign of campaigns) {
@@ -333,7 +375,7 @@ async function selectCampaign(campaign) {
   elements.saveIllustrationConfig.disabled = false;
   elements.campaignTitle.value = campaign.title;
   elements.campaignStatus.value = campaign.status;
-  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.saveCampaign, elements.exportCampaign].forEach((element) => { element.disabled = false; });
+  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.saveCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign].forEach((element) => { element.disabled = false; });
   const world = await api(`/api/v1/worlds/${campaign.worldId}`);
   elements.campaignWorldVersion.replaceChildren();
   for (const version of [...world.versions].reverse()) {
@@ -407,6 +449,46 @@ async function exportSelectedCampaign() {
   }
 }
 
+async function loadSelectedCampaign() {
+  if (!selectedCampaign) return;
+  elements.loadCampaign.disabled = true;
+  campaignMessage("Preparing the accepted campaign ledger for the story view…");
+  try {
+    const story = await api(`/api/v1/campaigns/${selectedCampaign.id}/export`);
+    sessionStorage.setItem(campaignResumeStorageKey, JSON.stringify({
+      campaignId: selectedCampaign.id,
+      activeTurnNumber: selectedCampaign.activeTurnNumber,
+      story
+    }));
+    window.location.assign("/");
+  } catch (error) {
+    campaignMessage(error.message || String(error), "error");
+    elements.loadCampaign.disabled = !selectedCampaign;
+  }
+}
+
+async function deleteSelectedCampaign() {
+  if (!selectedCampaign) return;
+  const campaignId = selectedCampaign.id;
+  const expectedTitle = selectedCampaign.title;
+  const confirmed = await requestTypedDelete(expectedTitle, `This permanently deletes “${expectedTitle}”, its accepted turns, Chronicle memory, and generated asset records. This cannot be undone.`);
+  if (!confirmed) return;
+  elements.deleteCampaign.disabled = true;
+  try {
+    await api(`/api/v1/campaigns/${campaignId}`, {
+      method: "DELETE",
+      body: JSON.stringify({ confirmation: "DELETE", expectedTitle })
+    });
+    selectedCampaign = null;
+    await loadCampaigns();
+    await loadWorlds(selectedWorld?.id || "");
+    campaignMessage(`Campaign “${expectedTitle}” was permanently deleted.`, "success");
+  } catch (error) {
+    campaignMessage(error.message || String(error), "error");
+    elements.deleteCampaign.disabled = !selectedCampaign;
+  }
+}
+
 async function loadEmbeddingConfig() {
   if (!selectedCampaign) return;
   embeddingConfig = await api(`/api/v1/campaigns/${selectedCampaign.id}/memory/embedding-config`);
@@ -440,6 +522,26 @@ async function loadIllustrationConfig() {
 function providerMessage(message, type = "") {
   elements.providerStatus.textContent = message;
   elements.providerStatus.className = `status ${type}`.trim();
+}
+
+function applyDiscoveredProviderContext() {
+  const option = elements.modelSelect.selectedOptions[0];
+  const contextLength = Number(option?.dataset.contextLength || 0);
+  const model = discoveredProviderModels.find((item) => (item.loaded ? item.instanceId : item.id) === elements.modelSelect.value);
+  if (model) elements.providerDefaultModel.value = model.id;
+  if (contextLength > 0) {
+    elements.providerContextTokens.value = String(contextLength);
+    elements.providerContextTokens.readOnly = true;
+    elements.providerContextTokens.setAttribute("aria-readonly", "true");
+    elements.providerContextSource.textContent = `Locked to ${number(contextLength)} tokens advertised by the selected model.`;
+    elements.providerContextSource.className = "field-note api-supplied";
+    if (selectedProvider) elements.budgetTokens.value = String(Math.max(512, contextLength - selectedProvider.maxOutputTokens - 1024));
+  } else {
+    elements.providerContextTokens.readOnly = false;
+    elements.providerContextTokens.removeAttribute("aria-readonly");
+    elements.providerContextSource.textContent = "The model API did not advertise a context length; enter the loaded context manually.";
+    elements.providerContextSource.className = "field-note manual-entry";
+  }
 }
 
 async function loadProviders(preselectId = "") {
@@ -512,6 +614,7 @@ async function discoverProviderModels() {
   providerMessage(`Querying ${selectedProvider.name} model inventory…`);
   try {
     const { models } = await api(`/api/v1/providers/${selectedProvider.id}/models`);
+    discoveredProviderModels = models;
     elements.modelSelect.replaceChildren(new Option(selectedProvider.defaultModel ? `Profile default · ${selectedProvider.defaultModel}` : "Select a model", ""));
     for (const model of models) {
       const context = model.contextLength ? ` · ${number(model.contextLength)} context` : "";
@@ -522,10 +625,9 @@ async function discoverProviderModels() {
     const loaded = models.find((model) => model.loaded) || models[0];
     if (loaded) {
       elements.modelSelect.value = loaded.loaded ? loaded.instanceId : loaded.id;
-      if (loaded.contextLength) {
-        const available = Math.max(512, loaded.contextLength - selectedProvider.maxOutputTokens - 1024);
-        elements.budgetTokens.value = String(available);
-      }
+      applyDiscoveredProviderContext();
+    } else {
+      applyDiscoveredProviderContext();
     }
     providerMessage(`${models.length} model entr${models.length === 1 ? "y" : "ies"} found. Loaded context length is used as the context-budget default when advertised.`, "success");
   } catch (error) {
@@ -539,7 +641,16 @@ elements.providerSelect.addEventListener("change", () => {
   selectedProvider = providers.find((provider) => provider.id === elements.providerSelect.value) || null;
   elements.discoverModels.disabled = !selectedProvider;
   elements.generateTurn.disabled = !selectedProvider || !selectedCampaign;
+  discoveredProviderModels = [];
+  elements.modelSelect.replaceChildren(new Option("Discover models or use the profile default", ""));
+  elements.modelSelect.disabled = true;
+  elements.providerContextTokens.readOnly = false;
+  elements.providerContextTokens.removeAttribute("aria-readonly");
+  elements.providerContextSource.textContent = "Editable until model discovery supplies a context length.";
+  elements.providerContextSource.className = "field-note";
 });
+
+elements.modelSelect.addEventListener("change", applyDiscoveredProviderContext);
 
 elements.providerType.addEventListener("change", () => {
   const defaults = {
@@ -981,6 +1092,16 @@ elements.storyFile.addEventListener("change", async () => {
     setStatus(error.message || String(error), "error");
   }
 });
+elements.deleteConfirmationInput.addEventListener("input", () => {
+  elements.confirmDelete.disabled = elements.deleteConfirmationInput.value !== pendingDeleteTitle;
+});
+elements.deleteDialog.addEventListener("close", () => {
+  const resolve = pendingDeleteResolve;
+  pendingDeleteResolve = null;
+  const confirmed = elements.deleteDialog.returnValue === "confirm" && elements.deleteConfirmationInput.value === pendingDeleteTitle;
+  pendingDeleteTitle = "";
+  if (resolve) resolve(confirmed);
+});
 elements.importStory.addEventListener("click", importStory);
 elements.importBrowserState.addEventListener("click", importBrowserState);
 elements.newWorld.addEventListener("click", newWorld);
@@ -991,10 +1112,13 @@ elements.forkWorld.addEventListener("click", forkSelectedWorld);
 elements.createCampaign.addEventListener("click", createCampaignFromWorld);
 elements.exportWorld.addEventListener("click", exportSelectedWorld);
 elements.archiveWorld.addEventListener("click", toggleWorldArchive);
+elements.deleteWorld.addEventListener("click", deleteSelectedWorld);
 elements.refreshCampaigns.addEventListener("click", () => loadCampaigns().catch((error) => setStatus(error.message, "error")));
 elements.campaignForm.addEventListener("submit", saveSelectedCampaign);
 elements.migrateCampaign.addEventListener("click", migrateSelectedCampaign);
 elements.exportCampaign.addEventListener("click", exportSelectedCampaign);
+elements.loadCampaign.addEventListener("click", loadSelectedCampaign);
+elements.deleteCampaign.addEventListener("click", deleteSelectedCampaign);
 elements.campaignWorldVersion.addEventListener("change", () => {
   elements.migrateCampaign.disabled = !selectedCampaign || elements.campaignWorldVersion.value === selectedCampaign.worldVersionId;
 });
@@ -1002,6 +1126,9 @@ elements.contextForm.addEventListener("submit", previewContext);
 elements.reindexMemory.addEventListener("click", rebuildMemory);
 elements.providerForm.addEventListener("submit", saveProvider);
 elements.discoverModels.addEventListener("click", discoverProviderModels);
+elements.compression.addEventListener("change", () => {
+  elements.compression.title = elements.compression.selectedOptions[0]?.title || "Choose how Chronicle fits history into the context budget.";
+});
 elements.discoverEmbeddingModels.addEventListener("click", discoverEmbeddingModels);
 elements.embeddingForm.addEventListener("submit", saveEmbeddingConfig);
 elements.illustrationForm.addEventListener("submit", saveIllustrationConfig);
