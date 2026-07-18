@@ -3,6 +3,7 @@ import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { runChronicleJob } from "../../api/src/memory-service.js";
 import { runGenerationJob } from "../../api/src/generation-service.js";
+import { runImageJob } from "../../api/src/image-service.js";
 
 function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -21,7 +22,14 @@ export async function runWorker(pool: DatabasePool, config: RuntimeConfig, signa
   while (!signal.aborted) {
     try {
       const generated = await runGenerationJob(pool, workerId, config.workerLeaseSeconds, config.credentialEncryptionKey);
-      const worked = generated || await runChronicleJob(pool, workerId, config.workerLeaseSeconds, config.credentialEncryptionKey);
+      const illustrated = generated || await runImageJob(
+        pool,
+        workerId,
+        config.workerLeaseSeconds,
+        config.credentialEncryptionKey,
+        { root: config.assetStorageRoot }
+      );
+      const worked = generated || illustrated || await runChronicleJob(pool, workerId, config.workerLeaseSeconds, config.credentialEncryptionKey);
       if (!worked) await wait(config.workerPollIntervalMs, signal);
     } catch (error) {
       console.error(JSON.stringify({

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { callEmbeddingProvider, callTextProvider, discoverModels, type TextProviderProfile } from "../../packages/story-engine/src/providers.js";
+import { callEmbeddingProvider, callImageProvider, callTextProvider, discoverImageModels, discoverModels, type TextProviderProfile } from "../../packages/story-engine/src/providers.js";
 
 const profile: TextProviderProfile = {
   providerType: "lmstudio",
@@ -86,5 +86,45 @@ describe("text provider adapters", () => {
     }), { status: 200 }));
     await expect(callEmbeddingProvider(profile, ["first", "second"], fetcher as typeof fetch))
       .rejects.toThrow("inconsistent dimensions");
+  });
+
+  it("uses an independent OpenAI-compatible image endpoint and requires persisted base64 output", async () => {
+    const imageProfile = { ...profile, providerType: "openai_compatible" as const, baseUrl: "http://images.test" };
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe("http://images.test/v1/images/generations");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        model: "loaded-instance-id",
+        prompt: "Synthetic fictional panorama.",
+        n: 1,
+        size: "1024x1024",
+        quality: "high",
+        output_format: "png",
+        response_format: "b64_json"
+      });
+      return new Response(JSON.stringify({ id: "image-1", data: [{ b64_json: "aW1hZ2U=" }] }), { status: 200 });
+    });
+    const result = await callImageProvider(imageProfile, {
+      prompt: "Synthetic fictional panorama.",
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "high",
+      outputFormat: "png"
+    }, fetcher as typeof fetch);
+    expect(result).toMatchObject({ base64: "aW1hZ2U=", mimeType: "image/png", responseId: "image-1" });
+  });
+
+  it("uses OpenRouter's dedicated image-model inventory", async () => {
+    const imageProfile = { ...profile, providerType: "openrouter" as const, baseUrl: "https://openrouter.ai/api/v1" };
+    const fetcher = vi.fn(async (url: string | URL | Request) => {
+      expect(String(url)).toBe("https://openrouter.ai/api/v1/images/models");
+      return new Response(JSON.stringify({ data: [{ id: "synthetic/image-model", name: "Synthetic Image Model" }] }), { status: 200 });
+    });
+    expect(await discoverImageModels(imageProfile, fetcher as typeof fetch)).toEqual([{
+      id: "synthetic/image-model",
+      displayName: "Synthetic Image Model",
+      loaded: true,
+      instanceId: "synthetic/image-model",
+      contextLength: 0
+    }]);
   });
 });

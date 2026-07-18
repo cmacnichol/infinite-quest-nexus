@@ -8,7 +8,13 @@ import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import { storyImportPreviewRequestSchema, storyImportRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
-import { generationRequestSchema, playerCampaignConfigSchema, providerProfileInputSchema } from "../../../packages/contracts/src/generation.js";
+import {
+  generationRequestSchema,
+  illustrationConfigSchema,
+  illustrationRequestSchema,
+  playerCampaignConfigSchema,
+  providerProfileInputSchema
+} from "../../../packages/contracts/src/generation.js";
 import {
   campaignCreateSchema,
   campaignUpdateSchema,
@@ -32,6 +38,14 @@ import {
 import { readAsset, type FilesystemAssetStore } from "./asset-service.js";
 import { createProvider, listProviders, providerModels } from "./provider-service.js";
 import { enqueueGeneration, getGenerationJob, getGenerationResult, retryGeneration, syncPlayerCampaignConfig } from "./generation-service.js";
+import {
+  enqueueIllustration,
+  getIllustrationConfig,
+  getImageJob,
+  listCampaignImageJobs,
+  retryImageJob,
+  setIllustrationConfig
+} from "./image-service.js";
 import {
   createCampaign,
   createWorld,
@@ -266,6 +280,35 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/retry", async (request, reply) => (
     reply.code(202).send(await retryGeneration(pool, uuidSchema.parse(request.params.jobId)))
+  ));
+
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-config", async (request) => (
+    getIllustrationConfig(pool, uuidSchema.parse(request.params.campaignId))
+  ));
+
+  app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-config", async (request) => (
+    setIllustrationConfig(
+      pool,
+      uuidSchema.parse(request.params.campaignId),
+      illustrationConfigSchema.parse(request.body)
+    )
+  ));
+
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/image-jobs", async (request) => ({
+    jobs: await listCampaignImageJobs(pool, uuidSchema.parse(request.params.campaignId))
+  }));
+
+  app.post<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustrations", async (request, reply) => {
+    const job = await enqueueIllustration(pool, uuidSchema.parse(request.params.turnId), illustrationRequestSchema.parse(request.body));
+    return reply.code(job.duplicate ? 200 : 202).send(job);
+  });
+
+  app.get<{ Params: { jobId: string } }>("/api/v1/image-jobs/:jobId", async (request) => (
+    getImageJob(pool, uuidSchema.parse(request.params.jobId))
+  ));
+
+  app.post<{ Params: { jobId: string } }>("/api/v1/image-jobs/:jobId/retry", async (request, reply) => (
+    reply.code(202).send(await retryImageJob(pool, uuidSchema.parse(request.params.jobId)))
   ));
 
   app.get<{ Params: { assetId: string } }>("/api/v1/assets/:assetId", async (request, reply) => {

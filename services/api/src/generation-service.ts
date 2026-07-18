@@ -41,6 +41,7 @@ import {
 import { sha256, stripMechanicsLeakage } from "../../../packages/domain/src/text.js";
 import { buildContextPreview, enqueueEmbeddingReindex } from "./memory-service.js";
 import { loadTextProvider } from "./provider-service.js";
+import { enqueueAcceptedTurnIllustration } from "./image-service.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
 
@@ -359,6 +360,7 @@ async function commitStory(
     [job.owner_user_id, job.campaign_id, campaign.world_version_id, turnId, job.expected_turn_number, memory.content, memory.tokenEstimate,
       Math.min(1, 0.5 + job.expected_turn_number / 100), memory.entities, json({ sanitized: memory.sanitized, removedMechanicsSegments: memory.removedMechanicsSegments, generated: true })]
   );
+  await enqueueAcceptedTurnIllustration(client, job.owner_user_id, job.campaign_id, turnId, story.image_prompt);
   if (response.responseId) {
     await client.query(
       `INSERT INTO model_chains (owner_user_id, campaign_id, world_version_id, provider_profile_id, model, endpoint_identity,

@@ -9,6 +9,8 @@ let detectedBrowserStory = null;
 let providers = [];
 let selectedProvider = null;
 let embeddingConfig = null;
+let illustrationConfig = null;
+let latestDisplayedTurn = null;
 let contextPreviewSequence = 0;
 
 async function api(path, options = {}) {
@@ -328,6 +330,7 @@ async function selectCampaign(campaign) {
   elements.previewContext.disabled = false;
   elements.generateTurn.disabled = !selectedProvider;
   elements.saveEmbeddingConfig.disabled = false;
+  elements.saveIllustrationConfig.disabled = false;
   elements.campaignTitle.value = campaign.title;
   elements.campaignStatus.value = campaign.status;
   [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.saveCampaign, elements.exportCampaign].forEach((element) => { element.disabled = false; });
@@ -348,6 +351,8 @@ async function selectCampaign(campaign) {
     [number(metrics.embeddedMemories), "embedded memories"]
   ].map(([value, label]) => `<div class="metric"><strong>${value}</strong><span>${label}</span></div>`).join("");
   await loadEmbeddingConfig();
+  await loadIllustrationConfig();
+  await loadLatestImageJob(false);
   await previewContext();
 }
 
@@ -415,6 +420,23 @@ async function loadEmbeddingConfig() {
     : "Semantic retrieval is disabled for this campaign; deterministic lexical and chronological retrieval remains active.";
 }
 
+async function loadIllustrationConfig() {
+  if (!selectedCampaign) return;
+  illustrationConfig = await api(`/api/v1/campaigns/${selectedCampaign.id}/illustration-config`);
+  elements.illustrationEnabled.checked = illustrationConfig.enabled;
+  elements.illustrationProvider.value = illustrationConfig.providerProfileId || "";
+  elements.illustrationModel.value = illustrationConfig.model || "";
+  elements.illustrationSize.value = illustrationConfig.size || "1024x1024";
+  elements.illustrationAspectRatio.value = illustrationConfig.aspectRatio || "1:1";
+  elements.illustrationQuality.value = illustrationConfig.quality || "auto";
+  elements.illustrationOutputFormat.value = illustrationConfig.outputFormat || "png";
+  elements.illustrationMaxAttempts.value = String(illustrationConfig.maxAttempts || 3);
+  elements.discoverIllustrationModels.disabled = !elements.illustrationProvider.value;
+  elements.illustrationStatus.textContent = illustrationConfig.enabled
+    ? `Automatic illustrations are enabled with ${illustrationConfig.model}. Endpoint health: ${providers.find((provider) => provider.id === illustrationConfig.providerProfileId)?.healthStatus || "unknown"}. They run after story acceptance and cannot change the accepted turn.`
+    : "Illustrations are disabled for this campaign. Story generation is unaffected.";
+}
+
 function providerMessage(message, type = "") {
   elements.providerStatus.textContent = message;
   elements.providerStatus.className = `status ${type}`.trim();
@@ -430,6 +452,10 @@ async function loadProviders(preselectId = "") {
   for (const provider of providers.filter((item) => item.providerRole === "embedding" && item.enabled)) {
     elements.embeddingProvider.append(new Option(`${provider.name} · ${provider.providerType}`, provider.id));
   }
+  elements.illustrationProvider.replaceChildren(new Option("No image provider configured", ""));
+  for (const provider of providers.filter((item) => item.providerRole === "image" && item.enabled)) {
+    elements.illustrationProvider.append(new Option(`${provider.name} · ${provider.providerType} · ${provider.healthStatus || "unknown"}`, provider.id));
+  }
   const target = providers.find((provider) => provider.id === preselectId && provider.providerRole === "text" && provider.enabled)
     || providers.find((provider) => provider.id === elements.providerSelect.value)
     || providers.find((provider) => provider.providerRole === "text" && provider.enabled)
@@ -440,6 +466,7 @@ async function loadProviders(preselectId = "") {
   elements.generateTurn.disabled = !target || !selectedCampaign;
   if (target) providerMessage(`${target.name} selected. Profile context is ${number(target.contextWindowTokens)} tokens; maximum output is ${number(target.maxOutputTokens)} tokens.`);
   if (embeddingConfig?.providerProfileId) elements.embeddingProvider.value = embeddingConfig.providerProfileId;
+  if (illustrationConfig?.providerProfileId) elements.illustrationProvider.value = illustrationConfig.providerProfileId;
 }
 
 async function saveProvider(event) {
@@ -467,6 +494,11 @@ async function saveProvider(event) {
       elements.embeddingProvider.value = provider.id;
       elements.embeddingModel.value = provider.defaultModel || "";
       elements.discoverEmbeddingModels.disabled = false;
+    }
+    if (provider.providerRole === "image") {
+      elements.illustrationProvider.value = provider.id;
+      elements.illustrationModel.value = provider.defaultModel || "";
+      elements.discoverIllustrationModels.disabled = false;
     }
     providerMessage(`${provider.name} saved. Credentials, if supplied, were encrypted before database storage.`, "success");
   } catch (error) {
@@ -573,6 +605,123 @@ async function saveEmbeddingConfig(event) {
   }
 }
 
+elements.illustrationProvider.addEventListener("change", () => {
+  const provider = providers.find((item) => item.id === elements.illustrationProvider.value);
+  elements.discoverIllustrationModels.disabled = !provider;
+  if (provider?.defaultModel && !elements.illustrationModel.value) elements.illustrationModel.value = provider.defaultModel;
+});
+
+async function discoverIllustrationModels() {
+  const provider = providers.find((item) => item.id === elements.illustrationProvider.value);
+  if (!provider) return;
+  elements.discoverIllustrationModels.disabled = true;
+  elements.illustrationStatus.className = "status";
+  elements.illustrationStatus.textContent = `Querying ${provider.name} image model inventory…`;
+  try {
+    const { models } = await api(`/api/v1/providers/${provider.id}/models`);
+    elements.illustrationModels.replaceChildren();
+    for (const model of models) elements.illustrationModels.append(new Option(model.displayName, model.id));
+    if (models[0]) elements.illustrationModel.value = models[0].id;
+    elements.illustrationStatus.textContent = `${models.length} image model entr${models.length === 1 ? "y" : "ies"} found. Confirm the model and save this campaign's illustration settings.`;
+  } catch (error) {
+    elements.illustrationStatus.className = "status error";
+    elements.illustrationStatus.textContent = error.message || String(error);
+  } finally {
+    elements.discoverIllustrationModels.disabled = !elements.illustrationProvider.value;
+  }
+}
+
+async function saveIllustrationConfig(event) {
+  event.preventDefault();
+  if (!selectedCampaign) return;
+  elements.saveIllustrationConfig.disabled = true;
+  elements.illustrationStatus.className = "status";
+  elements.illustrationStatus.textContent = "Saving independent illustration configuration…";
+  try {
+    illustrationConfig = await api(`/api/v1/campaigns/${selectedCampaign.id}/illustration-config`, {
+      method: "PUT",
+      body: JSON.stringify({
+        enabled: elements.illustrationEnabled.checked,
+        providerProfileId: elements.illustrationProvider.value || null,
+        model: elements.illustrationModel.value,
+        size: elements.illustrationSize.value,
+        aspectRatio: elements.illustrationAspectRatio.value,
+        quality: elements.illustrationQuality.value,
+        outputFormat: elements.illustrationOutputFormat.value,
+        maxAttempts: elements.illustrationMaxAttempts.value
+      })
+    });
+    elements.illustrationStatus.className = "status success";
+    elements.illustrationStatus.textContent = illustrationConfig.enabled
+      ? "Automatic illustration child jobs are enabled. Story turns still commit successfully if the image endpoint is unavailable."
+      : "Illustrations disabled. No image endpoint will be called for new turns.";
+  } catch (error) {
+    elements.illustrationStatus.className = "status error";
+    elements.illustrationStatus.textContent = error.message || String(error);
+  } finally {
+    elements.saveIllustrationConfig.disabled = !selectedCampaign;
+  }
+}
+
+function renderImageJobStatus(job) {
+  elements.illustrationStatus.replaceChildren();
+  elements.illustrationStatus.className = `status ${job.status === "completed" ? "success" : ["recoverable", "failed"].includes(job.status) ? "error" : ""}`.trim();
+  const text = document.createElement("span");
+  text.textContent = job.status === "completed"
+    ? "Illustration generated and stored in Nexus shared asset storage."
+    : job.status === "queued"
+      ? `Illustration queued${job.attempts ? ` · attempt ${job.attempts} of ${job.maxAttempts}` : ""}. Story acceptance is already complete.`
+      : job.status === "generating"
+        ? `Illustration generating · attempt ${job.attempts} of ${job.maxAttempts}.`
+        : `${job.errorMessage || "Illustration generation did not complete."} The accepted story turn is unchanged.`;
+  elements.illustrationStatus.append(text);
+  if (["recoverable", "failed"].includes(job.status)) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "button secondary inline-action";
+    retry.textContent = "Retry illustration";
+    retry.addEventListener("click", async () => {
+      retry.disabled = true;
+      const queued = await api(`/api/v1/image-jobs/${job.id}/retry`, { method: "POST", body: "{}" });
+      renderImageJobStatus(queued);
+      void monitorImageJob(job.id);
+    });
+    elements.illustrationStatus.append(retry);
+  }
+}
+
+async function monitorImageJob(jobId) {
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    const job = await api(`/api/v1/image-jobs/${jobId}`);
+    renderImageJobStatus(job);
+    if (job.status === "completed") {
+      await displayLatestTurn();
+      return;
+    }
+    if (["recoverable", "failed"].includes(job.status)) return;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+
+async function loadLatestImageJob(monitor = false) {
+  if (!selectedCampaign) return;
+  const { jobs } = await api(`/api/v1/campaigns/${selectedCampaign.id}/image-jobs`);
+  const job = jobs[0];
+  if (!job) return;
+  renderImageJobStatus(job);
+  if (monitor && ["queued", "generating"].includes(job.status)) void monitorImageJob(job.id);
+}
+
+async function requestLatestIllustration(replace = false) {
+  if (!latestDisplayedTurn) return;
+  const job = await api(`/api/v1/turns/${latestDisplayedTurn.id}/illustrations`, {
+    method: "POST",
+    body: JSON.stringify({ replace })
+  });
+  renderImageJobStatus(job);
+  if (["queued", "generating"].includes(job.status)) void monitorImageJob(job.id);
+}
+
 elements.modelSelect.addEventListener("change", () => {
   const contextLength = Number(elements.modelSelect.selectedOptions[0]?.dataset.contextLength || 0);
   if (contextLength && selectedProvider) elements.budgetTokens.value = String(Math.max(512, contextLength - selectedProvider.maxOutputTokens - 1024));
@@ -582,7 +731,11 @@ async function displayLatestTurn() {
   if (!selectedCampaign) return;
   const { turns } = await api(`/api/v1/campaigns/${selectedCampaign.id}/turns`);
   const turn = turns.at(-1);
-  if (!turn) return;
+  if (!turn) {
+    latestDisplayedTurn = null;
+    return;
+  }
+  latestDisplayedTurn = turn;
   elements.generatedTurn.replaceChildren();
   const title = document.createElement("h3");
   title.textContent = `Turn ${turn.turnNumber}`;
@@ -594,7 +747,27 @@ async function displayLatestTurn() {
     item.textContent = choice;
     choices.append(item);
   }
-  elements.generatedTurn.append(title, narration, choices);
+  elements.generatedTurn.append(title, narration);
+  if (turn.imageUrl) {
+    const image = document.createElement("img");
+    image.src = turn.imageUrl;
+    image.alt = `Illustration for turn ${turn.turnNumber}`;
+    image.loading = "lazy";
+    image.className = "turn-illustration";
+    elements.generatedTurn.append(image);
+  }
+  elements.generatedTurn.append(choices);
+  if (turn.imagePrompt && illustrationConfig?.providerProfileId) {
+    const illustrationButton = document.createElement("button");
+    illustrationButton.type = "button";
+    illustrationButton.className = "button secondary";
+    illustrationButton.textContent = turn.imageUrl ? "Regenerate illustration" : "Generate illustration";
+    illustrationButton.addEventListener("click", () => requestLatestIllustration(Boolean(turn.imageUrl)).catch((error) => {
+      elements.illustrationStatus.className = "status error";
+      elements.illustrationStatus.textContent = error.message || String(error);
+    }));
+    elements.generatedTurn.append(illustrationButton);
+  }
   elements.generatedTurn.classList.remove("hidden");
 }
 
@@ -630,6 +803,7 @@ async function generateTurn(event) {
         elements.storyAction.value = "";
         await loadCampaigns(selectedCampaign.id);
         await displayLatestTurn();
+        await loadLatestImageJob(true);
         return;
       }
       if (status.status === "recoverable") throw new Error(`${status.errorMessage || "The provider response was incomplete."} The existing turn is unchanged; this job can be retried.`);
@@ -830,6 +1004,8 @@ elements.providerForm.addEventListener("submit", saveProvider);
 elements.discoverModels.addEventListener("click", discoverProviderModels);
 elements.discoverEmbeddingModels.addEventListener("click", discoverEmbeddingModels);
 elements.embeddingForm.addEventListener("submit", saveEmbeddingConfig);
+elements.illustrationForm.addEventListener("submit", saveIllustrationConfig);
+elements.discoverIllustrationModels.addEventListener("click", discoverIllustrationModels);
 elements.generationForm.addEventListener("submit", generateTurn);
 
 detectBrowserStory();

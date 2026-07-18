@@ -1220,7 +1220,7 @@
 
           <div class="world-gen-box stack">
             <label class="checkline"><input id="useNexusStoryEngine" type="checkbox" /> Use the database-backed Nexus Story Engine for main story turns</label>
-            <p class="mini">When enabled, the backend worker privately resolves RPG actions and event triggers, then commits accepted story turns and Chronicle memory. Only fictional consequences reach the narration prompt; roll details remain available in the player disclosure. Automatic illustrations are deferred until an independent Nexus image endpoint is configured.</p>
+            <p class="mini">When enabled, the backend worker privately resolves RPG actions and event triggers, then commits accepted story turns and Chronicle memory. Only fictional consequences reach the narration prompt; roll details remain available in the player disclosure. Optional illustrations use the campaign's independently configured Nexus image endpoint after story acceptance.</p>
             <div id="nexusStoryEngineSettings" class="stack hidden">
               <label>Nexus API base URL
                 <input id="nexusApiBaseUrl" type="url" inputmode="url" placeholder="Same origin when blank, or http://localhost:8080" />
@@ -5262,6 +5262,30 @@
         promptPreview: activityResponsePreview(finalPrompt)
       }, { operationId });
       const previousImageUrl = turn.imageUrl || "";
+      if (turn.nexusTurnId) {
+        closeImagePromptDialog();
+        turn.imagePrompt = finalPrompt;
+        turn.imageError = "";
+        turn.imageGenerating = true;
+        renderAll();
+        saveState();
+        try {
+          const queued = await nexusApi("/turns/" + encodeURIComponent(turn.nexusTurnId) + "/illustrations", {
+            method: "POST",
+            body: JSON.stringify({ replace: true, prompt: finalPrompt })
+          });
+          turn.nexusImageJobId = String(queued.id || "");
+          await monitorNexusImageJobForTurn(turn, turn.nexusImageJobId);
+          toast("Nexus illustration regenerated without changing the story turn.");
+        } catch (err) {
+          turn.imageError = err?.message || String(err);
+          turn.imageGenerating = false;
+          renderAll();
+          saveState();
+          toast(turn.imageError, 7000);
+        }
+        return;
+      }
       showLlmWaitIndicator();
       turn.imagePrompt = finalPrompt;
       turn.imageUrl = "";
@@ -6723,6 +6747,81 @@ Difficulty modifier guidance for d% target numbers: +30 routine, +15 easy, +0 st
         updateTurnGenerationDetail("LM Studio returned reasoning without an RPG assessment; using local stat matching at standard difficulty.");
         return performRpgRoll(localRpgAssessment(action));
       }
+    }
+
+    function nexusAssetDisplayUrl(assetUrl) {
+      const value = String(assetUrl || "").trim();
+      if (!value) return "";
+      try {
+        return new URL(value, normalizedNexusApiBaseUrl() || globalThis.location.origin).href;
+      } catch {
+        return "";
+      }
+    }
+
+    async function monitorNexusImageJobForTurn(turn, jobId) {
+      if (!turn || !jobId) return false;
+      turn.nexusImageJobId = String(jobId);
+      for (let poll = 0; poll < NEXUS_GENERATION_MAX_POLLS; poll += 1) {
+        const job = await nexusApi("/image-jobs/" + encodeURIComponent(jobId));
+        if (!state.turns.some(candidate => candidate.id === turn.id)) return false;
+        turn.imageGenerating = job.status === "queued" || job.status === "generating";
+        if (job.status === "completed") {
+          const imageUrl = nexusAssetDisplayUrl(job.assetUrl);
+          if (!imageUrl) throw new Error("Nexus completed the illustration without a usable stored asset URL.");
+          turn.imageUrl = imageUrl;
+          turn.imageError = "";
+          turn.imageGenerating = false;
+          markUnsavedForFullExport();
+          saveState();
+          renderAll();
+          await waitForTurnImageDisplayed(turn);
+          return true;
+        }
+        if (job.status === "recoverable" || job.status === "failed") {
+          turn.imageError = job.errorMessage || "Nexus illustration generation did not complete.";
+          turn.imageGenerating = false;
+          saveState();
+          renderAll();
+          return false;
+        }
+        saveState();
+        renderAll();
+        await sleep(NEXUS_GENERATION_POLL_MS);
+      }
+      turn.imageGenerating = false;
+      turn.imageError = "The Nexus illustration is still running and can be resumed from Nexus.";
+      saveState();
+      renderAll();
+      return false;
+    }
+
+    async function syncNexusIllustrationForTurn(turn) {
+      if (!turn?.nexusTurnId || !turn?.nexusCampaignId) return false;
+      try {
+        const result = await nexusApi("/campaigns/" + encodeURIComponent(turn.nexusCampaignId) + "/image-jobs");
+        const job = (Array.isArray(result.jobs) ? result.jobs : []).find(candidate => String(candidate.turnId || "") === String(turn.nexusTurnId));
+        if (!job) {
+          turn.imageGenerating = false;
+          saveState();
+          renderAll();
+          return false;
+        }
+        return monitorNexusImageJobForTurn(turn, String(job.id || ""));
+      } catch (error) {
+        turn.imageGenerating = false;
+        turn.imageError = error?.message || String(error);
+        saveState();
+        renderAll();
+        return false;
+      }
+    }
+
+    function resumePendingNexusIllustrations() {
+      if (!nexusStoryEngineEnabled()) return;
+      state.turns
+        .filter(turn => turn.nexusTurnId && !turn.imageUrl && (turn.imageGenerating || turn.nexusImageJobId))
+        .forEach(turn => { void syncNexusIllustrationForTurn(turn); });
     }
 
     function storySystemPrompt() {
@@ -8252,6 +8351,7 @@ ${addition}`.trim();
             scratchpad: String(result.stateSnapshot?.scratchpad || ""),
             tracker_updates: [],
             image_prompt: result.imagePrompt || "",
+            __nexusTurnId: String(result.resultTurnId || ""),
             __nexusTrackers: Array.isArray(result.stateSnapshot?.trackers) ? result.stateSnapshot.trackers : [],
             __nexusEventTriggers: Array.isArray(result.stateSnapshot?.eventTriggers) ? result.stateSnapshot.eventTriggers : [],
             __nexusPendingEventTriggers: Array.isArray(result.stateSnapshot?.pendingEventTriggers) ? result.stateSnapshot.pendingEventTriggers : [],
@@ -8565,9 +8665,11 @@ Rewrite rules:
         turnNumber: state.turns.length + 1,
         action,
         narration: maybeParagraphizeStoryText(narration),
-        imagePrompt: raw.__nexusGenerationJobId || state.settings.generateImages === false
-          ? ""
-          : String(raw.image_prompt || raw.imagePrompt || "A cinematic fantasy adventure scene, no text."),
+        imagePrompt: raw.__nexusGenerationJobId
+          ? String(raw.image_prompt || raw.imagePrompt || "")
+          : state.settings.generateImages === false
+            ? ""
+            : String(raw.image_prompt || raw.imagePrompt || "A cinematic fantasy adventure scene, no text."),
         imageUrl: "",
         imageError: "",
         imageGenerating: false,
@@ -8582,6 +8684,9 @@ Rewrite rules:
         lmStudioResponseId: String(raw.__lmStudioResponseId || ""),
         lmStudioStorySignature: String(raw.__lmStudioStorySignature || ""),
         lmStudioStats: isPlainObject(raw.__lmStudioStats) ? { ...raw.__lmStudioStats } : null,
+        nexusTurnId: String(raw.__nexusTurnId || ""),
+        nexusCampaignId: String(raw.__nexusCampaignId || ""),
+        nexusImageJobId: "",
         scratchpadSnapshot: String(raw.scratchpad || state.scratchpad || ""),
         trackersSnapshot: deepClone(state.trackers),
         worldStateSnapshot: { scratchpad: String(raw.scratchpad || state.scratchpad || ""), trackers: deepClone(state.trackers) },
@@ -8836,7 +8941,9 @@ Rewrite rules:
         setTurnGenerationStage("finalize", "Applying continuity and tracker updates, then saving the completed turn.");
         markUnsavedForFullExport();
 
-        if (state.settings.generateImages && turn.imagePrompt) {
+        if (turn.nexusTurnId && turn.imagePrompt) {
+          turn.imageGenerating = true;
+        } else if (state.settings.generateImages && turn.imagePrompt) {
           turn.imageGenerating = true;
         }
 
@@ -8850,7 +8957,9 @@ Rewrite rules:
         renderAll();
         await waitForTurnNarrationDisplayed(turn);
 
-        if (state.settings.generateImages && turn.imagePrompt) {
+        if (turn.nexusTurnId) {
+          void syncNexusIllustrationForTurn(turn);
+        } else if (state.settings.generateImages && turn.imagePrompt) {
           generateImageForTurnInBackground(turn, turn.imagePrompt);
         }
         recordActivity("story", `Turn ${turn.turnNumber} completed`, "success", {
@@ -8861,7 +8970,7 @@ Rewrite rules:
           customActionSuggestion: turn.customActionSuggestion || "",
           roll: turn.roll ? { stat: turn.roll.statName, roll: turn.roll.roll, target: turn.roll.target, success: turn.roll.success } : null,
           trackerCount: state.trackers.length,
-          imageQueued: !!(state.settings.generateImages && turn.imagePrompt),
+          imageQueued: !!(turn.nexusTurnId || (state.settings.generateImages && turn.imagePrompt)),
           modelUsed: turn.llmModelInfo?.used || state.settings.llmModel || ""
         }, { operationId });
       } catch (err) {
@@ -12043,7 +12152,9 @@ ${imageRule}- Update only the trackers provided in the prompt unless a tracker n
       });
       await maybeApplySpecialApiKeyPreset();
       await maybeImportWorldFromLocationHash();
-      if (await maybeResumePendingNexusGeneration()) return;
+      const resumedGeneration = await maybeResumePendingNexusGeneration();
+      resumePendingNexusIllustrations();
+      if (resumedGeneration) return;
       maybeOpenGettingStarted();
     }
 

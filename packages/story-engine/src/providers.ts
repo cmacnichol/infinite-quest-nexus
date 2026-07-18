@@ -42,6 +42,22 @@ export type EmbeddingResult = {
   usage: { inputTokens: number; totalTokens: number };
 };
 
+export type ImageProviderRequest = {
+  prompt: string;
+  size: string;
+  aspectRatio: string;
+  quality: "auto" | "low" | "medium" | "high";
+  outputFormat: "png" | "jpeg" | "webp";
+};
+
+export type ImageProviderResult = {
+  base64: string;
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
+  responseId: string;
+  usage: Record<string, unknown>;
+  rawMetadata: Record<string, unknown>;
+};
+
 type Fetch = typeof fetch;
 
 function rootUrl(baseUrl: string): string {
@@ -198,6 +214,46 @@ export async function callEmbeddingProvider(
   };
 }
 
+export async function callImageProvider(
+  profile: TextProviderProfile,
+  request: ImageProviderRequest,
+  fetcher: Fetch = fetch
+): Promise<ImageProviderResult> {
+  const base = profile.providerType === "openrouter" ? rootUrl(profile.baseUrl) : openAiRoot(profile.baseUrl);
+  const url = profile.providerType === "openrouter" ? `${base}/images` : `${base}/images/generations`;
+  const payload: Record<string, unknown> = {
+    model: profile.model,
+    prompt: request.prompt,
+    n: 1,
+    size: request.size,
+    quality: request.quality,
+    output_format: request.outputFormat,
+    ...(profile.providerType === "openrouter" ? { aspect_ratio: request.aspectRatio } : { response_format: "b64_json" })
+  };
+  const data = await checkedJson(await fetcher(url, {
+    method: "POST",
+    headers: headers(profile),
+    body: JSON.stringify(payload)
+  }));
+  const image = Array.isArray(data.data) ? data.data[0] : undefined;
+  const base64 = String(image?.b64_json || "").replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "").trim();
+  if (!base64) {
+    if (image?.url) throw new Error("The image provider returned only a temporary URL. Configure it to return base64 image data so Nexus can persist the asset safely.");
+    throw new Error("The image provider response did not contain base64 image data.");
+  }
+  const mediaType = String(image?.media_type || `image/${request.outputFormat === "jpeg" ? "jpeg" : request.outputFormat}`).toLowerCase();
+  if (!(["image/png", "image/jpeg", "image/webp"] as const).includes(mediaType as "image/png" | "image/jpeg" | "image/webp")) {
+    throw new Error(`The image provider returned unsupported media type '${mediaType}'.`);
+  }
+  return {
+    base64,
+    mimeType: mediaType as ImageProviderResult["mimeType"],
+    responseId: String(data.id || image?.id || ""),
+    usage: typeof data.usage === "object" && data.usage ? data.usage : {},
+    rawMetadata: { created: data.created || null, provider: data.provider || "" }
+  };
+}
+
 function inventoryRows(data: Record<string, any>): any[] {
   return Array.isArray(data.models) ? data.models : Array.isArray(data.data) ? data.data : [];
 }
@@ -224,4 +280,16 @@ export async function discoverModels(profile: TextProviderProfile, fetcher: Fetc
       contextLength: Number(model.context_length || model.max_context_length || model.loaded_context_length || 0)
     }];
   }).filter((model: ModelInventoryItem) => model.id);
+}
+
+export async function discoverImageModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
+  if (profile.providerType !== "openrouter") return discoverModels(profile, fetcher);
+  const data = await checkedJson(await fetcher(`${rootUrl(profile.baseUrl)}/images/models`, { headers: headers(profile) }));
+  return inventoryRows(data).map((model: any) => ({
+    id: String(model.id || model.key || ""),
+    displayName: String(model.name || model.display_name || model.id || model.key || ""),
+    loaded: true,
+    instanceId: String(model.id || model.key || ""),
+    contextLength: 0
+  })).filter((model: ModelInventoryItem) => model.id);
 }

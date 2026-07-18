@@ -30,6 +30,27 @@ export const generationRequestSchema = z.object({
   }).default({ budgetTokens: 32000, compression: "auto", recentTurns: 8 })
 });
 
+export const illustrationConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  providerProfileId: z.uuid().nullable().default(null),
+  model: z.string().trim().max(500).default(""),
+  size: z.string().trim().regex(/^\d{2,5}x\d{2,5}$/).default("1024x1024"),
+  aspectRatio: z.string().trim().regex(/^\d{1,3}:\d{1,3}$/).default("1:1"),
+  quality: z.enum(["auto", "low", "medium", "high"]).default("auto"),
+  outputFormat: z.enum(["png", "jpeg", "webp"]).default("png"),
+  maxAttempts: z.coerce.number().int().min(1).max(10).default(3)
+}).superRefine((value, context) => {
+  if (value.enabled && !value.providerProfileId) context.addIssue({ code: "custom", path: ["providerProfileId"], message: "Select an image provider when illustrations are enabled." });
+  if (value.enabled && !value.model) context.addIssue({ code: "custom", path: ["model"], message: "Select an image model when illustrations are enabled." });
+});
+
+export const illustrationRequestSchema = z.object({
+  providerProfileId: z.uuid().optional(),
+  model: z.string().trim().max(500).optional(),
+  prompt: z.string().trim().min(1).max(20_000).optional(),
+  replace: z.boolean().default(false)
+});
+
 export const playerRpgStatSchema = z.object({
   id: z.string().trim().min(1).max(200),
   name: z.string().trim().min(1).max(200),
@@ -101,6 +122,8 @@ export const storyTurnOutputSchema = z.object({
 export type ProviderProfileInput = z.infer<typeof providerProfileInputSchema>;
 export type ProviderType = z.infer<typeof providerTypeSchema>;
 export type GenerationRequest = z.infer<typeof generationRequestSchema>;
+export type IllustrationConfig = z.infer<typeof illustrationConfigSchema>;
+export type IllustrationRequest = z.infer<typeof illustrationRequestSchema>;
 export type StoryTurnOutput = z.infer<typeof storyTurnOutputSchema>;
 export type PlayerCampaignConfig = z.infer<typeof playerCampaignConfigSchema>;
 export type PlayerRpgStat = z.infer<typeof playerRpgStatSchema>;
