@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "check": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit && node --check apps/web/public/nexus.js",
     "check:data": "node scripts/check-repository-data.mjs",
     "dev": "tsx watch services/runtime/src/main.ts",
     "start": "node dist/services/runtime/src/main.js",

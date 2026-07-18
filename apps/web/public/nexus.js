@@ -1,6 +1,9 @@
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
 let selectedFile = null;
+let selectedImport = null;
 let selectedCampaign = null;
+let worlds = [];
+let selectedWorld = null;
 const legacyStorageKey = "infiniteQuestNexusClientState.v1";
 let detectedBrowserStory = null;
 let providers = [];
@@ -27,11 +30,277 @@ function number(value) {
   return Number(value || 0).toLocaleString();
 }
 
+function worldMessage(message, type = "") {
+  elements.worldStatus.textContent = message;
+  elements.worldStatus.className = `status ${type}`.trim();
+}
+
+function campaignMessage(message, type = "") {
+  elements.campaignStatusMessage.textContent = message;
+  elements.campaignStatusMessage.className = `status ${type}`.trim();
+  elements.campaignStatusMessage.classList.remove("hidden");
+}
+
+function setWorldEditorDisabled(disabled) {
+  [
+    elements.worldTitle,
+    elements.worldGenre,
+    elements.worldTone,
+    elements.worldPremise,
+    elements.worldBackground,
+    elements.worldCharacter,
+    elements.worldFirstAction,
+    elements.worldRules,
+    elements.worldReleaseNotes,
+    elements.forkWorldTitle,
+    elements.newCampaignTitle,
+    elements.saveWorldDraft,
+    elements.publishWorld,
+    elements.forkWorld,
+    elements.createCampaign,
+    elements.exportWorld,
+    elements.archiveWorld
+  ].forEach((element) => { element.disabled = disabled; });
+}
+
+function worldContentFromForm() {
+  const current = selectedWorld?.draftContent || {};
+  return {
+    ...current,
+    schemaVersion: Number(current.schemaVersion || 2),
+    world: {
+      ...(current.world || {}),
+      title: elements.worldTitle.value,
+      genre: elements.worldGenre.value,
+      tone: elements.worldTone.value,
+      premise: elements.worldPremise.value,
+      backgroundStory: elements.worldBackground.value,
+      character: elements.worldCharacter.value,
+      firstAction: elements.worldFirstAction.value,
+      rules: elements.worldRules.value
+    },
+    entities: Array.isArray(current.entities) ? current.entities : [],
+    relationships: Array.isArray(current.relationships) ? current.relationships : [],
+    rpgStats: Array.isArray(current.rpgStats) ? current.rpgStats : [],
+    defaultTriggers: Array.isArray(current.defaultTriggers) ? current.defaultTriggers : [],
+    eventTriggers: Array.isArray(current.eventTriggers) ? current.eventTriggers : [],
+    assets: Array.isArray(current.assets) ? current.assets : [],
+    defaults: current.defaults && typeof current.defaults === "object" ? current.defaults : {}
+  };
+}
+
+async function loadWorlds(preselectId = "") {
+  ({ worlds } = await api("/api/v1/worlds"));
+  elements.worldList.replaceChildren();
+  if (!worlds.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No worlds yet. Create one or import a portable world.";
+    elements.worldList.append(empty);
+    selectedWorld = null;
+    setWorldEditorDisabled(true);
+    return;
+  }
+  for (const world of worlds) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "world-button";
+    button.dataset.worldId = world.id;
+    const title = document.createElement("strong");
+    title.textContent = world.title;
+    const details = document.createElement("span");
+    details.textContent = `${world.status} · ${world.latestVersionNumber ? `version ${world.latestVersionNumber}` : "unpublished"} · ${number(world.campaignCount)} campaign${Number(world.campaignCount) === 1 ? "" : "s"}`;
+    button.append(title, details);
+    button.addEventListener("click", () => selectWorld(world.id));
+    elements.worldList.append(button);
+  }
+  const targetId = preselectId || selectedWorld?.id;
+  if (targetId && worlds.some((world) => world.id === targetId)) await selectWorld(targetId);
+}
+
+async function selectWorld(worldId) {
+  selectedWorld = await api(`/api/v1/worlds/${worldId}`);
+  document.querySelectorAll(".world-button").forEach((button) => button.classList.toggle("active", button.dataset.worldId === worldId));
+  const overview = selectedWorld.draftContent?.world || {};
+  elements.worldEditorTitle.textContent = selectedWorld.title;
+  elements.worldEditorMeta.textContent = `${selectedWorld.status} · draft revision ${selectedWorld.draftRevision} · ${selectedWorld.versions.length} published version${selectedWorld.versions.length === 1 ? "" : "s"}`;
+  elements.worldTitle.value = overview.title || selectedWorld.title;
+  elements.worldGenre.value = overview.genre || "";
+  elements.worldTone.value = overview.tone || "";
+  elements.worldPremise.value = overview.premise || "";
+  elements.worldBackground.value = overview.backgroundStory || "";
+  elements.worldCharacter.value = overview.character || "";
+  elements.worldFirstAction.value = overview.firstAction || "";
+  elements.worldRules.value = overview.rules || "";
+  elements.worldReleaseNotes.value = "";
+  elements.worldVersionSelect.replaceChildren(new Option(selectedWorld.versions.length ? "Latest published version" : "No published versions", ""));
+  for (const version of selectedWorld.versions) {
+    elements.worldVersionSelect.append(new Option(`Version ${version.versionNumber}${version.releaseNotes ? ` · ${version.releaseNotes}` : ""}`, version.id));
+  }
+  elements.worldVersionSelect.disabled = !selectedWorld.versions.length;
+  setWorldEditorDisabled(false);
+  const archived = selectedWorld.status === "archived";
+  elements.archiveWorld.textContent = archived ? "Restore" : "Archive";
+  elements.saveWorldDraft.disabled = archived;
+  elements.publishWorld.disabled = archived;
+  elements.createCampaign.disabled = !selectedWorld.versions.length;
+  elements.exportWorld.disabled = !selectedWorld.versions.length;
+  elements.forkWorld.disabled = !selectedWorld.versions.length;
+  worldMessage(archived ? "This world is archived. Restore it before editing or publishing." : "Draft loaded from authoritative PostgreSQL storage.");
+}
+
+async function newWorld() {
+  const title = elements.newWorldTitle.value.trim();
+  if (!title) {
+    worldMessage("Enter a title for the new world.", "error");
+    elements.newWorldTitle.focus();
+    return;
+  }
+  worldMessage("Creating world draft…");
+  try {
+    const world = await api("/api/v1/worlds", { method: "POST", body: JSON.stringify({ title }) });
+    elements.newWorldTitle.value = "";
+    await loadWorlds(world.id);
+    worldMessage("World draft created. It must be published before a campaign can use it.", "success");
+  } catch (error) {
+    worldMessage(error.message || String(error), "error");
+  }
+}
+
+async function saveWorldDraft(event) {
+  event.preventDefault();
+  if (!selectedWorld) return;
+  elements.saveWorldDraft.disabled = true;
+  worldMessage("Saving world draft…");
+  try {
+    const saved = await api(`/api/v1/worlds/${selectedWorld.id}/draft`, {
+      method: "PUT",
+      body: JSON.stringify({
+        expectedRevision: selectedWorld.draftRevision,
+        title: elements.worldTitle.value,
+        content: worldContentFromForm()
+      })
+    });
+    await loadWorlds(selectedWorld.id);
+    worldMessage(`Draft revision ${saved.revision} saved. Existing campaigns remain unchanged.`, "success");
+  } catch (error) {
+    worldMessage(error.message || String(error), "error");
+  } finally {
+    elements.saveWorldDraft.disabled = selectedWorld?.status === "archived";
+  }
+}
+
+async function publishSelectedWorld() {
+  if (!selectedWorld) return;
+  elements.publishWorld.disabled = true;
+  worldMessage("Publishing immutable world version…");
+  try {
+    const published = await api(`/api/v1/worlds/${selectedWorld.id}/publish`, {
+      method: "POST",
+      body: JSON.stringify({ expectedRevision: selectedWorld.draftRevision, releaseNotes: elements.worldReleaseNotes.value })
+    });
+    await loadWorlds(selectedWorld.id);
+    await loadCampaigns();
+    worldMessage(`Version ${published.versionNumber} published. Existing campaigns remain pinned to their current versions.`, "success");
+  } catch (error) {
+    worldMessage(error.message || String(error), "error");
+  } finally {
+    elements.publishWorld.disabled = selectedWorld?.status === "archived";
+  }
+}
+
+function selectedWorldVersionId() {
+  return elements.worldVersionSelect.value || selectedWorld?.versions?.[0]?.id || "";
+}
+
+async function forkSelectedWorld() {
+  if (!selectedWorld || !selectedWorldVersionId()) return;
+  const title = elements.forkWorldTitle.value.trim();
+  if (!title) {
+    worldMessage("Enter a title for the independent fork.", "error");
+    elements.forkWorldTitle.focus();
+    return;
+  }
+  try {
+    const fork = await api(`/api/v1/worlds/${selectedWorld.id}/fork`, {
+      method: "POST",
+      body: JSON.stringify({ title, sourceWorldVersionId: selectedWorldVersionId() })
+    });
+    elements.forkWorldTitle.value = "";
+    await loadWorlds(fork.worldId);
+    worldMessage("Fork created as an unpublished independent draft.", "success");
+  } catch (error) {
+    worldMessage(error.message || String(error), "error");
+  }
+}
+
+async function toggleWorldArchive() {
+  if (!selectedWorld) return;
+  const nextStatus = selectedWorld.status === "archived"
+    ? (selectedWorld.versions.length ? "active" : "draft")
+    : "archived";
+  try {
+    await api(`/api/v1/worlds/${selectedWorld.id}`, { method: "PATCH", body: JSON.stringify({ status: nextStatus }) });
+    await loadWorlds(selectedWorld.id);
+    worldMessage(nextStatus === "archived" ? "World archived. Existing campaigns remain available." : "World restored.", "success");
+  } catch (error) {
+    worldMessage(error.message || String(error), "error");
+  }
+}
+
+async function downloadJson(path, filename) {
+  const response = await fetch(path, { headers: { accept: "application/json" } });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.message || `Export failed with HTTP ${response.status}.`);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+async function exportSelectedWorld() {
+  if (!selectedWorld || !selectedWorldVersionId()) return;
+  try {
+    await downloadJson(`/api/v1/worlds/${selectedWorld.id}/export?worldVersionId=${encodeURIComponent(selectedWorldVersionId())}`, "infinite-quest-world.json");
+    worldMessage("Published world version exported without campaign or provider data.", "success");
+  } catch (error) {
+    worldMessage(error.message || String(error), "error");
+  }
+}
+
+async function createCampaignFromWorld() {
+  if (!selectedWorld || !selectedWorldVersionId()) return;
+  const title = elements.newCampaignTitle.value.trim();
+  if (!title) {
+    worldMessage("Enter a title for the new campaign.", "error");
+    elements.newCampaignTitle.focus();
+    return;
+  }
+  try {
+    const campaign = await api("/api/v1/campaigns", {
+      method: "POST",
+      body: JSON.stringify({ title, worldVersionId: selectedWorldVersionId() })
+    });
+    elements.newCampaignTitle.value = "";
+    await loadCampaigns(campaign.id);
+    worldMessage("Campaign created from the selected immutable world version.", "success");
+  } catch (error) {
+    worldMessage(error.message || String(error), "error");
+  }
+}
+
 async function loadCampaigns(preselectId = "") {
   const { campaigns } = await api("/api/v1/campaigns");
   elements.campaignList.replaceChildren();
   if (!campaigns.length) {
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
+    selectedCampaign = null;
+    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.saveCampaign, elements.migrateCampaign, elements.exportCampaign].forEach((element) => { element.disabled = true; });
     return;
   }
   for (const campaign of campaigns) {
@@ -42,7 +311,7 @@ async function loadCampaigns(preselectId = "") {
     const title = document.createElement("strong");
     title.textContent = campaign.title;
     const details = document.createElement("span");
-    details.textContent = `${campaign.activeTurnNumber} accepted turns · ${campaign.worldTitle}`;
+    details.textContent = `${campaign.activeTurnNumber} accepted turns · ${campaign.worldTitle} v${campaign.worldVersionNumber}${campaign.worldUpdateAvailable ? " · update available" : ""}${campaign.status === "archived" ? " · archived" : ""}`;
     button.append(title, details);
     button.addEventListener("click", () => selectCampaign(campaign));
     elements.campaignList.append(button);
@@ -59,6 +328,18 @@ async function selectCampaign(campaign) {
   elements.previewContext.disabled = false;
   elements.generateTurn.disabled = !selectedProvider;
   elements.saveEmbeddingConfig.disabled = false;
+  elements.campaignTitle.value = campaign.title;
+  elements.campaignStatus.value = campaign.status;
+  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.saveCampaign, elements.exportCampaign].forEach((element) => { element.disabled = false; });
+  const world = await api(`/api/v1/worlds/${campaign.worldId}`);
+  elements.campaignWorldVersion.replaceChildren();
+  for (const version of [...world.versions].reverse()) {
+    elements.campaignWorldVersion.append(new Option(`Version ${version.versionNumber}`, version.id));
+  }
+  elements.campaignWorldVersion.value = campaign.worldVersionId;
+  elements.migrateCampaign.disabled = !world.versions.some((version) => version.versionNumber > campaign.worldVersionNumber);
+  if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
+  else elements.campaignStatusMessage.classList.add("hidden");
   const metrics = await api(`/api/v1/campaigns/${campaign.id}/memory/metrics`);
   elements.memoryMetrics.innerHTML = [
     [number(metrics.turns), "accepted turns"],
@@ -68,6 +349,57 @@ async function selectCampaign(campaign) {
   ].map(([value, label]) => `<div class="metric"><strong>${value}</strong><span>${label}</span></div>`).join("");
   await loadEmbeddingConfig();
   await previewContext();
+}
+
+async function saveSelectedCampaign(event) {
+  event.preventDefault();
+  if (!selectedCampaign) return;
+  elements.saveCampaign.disabled = true;
+  try {
+    await api(`/api/v1/campaigns/${selectedCampaign.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title: elements.campaignTitle.value, status: elements.campaignStatus.value })
+    });
+    await loadCampaigns(selectedCampaign.id);
+    campaignMessage("Campaign metadata saved. Accepted turns and Chronicle memory were unchanged.", "success");
+  } catch (error) {
+    campaignMessage(error.message || String(error), "error");
+  } finally {
+    elements.saveCampaign.disabled = !selectedCampaign;
+  }
+}
+
+async function migrateSelectedCampaign() {
+  if (!selectedCampaign) return;
+  const world = await api(`/api/v1/worlds/${selectedCampaign.worldId}`);
+  const targetId = elements.campaignWorldVersion.value;
+  const target = world.versions.find((version) => version.id === targetId);
+  if (!target || target.versionNumber <= selectedCampaign.worldVersionNumber) {
+    campaignMessage("Select a newer published version before migrating.", "error");
+    return;
+  }
+  if (!window.confirm(`Migrate this campaign from world version ${selectedCampaign.worldVersionNumber} to version ${target.versionNumber}? Accepted turns will remain append-only.`)) return;
+  elements.migrateCampaign.disabled = true;
+  try {
+    await api(`/api/v1/campaigns/${selectedCampaign.id}/migrate-world`, {
+      method: "POST",
+      body: JSON.stringify({ worldVersionId: target.id, note: "Explicit migration from the World Library interface." })
+    });
+    await loadCampaigns(selectedCampaign.id);
+    campaignMessage(`Campaign migrated to world version ${target.versionNumber}. The next generation will bootstrap a fresh model chain from database state.`, "success");
+  } catch (error) {
+    campaignMessage(error.message || String(error), "error");
+  }
+}
+
+async function exportSelectedCampaign() {
+  if (!selectedCampaign) return;
+  try {
+    await downloadJson(`/api/v1/campaigns/${selectedCampaign.id}/export`, "infinite-quest-campaign.json");
+    campaignMessage("Portable campaign exported without provider profiles or credentials.", "success");
+  } catch (error) {
+    campaignMessage(error.message || String(error), "error");
+  }
 }
 
 async function loadEmbeddingConfig() {
@@ -313,6 +645,11 @@ async function generateTurn(event) {
 }
 
 async function importStoryObject(story, sourceName) {
+  const preview = await api("/api/v1/imports/legacy-story/preview", {
+    method: "POST",
+    body: JSON.stringify({ sourceName, story })
+  });
+  if (!preview.valid) throw new Error(preview.warnings.join(" ") || "The campaign export is not valid for import.");
   setStatus(`Importing ${story.turns?.length || 0} turns into PostgreSQL and building Chronicle memory…`);
   const result = await api("/api/v1/imports/legacy-story", {
     method: "POST",
@@ -320,21 +657,53 @@ async function importStoryObject(story, sourceName) {
   });
   const duplicate = result.duplicate ? "The story was already imported; the existing campaign was selected." : "Import completed.";
   setStatus(`${duplicate} ${result.stats.turnCount} turns and ${result.stats.memoryCount} memories are available. Complete history is approximately ${number(result.stats.estimatedHistoryTokens)} tokens.`, "success");
+  await loadWorlds(result.worldId);
   await loadCampaigns(result.campaignId);
 }
 
-async function importStory() {
-  if (!selectedFile) return;
+async function previewImportFile(file) {
+  selectedImport = null;
   elements.importStory.disabled = true;
-  setStatus(`Reading ${selectedFile.name}…`);
+  elements.importPreview.textContent = "Validating file without writing to the database…";
+  const text = await file.text();
+  const parsed = JSON.parse(text.replace(/^\uFEFF/, ""));
+  if (parsed?.format === "infinite-quest-world") {
+    const request = { sourceName: file.name, worldExport: parsed };
+    const preview = await api("/api/v1/imports/world/preview", { method: "POST", body: JSON.stringify(request) });
+    selectedImport = { kind: "world", request };
+    elements.importPreview.textContent = `${preview.duplicate ? "Duplicate" : "New"} world · ${preview.counts.entities} entities · ${preview.counts.relationships} relationships · ${preview.counts.triggers} triggers${preview.warnings.length ? ` · ${preview.warnings.join(" ")}` : ""}`;
+    elements.importStory.disabled = false;
+    setStatus(preview.duplicate ? "This world was already imported. Importing will select the existing record." : "Portable world validated and ready to import.", preview.duplicate ? "" : "success");
+    return;
+  }
+  if (parsed?.world && Array.isArray(parsed.turns)) {
+    const request = { sourceName: file.name, story: parsed };
+    const preview = await api("/api/v1/imports/legacy-story/preview", { method: "POST", body: JSON.stringify(request) });
+    selectedImport = { kind: "campaign", request };
+    elements.importPreview.textContent = `${preview.duplicate ? "Duplicate" : "New"} campaign · ${preview.counts.turns} turns · approximately ${number(preview.counts.estimatedHistoryTokens)} history tokens${preview.warnings.length ? ` · ${preview.warnings.join(" ")}` : ""}`;
+    elements.importStory.disabled = !preview.valid;
+    setStatus(preview.valid ? (preview.duplicate ? "This campaign was already imported. Importing will select the existing record." : "Campaign validated and ready to import.") : "Correct the validation warnings before importing.", preview.valid ? (preview.duplicate ? "" : "success") : "error");
+    return;
+  }
+  throw new Error("The file is neither a portable Infinite Quest world nor a campaign/story export.");
+}
+
+async function importStory() {
+  if (!selectedFile || !selectedImport) return;
+  elements.importStory.disabled = true;
   try {
-    const text = await selectedFile.text();
-    const story = JSON.parse(text.replace(/^\uFEFF/, ""));
-    await importStoryObject(story, selectedFile.name);
+    if (selectedImport.kind === "world") {
+      setStatus("Importing the validated portable world…");
+      const result = await api("/api/v1/imports/world", { method: "POST", body: JSON.stringify(selectedImport.request) });
+      await loadWorlds(result.worldId);
+      setStatus(result.duplicate ? "The world was already imported; the existing World Library record was selected." : "World imported with an immutable version and editable draft.", "success");
+    } else {
+      await importStoryObject(selectedImport.request.story, selectedImport.request.sourceName);
+    }
   } catch (error) {
     setStatus(error.message || String(error), "error");
   } finally {
-    elements.importStory.disabled = !selectedFile;
+    elements.importStory.disabled = !selectedImport;
   }
 }
 
@@ -421,14 +790,40 @@ async function rebuildMemory() {
   }
 }
 
-elements.storyFile.addEventListener("change", () => {
+elements.storyFile.addEventListener("change", async () => {
   selectedFile = elements.storyFile.files?.[0] || null;
-  elements.importStory.disabled = !selectedFile;
-  setStatus(selectedFile ? `${selectedFile.name} is ready to import.` : "Choose a story file to begin.");
+  selectedImport = null;
+  elements.importStory.disabled = true;
+  if (!selectedFile) {
+    elements.importPreview.textContent = "No file has been validated.";
+    setStatus("Choose a story file to begin.");
+    return;
+  }
+  setStatus(`Reading and validating ${selectedFile.name}…`);
+  try {
+    await previewImportFile(selectedFile);
+  } catch (error) {
+    elements.importPreview.textContent = "Validation failed; no database content was changed.";
+    setStatus(error.message || String(error), "error");
+  }
 });
 elements.importStory.addEventListener("click", importStory);
 elements.importBrowserState.addEventListener("click", importBrowserState);
+elements.newWorld.addEventListener("click", newWorld);
+elements.refreshWorlds.addEventListener("click", () => loadWorlds().catch((error) => worldMessage(error.message || String(error), "error")));
+elements.worldForm.addEventListener("submit", saveWorldDraft);
+elements.publishWorld.addEventListener("click", publishSelectedWorld);
+elements.forkWorld.addEventListener("click", forkSelectedWorld);
+elements.createCampaign.addEventListener("click", createCampaignFromWorld);
+elements.exportWorld.addEventListener("click", exportSelectedWorld);
+elements.archiveWorld.addEventListener("click", toggleWorldArchive);
 elements.refreshCampaigns.addEventListener("click", () => loadCampaigns().catch((error) => setStatus(error.message, "error")));
+elements.campaignForm.addEventListener("submit", saveSelectedCampaign);
+elements.migrateCampaign.addEventListener("click", migrateSelectedCampaign);
+elements.exportCampaign.addEventListener("click", exportSelectedCampaign);
+elements.campaignWorldVersion.addEventListener("change", () => {
+  elements.migrateCampaign.disabled = !selectedCampaign || elements.campaignWorldVersion.value === selectedCampaign.worldVersionId;
+});
 elements.contextForm.addEventListener("submit", previewContext);
 elements.reindexMemory.addEventListener("click", rebuildMemory);
 elements.providerForm.addEventListener("submit", saveProvider);
@@ -439,4 +834,5 @@ elements.generationForm.addEventListener("submit", generateTurn);
 
 detectBrowserStory();
 loadProviders().catch((error) => providerMessage(error.message || String(error), "error"));
+loadWorlds().catch((error) => worldMessage(error.message || String(error), "error"));
 loadCampaigns().catch((error) => setStatus(error.message || String(error), "error"));

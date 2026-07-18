@@ -32,9 +32,13 @@ The current implementation is a production-shaped vertical slice. It serves the 
 - Typed backend RPG assessment, durable private percentile resolution, and retry-safe reuse without rerolling.
 - Typed before/after event evaluation, trigger counters, deferred events, and validated fiction-only after-scene extensions.
 - A migration, provider, generation, and memory-inspection UI at `/nexus/`.
+- A database-backed World Library for editable drafts, immutable publication, version history, fork provenance, archive/restore, and portable world export/import.
+- Campaign creation from selected world versions, campaign switching and archive controls, explicit audited upgrades to newer versions, and credential-free portable campaign exports.
 - Docker Swarm definitions for replicated API and worker services using CephFS assets.
 
 The player UI can now use the Nexus Story Engine for main story turns from **Model Settings**, including campaigns with RPG stats and before/after event triggers. Referee responses, random values, targets, trigger reasons, and orchestration diagnostics remain private. The narrative request receives only selected fictional consequences and authoritative trigger effects after independent sanitization.
+
+The Nexus interface at `/nexus/` is the Phase 2 management surface. World drafts use optimistic revisions; publication creates immutable numbered versions. Creating or editing a world never alters an existing campaign. When a newer version is available, the campaign panel offers an explicit migration that preserves its append-only accepted-turn ledger and starts the next generation from a fresh database-backed model chain.
 
 ## Requirements
 
@@ -173,6 +177,8 @@ pnpm test:integration
 The default Compose stack does not expose PostgreSQL. Copy `compose.override.example.yaml` to `compose.override.yaml` when direct host access is required for development.
 
 The deterministic integration suites use mock compatible endpoints and verify full database context, typed private RPG assessment, fiction-only consequence handoff, before/after triggers, persisted-roll reuse after recovery, compact truncation recovery, mechanics cleanup, committed-result retrieval, unchanged campaign state after unrecoverable responses, fresh-vector indexing, hybrid ranking, and lexical fallback when embeddings are unavailable. The Docker build stage includes tests so it can be run on the Compose network without publishing PostgreSQL.
+
+World Library integration coverage additionally verifies immutable published versions, optimistic draft conflicts, explicit campaign migration records, cross-world isolation, fork provenance, idempotent world import, editable drafts for legacy imports, and exports that omit provider configuration and credentials.
 
 Runtime roles use the same image:
 

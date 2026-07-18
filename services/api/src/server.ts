@@ -6,10 +6,21 @@ import { z } from "zod";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
-import { storyImportRequestSchema } from "../../../packages/contracts/src/imports.js";
+import { storyImportPreviewRequestSchema, storyImportRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
 import { generationRequestSchema, playerCampaignConfigSchema, providerProfileInputSchema } from "../../../packages/contracts/src/generation.js";
-import { importLegacyStory } from "./import-service.js";
+import {
+  campaignCreateSchema,
+  campaignUpdateSchema,
+  campaignWorldMigrationSchema,
+  worldCreateSchema,
+  worldDraftUpdateSchema,
+  worldForkSchema,
+  worldImportRequestSchema,
+  worldPublishSchema,
+  worldStatusUpdateSchema
+} from "../../../packages/contracts/src/world-library.js";
+import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js";
 import {
   buildContextPreview,
   enqueueChronicleReindex,
@@ -21,6 +32,23 @@ import {
 import { readAsset, type FilesystemAssetStore } from "./asset-service.js";
 import { createProvider, listProviders, providerModels } from "./provider-service.js";
 import { enqueueGeneration, getGenerationJob, getGenerationResult, retryGeneration, syncPlayerCampaignConfig } from "./generation-service.js";
+import {
+  createCampaign,
+  createWorld,
+  exportCampaign,
+  exportWorld,
+  forkWorld,
+  getWorld,
+  importWorld,
+  listCampaigns,
+  listWorlds,
+  migrateCampaignWorld,
+  previewWorldImport,
+  publishWorld,
+  updateCampaign,
+  updateWorld,
+  updateWorldDraft
+} from "./world-service.js";
 
 type BuildServerOptions = {
   config: RuntimeConfig;
@@ -121,21 +149,73 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     return reply.code(result.duplicate ? 200 : 201).send(result);
   });
 
-  app.get("/api/v1/campaigns", async () => {
-    const ownerUserId = await initialOwnerId(pool);
-    const result = await pool.query(
-      `SELECT c.id, c.title, c.status, c.active_turn_number AS "activeTurnNumber",
-              c.created_at AS "createdAt", c.updated_at AS "updatedAt",
-              w.id AS "worldId", w.title AS "worldTitle", c.world_version_id AS "worldVersionId"
-         FROM campaigns c
-         JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
-         JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
-        WHERE c.owner_user_id = $1
-        ORDER BY c.updated_at DESC`,
-      [ownerUserId]
-    );
-    return { campaigns: result.rows };
+  app.post("/api/v1/imports/legacy-story/preview", async (request) => (
+    previewLegacyStoryImport(pool, storyImportPreviewRequestSchema.parse(request.body))
+  ));
+
+  app.post("/api/v1/imports/world/preview", async (request) => (
+    previewWorldImport(pool, worldImportRequestSchema.parse(request.body))
+  ));
+
+  app.post("/api/v1/imports/world", async (request, reply) => {
+    const result = await importWorld(pool, worldImportRequestSchema.parse(request.body));
+    return reply.code(result.duplicate ? 200 : 201).send(result);
   });
+
+  app.get("/api/v1/worlds", async () => ({ worlds: await listWorlds(pool) }));
+
+  app.post("/api/v1/worlds", async (request, reply) => (
+    reply.code(201).send(await createWorld(pool, worldCreateSchema.parse(request.body)))
+  ));
+
+  app.get<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId", async (request) => (
+    getWorld(pool, uuidSchema.parse(request.params.worldId))
+  ));
+
+  app.put<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/draft", async (request) => (
+    updateWorldDraft(pool, uuidSchema.parse(request.params.worldId), worldDraftUpdateSchema.parse(request.body))
+  ));
+
+  app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/publish", async (request, reply) => (
+    reply.code(201).send(await publishWorld(pool, uuidSchema.parse(request.params.worldId), worldPublishSchema.parse(request.body)))
+  ));
+
+  app.patch<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId", async (request) => (
+    updateWorld(pool, uuidSchema.parse(request.params.worldId), worldStatusUpdateSchema.parse(request.body))
+  ));
+
+  app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/fork", async (request, reply) => (
+    reply.code(201).send(await forkWorld(pool, uuidSchema.parse(request.params.worldId), worldForkSchema.parse(request.body)))
+  ));
+
+  app.get<{ Params: { worldId: string }; Querystring: { worldVersionId?: string } }>("/api/v1/worlds/:worldId/export", async (request, reply) => {
+    const versionId = request.query.worldVersionId ? uuidSchema.parse(request.query.worldVersionId) : undefined;
+    return reply
+      .header("content-disposition", 'attachment; filename="infinite-quest-world.json"')
+      .send(await exportWorld(pool, uuidSchema.parse(request.params.worldId), versionId));
+  });
+
+  app.get("/api/v1/campaigns", async () => {
+    return { campaigns: await listCampaigns(pool) };
+  });
+
+  app.post("/api/v1/campaigns", async (request, reply) => (
+    reply.code(201).send(await createCampaign(pool, campaignCreateSchema.parse(request.body)))
+  ));
+
+  app.patch<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId", async (request) => (
+    updateCampaign(pool, uuidSchema.parse(request.params.campaignId), campaignUpdateSchema.parse(request.body))
+  ));
+
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/migrate-world", async (request) => (
+    migrateCampaignWorld(pool, uuidSchema.parse(request.params.campaignId), campaignWorldMigrationSchema.parse(request.body))
+  ));
+
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/export", async (request, reply) => (
+    reply
+      .header("content-disposition", 'attachment; filename="infinite-quest-campaign.json"')
+      .send(await exportCampaign(pool, uuidSchema.parse(request.params.campaignId)))
+  ));
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/turns", async (request) => {
     const ownerUserId = await initialOwnerId(pool);

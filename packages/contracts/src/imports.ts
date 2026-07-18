@@ -55,9 +55,12 @@ export const storyImportRequestSchema = z.object({
   story: legacyStorySchema
 });
 
+export const storyImportPreviewRequestSchema = storyImportRequestSchema;
+
 export type LegacyStory = z.infer<typeof legacyStorySchema>;
 export type LegacyTurn = z.infer<typeof legacyTurnSchema>;
 export type StoryImportRequest = z.infer<typeof storyImportRequestSchema>;
+export type StoryImportPreviewRequest = z.infer<typeof storyImportPreviewRequestSchema>;
 
 export type StoryImportResult = {
   importId: string;

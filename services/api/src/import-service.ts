@@ -113,13 +113,19 @@ export async function importLegacyStory(
     const worldId = worldInsert.rows[0]?.id;
     if (!worldId) throw new Error("Could not create the imported world.");
 
+    const worldContent = legacyWorldContent(request.story);
     const worldVersionInsert = await client.query<{ id: string }>(
       `INSERT INTO world_versions (world_id, owner_user_id, version_number, content, source_hash)
        VALUES ($1, $2, 1, $3, $4) RETURNING id`,
-      [worldId, ownerUserId, json(legacyWorldContent(request.story)), sourceHash]
+      [worldId, ownerUserId, json(worldContent), sourceHash]
     );
     const worldVersionId = worldVersionInsert.rows[0]?.id;
     if (!worldVersionId) throw new Error("Could not create the imported world version.");
+    await client.query(
+      `INSERT INTO world_drafts (world_id, owner_user_id, based_on_world_version_id, revision, content)
+       VALUES ($1,$2,$3,1,$4)`,
+      [worldId, ownerUserId, worldVersionId, json(worldContent)]
+    );
 
     const sanitizedSettings = removeProviderSecrets(request.story.settings);
     delete sanitizedSettings.nexusCampaignId;
@@ -278,4 +284,40 @@ export async function importLegacyStory(
 
     return { importId, worldId, worldVersionId, campaignId, duplicate: false, stats };
   });
+}
+
+export async function previewLegacyStoryImport(pool: DatabasePool, request: StoryImportRequest) {
+  const sanitizedStory = sanitizedStoryForHash(request.story);
+  const sourceHash = sha256(stableStringify(sanitizedStory));
+  const ownerUserId = await initialOwnerId(pool);
+  const prior = await pool.query<{ campaign_id: string | null }>(
+    "SELECT campaign_id FROM imports WHERE owner_user_id = $1 AND source_hash = $2 AND status = 'completed'",
+    [ownerUserId, sourceHash]
+  );
+  const missingNarration = request.story.turns
+    .map((turn, index) => ({ turn, index }))
+    .filter(({ turn }) => !turnNarration(turn))
+    .map(({ index }) => index + 1);
+  const completeHistoryCharacters = request.story.turns.reduce((total, turn) => (
+    total + String(turn.action ?? "").length + turnNarration(turn).length
+  ), 0);
+  const sanitizedSettings = removeProviderSecrets(request.story.settings);
+  const credentialsRemoved = stableStringify(sanitizedSettings) !== stableStringify(request.story.settings ?? {});
+  const warnings = [
+    ...(credentialsRemoved ? ["Provider credentials and endpoint secrets will not be imported."] : []),
+    ...(missingNarration.length ? [`${missingNarration.length} turn(s) have no narration and must be corrected before import.`] : [])
+  ];
+  return {
+    kind: "campaign" as const,
+    title: worldTitle(request.story),
+    duplicate: Boolean(prior.rows[0]?.campaign_id),
+    existingCampaignId: prior.rows[0]?.campaign_id ?? null,
+    valid: missingNarration.length === 0,
+    counts: {
+      turns: request.story.turns.length,
+      completeHistoryCharacters,
+      estimatedHistoryTokens: request.story.turns.reduce((total, turn) => total + estimateTokens(`${turn.action ?? ""}\n${turnNarration(turn)}`), 0)
+    },
+    warnings
+  };
 }

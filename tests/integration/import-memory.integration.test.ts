@@ -52,6 +52,13 @@ integration("legacy import and Chronicle integration", () => {
     const result = await importLegacyStory(pool, request);
     expect(result.campaignId).toBe(campaignId);
     expect(result.duplicate).toBe(true);
+    const draft = await pool.query<{ based_on_world_version_id: string; revision: number }>(
+      `SELECT wd.based_on_world_version_id, wd.revision
+         FROM world_drafts wd JOIN campaigns c ON c.world_version_id = wd.based_on_world_version_id
+        WHERE c.id = $1`,
+      [campaignId]
+    );
+    expect(draft.rows[0]).toMatchObject({ revision: 1 });
   });
 
   it("serializes concurrent imports of identical content", async () => {

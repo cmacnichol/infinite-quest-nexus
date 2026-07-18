@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Infinite Quest Nexus Migration</title>
+  <title>Infinite Quest Nexus</title>
   <link rel="stylesheet" href="/nexus/nexus.css">
 </head>
 <body>
   <header class="site-header">
     <div>
       <p class="eyebrow">Infinite Quest Nexus</p>
-      <h1>Chronicle migration</h1>
-      <p>Import a portable Infinite Quest story into authoritative PostgreSQL storage and inspect the fiction-only memory context.</p>
+      <h1>World Library &amp; Chronicle</h1>
+      <p>Author reusable versioned worlds, run persistent campaigns, and inspect the fiction-only memory selected for generation.</p>
     </div>
     <a class="button secondary" href="/">Return to Infinite Quest</a>
   </header>
@@ -55,19 +55,73 @@
       <div id="providerStatus" class="status" role="status" aria-live="polite">LM Studio and compatible provider calls are server-side, so browser CORS does not apply.</div>
     </section>
 
+    <section class="card world-library-card" aria-labelledby="world-library-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">World Library</p>
+          <h2 id="world-library-title">Reusable story worlds</h2>
+          <p>Drafts are editable. Published versions are immutable, and existing campaigns stay pinned until explicitly migrated.</p>
+        </div>
+        <div class="button-row">
+          <label class="compact-field">New world title<input id="newWorldTitle" maxlength="200" placeholder="Name a new world"></label>
+          <button id="newWorld" class="button primary" type="button">New world</button>
+          <button id="refreshWorlds" class="icon-button" type="button" aria-label="Refresh worlds">↻</button>
+        </div>
+      </div>
+      <div class="world-workspace">
+        <aside>
+          <div id="worldList" class="world-list"><p class="muted">Loading worlds…</p></div>
+        </aside>
+        <form id="worldForm" class="world-form">
+          <div class="world-editor-heading">
+            <div>
+              <h3 id="worldEditorTitle">Select or create a world</h3>
+              <p id="worldEditorMeta" class="muted">No world draft is selected.</p>
+            </div>
+            <label>Published version<select id="worldVersionSelect" disabled><option value="">No published versions</option></select></label>
+          </div>
+          <div class="world-fields">
+            <label>Title<input id="worldTitle" required maxlength="200" disabled></label>
+            <label>Genre<input id="worldGenre" maxlength="2000" disabled></label>
+            <label>Tone<input id="worldTone" maxlength="2000" disabled></label>
+            <label class="wide-field">Premise<textarea id="worldPremise" rows="3" maxlength="200000" disabled></textarea></label>
+            <label class="wide-field">Background and canon<textarea id="worldBackground" rows="6" maxlength="200000" disabled></textarea></label>
+            <label class="wide-field">Character defaults<textarea id="worldCharacter" rows="3" maxlength="200000" disabled></textarea></label>
+            <label class="wide-field">Opening action<textarea id="worldFirstAction" rows="2" maxlength="200000" disabled></textarea></label>
+            <label class="wide-field">Rules<textarea id="worldRules" rows="3" maxlength="200000" disabled></textarea></label>
+            <label class="wide-field">Release notes<input id="worldReleaseNotes" maxlength="10000" disabled placeholder="Describe this published version without changing canon"></label>
+          </div>
+          <div class="quick-create-fields">
+            <label>Fork title<input id="forkWorldTitle" maxlength="200" disabled placeholder="Name an independent fork"></label>
+            <label>New campaign title<input id="newCampaignTitle" maxlength="200" disabled placeholder="Name a campaign for the selected version"></label>
+          </div>
+          <div class="button-row world-actions">
+            <button id="saveWorldDraft" class="button primary" type="submit" disabled>Save draft</button>
+            <button id="publishWorld" class="button secondary" type="button" disabled>Publish version</button>
+            <button id="forkWorld" class="button secondary" type="button" disabled>Fork selected version</button>
+            <button id="createCampaign" class="button secondary" type="button" disabled>Create campaign</button>
+            <button id="exportWorld" class="button secondary" type="button" disabled>Export version</button>
+            <button id="archiveWorld" class="button danger" type="button" disabled>Archive</button>
+          </div>
+          <div id="worldStatus" class="status" role="status" aria-live="polite">World content is stored in PostgreSQL, never embedded in this client.</div>
+        </form>
+      </div>
+    </section>
+
     <section class="card import-card" aria-labelledby="import-title">
       <div>
-        <h2 id="import-title">Import a saved story</h2>
-        <p>The import is idempotent. Importing the same file again returns the existing campaign instead of duplicating it.</p>
+        <h2 id="import-title">Import a world or campaign</h2>
+        <p>Files are validated and previewed before import. Re-importing identical content selects the existing database record.</p>
       </div>
       <label class="file-field">
-        <span>Infinite Quest <code>.story</code> or JSON file</span>
+        <span>Infinite Quest <code>.story</code>, campaign export, or world JSON</span>
         <input id="storyFile" type="file" accept=".story,.json,application/json">
       </label>
       <div class="import-actions">
-        <button id="importStory" class="button primary" type="button" disabled>Import selected file</button>
+        <button id="importStory" class="button primary" type="button" disabled>Import validated file</button>
         <button id="importBrowserState" class="button secondary" type="button" disabled>Import current browser story</button>
       </div>
+      <div id="importPreview" class="import-preview muted">No file has been validated.</div>
       <div id="importStatus" class="status" role="status" aria-live="polite">Choose a story file to begin.</div>
     </section>
 
@@ -91,6 +145,16 @@
           </div>
           <button id="reindexMemory" class="button secondary" type="button" disabled>Rebuild memory</button>
         </div>
+
+        <form id="campaignForm" class="campaign-controls">
+          <label>Campaign title<input id="campaignTitle" maxlength="200" disabled></label>
+          <label>Status<select id="campaignStatus" disabled><option value="active">Active</option><option value="archived">Archived</option></select></label>
+          <label>World version<select id="campaignWorldVersion" disabled><option value="">Select a campaign</option></select></label>
+          <button id="saveCampaign" class="button secondary" type="submit" disabled>Save campaign</button>
+          <button id="migrateCampaign" class="button secondary" type="button" disabled>Migrate version</button>
+          <button id="exportCampaign" class="button secondary" type="button" disabled>Export campaign</button>
+        </form>
+        <div id="campaignStatusMessage" class="status hidden" role="status" aria-live="polite"></div>
 
         <div id="memoryMetrics" class="metrics" aria-live="polite"></div>
 
