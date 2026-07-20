@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
-import { callEmbeddingProvider, callImageProvider, callTextProvider, discoverEmbeddingModels, discoverImageModels, discoverModels, reportedProviderCost, type TextProviderProfile } from "../../packages/story-engine/src/providers.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { providerProfileInputSchema } from "../../packages/contracts/src/generation.js";
+import { callEmbeddingProvider, callImageProvider, callTextProvider, discoverEmbeddingModels, discoverImageModels, discoverModels, providerTransportErrorDetails, reportedProviderCost, type TextProviderProfile } from "../../packages/story-engine/src/providers.js";
 
 const profile: TextProviderProfile = {
   providerType: "lmstudio",
@@ -10,7 +11,57 @@ const profile: TextProviderProfile = {
   temperature: 0.8
 };
 
+afterEach(() => vi.restoreAllMocks());
+
 describe("text provider adapters", () => {
+  it("defaults provider request deadlines to five minutes", () => {
+    const parsed = providerProfileInputSchema.parse({
+      name: "Synthetic provider",
+      providerType: "lmstudio",
+      providerRole: "text",
+      baseUrl: "http://lmstudio.test",
+      defaultModel: "synthetic-model"
+    });
+    expect(parsed.requestTimeoutMs).toBe(300_000);
+  });
+
+  it("normalizes header timeouts into explicit safe transport diagnostics", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const timeoutProfile = { ...profile, requestTimeoutMs: 420_000, apiKey: "synthetic-secret-token" };
+    const fetcher = vi.fn(async () => {
+      throw new TypeError("fetch failed", { cause: Object.assign(new Error("Headers Timeout Error Bearer synthetic-secret-token"), { code: "UND_ERR_HEADERS_TIMEOUT" }) });
+    });
+    let thrown: unknown;
+    try {
+      await callTextProvider(timeoutProfile, { systemPrompt: "secret prompt", input: "private action" }, fetcher as typeof fetch);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain("timed out after 7 minutes");
+    expect(providerTransportErrorDetails(thrown)).toMatchObject({
+      timedOut: true,
+      timeoutMs: 420_000,
+      transportCode: "UND_ERR_HEADERS_TIMEOUT",
+      endpoint: "http://lmstudio.test/api/v1/chat"
+    });
+    const logged = consoleError.mock.calls.map(([value]) => String(value)).join("\n");
+    expect(logged).toContain('"event":"provider_transport_error"');
+    expect(logged).not.toContain("secret prompt");
+    expect(logged).not.toContain("private action");
+    expect(logged).not.toContain("synthetic-secret-token");
+    consoleError.mockRestore();
+  });
+
+  it("attaches an abort deadline and configurable dispatcher to outbound requests", async () => {
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeDefined();
+      return new Response(JSON.stringify({ output: [{ type: "message", content: "{}" }], stats: {} }), { status: 200 });
+    });
+    await callTextProvider({ ...profile, requestTimeoutMs: 600_000 }, { systemPrompt: "system", input: "input" }, fetcher as typeof fetch);
+  });
+
   it("normalizes only explicit valid provider-reported costs", () => {
     expect(reportedProviderCost({ cost: 0.00001234 })).toEqual({ amount: "0.00001234", currency: "USD" });
     expect(reportedProviderCost({ cost: 0, currency: "usd" })).toEqual({ amount: "0", currency: "USD" });
@@ -83,6 +134,34 @@ describe("text provider adapters", () => {
       systemPrompt: "system",
       input: "authoritative snapshot",
       recoveryInput: "return compact JSON"
+    }, fetcher as typeof fetch);
+  });
+
+  it("includes the rejected response in stateless OpenRouter recovery", async () => {
+    const openRouterProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "openrouter",
+      baseUrl: "https://openrouter.test/api/v1"
+    };
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body.messages).toEqual([
+        { role: "system", content: "system" },
+        { role: "user", content: "authoritative snapshot" },
+        { role: "assistant", content: '{"narration":"She rolls a 17."}' },
+        { role: "user", content: "rewrite the rejected response" }
+      ]);
+      return new Response(JSON.stringify({
+        id: "recovery-response",
+        choices: [{ message: { content: "{}" }, finish_reason: "stop" }],
+        usage: {}
+      }), { status: 200 });
+    });
+    await callTextProvider(openRouterProfile, {
+      systemPrompt: "system",
+      input: "authoritative snapshot",
+      recoveryInput: "rewrite the rejected response",
+      rejectedResponse: '{"narration":"She rolls a 17."}'
     }, fetcher as typeof fetch);
   });
 

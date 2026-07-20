@@ -31,6 +31,9 @@ body[data-management-view="providers"] .world-management,
 body[data-management-view="worlds"] .provider-management { display: none; }
 .provider-form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; align-items: end; }
 .provider-model-settings { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.provider-advanced-settings { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 10px; background: #101522; padding: 10px 13px; }
+.provider-advanced-settings summary { color: var(--purple); cursor: pointer; font-size: .86rem; font-weight: 800; }
+.provider-advanced-fields { display: grid; grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
 .provider-form label, .provider-select-row label, .generation-form label { display: grid; gap: 7px; color: var(--muted); font-size: .86rem; font-weight: 700; }
 .provider-form label[title] { cursor: help; }
 .field-label-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
@@ -205,6 +208,7 @@ code { color: var(--gold); }
   .site-header { padding-top: 24px; }
   .context-controls { grid-template-columns: 1fr; }
   .provider-form, .provider-model-settings, .generation-form, .embedding-controls, .illustration-settings { grid-template-columns: 1fr; }
+  .provider-advanced-fields { grid-template-columns: 1fr; }
   .campaign-settings-heading, .illustration-toggle-row { align-items: stretch; flex-direction: column; }
   .world-editor-heading, .world-fields, .quick-create-fields, .campaign-controls { grid-template-columns: 1fr; }
   .context-controls .query-field { grid-column: auto; }

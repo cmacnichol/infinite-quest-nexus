@@ -459,6 +459,19 @@ integration("durable Story Engine integration", () => {
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
     const turn = await pool.query<{ narration: string }>("SELECT narration FROM turns WHERE campaign_id = $1 AND turn_number = 3", [imported.campaignId]);
     expect(turn.rows[0]?.narration).not.toMatch(/roll|dice|check/i);
+    const recoveryMessages = requests.at(-1)?.messages || [];
+    expect(recoveryMessages.at(-2)?.content).toContain("She rolls a 17");
+    expect(recoveryMessages.at(-1)?.content).toContain('"rolls a 17"');
+  });
+
+  it("accepts ordinary loading-dock language without invoking recovery", async () => {
+    const imported = await campaign();
+    const requestCount = requests.length;
+    replies.push({ content: validStory("A roll-up door closes while a cart approaches on rolling wheels.") });
+    const job = await queue(imported.campaignId);
+    await runGenerationJob(pool, "story-worker-benign-roll", 30, credentialSecret);
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+    expect(requests.length - requestCount).toBe(1);
   });
 
   it("leaves the accepted ledger unchanged when compact recovery is also truncated", async () => {

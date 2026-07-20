@@ -30,6 +30,7 @@ import {
   worldPublishSchema,
   worldStatusUpdateSchema
 } from "../../../packages/contracts/src/world-library.js";
+import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
 import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js";
 import { importInfiniteWorlds, previewInfiniteWorldsImport } from "./infinite-worlds-import-service.js";
 import {
@@ -96,6 +97,10 @@ function errorDetails(error: unknown): { name: string; message: string; issues?:
   return { name: "Error", message: String(error) };
 }
 
+function exposeError(error: unknown, code: number): boolean {
+  return code < 500 || (typeof error === "object" && error !== null && "expose" in error && (error as { expose?: unknown }).expose === true);
+}
+
 export async function buildServer({ config, pool }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: { level: process.env.LOG_LEVEL?.trim() || "info" },
@@ -121,11 +126,14 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.setErrorHandler((error, request, reply) => {
     const code = statusCode(error);
     const details = errorDetails(error);
+    const exposed = exposeError(error, code);
+    const transport = providerTransportErrorDetails(error);
     request.log.error({ err: error, code }, "request_failed");
     void reply.code(code).send({
-      error: code >= 500 ? "Internal server error" : details.name || "Invalid request",
-      message: code >= 500 ? "The request failed. Use the correlation ID to locate server diagnostics." : details.message,
+      error: exposed ? details.name || "Provider request failed" : "Internal server error",
+      message: exposed ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
       correlationId: request.id,
+      ...(transport ? { details: { code: transport.timedOut ? "provider_request_timeout" : "provider_transport_error", transport } } : {}),
       ...(details.issues === undefined ? {} : { issues: details.issues })
     });
   });

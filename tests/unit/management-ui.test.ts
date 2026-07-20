@@ -7,6 +7,13 @@ const managementScript = readFileSync("apps/web/public/nexus.js", "utf8");
 const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
 
 describe("Nexus management UI contracts", () => {
+  it("leaves fiction-boundary validation exclusively to the Nexus Story Engine", () => {
+    expect(playerHtml).not.toContain("STORY_RPG_MECHANIC_PATTERNS");
+    expect(playerHtml).not.toContain("storyRpgMechanicLeakFields");
+    expect(playerHtml).not.toContain("repairStatelessStoryRpgLeak");
+    expect(playerHtml).not.toContain("sanitizeFullHistoryRpgMechanics");
+  });
+
   it("uses Nexus branding and focused management navigation", () => {
     expect(playerHtml).toContain("<h1>Infinite Quest Nexus</h1>");
     expect(playerHtml).not.toMatch(/single-page AI-powered choose-your-own-adventure story engine/i);
@@ -21,6 +28,19 @@ describe("Nexus management UI contracts", () => {
     expect(playerHtml).not.toContain("Load Story File");
     expect(playerHtml).not.toContain('id="importFile"');
     expect(playerHtml).not.toContain("function loadStory(file)");
+  });
+
+  it("autosaves before leaving the story for Nexus management", () => {
+    const navigationHelper = playerHtml.match(/function navigateFromStory\(url\) \{[\s\S]*?\n    \}/)?.[0] || "";
+    expect(navigationHelper).toContain("syncFormToState();");
+    expect(navigationHelper).toContain("syncInlineWorldEditorState();");
+    expect(navigationHelper).toContain("saveState();");
+    expect(navigationHelper.indexOf("saveState();")).toBeLessThan(navigationHelper.indexOf("navigatingAfterAutosave = true;"));
+    expect(navigationHelper.indexOf("navigatingAfterAutosave = true;")).toBeLessThan(navigationHelper.indexOf("window.location.assign(url);"));
+    expect(playerHtml).toContain("if (navigatingAfterAutosave) return;");
+    expect(playerHtml).toContain('navigateFromStory("/nexus/#world-library")');
+    expect(playerHtml).toContain('navigateFromStory("/nexus/#providers")');
+    expect(playerHtml).not.toContain('closeMenu(); window.location.assign("/nexus/');
   });
 
   it("consolidates Infinite Worlds files into the World Management importer", () => {
@@ -49,6 +69,10 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).not.toContain("Generate next turn");
     expect(managementScript).not.toContain("async function generateTurn(event)");
     expect(managementHtml).toContain('id="providerProfileList"');
+    expect(managementHtml).toContain('id="providerAdvancedSettings"');
+    expect(managementHtml).toContain('id="providerRequestTimeoutMinutes"');
+    expect(managementHtml).toContain('value="5"');
+    expect(managementScript).toContain("requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000)");
     expect(managementHtml).toContain('id="campaignTextProvider"');
     expect(managementHtml).toContain('id="campaignImageProvider"');
     expect(managementHtml).toContain('id="campaignStoryLengthProfile"');

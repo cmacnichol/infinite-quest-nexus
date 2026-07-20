@@ -33,6 +33,7 @@ import {
   fictionGuidanceForEvents,
   fictionGuidanceForRoll,
   localRpgAssessment,
+  logProviderTransportError,
   mechanicsLeakFields,
   parseEventExtension,
   parseRpgAssessment,
@@ -42,6 +43,7 @@ import {
   RPG_ASSESSMENT_SYSTEM_PROMPT,
   STORY_PROMPT_PROTOCOL_VERSION,
   STORY_SYSTEM_PROMPT,
+  providerTransportErrorDetails,
   type ActivatedEvent,
   type PrivateRollResolution
 } from "../../../packages/story-engine/src/index.js";
@@ -113,15 +115,25 @@ async function callCampaignTextProvider(
   operation: StoryCostOperation,
   request: Parameters<typeof callTextProvider>[1]
 ) {
-  const result = await callTextProvider(provider, request);
-  await recordProfileCost(pool, provider, {
-    ownerUserId: job.owner_user_id,
-    campaignId: job.campaign_id,
-    generationJobId: job.id,
-    category: "story",
-    operation
-  }, result);
-  return result;
+  try {
+    const result = await callTextProvider(provider, request);
+    await recordProfileCost(pool, provider, {
+      ownerUserId: job.owner_user_id,
+      campaignId: job.campaign_id,
+      generationJobId: job.id,
+      category: "story",
+      operation
+    }, result);
+    return result;
+  } catch (error) {
+    logProviderTransportError(error, {
+      generationJobId: job.id,
+      campaignId: job.campaign_id,
+      providerProfileId: job.provider_profile_id,
+      storyOperation: operation
+    });
+    throw error;
+  }
 }
 
 function snapshottedStoryLength(context: ClaimedJob["context_options"]): StoryLengthWordRange {
@@ -767,17 +779,20 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
     );
     if (firstReason) {
       const recoveryKind = firstReason === "mechanics_leak" ? "mechanics_cleanup" : firstReason === "output_limit" ? "compact_completion" : "schema_repair";
+      const rejectedResponse = result.content;
       result = await callCampaignTextProvider(pool, provider, job, "story_recovery", {
         ...baseRequest,
         ...(provider.providerType === "lmstudio" && result.responseId && firstReason !== "mechanics_leak" ? { previousResponseId: result.responseId } : {}),
-        recoveryInput: recoveryInstruction(firstReason, initialValidationErrors, storyLength)
+        recoveryInput: recoveryInstruction(firstReason, initialValidationErrors, storyLength),
+        rejectedResponse
       });
       parsed = parseStoryOutput(result.content, storyMemoryDefaults);
       await pool.query(
         `INSERT INTO generation_attempts (owner_user_id, generation_job_id, attempt_number, recovery_kind, request_metadata,
            response_metadata, provider_response_id, finish_reason, raw_output, validation_errors, completed_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())`,
-        [job.owner_user_id, job.id, initialAttemptNumber + 1, recoveryKind, json({ model: provider.model, providerType: provider.providerType, previousResponseIdUsed: provider.providerType === "lmstudio" && firstReason !== "mechanics_leak" }),
+        [job.owner_user_id, job.id, initialAttemptNumber + 1, recoveryKind, json({ model: provider.model, providerType: provider.providerType,
+          previousResponseIdUsed: provider.providerType === "lmstudio" && firstReason !== "mechanics_leak", rejectedResponseIncluded: Boolean(rejectedResponse) }),
           json({ usage: result.usage, outputLimited: result.outputLimited, modelInstanceId: result.modelInstanceId }), result.responseId || null,
           result.finishReason || null, result.content || null, json(parsed.ok ? [] : parsed.errors)]
       );
@@ -850,12 +865,17 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
     await withTransaction(pool, (client) => commitStory(client, job, committedStory, provider, result, contextFingerprint,
       contextDiagnostics, inputs, orchestration, safeAction, workerId));
   } catch (error) {
-    const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "generation_failed";
+    const transportError = providerTransportErrorDetails(error);
+    const code = transportError
+      ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
+      : typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "generation_failed";
     await pool.query(
       `UPDATE generation_jobs SET status = 'failed', error_code = $3, error_message = $4,
+         recovery_metadata = recovery_metadata || $5::jsonb,
          lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-       WHERE id = $1 AND owner_user_id = $2 AND status <> 'completed' AND lease_owner = $5`,
-      [job.id, job.owner_user_id, code, (error instanceof Error ? error.message : String(error)).slice(0, 4000), workerId]
+       WHERE id = $1 AND owner_user_id = $2 AND status <> 'completed' AND lease_owner = $6`,
+      [job.id, job.owner_user_id, code, (error instanceof Error ? error.message : String(error)).slice(0, 4000),
+        json(transportError ? { transportError } : {}), workerId]
     );
   } finally {
     clearInterval(heartbeat);

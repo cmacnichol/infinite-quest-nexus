@@ -3,7 +3,7 @@ import type { DatabaseClient, DatabasePool } from "../../../packages/database/sr
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import { DEFAULT_EMBEDDING_MODEL, type CampaignEmbeddingConfig, type CompressionLevel, type MemoryContextQuery } from "../../../packages/contracts/src/memory.js";
 import { compressTurnMemory, buildTurnFictionMemory } from "../../../packages/story-engine/src/chronicle.js";
-import { callEmbeddingProvider } from "../../../packages/story-engine/src/providers.js";
+import { callEmbeddingProvider, logProviderTransportError } from "../../../packages/story-engine/src/providers.js";
 import { estimateTokens, extractEntities, stableStringify, stripMechanicsLeakage, truncateAtBoundary } from "../../../packages/domain/src/text.js";
 import { loadEmbeddingProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
@@ -654,6 +654,12 @@ async function applySemanticRelevance(
     return { mode: "hybrid", semanticAvailable: true, embeddedCandidates: freshScores.length, model: config.embedding_model,
       queryExpanded: true, effectiveQueryPrefix: prefixes.queryPrefix };
   } catch (error) {
+    logProviderTransportError(error, {
+      campaignId,
+      providerProfileId: config.embedding_provider_profile_id,
+      generationJobId: costAttribution.generationJobId || null,
+      memoryOperation: costAttribution.operation || "context_preview_embedding"
+    });
     return {
       mode: "lexical_fallback",
       semanticAvailable: false,
@@ -1173,6 +1179,12 @@ export async function runChronicleJob(pool: DatabasePool, workerId: string, leas
       }
     }
   } catch (error) {
+    logProviderTransportError(error, {
+      chronicleJobId: claimed.id,
+      campaignId: claimed.campaign_id,
+      jobType: claimed.job_type,
+      workerId
+    });
     if (claimed.job_type === "embed_campaign") {
       const current = await embeddingConfig(pool, claimed.owner_user_id, claimed.campaign_id).catch(() => undefined);
       if (current?.embedding_provider_profile_id) {

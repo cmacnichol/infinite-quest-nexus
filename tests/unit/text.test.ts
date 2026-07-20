@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { estimateTokens, removeProviderSecrets, stableStringify, stripMechanicsLeakage } from "../../packages/domain/src/text.js";
+import {
+  containsMechanicsLanguage,
+  estimateTokens,
+  mechanicsLanguageMatches,
+  removeProviderSecrets,
+  stableStringify,
+  stripMechanicsLeakage
+} from "../../packages/domain/src/text.js";
 
 describe("fiction-safe text handling", () => {
   it("removes explicit RPG mechanics without removing adjacent fiction", () => {
@@ -15,6 +22,48 @@ describe("fiction-safe text handling", () => {
   it("does not treat ordinary diegetic uses of rolled as mechanics", () => {
     const result = stripMechanicsLeakage("Test Character rolled their eyes and closed Object Beta.");
     expect(result.changed).toBe(false);
+  });
+
+  it("allows ordinary fiction that happens to use roll or difficulty words", () => {
+    for (const text of [
+      "A large roll-up door closes behind her.",
+      "The smooth, rolling approach of wheels echoes through the bay.",
+      "He unrolls a map beside a roll of canvas.",
+      "She crosses the flooded room with difficulty.",
+      "The patient remains in critical condition.",
+      "The scoreboard shows the final score."
+    ]) {
+      expect(containsMechanicsLanguage(text), text).toBe(false);
+    }
+  });
+
+  it("detects contextual resolution mechanics and engine metadata", () => {
+    const contaminated = [
+      "She rolls a 17 and opens the lock.",
+      "Roll the dice before continuing.",
+      "The die shows seventeen.",
+      "The RPG stat is hidden.",
+      "Make a skill check.",
+      "The difficulty class is 15.",
+      "Apply a +4 modifier.",
+      "The target was 65%.",
+      "This is a critical success.",
+      "A parser error interrupted the response.",
+      "The parser diagnostics mention a missing field.",
+      "The raw model response follows.",
+      "The rejected model output omitted narration.",
+      "Here is my internal reasoning."
+    ];
+    for (const text of contaminated) {
+      expect(containsMechanicsLanguage(text), text).toBe(true);
+      expect(mechanicsLanguageMatches(text), text).not.toHaveLength(0);
+    }
+  });
+
+  it("reports the exact matched span for actionable recovery", () => {
+    expect(mechanicsLanguageMatches("She rolls a 17 and opens the lock.")).toEqual([
+      { category: "dice", text: "rolls a 17", index: 4 }
+    ]);
   });
 
   it("removes provider credentials while retaining memory settings", () => {

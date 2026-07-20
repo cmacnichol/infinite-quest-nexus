@@ -12,6 +12,7 @@ export const providerProfileInputSchema = z.object({
   contextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).default(32768),
   maxOutputTokens: z.coerce.number().int().min(128).max(262144).default(4096),
   temperature: z.coerce.number().min(0).max(2).default(0.8),
+  requestTimeoutMs: z.coerce.number().int().min(60_000).max(3_600_000).default(300_000),
   apiKey: z.string().trim().max(16_384).optional(),
   enabled: z.boolean().default(true),
   isDefault: z.boolean().default(false),
@@ -29,6 +30,7 @@ export const providerProfileUpdateSchema = z.object({
   contextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).optional(),
   maxOutputTokens: z.coerce.number().int().min(128).max(262144).optional(),
   temperature: z.coerce.number().min(0).max(2).optional(),
+  requestTimeoutMs: z.coerce.number().int().min(60_000).max(3_600_000).optional(),
   apiKey: z.string().trim().max(16_384).optional(),
   enabled: z.boolean().optional(),
   isDefault: z.boolean().optional()

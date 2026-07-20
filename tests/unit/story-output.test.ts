@@ -66,6 +66,22 @@ describe("story output integrity", () => {
     }
   });
 
+  it("accepts ordinary roll and difficulty language in fiction and image prompts", () => {
+    const result = parseStoryOutput(story({
+      narration: "A large roll-up door closes as wheels approach on a rolling track. She crosses the uneven floor with difficulty.",
+      image_prompt: "An industrial loading bay with a closed roll-up door and a rolling cart."
+    }));
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it("detects singular die resolution and returns actionable validation detail", () => {
+    expect(parseStoryOutput(story({ narration: "The die shows seventeen, so the door opens." }))).toMatchObject({
+      ok: false,
+      code: "mechanics_leak",
+      errors: [expect.stringContaining('"The die shows"')]
+    });
+  });
+
   it("encrypts provider credentials with authenticated encryption", () => {
     const encrypted = encryptCredential("private-provider-key", "test-master-secret");
     expect(encrypted.ciphertext).not.toContain("private-provider-key");
@@ -76,6 +92,12 @@ describe("story output integrity", () => {
   it("does not prime the narrative prompt with roll or dice vocabulary", () => {
     expect(STORY_SYSTEM_PROMPT).not.toMatch(/\broll(?:s|ed|ing)?\b|\bdice?\b/i);
     expect(recoveryInstruction("mechanics_leak")).not.toMatch(/\broll(?:s|ed|ing)?\b|\bdice?\b/i);
+  });
+
+  it("includes fiction-boundary findings in mechanics cleanup instructions", () => {
+    const instruction = recoveryInstruction("mechanics_leak", ['Mechanics language detected in narration: "rolls a 17".']);
+    expect(instruction).toContain('"rolls a 17"');
+    expect(instruction).toContain("Rewrite the rejected response");
   });
 
   it("gives schema repair enough typed detail to correct tracker arrays", () => {

@@ -1,7 +1,7 @@
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import type { ProviderProfileInput, ProviderProfileUpdate, ProviderTextRequest } from "../../../packages/contracts/src/generation.js";
-import { callTextProvider, decryptCredential, encryptCredential, discoverEmbeddingModels, discoverImageModels, discoverModels, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
+import { callTextProvider, decryptCredential, encryptCredential, discoverEmbeddingModels, discoverImageModels, discoverModels, logProviderTransportError, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
 
 type ProviderRow = {
   id: string;
@@ -13,6 +13,7 @@ type ProviderRow = {
   context_window_tokens: number;
   max_output_tokens: number;
   temperature: number;
+  request_timeout_ms: number;
   configuration: Record<string, unknown>;
   encrypted_api_key: string | null;
   credential_nonce: string | null;
@@ -39,6 +40,7 @@ export function publicProvider(row: ProviderRow) {
     contextWindowTokens: row.context_window_tokens,
     maxOutputTokens: row.max_output_tokens,
     temperature: row.temperature,
+    requestTimeoutMs: row.request_timeout_ms,
     configuration: row.configuration,
     enabled: row.enabled,
     isDefault: row.is_default,
@@ -53,7 +55,7 @@ export function publicProvider(row: ProviderRow) {
 }
 
 const selectColumns = `id, name, provider_type, provider_role, base_url, default_model,
-  context_window_tokens, max_output_tokens, temperature, configuration, encrypted_api_key,
+  context_window_tokens, max_output_tokens, temperature, request_timeout_ms, configuration, encrypted_api_key,
   credential_nonce, credential_auth_tag, credential_key_version, enabled, is_default, health_status,
   consecutive_failures, last_health_check_at, last_health_error, created_at, updated_at`;
 
@@ -91,7 +93,7 @@ export async function listProviders(pool: DatabasePool) {
   return result.rows.map(publicProvider);
 }
 
-export async function createProvider(pool: DatabasePool, input: Omit<ProviderProfileInput, "isDefault"> & { isDefault?: boolean }, credentialSecret: string) {
+export async function createProvider(pool: DatabasePool, input: Omit<ProviderProfileInput, "isDefault" | "requestTimeoutMs"> & { isDefault?: boolean; requestTimeoutMs?: number }, credentialSecret: string) {
   const encrypted = input.apiKey ? encryptCredential(input.apiKey, credentialSecret) : null;
   return withTransaction(pool, async (client) => {
     const ownerUserId = await initialOwnerId(client);
@@ -101,12 +103,12 @@ export async function createProvider(pool: DatabasePool, input: Omit<ProviderPro
     const result = await client.query<ProviderRow>(
       `INSERT INTO provider_profiles (
          owner_user_id, name, provider_type, provider_role, base_url, default_model,
-         context_window_tokens, max_output_tokens, temperature, configuration,
+         context_window_tokens, max_output_tokens, temperature, request_timeout_ms, configuration,
          encrypted_api_key, credential_nonce, credential_auth_tag, credential_key_version, enabled, is_default
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
        RETURNING ${selectColumns}`,
       [ownerUserId, input.name, input.providerType, input.providerRole, input.baseUrl.replace(/\/+$/, ""), input.defaultModel,
-        input.contextWindowTokens, input.maxOutputTokens, input.temperature, JSON.stringify(input.configuration),
+        input.contextWindowTokens, input.maxOutputTokens, input.temperature, input.requestTimeoutMs ?? 300_000, JSON.stringify(input.configuration),
         encrypted?.ciphertext ?? null, encrypted?.nonce ?? null, encrypted?.authTag ?? null, encrypted?.keyVersion ?? null, input.enabled, Boolean(input.isDefault)]
     );
     const row = result.rows[0];
@@ -145,17 +147,18 @@ export async function updateProvider(pool: DatabasePool, providerProfileId: stri
       `UPDATE provider_profiles SET
          name = COALESCE($3, name), base_url = COALESCE($4, base_url), default_model = COALESCE($5, default_model),
          context_window_tokens = COALESCE($6, context_window_tokens), max_output_tokens = COALESCE($7, max_output_tokens),
-         temperature = COALESCE($8, temperature), enabled = COALESCE($9, enabled),
-         is_default = CASE WHEN $10 THEN $11 ELSE is_default END,
-         encrypted_api_key = CASE WHEN $12 THEN $13 ELSE encrypted_api_key END,
-         credential_nonce = CASE WHEN $12 THEN $14 ELSE credential_nonce END,
-         credential_auth_tag = CASE WHEN $12 THEN $15 ELSE credential_auth_tag END,
-         credential_key_version = CASE WHEN $12 THEN $16 ELSE credential_key_version END,
+         temperature = COALESCE($8, temperature), request_timeout_ms = COALESCE($9, request_timeout_ms),
+         enabled = COALESCE($10, enabled),
+         is_default = CASE WHEN $11 THEN $12 ELSE is_default END,
+         encrypted_api_key = CASE WHEN $13 THEN $14 ELSE encrypted_api_key END,
+         credential_nonce = CASE WHEN $13 THEN $15 ELSE credential_nonce END,
+         credential_auth_tag = CASE WHEN $13 THEN $16 ELSE credential_auth_tag END,
+         credential_key_version = CASE WHEN $13 THEN $17 ELSE credential_key_version END,
          updated_at = now()
        WHERE id = $1 AND owner_user_id = $2 RETURNING ${selectColumns}`,
       [providerProfileId, ownerUserId, input.name ?? null, input.baseUrl?.replace(/\/+$/, "") ?? null,
         input.defaultModel ?? null, input.contextWindowTokens ?? null, input.maxOutputTokens ?? null,
-        input.temperature ?? null, input.enabled ?? null, input.isDefault !== undefined, input.isDefault ?? false,
+        input.temperature ?? null, input.requestTimeoutMs ?? null, input.enabled ?? null, input.isDefault !== undefined, input.isDefault ?? false,
         input.apiKey !== undefined, encrypted?.ciphertext ?? null, encrypted?.nonce ?? null,
         encrypted?.authTag ?? null, encrypted?.keyVersion ?? null]
     );
@@ -235,6 +238,7 @@ export async function loadTextProvider(pool: DatabasePool, ownerUserId: string, 
     contextWindowTokens: row.context_window_tokens,
     maxOutputTokens: row.max_output_tokens,
     temperature: row.temperature,
+    requestTimeoutMs: row.request_timeout_ms,
     configuration: row.configuration,
     ...(apiKey ? { apiKey } : {})
   };
@@ -262,6 +266,7 @@ export async function loadEmbeddingProvider(pool: DatabasePool, ownerUserId: str
     contextWindowTokens: row.context_window_tokens,
     maxOutputTokens: row.max_output_tokens,
     temperature: row.temperature,
+    requestTimeoutMs: row.request_timeout_ms,
     configuration: row.configuration,
     ...(apiKey ? { apiKey } : {})
   };
@@ -300,6 +305,7 @@ async function loadProviderByRole(
     contextWindowTokens: row.context_window_tokens,
     maxOutputTokens: row.max_output_tokens,
     temperature: row.temperature,
+    requestTimeoutMs: row.request_timeout_ms,
     configuration: row.configuration,
     ...(apiKey ? { apiKey } : {})
   };
@@ -317,6 +323,7 @@ export async function providerModels(pool: DatabasePool, providerProfileId: stri
     await recordProviderHealth(pool, ownerUserId, providerProfileId, true);
     return models;
   } catch (error) {
+    logProviderTransportError(error, { providerProfileId, ownerUserId, providerRole: role, operation: "provider_model_inventory" });
     await recordProviderHealth(pool, ownerUserId, providerProfileId, false, error instanceof Error ? error.message : String(error));
     throw error;
   }
@@ -330,6 +337,7 @@ export async function discoverUnsavedProviderModels(input: Omit<ProviderProfileI
     contextWindowTokens: input.contextWindowTokens,
     maxOutputTokens: input.maxOutputTokens,
     temperature: input.temperature,
+    requestTimeoutMs: input.requestTimeoutMs,
     configuration: input.configuration,
     ...(input.apiKey ? { apiKey: input.apiKey } : {})
   };

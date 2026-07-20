@@ -1,21 +1,7 @@
 import { storyTurnOutputSchema, type StoryTurnOutput } from "../../contracts/src/generation.js";
+import { containsMechanicsLanguage, mechanicsLanguageMatches } from "../../domain/src/text.js";
 
-const MECHANICS_PATTERNS = [
-  /\broll(?:s|ed|ing)?\b/i,
-  /\bdice?\b/i,
-  /\bd(?:4|6|8|10|12|20|100)\b/i,
-  /\b(?:stat|skill|ability)\s+check\b/i,
-  /\bdifficulty(?:\s+(?:class|modifier|label))?\b/i,
-  /\bmodifier\s*[:=]?\s*[+-]?\d+/i,
-  /\btarget\s+(?:number\s+)?\d{1,3}%?/i,
-  /\b(?:success|failure)\s+by\s+\d+/i,
-  /\b(?:critical|automatic)\s+(?:success|failure)\b/i,
-  /\bpercentile\b/i
-];
-
-export function containsMechanicsLanguage(value: string): boolean {
-  return MECHANICS_PATTERNS.some((pattern) => pattern.test(String(value ?? "")));
-}
+export { containsMechanicsLanguage, mechanicsLanguageMatches } from "../../domain/src/text.js";
 
 export type StoryParseResult =
   | { ok: true; story: StoryTurnOutput }
@@ -74,6 +60,15 @@ export function mechanicsLeakFields(story: StoryTurnOutput): string[] {
     .map(([field]) => field);
 }
 
+export function mechanicsLeakErrors(story: StoryTurnOutput): string[] {
+  return storyTextFields(story).flatMap(([field, value]) => {
+    const matches = mechanicsLanguageMatches(value);
+    if (!matches.length) return [];
+    const terms = [...new Set(matches.map((match) => match.text))].slice(0, 5);
+    return [`Mechanics language detected in ${field}: ${terms.map((term) => JSON.stringify(term)).join(", ")}.`];
+  });
+}
+
 function withRecoverableMemoryFields(parsed: unknown, defaults: StoryMemoryDefaults): unknown {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
   const story = parsed as Record<string, unknown>;
@@ -100,7 +95,7 @@ export function parseStoryOutput(content: string, memoryDefaults: StoryMemoryDef
   if (!validated.success) {
     return { ok: false, code: "invalid_schema", errors: validated.error.issues.map((issue) => `${issue.path.join(".") || "response"}: ${issue.message}`) };
   }
-  const leaked = mechanicsLeakFields(validated.data);
-  if (leaked.length) return { ok: false, code: "mechanics_leak", errors: leaked.map((field) => `Mechanics language detected in ${field}.`) };
+  const leakErrors = mechanicsLeakErrors(validated.data);
+  if (leakErrors.length) return { ok: false, code: "mechanics_leak", errors: leakErrors };
   return { ok: true, story: validated.data };
 }

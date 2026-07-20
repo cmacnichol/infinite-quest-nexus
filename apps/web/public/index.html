@@ -59,6 +59,16 @@
           <label title="Maximum tokens the provider may generate in one response. This must leave enough context capacity for the prompt.">Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
         </div>
         <label title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
+        <details id="providerAdvancedSettings" class="provider-advanced-settings">
+          <summary>Advanced request settings</summary>
+          <div class="provider-advanced-fields">
+            <label title="Maximum wall-clock time Nexus waits for one provider HTTP request, including response headers and body. Increase this for slower local generation.">
+              Request timeout (minutes)
+              <input id="providerRequestTimeoutMinutes" type="number" min="1" max="60" step="0.5" value="5" required>
+              <span class="field-note">Defaults to 5 minutes. When reached, Nexus closes the request and records an explicit timeout diagnostic.</span>
+            </label>
+          </div>
+        </details>
         <label class="toggle-field" title="Disabled profiles remain stored but cannot be selected for new provider work."><input id="providerEnabled" type="checkbox" checked> Profile enabled</label>
         <label class="toggle-field" title="Used when a campaign leaves this provider role unassigned. A role with only one enabled profile treats it as the default automatically."><input id="providerIsDefault" type="checkbox"> Make this the default profile for its role</label>
         <button id="saveProvider" class="button primary" type="submit">Save provider</button>

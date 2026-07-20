@@ -16,7 +16,9 @@ Provider profiles are owned by the internal user. User-supplied API keys are enc
 
 LM Studio model discovery records loaded instance IDs and context lengths. Requests target the selected instance ID and omit `context_length`; the advertised loaded length instead controls the application's prompt budget. OpenRouter, Manifest, and generic compatible providers use OpenAI-style model and chat routes.
 
-The narrative model receives only fiction scopes and the current player action. Output must be a complete typed JSON object. Validation scans narration, choices, custom action, scratchpad, trackers, and image prompt for rolls or mechanics. Invalid, contaminated, and output-limited responses receive one compact recovery attempt. If recovery is still incomplete, the job becomes recoverable and the accepted-turn ledger remains unchanged.
+The narrative model receives only fiction scopes and the current player action. Output must be a complete typed JSON object. One shared, contextual fiction-boundary classifier scans narration, choices, custom action, scratchpad, trackers, Chronicle fields, and image prompt for resolution mechanics or engine metadata. It rejects phrases such as numeric rolls, skill checks, difficulty classes, target values, parser diagnostics, and private reasoning while allowing ordinary fiction such as roll-up doors, rolling wheels, and doing something with difficulty. The browser does not duplicate this validation or repair logic.
+
+Invalid, contaminated, and output-limited responses receive one compact recovery attempt. Stateless providers such as OpenRouter receive the rejected response and exact validator findings so they can rewrite the intended result instead of regenerating blindly. If recovery is still incomplete, the job becomes recoverable and the accepted-turn ledger remains unchanged.
 
 ## Consequences
 

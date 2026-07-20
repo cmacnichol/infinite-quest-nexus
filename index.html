@@ -3772,7 +3772,7 @@
       return Object.values(normalized).some(Boolean) ? normalized : null;
     }
 
-    function sanitizeFullHistoryRpgMechanics(history) {
+    function normalizeBrowserFullHistory(history) {
       if (!history) return null;
       const cleaned = {
         characters: fictionOnlyStoryTextForPrompt(history.characters || ""),
@@ -4392,8 +4392,10 @@
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         const error = new Error(payload.message || "Nexus request failed with HTTP " + response.status + ".");
+        error.name = payload.error || "NexusApiError";
         error.status = response.status;
         error.payload = payload;
+        error.correlationId = payload.correlationId || response.headers.get("x-correlation-id") || "";
         throw error;
       }
       return payload;
@@ -4546,7 +4548,7 @@
         if (typeof dialog.showModal === "function") dialog.showModal();
       } catch (err) {
         console.warn("Could not open Getting Started dialog.", err);
-        window.location.assign("/nexus/#providers");
+        navigateFromStory("/nexus/#providers");
       }
     }
 
@@ -6648,67 +6650,9 @@ ${rpgRollRule}${imageRule}- If event_triggers are provided, treat their instruct
 - If the player acts from an older turn, treat it as a branch and continue from the provided history only.`;
     }
 
-    const STORY_RPG_MECHANIC_PATTERNS = [
-      /\b(?:d100|d%|percentile (?:roll|check)|rpg (?:roll|check|stat)|dice? (?:roll|check)|skill check|stat check|ability check|difficulty (?:class|modifier|rating)|target (?:number|score)|target (?:of|was|is) \d{1,3}|roll result|roll of \d{1,3}|rolled (?:a )?\d{1,3}|roll(?:ed|ing)? (?:well|poorly|badly|successfully)|(?:make|attempt) (?:a )?roll|(?:you )?(?:succeed(?:ed)?|fail(?:ed|ure)?)(?: your| the)? (?:roll|check)|(?:the )?(?:roll|check) (?:succeeded|failed))\b/i,
-      /\b\d{1,3}\s*%\s+(?:chance|target|stat|score)\b/i
-    ];
-
     function fictionOnlyStoryTextForPrompt(value = "", maxChars = 0) {
-      const text = String(value || "");
-      const cleaned = text
-        .split(/(?<=[.!?])\s+|\n+/)
-        .filter(part => !STORY_RPG_MECHANIC_PATTERNS.some(pattern => pattern.test(part)))
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .trim();
+      const cleaned = String(value || "").replace(/\s+/g, " ").trim();
       return maxChars > 0 ? truncateText(cleaned, maxChars) : cleaned;
-    }
-
-    function storyRpgMechanicLeakFields(raw) {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
-      const candidates = [
-        ["narration", storyNarrationFromResult(raw)],
-        ["additional_text", raw.additional_text || raw.additionalText],
-        ...((Array.isArray(raw.choices) ? raw.choices : []).map((value, index) => [`choices[${index}]`, value])),
-        ["custom_action_suggestion", raw.custom_action_suggestion || raw.customActionSuggestion || raw.alternative_action || raw.alternativeAction],
-        ["scratchpad", raw.scratchpad],
-        ["image_prompt", raw.image_prompt || raw.imagePrompt],
-        ...((Array.isArray(raw.tracker_updates) ? raw.tracker_updates : []).flatMap((update, index) => [
-          [`tracker_updates[${index}].value`, update?.value],
-          [`tracker_updates[${index}].rationale`, update?.rationale]
-        ]))
-      ];
-      return candidates
-        .filter(([, value]) => typeof value === "string" && STORY_RPG_MECHANIC_PATTERNS.some(pattern => pattern.test(value)))
-        .map(([field]) => field);
-    }
-
-    function storyRpgMechanicLeakError(fields = []) {
-      const err = new Error(`${providerName()} exposed RPG resolution mechanics in ${fields.join(", ") || "the story response"}. The response was rejected before it could be displayed or saved.`);
-      err.name = "StoryRpgMechanicLeakError";
-      err.isStoryRpgMechanicLeakError = true;
-      err.leakFields = fields;
-      return err;
-    }
-
-    function storyRpgLeakRepairSystemPrompt() {
-      return `You are a strict JSON story-response editor.
-Return ONLY one valid JSON object with the same fields and fictional outcome as the supplied response.
-Remove every reference or implication of RPG mechanics from all fields, including narration, choices, custom_action_suggestion, scratchpad, tracker_updates, and image_prompt.
-Never mention rolls, dice, checks, stats, scores, targets, modifiers, difficulty classes, percentages, success/failure labels, or game mechanics.
-Rewrite those references as natural events and consequences inside the fiction. Preserve names, continuity, choices, tracker values, and whether the attempted action works or does not work as intended.`;
-    }
-
-    async function repairStatelessStoryRpgLeak(raw, leakFields = []) {
-      const storyResponse = Object.fromEntries(Object.entries(raw || {}).filter(([key]) => !key.startsWith("__")));
-      const repaired = await callOpenRouterJson("story mechanic cleanup", buildOpenRouterInstructionMessages(
-        storyRpgLeakRepairSystemPrompt(),
-        JSON.stringify({ detected_fields: leakFields, story_response_to_clean: storyResponse }, null, 2)
-      ), { temperature: 0.1, max_tokens: storyOutputTokenBudget(), json_retries: 1, no_content_retries: 1 });
-      const remaining = storyRpgMechanicLeakFields(repaired);
-      if (remaining.length) throw storyRpgMechanicLeakError(remaining);
-      assertUsableStoryResult(repaired, "story mechanic cleanup");
-      return repaired;
     }
 
     function memorySummarySystemPrompt() {
@@ -7111,8 +7055,6 @@ Rules:
         eventTriggerExtensionSystemPrompt(),
         buildEventTriggerExtensionPrompt(action, turn, immediateTriggers)
       ), { temperature: Number(state.settings.temperature ?? 0.85), max_tokens: 1200, json_retries: 2, no_content_retries: 2 });
-      const mechanicLeakFields = storyRpgMechanicLeakFields(raw);
-      if (mechanicLeakFields.length) throw storyRpgMechanicLeakError(mechanicLeakFields);
       const addition = maybeParagraphizeStoryText(String(raw.additional_text || raw.additionalText || raw.narration || raw.text || "").trim());
       if (addition) {
         turn.narration = `${String(turn.narration || "").trim()}
@@ -7134,7 +7076,7 @@ ${addition}`.trim();
         memorySummarySystemPrompt(),
         buildFullHistoryUpdatePrompt()
       ), { temperature: 0.2, max_tokens: summaryOutputTokens, json_retries: 2, no_content_retries: 2 });
-      const normalized = sanitizeFullHistoryRpgMechanics(normalizeFullHistory(raw));
+      const normalized = normalizeBrowserFullHistory(normalizeFullHistory(raw));
       if (!normalized) throw new Error("The model did not return a usable full-history memory summary.");
       state.fullHistory = normalized;
       setFullHistoryCompressedThroughCurrentTurn();
@@ -7364,7 +7306,6 @@ ${addition}`.trim();
       if (Number.isFinite(Number(stats.time_to_first_token_seconds))) details.push(`${Number(stats.time_to_first_token_seconds).toFixed(2)}s to first token`);
       if (stats.reasoning_finalization_used) details.push("final story recovered after reasoning limit");
       if (stats.output_limit_recovery_used) details.push("story recovered after output limit");
-      if (stats.rpg_mechanic_cleanup_used) details.push("hidden RPG mechanics removed from story JSON");
       if (stats.json_repair_used) details.push("JSON syntax repaired from stored response");
       if (stats.schema_recovery_used) details.push("story schema recovered from stored response");
       target.textContent = `Stateful conversation active through turn ${turn.turnNumber}${details.length ? ` · ${details.join(" · ")}` : ""}.`;
@@ -7693,12 +7634,10 @@ ${addition}`.trim();
         ? "Your previous assistant message contains the intended Infinite Quest story but is not parseable as one valid JSON object. Preserve its narration, choices, scratchpad, tracker updates, and image prompt exactly where possible. Correct only JSON syntax and the required object shape. Return only the corrected JSON object with no markdown or commentary."
         : (recoveryReason === "missing_narration"
           ? "Your previous assistant message returned valid JSON but used the wrong object shape and omitted the required nonempty top-level narration field. Recover the intended story content from the preceding response and return the complete Infinite Quest story JSON now, including narration, exactly four choices, custom_action_suggestion, scratchpad, tracker_updates, and image_prompt. Do not return event-trigger-check JSON. Output only the corrected story JSON object with no markdown or commentary."
-          : (recoveryReason === "rpg_leak"
-            ? "Rewrite the preceding Infinite Quest story response as one complete JSON object with the same fictional outcome, continuity, choices, scratchpad, tracker updates, and image intent, but remove every reference or implication of RPG mechanics from every field. Never mention rolls, dice, checks, stats, scores, targets, modifiers, difficulty classes, percentages, success/failure labels, or game mechanics. Express the resolved outcome only as natural events and consequences in the fiction. Output only valid JSON with no markdown or commentary."
-            : (recoveryReason === "output_limit"
+          : (recoveryReason === "output_limit"
             ? `The previous story generation reached its output limit. Recover the intended next turn from that stored response and return one complete, compact Infinite Quest story JSON object—not a fragment or continuation. Do not repeat private reasoning. Preserve the established events, but shorten narration to at most ${compactNarrationWords} words so there is ample room to close the JSON. Prioritize nonempty narration, exactly four concise choices, a distinct custom_action_suggestion, compact scratchpad, essential tracker_updates, and a concise image_prompt. Output only valid JSON with no markdown or commentary.`
-            : "The previous generation reached its output limit during private reasoning. Do not restart or repeat that reasoning. Return the final required Infinite Quest story JSON object now, following the original system instructions and JSON shape. Output only valid JSON with no markdown.")));
-      const outputBudget = ["output_limit", "rpg_leak"].includes(recoveryReason) ? lmStudioCompactStoryRecoveryBudget() : storyOutputTokenBudget();
+            : "The previous generation reached its output limit during private reasoning. Do not restart or repeat that reasoning. Return the final required Infinite Quest story JSON object now, following the original system instructions and JSON shape. Output only valid JSON with no markdown."));
+      const outputBudget = recoveryReason === "output_limit" ? lmStudioCompactStoryRecoveryBudget() : storyOutputTokenBudget();
       const payload = {
         model,
         previous_response_id: previousResponseId,
@@ -7713,7 +7652,7 @@ ${addition}`.trim();
       if (reasoning) payload.reasoning = reasoning;
       const requestLabel = recoveryReason === "invalid_json"
         ? "story JSON repair"
-        : (recoveryReason === "missing_narration" ? "story schema recovery" : (recoveryReason === "output_limit" ? "compact story continuation" : (recoveryReason === "rpg_leak" ? "story mechanic cleanup" : "story finalization")));
+        : (recoveryReason === "missing_narration" ? "story schema recovery" : (recoveryReason === "output_limit" ? "compact story continuation" : "story finalization"));
       return requestLmStudioNativeChat(payload, { ...options, requestLabel, reasoningFallbackMaxTokens: outputBudget });
     }
 
@@ -7777,7 +7716,6 @@ ${addition}`.trim();
       let content = lmStudioResponseContent(result.data);
       let recoveredFromReasoningLimit = false;
       let recoveredFromOutputLimit = !!manualRecovery;
-      let recoveredFromRpgMechanicLeak = false;
       const initialLimit = lmStudioOutputLimitDetails(result.data, result.requestPayload);
       if (!manualRecovery && initialLimit && String(result.data?.response_id || "")) {
         const limitedData = result.data;
@@ -7887,33 +7825,6 @@ ${addition}`.trim();
           narrationCharacters: storyNarrationFromResult(parsed).length
         });
       }
-      let mechanicLeakFields = storyRpgMechanicLeakFields(parsed);
-      if (mechanicLeakFields.length) {
-        const previousResponseId = String(data?.response_id || "").trim();
-        recordActivity("story", "LM Studio story mechanic leakage detected", "warn", {
-          responseId: previousResponseId,
-          fields: mechanicLeakFields
-        });
-        if (!previousResponseId) throw storyRpgMechanicLeakError(mechanicLeakFields);
-        updateTurnGenerationDetail("LM Studio exposed hidden resolution mechanics; rewriting the response as fiction-only JSON before displaying it.");
-        result = await finalizeLmStudioStatefulStory(model, previousResponseId, options, "rpg_leak");
-        if (!result.ok) throw storyRpgMechanicLeakError(mechanicLeakFields);
-        data = result.data;
-        content = lmStudioResponseContent(data);
-        stats = data?.stats || {};
-        if (!content) throw storyRpgMechanicLeakError(mechanicLeakFields);
-        try {
-          parsed = extractJson(content, responseDetailsFor(data));
-          assertUsableStoryResult(parsed, "story mechanic cleanup");
-        } catch (err) {
-          const leakError = storyRpgMechanicLeakError(mechanicLeakFields);
-          leakError.cause = err;
-          throw leakError;
-        }
-        mechanicLeakFields = storyRpgMechanicLeakFields(parsed);
-        if (mechanicLeakFields.length) throw storyRpgMechanicLeakError(mechanicLeakFields);
-        recoveredFromRpgMechanicLeak = true;
-      }
       parsed.__lmStudioResponseId = String(data.response_id || "");
       parsed.__lmStudioStorySignature = signature;
       parsed.__lmStudioStats = {
@@ -7926,9 +7837,8 @@ ${addition}`.trim();
         json_repair_used: recoveredFromInvalidJson,
         schema_recovery_used: recoveredFromMissingNarration,
         output_limit_recovery_used: recoveredFromOutputLimit,
-        rpg_mechanic_cleanup_used: recoveredFromRpgMechanicLeak,
         reasoning_tokens_before_finalization: recoveredFromReasoningLimit ? Number(initialStats.reasoning_output_tokens || 0) : 0,
-        finalization_output_tokens: recoveredFromReasoningLimit || recoveredFromInvalidJson || recoveredFromOutputLimit || recoveredFromRpgMechanicLeak ? Number(stats.total_output_tokens || 0) : 0
+        finalization_output_tokens: recoveredFromReasoningLimit || recoveredFromInvalidJson || recoveredFromOutputLimit ? Number(stats.total_output_tokens || 0) : 0
       };
       parsed.__openrouterModel = String(data.model_instance_id || state.settings.llmModel || "");
       recordActivity("story", "LM Studio story response accepted", "success", {
@@ -7937,7 +7847,6 @@ ${addition}`.trim();
         narrationCharacters: storyNarrationFromResult(parsed).length,
         reasoningFinalizationUsed: recoveredFromReasoningLimit,
         outputLimitRecoveryUsed: recoveredFromOutputLimit,
-        rpgMechanicCleanupUsed: recoveredFromRpgMechanicLeak,
         jsonRepairUsed: recoveredFromInvalidJson,
         schemaRecoveryUsed: recoveredFromMissingNarration
       });
@@ -8117,6 +8026,19 @@ ${addition}`.trim();
       setTurnGenerationStage(phase.id, `${phase.detail}${execution}`);
     }
 
+    function nexusGenerationJobError(job, pending, fallbackMessage) {
+      const message = String(job?.errorMessage || fallbackMessage || "Nexus Story Engine generation failed.");
+      const error = new Error(message + " The accepted campaign turn is unchanged.");
+      const transport = job?.recoveryMetadata?.transportError || null;
+      error.name = job?.errorCode === "provider_request_timeout" ? "ProviderTimeoutError"
+        : job?.errorCode === "provider_transport_error" ? "ProviderTransportError" : "NexusGenerationError";
+      error.errorCode = String(job?.errorCode || "generation_failed");
+      error.nexusGenerationJobId = String(pending?.jobId || job?.id || "");
+      error.nexusCampaignId = String(pending?.campaignId || job?.campaignId || "");
+      error.transport = transport;
+      return error;
+    }
+
     async function callNexusStoryEngine(action, rollResult = null, eventTriggerResults = [], options = {}) {
       let pending = state.settings.nexusPendingGeneration;
       let providerProfileId = String(pending?.jobId ? pending.providerProfileId : state.settings.nexusProviderProfileId || "");
@@ -8204,12 +8126,12 @@ ${addition}`.trim();
           }
           state.settings.nexusPendingGeneration = null;
           saveState();
-          throw new Error((job.errorMessage || "Nexus could not recover a complete story turn.") + " The accepted campaign turn is unchanged.");
+          throw nexusGenerationJobError(job, pending, "Nexus could not recover a complete story turn.");
         }
         if (job.status === "failed") {
           state.settings.nexusPendingGeneration = null;
           saveState();
-          throw new Error(job.errorMessage || "Nexus Story Engine generation failed without changing the campaign.");
+          throw nexusGenerationJobError(job, pending, "Nexus Story Engine generation failed.");
         }
         await sleep(NEXUS_GENERATION_POLL_MS);
       }
@@ -8268,11 +8190,7 @@ ${addition}`.trim();
         storySystemPrompt(),
         buildUserPrompt(action, rollResult, eventTriggerResults)
       ), { temperature: Number(state.settings.temperature ?? 0.85), max_tokens: maxTokens, ...options });
-      const mechanicLeakFields = storyRpgMechanicLeakFields(raw);
-      if (!mechanicLeakFields.length) return raw;
-      recordActivity("story", `${providerName()} story mechanic leakage detected`, "warn", { fields: mechanicLeakFields });
-      updateTurnGenerationDetail(`${providerName()} exposed hidden resolution mechanics; rewriting the response as fiction-only JSON before displaying it.`);
-      return repairStatelessStoryRpgLeak(raw, mechanicLeakFields);
+      return raw;
     }
 
     function imageModerationSignal(error) {
@@ -8856,8 +8774,6 @@ Rewrite rules:
           raw = await callOpenRouterChat(action, roll, activatedForMainStory, storyCallOptions);
         }
         assertUsableStoryResult(raw);
-        const mechanicLeakFields = storyRpgMechanicLeakFields(raw);
-        if (mechanicLeakFields.length) throw storyRpgMechanicLeakError(mechanicLeakFields);
         applyTurnState(raw);
         const turn = normalizeTurnResult(raw, action, raw.__nexusRoll || roll);
         const acceptedBeforeEvents = raw.__nexusGenerationJobId
@@ -8970,6 +8886,17 @@ Rewrite rules:
           action: String(action || ""),
           error: err?.message || String(err),
           errorType: err?.name || "Error",
+          errorCode: err?.errorCode || "",
+          correlationId: err?.correlationId || "",
+          nexusGenerationJobId: err?.nexusGenerationJobId || "",
+          nexusCampaignId: err?.nexusCampaignId || "",
+          transportCode: err?.transport?.transportCode || "",
+          transportOperation: err?.transport?.operation || "",
+          transportProvider: err?.transport?.providerType || "",
+          transportEndpoint: err?.transport?.endpoint || "",
+          requestTimeoutMs: Number(err?.transport?.timeoutMs || 0),
+          transportDurationMs: Number(err?.transport?.durationMs || 0),
+          transportTimedOut: !!err?.transport?.timedOut,
           parserError: err?.cause?.message || "",
           contentEnding: err?.contentEnding || "",
           rawKeys: Array.isArray(err?.rawKeys) ? err.rawKeys : [],
@@ -10058,6 +9985,7 @@ ${missingList}`,
 
     const UNSAVED_CLOSE_WARNING = "You have not saved this adventure. Your pictures will be lost if you do not save. Are you sure you want to close the window?";
     let dirtySinceFullExport = false;
+    let navigatingAfterAutosave = false;
 
     function hasAdventureContentToSave() {
       return state.turns.some(turn => turn.imageUrl || turn.imageGenerating || turn.imagePrompt || turn.narration) || !!state.scratchpad || !!state.trackers.length || fullHistoryHasContent();
@@ -10076,10 +10004,21 @@ ${missingList}`,
     }
 
     function handleBeforeUnload(event) {
+      if (navigatingAfterAutosave) return;
       if (!(dirtySinceFullExport || state.unsavedFullExport) || !hasAdventureContentToSave()) return;
       event.preventDefault();
       event.returnValue = UNSAVED_CLOSE_WARNING;
       return UNSAVED_CLOSE_WARNING;
+    }
+
+    function navigateFromStory(url) {
+      closeMenu();
+      syncFormToState();
+      syncInlineWorldEditorState();
+      normalizePerTurnSnapshots();
+      saveState();
+      navigatingAfterAutosave = true;
+      window.location.assign(url);
     }
 
     function clearAll() {
@@ -10140,7 +10079,7 @@ ${missingList}`,
         if (!event.target.closest(".menu-wrap")) closeMenu();
       });
       addClick("btnOpenWorldSetup", () => { closeMenu(); openWorldSetupDialog(); });
-      addClick("btnOpenProviderManagement", () => { closeMenu(); window.location.assign("/nexus/#providers"); });
+      addClick("btnOpenProviderManagement", () => { navigateFromStory("/nexus/#providers"); });
       addClick("btnOpenEditState", () => { closeMenu(); openEditStateDialog(); });
       addClick("btnOpenActivityLog", openActivityLogDialog);
       addClick("btnCloseActivityLog", closeActivityLogDialog);
@@ -10159,7 +10098,7 @@ ${missingList}`,
       addClick("btnRestartGettingStarted", restartGettingStartedDialogue);
       addClick("btnCloseWorldSetup", closeWorldSetupDialog);
       addClick("btnCloseEditState", closeEditStateDialog);
-      addClick("btnGettingConfigureProviders", () => { window.location.assign("/nexus/#providers"); });
+      addClick("btnGettingConfigureProviders", () => { navigateFromStory("/nexus/#providers"); });
       addClick("btnSkipGettingStartedToStory", () => {
         closeDialog("gettingStartedDialog");
         toast(hasConfiguredProvider() ? "Closed Getting Started." : "Provider setup skipped for now. Open Provider Management from the Menu when you are ready.");
@@ -10277,7 +10216,7 @@ ${missingList}`,
       $("btnAddDefaultTrigger").addEventListener("click", addDefaultTrigger);
       addClick("btnRefreshStorySummary", refreshStorySummaryNow);
       $("btnExportJson").addEventListener("click", () => { closeMenu(); exportJson(); });
-      $("btnOpenNexusImport")?.addEventListener("click", () => { closeMenu(); window.location.assign("/nexus/#world-library"); });
+      $("btnOpenNexusImport")?.addEventListener("click", () => { navigateFromStory("/nexus/#world-library"); });
       $("btnExportMarkdown").addEventListener("click", () => { closeMenu(); exportMarkdown(); });
       $("btnExportHtml").addEventListener("click", () => { closeMenu(); exportHtml().catch(err => showMessagePopup("HTML export failed", err?.message || String(err || "Something went wrong."))); });
       $("storyHistoryCompression")?.addEventListener("change", event => {

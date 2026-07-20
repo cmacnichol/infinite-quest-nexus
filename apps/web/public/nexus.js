@@ -73,7 +73,14 @@ async function api(path, options = {}) {
     headers: { ...(hasBody ? { "content-type": "application/json" } : {}), ...(options.headers || {}) }
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.message || `Request failed with HTTP ${response.status}.`);
+  if (!response.ok) {
+    const error = new Error(payload.message || `Request failed with HTTP ${response.status}.`);
+    error.name = payload.error || "ApiError";
+    error.statusCode = response.status;
+    error.correlationId = payload.correlationId || response.headers.get("x-correlation-id") || "";
+    error.details = payload.details || null;
+    throw error;
+  }
   return payload;
 }
 
@@ -798,7 +805,7 @@ function renderProviderProfiles() {
     const title = document.createElement("strong");
     title.textContent = provider.name;
     const summary = document.createElement("span");
-    summary.textContent = `${provider.providerRole} · ${provider.providerType} · ${provider.defaultModel || "model not selected"}`;
+    summary.textContent = `${provider.providerRole} · ${provider.providerType} · ${provider.defaultModel || "model not selected"} · ${Number(provider.requestTimeoutMs || 300000) / 60000} min timeout`;
     details.append(title, summary);
     const actions = document.createElement("div");
     actions.className = "button-row";
@@ -860,6 +867,8 @@ function resetProviderForm() {
   elements.providerContextTokens.value = "32768";
   elements.providerOutputTokens.value = "4096";
   elements.providerTemperature.value = "0.8";
+  elements.providerRequestTimeoutMinutes.value = "5";
+  elements.providerAdvancedSettings.open = false;
   elements.providerEnabled.checked = true;
   elements.providerType.disabled = false;
   elements.providerRole.disabled = false;
@@ -883,6 +892,7 @@ function beginProviderEdit(provider) {
   elements.providerContextTokens.value = String(provider.contextWindowTokens);
   elements.providerOutputTokens.value = String(provider.maxOutputTokens);
   elements.providerTemperature.value = String(provider.temperature);
+  elements.providerRequestTimeoutMinutes.value = String(Number(provider.requestTimeoutMs || 300000) / 60000);
   elements.providerEnabled.checked = provider.enabled;
   elements.providerIsDefault.checked = provider.isDefault;
   elements.providerType.disabled = true;
@@ -937,6 +947,7 @@ async function saveProvider(event) {
         contextWindowTokens: elements.providerContextTokens.value,
         maxOutputTokens: elements.providerOutputTokens.value,
         temperature: elements.providerTemperature.value,
+        requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
         enabled: elements.providerEnabled.checked,
         ...(!editingProviderId ? { configuration: {} } : {})
       })
@@ -984,6 +995,7 @@ async function refreshProviderModelsFromForm() {
           contextWindowTokens: elements.providerContextTokens.value,
           maxOutputTokens: elements.providerOutputTokens.value,
           temperature: elements.providerTemperature.value,
+          requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
           enabled: elements.providerEnabled.checked,
           isDefault: elements.providerIsDefault.checked,
           configuration: {}

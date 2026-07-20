@@ -1,4 +1,5 @@
 import type { ProviderType } from "../../contracts/src/generation.js";
+import { Agent } from "undici";
 
 export type TextProviderProfile = {
   providerType: ProviderType;
@@ -7,6 +8,7 @@ export type TextProviderProfile = {
   contextWindowTokens: number;
   maxOutputTokens: number;
   temperature: number;
+  requestTimeoutMs?: number;
   apiKey?: string;
   configuration?: Record<string, unknown>;
 };
@@ -16,6 +18,7 @@ export type ProviderRequest = {
   input: string;
   previousResponseId?: string;
   recoveryInput?: string;
+  rejectedResponse?: string;
 };
 
 export type ProviderResult = {
@@ -69,6 +72,149 @@ export type ImageProviderResult = {
 
 type Fetch = typeof fetch;
 
+export type ProviderTransportDetails = {
+  providerType: ProviderType;
+  operation: string;
+  endpoint: string;
+  model: string;
+  timeoutMs: number;
+  durationMs: number;
+  timedOut: boolean;
+  transportCode: string;
+  causeName: string;
+  causeMessage: string;
+};
+
+export class ProviderTransportError extends Error {
+  readonly code: "provider_request_timeout" | "provider_transport_error";
+  readonly statusCode: 502 | 504;
+  readonly expose = true;
+  readonly transport: ProviderTransportDetails;
+
+  constructor(message: string, details: ProviderTransportDetails, cause: unknown) {
+    super(message, { cause });
+    this.name = details.timedOut ? "ProviderTimeoutError" : "ProviderTransportError";
+    this.code = details.timedOut ? "provider_request_timeout" : "provider_transport_error";
+    this.statusCode = details.timedOut ? 504 : 502;
+    this.transport = details;
+  }
+}
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
+const MAX_REQUEST_TIMEOUT_MS = 3_600_000;
+const providerDispatcher = new Agent({
+  headersTimeout: MAX_REQUEST_TIMEOUT_MS,
+  bodyTimeout: MAX_REQUEST_TIMEOUT_MS,
+  connectTimeout: MAX_REQUEST_TIMEOUT_MS
+});
+const responseStartTimes = new WeakMap<Response, number>();
+
+function requestTimeoutMs(profile: TextProviderProfile): number {
+  const value = Number(profile.requestTimeoutMs);
+  return Number.isInteger(value) && value >= 1_000 ? value : DEFAULT_REQUEST_TIMEOUT_MS;
+}
+
+function safeEndpoint(value: string): string {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return "invalid-provider-url";
+  }
+}
+
+function safeCauseMessage(value: string): string {
+  return value
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/(https?:\/\/[^\s/:@]+):[^@\s/]+@/gi, "$1:[redacted]@")
+    .replace(/([?&](?:api[_-]?key|access[_-]?token|token|key)=)[^&\s]+/gi, "$1[redacted]");
+}
+
+function errorChain(error: unknown): Array<Record<string, unknown>> {
+  const chain: Array<Record<string, unknown>> = [];
+  let current = error;
+  for (let index = 0; index < 6 && typeof current === "object" && current !== null; index += 1) {
+    chain.push(current as Record<string, unknown>);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return chain;
+}
+
+function transportFailure(
+  profile: TextProviderProfile,
+  operation: string,
+  url: string,
+  cause: unknown,
+  startedAt: number
+): ProviderTransportError {
+  if (cause instanceof ProviderTransportError) return cause;
+  const chain = errorChain(cause);
+  const messages = chain.map((item) => String(item.message || ""));
+  const names = chain.map((item) => String(item.name || ""));
+  const codes = chain.map((item) => String(item.code || "")).filter(Boolean);
+  const timedOut = codes.some((code) => /TIMEOUT/i.test(code))
+    || names.some((name) => /^(?:TimeoutError|AbortError)$/i.test(name))
+    || messages.some((message) => /timed?\s*out|headers timeout|body timeout/i.test(message));
+  const timeoutMs = requestTimeoutMs(profile);
+  const providerName = profile.providerType === "lmstudio" ? "LM Studio"
+    : profile.providerType === "openrouter" ? "OpenRouter"
+      : profile.providerType === "openai_compatible" ? "OpenAI-compatible provider" : "Manifest provider";
+  const transportCode = codes[0] || (timedOut ? "REQUEST_TIMEOUT" : "TRANSPORT_FAILURE");
+  const causeName = names.find(Boolean) || "Error";
+  const causeMessage = messages.findLast(Boolean) || messages.find(Boolean) || String(cause || "Transport failure");
+  const durationMs = Math.max(0, Date.now() - startedAt);
+  const details: ProviderTransportDetails = {
+    providerType: profile.providerType,
+    operation,
+    endpoint: safeEndpoint(url),
+    model: profile.model,
+    timeoutMs,
+    durationMs,
+    timedOut,
+    transportCode,
+    causeName,
+    causeMessage: safeCauseMessage(causeMessage).slice(0, 1000)
+  };
+  const message = timedOut
+    ? `${providerName} ${operation} timed out after ${Math.round(timeoutMs / 60_000 * 10) / 10} minutes before a complete response was received. Nexus closed the provider request; increase Request timeout in the provider's Advanced settings or reduce the request workload.`
+    : `${providerName} ${operation} could not complete because the provider connection failed (${transportCode}). Check the endpoint and Docker host logs for transport diagnostics.`;
+  const error = new ProviderTransportError(message, details, cause);
+  console.error(JSON.stringify({ event: "provider_transport_error", ...details }));
+  return error;
+}
+
+export function providerTransportErrorDetails(error: unknown): ProviderTransportDetails | null {
+  return error instanceof ProviderTransportError ? error.transport : null;
+}
+
+export function logProviderTransportError(error: unknown, context: Record<string, unknown>): void {
+  const transport = providerTransportErrorDetails(error);
+  if (!transport) return;
+  console.error(JSON.stringify({ event: "provider_transport_error_correlated", ...context, ...transport }));
+}
+
+async function providerFetch(
+  profile: TextProviderProfile,
+  operation: string,
+  url: string,
+  init: RequestInit,
+  fetcher: Fetch
+): Promise<Response> {
+  const timeoutMs = requestTimeoutMs(profile);
+  const startedAt = Date.now();
+  try {
+    const response = await fetcher(url, {
+      ...init,
+      signal: AbortSignal.timeout(timeoutMs),
+      dispatcher: providerDispatcher
+    } as RequestInit);
+    responseStartTimes.set(response, startedAt);
+    return response;
+  } catch (error) {
+    throw transportFailure(profile, operation, url, error, startedAt);
+  }
+}
+
 function rootUrl(baseUrl: string): string {
   return baseUrl.trim().replace(/\/+$/, "");
 }
@@ -93,8 +239,19 @@ function headers(profile: TextProviderProfile): Record<string, string> {
   };
 }
 
-async function checkedJson(response: Response): Promise<Record<string, any>> {
-  const text = await response.text();
+async function checkedJson(
+  response: Response,
+  profile?: TextProviderProfile,
+  operation = "request",
+  url = response.url
+): Promise<Record<string, any>> {
+  let text = "";
+  try {
+    text = await response.text();
+  } catch (error) {
+    if (!profile) throw error;
+    throw transportFailure(profile, operation, url, error, responseStartTimes.get(response) ?? Date.now());
+  }
   let data: Record<string, any> = {};
   try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* response error below includes preview */ }
   if (!response.ok) {
@@ -120,12 +277,14 @@ export function reportedProviderCost(usage: unknown): ReportedProviderCost | nul
 }
 
 async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, fetcher: Fetch): Promise<ProviderResult> {
+  const rejectedResponse = String(request.rejectedResponse || "").trim()
+    .slice(0, Math.max(4000, Math.min(80_000, profile.maxOutputTokens * 4)));
   const payload: Record<string, unknown> = {
     model: profile.model,
     input: request.previousResponseId && request.recoveryInput
       ? request.recoveryInput
       : request.recoveryInput
-        ? `${request.input}\n\nRECOVERY REQUIREMENT:\n${request.recoveryInput}`
+        ? `${request.input}${rejectedResponse ? `\n\nREJECTED RESPONSE TO REWRITE:\n${rejectedResponse}` : ""}\n\nRECOVERY REQUIREMENT:\n${request.recoveryInput}`
         : request.input,
     store: true,
     stream: false,
@@ -136,8 +295,9 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
   else payload.system_prompt = request.systemPrompt;
   // Supplying context_length while targeting an already loaded LM Studio instance can load a duplicate.
   // The selected model/instance from inventory is therefore sent without a load-time override.
-  const response = await fetcher(`${lmStudioRoot(profile.baseUrl)}/api/v1/chat`, { method: "POST", headers: headers(profile), body: JSON.stringify(payload) });
-  const data = await checkedJson(response);
+  const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`;
+  const response = await providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile), body: JSON.stringify(payload) }, fetcher);
+  const data = await checkedJson(response, profile, "story generation", url);
   const messages = (Array.isArray(data.output) ? data.output : []).filter((item: any) => item?.type === "message");
   const content = String(messages.at(-1)?.content ?? "").trim();
   const outputTokens = Number(data.stats?.total_output_tokens || 0);
@@ -156,10 +316,15 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
 }
 
 async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, fetcher: Fetch): Promise<ProviderResult> {
+  const rejectedResponse = String(request.rejectedResponse || "").trim()
+    .slice(0, Math.max(4000, Math.min(80_000, profile.maxOutputTokens * 4)));
   const messages = [
     { role: "system", content: request.systemPrompt },
     { role: "user", content: request.input },
-    ...(request.recoveryInput ? [{ role: "assistant", content: "The previous response was incomplete or invalid." }, { role: "user", content: request.recoveryInput }] : [])
+    ...(request.recoveryInput ? [
+      { role: "assistant", content: rejectedResponse || "The previous response was incomplete or invalid." },
+      { role: "user", content: request.recoveryInput }
+    ] : [])
   ];
   const payload: Record<string, unknown> = {
     model: profile.model,
@@ -168,7 +333,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     max_tokens: profile.maxOutputTokens,
     response_format: { type: "json_object" }
   };
-  const send = () => fetcher(`${openAiRoot(profile.baseUrl)}/chat/completions`, { method: "POST", headers: headers(profile), body: JSON.stringify(payload) });
+  const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
+  const send = () => providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile), body: JSON.stringify(payload) }, fetcher);
   let response = await send();
   if (!response.ok) {
     const clone = response.clone();
@@ -178,7 +344,7 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       response = await send();
     }
   }
-  const data = await checkedJson(response);
+  const data = await checkedJson(response, profile, "story generation", url);
   const choice = data.choices?.[0] || {};
   const contentValue = choice.message?.content;
   const content = typeof contentValue === "string" ? contentValue : Array.isArray(contentValue)
@@ -214,12 +380,13 @@ export async function callEmbeddingProvider(
   if (!inputs.length) return {
     embeddings: [], model: profile.model, responseId: "", usage: { inputTokens: 0, totalTokens: 0 }, reportedCost: null
   };
-  const response = await fetcher(`${openAiRoot(profile.baseUrl)}/embeddings`, {
+  const url = `${openAiRoot(profile.baseUrl)}/embeddings`;
+  const response = await providerFetch(profile, "embedding generation", url, {
     method: "POST",
     headers: headers(profile),
     body: JSON.stringify({ model: profile.model, input: inputs })
-  });
-  const data = await checkedJson(response);
+  }, fetcher);
+  const data = await checkedJson(response, profile, "embedding generation", url);
   const rows = Array.isArray(data.data) ? [...data.data].sort((left: any, right: any) => Number(left?.index || 0) - Number(right?.index || 0)) : [];
   if (rows.length !== inputs.length) throw new Error(`Embedding provider returned ${rows.length} vectors for ${inputs.length} inputs.`);
   const embeddings = rows.map((row: any, index: number) => {
@@ -256,11 +423,11 @@ export async function callImageProvider(
     output_format: request.outputFormat,
     ...(profile.providerType === "openrouter" ? { aspect_ratio: request.aspectRatio } : { response_format: "b64_json" })
   };
-  const data = await checkedJson(await fetcher(url, {
+  const data = await checkedJson(await providerFetch(profile, "image generation", url, {
     method: "POST",
     headers: headers(profile),
     body: JSON.stringify(payload)
-  }));
+  }, fetcher), profile, "image generation", url);
   const image = Array.isArray(data.data) ? data.data[0] : undefined;
   const base64 = String(image?.b64_json || "").replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "").trim();
   if (!base64) {
@@ -369,13 +536,14 @@ export async function discoverModels(profile: TextProviderProfile, fetcher: Fetc
   const url = profile.providerType === "lmstudio"
     ? `${lmStudioRoot(profile.baseUrl)}/api/v1/models`
     : `${openAiRoot(profile.baseUrl)}/models`;
-  const data = await checkedJson(await fetcher(url, { headers: headers(profile) }));
+  const data = await checkedJson(await providerFetch(profile, "model discovery", url, { headers: headers(profile) }, fetcher), profile, "model discovery", url);
   return inventoryItems(inventoryRows(data));
 }
 
 export async function discoverEmbeddingModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
   if (profile.providerType !== "openrouter") return discoverModels(profile, fetcher);
-  const data = await checkedJson(await fetcher(`${rootUrl(profile.baseUrl)}/embeddings/models`, { headers: headers(profile) }));
+  const url = `${rootUrl(profile.baseUrl)}/embeddings/models`;
+  const data = await checkedJson(await providerFetch(profile, "embedding model discovery", url, { headers: headers(profile) }, fetcher), profile, "embedding model discovery", url);
   return inventoryRows(data).map((model: any) => ({
     id: String(model.id || model.canonical_slug || model.key || ""),
     displayName: String(model.name || model.display_name || model.id || model.canonical_slug || model.key || ""),
@@ -390,10 +558,11 @@ export async function discoverImageModels(profile: TextProviderProfile, fetcher:
     const url = profile.providerType === "lmstudio"
       ? `${lmStudioRoot(profile.baseUrl)}/api/v1/models`
       : `${openAiRoot(profile.baseUrl)}/models`;
-    const data = await checkedJson(await fetcher(url, { headers: headers(profile) }));
+    const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile) }, fetcher), profile, "image model discovery", url);
     return inventoryItems(imageInventoryRows(inventoryRows(data)));
   }
-  const data = await checkedJson(await fetcher(`${rootUrl(profile.baseUrl)}/images/models`, { headers: headers(profile) }));
+  const url = `${rootUrl(profile.baseUrl)}/images/models`;
+  const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile) }, fetcher), profile, "image model discovery", url);
   return inventoryRows(data).map((model: any) => ({
     id: String(model.id || model.key || ""),
     displayName: String(model.name || model.display_name || model.id || model.key || ""),

@@ -80,7 +80,10 @@ export function recoveryInstruction(
     const compactLength = compactStoryLengthWordRange(storyLength);
     return `The preceding response reached its output limit. Recover its intended fictional events and return one new, compact, complete JSON object. Do not continue the fragment. Aim for ${compactLength.minWords}-${compactLength.maxWords} narration words, keep continuity fields concise, and close every field.`;
   }
-  if (reason === "mechanics_leak") return "Regenerate the same intended fictional outcome from the authoritative snapshot. Every field must contain fiction or continuity facts only; remove all non-diegetic resolution and game-system terminology. Return only a complete JSON object.";
+  if (reason === "mechanics_leak") {
+    const details = validationErrors.length ? ` The fiction-boundary validator found: ${validationErrors.slice(0, 8).join("; ")}` : "";
+    return `Rewrite the rejected response while preserving its intended fictional outcome and valid continuity.${details} Every field must contain fiction or continuity facts only; replace the identified non-diegetic resolution or engine metadata with natural events and consequences. Return only one complete JSON object.`;
+  }
   const errors = validationErrors.length ? ` Correct these validation errors: ${validationErrors.slice(0, 8).join("; ")}.` : "";
   return `The preceding response was not a valid complete Infinite Quest story object. Recover the intended events and return one syntactically valid, schema-complete JSON object.${errors} tracker_updates must be an array of JSON objects such as [{"name":"fictional tracker name","value":"new fictional value"}], or [] when unchanged; never return tracker strings. Keep it compact and return no commentary.`;
 }

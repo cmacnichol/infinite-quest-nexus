@@ -2,7 +2,7 @@ import type { IllustrationConfig, IllustrationRequest } from "../../../packages/
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import { sha256 } from "../../../packages/domain/src/text.js";
-import { callImageProvider, containsMechanicsLanguage } from "../../../packages/story-engine/src/index.js";
+import { callImageProvider, containsMechanicsLanguage, logProviderTransportError } from "../../../packages/story-engine/src/index.js";
 import { persistTurnImage, type FilesystemAssetStore } from "./asset-service.js";
 import { loadImageProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
@@ -315,6 +315,13 @@ export async function runImageJob(
       }, response);
     });
   } catch (error) {
+    logProviderTransportError(error, {
+      imageJobId: job.id,
+      campaignId: job.campaign_id,
+      turnId: job.turn_id,
+      providerProfileId: job.provider_profile_id,
+      workerId
+    });
     await recordProviderHealth(pool, job.owner_user_id, job.provider_profile_id, false, error instanceof Error ? error.message : String(error)).catch(() => undefined);
     const permanent = typeof error === "object" && error !== null && "permanent" in error && Boolean((error as { permanent: unknown }).permanent);
     const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "image_generation_failed";
