@@ -1,5 +1,6 @@
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
 let selectedFile = null;
+let selectedImportSource = null;
 let selectedImport = null;
 let selectedCampaign = null;
 let worlds = [];
@@ -11,16 +12,65 @@ let providers = [];
 let selectedProvider = null;
 let embeddingConfig = null;
 let illustrationConfig = null;
-let latestDisplayedTurn = null;
 let contextPreviewSequence = 0;
 let discoveredProviderModels = [];
 let pendingDeleteTitle = "";
 let pendingDeleteResolve = null;
+let editingProviderId = "";
+let discoveredProfileModels = [];
+let discoveredEmbeddingModels = [];
+let providerModelPickerTarget = "provider";
+let embeddingJobPollSequence = 0;
+const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
+const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
+const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
+
+function clampedMemoryContextBudget(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS;
+  return Math.min(MAX_MEMORY_CONTEXT_BUDGET_TOKENS, Math.max(MIN_MEMORY_CONTEXT_BUDGET_TOKENS, Math.trunc(numeric)));
+}
+
+function applyEmbeddingModelContextBudget(model) {
+  const modelContextTokens = Number(model?.contextLength || 0);
+  if (!modelContextTokens) {
+    elements.budgetTokensSource.textContent = "This embedding model did not advertise a context limit; the memory context budget remains editable.";
+    elements.budgetTokensSource.className = "field-note manual-entry";
+    return;
+  }
+  const textProvider = effectiveCampaignProvider("text");
+  const storyInputCapacity = textProvider
+    ? Number(textProvider.contextWindowTokens || 0) - Number(textProvider.maxOutputTokens || 0) - 1024
+    : 0;
+  const embeddingCapacity = Math.max(MIN_MEMORY_CONTEXT_BUDGET_TOKENS, modelContextTokens - 512);
+  const safeBudget = clampedMemoryContextBudget(storyInputCapacity >= MIN_MEMORY_CONTEXT_BUDGET_TOKENS
+    ? Math.min(embeddingCapacity, storyInputCapacity)
+    : embeddingCapacity);
+  elements.budgetTokens.value = String(safeBudget);
+  elements.budgetTokensSource.textContent = storyInputCapacity >= MIN_MEMORY_CONTEXT_BUDGET_TOKENS && storyInputCapacity < embeddingCapacity
+    ? `Automatically set to ${number(safeBudget)} tokens: capped by the story provider after reserving output and protocol space.`
+    : `Automatically set to ${number(safeBudget)} tokens from the model's advertised ${number(modelContextTokens)}-token context, with a 512-token safety reserve.`;
+  elements.budgetTokensSource.className = "field-note api-supplied";
+}
+
+function applyManagementView() {
+  const providerView = window.location.hash === "#providers";
+  document.body.dataset.managementView = providerView ? "providers" : "worlds";
+  elements.managementTitle.textContent = providerView ? "Provider Management" : "World Management";
+  elements.managementDescription.textContent = providerView
+    ? "Add and manage provider profiles independently for text, image generation, and Chronicle embeddings."
+    : "Author reusable versioned worlds, configure campaigns, and inspect the fiction-only memory selected for generation.";
+  document.title = `${elements.managementTitle.textContent} · Infinite Quest Nexus`;
+}
+
+applyManagementView();
+window.addEventListener("hashchange", applyManagementView);
 
 async function api(path, options = {}) {
+  const hasBody = options.body !== undefined && options.body !== null;
   const response = await fetch(path, {
     ...options,
-    headers: { "content-type": "application/json", ...(options.headers || {}) }
+    headers: { ...(hasBody ? { "content-type": "application/json" } : {}), ...(options.headers || {}) }
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.message || `Request failed with HTTP ${response.status}.`);
@@ -34,6 +84,20 @@ function setStatus(message, type = "") {
 
 function number(value) {
   return Number(value || 0).toLocaleString();
+}
+
+function money(value, currency) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || !/^[A-Z]{3}$/.test(String(currency || ""))) return "";
+  if (amount > 0 && amount < 0.0001) {
+    return `<${new Intl.NumberFormat(undefined, { style: "currency", currency, minimumFractionDigits: 4, maximumFractionDigits: 4 }).format(0.0001)}`;
+  }
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency,
+    minimumFractionDigits: amount < 0.01 ? 4 : 2,
+    maximumFractionDigits: amount < 0.01 ? 6 : 2
+  }).format(amount);
 }
 
 function worldMessage(message, type = "") {
@@ -344,7 +408,10 @@ async function loadCampaigns(preselectId = "") {
   if (!campaigns.length) {
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
     selectedCampaign = null;
-    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.saveCampaign, elements.migrateCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign].forEach((element) => { element.disabled = true; });
+    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationEnabled, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.saveIllustrationConfig, elements.discoverIllustrationModels].forEach((element) => { element.disabled = true; });
+    elements.illustrationEnabled.checked = false;
+    renderIllustrationSettingsVisibility();
+    elements.campaignCostSection.classList.add("hidden");
     return;
   }
   for (const campaign of campaigns) {
@@ -365,17 +432,22 @@ async function loadCampaigns(preselectId = "") {
 }
 
 async function selectCampaign(campaign) {
+  embeddingJobPollSequence += 1;
+  elements.embeddingProgress.classList.add("hidden");
   selectedCampaign = campaign;
   document.querySelectorAll(".campaign-button").forEach((button) => button.classList.toggle("active", button.dataset.campaignId === campaign.id));
   elements.memoryTitle.textContent = campaign.title;
   elements.reindexMemory.disabled = false;
   elements.previewContext.disabled = false;
-  elements.generateTurn.disabled = !selectedProvider;
   elements.saveEmbeddingConfig.disabled = false;
   elements.saveIllustrationConfig.disabled = false;
   elements.campaignTitle.value = campaign.title;
   elements.campaignStatus.value = campaign.status;
-  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.saveCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign].forEach((element) => { element.disabled = false; });
+  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationEnabled, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts].forEach((element) => { element.disabled = false; });
+  elements.campaignTextProvider.value = campaign.textProviderProfileId || "";
+  elements.campaignImageProvider.value = campaign.imageProviderProfileId || "";
+  elements.campaignStoryLengthProfile.value = campaign.storyLengthProfile || "standard";
+  populateEmbeddingProviderSelect();
   const world = await api(`/api/v1/worlds/${campaign.worldId}`);
   elements.campaignWorldVersion.replaceChildren();
   for (const version of [...world.versions].reverse()) {
@@ -385,14 +457,12 @@ async function selectCampaign(campaign) {
   elements.migrateCampaign.disabled = !world.versions.some((version) => version.versionNumber > campaign.worldVersionNumber);
   if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
   else elements.campaignStatusMessage.classList.add("hidden");
-  const metrics = await api(`/api/v1/campaigns/${campaign.id}/memory/metrics`);
-  elements.memoryMetrics.innerHTML = [
-    [number(metrics.turns), "accepted turns"],
-    [number(metrics.estimatedCompleteHistoryTokens), "complete-history tokens"],
-    [number(metrics.memoryCount), "Chronicle memories"],
-    [number(metrics.embeddedMemories), "embedded memories"]
-  ].map(([value, label]) => `<div class="metric"><strong>${value}</strong><span>${label}</span></div>`).join("");
+  const metrics = await refreshCampaignMemoryMetrics();
+  await refreshCampaignCostSummary();
   await loadEmbeddingConfig();
+  if (["queued", "running"].includes(metrics?.semanticHealth?.jobStatus) && metrics.semanticHealth.jobId) {
+    void resumeEmbeddingJobProgress(metrics.semanticHealth.jobId, campaign.id);
+  }
   await loadIllustrationConfig();
   await loadLatestImageJob(false);
   await previewContext();
@@ -405,10 +475,15 @@ async function saveSelectedCampaign(event) {
   try {
     await api(`/api/v1/campaigns/${selectedCampaign.id}`, {
       method: "PATCH",
-      body: JSON.stringify({ title: elements.campaignTitle.value, status: elements.campaignStatus.value })
+      body: JSON.stringify({
+        title: elements.campaignTitle.value,
+        status: elements.campaignStatus.value,
+        textProviderProfileId: elements.campaignTextProvider.value || null,
+        storyLengthProfile: elements.campaignStoryLengthProfile.value
+      })
     });
     await loadCampaigns(selectedCampaign.id);
-    campaignMessage("Campaign metadata saved. Accepted turns and Chronicle memory were unchanged.", "success");
+    campaignMessage("Campaign metadata and default story length saved. Accepted turns and Chronicle memory were unchanged.", "success");
   } catch (error) {
     campaignMessage(error.message || String(error), "error");
   } finally {
@@ -457,7 +532,9 @@ async function loadSelectedCampaign() {
     const story = await api(`/api/v1/campaigns/${selectedCampaign.id}/export`);
     sessionStorage.setItem(campaignResumeStorageKey, JSON.stringify({
       campaignId: selectedCampaign.id,
+      worldVersionId: selectedCampaign.worldVersionId,
       activeTurnNumber: selectedCampaign.activeTurnNumber,
+      providerProfileId: effectiveCampaignProvider("text")?.id || "",
       story
     }));
     window.location.assign("/");
@@ -489,34 +566,142 @@ async function deleteSelectedCampaign() {
   }
 }
 
+function renderSemanticMemoryHealth(health) {
+  const state = health?.status || "disabled";
+  const labels = {
+    disabled: "Disabled",
+    indexing: "Indexing",
+    healthy: "Healthy",
+    degraded: "Degraded",
+    failed: "Failed",
+    unavailable: "Unavailable"
+  };
+  elements.semanticMemoryHealth.dataset.state = state;
+  elements.semanticMemoryHealthBadge.textContent = labels[state] || state;
+  elements.semanticMemoryHealthTitle.textContent = state === "healthy"
+    ? `Semantic memory healthy · ${number(health.coveragePercent)}% coverage`
+    : state === "indexing"
+      ? `Semantic indexing in progress · ${number(health.coveragePercent)}% available`
+      : state === "disabled"
+        ? "Semantic memory disabled"
+        : `Semantic memory ${labels[state]?.toLowerCase() || state}`;
+  const provider = health?.providerName ? ` Provider: ${health.providerName}${health.model ? ` · ${health.model}` : ""}.` : "";
+  elements.semanticMemoryHealthMessage.textContent = `${health?.message || "Semantic memory status is unavailable."}${provider}`;
+}
+
+async function refreshCampaignMemoryMetrics() {
+  if (!selectedCampaign) return null;
+  const campaignId = selectedCampaign.id;
+  const metrics = await api(`/api/v1/campaigns/${campaignId}/memory/metrics`);
+  if (selectedCampaign?.id !== campaignId) return null;
+  elements.memoryMetrics.innerHTML = [
+    [number(metrics.turns), "accepted turns"],
+    [number(metrics.estimatedCompleteHistoryTokens), "complete-history tokens"],
+    [number(metrics.memoryCount), "Chronicle memories"],
+    [number(metrics.semanticHealth?.indexedMemories ?? metrics.embeddedMemories), "current embeddings"]
+  ].map(([value, label]) => `<div class="metric"><strong>${value}</strong><span>${label}</span></div>`).join("");
+  renderSemanticMemoryHealth(metrics.semanticHealth);
+  return metrics;
+}
+
+function appendCostMetric(value, label) {
+  const metric = document.createElement("div");
+  metric.className = "cost-metric";
+  const strong = document.createElement("strong");
+  strong.textContent = value;
+  const span = document.createElement("span");
+  span.textContent = label;
+  metric.append(strong, span);
+  elements.campaignCostMetrics.append(metric);
+}
+
+async function refreshCampaignCostSummary() {
+  if (!selectedCampaign) {
+    elements.campaignCostSection.classList.add("hidden");
+    return null;
+  }
+  const campaignId = selectedCampaign.id;
+  const summary = await api(`/api/v1/campaigns/${campaignId}/cost-summary`);
+  if (selectedCampaign?.id !== campaignId) return null;
+  elements.campaignCostSection.classList.remove("hidden");
+  elements.campaignCostMetrics.replaceChildren();
+  if (!summary.hasReportedCosts || !Array.isArray(summary.totals) || !summary.totals.length) {
+    elements.campaignCostMessage.textContent = "No provider-reported cost data is available. Local or unsupported providers are not recorded as zero-cost calls.";
+    return summary;
+  }
+  elements.campaignCostMessage.textContent = "Actual charges reported by configured providers since campaign cost tracking was enabled.";
+  for (const total of summary.totals) {
+    const suffix = summary.totals.length > 1 ? ` (${total.currency})` : "";
+    appendCostMetric(money(total.amount, total.currency), `campaign total${suffix}`);
+    appendCostMetric(money(total.byCategory?.story || 0, total.currency), `story${suffix}`);
+    appendCostMetric(money(total.byCategory?.image || 0, total.currency), `images${suffix}`);
+    appendCostMetric(money(total.byCategory?.memory || 0, total.currency), `semantic memory${suffix}`);
+    appendCostMetric(money(total.otherCampaignOperations || 0, total.currency), `other operations${suffix}`);
+  }
+  return summary;
+}
+
 async function loadEmbeddingConfig() {
   if (!selectedCampaign) return;
   embeddingConfig = await api(`/api/v1/campaigns/${selectedCampaign.id}/memory/embedding-config`);
+  discoveredEmbeddingModels = [];
   elements.embeddingEnabled.checked = embeddingConfig.enabled;
-  elements.embeddingProvider.value = embeddingConfig.providerProfileId || "";
-  elements.embeddingModel.value = embeddingConfig.model || "";
+  populateEmbeddingProviderSelect();
+  if (embeddingConfig.providerProfileId) elements.embeddingProvider.value = embeddingConfig.providerProfileId;
+  elements.embeddingModel.value = embeddingConfig.model || "text-embedding-nomic-embed-text-v1.5";
+  elements.embeddingDocumentPrefix.value = embeddingConfig.documentPrefix ?? "";
+  elements.embeddingQueryPrefix.value = embeddingConfig.queryPrefix ?? "";
   elements.embeddingBatchSize.value = String(embeddingConfig.batchSize || 16);
   elements.discoverEmbeddingModels.disabled = !elements.embeddingProvider.value;
+  elements.embeddingModel.disabled = !elements.embeddingProvider.value;
+  const embeddingProvider = providers.find((provider) => provider.id === elements.embeddingProvider.value);
+  const fallbackLabel = embeddingProvider?.providerRole === "text" ? `text provider ${embeddingProvider.name}` : embeddingProvider?.name;
+  elements.embeddingStatus.className = "status";
   elements.embeddingStatus.textContent = embeddingConfig.enabled
-    ? `Hybrid retrieval is enabled with ${embeddingConfig.model}. New accepted memories are indexed by a durable worker job.`
-    : "Semantic retrieval is disabled for this campaign; deterministic lexical and chronological retrieval remains active.";
+    ? `Hybrid retrieval is enabled with ${fallbackLabel || "the selected provider"} and ${embeddingConfig.model}. Effective task prefixes: document “${embeddingConfig.effectiveDocumentPrefix || "none"}”, query “${embeddingConfig.effectiveQueryPrefix || "none"}”. New accepted memories are indexed by a durable worker job.`
+    : `Semantic retrieval is disabled for this campaign. When enabled, it will use ${fallbackLabel || "the selected provider"} with ${embeddingConfig.model}; deterministic lexical and chronological retrieval remains active.`;
 }
 
 async function loadIllustrationConfig() {
   if (!selectedCampaign) return;
   illustrationConfig = await api(`/api/v1/campaigns/${selectedCampaign.id}/illustration-config`);
-  elements.illustrationEnabled.checked = illustrationConfig.enabled;
-  elements.illustrationProvider.value = illustrationConfig.providerProfileId || "";
   elements.illustrationModel.value = illustrationConfig.model || "";
   elements.illustrationSize.value = illustrationConfig.size || "1024x1024";
   elements.illustrationAspectRatio.value = illustrationConfig.aspectRatio || "1:1";
   elements.illustrationQuality.value = illustrationConfig.quality || "auto";
   elements.illustrationOutputFormat.value = illustrationConfig.outputFormat || "png";
   elements.illustrationMaxAttempts.value = String(illustrationConfig.maxAttempts || 3);
-  elements.discoverIllustrationModels.disabled = !elements.illustrationProvider.value;
-  elements.illustrationStatus.textContent = illustrationConfig.enabled
+  syncIllustrationProviderAvailability(true);
+  const provider = effectiveCampaignProvider("image");
+  elements.campaignImageProviderSummary.textContent = provider
+    ? `Using ${provider.name}${selectedCampaign?.imageProviderProfileId ? " for this campaign" : " as the default image profile"}.`
+    : enabledProviders("image").length
+      ? "Select an image provider for this campaign before enabling illustrations."
+      : "Add and enable an illustration provider in Provider Management before images can be enabled.";
+  elements.illustrationStatus.textContent = illustrationConfig.enabled && provider
     ? `Automatic illustrations are enabled with ${illustrationConfig.model}. Endpoint health: ${providers.find((provider) => provider.id === illustrationConfig.providerProfileId)?.healthStatus || "unknown"}. They run after story acceptance and cannot change the accepted turn.`
-    : "Illustrations are disabled for this campaign. Story generation is unaffected.";
+    : illustrationConfig.enabled
+      ? "Illustrations were configured previously, but no enabled image provider is available now. Automatic image jobs are disabled until a provider is restored and the settings are saved."
+      : "Illustrations are disabled for this campaign. Story generation is unaffected.";
+}
+
+function renderIllustrationSettingsVisibility() {
+  const visible = elements.illustrationEnabled.checked && enabledProviders("image").length > 0;
+  elements.illustrationSettings.classList.toggle("hidden", !visible);
+  elements.illustrationSettings.setAttribute("aria-hidden", String(!visible));
+}
+
+function syncIllustrationProviderAvailability(restoreSavedState = false) {
+  const hasImageProvider = enabledProviders("image").length > 0;
+  if (restoreSavedState) elements.illustrationEnabled.checked = Boolean(illustrationConfig?.enabled && hasImageProvider);
+  if (!hasImageProvider) elements.illustrationEnabled.checked = false;
+  elements.illustrationEnabled.disabled = !selectedCampaign || !hasImageProvider;
+  elements.illustrationEnabled.title = hasImageProvider
+    ? "Enable independent illustration jobs for accepted turns."
+    : "Add and enable an illustration provider in Provider Management first.";
+  elements.campaignImageProvider.disabled = !selectedCampaign || !hasImageProvider;
+  elements.discoverIllustrationModels.disabled = !selectedCampaign || !effectiveCampaignProvider("image");
+  renderIllustrationSettingsVisibility();
 }
 
 function providerMessage(message, type = "") {
@@ -535,7 +720,9 @@ function applyDiscoveredProviderContext() {
     elements.providerContextTokens.setAttribute("aria-readonly", "true");
     elements.providerContextSource.textContent = `Locked to ${number(contextLength)} tokens advertised by the selected model.`;
     elements.providerContextSource.className = "field-note api-supplied";
-    if (selectedProvider) elements.budgetTokens.value = String(Math.max(512, contextLength - selectedProvider.maxOutputTokens - 1024));
+    if (selectedProvider?.providerRole === "text") {
+      elements.budgetTokens.value = String(clampedMemoryContextBudget(contextLength - selectedProvider.maxOutputTokens - 1024));
+    }
   } else {
     elements.providerContextTokens.readOnly = false;
     elements.providerContextTokens.removeAttribute("aria-readonly");
@@ -544,67 +731,424 @@ function applyDiscoveredProviderContext() {
   }
 }
 
+function enabledProviders(role) {
+  return providers.filter((provider) => provider.providerRole === role && provider.enabled);
+}
+
+function defaultProvider(role) {
+  const available = enabledProviders(role);
+  return available.find((provider) => provider.isDefault) || (available.length === 1 ? available[0] : null);
+}
+
+function effectiveCampaignProvider(role) {
+  const select = role === "text" ? elements.campaignTextProvider : elements.campaignImageProvider;
+  const storedId = role === "text" ? selectedCampaign?.textProviderProfileId : selectedCampaign?.imageProviderProfileId;
+  const selectedId = selectedCampaign && !select.disabled ? select.value : storedId;
+  return enabledProviders(role).find((provider) => provider.id === selectedId) || defaultProvider(role);
+}
+
+function populateProviderSelect(select, role, label) {
+  const current = select.value;
+  const available = enabledProviders(role);
+  const fallback = defaultProvider(role);
+  const emptyLabel = fallback
+    ? `Use default · ${fallback.name}`
+    : available.length
+      ? `Select a ${label} provider`
+      : `No enabled ${label} providers`;
+  select.replaceChildren(new Option(emptyLabel, ""));
+  for (const provider of available) {
+    select.append(new Option(`${provider.name} · ${provider.providerType}${provider.isDefault ? " · default" : ""}`, provider.id));
+  }
+  select.value = available.some((provider) => provider.id === current) ? current : "";
+}
+
+function populateEmbeddingProviderSelect() {
+  const current = embeddingConfig?.providerProfileId || elements.embeddingProvider.value;
+  const embeddingProviders = enabledProviders("embedding");
+  elements.embeddingProvider.replaceChildren();
+  if (embeddingProviders.length) {
+    const fallback = defaultProvider("embedding");
+    elements.embeddingProvider.append(new Option(fallback ? `Use default · ${fallback.name}` : "Select an embedding provider", ""));
+    for (const provider of embeddingProviders) {
+      elements.embeddingProvider.append(new Option(`${provider.name} · ${provider.providerType}${provider.isDefault ? " · default" : ""}`, provider.id));
+    }
+    elements.embeddingProvider.value = embeddingProviders.some((provider) => provider.id === current) ? current : (fallback?.id || "");
+    return;
+  }
+  const textFallback = effectiveCampaignProvider("text");
+  if (textFallback) {
+    elements.embeddingProvider.append(new Option(`Text fallback · ${textFallback.name} · ${textFallback.providerType}`, textFallback.id));
+    elements.embeddingProvider.value = textFallback.id;
+  } else {
+    elements.embeddingProvider.append(new Option("No text or embedding provider configured", ""));
+  }
+}
+
+function renderProviderProfiles() {
+  elements.providerProfileList.replaceChildren();
+  if (!providers.length) {
+    elements.providerProfileList.innerHTML = '<p class="muted">No provider profiles have been added.</p>';
+    return;
+  }
+  for (const provider of providers) {
+    const row = document.createElement("div");
+    row.className = "provider-profile";
+    const details = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = provider.name;
+    const summary = document.createElement("span");
+    summary.textContent = `${provider.providerRole} · ${provider.providerType} · ${provider.defaultModel || "model not selected"}`;
+    details.append(title, summary);
+    const actions = document.createElement("div");
+    actions.className = "button-row";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "button secondary";
+    edit.textContent = "Edit";
+    edit.addEventListener("click", () => beginProviderEdit(provider));
+    actions.append(edit);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "button danger";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", async () => {
+      if (!window.confirm(`Delete provider profile “${provider.name}”? Campaign assignments and provider-linked jobs, chains, and derived embeddings will be removed.`)) return;
+      remove.disabled = true;
+      try {
+        await api(`/api/v1/providers/${provider.id}`, { method: "DELETE" });
+        if (editingProviderId === provider.id) resetProviderForm();
+        await loadProviders();
+        providerMessage(`${provider.name} deleted. Campaigns now use another default profile when available.`, "success");
+      } catch (error) {
+        providerMessage(error.message || String(error), "error");
+        remove.disabled = false;
+      }
+    });
+    actions.append(remove);
+    if (provider.isDefault || enabledProviders(provider.providerRole).length === 1) {
+      const badge = document.createElement("span");
+      badge.className = "default-badge";
+      badge.textContent = provider.isDefault ? "Default" : "Default (only profile)";
+      details.append(badge);
+      row.append(details, actions);
+    } else {
+      const makeDefault = document.createElement("button");
+      makeDefault.type = "button";
+      makeDefault.className = "button secondary";
+      makeDefault.textContent = "Make default";
+      makeDefault.addEventListener("click", async () => {
+        makeDefault.disabled = true;
+        await api(`/api/v1/providers/${provider.id}/default`, { method: "PUT", body: "{}" });
+        await loadProviders();
+        providerMessage(`${provider.name} is now the default ${provider.providerRole} profile.`, "success");
+      });
+      actions.append(makeDefault);
+      row.append(details, actions);
+    }
+    elements.providerProfileList.append(row);
+  }
+}
+
+function resetProviderForm() {
+  editingProviderId = "";
+  elements.providerForm.reset();
+  elements.providerName.value = "Local LM Studio";
+  elements.providerType.value = "lmstudio";
+  elements.providerRole.value = "text";
+  elements.providerBaseUrl.value = "http://host.docker.internal:1234";
+  elements.providerContextTokens.value = "32768";
+  elements.providerOutputTokens.value = "4096";
+  elements.providerTemperature.value = "0.8";
+  elements.providerEnabled.checked = true;
+  elements.providerType.disabled = false;
+  elements.providerRole.disabled = false;
+  elements.saveProvider.textContent = "Save provider";
+  elements.cancelProviderEdit.classList.add("hidden");
+  discoveredProfileModels = [];
+  elements.providerModelPickerList.replaceChildren();
+  elements.providerContextTokens.readOnly = false;
+  elements.providerContextSource.textContent = "Editable until model discovery supplies a context length.";
+  elements.providerContextSource.className = "field-note";
+}
+
+function beginProviderEdit(provider) {
+  editingProviderId = provider.id;
+  elements.providerName.value = provider.name;
+  elements.providerType.value = provider.providerType;
+  elements.providerRole.value = provider.providerRole;
+  elements.providerBaseUrl.value = provider.baseUrl;
+  elements.providerApiKey.value = "";
+  elements.providerDefaultModel.value = provider.defaultModel || "";
+  elements.providerContextTokens.value = String(provider.contextWindowTokens);
+  elements.providerOutputTokens.value = String(provider.maxOutputTokens);
+  elements.providerTemperature.value = String(provider.temperature);
+  elements.providerEnabled.checked = provider.enabled;
+  elements.providerIsDefault.checked = provider.isDefault;
+  elements.providerType.disabled = true;
+  elements.providerRole.disabled = true;
+  elements.saveProvider.textContent = "Save changes";
+  elements.cancelProviderEdit.classList.remove("hidden");
+  discoveredProfileModels = [];
+  elements.providerModelPickerList.replaceChildren();
+  elements.providerName.focus();
+  providerMessage(`Editing ${provider.name}. Leave the API key blank to keep the stored credential.`);
+}
+
 async function loadProviders(preselectId = "") {
   ({ providers } = await api("/api/v1/providers"));
-  elements.providerSelect.replaceChildren(new Option("No text provider configured", ""));
+  renderProviderProfiles();
+  const currentImportProviderId = elements.providerSelect.value;
+  elements.providerSelect.replaceChildren(new Option(defaultProvider("text") ? `Use default · ${defaultProvider("text").name}` : "Use the default text provider", ""));
   for (const provider of providers.filter((item) => item.providerRole === "text" && item.enabled)) {
-    elements.providerSelect.append(new Option(`${provider.name} · ${provider.providerType}`, provider.id));
+    elements.providerSelect.append(new Option(`${provider.name} · ${provider.providerType}${provider.isDefault ? " · default" : ""}`, provider.id));
   }
-  elements.embeddingProvider.replaceChildren(new Option("No embedding provider configured", ""));
-  for (const provider of providers.filter((item) => item.providerRole === "embedding" && item.enabled)) {
-    elements.embeddingProvider.append(new Option(`${provider.name} · ${provider.providerType}`, provider.id));
-  }
-  elements.illustrationProvider.replaceChildren(new Option("No image provider configured", ""));
-  for (const provider of providers.filter((item) => item.providerRole === "image" && item.enabled)) {
-    elements.illustrationProvider.append(new Option(`${provider.name} · ${provider.providerType} · ${provider.healthStatus || "unknown"}`, provider.id));
-  }
+  populateProviderSelect(elements.campaignTextProvider, "text", "text");
+  populateProviderSelect(elements.campaignImageProvider, "image", "image");
   const target = providers.find((provider) => provider.id === preselectId && provider.providerRole === "text" && provider.enabled)
-    || providers.find((provider) => provider.id === elements.providerSelect.value)
-    || providers.find((provider) => provider.providerRole === "text" && provider.enabled)
+    || providers.find((provider) => provider.id === currentImportProviderId && provider.providerRole === "text" && provider.enabled)
+    || defaultProvider("text")
     || null;
-  elements.providerSelect.value = target?.id || "";
+  elements.providerSelect.value = target && target.id !== defaultProvider("text")?.id ? target.id : "";
   selectedProvider = target;
   elements.discoverModels.disabled = !target;
-  elements.generateTurn.disabled = !target || !selectedCampaign;
   if (target) providerMessage(`${target.name} selected. Profile context is ${number(target.contextWindowTokens)} tokens; maximum output is ${number(target.maxOutputTokens)} tokens.`);
-  if (embeddingConfig?.providerProfileId) elements.embeddingProvider.value = embeddingConfig.providerProfileId;
-  if (illustrationConfig?.providerProfileId) elements.illustrationProvider.value = illustrationConfig.providerProfileId;
+  if (selectedCampaign) {
+    elements.campaignTextProvider.value = selectedCampaign.textProviderProfileId || "";
+    elements.campaignImageProvider.value = selectedCampaign.imageProviderProfileId || "";
+    syncIllustrationProviderAvailability(true);
+  }
+  populateEmbeddingProviderSelect();
 }
 
 async function saveProvider(event) {
   event.preventDefault();
   providerMessage("Saving provider profile…");
   try {
-    const provider = await api("/api/v1/providers", {
-      method: "POST",
+    const provider = await api(editingProviderId ? `/api/v1/providers/${editingProviderId}` : "/api/v1/providers", {
+      method: editingProviderId ? "PATCH" : "POST",
       body: JSON.stringify({
         name: elements.providerName.value,
-        providerType: elements.providerType.value,
-        providerRole: elements.providerRole.value,
+        ...(!editingProviderId ? { providerType: elements.providerType.value, providerRole: elements.providerRole.value } : {}),
         baseUrl: elements.providerBaseUrl.value,
         apiKey: elements.providerApiKey.value || undefined,
+        isDefault: elements.providerIsDefault.checked,
         defaultModel: elements.providerDefaultModel.value,
         contextWindowTokens: elements.providerContextTokens.value,
         maxOutputTokens: elements.providerOutputTokens.value,
-        temperature: 0.8,
-        configuration: {}
+        temperature: elements.providerTemperature.value,
+        enabled: elements.providerEnabled.checked,
+        ...(!editingProviderId ? { configuration: {} } : {})
       })
     });
-    elements.providerApiKey.value = "";
+    const wasEditing = Boolean(editingProviderId);
+    resetProviderForm();
     await loadProviders(provider.providerRole === "text" ? provider.id : "");
     if (provider.providerRole === "embedding") {
       elements.embeddingProvider.value = provider.id;
       elements.embeddingModel.value = provider.defaultModel || "";
+      elements.embeddingModel.disabled = false;
       elements.discoverEmbeddingModels.disabled = false;
+      discoveredEmbeddingModels = [];
     }
     if (provider.providerRole === "image") {
-      elements.illustrationProvider.value = provider.id;
+      elements.campaignImageProvider.value = provider.id;
       elements.illustrationModel.value = provider.defaultModel || "";
       elements.discoverIllustrationModels.disabled = false;
     }
-    providerMessage(`${provider.name} saved. Credentials, if supplied, were encrypted before database storage.`, "success");
+    providerMessage(`${provider.name} ${wasEditing ? "updated" : "saved"}. Credentials, if supplied, were encrypted before database storage.`, "success");
   } catch (error) {
     providerMessage(error.message || String(error), "error");
+  }
+}
+
+async function refreshProviderModelsFromForm() {
+  elements.refreshProviderModels.disabled = true;
+  elements.refreshProviderModelDialog.disabled = true;
+  providerMessage("Discovering models from this provider profile…");
+  elements.providerModelPickerStatus.textContent = "Discovering active and inactive models from the endpoint…";
+  elements.providerModelPickerStatus.className = "status";
+  try {
+    const useStoredProfile = editingProviderId && !elements.providerApiKey.value;
+    const result = useStoredProfile
+      ? await api(`/api/v1/providers/${editingProviderId}/models`)
+      : await api("/api/v1/providers/discover-models", {
+        method: "POST",
+        body: JSON.stringify({
+          name: elements.providerName.value || "Unsaved provider",
+          providerType: elements.providerType.value,
+          providerRole: elements.providerRole.value,
+          baseUrl: elements.providerBaseUrl.value,
+          apiKey: elements.providerApiKey.value || undefined,
+          defaultModel: elements.providerDefaultModel.value,
+          contextWindowTokens: elements.providerContextTokens.value,
+          maxOutputTokens: elements.providerOutputTokens.value,
+          temperature: elements.providerTemperature.value,
+          enabled: elements.providerEnabled.checked,
+          isDefault: elements.providerIsDefault.checked,
+          configuration: {}
+        })
+    });
+    discoveredProfileModels = result.models || [];
+    const orderedModels = [...discoveredProfileModels].sort((left, right) => Number(right.loaded) - Number(left.loaded) || left.displayName.localeCompare(right.displayName));
+    const current = elements.providerDefaultModel.value.trim();
+    const selected = orderedModels.find((model) => profileModelValue(model) === current || model.id === current)
+      || orderedModels.find((model) => model.loaded)
+      || orderedModels[0]
+      || null;
+    if (selected) {
+      const value = profileModelValue(selected);
+      elements.providerDefaultModel.value = value;
+    }
+    applyProfileModelContext();
+    renderProviderModelPicker();
+    elements.providerModelPickerStatus.textContent = `${discoveredProfileModels.length} model entr${discoveredProfileModels.length === 1 ? "y" : "ies"} found. Active models are listed first.`;
+    elements.providerModelPickerStatus.className = "status success";
+    providerMessage(`${discoveredProfileModels.length} model entr${discoveredProfileModels.length === 1 ? "y" : "ies"} found. Select one from Default model and save the profile.`, "success");
+  } catch (error) {
+    providerMessage(error.message || String(error), "error");
+    elements.providerModelPickerStatus.textContent = error.message || String(error);
+    elements.providerModelPickerStatus.className = "status error";
+  } finally {
+    elements.refreshProviderModels.disabled = false;
+    elements.refreshProviderModelDialog.disabled = false;
+  }
+}
+
+function profileModelValue(model) {
+  return String(model?.loaded ? model.instanceId || model.id : model?.id || "");
+}
+
+function activeModelPickerModels() {
+  return providerModelPickerTarget === "embedding" ? discoveredEmbeddingModels : discoveredProfileModels;
+}
+
+function activeModelPickerValue() {
+  return providerModelPickerTarget === "embedding"
+    ? elements.embeddingModel.value.trim()
+    : elements.providerDefaultModel.value.trim();
+}
+
+function chooseProviderModel(value) {
+  if (providerModelPickerTarget === "embedding") {
+    elements.embeddingModel.value = value;
+    const model = discoveredEmbeddingModels.find((item) => profileModelValue(item) === value || item.id === value);
+    applyEmbeddingModelContextBudget(model);
+    elements.providerModelDialog.close();
+    elements.embeddingStatus.className = "status";
+    elements.embeddingStatus.textContent = `${value} selected for campaign embeddings. Save & index to apply this change${model?.contextLength ? " and the advertised context budget" : ""}.`;
+    return;
+  }
+  elements.providerDefaultModel.value = value;
+  applyProfileModelContext();
+  elements.providerModelDialog.close();
+  providerMessage(`${value} selected as the profile default. Save the profile to keep this change.`);
+}
+
+function renderProviderModelPicker() {
+  const query = elements.providerModelFilter.value.trim().toLowerCase();
+  const discoveredModels = activeModelPickerModels();
+  const selectedValue = activeModelPickerValue();
+  const orderedModels = [...discoveredModels]
+    .sort((left, right) => Number(right.loaded) - Number(left.loaded) || left.displayName.localeCompare(right.displayName))
+    .filter((model) => !query || `${model.displayName} ${model.id} ${model.instanceId}`.toLowerCase().includes(query));
+  elements.providerModelPickerList.replaceChildren();
+  for (const model of orderedModels) {
+    const value = profileModelValue(model);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `provider-model-choice${selectedValue === value || selectedValue === model.id ? " selected" : ""}`;
+    const details = document.createElement("span");
+    const name = document.createElement("strong");
+    name.textContent = model.displayName;
+    const meta = document.createElement("span");
+    meta.className = "model-meta";
+    meta.textContent = `${value}${model.contextLength ? ` · ${number(model.contextLength)} context` : " · context not advertised"}`;
+    details.append(name, meta);
+    const state = document.createElement("span");
+    state.className = `provider-model-state${model.loaded ? " active" : ""}`;
+    state.textContent = model.loaded ? "Active" : "Not active";
+    button.append(details, state);
+    button.addEventListener("click", () => chooseProviderModel(value));
+    elements.providerModelPickerList.append(button);
+  }
+  if (!orderedModels.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = discoveredModels.length ? "No models match this filter." : "No endpoint models are available. Refresh the endpoint or enter a custom model ID.";
+    elements.providerModelPickerList.append(empty);
+  }
+}
+
+async function openProviderModelPicker(forceRefresh = false) {
+  providerModelPickerTarget = "provider";
+  const role = elements.providerRole.value;
+  elements.providerModelDialogTitle.textContent = role === "image" ? "Choose image model" : role === "embedding" ? "Choose embedding model" : "Choose default model";
+  elements.providerModelDialogDescription.textContent = role === "image"
+    ? "Only image-capable models are shown when the provider advertises modality data. Active models appear first."
+    : role === "embedding"
+      ? "Only embedding models are shown when the provider offers a dedicated inventory. Active models appear first."
+      : "Active models appear first. You may also select an available model that is not currently loaded.";
+  elements.providerModelFilter.value = "";
+  elements.providerCustomModel.value = elements.providerDefaultModel.value;
+  elements.providerModelPickerStatus.textContent = discoveredProfileModels.length
+    ? `${discoveredProfileModels.length} cached model entries. Refresh the endpoint to update this inventory.`
+    : "Refresh the endpoint to browse its model inventory.";
+  elements.providerModelPickerStatus.className = "status";
+  elements.providerModelDialog.showModal();
+  renderProviderModelPicker();
+  if (forceRefresh || !discoveredProfileModels.length) await refreshProviderModelsFromForm();
+  elements.providerModelFilter.focus();
+}
+
+async function openEmbeddingModelPicker(forceRefresh = false) {
+  const provider = providers.find((item) => item.id === elements.embeddingProvider.value);
+  if (!provider) {
+    elements.embeddingStatus.className = "status error";
+    elements.embeddingStatus.textContent = "Select an embedding provider before choosing its model.";
+    return;
+  }
+  providerModelPickerTarget = "embedding";
+  elements.providerModelDialogTitle.textContent = "Choose campaign embedding model";
+  elements.providerModelDialogDescription.textContent = `Models advertised by ${provider.name}. Active models appear first; confirm that the selected model supports embeddings.`;
+  elements.providerModelFilter.value = "";
+  elements.providerCustomModel.value = elements.embeddingModel.value;
+  elements.providerModelPickerStatus.textContent = discoveredEmbeddingModels.length
+    ? `${discoveredEmbeddingModels.length} cached model entries for ${provider.name}. Refresh the endpoint to update this inventory.`
+    : `Refresh ${provider.name} to browse its model inventory.`;
+  elements.providerModelPickerStatus.className = "status";
+  elements.providerModelDialog.showModal();
+  renderProviderModelPicker();
+  if (forceRefresh || !discoveredEmbeddingModels.length) await discoverEmbeddingModels();
+  elements.providerModelFilter.focus();
+}
+
+async function refreshActiveModelPicker() {
+  if (providerModelPickerTarget === "embedding") await discoverEmbeddingModels();
+  else await refreshProviderModelsFromForm();
+}
+
+function applyCustomProviderModel() {
+  const value = elements.providerCustomModel.value.trim();
+  if (!value) return;
+  chooseProviderModel(value);
+}
+
+function applyProfileModelContext() {
+  const selectedValue = elements.providerDefaultModel.value.trim();
+  const model = discoveredProfileModels.find((item) => profileModelValue(item) === selectedValue || item.id === selectedValue);
+  const contextLength = Number(model?.contextLength || 0);
+  if (contextLength > 0) {
+    elements.providerContextTokens.value = String(contextLength);
+    elements.providerContextTokens.readOnly = true;
+    elements.providerContextSource.textContent = `Locked to ${number(contextLength)} tokens advertised by ${model.displayName}.`;
+    elements.providerContextSource.className = "field-note api-supplied";
+  } else {
+    elements.providerContextTokens.readOnly = false;
+    elements.providerContextSource.textContent = model
+      ? "The endpoint did not advertise a context length for this model; enter it manually."
+      : "Editable until a discovered model supplies a context length.";
+    elements.providerContextSource.className = contextLength ? "field-note api-supplied" : "field-note manual-entry";
   }
 }
 
@@ -638,9 +1182,8 @@ async function discoverProviderModels() {
 }
 
 elements.providerSelect.addEventListener("change", () => {
-  selectedProvider = providers.find((provider) => provider.id === elements.providerSelect.value) || null;
+  selectedProvider = providers.find((provider) => provider.id === elements.providerSelect.value) || defaultProvider("text");
   elements.discoverModels.disabled = !selectedProvider;
-  elements.generateTurn.disabled = !selectedProvider || !selectedCampaign;
   discoveredProviderModels = [];
   elements.modelSelect.replaceChildren(new Option("Discover models or use the profile default", ""));
   elements.modelSelect.disabled = true;
@@ -648,9 +1191,17 @@ elements.providerSelect.addEventListener("change", () => {
   elements.providerContextTokens.removeAttribute("aria-readonly");
   elements.providerContextSource.textContent = "Editable until model discovery supplies a context length.";
   elements.providerContextSource.className = "field-note";
+  if (selectedImportSource && selectedImport?.kind === "infinite_worlds") {
+    previewImportSource(selectedImportSource.sourceName, selectedImportSource.sourceText, elements.infiniteWorldsKind.value, selectedImportSource.origin).catch((error) => setStatus(error.message || String(error), "error"));
+  }
 });
 
-elements.modelSelect.addEventListener("change", applyDiscoveredProviderContext);
+elements.modelSelect.addEventListener("change", () => {
+  applyDiscoveredProviderContext();
+  if (selectedImportSource && selectedImport?.kind === "infinite_worlds") {
+    previewImportSource(selectedImportSource.sourceName, selectedImportSource.sourceText, elements.infiniteWorldsKind.value, selectedImportSource.origin).catch((error) => setStatus(error.message || String(error), "error"));
+  }
+});
 
 elements.providerType.addEventListener("change", () => {
   const defaults = {
@@ -663,34 +1214,148 @@ elements.providerType.addEventListener("change", () => {
 
 elements.embeddingProvider.addEventListener("change", () => {
   const provider = providers.find((item) => item.id === elements.embeddingProvider.value);
+  discoveredEmbeddingModels = [];
   elements.discoverEmbeddingModels.disabled = !provider;
-  if (provider?.defaultModel && !elements.embeddingModel.value) elements.embeddingModel.value = provider.defaultModel;
+  elements.embeddingModel.disabled = !provider;
+  elements.embeddingModel.value = provider?.defaultModel || "";
+  elements.budgetTokensSource.textContent = provider
+    ? "Open the embedding model picker to apply an advertised context limit automatically."
+    : "Select a discovered embedding model to apply an advertised context limit automatically.";
+  elements.budgetTokensSource.className = "field-note";
+  elements.embeddingStatus.className = "status";
+  elements.embeddingStatus.textContent = provider
+    ? `${provider.name} selected. Open the embedding model picker to inspect its endpoint inventory.`
+    : "Select an embedding provider before choosing its model.";
+});
+
+elements.campaignTextProvider.addEventListener("change", () => {
+  if (!enabledProviders("embedding").length) populateEmbeddingProviderSelect();
 });
 
 async function discoverEmbeddingModels() {
   const provider = providers.find((item) => item.id === elements.embeddingProvider.value);
   if (!provider) return;
   elements.discoverEmbeddingModels.disabled = true;
+  elements.refreshProviderModelDialog.disabled = true;
   elements.embeddingStatus.textContent = `Querying ${provider.name} model inventory…`;
+  elements.providerModelPickerStatus.textContent = `Discovering active and inactive models from ${provider.name}…`;
+  elements.providerModelPickerStatus.className = "status";
   try {
     const { models } = await api(`/api/v1/providers/${provider.id}/models`);
-    elements.embeddingModels.replaceChildren();
-    for (const model of models) elements.embeddingModels.append(new Option(model.displayName, model.id));
-    const preferred = models.find((model) => /embed/i.test(`${model.id} ${model.displayName}`)) || models[0];
-    if (preferred) elements.embeddingModel.value = preferred.id;
-    elements.embeddingStatus.textContent = `${models.length} model entries found. Confirm an embedding-capable model before saving.`;
+    discoveredEmbeddingModels = models || [];
+    const current = elements.embeddingModel.value.trim();
+    const selected = discoveredEmbeddingModels.find((model) => profileModelValue(model) === current || model.id === current)
+      || discoveredEmbeddingModels.find((model) => model.loaded && /embed/i.test(`${model.id} ${model.displayName}`))
+      || discoveredEmbeddingModels.find((model) => /embed/i.test(`${model.id} ${model.displayName}`))
+      || discoveredEmbeddingModels.find((model) => model.loaded)
+      || discoveredEmbeddingModels[0]
+      || null;
+    if (selected && !current) elements.embeddingModel.value = profileModelValue(selected);
+    if (selected && (!current || profileModelValue(selected) === current || selected.id === current)) applyEmbeddingModelContextBudget(selected);
+    renderProviderModelPicker();
+    elements.providerModelPickerStatus.textContent = `${discoveredEmbeddingModels.length} model entr${discoveredEmbeddingModels.length === 1 ? "y" : "ies"} found. Select an embedding-capable model.`;
+    elements.providerModelPickerStatus.className = "status success";
+    elements.embeddingStatus.className = "status success";
+    elements.embeddingStatus.textContent = `${discoveredEmbeddingModels.length} model entries found for ${provider.name}. Select one in the model picker, then save and index.`;
   } catch (error) {
     elements.embeddingStatus.textContent = error.message || String(error);
     elements.embeddingStatus.className = "status error";
+    elements.providerModelPickerStatus.textContent = error.message || String(error);
+    elements.providerModelPickerStatus.className = "status error";
   } finally {
     elements.discoverEmbeddingModels.disabled = false;
+    elements.refreshProviderModelDialog.disabled = false;
+  }
+}
+
+function renderEmbeddingJobProgress(job) {
+  const progress = job?.progress || {};
+  const embedded = Number(progress.embedded || 0);
+  const total = Number(progress.total || 0);
+  elements.embeddingProgress.classList.remove("hidden");
+  if (total > 0) {
+    elements.embeddingProgressBar.max = total;
+    elements.embeddingProgressBar.value = Math.min(total, embedded);
+  } else if (["completed", "failed"].includes(job.status)) {
+    elements.embeddingProgressBar.max = 1;
+    elements.embeddingProgressBar.value = job.status === "completed" ? 1 : 0;
+  } else {
+    elements.embeddingProgressBar.removeAttribute("value");
+  }
+  const labels = {
+    queued: "Indexing queued; waiting for a Chronicle worker…",
+    running: total ? `Indexing semantic memory: ${number(embedded)} of ${number(total)} memories…` : "Indexing semantic memory…",
+    completed: total ? `Semantic indexing complete: ${number(total)} memories are ready.` : "Semantic indexing completed successfully.",
+    failed: `Semantic indexing failed${job.errorMessage ? `: ${job.errorMessage}` : "."}`
+  };
+  elements.embeddingProgressLabel.textContent = labels[job.status] || "Checking semantic indexing status…";
+  elements.saveEmbeddingConfig.textContent = job.status === "queued"
+    ? "Index queued…"
+    : job.status === "running"
+      ? total ? `Indexing ${embedded}/${total}…` : "Indexing…"
+      : job.status === "completed" ? "Index complete ✓" : "Index failed";
+  elements.saveEmbeddingConfig.classList.toggle("busy", ["queued", "running"].includes(job.status));
+  if (["queued", "running"].includes(job.status)) {
+    elements.semanticMemoryHealth.dataset.state = "indexing";
+    elements.semanticMemoryHealthBadge.textContent = "Indexing";
+    elements.semanticMemoryHealthTitle.textContent = total
+      ? `Semantic indexing in progress · ${number(Math.round(embedded / total * 100))}%`
+      : "Semantic indexing in progress";
+    elements.semanticMemoryHealthMessage.textContent = labels[job.status];
+  }
+}
+
+function embeddingPollDelay(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function monitorEmbeddingJob(jobId, campaignId, sequence) {
+  for (let poll = 0; poll < 1200; poll += 1) {
+    if (sequence !== embeddingJobPollSequence || selectedCampaign?.id !== campaignId) return null;
+    const job = await api(`/api/v1/jobs/${jobId}`);
+    renderEmbeddingJobProgress(job);
+    if (["completed", "failed"].includes(job.status)) {
+      await refreshCampaignMemoryMetrics();
+      elements.embeddingStatus.className = `status ${job.status === "completed" ? "success" : "error"}`;
+      elements.embeddingStatus.textContent = job.status === "completed"
+        ? "Semantic memory indexing completed. Hybrid retrieval is ready for the indexed Chronicle coverage shown above."
+        : `${job.errorMessage || "Semantic memory indexing failed."} Lexical Chronicle retrieval remains active; correct the provider or model and save again to retry.`;
+      return job;
+    }
+    await embeddingPollDelay(1000);
+  }
+  throw new Error("Semantic indexing is still running, but live progress monitoring timed out. Refresh the campaign to resume monitoring.");
+}
+
+async function resumeEmbeddingJobProgress(jobId, campaignId) {
+  const sequence = ++embeddingJobPollSequence;
+  elements.saveEmbeddingConfig.disabled = true;
+  elements.saveEmbeddingConfig.classList.add("busy");
+  try {
+    await monitorEmbeddingJob(jobId, campaignId, sequence);
+  } catch (error) {
+    if (sequence === embeddingJobPollSequence && selectedCampaign?.id === campaignId) {
+      elements.embeddingStatus.className = "status error";
+      elements.embeddingStatus.textContent = error.message || String(error);
+    }
+  } finally {
+    if (sequence === embeddingJobPollSequence && selectedCampaign?.id === campaignId) {
+      elements.saveEmbeddingConfig.disabled = false;
+      elements.saveEmbeddingConfig.classList.remove("busy");
+      elements.saveEmbeddingConfig.textContent = "Save & index";
+    }
   }
 }
 
 async function saveEmbeddingConfig(event) {
   event.preventDefault();
   if (!selectedCampaign) return;
+  const campaignId = selectedCampaign.id;
+  const sequence = ++embeddingJobPollSequence;
   elements.saveEmbeddingConfig.disabled = true;
+  elements.saveEmbeddingConfig.classList.add("busy");
+  elements.saveEmbeddingConfig.textContent = "Saving…";
+  elements.embeddingProgress.classList.add("hidden");
   elements.embeddingStatus.className = "status";
   elements.embeddingStatus.textContent = "Saving campaign memory configuration…";
   try {
@@ -700,30 +1365,45 @@ async function saveEmbeddingConfig(event) {
         enabled: elements.embeddingEnabled.checked,
         providerProfileId: elements.embeddingProvider.value || null,
         model: elements.embeddingModel.value,
-        batchSize: elements.embeddingBatchSize.value
+        batchSize: elements.embeddingBatchSize.value,
+        documentPrefix: elements.embeddingDocumentPrefix.value || null,
+        queryPrefix: elements.embeddingQueryPrefix.value || null
       })
     });
     embeddingConfig = saved;
-    elements.embeddingStatus.className = "status success";
-    elements.embeddingStatus.textContent = saved.enabled
-      ? `Semantic indexing queued as durable job ${saved.jobId}. Context retrieval will fall back safely until vectors are ready.`
-      : "Semantic retrieval disabled and derived vectors removed. Lexical Chronicle retrieval remains available.";
+    if (saved.enabled && !saved.jobId) throw new Error("Semantic memory was enabled, but the indexing job was not created.");
+    if (saved.enabled && saved.jobId) {
+      elements.embeddingStatus.textContent = `Semantic indexing queued as durable job ${saved.jobId}. Live progress will remain here until it completes or fails.`;
+      await monitorEmbeddingJob(saved.jobId, campaignId, sequence);
+    } else {
+      elements.embeddingProgress.classList.add("hidden");
+      await refreshCampaignMemoryMetrics();
+      elements.embeddingStatus.className = "status success";
+      elements.embeddingStatus.textContent = "Semantic retrieval disabled and derived vectors removed. Lexical Chronicle retrieval remains available.";
+    }
   } catch (error) {
     elements.embeddingStatus.className = "status error";
     elements.embeddingStatus.textContent = error.message || String(error);
   } finally {
-    elements.saveEmbeddingConfig.disabled = !selectedCampaign;
+    if (sequence === embeddingJobPollSequence && selectedCampaign?.id === campaignId) {
+      elements.saveEmbeddingConfig.disabled = false;
+      elements.saveEmbeddingConfig.classList.remove("busy");
+      elements.saveEmbeddingConfig.textContent = "Save & index";
+    }
   }
 }
 
-elements.illustrationProvider.addEventListener("change", () => {
-  const provider = providers.find((item) => item.id === elements.illustrationProvider.value);
-  elements.discoverIllustrationModels.disabled = !provider;
+elements.campaignImageProvider.addEventListener("change", () => {
+  const provider = effectiveCampaignProvider("image");
   if (provider?.defaultModel && !elements.illustrationModel.value) elements.illustrationModel.value = provider.defaultModel;
+  elements.campaignImageProviderSummary.textContent = provider
+    ? `Using ${provider.name} for this campaign.`
+    : "Select an image provider before saving enabled illustrations.";
+  syncIllustrationProviderAvailability();
 });
 
 async function discoverIllustrationModels() {
-  const provider = providers.find((item) => item.id === elements.illustrationProvider.value);
+  const provider = effectiveCampaignProvider("image");
   if (!provider) return;
   elements.discoverIllustrationModels.disabled = true;
   elements.illustrationStatus.className = "status";
@@ -738,22 +1418,42 @@ async function discoverIllustrationModels() {
     elements.illustrationStatus.className = "status error";
     elements.illustrationStatus.textContent = error.message || String(error);
   } finally {
-    elements.discoverIllustrationModels.disabled = !elements.illustrationProvider.value;
+    elements.discoverIllustrationModels.disabled = !effectiveCampaignProvider("image");
   }
 }
 
 async function saveIllustrationConfig(event) {
   event.preventDefault();
   if (!selectedCampaign) return;
+  const provider = effectiveCampaignProvider("image");
+  if (elements.illustrationEnabled.checked && !provider) {
+    elements.illustrationStatus.className = "status error";
+    elements.illustrationStatus.textContent = enabledProviders("image").length
+      ? "Select an image provider for this campaign before enabling illustrations."
+      : "Add and enable an illustration provider in Provider Management before enabling images.";
+    elements.campaignImageProvider.focus();
+    return;
+  }
+  if (elements.illustrationEnabled.checked && !elements.illustrationModel.value.trim()) {
+    elements.illustrationStatus.className = "status error";
+    elements.illustrationStatus.textContent = "Select or enter an image model before enabling illustrations.";
+    elements.illustrationModel.focus();
+    return;
+  }
   elements.saveIllustrationConfig.disabled = true;
   elements.illustrationStatus.className = "status";
   elements.illustrationStatus.textContent = "Saving independent illustration configuration…";
   try {
+    const updatedCampaign = await api(`/api/v1/campaigns/${selectedCampaign.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ imageProviderProfileId: elements.campaignImageProvider.value || null })
+    });
+    selectedCampaign = { ...selectedCampaign, ...updatedCampaign };
     illustrationConfig = await api(`/api/v1/campaigns/${selectedCampaign.id}/illustration-config`, {
       method: "PUT",
       body: JSON.stringify({
         enabled: elements.illustrationEnabled.checked,
-        providerProfileId: elements.illustrationProvider.value || null,
+        providerProfileId: provider?.id || null,
         model: elements.illustrationModel.value,
         size: elements.illustrationSize.value,
         aspectRatio: elements.illustrationAspectRatio.value,
@@ -806,7 +1506,6 @@ async function monitorImageJob(jobId) {
     const job = await api(`/api/v1/image-jobs/${jobId}`);
     renderImageJobStatus(job);
     if (job.status === "completed") {
-      await displayLatestTurn();
       return;
     }
     if (["recoverable", "failed"].includes(job.status)) return;
@@ -823,112 +1522,6 @@ async function loadLatestImageJob(monitor = false) {
   if (monitor && ["queued", "generating"].includes(job.status)) void monitorImageJob(job.id);
 }
 
-async function requestLatestIllustration(replace = false) {
-  if (!latestDisplayedTurn) return;
-  const job = await api(`/api/v1/turns/${latestDisplayedTurn.id}/illustrations`, {
-    method: "POST",
-    body: JSON.stringify({ replace })
-  });
-  renderImageJobStatus(job);
-  if (["queued", "generating"].includes(job.status)) void monitorImageJob(job.id);
-}
-
-elements.modelSelect.addEventListener("change", () => {
-  const contextLength = Number(elements.modelSelect.selectedOptions[0]?.dataset.contextLength || 0);
-  if (contextLength && selectedProvider) elements.budgetTokens.value = String(Math.max(512, contextLength - selectedProvider.maxOutputTokens - 1024));
-});
-
-async function displayLatestTurn() {
-  if (!selectedCampaign) return;
-  const { turns } = await api(`/api/v1/campaigns/${selectedCampaign.id}/turns`);
-  const turn = turns.at(-1);
-  if (!turn) {
-    latestDisplayedTurn = null;
-    return;
-  }
-  latestDisplayedTurn = turn;
-  elements.generatedTurn.replaceChildren();
-  const title = document.createElement("h3");
-  title.textContent = `Turn ${turn.turnNumber}`;
-  const narration = document.createElement("p");
-  narration.textContent = turn.narration;
-  const choices = document.createElement("ol");
-  for (const choice of turn.choices || []) {
-    const item = document.createElement("li");
-    item.textContent = choice;
-    choices.append(item);
-  }
-  elements.generatedTurn.append(title, narration);
-  if (turn.imageUrl) {
-    const image = document.createElement("img");
-    image.src = turn.imageUrl;
-    image.alt = `Illustration for turn ${turn.turnNumber}`;
-    image.loading = "lazy";
-    image.className = "turn-illustration";
-    elements.generatedTurn.append(image);
-  }
-  elements.generatedTurn.append(choices);
-  if (turn.imagePrompt && illustrationConfig?.providerProfileId) {
-    const illustrationButton = document.createElement("button");
-    illustrationButton.type = "button";
-    illustrationButton.className = "button secondary";
-    illustrationButton.textContent = turn.imageUrl ? "Regenerate illustration" : "Generate illustration";
-    illustrationButton.addEventListener("click", () => requestLatestIllustration(Boolean(turn.imageUrl)).catch((error) => {
-      elements.illustrationStatus.className = "status error";
-      elements.illustrationStatus.textContent = error.message || String(error);
-    }));
-    elements.generatedTurn.append(illustrationButton);
-  }
-  elements.generatedTurn.classList.remove("hidden");
-}
-
-async function generateTurn(event) {
-  event.preventDefault();
-  if (!selectedCampaign || !selectedProvider) return;
-  elements.generateTurn.disabled = true;
-  elements.generationStatus.classList.remove("hidden", "error", "success");
-  elements.generationStatus.textContent = "Queueing durable story generation…";
-  try {
-    const job = await api(`/api/v1/campaigns/${selectedCampaign.id}/generations`, {
-      method: "POST",
-      body: JSON.stringify({
-        action: elements.storyAction.value,
-        providerProfileId: selectedProvider.id,
-        model: elements.modelSelect.value || undefined,
-        idempotencyKey: crypto.randomUUID(),
-        context: {
-          budgetTokens: elements.budgetTokens.value,
-          compression: elements.compression.value,
-          recentTurns: 8,
-          modelContextWindowTokens: Number(elements.modelSelect.selectedOptions[0]?.dataset.contextLength || 0) || selectedProvider.contextWindowTokens
-        }
-      })
-    });
-    for (let attempt = 0; attempt < 600; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      const status = await api(`/api/v1/generation-jobs/${job.id}`);
-      elements.generationStatus.textContent = `Story Engine: ${status.status}${status.attempts ? ` · execution ${status.attempts}` : ""}`;
-      if (status.status === "completed") {
-        elements.generationStatus.classList.add("success");
-        elements.generationStatus.textContent = "Turn validated, committed, and indexed in Chronicle.";
-        elements.storyAction.value = "";
-        await loadCampaigns(selectedCampaign.id);
-        await displayLatestTurn();
-        await loadLatestImageJob(true);
-        return;
-      }
-      if (status.status === "recoverable") throw new Error(`${status.errorMessage || "The provider response was incomplete."} The existing turn is unchanged; this job can be retried.`);
-      if (status.status === "failed") throw new Error(status.errorMessage || "Story generation failed without changing the campaign.");
-    }
-    throw new Error("Generation is still running. Its durable job will continue on the server.");
-  } catch (error) {
-    elements.generationStatus.classList.add("error");
-    elements.generationStatus.textContent = error.message || String(error);
-  } finally {
-    elements.generateTurn.disabled = !selectedCampaign || !selectedProvider;
-  }
-}
-
 async function importStoryObject(story, sourceName) {
   const preview = await api("/api/v1/imports/legacy-story/preview", {
     method: "POST",
@@ -941,19 +1534,81 @@ async function importStoryObject(story, sourceName) {
     body: JSON.stringify({ sourceName, story })
   });
   const duplicate = result.duplicate ? "The story was already imported; the existing campaign was selected." : "Import completed.";
-  setStatus(`${duplicate} ${result.stats.turnCount} turns and ${result.stats.memoryCount} memories are available. Complete history is approximately ${number(result.stats.estimatedHistoryTokens)} tokens.`, "success");
+  setStatus(`${duplicate} ${result.stats.turnCount} turns and ${result.stats.memoryCount} memories are available. Complete history is approximately ${number(result.stats.estimatedHistoryTokens)} tokens. Use “Load story” in Campaigns to open the database-backed story.`, "success");
   await loadWorlds(result.worldId);
   await loadCampaigns(result.campaignId);
 }
 
-async function previewImportFile(file) {
+function parseImportJson(sourceText) {
+  let value = String(sourceText || "").trim().replace(/^\uFEFF/, "");
+  const fenced = value.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fenced?.[1]) value = fenced[1].trim();
+  return JSON.parse(value);
+}
+
+function infiniteWorldsRequest(sourceName, sourceText, sourceKind = elements.infiniteWorldsKind.value) {
+  return {
+    sourceName,
+    sourceText,
+    sourceKind,
+    selectedCharacterIndex: Number(elements.infiniteWorldsCharacter.value || 0),
+    ...(selectedWorldVersionId() ? { targetWorldVersionId: selectedWorldVersionId() } : {}),
+    ...(selectedProvider ? { providerProfileId: selectedProvider.id } : {}),
+    ...(elements.modelSelect.value ? { model: elements.modelSelect.value } : {}),
+    enrichFinalTurn: elements.infiniteWorldsEnrichFinal.checked
+  };
+}
+
+function showInfiniteWorldsOptions(show) {
+  elements.infiniteWorldsOptions.classList.toggle("hidden", !show);
+  if (!show) elements.infiniteWorldsCharacterField.classList.add("hidden");
+}
+
+async function previewInfiniteWorldsSource(sourceName, sourceText, sourceKind) {
+  showInfiniteWorldsOptions(true);
+  const request = infiniteWorldsRequest(sourceName, sourceText, sourceKind);
+  const preview = await api("/api/v1/imports/infinite-worlds/preview", { method: "POST", body: JSON.stringify(request) });
+  if (preview.kind === "world_json") {
+    const previousIndex = elements.infiniteWorldsCharacter.value;
+    elements.infiniteWorldsCharacter.replaceChildren(...preview.characters.map((character) => new Option(character.name, String(character.index))));
+    elements.infiniteWorldsCharacter.value = preview.characters.some((character) => String(character.index) === previousIndex) ? previousIndex : String(preview.selectedCharacterIndex || 0);
+    elements.infiniteWorldsCharacterField.classList.toggle("hidden", preview.characters.length < 2);
+    request.selectedCharacterIndex = Number(elements.infiniteWorldsCharacter.value || 0);
+    elements.importPreview.textContent = `${preview.duplicate ? "Duplicate" : "New"} Infinite Worlds world · world details only · no story turns · ${preview.characters.length || 1} playable character${preview.characters.length === 1 ? "" : "s"} · ${preview.counts.entities} entities · ${preview.counts.triggers} triggers`;
+  } else if (preview.kind === "world_text") {
+    elements.infiniteWorldsCharacterField.classList.add("hidden");
+    elements.importPreview.textContent = `Infinite Worlds world TXT · ${number(preview.counts.sourceWords)} words · LLM conversion will run when imported${preview.warnings.length ? ` · ${preview.warnings.join(" ")}` : ""}`;
+  } else {
+    elements.infiniteWorldsCharacterField.classList.add("hidden");
+    const worldLabel = selectedWorld ? `${selectedWorld.title} version ${selectedWorld.versions?.[0]?.versionNumber || "?"}` : "no selected published world";
+    elements.importPreview.textContent = `Infinite Worlds matching story TXT · story history only · ${preview.counts.turns} turns · target ${worldLabel} · approximately ${number(preview.counts.estimatedHistoryTokens || 0)} history tokens${preview.diagnostics?.length ? ` · ${preview.diagnostics.join(" ")}` : ""}`;
+  }
+  selectedImport = { kind: "infinite_worlds", request, preview };
+  elements.importStory.disabled = !preview.valid;
+  const readyMessage = preview.kind === "world_json"
+    ? "Infinite Worlds world JSON validated. This imports world details only; import the matching story TXT separately to restore story history."
+    : preview.kind === "story_text"
+      ? "Infinite Worlds story TXT validated and ready to attach to the selected published world."
+      : "Infinite Worlds export validated and ready to import.";
+  setStatus(preview.valid ? readyMessage : preview.warnings?.join(" ") || "This Infinite Worlds export needs more information before import.", preview.valid ? "success" : "error");
+}
+
+async function previewImportSource(sourceName, sourceText, sourceKind = "auto", origin = "file") {
+  selectedImportSource = { sourceName, sourceText, sourceKind, origin };
   selectedImport = null;
   elements.importStory.disabled = true;
-  elements.importPreview.textContent = "Validating file without writing to the database…";
-  const text = await file.text();
-  const parsed = JSON.parse(text.replace(/^\uFEFF/, ""));
+  elements.importPreview.textContent = "Validating content without writing to the database…";
+  let parsed = null;
+  try { parsed = parseImportJson(sourceText); } catch { /* TXT imports are validated by the server */ }
+  const forcedInfiniteWorlds = sourceKind !== "auto";
+  const looksLikeInfiniteWorldsJson = parsed && (Array.isArray(parsed.possibleCharacters) || (Array.isArray(parsed.triggerEvents) && ("background" in parsed || "instructions" in parsed)));
+  if (forcedInfiniteWorlds || looksLikeInfiniteWorldsJson || sourceName.toLowerCase().endsWith(".txt")) {
+    await previewInfiniteWorldsSource(sourceName, sourceText, sourceKind);
+    return;
+  }
+  showInfiniteWorldsOptions(false);
   if (parsed?.format === "infinite-quest-world") {
-    const request = { sourceName: file.name, worldExport: parsed };
+    const request = { sourceName, worldExport: parsed };
     const preview = await api("/api/v1/imports/world/preview", { method: "POST", body: JSON.stringify(request) });
     selectedImport = { kind: "world", request };
     elements.importPreview.textContent = `${preview.duplicate ? "Duplicate" : "New"} world · ${preview.counts.entities} entities · ${preview.counts.relationships} relationships · ${preview.counts.triggers} triggers${preview.warnings.length ? ` · ${preview.warnings.join(" ")}` : ""}`;
@@ -962,7 +1617,7 @@ async function previewImportFile(file) {
     return;
   }
   if (parsed?.world && Array.isArray(parsed.turns)) {
-    const request = { sourceName: file.name, story: parsed };
+    const request = { sourceName, story: parsed };
     const preview = await api("/api/v1/imports/legacy-story/preview", { method: "POST", body: JSON.stringify(request) });
     selectedImport = { kind: "campaign", request };
     elements.importPreview.textContent = `${preview.duplicate ? "Duplicate" : "New"} campaign · ${preview.counts.turns} turns · approximately ${number(preview.counts.estimatedHistoryTokens)} history tokens${preview.warnings.length ? ` · ${preview.warnings.join(" ")}` : ""}`;
@@ -970,14 +1625,114 @@ async function previewImportFile(file) {
     setStatus(preview.valid ? (preview.duplicate ? "This campaign was already imported. Importing will select the existing record." : "Campaign validated and ready to import.") : "Correct the validation warnings before importing.", preview.valid ? (preview.duplicate ? "" : "success") : "error");
     return;
   }
-  throw new Error("The file is neither a portable Infinite Quest world nor a campaign/story export.");
+  throw new Error("The content is neither an Infinite Quest world/campaign export nor a recognized Infinite Worlds export.");
+}
+
+async function previewImportFile(file) {
+  const sourceText = await file.text();
+  await previewImportSource(file.name, sourceText, elements.infiniteWorldsKind.value, "file");
+}
+
+function clipboardGuidance(kind = elements.clipboardImportKind.value) {
+  const guidance = {
+    auto: ["Choose the complete export.", "Automatic detection accepts Infinite Quest .story JSON or Infinite Worlds world JSON. Select matching story TXT explicitly because it is not JSON."],
+    campaign_json: ["Infinite Quest .story includes both parts.", "The pasted JSON should contain world details and accepted story turns. Importing it creates a World Library world and a campaign with Chronicle history."],
+    world_json: ["Infinite Worlds world JSON contains no story history.", "This creates only the reusable World Library world. Afterwards, select that published world and import the separate matching story TXT to create the campaign."],
+    story_text: ["Infinite Worlds story TXT must be attached to its world.", "First import and select the matching Infinite Worlds world JSON. This TXT then creates the campaign and Chronicle history against that published world version."]
+  }[kind] || ["Choose the complete export.", "Paste the complete copied content before validating it."];
+  elements.clipboardImportGuidance.replaceChildren();
+  const title = document.createElement("strong");
+  title.textContent = guidance[0];
+  const detail = document.createElement("span");
+  detail.textContent = guidance[1];
+  elements.clipboardImportGuidance.append(title, detail);
+}
+
+function openClipboardImport() {
+  elements.clipboardImportStatus.textContent = "No copied content has been validated.";
+  elements.clipboardImportStatus.className = "status";
+  clipboardGuidance();
+  elements.clipboardImportDialog.showModal();
+  elements.clipboardImportText.focus();
+}
+
+async function validateClipboardImport(event) {
+  event.preventDefault();
+  const sourceText = elements.clipboardImportText.value.trim();
+  const kind = elements.clipboardImportKind.value;
+  if (!sourceText) {
+    elements.clipboardImportStatus.textContent = "Paste the complete exported content before validating it.";
+    elements.clipboardImportStatus.className = "status error";
+    return;
+  }
+  elements.validateClipboardImport.disabled = true;
+  elements.clipboardImportStatus.textContent = "Validating copied content without changing the database…";
+  elements.clipboardImportStatus.className = "status";
+  try {
+    let sourceName = "clipboard-import.json";
+    let sourceKind = "auto";
+    if (kind === "campaign_json") {
+      const parsed = parseImportJson(sourceText);
+      if (!parsed?.world || !Array.isArray(parsed.turns)) throw new Error("This is not an Infinite Quest .story export: it must contain both world details and a turns array.");
+      sourceName = "clipboard.story";
+    } else if (kind === "world_json") {
+      sourceName = "infinite-worlds-world-clipboard.json";
+      sourceKind = "world_json";
+      elements.infiniteWorldsKind.value = "world_json";
+    } else if (kind === "story_text") {
+      sourceName = "infinite-worlds-story-clipboard.txt";
+      sourceKind = "story_text";
+      elements.infiniteWorldsKind.value = "story_text";
+    }
+    await previewImportSource(sourceName, sourceText, sourceKind, "clipboard");
+    if (!selectedImport || elements.importStory.disabled) {
+      throw new Error(elements.importStatus.textContent || "The copied content needs more information before it can be imported.");
+    }
+    selectedFile = null;
+    elements.storyFile.value = "";
+    elements.clipboardImportText.value = "";
+    elements.clipboardImportDialog.close();
+  } catch (error) {
+    elements.clipboardImportStatus.textContent = error.message || String(error);
+    elements.clipboardImportStatus.className = "status error";
+  } finally {
+    elements.validateClipboardImport.disabled = false;
+  }
 }
 
 async function importStory() {
-  if (!selectedFile || !selectedImport) return;
+  if (!selectedImport) return;
   elements.importStory.disabled = true;
   try {
-    if (selectedImport.kind === "world") {
+    if (selectedImport.kind === "infinite_worlds") {
+      setStatus(selectedImport.preview.kind === "world_text" ? "Converting and importing the Infinite Worlds world with the selected text provider…" : "Importing the validated Infinite Worlds export…");
+      const result = await api("/api/v1/imports/infinite-worlds", { method: "POST", body: JSON.stringify(selectedImport.request) });
+      await loadWorlds(result.worldId);
+      if (result.kind === "campaign") {
+        await loadCampaigns(result.campaignId);
+        let imageMessage = "";
+        if (elements.infiniteWorldsFinalImage.checked) {
+          try {
+            const config = await api(`/api/v1/campaigns/${result.campaignId}/illustration-config`);
+            const { turns } = await api(`/api/v1/campaigns/${result.campaignId}/turns`);
+            const finalTurn = turns.at(-1);
+            if (!config.enabled) imageMessage = " Illustration was not queued because this campaign's image pipeline is disabled.";
+            else if (!finalTurn?.imagePrompt) imageMessage = " Illustration was not queued because the final imported turn has no image prompt.";
+            else {
+              await api(`/api/v1/turns/${finalTurn.id}/illustrations`, { method: "POST", body: JSON.stringify({}) });
+              imageMessage = " The latest-turn illustration was queued independently.";
+            }
+          } catch (error) {
+            imageMessage = ` Story import succeeded; optional illustration was not queued: ${error.message || String(error)}`;
+          }
+        }
+        setStatus(`${result.duplicate ? "The matching story was already imported; its campaign was selected." : `Imported ${result.stats.turnCount} turns and built ${result.stats.memoryCount} Chronicle memories.`}${imageMessage}`, "success");
+      } else {
+        setStatus(result.duplicate
+          ? "The Infinite Worlds world was already imported; the existing record was selected. This JSON contains no story history—import the matching story TXT separately."
+          : "Infinite Worlds world details imported with an immutable version and editable draft. No story history was included; import the matching story TXT separately to create a campaign.", "success");
+      }
+    } else if (selectedImport.kind === "world") {
       setStatus("Importing the validated portable world…");
       const result = await api("/api/v1/imports/world", { method: "POST", body: JSON.stringify(selectedImport.request) });
       await loadWorlds(result.worldId);
@@ -1026,8 +1781,10 @@ async function previewContext(event) {
   elements.previewContext.disabled = true;
   elements.contextPreview.textContent = "Building fiction-only context…";
   try {
+    const budgetTokens = clampedMemoryContextBudget(elements.budgetTokens.value);
+    elements.budgetTokens.value = String(budgetTokens);
     const parameters = new URLSearchParams({
-      budgetTokens: elements.budgetTokens.value,
+      budgetTokens: String(budgetTokens),
       compression: elements.compression.value,
       query: elements.memoryQuery.value,
       recentTurns: "8"
@@ -1077,6 +1834,7 @@ async function rebuildMemory() {
 
 elements.storyFile.addEventListener("change", async () => {
   selectedFile = elements.storyFile.files?.[0] || null;
+  selectedImportSource = null;
   selectedImport = null;
   elements.importStory.disabled = true;
   if (!selectedFile) {
@@ -1084,6 +1842,7 @@ elements.storyFile.addEventListener("change", async () => {
     setStatus("Choose a story file to begin.");
     return;
   }
+  elements.infiniteWorldsKind.value = "auto";
   setStatus(`Reading and validating ${selectedFile.name}…`);
   try {
     await previewImportFile(selectedFile);
@@ -1092,6 +1851,20 @@ elements.storyFile.addEventListener("change", async () => {
     setStatus(error.message || String(error), "error");
   }
 });
+elements.infiniteWorldsKind.addEventListener("change", () => {
+  if (selectedImportSource) previewImportSource(selectedImportSource.sourceName, selectedImportSource.sourceText, elements.infiniteWorldsKind.value, selectedImportSource.origin).catch((error) => setStatus(error.message || String(error), "error"));
+  else if (selectedFile) previewImportFile(selectedFile).catch((error) => setStatus(error.message || String(error), "error"));
+});
+elements.infiniteWorldsCharacter.addEventListener("change", () => {
+  if (selectedImportSource) previewImportSource(selectedImportSource.sourceName, selectedImportSource.sourceText, elements.infiniteWorldsKind.value, selectedImportSource.origin).catch((error) => setStatus(error.message || String(error), "error"));
+});
+elements.infiniteWorldsEnrichFinal.addEventListener("change", () => {
+  if (selectedImportSource) previewImportSource(selectedImportSource.sourceName, selectedImportSource.sourceText, elements.infiniteWorldsKind.value, selectedImportSource.origin).catch((error) => setStatus(error.message || String(error), "error"));
+});
+elements.openClipboardImport.addEventListener("click", openClipboardImport);
+elements.cancelClipboardImport.addEventListener("click", () => elements.clipboardImportDialog.close());
+elements.clipboardImportKind.addEventListener("change", () => clipboardGuidance());
+elements.clipboardImportForm.addEventListener("submit", validateClipboardImport);
 elements.deleteConfirmationInput.addEventListener("input", () => {
   elements.confirmDelete.disabled = elements.deleteConfirmationInput.value !== pendingDeleteTitle;
 });
@@ -1125,16 +1898,45 @@ elements.campaignWorldVersion.addEventListener("change", () => {
 elements.contextForm.addEventListener("submit", previewContext);
 elements.reindexMemory.addEventListener("click", rebuildMemory);
 elements.providerForm.addEventListener("submit", saveProvider);
+elements.cancelProviderEdit.addEventListener("click", resetProviderForm);
+elements.refreshProviderModels.addEventListener("click", async (event) => { event.stopPropagation(); await openProviderModelPicker(true); });
+elements.providerDefaultModel.addEventListener("click", () => { void openProviderModelPicker(); });
+elements.providerDefaultModel.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openProviderModelPicker(); }
+});
+elements.closeProviderModelDialog.addEventListener("click", () => elements.providerModelDialog.close());
+elements.refreshProviderModelDialog.addEventListener("click", refreshActiveModelPicker);
+elements.providerModelFilter.addEventListener("input", renderProviderModelPicker);
+elements.applyCustomProviderModel.addEventListener("click", applyCustomProviderModel);
+elements.providerDefaultModel.addEventListener("change", applyProfileModelContext);
 elements.discoverModels.addEventListener("click", discoverProviderModels);
 elements.compression.addEventListener("change", () => {
   elements.compression.title = elements.compression.selectedOptions[0]?.title || "Choose how Chronicle fits history into the context budget.";
 });
-elements.discoverEmbeddingModels.addEventListener("click", discoverEmbeddingModels);
+elements.budgetTokens.addEventListener("input", () => {
+  elements.budgetTokensSource.textContent = "Manual memory context budget. Selecting a discovered embedding model can recalculate it from advertised limits.";
+  elements.budgetTokensSource.className = "field-note manual-entry";
+});
+elements.discoverEmbeddingModels.addEventListener("click", async (event) => { event.stopPropagation(); await openEmbeddingModelPicker(true); });
+elements.embeddingModel.addEventListener("click", () => { void openEmbeddingModelPicker(); });
+elements.embeddingModel.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openEmbeddingModelPicker(); }
+});
 elements.embeddingForm.addEventListener("submit", saveEmbeddingConfig);
 elements.illustrationForm.addEventListener("submit", saveIllustrationConfig);
+elements.illustrationEnabled.addEventListener("change", () => {
+  if (elements.illustrationEnabled.checked && !enabledProviders("image").length) {
+    elements.illustrationEnabled.checked = false;
+    elements.illustrationStatus.className = "status error";
+    elements.illustrationStatus.textContent = "Add and enable an illustration provider in Provider Management before enabling images.";
+  }
+  const provider = effectiveCampaignProvider("image");
+  if (elements.illustrationEnabled.checked && provider?.defaultModel && !elements.illustrationModel.value.trim()) {
+    elements.illustrationModel.value = provider.defaultModel;
+  }
+  renderIllustrationSettingsVisibility();
+});
 elements.discoverIllustrationModels.addEventListener("click", discoverIllustrationModels);
-elements.generationForm.addEventListener("submit", generateTurn);
-
 detectBrowserStory();
 loadProviders().catch((error) => providerMessage(error.message || String(error), "error"));
 loadWorlds().catch((error) => worldMessage(error.message || String(error), "error"));

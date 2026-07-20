@@ -8,7 +8,9 @@ import { storyImportRequestSchema } from "../../packages/contracts/src/imports.j
 import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
-import { enqueueGeneration, getGenerationJob, getGenerationResult, retryGeneration, runGenerationJob, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
+import { enqueueGeneration, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, runGenerationJob, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
+import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/api/src/memory-service.js";
+import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -23,7 +25,11 @@ function validStory(narration = "Location Gamma opens and Marker Three becomes v
     custom_action_suggestion: "Inspect Object Delta.",
     scratchpad: "Private synthetic continuity marker.",
     tracker_updates: [{ name: "Location Gamma", value: "open" }],
-    image_prompt: "Synthetic Location Gamma with Marker Three visible."
+    image_prompt: "Synthetic Location Gamma with Marker Three visible.",
+    continuity_summary: "Test Character has reached Location Gamma after discovering Marker Three.",
+    canonical_facts: ["Location Gamma is open."],
+    superseded_facts: [],
+    open_threads: ["Determine what Marker Three unlocks."]
   });
 }
 
@@ -50,7 +56,7 @@ integration("durable Story Engine integration", () => {
           id: crypto.randomUUID(),
           model: "deterministic-mock",
           choices: [{ message: { content: reply.content }, finish_reason: reply.finishReason || "stop" }],
-          usage: { prompt_tokens: 700, completion_tokens: 220, total_tokens: 920 }
+          usage: { prompt_tokens: 700, completion_tokens: 220, total_tokens: 920, cost: 0.00125 }
         }));
       });
     });
@@ -78,9 +84,10 @@ integration("durable Story Engine integration", () => {
     await pool.end();
   });
 
-  async function campaign() {
+  async function campaign(storyLength?: "brief" | "standard" | "long" | "extended") {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `Generated campaign ${crypto.randomUUID()}`;
+    if (storyLength) fixture.settings.storyLength = storyLength;
     return importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "generation.story", story: fixture }));
   }
 
@@ -103,6 +110,7 @@ integration("durable Story Engine integration", () => {
     const serialized = JSON.stringify(lastRequest);
     expect(serialized).toContain("Location Beta");
     expect(serialized).toContain("Object Gamma");
+    expect(serialized).toContain("Use synthetic fixture markers only");
     expect(serialized).not.toContain("d100");
     expect(serialized).not.toContain("Private synthetic state");
     const committed = await pool.query<{ narration: string; content: string }>(
@@ -111,11 +119,250 @@ integration("durable Story Engine integration", () => {
     );
     expect(committed.rows[0]?.narration).toContain("Marker Three");
     expect(committed.rows[0]?.content).not.toMatch(/roll|dice|check/i);
-    expect(await getGenerationResult(pool, job.id)).toMatchObject({
+    const generationResult = await getGenerationResult(pool, job.id);
+    expect(generationResult).toMatchObject({
       status: "completed",
       campaignId: imported.campaignId,
       turnNumber: 3,
-      narration: expect.stringContaining("Marker Three")
+      narration: expect.stringContaining("Marker Three"),
+      reportedCost: { currency: "USD" }
+    });
+    expect(Number(generationResult.reportedCost?.amount || 0)).toBeGreaterThan(0);
+    const costSummary = await getCampaignCostSummary(pool, imported.campaignId);
+    expect(costSummary).toMatchObject({ campaignId: imported.campaignId, hasReportedCosts: true });
+    expect(Number(costSummary.totals[0]?.byCategory.story || 0)).toBeGreaterThan(0);
+    expect(Number(costSummary.totals[0]?.otherCampaignOperations || 0)).toBe(0);
+    const nextContext = await buildContextPreview(pool, imported.campaignId, {
+      budgetTokens: 8000,
+      compression: "auto",
+      query: "Marker Three unlocks",
+      recentTurns: 8
+    });
+    const nextSerialized = JSON.stringify(nextContext.scopes);
+    expect(nextSerialized).toContain("Private synthetic continuity marker");
+    expect(nextSerialized).toContain("Location Gamma");
+    expect(nextSerialized).toContain("Determine what Marker Three unlocks");
+  });
+
+  it("continues remote story generation when a separate local embedding provider is unavailable", async () => {
+    const imported = await campaign();
+    const embeddingProvider = await createProvider(pool, {
+      name: `Unavailable local embeddings ${crypto.randomUUID()}`,
+      providerType: "lmstudio",
+      providerRole: "embedding",
+      baseUrl: "http://127.0.0.1:1",
+      defaultModel: "text-embedding-nomic-embed-text-v1.5",
+      contextWindowTokens: 8192,
+      maxOutputTokens: 1024,
+      temperature: 0,
+      enabled: true,
+      configuration: {}
+    }, credentialSecret);
+    await setCampaignEmbeddingConfig(pool, imported.campaignId, {
+      enabled: true,
+      providerProfileId: embeddingProvider.id,
+      model: "text-embedding-nomic-embed-text-v1.5",
+      batchSize: 8
+    });
+    replies.push({ content: validStory("Remote story generation remains available through lexical Chronicle retrieval.") });
+    const job = await queue(imported.campaignId, "Continue despite unavailable local embeddings.");
+
+    await runGenerationJob(pool, "story-worker-provider-separation", 30, credentialSecret);
+
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+    expect(await getGenerationResult(pool, job.id)).toMatchObject({
+      status: "completed",
+      narration: expect.stringContaining("lexical Chronicle retrieval")
+    });
+    await pool.query(
+      "DELETE FROM chronicle_jobs WHERE campaign_id = $1",
+      [imported.campaignId]
+    );
+  });
+
+  it("records every durable generation phase in order", async () => {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const auditTable = `generation_status_audit_${suffix}`;
+    const auditFunction = `record_generation_status_${suffix}`;
+    const insertTrigger = `generation_status_insert_${suffix}`;
+    const updateTrigger = `generation_status_update_${suffix}`;
+    await pool.query(`CREATE TABLE ${auditTable} (
+      sequence bigserial PRIMARY KEY,
+      generation_job_id uuid NOT NULL,
+      status text NOT NULL
+    )`);
+    await pool.query(`CREATE FUNCTION ${auditFunction}() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        INSERT INTO ${auditTable} (generation_job_id, status) VALUES (NEW.id, NEW.status);
+        RETURN NEW;
+      END
+    $$`);
+    await pool.query(`CREATE TRIGGER ${insertTrigger} AFTER INSERT ON generation_jobs
+      FOR EACH ROW EXECUTE FUNCTION ${auditFunction}()`);
+    await pool.query(`CREATE TRIGGER ${updateTrigger} AFTER UPDATE OF status ON generation_jobs
+      FOR EACH ROW WHEN (OLD.status IS DISTINCT FROM NEW.status) EXECUTE FUNCTION ${auditFunction}()`);
+    try {
+      const imported = await campaign();
+      replies.push({ content: validStory() });
+      const job = await queue(imported.campaignId);
+      await runGenerationJob(pool, `story-worker-progress-${suffix}`, 30, credentialSecret);
+      const statuses = await pool.query<{ status: string }>(
+        `SELECT status FROM ${auditTable} WHERE generation_job_id = $1 ORDER BY sequence`,
+        [job.id]
+      );
+      expect(statuses.rows.map((row) => row.status)).toEqual([
+        "queued",
+        "assessing",
+        "generating",
+        "validating",
+        "committing",
+        "completed"
+      ]);
+    } finally {
+      await pool.query(`DROP TRIGGER IF EXISTS ${insertTrigger} ON generation_jobs`);
+      await pool.query(`DROP TRIGGER IF EXISTS ${updateTrigger} ON generation_jobs`);
+      await pool.query(`DROP FUNCTION IF EXISTS ${auditFunction}()`);
+      await pool.query(`DROP TABLE IF EXISTS ${auditTable}`);
+    }
+  });
+
+  it("rewinds the existing campaign without copying its world or campaign", async () => {
+    const imported = await campaign();
+    replies.push({ content: validStory() });
+    const job = await queue(imported.campaignId);
+    await runGenerationJob(pool, "story-worker-rewind", 30, credentialSecret);
+    const before = await pool.query<{ worlds: string; campaigns: string }>(
+      `SELECT (SELECT count(*) FROM worlds)::text AS worlds,
+              (SELECT count(*) FROM campaigns)::text AS campaigns`
+    );
+    const costBefore = await pool.query<{ count: string; amount: string }>(
+      `SELECT count(*)::text AS count, coalesce(sum(amount), 0)::text AS amount
+         FROM provider_cost_events WHERE campaign_id = $1`,
+      [imported.campaignId]
+    );
+
+    const rewound = await rewindCampaign(pool, imported.campaignId, { targetTurnNumber: 2 });
+
+    expect(rewound).toMatchObject({
+      campaignId: imported.campaignId,
+      activeTurnNumber: 2,
+      discardedTurnCount: 1,
+      stateSnapshot: { scratchpad: "Private synthetic continuity marker." }
+    });
+    const after = await pool.query<{ worlds: string; campaigns: string }>(
+      `SELECT (SELECT count(*) FROM worlds)::text AS worlds,
+              (SELECT count(*) FROM campaigns)::text AS campaigns`
+    );
+    expect(after.rows[0]).toEqual(before.rows[0]);
+    const campaignState = await pool.query<{ active_turn_number: number; scratchpad_private: string }>(
+      `SELECT c.active_turn_number, cs.scratchpad_private
+         FROM campaigns c JOIN campaign_state cs ON cs.campaign_id = c.id
+        WHERE c.id = $1`,
+      [imported.campaignId]
+    );
+    expect(campaignState.rows[0]).toEqual({
+      active_turn_number: 2,
+      scratchpad_private: "Private synthetic continuity marker."
+    });
+    const ledger = await pool.query<{ turn_number: number }>(
+      "SELECT turn_number FROM turns WHERE campaign_id = $1 ORDER BY turn_number",
+      [imported.campaignId]
+    );
+    expect(ledger.rows.map((row) => row.turn_number)).toEqual([1, 2]);
+    const discardedArtifacts = await pool.query<{ jobs: string; memories: string }>(
+      `SELECT
+         (SELECT count(*) FROM generation_jobs WHERE id = $2)::text AS jobs,
+         (SELECT count(*) FROM chronicle_memories WHERE campaign_id = $1 AND content LIKE '%Marker Three%')::text AS memories`,
+      [imported.campaignId, job.id]
+    );
+    expect(discardedArtifacts.rows[0]).toEqual({ jobs: "0", memories: "0" });
+    const costAfter = await pool.query<{ count: string; amount: string; attributed: string }>(
+      `SELECT count(*)::text AS count, coalesce(sum(amount), 0)::text AS amount,
+              count(*) FILTER (WHERE turn_id IS NOT NULL)::text AS attributed
+         FROM provider_cost_events WHERE campaign_id = $1`,
+      [imported.campaignId]
+    );
+    expect(costAfter.rows[0]).toMatchObject({
+      count: costBefore.rows[0]?.count,
+      amount: costBefore.rows[0]?.amount,
+      attributed: "0"
+    });
+  });
+
+  it("accepts a post-rewind story when the provider omits only derived Chronicle fields", async () => {
+    const imported = await campaign();
+    replies.push({ content: validStory("The first path reaches Marker Three.") });
+    const firstJob = await queue(imported.campaignId, "Take the first path.");
+    await runGenerationJob(pool, "story-worker-branch-source", 30, credentialSecret);
+    expect(await getGenerationJob(pool, firstJob.id)).toMatchObject({ status: "completed" });
+    await rewindCampaign(pool, imported.campaignId, { targetTurnNumber: 2 });
+
+    const branchStory = JSON.parse(validStory("The reply opens a different path through Location Gamma."));
+    delete branchStory.continuity_summary;
+    delete branchStory.canonical_facts;
+    delete branchStory.superseded_facts;
+    delete branchStory.open_threads;
+    replies.push({ content: JSON.stringify(branchStory) });
+    const branchJob = await queue(imported.campaignId, "Reply.");
+    await runGenerationJob(pool, "story-worker-branch-reply", 30, credentialSecret);
+
+    expect(await getGenerationJob(pool, branchJob.id)).toMatchObject({ status: "completed", expectedTurnNumber: 3 });
+    expect(await getGenerationResult(pool, branchJob.id)).toMatchObject({
+      status: "completed",
+      narration: expect.stringContaining("different path")
+    });
+  });
+
+  it("creates an optional campaign branch on the same immutable world version", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Branch source ${crypto.randomUUID()}`;
+    const source = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "branch-source.story", story: fixture }));
+    const before = await pool.query<{ worlds: string; campaigns: string }>(
+      `SELECT (SELECT count(*) FROM worlds)::text AS worlds,
+              (SELECT count(*) FROM campaigns)::text AS campaigns`
+    );
+    fixture.turns = fixture.turns.slice(0, 1);
+    const branch = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: "branch-copy.story",
+      story: fixture,
+      targetWorldVersionId: source.worldVersionId
+    }));
+    const after = await pool.query<{ worlds: string; campaigns: string }>(
+      `SELECT (SELECT count(*) FROM worlds)::text AS worlds,
+              (SELECT count(*) FROM campaigns)::text AS campaigns`
+    );
+
+    expect(branch.worldId).toBe(source.worldId);
+    expect(branch.worldVersionId).toBe(source.worldVersionId);
+    expect(branch.campaignId).not.toBe(source.campaignId);
+    expect(after.rows[0]?.worlds).toBe(before.rows[0]?.worlds);
+    expect(Number(after.rows[0]?.campaigns)).toBe(Number(before.rows[0]?.campaigns) + 1);
+  });
+
+  it("snapshots the campaign story-length profile into the durable job and prompt", async () => {
+    const imported = await campaign("extended");
+    replies.push({ content: validStory() });
+    const requestOffset = requests.length;
+    const job = await queue(imported.campaignId);
+    await pool.query("UPDATE campaigns SET story_length_profile = 'brief' WHERE id = $1", [imported.campaignId]);
+
+    await runGenerationJob(pool, "story-worker-length", 30, credentialSecret);
+    const snapshot = await pool.query<{ context_options: Record<string, unknown> }>(
+      "SELECT context_options FROM generation_jobs WHERE id = $1",
+      [job.id]
+    );
+    expect(snapshot.rows[0]?.context_options).toMatchObject({
+      storyLengthProfile: "extended",
+      narrationMinWords: 1200,
+      narrationMaxWords: 2000
+    });
+    const storyRequest = requests.slice(requestOffset).find((request) => JSON.stringify(request).includes("fiction writer for Infinite Quest"));
+    const storyUserMessage = storyRequest?.messages?.find((message: any) => message.role === "user");
+    const storyPayload = JSON.parse(storyUserMessage?.content || "{}");
+    expect(storyPayload.narration_length).toEqual({
+      profile: "extended",
+      target_min_words: 1200,
+      target_max_words: 2000
     });
   });
 
@@ -187,7 +434,7 @@ integration("durable Story Engine integration", () => {
   });
 
   it("recovers an output-limited response with a compact second request", async () => {
-    const imported = await campaign();
+    const imported = await campaign("long");
     replies.push(
       { content: '{"narration":"Location Gamma opens', finishReason: "length" },
       { content: validStory("Location Gamma opens in a compact, complete response.") }
@@ -198,6 +445,7 @@ integration("durable Story Engine integration", () => {
     const attempts = await pool.query<{ recovery_kind: string }>("SELECT recovery_kind FROM generation_attempts WHERE generation_job_id = $1 ORDER BY attempt_number", [job.id]);
     expect(attempts.rows.map((row) => row.recovery_kind)).toEqual(["initial", "compact_completion"]);
     expect(JSON.stringify(requests.at(-1))).toContain("compact, complete JSON object");
+    expect(JSON.stringify(requests.at(-1))).toContain("400-600 narration words");
   });
 
   it("rewrites mechanics-contaminated output before committing it", async () => {

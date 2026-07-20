@@ -1,6 +1,7 @@
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import type { LegacyStory, LegacyTurn, StoryImportRequest, StoryImportResult } from "../../../packages/contracts/src/imports.js";
+import { storyLengthProfileFromUnknown } from "../../../packages/contracts/src/story-settings.js";
 import { buildTurnFictionMemory, formatLegacySummary, turnNarration } from "../../../packages/story-engine/src/chronicle.js";
 import { estimateTokens, removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
@@ -52,10 +53,19 @@ function sanitizedStoryForHash(story: LegacyStory): Record<string, unknown> {
   delete settings.nexusCampaignId;
   delete settings.nexusCampaignTurnCount;
   delete settings.nexusPendingGeneration;
+  delete settings.nexusCampaignWorldVersionId;
+  delete settings.nexusBranchWorldVersionId;
   return {
     ...story,
     settings
   };
+}
+
+function importSourceHash(request: StoryImportRequest): string {
+  return sha256(stableStringify({
+    story: sanitizedStoryForHash(request.story),
+    targetWorldVersionId: request.targetWorldVersionId ?? null
+  }));
 }
 
 function duplicateResult(row: ImportRow): StoryImportResult {
@@ -82,59 +92,217 @@ async function existingImport(client: DatabaseClient, ownerUserId: string, sourc
   return result.rows[0] ?? null;
 }
 
+function turnIdentity(turn: LegacyTurn): string {
+  return stableStringify({
+    action: String(turn.action ?? "").trim(),
+    narration: turnNarration(turn),
+    choices: choices(turn),
+    customActionSuggestion: String(turn.customActionSuggestion ?? turn.custom_action_suggestion ?? "").trim(),
+    imagePrompt: String(turn.imagePrompt ?? "").trim()
+  });
+}
+
+function isExplicitCampaignBranch(story: LegacyStory): boolean {
+  const provenance = story.storyImportProvenance;
+  return Boolean(provenance && typeof provenance === "object" && !Array.isArray(provenance)
+    && (provenance as Record<string, unknown>).sourceType === "nexus_campaign_branch");
+}
+
+async function reconnectMatchingCampaign(
+  client: DatabaseClient,
+  ownerUserId: string,
+  sourceHash: string,
+  request: StoryImportRequest,
+  requiredWorldVersionId?: string,
+  priorImport?: ImportRow | null
+): Promise<StoryImportResult | null> {
+  if (isExplicitCampaignBranch(request.story)) return null;
+  const candidates = await client.query<{ campaign_id: string; world_version_id: string; world_id: string }>(
+    `SELECT c.id AS campaign_id, c.world_version_id, wv.world_id
+       FROM campaigns c
+       JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
+      WHERE c.owner_user_id = $1 AND c.title = $2 AND c.active_turn_number = $3
+        AND ($4::uuid IS NULL OR c.world_version_id = $4)
+      ORDER BY (c.id = $5::uuid) DESC, c.updated_at DESC
+      FOR SHARE OF c`,
+    [ownerUserId, worldTitle(request.story), request.story.turns.length, requiredWorldVersionId ?? null, priorImport?.campaign_id ?? null]
+  );
+  const requestedTurns = request.story.turns.map(turnIdentity);
+  for (const candidate of candidates.rows) {
+    const storedTurns = await client.query<{
+      action: string;
+      narration: string;
+      choices: unknown;
+      custom_action_suggestion: string;
+      image_prompt: string;
+    }>(
+      `SELECT action, narration, choices, custom_action_suggestion, image_prompt
+         FROM turns WHERE campaign_id = $1 AND owner_user_id = $2 ORDER BY turn_number`,
+      [candidate.campaign_id, ownerUserId]
+    );
+    const storedIdentities = storedTurns.rows.map((turn) => turnIdentity({
+      action: turn.action,
+      narration: turn.narration,
+      choices: Array.isArray(turn.choices) ? turn.choices : [],
+      customActionSuggestion: turn.custom_action_suggestion,
+      imagePrompt: turn.image_prompt
+    }));
+    if (storedIdentities.length !== requestedTurns.length
+      || storedIdentities.some((identity, index) => identity !== requestedTurns[index])) continue;
+
+    const memoryStats = await client.query<{ memory_count: string; sanitized_count: string; imported_summary: boolean }>(
+      `SELECT count(*)::text AS memory_count,
+              count(*) FILTER (WHERE metadata->>'sanitized' = 'true')::text AS sanitized_count,
+              bool_or(memory_kind = 'legacy_summary') AS imported_summary
+         FROM chronicle_memories WHERE campaign_id = $1 AND owner_user_id = $2`,
+      [candidate.campaign_id, ownerUserId]
+    );
+    const completeHistoryCharacters = request.story.turns.reduce((total, turn) => (
+      total + String(turn.action ?? "").length + turnNarration(turn).length
+    ), 0);
+    const stats: StoryImportResult["stats"] = {
+      turnCount: request.story.turns.length,
+      memoryCount: Number(memoryStats.rows[0]?.memory_count || 0),
+      completeHistoryCharacters,
+      estimatedHistoryTokens: request.story.turns.reduce((total, turn) => (
+        total + estimateTokens(`${String(turn.action ?? "")}\n${turnNarration(turn)}`)
+      ), 0),
+      importedSummary: memoryStats.rows[0]?.imported_summary === true,
+      sanitizedMemoryCount: Number(memoryStats.rows[0]?.sanitized_count || 0)
+    };
+    const reconnect = priorImport
+      ? await client.query<{ id: string }>(
+        `UPDATE imports SET source_type = 'campaign_reconnect', source_name = $2, status = 'completed',
+                world_id = $3, world_version_id = $4, campaign_id = $5, stats = $6, completed_at = now()
+          WHERE id = $1 AND owner_user_id = $7 RETURNING id`,
+        [priorImport.id, request.sourceName, candidate.world_id, candidate.world_version_id,
+          candidate.campaign_id, json(stats), ownerUserId]
+      )
+      : await client.query<{ id: string }>(
+        `INSERT INTO imports (
+           owner_user_id, source_type, source_name, source_hash, status,
+           world_id, world_version_id, campaign_id, stats, completed_at
+         ) VALUES ($1,'campaign_reconnect',$2,$3,'completed',$4,$5,$6,$7,now()) RETURNING id`,
+        [ownerUserId, request.sourceName, sourceHash, candidate.world_id, candidate.world_version_id,
+          candidate.campaign_id, json(stats)]
+      );
+    const importId = reconnect.rows[0]?.id;
+    if (!importId) throw new Error("Could not record the campaign reconnection.");
+    await client.query(
+      `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, correlation_id, details)
+       VALUES ($1,$2,'campaign_reconnected',$3,$4)`,
+      [ownerUserId, candidate.campaign_id, importId, json({ sourceName: request.sourceName, sourceHash, turnCount: stats.turnCount })]
+    );
+    return {
+      importId,
+      worldId: candidate.world_id,
+      worldVersionId: candidate.world_version_id,
+      campaignId: candidate.campaign_id,
+      duplicate: true,
+      stats
+    };
+  }
+  return null;
+}
+
+async function matchingWorldVersion(client: DatabaseClient, ownerUserId: string, story: LegacyStory) {
+  const result = await client.query<{ world_id: string; world_version_id: string }>(
+    `SELECT world_id, id AS world_version_id
+       FROM world_versions
+      WHERE owner_user_id = $1 AND content = $2::jsonb
+      ORDER BY created_at DESC LIMIT 1`,
+    [ownerUserId, json(legacyWorldContent(story))]
+  );
+  return result.rows[0] ?? null;
+}
+
 export async function importLegacyStory(
   pool: DatabasePool,
   request: StoryImportRequest,
   assetStore?: FilesystemAssetStore
 ): Promise<StoryImportResult> {
-  const sanitizedStory = sanitizedStoryForHash(request.story);
-  const sourceHash = sha256(stableStringify(sanitizedStory));
+  const sourceHash = importSourceHash(request);
 
   return withTransaction(pool, async (client) => {
     const ownerUserId = await initialOwnerId(client);
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${ownerUserId}:${sourceHash}`]);
     const prior = await existingImport(client, ownerUserId, sourceHash);
+
+    const requestedTarget = request.targetWorldVersionId
+      ? await client.query<{ world_id: string; world_version_id: string }>(
+        `SELECT world_id, id AS world_version_id FROM world_versions WHERE id = $1 AND owner_user_id = $2`,
+        [request.targetWorldVersionId, ownerUserId]
+      )
+      : null;
+    const existingTarget = requestedTarget?.rows[0] ?? null;
+    const reconnected = await reconnectMatchingCampaign(
+      client,
+      ownerUserId,
+      sourceHash,
+      request,
+      existingTarget?.world_version_id,
+      prior
+    );
+    if (reconnected) return reconnected;
     if (prior) return duplicateResult(prior);
 
     const importInsert = await client.query<{ id: string }>(
       `INSERT INTO imports (owner_user_id, source_type, source_name, source_hash, status)
-       VALUES ($1, 'legacy_story_json', $2, $3, 'processing')
+       VALUES ($1, $2, $3, $4, 'processing')
        RETURNING id`,
-      [ownerUserId, request.sourceName, sourceHash]
+      [ownerUserId, request.targetWorldVersionId ? "infinite_worlds_story_txt" : "legacy_story_json", request.sourceName, sourceHash]
     );
     const importId = importInsert.rows[0]?.id;
     if (!importId) throw new Error("Could not create the import record.");
 
-    const worldInsert = await client.query<{ id: string }>(
-      `INSERT INTO worlds (owner_user_id, title, status)
-       VALUES ($1, $2, 'active') RETURNING id`,
-      [ownerUserId, worldTitle(request.story)]
-    );
-    const worldId = worldInsert.rows[0]?.id;
-    if (!worldId) throw new Error("Could not create the imported world.");
+    let worldId: string;
+    let worldVersionId: string;
+    if (existingTarget) {
+      worldId = existingTarget.world_id;
+      worldVersionId = existingTarget.world_version_id;
+    } else {
+      const worldContent = legacyWorldContent(request.story);
+      const matchingVersion = await matchingWorldVersion(client, ownerUserId, request.story);
+      if (matchingVersion) {
+        worldId = matchingVersion.world_id;
+        worldVersionId = matchingVersion.world_version_id;
+      } else {
+        const worldInsert = await client.query<{ id: string }>(
+          `INSERT INTO worlds (owner_user_id, title, status)
+           VALUES ($1, $2, 'active') RETURNING id`,
+          [ownerUserId, worldTitle(request.story)]
+        );
+        const newWorldId = worldInsert.rows[0]?.id;
+        if (!newWorldId) throw new Error("Could not create the imported world.");
+        worldId = newWorldId;
 
-    const worldContent = legacyWorldContent(request.story);
-    const worldVersionInsert = await client.query<{ id: string }>(
-      `INSERT INTO world_versions (world_id, owner_user_id, version_number, content, source_hash)
-       VALUES ($1, $2, 1, $3, $4) RETURNING id`,
-      [worldId, ownerUserId, json(worldContent), sourceHash]
-    );
-    const worldVersionId = worldVersionInsert.rows[0]?.id;
-    if (!worldVersionId) throw new Error("Could not create the imported world version.");
-    await client.query(
-      `INSERT INTO world_drafts (world_id, owner_user_id, based_on_world_version_id, revision, content)
-       VALUES ($1,$2,$3,1,$4)`,
-      [worldId, ownerUserId, worldVersionId, json(worldContent)]
-    );
+        const worldVersionInsert = await client.query<{ id: string }>(
+          `INSERT INTO world_versions (world_id, owner_user_id, version_number, content, source_hash)
+           VALUES ($1, $2, 1, $3, $4) RETURNING id`,
+          [worldId, ownerUserId, json(worldContent), sourceHash]
+        );
+        const newWorldVersionId = worldVersionInsert.rows[0]?.id;
+        if (!newWorldVersionId) throw new Error("Could not create the imported world version.");
+        worldVersionId = newWorldVersionId;
+        await client.query(
+          `INSERT INTO world_drafts (world_id, owner_user_id, based_on_world_version_id, revision, content)
+           VALUES ($1,$2,$3,1,$4)`,
+          [worldId, ownerUserId, worldVersionId, json(worldContent)]
+        );
+      }
+    }
 
     const sanitizedSettings = removeProviderSecrets(request.story.settings);
     delete sanitizedSettings.nexusCampaignId;
     delete sanitizedSettings.nexusCampaignTurnCount;
     delete sanitizedSettings.nexusPendingGeneration;
+    delete sanitizedSettings.nexusCampaignWorldVersionId;
+    delete sanitizedSettings.nexusBranchWorldVersionId;
+    const storyLengthProfile = storyLengthProfileFromUnknown(request.story.settings?.storyLength ?? request.story.settings?.story_length);
     const campaignInsert = await client.query<{ id: string }>(
-      `INSERT INTO campaigns (owner_user_id, world_version_id, title, active_turn_number, legacy_settings)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [ownerUserId, worldVersionId, worldTitle(request.story), request.story.turns.length, json(sanitizedSettings)]
+      `INSERT INTO campaigns (owner_user_id, world_version_id, title, active_turn_number, story_length_profile, legacy_settings)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [ownerUserId, worldVersionId, worldTitle(request.story), request.story.turns.length, storyLengthProfile, json(sanitizedSettings)]
     );
     const campaignId = campaignInsert.rows[0]?.id;
     if (!campaignId) throw new Error("Could not create the imported campaign.");
@@ -154,7 +322,7 @@ export async function importLegacyStory(
         json(request.story.pendingEventTriggers ?? []),
         json(request.story.rpgStats ?? []),
         json({
-          sourceType: "legacy_story_json",
+          sourceType: request.targetWorldVersionId ? "infinite_worlds_story_txt" : "legacy_story_json",
           sourceName: request.sourceName,
           sourceHash,
           world: request.story.worldImportProvenance ?? null,
@@ -287,9 +455,15 @@ export async function importLegacyStory(
 }
 
 export async function previewLegacyStoryImport(pool: DatabasePool, request: StoryImportRequest) {
-  const sanitizedStory = sanitizedStoryForHash(request.story);
-  const sourceHash = sha256(stableStringify(sanitizedStory));
+  const sourceHash = importSourceHash(request);
   const ownerUserId = await initialOwnerId(pool);
+  if (request.targetWorldVersionId) {
+    const target = await pool.query(
+      "SELECT 1 FROM world_versions WHERE id = $1 AND owner_user_id = $2",
+      [request.targetWorldVersionId, ownerUserId]
+    );
+    if (!target.rowCount) throw Object.assign(new Error("The selected target world version was not found."), { statusCode: 404 });
+  }
   const prior = await pool.query<{ campaign_id: string | null }>(
     "SELECT campaign_id FROM imports WHERE owner_user_id = $1 AND source_hash = $2 AND status = 'completed'",
     [ownerUserId, sourceHash]

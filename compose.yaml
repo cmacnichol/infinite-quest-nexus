@@ -19,21 +19,6 @@ services:
     networks:
       - infinitequest-backend
 
-  infinitequest-migrations:
-    build:
-      context: .
-    image: infinitequest-nexus:local
-    command: ["node", "dist/services/runtime/src/main.js", "migrate"]
-    environment:
-      APP_ROLE: migrate
-      DATABASE_URL: postgresql://infinitequest:${POSTGRES_PASSWORD}@postgres:5432/infinitequest
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: "no"
-    networks:
-      - infinitequest-backend
-
   infinitequest-app:
     build:
       context: .
@@ -52,8 +37,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      infinitequest-migrations:
-        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s

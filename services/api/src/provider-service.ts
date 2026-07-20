@@ -1,7 +1,7 @@
-import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import { initialOwnerId } from "../../../packages/database/src/pool.js";
-import type { ProviderProfileInput } from "../../../packages/contracts/src/generation.js";
-import { decryptCredential, encryptCredential, discoverImageModels, discoverModels, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
+import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
+import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
+import type { ProviderProfileInput, ProviderProfileUpdate, ProviderTextRequest } from "../../../packages/contracts/src/generation.js";
+import { callTextProvider, decryptCredential, encryptCredential, discoverEmbeddingModels, discoverImageModels, discoverModels, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
 
 type ProviderRow = {
   id: string;
@@ -19,6 +19,7 @@ type ProviderRow = {
   credential_auth_tag: string | null;
   credential_key_version: number | null;
   enabled: boolean;
+  is_default: boolean;
   health_status: "unknown" | "healthy" | "degraded" | "unavailable";
   consecutive_failures: number;
   last_health_check_at: Date | null;
@@ -40,6 +41,7 @@ export function publicProvider(row: ProviderRow) {
     temperature: row.temperature,
     configuration: row.configuration,
     enabled: row.enabled,
+    isDefault: row.is_default,
     healthStatus: row.health_status,
     consecutiveFailures: row.consecutive_failures,
     lastHealthCheckAt: row.last_health_check_at,
@@ -52,7 +54,7 @@ export function publicProvider(row: ProviderRow) {
 
 const selectColumns = `id, name, provider_type, provider_role, base_url, default_model,
   context_window_tokens, max_output_tokens, temperature, configuration, encrypted_api_key,
-  credential_nonce, credential_auth_tag, credential_key_version, enabled, health_status,
+  credential_nonce, credential_auth_tag, credential_key_version, enabled, is_default, health_status,
   consecutive_failures, last_health_check_at, last_health_error, created_at, updated_at`;
 
 export async function recordProviderHealth(
@@ -89,23 +91,126 @@ export async function listProviders(pool: DatabasePool) {
   return result.rows.map(publicProvider);
 }
 
-export async function createProvider(pool: DatabasePool, input: ProviderProfileInput, credentialSecret: string) {
-  const ownerUserId = await initialOwnerId(pool);
+export async function createProvider(pool: DatabasePool, input: Omit<ProviderProfileInput, "isDefault"> & { isDefault?: boolean }, credentialSecret: string) {
   const encrypted = input.apiKey ? encryptCredential(input.apiKey, credentialSecret) : null;
-  const result = await pool.query<ProviderRow>(
-    `INSERT INTO provider_profiles (
-       owner_user_id, name, provider_type, provider_role, base_url, default_model,
-       context_window_tokens, max_output_tokens, temperature, configuration,
-       encrypted_api_key, credential_nonce, credential_auth_tag, credential_key_version, enabled
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-     RETURNING ${selectColumns}`,
-    [ownerUserId, input.name, input.providerType, input.providerRole, input.baseUrl.replace(/\/+$/, ""), input.defaultModel,
-      input.contextWindowTokens, input.maxOutputTokens, input.temperature, JSON.stringify(input.configuration),
-      encrypted?.ciphertext ?? null, encrypted?.nonce ?? null, encrypted?.authTag ?? null, encrypted?.keyVersion ?? null, input.enabled]
+  return withTransaction(pool, async (client) => {
+    const ownerUserId = await initialOwnerId(client);
+    if (input.isDefault) {
+      await client.query("UPDATE provider_profiles SET is_default = false, updated_at = now() WHERE owner_user_id = $1 AND provider_role = $2", [ownerUserId, input.providerRole]);
+    }
+    const result = await client.query<ProviderRow>(
+      `INSERT INTO provider_profiles (
+         owner_user_id, name, provider_type, provider_role, base_url, default_model,
+         context_window_tokens, max_output_tokens, temperature, configuration,
+         encrypted_api_key, credential_nonce, credential_auth_tag, credential_key_version, enabled, is_default
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+       RETURNING ${selectColumns}`,
+      [ownerUserId, input.name, input.providerType, input.providerRole, input.baseUrl.replace(/\/+$/, ""), input.defaultModel,
+        input.contextWindowTokens, input.maxOutputTokens, input.temperature, JSON.stringify(input.configuration),
+        encrypted?.ciphertext ?? null, encrypted?.nonce ?? null, encrypted?.authTag ?? null, encrypted?.keyVersion ?? null, input.enabled, Boolean(input.isDefault)]
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error("Provider profile was not created.");
+    return publicProvider(row);
+  });
+}
+
+export async function setDefaultProvider(pool: DatabasePool, providerProfileId: string) {
+  return withTransaction(pool, async (client) => {
+    const ownerUserId = await initialOwnerId(client);
+    const selected = await client.query<Pick<ProviderRow, "provider_role">>(
+      "SELECT provider_role FROM provider_profiles WHERE id = $1 AND owner_user_id = $2 AND enabled = true FOR UPDATE",
+      [providerProfileId, ownerUserId]
+    );
+    const role = selected.rows[0]?.provider_role;
+    if (!role) throw Object.assign(new Error("Enabled provider profile not found."), { statusCode: 404 });
+    await client.query("UPDATE provider_profiles SET is_default = false, updated_at = now() WHERE owner_user_id = $1 AND provider_role = $2 AND is_default = true", [ownerUserId, role]);
+    await client.query("UPDATE provider_profiles SET is_default = true, updated_at = now() WHERE id = $1 AND owner_user_id = $2", [providerProfileId, ownerUserId]);
+    const result = await client.query<ProviderRow>(`SELECT ${selectColumns} FROM provider_profiles WHERE id = $1 AND owner_user_id = $2`, [providerProfileId, ownerUserId]);
+    return publicProvider(result.rows[0]!);
+  });
+}
+
+export async function updateProvider(pool: DatabasePool, providerProfileId: string, input: ProviderProfileUpdate, credentialSecret: string) {
+  return withTransaction(pool, async (client) => {
+    const ownerUserId = await initialOwnerId(client);
+    const current = await client.query<ProviderRow>(`SELECT ${selectColumns} FROM provider_profiles WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [providerProfileId, ownerUserId]);
+    const row = current.rows[0];
+    if (!row) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+    if (input.isDefault) {
+      await client.query("UPDATE provider_profiles SET is_default = false, updated_at = now() WHERE owner_user_id = $1 AND provider_role = $2 AND is_default = true", [ownerUserId, row.provider_role]);
+    }
+    const encrypted = input.apiKey ? encryptCredential(input.apiKey, credentialSecret) : null;
+    const result = await client.query<ProviderRow>(
+      `UPDATE provider_profiles SET
+         name = COALESCE($3, name), base_url = COALESCE($4, base_url), default_model = COALESCE($5, default_model),
+         context_window_tokens = COALESCE($6, context_window_tokens), max_output_tokens = COALESCE($7, max_output_tokens),
+         temperature = COALESCE($8, temperature), enabled = COALESCE($9, enabled),
+         is_default = CASE WHEN $10 THEN $11 ELSE is_default END,
+         encrypted_api_key = CASE WHEN $12 THEN $13 ELSE encrypted_api_key END,
+         credential_nonce = CASE WHEN $12 THEN $14 ELSE credential_nonce END,
+         credential_auth_tag = CASE WHEN $12 THEN $15 ELSE credential_auth_tag END,
+         credential_key_version = CASE WHEN $12 THEN $16 ELSE credential_key_version END,
+         updated_at = now()
+       WHERE id = $1 AND owner_user_id = $2 RETURNING ${selectColumns}`,
+      [providerProfileId, ownerUserId, input.name ?? null, input.baseUrl?.replace(/\/+$/, "") ?? null,
+        input.defaultModel ?? null, input.contextWindowTokens ?? null, input.maxOutputTokens ?? null,
+        input.temperature ?? null, input.enabled ?? null, input.isDefault !== undefined, input.isDefault ?? false,
+        input.apiKey !== undefined, encrypted?.ciphertext ?? null, encrypted?.nonce ?? null,
+        encrypted?.authTag ?? null, encrypted?.keyVersion ?? null]
+    );
+    const updated = result.rows[0];
+    if (!updated) throw new Error("Provider profile was not updated.");
+    if (updated.provider_role === "text" && updated.max_output_tokens + 512 >= updated.context_window_tokens) {
+      throw Object.assign(new Error("Text output reserve must leave at least 512 tokens for input context."), { statusCode: 400 });
+    }
+    await client.query(
+      `UPDATE chronicle_memories SET embedding = NULL, embedding_provider_profile_id = NULL,
+              embedding_model = NULL, embedding_dimensions = NULL, embedding_content_hash = NULL,
+              embedding_updated_at = NULL, embedding_provider_fingerprint = NULL
+        WHERE owner_user_id = $1 AND embedding_provider_profile_id = $2`,
+      [ownerUserId, providerProfileId]
+    );
+    await client.query(
+      `INSERT INTO chronicle_jobs (owner_user_id, campaign_id, job_type)
+       SELECT owner_user_id, campaign_id, 'embed_campaign' FROM campaign_memory_configs
+        WHERE owner_user_id = $1 AND embedding_provider_profile_id = $2 AND embedding_enabled = true
+       ON CONFLICT (campaign_id, job_type) WHERE status IN ('queued', 'running')
+       DO UPDATE SET work_version = chronicle_jobs.work_version + 1, updated_at = now()`,
+      [ownerUserId, providerProfileId]
+    );
+    return publicProvider(updated);
+  });
+}
+
+export async function resolveEffectiveProviderId(pool: DatabasePool | DatabaseClient, ownerUserId: string, role: "text" | "image" | "embedding", selectedId?: string | null) {
+  if (selectedId) {
+    const selected = await pool.query<{ id: string }>("SELECT id FROM provider_profiles WHERE id = $1 AND owner_user_id = $2 AND provider_role = $3 AND enabled = true", [selectedId, ownerUserId, role]);
+    if (!selected.rows[0]) throw Object.assign(new Error(`Enabled ${role} provider profile not found.`), { statusCode: 400 });
+    return selectedId;
+  }
+  const result = await pool.query<{ id: string; is_default: boolean }>(
+    "SELECT id, is_default FROM provider_profiles WHERE owner_user_id = $1 AND provider_role = $2 AND enabled = true ORDER BY is_default DESC, name",
+    [ownerUserId, role]
   );
-  const row = result.rows[0];
-  if (!row) throw new Error("Provider profile was not created.");
-  return publicProvider(row);
+  if (result.rows.length === 1 || result.rows[0]?.is_default) return result.rows[0]?.id || null;
+  return null;
+}
+
+export async function generateProviderText(pool: DatabasePool, request: ProviderTextRequest, credentialSecret: string) {
+  const ownerUserId = await initialOwnerId(pool);
+  const providerId = await resolveEffectiveProviderId(pool, ownerUserId, "text", request.providerProfileId);
+  if (!providerId) throw Object.assign(new Error("Add a text provider or mark one as default in Provider Management."), { statusCode: 409 });
+  const profile = await loadTextProvider(pool, ownerUserId, providerId, credentialSecret, request.model);
+  const systemPrompt = request.messages.filter((message) => message.role === "system").map((message) => message.content).join("\n\n") || "Return only the requested result.";
+  const input = request.messages.filter((message) => message.role !== "system").map((message) => `${message.role}: ${message.content}`).join("\n\n");
+  const result = await callTextProvider(profile, { systemPrompt, input });
+  return {
+    content: result.content,
+    finishReason: result.finishReason,
+    model: result.modelInstanceId || profile.model,
+    usage: result.usage
+  };
 }
 
 export async function loadTextProvider(pool: DatabasePool, ownerUserId: string, providerProfileId: string, credentialSecret: string, model = ""): Promise<TextProviderProfile & { id: string; name: string }> {
@@ -136,7 +241,30 @@ export async function loadTextProvider(pool: DatabasePool, ownerUserId: string, 
 }
 
 export async function loadEmbeddingProvider(pool: DatabasePool, ownerUserId: string, providerProfileId: string, credentialSecret: string, model = ""): Promise<TextProviderProfile & { id: string; name: string }> {
-  return loadProviderByRole(pool, ownerUserId, providerProfileId, credentialSecret, "embedding", model);
+  const result = await pool.query<ProviderRow>(
+    `SELECT ${selectColumns} FROM provider_profiles
+      WHERE id = $1 AND owner_user_id = $2 AND provider_role IN ('embedding', 'text') AND enabled = true`,
+    [providerProfileId, ownerUserId]
+  );
+  const row = result.rows[0];
+  if (!row) throw Object.assign(new Error("Enabled embedding or fallback text provider profile not found."), { statusCode: 404 });
+  const apiKey = row.encrypted_api_key && row.credential_nonce && row.credential_auth_tag && row.credential_key_version
+    ? decryptCredential({ ciphertext: row.encrypted_api_key, nonce: row.credential_nonce, authTag: row.credential_auth_tag, keyVersion: row.credential_key_version }, credentialSecret)
+    : undefined;
+  const selectedModel = model.trim() || row.default_model.trim();
+  if (!selectedModel) throw Object.assign(new Error("Select an embedding model for this provider profile."), { statusCode: 400 });
+  return {
+    id: row.id,
+    name: row.name,
+    providerType: row.provider_type,
+    baseUrl: row.base_url,
+    model: selectedModel,
+    contextWindowTokens: row.context_window_tokens,
+    maxOutputTokens: row.max_output_tokens,
+    temperature: row.temperature,
+    configuration: row.configuration,
+    ...(apiKey ? { apiKey } : {})
+  };
 }
 
 export async function loadImageProvider(pool: DatabasePool, ownerUserId: string, providerProfileId: string, credentialSecret: string, model = ""): Promise<TextProviderProfile & { id: string; name: string }> {
@@ -181,13 +309,54 @@ export async function providerModels(pool: DatabasePool, providerProfileId: stri
   const ownerUserId = await initialOwnerId(pool);
   const { profile, role } = await loadProviderForInventory(pool, ownerUserId, providerProfileId, credentialSecret);
   try {
-    const models = await (role === "image" ? discoverImageModels(profile) : discoverModels(profile));
+    const models = await (role === "image"
+      ? discoverImageModels(profile)
+      : role === "embedding"
+        ? discoverEmbeddingModels(profile)
+        : discoverModels(profile));
     await recordProviderHealth(pool, ownerUserId, providerProfileId, true);
     return models;
   } catch (error) {
     await recordProviderHealth(pool, ownerUserId, providerProfileId, false, error instanceof Error ? error.message : String(error));
     throw error;
   }
+}
+
+export async function discoverUnsavedProviderModels(input: Omit<ProviderProfileInput, "isDefault"> & { isDefault?: boolean }) {
+  const profile: TextProviderProfile = {
+    providerType: input.providerType,
+    baseUrl: input.baseUrl.replace(/\/+$/, ""),
+    model: input.defaultModel,
+    contextWindowTokens: input.contextWindowTokens,
+    maxOutputTokens: input.maxOutputTokens,
+    temperature: input.temperature,
+    configuration: input.configuration,
+    ...(input.apiKey ? { apiKey: input.apiKey } : {})
+  };
+  return input.providerRole === "image"
+    ? discoverImageModels(profile)
+    : input.providerRole === "embedding"
+      ? discoverEmbeddingModels(profile)
+      : discoverModels(profile);
+}
+
+export async function deleteProvider(pool: DatabasePool, providerProfileId: string) {
+  return withTransaction(pool, async (client) => {
+    const ownerUserId = await initialOwnerId(client);
+    const current = await client.query<{ id: string; name: string }>("SELECT id, name FROM provider_profiles WHERE id = $1 AND owner_user_id = $2 FOR UPDATE", [providerProfileId, ownerUserId]);
+    const provider = current.rows[0];
+    if (!provider) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+    await client.query("UPDATE campaigns SET text_provider_profile_id = NULL WHERE owner_user_id = $1 AND text_provider_profile_id = $2", [ownerUserId, providerProfileId]);
+    await client.query("UPDATE campaigns SET image_provider_profile_id = NULL WHERE owner_user_id = $1 AND image_provider_profile_id = $2", [ownerUserId, providerProfileId]);
+    await client.query("UPDATE campaign_memory_configs SET embedding_enabled = false, embedding_provider_profile_id = NULL WHERE owner_user_id = $1 AND embedding_provider_profile_id = $2", [ownerUserId, providerProfileId]);
+    await client.query("UPDATE chronicle_memories SET embedding = NULL, embedding_provider_profile_id = NULL, embedding_model = NULL, embedding_dimensions = NULL, embedding_content_hash = NULL, embedding_updated_at = NULL, embedding_provider_fingerprint = NULL WHERE owner_user_id = $1 AND embedding_provider_profile_id = $2", [ownerUserId, providerProfileId]);
+    await client.query("UPDATE campaign_illustration_configs SET enabled = false, provider_profile_id = NULL WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
+    await client.query("DELETE FROM image_jobs WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
+    await client.query("DELETE FROM model_chains WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
+    await client.query("DELETE FROM generation_jobs WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
+    await client.query("DELETE FROM provider_profiles WHERE id = $1 AND owner_user_id = $2", [providerProfileId, ownerUserId]);
+    return { deleted: true, ...provider };
+  });
 }
 
 async function loadProviderForInventory(pool: DatabasePool, ownerUserId: string, id: string, secret: string): Promise<{ profile: TextProviderProfile; role: ProviderRow["provider_role"] }> {

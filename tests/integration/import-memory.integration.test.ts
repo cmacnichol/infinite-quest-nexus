@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { sha256 } from "../../packages/domain/src/text.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
+import { exportCampaign } from "../../services/api/src/world-service.js";
 import {
   buildContextPreview,
   enqueueChronicleReindex,
@@ -61,6 +63,60 @@ integration("legacy import and Chronicle integration", () => {
     expect(draft.rows[0]).toMatchObject({ revision: 1 });
   });
 
+  it("reconnects an exact ledger when its saved world-version id is stale", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    const before = await pool.query<{ worlds: string; campaigns: string; world_id: string }>(
+      `SELECT (SELECT count(*) FROM worlds)::text AS worlds,
+              (SELECT count(*) FROM campaigns)::text AS campaigns,
+              wv.world_id
+         FROM campaigns c JOIN world_versions wv ON wv.id = c.world_version_id
+        WHERE c.id = $1`,
+      [campaignId]
+    );
+    const result = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: `stale-link-${crypto.randomUUID()}.story`,
+      story: fixture,
+      targetWorldVersionId: crypto.randomUUID()
+    }));
+    const after = await pool.query<{ worlds: string; campaigns: string }>(
+      `SELECT (SELECT count(*) FROM worlds)::text AS worlds,
+              (SELECT count(*) FROM campaigns)::text AS campaigns`
+    );
+    expect(result).toMatchObject({ campaignId, worldId: before.rows[0]?.world_id, duplicate: true });
+    expect(after.rows[0]).toEqual({ worlds: before.rows[0]?.worlds, campaigns: before.rows[0]?.campaigns });
+  });
+
+  it("creates an explicit campaign branch while reusing identical world canon", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.storyImportProvenance = {
+      sourceType: "nexus_campaign_branch",
+      parentCampaignId: campaignId,
+      branchTurnNumber: fixture.turns.length,
+      branchId: crypto.randomUUID()
+    };
+    const before = await pool.query<{ worlds: string; campaigns: string; world_id: string }>(
+      `SELECT (SELECT count(*) FROM worlds)::text AS worlds,
+              (SELECT count(*) FROM campaigns)::text AS campaigns,
+              wv.world_id
+         FROM campaigns c JOIN world_versions wv ON wv.id = c.world_version_id
+        WHERE c.id = $1`,
+      [campaignId]
+    );
+    const result = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: `explicit-branch-${crypto.randomUUID()}.story`,
+      story: fixture,
+      targetWorldVersionId: crypto.randomUUID()
+    }));
+    const after = await pool.query<{ worlds: string; campaigns: string }>(
+      `SELECT (SELECT count(*) FROM worlds)::text AS worlds,
+              (SELECT count(*) FROM campaigns)::text AS campaigns`
+    );
+    expect(result.campaignId).not.toBe(campaignId);
+    expect(result.worldId).toBe(before.rows[0]?.world_id);
+    expect(Number(after.rows[0]?.worlds)).toBe(Number(before.rows[0]?.worlds));
+    expect(Number(after.rows[0]?.campaigns)).toBe(Number(before.rows[0]?.campaigns) + 1);
+  });
+
   it("serializes concurrent imports of identical content", async () => {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `Concurrent import ${crypto.randomUUID()}`;
@@ -78,6 +134,23 @@ integration("legacy import and Chronicle integration", () => {
     expect(metrics.turns).toBe(2);
     expect(metrics.memoryCount).toBe(3);
     expect(metrics.estimatedCompleteHistoryTokens).toBeGreaterThan(0);
+    expect(metrics.semanticHealth).toMatchObject({ status: "disabled", enabled: false, totalMemories: 3 });
+  });
+
+  it("round-trips loadable story settings and history without credentials", async () => {
+    const exported = await exportCampaign(pool, campaignId) as Record<string, any>;
+    expect(exported.format).toBe("infinite-quest-campaign");
+    expect(exported.settings.aiProvider).toBe("openrouter");
+    expect(exported.settings).not.toHaveProperty("apiKey");
+    expect(exported.settings.storyHistoryTokenLimit).toBe(128000);
+    expect(exported.settings.storyLength).toBe("long");
+    expect((await pool.query<{ story_length_profile: string }>("SELECT story_length_profile FROM campaigns WHERE id = $1", [campaignId])).rows[0]?.story_length_profile).toBe("long");
+    expect(exported.fullHistory).toMatchObject({
+      characters: "Test Character remains present.",
+      otherImportantNotes: "Object Gamma remains unresolved."
+    });
+    expect(exported.fullHistoryCompressedThroughTurn).toBe(2);
+    expect(exported.baseTrackersAtStart).toEqual(exported.defaultTriggers);
   });
 
   it("builds a relevant fiction-only context without private mechanics", async () => {
@@ -88,6 +161,7 @@ integration("legacy import and Chronicle integration", () => {
       recentTurns: 8
     });
     const serialized = JSON.stringify(context.scopes);
+    expect(context.budget.estimatedSelectedTokens).toBeLessThanOrEqual(context.budget.configuredTokens);
     expect(serialized).toContain("Location Beta");
     expect(serialized).toContain("Object Gamma");
     expect(serialized).not.toContain("d100");
@@ -145,19 +219,21 @@ integration("legacy import and Chronicle integration", () => {
     const provider = await pool.query<{ id: string }>(
       `INSERT INTO provider_profiles (
          owner_user_id, name, provider_type, provider_role, base_url, default_model
-       ) VALUES ($1,$2,'lmstudio','embedding','http://embedding.test','fixture-embed') RETURNING id`,
+       ) VALUES ($1,$2,'lmstudio','embedding','http://embedding.test','text-embedding-nomic-embed-text-v1.5') RETURNING id`,
       [ownerUserId, `Embedding fixture ${crypto.randomUUID()}`]
     );
     await setCampaignEmbeddingConfig(pool, campaignId, {
       enabled: true,
       providerProfileId: provider.rows[0]!.id,
-      model: "fixture-embed",
+      model: "text-embedding-nomic-embed-text-v1.5",
       batchSize: 2
     });
+    const embeddingInputs: string[][] = [];
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const { input } = JSON.parse(String(init?.body)) as { input: string[] };
+      embeddingInputs.push(input);
       return new Response(JSON.stringify({
-        model: "fixture-embed",
+        model: "text-embedding-nomic-embed-text-v1.5",
         data: input.map((content, index) => ({
           index,
           embedding: /Object Gamma|related marker|Marker One/i.test(content) ? [1, 0, 0] : [0, 1, 0]
@@ -167,6 +243,7 @@ integration("legacy import and Chronicle integration", () => {
     const jobId = await enqueueEmbeddingReindex(pool, campaignId);
     expect(jobId).toBeTruthy();
     expect(await runChronicleJob(pool, "embedding-worker", 30, "")).toBe(true);
+    expect(embeddingInputs.flat().every((input) => input.startsWith("search_document: "))).toBe(true);
     const indexed = await pool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM chronicle_memories
         WHERE owner_user_id = $1 AND campaign_id = $2 AND embedding IS NOT NULL
@@ -174,6 +251,15 @@ integration("legacy import and Chronicle integration", () => {
       [ownerUserId, campaignId]
     );
     expect(Number(indexed.rows[0]?.count)).toBeGreaterThan(0);
+    const health = (await getChronicleMetrics(pool, campaignId)).semanticHealth;
+    expect(health).toMatchObject({
+      status: "healthy",
+      providerHealth: "healthy",
+      coveragePercent: 100,
+      jobId,
+      jobStatus: "completed"
+    });
+    expect(health.indexedMemories).toBe(health.totalMemories);
 
     const hybrid = await buildContextPreview(pool, campaignId, {
       budgetTokens: 4096,
@@ -182,6 +268,7 @@ integration("legacy import and Chronicle integration", () => {
       recentTurns: 1
     });
     expect(hybrid.retrieval.mode).toBe("hybrid");
+    expect(embeddingInputs.at(-1)?.[0]).toMatch(/^search_query: /);
     expect(hybrid.scopes.chronicle.some((memory) => Number(memory.semanticRelevance) > 0.9)).toBe(true);
 
     vi.stubGlobal("fetch", vi.fn(async () => new Response("offline", { status: 503 })));
@@ -193,5 +280,96 @@ integration("legacy import and Chronicle integration", () => {
     });
     expect(fallback.retrieval.mode).toBe("lexical_fallback");
     expect(JSON.stringify(fallback.scopes)).toContain("Location Beta");
+  });
+
+  it("requeues a running embedding job when Chronicle content changes concurrently", async () => {
+    await pool.query(
+      `UPDATE chronicle_memories SET content = content || E'\\nRace preparation.'
+        WHERE id = (SELECT id FROM chronicle_memories WHERE campaign_id = $1 ORDER BY ordinal LIMIT 1)`,
+      [campaignId]
+    );
+    let releaseFirstBatch!: () => void;
+    let markStarted!: () => void;
+    const firstBatchStarted = new Promise<void>((resolveStarted) => { markStarted = resolveStarted; });
+    const release = new Promise<void>((resolveRelease) => { releaseFirstBatch = resolveRelease; });
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const { input } = JSON.parse(String(init?.body)) as { input: string[] };
+      markStarted();
+      await release;
+      return new Response(JSON.stringify({
+        model: "text-embedding-nomic-embed-text-v1.5",
+        data: input.map((_content, index) => ({ index, embedding: [1, 0, 0] }))
+      }), { status: 200 });
+    }));
+    const jobId = await enqueueEmbeddingReindex(pool, campaignId);
+    expect(jobId).toBeTruthy();
+    const firstRun = runChronicleJob(pool, "embedding-race-worker-a", 30, "");
+    await firstBatchStarted;
+    await pool.query(
+      `UPDATE chronicle_memories SET content = content || E'\\nConcurrent accepted fact.'
+        WHERE id = (SELECT id FROM chronicle_memories WHERE campaign_id = $1 ORDER BY ordinal LIMIT 1)`,
+      [campaignId]
+    );
+    expect(await enqueueEmbeddingReindex(pool, campaignId)).toBe(jobId);
+    releaseFirstBatch();
+    expect(await firstRun).toBe(true);
+    const queued = await pool.query<{ status: string; work_version: string }>(
+      "SELECT status, work_version::text FROM chronicle_jobs WHERE id = $1",
+      [jobId]
+    );
+    expect(queued.rows[0]?.status).toBe("queued");
+
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const { input } = JSON.parse(String(init?.body)) as { input: string[] };
+      return new Response(JSON.stringify({
+        model: "text-embedding-nomic-embed-text-v1.5",
+        data: input.map((_content, index) => ({ index, embedding: [1, 0, 0] }))
+      }), { status: 200 });
+    }));
+    expect(await runChronicleJob(pool, "embedding-race-worker-b", 30, "")).toBe(true);
+    const fresh = await pool.query<{ content: string; embedding_content_hash: string | null; embedded: boolean }>(
+      `SELECT content, embedding_content_hash, embedding IS NOT NULL AS embedded
+         FROM chronicle_memories WHERE campaign_id = $1`,
+      [campaignId]
+    );
+    expect(fresh.rows.every((memory) => memory.embedded && memory.embedding_content_hash === sha256(memory.content))).toBe(true);
+  });
+
+  it("keeps long-history retrieval bounded while recovering a middle-period fact", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Long Chronicle ${crypto.randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "long-chronicle.story", story: fixture }));
+    const ownerUserId = await initialOwnerId(pool);
+    await pool.query(
+      `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration)
+       SELECT $1, $2, ordinal, 'Continue the expedition.',
+              CASE WHEN ordinal = 350 THEN 'NeedleMiddleMarker is hidden beneath Location Delta.'
+                   ELSE 'The expedition advances through a synthetic location.' END
+         FROM generate_series(3, 702) ordinal`,
+      [ownerUserId, imported.campaignId]
+    );
+    await pool.query(
+      `INSERT INTO chronicle_memories (
+         owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal,
+         content, token_estimate, importance, entities, metadata
+       )
+       SELECT t.owner_user_id, t.campaign_id, c.world_version_id, t.id, 'turn_fiction', t.turn_number,
+              'Turn ' || t.turn_number || E'\nPlayer action: ' || t.action || E'\nNarration: ' || t.narration,
+              24, 0.5, ARRAY[]::text[], '{}'::jsonb
+         FROM turns t JOIN campaigns c ON c.id = t.campaign_id
+        WHERE t.campaign_id = $1 AND t.turn_number >= 3`,
+      [imported.campaignId]
+    );
+    await pool.query("UPDATE campaigns SET active_turn_number = 702 WHERE id = $1", [imported.campaignId]);
+    const context = await buildContextPreview(pool, imported.campaignId, {
+      budgetTokens: 4096,
+      compression: "auto",
+      query: "Where is NeedleMiddleMarker?",
+      recentTurns: 8
+    });
+    expect(JSON.stringify(context.scopes)).toContain("NeedleMiddleMarker");
+    expect(context.scopes.chronicle.length).toBeLessThan(100);
+    expect(context.budget.estimatedSelectedTokens).toBeLessThanOrEqual(4096);
+    expect(context.metrics.turns).toBe(702);
   });
 });

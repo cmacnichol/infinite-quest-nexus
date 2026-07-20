@@ -10,8 +10,8 @@
   <header class="site-header">
     <div>
       <p class="eyebrow">Infinite Quest Nexus</p>
-      <h1>World Management</h1>
-      <p>Author reusable versioned worlds, run persistent campaigns, and inspect the fiction-only memory selected for generation.</p>
+      <h1 id="managementTitle">World Management</h1>
+      <p id="managementDescription">Author reusable versioned worlds, run persistent campaigns, and inspect the fiction-only memory selected for generation.</p>
     </div>
     <nav class="header-actions" aria-label="Nexus sections">
       <a class="button secondary" href="#providers">Providers</a>
@@ -22,15 +22,15 @@
   </header>
 
   <main>
-    <section id="providers" class="card provider-card anchor-section" aria-labelledby="provider-title">
+    <section id="providers" class="card provider-card anchor-section provider-management" aria-labelledby="provider-title">
       <div>
         <p class="eyebrow">Story Engine</p>
-        <h2 id="provider-title">Provider endpoints</h2>
-        <p>Provider requests run through the backend. API keys are encrypted before storage and are never returned to this browser.</p>
+        <h2 id="provider-title">Provider profiles</h2>
+        <p>Add independent profiles for story text, Chronicle embeddings, and image generation. API keys are encrypted before storage and are never returned to this browser.</p>
       </div>
       <form id="providerForm" class="provider-form">
-        <label>Profile name<input id="providerName" required maxlength="120" value="Local LM Studio"></label>
-        <label>Provider
+        <label title="A unique, recognizable name used when assigning this provider profile to campaigns.">Profile name<input id="providerName" required maxlength="120" value="Local LM Studio"></label>
+        <label title="The API protocol and provider-specific adapter Nexus uses for model discovery and generation.">Provider
           <select id="providerType">
             <option value="lmstudio">LM Studio native</option>
             <option value="openrouter">OpenRouter</option>
@@ -38,32 +38,37 @@
             <option value="openai_compatible">OpenAI-compatible</option>
           </select>
         </label>
-        <label>Role
+        <label title="Limits this profile to story text, Chronicle embeddings, or illustration generation so credentials and endpoints remain independent.">Role
           <select id="providerRole">
             <option value="text">Story text</option>
             <option value="embedding">Chronicle embeddings</option>
             <option value="image">Illustrations</option>
           </select>
         </label>
-        <label>Base URL<input id="providerBaseUrl" required type="url" value="http://host.docker.internal:1234"></label>
-        <label>API key (optional for local endpoints)<input id="providerApiKey" type="password" autocomplete="off"></label>
-        <label>Default model<input id="providerDefaultModel" placeholder="May be selected after discovery"></label>
-        <label>Context window
-          <input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768" aria-describedby="providerContextSource">
-          <span id="providerContextSource" class="field-note">Editable until model discovery supplies a context length.</span>
-        </label>
-        <label>Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
-        <button class="button primary" type="submit">Save provider</button>
+        <label title="The endpoint root Nexus calls from the server. Do not include a model-specific path.">Base URL<input id="providerBaseUrl" required type="url" value="http://host.docker.internal:1234"></label>
+        <label title="Bearer credential sent only to this provider. Leave blank for unauthenticated local endpoints or while editing to retain the stored key.">API key (optional for local endpoints)<input id="providerApiKey" type="password" autocomplete="off"></label>
+        <div class="provider-model-settings">
+          <label class="model-discovery-field" title="The model Nexus uses when a campaign does not request a model override. Refresh to load the endpoint inventory.">
+            <span class="field-label-row"><span>Default model</span><button id="refreshProviderModels" class="mini-icon-button" type="button" aria-label="Refresh models from endpoint" title="Refresh active and inactive models from this endpoint">↻</button></span>
+            <input id="providerDefaultModel" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog" placeholder="Click to choose a model">
+          </label>
+          <label title="Maximum combined prompt and response capacity. Selecting a discovered model applies the endpoint-advertised value automatically.">Context window
+            <input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768" aria-describedby="providerContextSource">
+            <span id="providerContextSource" class="field-note">Editable until model discovery supplies a context length.</span>
+          </label>
+          <label title="Maximum tokens the provider may generate in one response. This must leave enough context capacity for the prompt.">Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
+        </div>
+        <label title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
+        <label class="toggle-field" title="Disabled profiles remain stored but cannot be selected for new provider work."><input id="providerEnabled" type="checkbox" checked> Profile enabled</label>
+        <label class="toggle-field" title="Used when a campaign leaves this provider role unassigned. A role with only one enabled profile treats it as the default automatically."><input id="providerIsDefault" type="checkbox"> Make this the default profile for its role</label>
+        <button id="saveProvider" class="button primary" type="submit">Save provider</button>
+        <button id="cancelProviderEdit" class="button secondary hidden" type="button">Cancel edit</button>
       </form>
-      <div class="provider-select-row">
-        <label>Active text provider<select id="providerSelect"><option value="">No text provider configured</option></select></label>
-        <button id="discoverModels" class="button secondary" type="button" disabled>Discover models</button>
-        <label>Model<select id="modelSelect" disabled><option value="">Discover models or use the profile default</option></select></label>
-      </div>
+      <div id="providerProfileList" class="provider-profile-list"><p class="muted">Loading provider profiles…</p></div>
       <div id="providerStatus" class="status" role="status" aria-live="polite">LM Studio and compatible provider calls are server-side, so browser CORS does not apply.</div>
     </section>
 
-    <section id="world-library" class="card world-library-card anchor-section" aria-labelledby="world-library-title">
+    <section id="world-library" class="card world-library-card anchor-section world-management" aria-labelledby="world-library-title">
       <div class="section-heading">
         <div>
           <p class="eyebrow">World Library</p>
@@ -117,24 +122,7 @@
       </div>
     </section>
 
-    <section class="card import-card" aria-labelledby="import-title">
-      <div>
-        <h2 id="import-title">Import a world or campaign</h2>
-        <p>Files are validated and previewed before import. Re-importing identical content selects the existing database record.</p>
-      </div>
-      <label class="file-field">
-        <span>Infinite Quest <code>.story</code>, campaign export, or world JSON</span>
-        <input id="storyFile" type="file" accept=".story,.json,application/json">
-      </label>
-      <div class="import-actions">
-        <button id="importStory" class="button primary" type="button" disabled>Import validated file</button>
-        <button id="importBrowserState" class="button secondary" type="button" disabled>Import current browser story</button>
-      </div>
-      <div id="importPreview" class="import-preview muted">No file has been validated.</div>
-      <div id="importStatus" class="status" role="status" aria-live="polite">Choose a story file to begin.</div>
-    </section>
-
-    <section id="campaigns" class="workspace anchor-section">
+    <section id="campaigns" class="workspace anchor-section world-management">
       <aside class="card campaign-list-card">
         <div class="section-heading">
           <div>
@@ -149,16 +137,25 @@
       <section class="card memory-card">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">Chronicle</p>
+            <p class="eyebrow">Campaign workspace</p>
             <h2 id="memoryTitle">Select a campaign</h2>
           </div>
-          <button id="reindexMemory" class="button secondary" type="button" disabled>Rebuild memory</button>
         </div>
 
         <form id="campaignForm" class="campaign-controls">
           <label>Campaign title<input id="campaignTitle" maxlength="200" disabled></label>
           <label>Status<select id="campaignStatus" disabled><option value="active">Active</option><option value="archived">Archived</option></select></label>
           <label>World version<select id="campaignWorldVersion" disabled><option value="">Select a campaign</option></select></label>
+          <label>Text provider profile<select id="campaignTextProvider" disabled><option value="">Use default text provider</option></select></label>
+          <label title="Sets the requested narration size for each new story turn. The provider maximum output remains a separate safety ceiling.">
+            Default story response length
+            <select id="campaignStoryLengthProfile" disabled>
+              <option value="brief">Brief — 250–450 words</option>
+              <option value="standard" selected>Standard — 450–900 words</option>
+              <option value="long">Long — 800–1,400 words</option>
+              <option value="extended">Extended — 1,200–2,000 words</option>
+            </select>
+          </label>
           <button id="saveCampaign" class="button secondary" type="submit" disabled>Save campaign</button>
           <button id="migrateCampaign" class="button secondary" type="button" disabled>Migrate version</button>
           <button id="loadCampaign" class="button primary" type="button" disabled>Load story</button>
@@ -167,36 +164,88 @@
         </form>
         <div id="campaignStatusMessage" class="status hidden" role="status" aria-live="polite"></div>
 
+        <section id="campaignCostSection" class="campaign-settings-section campaign-cost-section hidden" aria-labelledby="campaignCostTitle">
+          <div class="campaign-settings-heading">
+            <div>
+              <p class="eyebrow">Usage</p>
+              <h3 id="campaignCostTitle">Reported provider cost</h3>
+              <p id="campaignCostMessage">No provider-reported cost data is available for this campaign.</p>
+            </div>
+          </div>
+          <div id="campaignCostMetrics" class="cost-metrics" aria-live="polite"></div>
+        </section>
+
+        <section id="campaignIllustrationSection" class="campaign-settings-section illustration-settings-section" aria-labelledby="campaignIllustrationTitle">
+          <div class="campaign-settings-heading">
+            <div>
+              <p class="eyebrow">Optional output</p>
+              <h3 id="campaignIllustrationTitle">Campaign illustrations</h3>
+              <p>Configure independent image jobs that run only after a story turn is accepted.</p>
+            </div>
+          </div>
+          <form id="illustrationForm" class="illustration-controls">
+            <div class="illustration-toggle-row">
+              <label class="toggle-field"><input id="illustrationEnabled" type="checkbox" disabled> Generate an optional illustration after each accepted turn</label>
+              <button id="saveIllustrationConfig" class="button primary" type="submit" disabled>Save illustration settings</button>
+            </div>
+            <div id="illustrationSettings" class="illustration-settings hidden" aria-hidden="true">
+              <label>Image provider profile<select id="campaignImageProvider" disabled><option value="">Use default image provider</option></select></label>
+              <p id="campaignImageProviderSummary" class="field-note">Image generation uses the campaign image profile, or the default image profile when left empty.</p>
+              <label>Image model<input id="illustrationModel" maxlength="500" list="illustrationModels" placeholder="Select an image-capable model" disabled><datalist id="illustrationModels"></datalist></label>
+              <label>Size<input id="illustrationSize" maxlength="20" value="1024x1024" pattern="[0-9]{2,5}x[0-9]{2,5}" disabled></label>
+              <label>Aspect ratio<input id="illustrationAspectRatio" maxlength="10" value="1:1" pattern="[0-9]{1,3}:[0-9]{1,3}" disabled></label>
+              <label>Quality<select id="illustrationQuality" disabled><option value="auto">Automatic</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>
+              <label>Format<select id="illustrationOutputFormat" disabled><option value="png">PNG</option><option value="jpeg">JPEG</option><option value="webp">WebP</option></select></label>
+              <label>Attempts<input id="illustrationMaxAttempts" type="number" min="1" max="10" value="3" disabled></label>
+              <button id="discoverIllustrationModels" class="button secondary" type="button" disabled>Discover image models</button>
+            </div>
+          </form>
+          <div id="illustrationStatus" class="status">Illustrations are optional child jobs. Image failures never roll back or rerun an accepted story turn.</div>
+        </section>
+
+        <section id="campaignContextSection" class="campaign-settings-section chronicle-settings-section" aria-labelledby="campaignContextTitle">
+          <div class="campaign-settings-heading">
+            <div>
+              <p class="eyebrow">Chronicle</p>
+              <h3 id="campaignContextTitle">Memory and context</h3>
+              <p>Control semantic lookup and preview the campaign context sent to story generation.</p>
+            </div>
+            <button id="reindexMemory" class="button secondary" type="button" disabled>Rebuild memory</button>
+          </div>
+
         <div id="memoryMetrics" class="metrics" aria-live="polite"></div>
+
+        <div id="semanticMemoryHealth" class="semantic-memory-health" data-state="disabled" role="status" aria-live="polite">
+          <span id="semanticMemoryHealthBadge" class="health-badge">Disabled</span>
+          <div>
+            <strong id="semanticMemoryHealthTitle">Semantic memory disabled</strong>
+            <p id="semanticMemoryHealthMessage">Chronicle is using deterministic lexical and chronological retrieval.</p>
+          </div>
+        </div>
 
         <form id="embeddingForm" class="embedding-controls">
           <label class="toggle-field"><input id="embeddingEnabled" type="checkbox"> Enable hybrid semantic memory for this campaign</label>
-          <label>Embedding provider<select id="embeddingProvider"><option value="">No embedding provider configured</option></select></label>
-          <label>Embedding model<input id="embeddingModel" maxlength="500" list="embeddingModels" placeholder="e.g. text-embedding-nomic-embed-text-v1.5"><datalist id="embeddingModels"></datalist></label>
+          <label title="Selects the endpoint used to create Chronicle vectors. If no embedding profile is enabled, this automatically uses the campaign's effective text provider.">Embedding provider<select id="embeddingProvider"><option value="">Uses the campaign text provider when no embedding provider is enabled</option></select></label>
+          <label class="model-discovery-field" title="Names the embedding model sent to the selected endpoint. Refresh to load the selected provider's model inventory.">
+            <span class="field-label-row"><span>Embedding model</span><button id="discoverEmbeddingModels" class="mini-icon-button" type="button" aria-label="Refresh embedding models from endpoint" title="Refresh active and inactive models from the selected embedding endpoint">↻</button></span>
+            <input id="embeddingModel" maxlength="500" value="text-embedding-nomic-embed-text-v1.5" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog" placeholder="Click to choose an embedding model">
+          </label>
+          <label title="Optional document-task prefix. Leave blank to use the model-aware default, including search_document for Nomic retrieval models.">Document prefix<input id="embeddingDocumentPrefix" maxlength="200" placeholder="Automatic for selected model"></label>
+          <label title="Optional query-task prefix. Leave blank to use the model-aware default, including search_query for Nomic retrieval models.">Query prefix<input id="embeddingQueryPrefix" maxlength="200" placeholder="Automatic for selected model"></label>
           <label>Batch size<input id="embeddingBatchSize" type="number" min="1" max="128" value="16"></label>
-          <button id="discoverEmbeddingModels" class="button secondary" type="button" disabled>Discover embedding models</button>
           <button id="saveEmbeddingConfig" class="button primary" type="submit" disabled>Save &amp; index</button>
         </form>
+        <div id="embeddingProgress" class="embedding-progress hidden" aria-live="polite">
+          <progress id="embeddingProgressBar" max="100" value="0"></progress>
+          <span id="embeddingProgressLabel">Waiting to index semantic memory…</span>
+        </div>
         <div id="embeddingStatus" class="status">Semantic retrieval is optional. Without it, Chronicle uses full-text, entity, chronology, and recency retrieval.</div>
-
-        <form id="illustrationForm" class="illustration-controls">
-          <label class="toggle-field"><input id="illustrationEnabled" type="checkbox"> Generate an optional illustration after each accepted turn</label>
-          <label>Image provider<select id="illustrationProvider"><option value="">No image provider configured</option></select></label>
-          <label>Image model<input id="illustrationModel" maxlength="500" list="illustrationModels" placeholder="Select an image-capable model"><datalist id="illustrationModels"></datalist></label>
-          <label>Size<input id="illustrationSize" maxlength="20" value="1024x1024" pattern="[0-9]{2,5}x[0-9]{2,5}"></label>
-          <label>Aspect ratio<input id="illustrationAspectRatio" maxlength="10" value="1:1" pattern="[0-9]{1,3}:[0-9]{1,3}"></label>
-          <label>Quality<select id="illustrationQuality"><option value="auto">Automatic</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>
-          <label>Format<select id="illustrationOutputFormat"><option value="png">PNG</option><option value="jpeg">JPEG</option><option value="webp">WebP</option></select></label>
-          <label>Attempts<input id="illustrationMaxAttempts" type="number" min="1" max="10" value="3"></label>
-          <button id="discoverIllustrationModels" class="button secondary" type="button" disabled>Discover image models</button>
-          <button id="saveIllustrationConfig" class="button primary" type="submit" disabled>Save illustration settings</button>
-        </form>
-        <div id="illustrationStatus" class="status">Illustrations are optional child jobs. Image failures never roll back or rerun an accepted story turn.</div>
 
         <form id="contextForm" class="context-controls">
           <label>
             Context budget
-            <input id="budgetTokens" type="number" min="512" max="1000000" step="1024" value="32000">
+            <input id="budgetTokens" type="number" min="512" max="1000000" step="1024" value="32000" aria-describedby="budgetTokensSource">
+            <span id="budgetTokensSource" class="field-note">Select a discovered embedding model to apply an advertised context limit automatically.</span>
           </label>
           <label>
             Compression
@@ -227,19 +276,100 @@
 
         <div id="contextSummary" class="status hidden"></div>
         <pre id="contextPreview" class="context-preview" tabindex="0">The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.</pre>
-
-        <form id="generationForm" class="generation-form">
-          <label>
-            Next action
-            <textarea id="storyAction" required maxlength="12000" rows="3" placeholder="What do you do next?"></textarea>
-          </label>
-          <button id="generateTurn" class="button primary" type="submit" disabled>Generate next turn</button>
-        </form>
-        <div id="generationStatus" class="status hidden" role="status" aria-live="polite"></div>
-        <article id="generatedTurn" class="generated-turn hidden"></article>
+        </section>
       </section>
     </section>
+
+    <section class="card import-card world-management" aria-labelledby="import-title">
+      <div>
+        <h2 id="import-title">Import a world or campaign</h2>
+        <p>Upload a file or paste its copied contents. Infinite Quest <code>.story</code> exports include the world and story history. Infinite Worlds world JSON contains only world details; import its matching story TXT separately after selecting the imported world.</p>
+      </div>
+      <label class="file-field">
+        <span>Infinite Quest <code>.story</code>/campaign or world export, or Infinite Worlds JSON/TXT</span>
+        <input id="storyFile" type="file" accept=".story,.json,.txt,application/json,text/plain">
+      </label>
+      <div id="infiniteWorldsOptions" class="import-options hidden">
+        <label>Infinite Worlds file type
+          <select id="infiniteWorldsKind">
+            <option value="auto">Detect automatically</option>
+            <option value="world_json">World raw JSON</option>
+            <option value="world_text">World editor TXT (LLM conversion)</option>
+            <option value="story_text">Matching story TXT</option>
+          </select>
+        </label>
+        <label id="infiniteWorldsCharacterField" class="hidden">Player character
+          <select id="infiniteWorldsCharacter"></select>
+        </label>
+        <label class="toggle-field"><input id="infiniteWorldsEnrichFinal" type="checkbox"> Generate missing final-turn choices with the selected text provider</label>
+        <label class="toggle-field"><input id="infiniteWorldsFinalImage" type="checkbox"> Queue an illustration for the latest imported turn</label>
+        <p class="muted">Story TXT attaches to the latest published version of the selected World Library world. World TXT conversion uses the selected text provider below.</p>
+      </div>
+      <div class="import-actions">
+        <button id="openClipboardImport" class="button secondary" type="button">Paste copied content</button>
+        <button id="importStory" class="button primary" type="button" disabled>Import validated content</button>
+        <button id="importBrowserState" class="button secondary" type="button" disabled>Import current browser story</button>
+      </div>
+      <div class="provider-select-row">
+        <label>World import text provider<select id="providerSelect"><option value="">Use the default text provider</option></select></label>
+        <button id="discoverModels" class="button secondary" type="button" disabled>Discover models</button>
+        <label>Conversion model<select id="modelSelect" disabled><option value="">Discover models or use the profile default</option></select></label>
+      </div>
+      <div id="importPreview" class="import-preview muted">No file has been validated.</div>
+      <div id="importStatus" class="status" role="status" aria-live="polite">Choose a story file to begin.</div>
+    </section>
   </main>
+
+  <dialog id="clipboardImportDialog" class="confirm-dialog paste-dialog" aria-labelledby="clipboardImportTitle">
+    <form id="clipboardImportForm">
+      <div>
+        <h2 id="clipboardImportTitle">Paste copied import content</h2>
+        <p>Paste the complete contents copied from an export. Nothing is written to the database until the validated content is imported from the main World Management screen.</p>
+      </div>
+      <label>Content type
+        <select id="clipboardImportKind">
+          <option value="auto">Detect Infinite Quest or Infinite Worlds JSON</option>
+          <option value="campaign_json">Infinite Quest .story JSON — world and story history</option>
+          <option value="world_json">Infinite Worlds world JSON — world details only</option>
+          <option value="story_text">Infinite Worlds matching story TXT — story history only</option>
+        </select>
+      </label>
+      <div id="clipboardImportGuidance" class="import-guidance" role="note">
+        <strong>Choose the complete export.</strong>
+        <span>Automatic detection accepts Infinite Quest <code>.story</code> JSON or Infinite Worlds world JSON. Select matching story TXT explicitly because it is not JSON.</span>
+      </div>
+      <label>Copied export content
+        <textarea id="clipboardImportText" rows="16" spellcheck="false" placeholder="Paste the complete .story JSON, Infinite Worlds world JSON, or matching story TXT here."></textarea>
+      </label>
+      <div id="clipboardImportStatus" class="status" role="status" aria-live="polite">No copied content has been validated.</div>
+      <div class="button-row confirm-actions">
+        <button id="cancelClipboardImport" class="button secondary" type="button">Cancel</button>
+        <button id="validateClipboardImport" class="button primary" type="submit">Validate copied content</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="providerModelDialog" class="confirm-dialog provider-model-dialog" aria-labelledby="providerModelDialogTitle">
+    <div class="provider-model-dialog-body">
+      <div class="section-heading">
+        <div>
+          <h2 id="providerModelDialogTitle">Choose default model</h2>
+          <p id="providerModelDialogDescription">Active models appear first. You may also select an available model that is not currently loaded.</p>
+        </div>
+        <button id="closeProviderModelDialog" class="icon-button" type="button" aria-label="Close model picker">×</button>
+      </div>
+      <div class="provider-model-picker-tools">
+        <label title="Filters the endpoint inventory by display name, base model ID, or loaded instance ID.">Filter models<input id="providerModelFilter" type="search" placeholder="Search by model name or ID"></label>
+        <button id="refreshProviderModelDialog" class="button secondary" type="button">↻ Refresh endpoint</button>
+      </div>
+      <div id="providerModelPickerStatus" class="status">Refresh the endpoint to browse its model inventory.</div>
+      <div id="providerModelPickerList" class="provider-model-picker-list"></div>
+      <div class="provider-custom-model-row">
+        <label title="Use this when a compatible endpoint accepts a model ID that it does not advertise in model discovery.">Custom model ID<input id="providerCustomModel" placeholder="Enter a model ID not reported by the endpoint"></label>
+        <button id="applyCustomProviderModel" class="button secondary" type="button">Use custom ID</button>
+      </div>
+    </div>
+  </dialog>
 
   <dialog id="deleteDialog" class="confirm-dialog" aria-labelledby="deleteDialogTitle">
     <form id="deleteForm" method="dialog">

@@ -28,7 +28,6 @@ Use these deployment names unless an infrastructure constraint requires otherwis
 - `infinitequest-web`
 - `infinitequest-api`
 - `infinitequest-worker`
-- `infinitequest-migrations`
 
 Use `infinitequest` as the Docker stack name and as the prefix for related networks, configs, and secrets.
 
@@ -59,7 +58,7 @@ The application must connect to PostgreSQL through the Compose service name, ret
 
 The Swarm stack uses the same application image but runs API and worker roles as separate services so they can scale and roll independently. It receives the external PostgreSQL connection through Swarm secrets/configuration and contains no `postgres` service. Static web assets may be served by the API service or an explicitly introduced web service, but this choice must not change API contracts or persistence behavior.
 
-Use a one-shot migration command based on the same application image. Compose may run it before normal application startup; Swarm deployment must run or verify migrations as an explicit deployment step rather than allowing every replica to race migrations at startup. The migration path must also create or verify the initial user.
+Use `node-pg-migrate` from the same application image. The combined Compose role and every Swarm API replica run the standard migration check before serving traffic; PostgreSQL advisory locking serializes schema changes so exactly one replica applies pending work while the others wait. Worker-only replicas verify and wait for the current schema rather than applying migrations. A new database is initialized automatically, including the initial user. Online migrations apply automatically; migrations explicitly named with the `.maintenance.sql` suffix require a reviewed backup and operator opt-in on an existing database.
 
 Keep local PostgreSQL compatible with the Swarm database: pin the same supported major version, enable the same required extensions, apply the same migrations, and test the same transaction and isolation behavior. If vector search uses a PostgreSQL extension, include the same extension and version in both environments.
 
@@ -233,7 +232,7 @@ Compose and Swarm must use the same schema migrations, initial-user bootstrap, p
 
 Use structured logs with correlation IDs for campaign, generation job, model request, and accepted turn. Record prompt size, retrieved-memory identifiers, context utilization, model and endpoint identity, recovery attempts, validation results, and latency without logging credentials, private reasoning, or unnecessary sensitive story content.
 
-Database migrations must be ordered, repeatable, reviewed, and safe for the deployed application version. Back up authoritative database data and test restoration. Treat embeddings and summaries as rebuildable unless operational requirements later make their backup worthwhile.
+Database migrations must be ordered, repeatable, reviewed, and safe for the deployed application version. Prefer backward-compatible expand/contract changes so rolling API replicas can coexist. Applied online migrations are automatic; destructive or downtime-requiring `.maintenance.sql` migrations must remain exceptional and require an explicit operator opt-in on an existing database. Back up authoritative database data and test restoration. Treat embeddings and summaries as rebuildable unless operational requirements later make their backup worthwhile.
 
 ## Security
 

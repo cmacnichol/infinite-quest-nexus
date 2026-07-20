@@ -4,7 +4,8 @@ import { initialOwnerId, withTransaction } from "../../../packages/database/src/
 import { sha256 } from "../../../packages/domain/src/text.js";
 import { callImageProvider, containsMechanicsLanguage } from "../../../packages/story-engine/src/index.js";
 import { persistTurnImage, type FilesystemAssetStore } from "./asset-service.js";
-import { loadImageProvider, recordProviderHealth } from "./provider-service.js";
+import { loadImageProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
+import { recordProfileCost } from "./cost-service.js";
 
 type IllustrationConfigRow = {
   enabled: boolean;
@@ -95,13 +96,19 @@ export async function getIllustrationConfig(pool: DatabasePool, campaignId: stri
 
 export async function setIllustrationConfig(pool: DatabasePool, campaignId: string, config: IllustrationConfig) {
   const ownerUserId = await initialOwnerId(pool);
+  if (config.enabled && !config.providerProfileId) {
+    throw Object.assign(new Error("Add and enable an image provider before enabling illustrations."), { statusCode: 409 });
+  }
+  if (config.enabled && !config.model.trim()) {
+    throw Object.assign(new Error("Select an image model before enabling illustrations."), { statusCode: 400 });
+  }
   if (config.providerProfileId) {
     const provider = await pool.query(
       `SELECT id FROM provider_profiles
         WHERE id = $1 AND owner_user_id = $2 AND provider_role = 'image' AND enabled = true`,
       [config.providerProfileId, ownerUserId]
     );
-    if (!provider.rows[0]) throw Object.assign(new Error("Enabled image provider profile not found."), { statusCode: 400 });
+    if (!provider.rows[0]) throw Object.assign(new Error("The selected image provider does not exist or is disabled."), { statusCode: 409 });
   }
   const result = await pool.query<IllustrationConfigRow>(
     `INSERT INTO campaign_illustration_configs (
@@ -146,16 +153,23 @@ export async function enqueueAcceptedTurnIllustration(
   turnId: string,
   imagePrompt: string
 ): Promise<string | null> {
-  const configResult = await client.query<IllustrationConfigRow>(
-    `SELECT c.enabled, c.provider_profile_id, c.model, c.size, c.aspect_ratio, c.quality, c.output_format, c.max_attempts
+  const configResult = await client.query<IllustrationConfigRow & { campaign_provider_profile_id: string | null }>(
+    `SELECT c.enabled, c.provider_profile_id, c.model, c.size, c.aspect_ratio, c.quality, c.output_format, c.max_attempts,
+            campaign.image_provider_profile_id AS campaign_provider_profile_id
        FROM campaign_illustration_configs c
-       JOIN provider_profiles p ON p.id = c.provider_profile_id AND p.owner_user_id = c.owner_user_id
-      WHERE c.campaign_id = $1 AND c.owner_user_id = $2 AND c.enabled = true
-        AND p.provider_role = 'image' AND p.enabled = true`,
+       JOIN campaigns campaign ON campaign.id = c.campaign_id AND campaign.owner_user_id = c.owner_user_id
+      WHERE c.campaign_id = $1 AND c.owner_user_id = $2 AND c.enabled = true`,
     [campaignId, ownerUserId]
   );
   const row = configResult.rows[0];
   if (!row) return null;
+  const configuredProviderId = row.provider_profile_id;
+  row.provider_profile_id = await resolveEffectiveProviderId(client, ownerUserId, "image", row.campaign_provider_profile_id);
+  if (!row.provider_profile_id) return null;
+  if (row.provider_profile_id !== configuredProviderId) {
+    const provider = await client.query<{ default_model: string }>("SELECT default_model FROM provider_profiles WHERE id = $1 AND owner_user_id = $2", [row.provider_profile_id, ownerUserId]);
+    if (provider.rows[0]?.default_model) row.model = provider.rows[0].default_model;
+  }
   const job = await insertImageJob(client, { ownerUserId, campaignId, turnId, prompt: imagePrompt, config: publicConfig(row) });
   return job?.id || null;
 }
@@ -176,13 +190,26 @@ export async function enqueueIllustration(pool: DatabasePool, turnId: string, re
     if (existing.rows[0] && (!request.replace || ["queued", "generating"].includes(existing.rows[0].status))) {
       return { ...publicJob(existing.rows[0]), duplicate: true };
     }
-    const configResult = await client.query<IllustrationConfigRow>(
-      `SELECT enabled, provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
-         FROM campaign_illustration_configs WHERE campaign_id = $1 AND owner_user_id = $2`,
+    const configResult = await client.query<IllustrationConfigRow & { campaign_provider_profile_id: string | null }>(
+      `SELECT config.enabled, config.provider_profile_id, config.model, config.size, config.aspect_ratio, config.quality,
+              config.output_format, config.max_attempts, campaign.image_provider_profile_id AS campaign_provider_profile_id
+         FROM campaign_illustration_configs config
+         JOIN campaigns campaign ON campaign.id = config.campaign_id AND campaign.owner_user_id = config.owner_user_id
+        WHERE config.campaign_id = $1 AND config.owner_user_id = $2`,
       [turn.campaign_id, ownerUserId]
     );
     const config = publicConfig(configResult.rows[0]);
-    if (request.providerProfileId) config.providerProfileId = request.providerProfileId;
+    const configuredProviderId = config.providerProfileId;
+    config.providerProfileId = await resolveEffectiveProviderId(
+      client,
+      ownerUserId,
+      "image",
+      request.providerProfileId || configResult.rows[0]?.campaign_provider_profile_id
+    );
+    if (config.providerProfileId && config.providerProfileId !== configuredProviderId && !request.model) {
+      const providerModel = await client.query<{ default_model: string }>("SELECT default_model FROM provider_profiles WHERE id = $1 AND owner_user_id = $2", [config.providerProfileId, ownerUserId]);
+      if (providerModel.rows[0]?.default_model) config.model = providerModel.rows[0].default_model;
+    }
     if (request.model) config.model = request.model;
     if (!config.providerProfileId || !config.model) throw Object.assign(new Error("Configure an image provider and model before requesting an illustration."), { statusCode: 409 });
     const provider = await client.query(
@@ -278,6 +305,14 @@ export async function runImageJob(
         [job.id, job.owner_user_id, asset.id, response.responseId || null,
           JSON.stringify({ usage: response.usage, provider: response.rawMetadata, mimeType: response.mimeType, byteLength: bytes.length }), workerId]
       );
+      await recordProfileCost(client, provider, {
+        ownerUserId: job.owner_user_id,
+        campaignId: job.campaign_id,
+        turnId: job.turn_id,
+        imageJobId: job.id,
+        category: "image",
+        operation: "illustration"
+      }, response);
     });
   } catch (error) {
     await recordProviderHealth(pool, job.owner_user_id, job.provider_profile_id, false, error instanceof Error ? error.message : String(error)).catch(() => undefined);

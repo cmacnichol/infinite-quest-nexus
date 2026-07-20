@@ -2,14 +2,14 @@
 
 Infinite Quest Nexus is the server-backed evolution of Infinite Quest. PostgreSQL owns worlds, campaigns, accepted turns, and Chronicle memory so story continuity no longer depends on a browser session, a model instance, or an LLM context chain.
 
-The current implementation is a production-shaped vertical slice. It serves the existing Infinite Quest client, imports portable `.story` JSON into PostgreSQL, constructs fiction-only local Chronicle memory, and can generate validated database-backed turns through LM Studio, OpenRouter, Manifest, or another OpenAI-compatible text endpoint. The same application image runs in combined, API, worker, or migration roles.
+The current implementation is a production-shaped vertical slice. It serves the existing Infinite Quest client, imports portable `.story` JSON into PostgreSQL, constructs fiction-only local Chronicle memory, and can generate validated database-backed turns through LM Studio, OpenRouter, Manifest, or another OpenAI-compatible text endpoint. The same application image runs in combined, API, worker, or recovery migration roles.
 
 ## What works now
 
 - PostgreSQL 18.4 with pgvector 0.8.5.
 - Idempotent initial-user migration using the stable system key `initial-owner`.
 - Two-container Docker Desktop steady state: application plus PostgreSQL.
-- Explicit one-shot database migration container.
+- Automatic, advisory-lock-coordinated PostgreSQL initialization and online schema migrations through `node-pg-migrate`.
 - Legacy `.story` JSON import into world, immutable world version, campaign, state, and accepted turns.
 - Separation of canonical narration, private mechanics, and private state snapshots.
 - Chronicle memory rebuilt from accepted action and narration only.
@@ -17,7 +17,11 @@ The current implementation is a production-shaped vertical slice. It serves the 
 - Complete-history character and token estimates.
 - Automatic, full, balanced, compact, and summary context modes.
 - Optional campaign-scoped embeddings combined with PostgreSQL full-text relevance, recency, and chronological coverage.
+- Typed living summaries, canonical facts with explicit supersession, current open threads, and hierarchical summary checkpoints rebuilt from accepted turn snapshots.
+- Budgeted World Library rules/entities/relationships plus validated campaign trackers and fiction-only continuity state.
+- Hard prompt-envelope budgeting that reserves provider output and prompt overhead, caps caller context hints, and records selected memory IDs and hashes.
 - LM Studio and OpenAI-compatible `/v1/embeddings` support with hash-based freshness and deterministic lexical fallback.
+- Model-aware embedding task prefixes, provider fingerprints, bounded semantic candidates, and work-versioned indexing that cannot lose concurrent accepted turns.
 - Independently configured embedding providers, models, credentials, batch sizes, health failures, and rebuild jobs.
 - Durable PostgreSQL-backed Chronicle reindex jobs claimed safely by worker replicas.
 - Encrypted, user-owned text-provider profiles with independent endpoint, key, model, context, and output settings.
@@ -42,12 +46,13 @@ The current implementation is a production-shaped vertical slice. It serves the 
 
 The player UI can now use the Nexus Story Engine for main story turns from **Active Text Provider & Context**, including campaigns with RPG stats and before/after event triggers. Referee responses, random values, targets, trigger reasons, and orchestration diagnostics remain private. The narrative request receives only selected fictional consequences and authoritative trigger effects after independent sanitization. Illustrations are configured separately in Nexus and run only after accepted story completion.
 
-The Nexus interface at `/nexus/` is the World Management surface. World drafts use optimistic revisions; publication creates immutable numbered versions. Creating or editing a world never alters an existing campaign. When a newer version is available, the campaign panel offers an explicit migration that preserves its append-only accepted-turn ledger and starts the next generation from a fresh database-backed model chain. Selecting **Load story** passes the server-generated accepted ledger through one-time session storage, reconnects the same campaign ID, and opens the player view at the latest accepted turn without persisting provider credentials in the handoff.
+The Nexus interface at `/nexus/` is the World Management surface. World drafts use optimistic revisions; publication creates immutable numbered versions. Creating or editing a world never alters an existing campaign. When a newer version is available, the campaign panel offers an explicit migration that preserves its append-only accepted-turn ledger and starts the next generation from a fresh database-backed model chain. The same panel stores the campaign's default story response length independently from the provider's maximum-output safety ceiling. Selecting **Load story** passes the server-generated accepted ledger through one-time session storage, reconnects the same campaign ID, and opens the player view at the latest accepted turn without persisting provider credentials in the handoff.
 
 ## Requirements
 
 - Docker Desktop with Linux containers and the Compose plugin.
 - At least 2 GB of available memory for the local stack.
+- Node.js 22.13 or newer and pnpm 11.14.0 when running the source-level development commands directly.
 - An external LM Studio, OpenRouter, Manifest, or OpenAI-compatible endpoint for Story Engine generation.
 
 ## Start locally
@@ -71,13 +76,15 @@ Open:
 - Nexus migration and Chronicle inspector: `http://localhost:8080/nexus/`
 - Readiness: `http://localhost:8080/health/ready`
 
-The first startup downloads `pgvector/pgvector:0.8.5-pg18-trixie`, builds the application image, waits for PostgreSQL, applies migrations once, and starts the combined API/worker role.
+The first startup downloads `pgvector/pgvector:0.8.5-pg18-trixie`, builds the application image, waits for PostgreSQL, creates the schema and initial owner, and starts the combined API/worker role. Later starts check the migration history and apply only pending online migrations.
 
 Open `/nexus/`, save a text-provider profile, discover models, select a campaign, and enter the next action. For LM Studio running on the Docker Desktop host, the default endpoint is `http://host.docker.internal:1234`. Swarm deployments must use stable private-network DNS instead.
 
 Model discovery uses an advertised context length as the provider and prompt-budget default. The context field becomes read-only while that API-supplied value is active; it remains editable when the endpoint omits context metadata. Hover text and the expandable help panel describe every Chronicle compression level.
 
 For semantic Chronicle retrieval, save a separate provider profile with the **Chronicle embeddings** role. Select the campaign, enable hybrid semantic memory, choose an embedding-capable model, and save the configuration. LM Studio exposes embeddings through its OpenAI-compatible `/v1/embeddings` endpoint. Indexing runs as a durable worker job; story context continues with lexical retrieval while vectors are incomplete or the embedding endpoint is unavailable.
+
+Document and query task prefixes are automatic when left blank. The default Nomic model uses `search_document: ` for stored Chronicle records and `search_query: ` for retrieval. Override them only when the selected embedding model documents a different instruction format.
 
 For optional artwork, save a separate provider profile with the **Illustrations** role. Select a campaign, choose the image profile and model, configure the render options, and enable automatic illustrations. OpenRouter uses its dedicated Image API; other profiles use a compatible `/v1/images/generations` endpoint. Nexus accepts base64 PNG, JPEG, or WebP output and stores it in shared asset storage. Illustration retries and failures never rerun or reject the story turn.
 
@@ -121,6 +128,8 @@ The context-preview API builds controlled scopes:
 1. Descriptive world canon.
 2. Campaign identity and accepted-turn position.
 3. Selected Chronicle memories.
+
+The authoritative scopes include the World Library overview and rules, query-relevant versioned entities and relationships, current trackers, a validated fiction-only continuity scratchpad, the latest scene, the living campaign summary, current open threads, relevant facts/events, recent turns, and bounded chronological samples. Imported scratchpads stay private until a validated story turn replaces them.
 4. The latest fiction-only current scene.
 
 It excludes roll records, mechanics fields, private scratchpads, parser diagnostics, rejected output, and credentials.
@@ -194,16 +203,18 @@ The default Compose stack does not expose PostgreSQL. Copy `compose.override.exa
 
 The deterministic integration suites use mock compatible endpoints and verify full database context, typed private RPG assessment, fiction-only consequence handoff, before/after triggers, persisted-roll reuse after recovery, compact truncation recovery, mechanics cleanup, committed-result retrieval, unchanged campaign state after unrecoverable responses, fresh-vector indexing, hybrid ranking, and lexical fallback when embeddings are unavailable. The Docker build stage includes tests so it can be run on the Compose network without publishing PostgreSQL.
 
-World Library integration coverage additionally verifies immutable published versions, optimistic draft conflicts, explicit campaign migration records, cross-world isolation, fork provenance, idempotent world import, editable drafts for legacy imports, and exports that omit provider configuration and credentials.
+World Library integration coverage additionally verifies immutable published versions, optimistic draft conflicts, explicit campaign migration records, campaign story-length persistence and export, cross-world isolation, fork provenance, idempotent world import, editable drafts for legacy imports, and exports that omit provider configuration and credentials.
 
 Runtime roles use the same image:
 
 ```text
 APP_ROLE=all       web/API and worker in one process
-APP_ROLE=api       stateless web/API replica
-APP_ROLE=worker    durable background worker
-APP_ROLE=migrate   apply migrations and exit
+APP_ROLE=api       web/API replica; coordinates automatic migrations before becoming ready
+APP_ROLE=worker    durable worker; waits for the API-coordinated schema version
+APP_ROLE=migrate   recovery/maintenance command that applies migrations and exits
 ```
+
+Migration files are ordered SQL under `database/migrations`. `node-pg-migrate` records their application in `schema_migrations`, wraps pending work in a transaction, and uses a PostgreSQL advisory lock so only one API replica changes the schema. Files ending in `.maintenance.sql` are treated as destructive or downtime-requiring changes: they apply automatically to a new empty database, but an existing database requires `ALLOW_MAINTENANCE_MIGRATIONS=true` or the explicit `migrate` role after a verified backup.
 
 ## Local data and backups
 
@@ -239,26 +250,6 @@ printf '%s' 'postgresql://USER:PASSWORD@DATABASE_HOST:5432/DATABASE' | docker se
 printf '%s' 'A-LONG-RANDOM-CREDENTIAL-ENCRYPTION-KEY' | docker secret create infinitequest_credential_encryption_key -
 ```
 
-Run migrations explicitly with the same versioned application image before updating replicas. One option is a temporary one-shot service:
-
-```bash
-docker service create \
-  --name infinitequest-migrations \
-  --mode replicated-job \
-  --replicas 1 \
-  --secret source=infinitequest_database_url,target=infinitequest_database_url \
-  --env APP_ROLE=migrate \
-  --env DATABASE_URL_FILE=/run/secrets/infinitequest_database_url \
-  ghcr.io/cmacnichol/infinite-quest-nexus:VERSION
-```
-
-Inspect its logs and remove it after successful completion:
-
-```bash
-docker service logs infinitequest-migrations
-docker service rm infinitequest-migrations
-```
-
 Deploy the stack:
 
 ```bash
@@ -266,7 +257,9 @@ export NEXUS_IMAGE=ghcr.io/cmacnichol/infinite-quest-nexus:VERSION
 docker stack deploy -c deploy/swarm/stack.yaml infinitequest
 ```
 
-The default stack runs two API replicas and two worker replicas. API state, worker leases, and job results are stored in PostgreSQL; no sticky session is required.
+The default stack runs two API replicas and two worker replicas. On a new database, the first API replica holding the PostgreSQL advisory lock creates the complete schema and initial owner. On normal upgrades, it applies pending online migrations before becoming ready; the other API replicas wait on the same lock, and workers wait until no migrations are pending. API state, worker leases, and job results are stored in PostgreSQL; no sticky session is required.
+
+A migration named with the `.maintenance.sql` suffix intentionally blocks normal startup on an existing database. This is reserved for reviewed major upgrades that require a backup, downtime, or destructive schema work. Run those migrations explicitly with the same image's `APP_ROLE=migrate` recovery command or temporarily set `ALLOW_MAINTENANCE_MIGRATIONS=true` during the controlled rollout, then remove the override.
 
 ## Container publishing
 
@@ -292,6 +285,6 @@ The repository workflows validate the TypeScript project, migrations, PostgreSQL
 
 ## Next implementation milestones
 
-1. Database-backed editing revisions, undo branches, and richer recovery controls.
+1. Database-backed editing revisions, undo branches, richer recovery controls, the deferred [selective Infinite Worlds campaign update workflow](docs/operations/deferred-improvements.md#update-an-existing-campaign-from-an-infinite-worlds-story-txt-export), and [safe durable story streaming](docs/operations/deferred-improvements.md#stream-provisional-story-narration-during-generation).
 2. OIDC identities linked to the existing initial owner without changing content ownership.
 3. Production metrics, backup/restore verification, and staged Swarm rollout automation.

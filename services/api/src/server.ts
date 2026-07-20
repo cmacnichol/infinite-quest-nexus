@@ -6,14 +6,17 @@ import { z } from "zod";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
-import { storyImportPreviewRequestSchema, storyImportRequestSchema } from "../../../packages/contracts/src/imports.js";
+import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema, storyImportRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
 import {
+  campaignRewindSchema,
   generationRequestSchema,
   illustrationConfigSchema,
   illustrationRequestSchema,
   playerCampaignConfigSchema,
-  providerProfileInputSchema
+  providerProfileInputSchema,
+  providerProfileUpdateSchema,
+  providerTextRequestSchema
 } from "../../../packages/contracts/src/generation.js";
 import {
   campaignCreateSchema,
@@ -28,6 +31,7 @@ import {
   worldStatusUpdateSchema
 } from "../../../packages/contracts/src/world-library.js";
 import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js";
+import { importInfiniteWorlds, previewInfiniteWorldsImport } from "./infinite-worlds-import-service.js";
 import {
   buildContextPreview,
   enqueueChronicleReindex,
@@ -37,8 +41,8 @@ import {
   setCampaignEmbeddingConfig
 } from "./memory-service.js";
 import { readAsset, type FilesystemAssetStore } from "./asset-service.js";
-import { createProvider, listProviders, providerModels } from "./provider-service.js";
-import { enqueueGeneration, getGenerationJob, getGenerationResult, retryGeneration, syncPlayerCampaignConfig } from "./generation-service.js";
+import { createProvider, deleteProvider, discoverUnsavedProviderModels, generateProviderText, listProviders, providerModels, setDefaultProvider, updateProvider } from "./provider-service.js";
+import { enqueueGeneration, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, syncPlayerCampaignConfig } from "./generation-service.js";
 import {
   enqueueIllustration,
   getIllustrationConfig,
@@ -66,6 +70,7 @@ import {
   updateWorld,
   updateWorldDraft
 } from "./world-service.js";
+import { getCampaignCostSummary, turnReportedCosts } from "./cost-service.js";
 
 type BuildServerOptions = {
   config: RuntimeConfig;
@@ -160,6 +165,26 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     models: await providerModels(pool, uuidSchema.parse(request.params.providerId), config.credentialEncryptionKey)
   }));
 
+  app.put<{ Params: { providerId: string } }>("/api/v1/providers/:providerId/default", async (request) => (
+    setDefaultProvider(pool, uuidSchema.parse(request.params.providerId))
+  ));
+
+  app.patch<{ Params: { providerId: string } }>("/api/v1/providers/:providerId", async (request) => (
+    updateProvider(pool, uuidSchema.parse(request.params.providerId), providerProfileUpdateSchema.parse(request.body), config.credentialEncryptionKey)
+  ));
+
+  app.post("/api/v1/provider-text/generate", async (request) => (
+    generateProviderText(pool, providerTextRequestSchema.parse(request.body), config.credentialEncryptionKey)
+  ));
+
+  app.post("/api/v1/providers/discover-models", async (request) => ({
+    models: await discoverUnsavedProviderModels(providerProfileInputSchema.parse(request.body))
+  }));
+
+  app.delete<{ Params: { providerId: string } }>("/api/v1/providers/:providerId", async (request) => (
+    deleteProvider(pool, uuidSchema.parse(request.params.providerId))
+  ));
+
   app.post("/api/v1/imports/legacy-story", async (request, reply) => {
     const body = storyImportRequestSchema.parse(request.body);
     const result = await importLegacyStory(pool, body, assetStore);
@@ -176,6 +201,20 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.post("/api/v1/imports/world", async (request, reply) => {
     const result = await importWorld(pool, worldImportRequestSchema.parse(request.body));
+    return reply.code(result.duplicate ? 200 : 201).send(result);
+  });
+
+  app.post("/api/v1/imports/infinite-worlds/preview", async (request) => (
+    previewInfiniteWorldsImport(pool, infiniteWorldsImportRequestSchema.parse(request.body))
+  ));
+
+  app.post("/api/v1/imports/infinite-worlds", async (request, reply) => {
+    const result = await importInfiniteWorlds(
+      pool,
+      infiniteWorldsImportRequestSchema.parse(request.body),
+      config.credentialEncryptionKey,
+      assetStore
+    );
     return reply.code(result.duplicate ? 200 : 201).send(result);
   });
 
@@ -254,13 +293,19 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
         ORDER BY turn_number`,
       [ownerUserId, campaignId]
     );
-    return { turns: result.rows };
+    const costs = await turnReportedCosts(pool, ownerUserId, result.rows.map((turn: { id: string }) => turn.id));
+    return { turns: result.rows.map((turn: { id: string }) => ({ ...turn, reportedCost: costs.get(turn.id) || null })) };
   });
+
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/cost-summary", async (request) => (
+    getCampaignCostSummary(pool, uuidSchema.parse(request.params.campaignId))
+  ));
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/sync-status", async (request, reply) => {
     const ownerUserId = await initialOwnerId(pool);
     const result = await pool.query(
-      `SELECT id, title, active_turn_number AS "activeTurnNumber", world_version_id AS "worldVersionId", updated_at AS "updatedAt"
+      `SELECT id, title, active_turn_number AS "activeTurnNumber", world_version_id AS "worldVersionId",
+              story_length_profile AS "storyLengthProfile", updated_at AS "updatedAt"
          FROM campaigns WHERE id = $1 AND owner_user_id = $2`,
       [uuidSchema.parse(request.params.campaignId), ownerUserId]
     );
@@ -272,6 +317,14 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       pool,
       uuidSchema.parse(request.params.campaignId),
       playerCampaignConfigSchema.parse(request.body)
+    )
+  ));
+
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/rewind", async (request) => (
+    rewindCampaign(
+      pool,
+      uuidSchema.parse(request.params.campaignId),
+      campaignRewindSchema.parse(request.body)
     )
   ));
 

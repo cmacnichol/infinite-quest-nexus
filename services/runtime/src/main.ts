@@ -1,5 +1,5 @@
 import { createDatabasePool, loadRuntimeConfig } from "../../../packages/database/src/index.js";
-import { migrateDatabase } from "../../../packages/database/src/migrate.js";
+import { migrateDatabase, waitForDatabaseMigrations } from "../../../packages/database/src/migrate.js";
 import { buildServer } from "../../api/src/server.js";
 import { runWorker } from "../../worker/src/worker.js";
 
@@ -17,16 +17,28 @@ process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
 try {
   if (config.role === "migrate") {
-    const applied = await migrateDatabase(pool, config.migrationDirectory);
+    const applied = await migrateDatabase(pool, config.migrationDirectory, { allowMaintenanceMigrations: true });
     console.log(JSON.stringify({ event: "migrations_complete", applied }));
-  } else if (config.role === "api") {
+  } else {
+    if (config.role === "worker") {
+      await waitForDatabaseMigrations(pool, config.migrationDirectory, config.migrationWaitSeconds * 1000);
+      console.log(JSON.stringify({ event: "migrations_verified", role: config.role }));
+    } else {
+      const applied = await migrateDatabase(pool, config.migrationDirectory, {
+        allowMaintenanceMigrations: config.allowMaintenanceMigrations
+      });
+      console.log(JSON.stringify({ event: "migrations_complete", role: config.role, applied }));
+    }
+  }
+
+  if (config.role === "api") {
     const server = await buildServer({ config, pool });
     await server.listen({ host: config.host, port: config.port });
     await new Promise<void>((resolve) => abortController.signal.addEventListener("abort", () => resolve(), { once: true }));
     await server.close();
   } else if (config.role === "worker") {
     await runWorker(pool, config, abortController.signal);
-  } else {
+  } else if (config.role === "all") {
     const server = await buildServer({ config, pool });
     await server.listen({ host: config.host, port: config.port });
     await runWorker(pool, config, abortController.signal);

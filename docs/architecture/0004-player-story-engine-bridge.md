@@ -14,7 +14,7 @@ Add an opt-in bridge in Model Settings. On the first eligible story turn, the br
 
 Before submission, the browser persists a UUID idempotency key, action, expected local turn count, provider profile, and selected model. After submission it also persists the job ID. Reloading the page resumes that same job or repeats the same idempotent enqueue when the response was lost before the job ID was saved. A completed result is read from the accepted `turns` row through a dedicated result endpoint; rejected or partial model output is never returned as story content.
 
-The bridge checks the authoritative campaign turn count before each new turn. Matching histories reconnect directly. A single additional database turn is accepted only when it corresponds to the browser's recorded pending job. Other divergence detaches the linkage and explicitly imports the current browser branch as a new campaign snapshot.
+The bridge checks the authoritative campaign turn count before each new turn. Matching histories reconnect directly. A single additional database turn is accepted only when it corresponds to the browser's recorded pending job. When a player acts from an earlier accepted turn, the default operation transactionally rewinds the same campaign, deletes later turn-owned artifacts, restores the selected state snapshot, invalidates response chains, and rebuilds derived Chronicle memory from the remaining ledger. The player may instead explicitly create a separate campaign branch; that import reuses the source campaign's immutable world version and records branch provenance, so it does not duplicate the world. Unexpected divergence also reuses the last known immutable world version when a replacement campaign snapshot is necessary.
 
 The initial bridge blocked backend mode when browser-side RPG rolls or event triggers were enabled. ADR 0005 replaces that temporary restriction with typed, worker-owned orchestration.
 
@@ -24,4 +24,5 @@ The initial bridge blocked backend mode when browser-side RPG rolls or event tri
 - Refreshing or closing the browser does not create a second turn or lose an accepted backend result.
 - Switching models affects the next generation provider but never removes the campaign snapshot and retrieved Chronicle context.
 - Linkage-only browser settings do not affect importer content hashes, so reconnecting the same story remains idempotent.
+- Rewinding is destructive to later turns and therefore requires an explicit player choice; creating a separate campaign remains the non-destructive alternative.
 - The bridge remains responsible for browser/database synchronization, while ADR 0005 defines the mechanics and event boundary used by every backend turn.

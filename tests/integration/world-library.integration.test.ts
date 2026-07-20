@@ -4,6 +4,7 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import {
   campaignCreateSchema,
+  campaignUpdateSchema,
   campaignWorldMigrationSchema,
   resourceDeleteSchema,
   worldContentSchema,
@@ -27,6 +28,7 @@ import {
   migrateCampaignWorld,
   previewWorldImport,
   publishWorld,
+  updateCampaign,
   updateWorldDraft
 } from "../../services/api/src/world-service.js";
 
@@ -136,6 +138,22 @@ integration("World Library and campaign version integration", () => {
     expect(turns.rows).toHaveLength(0);
     const chains = await pool.query<{ active: boolean }>("SELECT active FROM model_chains WHERE campaign_id = $1", [campaign.id]);
     expect(chains.rows).toEqual([{ active: false }]);
+  });
+
+  it("persists and exports the authoritative campaign story-length profile", async () => {
+    const world = await publishedWorld("Story Length");
+    const campaign = await createCampaign(pool, campaignCreateSchema.parse({
+      title: `Synthetic Length Campaign ${crypto.randomUUID()}`,
+      worldVersionId: world.version.worldVersionId,
+      storyLengthProfile: "long"
+    }));
+    expect(campaign.storyLengthProfile).toBe("long");
+    expect((await listCampaigns(pool)).find((item: any) => item.id === campaign.id)?.storyLengthProfile).toBe("long");
+
+    const updated = await updateCampaign(pool, campaign.id, campaignUpdateSchema.parse({ storyLengthProfile: "extended" }));
+    expect(updated.storyLengthProfile).toBe("extended");
+    const exported = await exportCampaign(pool, campaign.id);
+    expect(exported.settings.storyLength).toBe("extended");
   });
 
   it("forks a selected immutable version into an independent draft", async () => {

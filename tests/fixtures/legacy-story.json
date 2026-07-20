@@ -3,7 +3,8 @@
     "aiProvider": "openrouter",
     "apiKey": "test-credential-placeholder",
     "memoryManagementMode": "full_reload",
-    "storyHistoryTokenLimit": 128000
+    "storyHistoryTokenLimit": 128000,
+    "storyLength": "long"
   },
   "world": {
     "title": "Synthetic Test World",

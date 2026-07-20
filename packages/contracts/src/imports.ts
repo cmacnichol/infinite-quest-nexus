@@ -52,7 +52,8 @@ export const legacyStorySchema = z.object({
 
 export const storyImportRequestSchema = z.object({
   sourceName: z.string().max(512).default("legacy-story.story"),
-  story: legacyStorySchema
+  story: legacyStorySchema,
+  targetWorldVersionId: z.uuid().optional()
 });
 
 export const storyImportPreviewRequestSchema = storyImportRequestSchema;
@@ -61,6 +62,19 @@ export type LegacyStory = z.infer<typeof legacyStorySchema>;
 export type LegacyTurn = z.infer<typeof legacyTurnSchema>;
 export type StoryImportRequest = z.infer<typeof storyImportRequestSchema>;
 export type StoryImportPreviewRequest = z.infer<typeof storyImportPreviewRequestSchema>;
+
+export const infiniteWorldsImportRequestSchema = z.object({
+  sourceName: z.string().trim().max(512).default("infinite-worlds-export.txt"),
+  sourceText: z.string().min(1).max(50_000_000),
+  sourceKind: z.enum(["auto", "world_json", "world_text", "story_text"]).default("auto"),
+  selectedCharacterIndex: z.coerce.number().int().nonnegative().max(1000).default(0),
+  targetWorldVersionId: z.uuid().optional(),
+  providerProfileId: z.uuid().optional(),
+  model: z.string().trim().max(500).optional(),
+  enrichFinalTurn: z.boolean().default(false)
+});
+
+export type InfiniteWorldsImportRequest = z.infer<typeof infiniteWorldsImportRequestSchema>;
 
 export type StoryImportResult = {
   importId: string;

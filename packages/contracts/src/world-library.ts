@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEFAULT_STORY_LENGTH_PROFILE, storyLengthProfileSchema } from "./story-settings.js";
 
 const title = z.string().trim().min(1).max(200);
 const shortText = z.string().max(2000).default("");
@@ -67,13 +68,17 @@ export const worldImportRequestSchema = z.object({
 
 export const campaignCreateSchema = z.object({
   worldVersionId: z.uuid(),
-  title
+  title,
+  storyLengthProfile: storyLengthProfileSchema.default(DEFAULT_STORY_LENGTH_PROFILE)
 });
 
 export const campaignUpdateSchema = z.object({
   title: title.optional(),
-  status: z.enum(["active", "archived"]).optional()
-}).refine((value) => value.title !== undefined || value.status !== undefined, "At least one field is required.");
+  status: z.enum(["active", "archived"]).optional(),
+  textProviderProfileId: z.uuid().nullable().optional(),
+  imageProviderProfileId: z.uuid().nullable().optional(),
+  storyLengthProfile: storyLengthProfileSchema.optional()
+}).refine((value) => Object.values(value).some((item) => item !== undefined), "At least one field is required.");
 
 export const campaignWorldMigrationSchema = z.object({
   worldVersionId: z.uuid(),

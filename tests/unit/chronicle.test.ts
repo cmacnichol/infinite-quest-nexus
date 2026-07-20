@@ -1,7 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { buildTurnFictionMemory, compressTurnMemory, formatLegacySummary } from "../../packages/story-engine/src/chronicle.js";
+import { campaignEmbeddingConfigSchema, DEFAULT_EMBEDDING_MODEL, MAX_MEMORY_CONTEXT_BUDGET_TOKENS, memoryContextQuerySchema } from "../../packages/contracts/src/memory.js";
 
 describe("Chronicle memory construction", () => {
+  it("defaults campaign embeddings to the standard Nomic model", () => {
+    const config = campaignEmbeddingConfigSchema.parse({ enabled: false });
+    expect(config.model).toBe(DEFAULT_EMBEDDING_MODEL);
+    expect(config.model).toBe("text-embedding-nomic-embed-text-v1.5");
+  });
+
+  it("allows the API to resolve an enabled campaign's provider fallback", () => {
+    const config = campaignEmbeddingConfigSchema.parse({ enabled: true });
+    expect(config.providerProfileId).toBeNull();
+    expect(config.model).toBe(DEFAULT_EMBEDDING_MODEL);
+    expect(config.documentPrefix).toBeNull();
+    expect(config.queryPrefix).toBeNull();
+  });
+
+  it("clamps oversized provider-derived context budgets at the API boundary", () => {
+    const query = memoryContextQuerySchema.parse({ budgetTokens: 2_048_000 });
+    expect(query.budgetTokens).toBe(MAX_MEMORY_CONTEXT_BUDGET_TOKENS);
+  });
+
   it("indexes only action and fiction narration", () => {
     const memory = buildTurnFictionMemory({
       action: "Open Location Alpha.",

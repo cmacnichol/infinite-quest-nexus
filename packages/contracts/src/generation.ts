@@ -14,12 +14,38 @@ export const providerProfileInputSchema = z.object({
   temperature: z.coerce.number().min(0).max(2).default(0.8),
   apiKey: z.string().trim().max(16_384).optional(),
   enabled: z.boolean().default(true),
+  isDefault: z.boolean().default(false),
   configuration: z.record(z.string(), z.unknown()).default({})
+}).superRefine((value, context) => {
+  if (value.providerRole === "text" && value.maxOutputTokens + 512 >= value.contextWindowTokens) {
+    context.addIssue({ code: "custom", path: ["maxOutputTokens"], message: "Text output reserve must leave at least 512 tokens for input context." });
+  }
+});
+
+export const providerProfileUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  baseUrl: z.url().refine((value) => value.startsWith("http://") || value.startsWith("https://"), "Base URL must use HTTP or HTTPS.").optional(),
+  defaultModel: z.string().trim().max(500).optional(),
+  contextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).optional(),
+  maxOutputTokens: z.coerce.number().int().min(128).max(262144).optional(),
+  temperature: z.coerce.number().min(0).max(2).optional(),
+  apiKey: z.string().trim().max(16_384).optional(),
+  enabled: z.boolean().optional(),
+  isDefault: z.boolean().optional()
+}).refine((value) => Object.values(value).some((item) => item !== undefined), "At least one provider field is required.");
+
+export const providerTextRequestSchema = z.object({
+  providerProfileId: z.uuid().optional(),
+  model: z.string().trim().max(500).optional(),
+  messages: z.array(z.object({
+    role: z.enum(["system", "user", "assistant"]),
+    content: z.string().min(1).max(200_000)
+  })).min(1).max(30)
 });
 
 export const generationRequestSchema = z.object({
   action: z.string().trim().min(1).max(12_000),
-  providerProfileId: z.uuid(),
+  providerProfileId: z.uuid().optional(),
   model: z.string().trim().max(500).optional(),
   idempotencyKey: z.string().trim().min(8).max(200),
   context: z.object({
@@ -28,6 +54,10 @@ export const generationRequestSchema = z.object({
     recentTurns: z.coerce.number().int().min(1).max(100).default(8),
     modelContextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).optional()
   }).default({ budgetTokens: 32000, compression: "auto", recentTurns: 8 })
+});
+
+export const campaignRewindSchema = z.object({
+  targetTurnNumber: z.coerce.number().int().min(1)
 });
 
 export const illustrationConfigSchema = z.object({
@@ -116,12 +146,19 @@ export const storyTurnOutputSchema = z.object({
   custom_action_suggestion: z.string().trim().min(1).max(2000),
   scratchpad: z.string().max(100_000).default(""),
   tracker_updates: z.array(z.record(z.string(), z.unknown())).max(200).default([]),
-  image_prompt: z.string().max(20_000).default("")
+  image_prompt: z.string().max(20_000).default(""),
+  continuity_summary: z.string().trim().min(1).max(20_000),
+  canonical_facts: z.array(z.string().trim().min(1).max(4000)).max(100),
+  superseded_facts: z.array(z.string().trim().min(1).max(4000)).max(100),
+  open_threads: z.array(z.string().trim().min(1).max(4000)).max(100)
 });
 
 export type ProviderProfileInput = z.infer<typeof providerProfileInputSchema>;
+export type ProviderProfileUpdate = z.infer<typeof providerProfileUpdateSchema>;
+export type ProviderTextRequest = z.infer<typeof providerTextRequestSchema>;
 export type ProviderType = z.infer<typeof providerTypeSchema>;
 export type GenerationRequest = z.infer<typeof generationRequestSchema>;
+export type CampaignRewindRequest = z.infer<typeof campaignRewindSchema>;
 export type IllustrationConfig = z.infer<typeof illustrationConfigSchema>;
 export type IllustrationRequest = z.infer<typeof illustrationRequestSchema>;
 export type StoryTurnOutput = z.infer<typeof storyTurnOutputSchema>;

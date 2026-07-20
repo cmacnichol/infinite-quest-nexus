@@ -14,7 +14,9 @@ import {
   type WorldPublishRequest,
   type WorldStatusUpdateRequest
 } from "../../../packages/contracts/src/world-library.js";
-import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
+import { removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
+import { resolveEffectiveProviderId } from "./provider-service.js";
+import { turnReportedCosts } from "./cost-service.js";
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? null);
@@ -30,6 +32,18 @@ function portableModelMetadata(value: unknown): Record<string, unknown> {
   return Object.fromEntries(["providerType", "model", "promptProtocolVersion"].flatMap((key) => (
     typeof source[key] === "string" && source[key] ? [[key, source[key]]] : []
   )));
+}
+
+function portableCampaignSettings(value: Record<string, unknown> | undefined): Record<string, unknown> {
+  const settings = removeProviderSecrets(value);
+  for (const key of Object.keys(settings)) {
+    const normalized = key.replaceAll(/[^a-z]/gi, "").toLowerCase();
+    if (/(?:apikey|password|authorization|credential|secret)/.test(normalized)
+      || /^(?:token|accesstoken|refreshtoken)$/.test(normalized)
+      || /^(?:baseurl|endpoint|customendpoint|lmstudioendpoint|imageendpoint|providerurl)$/.test(normalized)
+      || /^nexus(?:provider|imageprovider|embeddingprovider)/.test(normalized)) delete settings[key];
+  }
+  return settings;
 }
 
 const SENSITIVE_WORLD_KEYS = new Set([
@@ -399,7 +413,10 @@ export async function listCampaigns(pool: DatabasePool) {
   const result = await pool.query(
     `SELECT c.id, c.title, c.status, c.active_turn_number AS "activeTurnNumber",
             c.created_at AS "createdAt", c.updated_at AS "updatedAt",
+            c.story_length_profile AS "storyLengthProfile",
             w.id AS "worldId", w.title AS "worldTitle", c.world_version_id AS "worldVersionId",
+            c.text_provider_profile_id AS "textProviderProfileId",
+            c.image_provider_profile_id AS "imageProviderProfileId",
             wv.version_number AS "worldVersionNumber", latest.version_number AS "latestWorldVersionNumber",
             (latest.version_number > wv.version_number) AS "worldUpdateAvailable"
        FROM campaigns c
@@ -427,9 +444,9 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
     const source = version.rows[0];
     if (!source) throw httpError(404, "Published world version not found.");
     const campaign = await client.query<{ id: string }>(
-      `INSERT INTO campaigns (owner_user_id, world_version_id, title)
-       VALUES ($1,$2,$3) RETURNING id`,
-      [ownerUserId, request.worldVersionId, request.title]
+      `INSERT INTO campaigns (owner_user_id, world_version_id, title, story_length_profile)
+       VALUES ($1,$2,$3,$4) RETURNING id`,
+      [ownerUserId, request.worldVersionId, request.title, request.storyLengthProfile]
     );
     const campaignId = campaign.rows[0]?.id;
     if (!campaignId) throw new Error("Could not create campaign.");
@@ -447,20 +464,42 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
         json({ sourceType: "world_library", worldId: source.world_id, worldVersionId: request.worldVersionId })
       ]
     );
-    return { id: campaignId, title: request.title, status: "active", activeTurnNumber: 0, worldId: source.world_id, worldVersionId: request.worldVersionId, worldVersionNumber: source.version_number };
+    return { id: campaignId, title: request.title, status: "active", activeTurnNumber: 0, storyLengthProfile: request.storyLengthProfile, worldId: source.world_id, worldVersionId: request.worldVersionId, worldVersionNumber: source.version_number, textProviderProfileId: null, imageProviderProfileId: null };
   });
 }
 
 export async function updateCampaign(pool: DatabasePool, campaignId: string, request: CampaignUpdateRequest) {
-  const ownerUserId = await initialOwnerId(pool);
-  const result = await pool.query(
-    `UPDATE campaigns SET title = COALESCE($3, title), status = COALESCE($4, status), updated_at = now()
-      WHERE id = $1 AND owner_user_id = $2
-      RETURNING id, title, status, active_turn_number AS "activeTurnNumber", updated_at AS "updatedAt"`,
-    [campaignId, ownerUserId, request.title ?? null, request.status ?? null]
-  );
-  if (!result.rows[0]) throw httpError(404, "Campaign not found.");
-  return result.rows[0];
+  return withTransaction(pool, async (client) => {
+    const ownerUserId = await initialOwnerId(client);
+    if (request.textProviderProfileId) await resolveEffectiveProviderId(client, ownerUserId, "text", request.textProviderProfileId);
+    if (request.imageProviderProfileId) await resolveEffectiveProviderId(client, ownerUserId, "image", request.imageProviderProfileId);
+    const result = await client.query(
+      `UPDATE campaigns SET title = COALESCE($3, title), status = COALESCE($4, status),
+         text_provider_profile_id = CASE WHEN $5 THEN $6 ELSE text_provider_profile_id END,
+         image_provider_profile_id = CASE WHEN $7 THEN $8 ELSE image_provider_profile_id END,
+         story_length_profile = COALESCE($9, story_length_profile),
+         updated_at = now()
+        WHERE id = $1 AND owner_user_id = $2
+        RETURNING id, title, status, active_turn_number AS "activeTurnNumber",
+          text_provider_profile_id AS "textProviderProfileId", image_provider_profile_id AS "imageProviderProfileId",
+          story_length_profile AS "storyLengthProfile", updated_at AS "updatedAt"`,
+      [campaignId, ownerUserId, request.title ?? null, request.status ?? null,
+        request.textProviderProfileId !== undefined, request.textProviderProfileId ?? null,
+        request.imageProviderProfileId !== undefined, request.imageProviderProfileId ?? null,
+        request.storyLengthProfile ?? null]
+    );
+    if (!result.rows[0]) throw httpError(404, "Campaign not found.");
+    if (request.imageProviderProfileId !== undefined) {
+      const effectiveImageId = await resolveEffectiveProviderId(client, ownerUserId, "image", request.imageProviderProfileId);
+      await client.query(
+        `UPDATE campaign_illustration_configs c SET provider_profile_id = $3,
+           model = COALESCE(NULLIF(p.default_model, ''), c.model), updated_at = now()
+          FROM provider_profiles p WHERE c.campaign_id = $1 AND c.owner_user_id = $2 AND p.id = $3`,
+        [campaignId, ownerUserId, effectiveImageId]
+      );
+    }
+    return result.rows[0];
+  });
 }
 
 export async function deleteCampaign(pool: DatabasePool, campaignId: string, request: ResourceDeleteRequest) {
@@ -477,7 +516,7 @@ export async function deleteCampaign(pool: DatabasePool, campaignId: string, req
     const activeWork = await client.query(
       `SELECT 'generation' AS kind FROM generation_jobs
         WHERE campaign_id = $1 AND owner_user_id = $2
-          AND status IN ('queued','assessing','generating','validating','committing','indexing')
+          AND status IN ('queued','assessing','generating','validating','committing')
        UNION ALL
        SELECT 'illustration' AS kind FROM image_jobs
         WHERE campaign_id = $1 AND owner_user_id = $2 AND status IN ('queued','generating')
@@ -570,7 +609,7 @@ export async function migrateCampaignWorld(pool: DatabasePool, campaignId: strin
     if (next.version_number <= current.version_number) throw httpError(409, "Select a newer published world version.");
     const active = await client.query(
       `SELECT 1 FROM generation_jobs WHERE campaign_id = $1 AND owner_user_id = $2
-        AND status IN ('queued','assessing','generating','validating','committing','indexing') LIMIT 1`,
+        AND status IN ('queued','assessing','generating','validating','committing') LIMIT 1`,
       [campaignId, ownerUserId]
     );
     if (active.rowCount) throw httpError(409, "Wait for the active story generation job before migrating the campaign.");
@@ -594,7 +633,7 @@ export async function migrateCampaignWorld(pool: DatabasePool, campaignId: strin
 export async function exportCampaign(pool: DatabasePool, campaignId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const campaign = await pool.query<any>(
-    `SELECT c.title, c.status, c.active_turn_number, w.title AS world_title,
+    `SELECT c.title, c.status, c.active_turn_number, c.story_length_profile, c.legacy_settings, w.title AS world_title,
             wv.id AS world_version_id, wv.version_number, wv.content, cs.*
        FROM campaigns c
        JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
@@ -612,11 +651,22 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
        FROM turns WHERE campaign_id = $1 AND owner_user_id = $2 ORDER BY turn_number`,
     [campaignId, ownerUserId]
   );
+  const costs = await turnReportedCosts(pool, ownerUserId, turns.rows.map((turn: { id: string }) => turn.id));
+  const history = await pool.query<{ content: unknown; through_turn: number }>(
+    `SELECT content, through_turn
+       FROM summary_checkpoints
+      WHERE campaign_id = $1 AND owner_user_id = $2 AND summary_kind = 'legacy_full_history'
+      ORDER BY through_turn DESC, created_at DESC LIMIT 1`,
+    [campaignId, ownerUserId]
+  );
+  const importedHistory = history.rows[0];
+  const importProvenance = row.import_provenance && typeof row.import_provenance === "object" ? row.import_provenance : {};
   return {
     format: "infinite-quest-campaign",
     formatVersion: 1,
     exportedAt: new Date().toISOString(),
     world: row.content.world,
+    settings: { ...portableCampaignSettings(row.legacy_settings), storyLength: row.story_length_profile },
     turns: turns.rows.map((turn: any) => ({
       id: turn.id,
       turnNumber: turn.turn_number,
@@ -629,6 +679,7 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
       roll: turn.mechanics_private,
       worldStateSnapshot: turn.state_snapshot_private,
       llmModelInfo: portableModelMetadata(turn.model_metadata),
+      reportedCost: costs.get(turn.id) || null,
       createdAt: turn.accepted_at
     })),
     rpgStats: row.rpg_stats,
@@ -636,8 +687,15 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
     eventTriggers: row.event_triggers,
     pendingEventTriggers: row.pending_event_triggers,
     trackers: row.trackers,
+    baseTrackersAtStart: row.default_triggers,
     scratchpad: row.scratchpad_private,
+    ...(importedHistory ? {
+      fullHistory: importedHistory.content,
+      fullHistoryCompressedThroughTurn: importedHistory.through_turn
+    } : {}),
+    worldImportProvenance: importProvenance.world ?? null,
     storyImportProvenance: {
+      ...(importProvenance.story && typeof importProvenance.story === "object" ? importProvenance.story : {}),
       sourceType: "nexus_campaign_export",
       worldVersionId: row.world_version_id,
       worldVersionNumber: row.version_number

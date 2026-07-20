@@ -25,7 +25,13 @@ export type ProviderResult = {
   outputLimited: boolean;
   modelInstanceId: string;
   usage: { inputTokens: number; outputTokens: number; totalTokens: number };
+  reportedCost: ReportedProviderCost | null;
   rawMetadata: Record<string, unknown>;
+};
+
+export type ReportedProviderCost = {
+  amount: string;
+  currency: string;
 };
 
 export type ModelInventoryItem = {
@@ -39,7 +45,9 @@ export type ModelInventoryItem = {
 export type EmbeddingResult = {
   embeddings: number[][];
   model: string;
+  responseId: string;
   usage: { inputTokens: number; totalTokens: number };
+  reportedCost: ReportedProviderCost | null;
 };
 
 export type ImageProviderRequest = {
@@ -55,6 +63,7 @@ export type ImageProviderResult = {
   mimeType: "image/png" | "image/jpeg" | "image/webp";
   responseId: string;
   usage: Record<string, unknown>;
+  reportedCost: ReportedProviderCost | null;
   rawMetadata: Record<string, unknown>;
 };
 
@@ -99,6 +108,17 @@ function limitReason(values: unknown[]): boolean {
   return values.some((value) => /(?:length|max(?:imum)?[_ -]?(?:output[_ -]?)?tokens?|token[_ -]?limit|context[_ -]?(?:length|limit)|incomplete|truncated)/i.test(String(value ?? "")));
 }
 
+export function reportedProviderCost(usage: unknown): ReportedProviderCost | null {
+  if (!usage || typeof usage !== "object" || !("cost" in usage)) return null;
+  const rawCost = (usage as { cost?: unknown }).cost;
+  if ((typeof rawCost !== "number" && typeof rawCost !== "string") || String(rawCost).trim() === "") return null;
+  const numericCost = Number(rawCost);
+  if (!Number.isFinite(numericCost) || numericCost < 0) return null;
+  const currency = String((usage as { currency?: unknown }).currency || "USD").trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency)) return null;
+  return { amount: String(rawCost).trim(), currency };
+}
+
 async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, fetcher: Fetch): Promise<ProviderResult> {
   const payload: Record<string, unknown> = {
     model: profile.model,
@@ -130,6 +150,7 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
     outputLimited: limitReason(finishValues) || (outputTokens > 0 && outputTokens >= profile.maxOutputTokens),
     modelInstanceId: String(data.model_instance_id || profile.model),
     usage: { inputTokens: Number(data.stats?.input_tokens || 0), outputTokens, totalTokens: Number(data.stats?.input_tokens || 0) + outputTokens },
+    reportedCost: null,
     rawMetadata: { status: data.status || "", modelInstanceId: data.model_instance_id || "" }
   };
 }
@@ -174,6 +195,7 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       outputTokens: Number(data.usage?.completion_tokens || 0),
       totalTokens: Number(data.usage?.total_tokens || 0)
     },
+    reportedCost: reportedProviderCost(data.usage),
     rawMetadata: { model: data.model || "", provider: data.provider || "" }
   };
 }
@@ -189,7 +211,9 @@ export async function callEmbeddingProvider(
   inputs: string[],
   fetcher: Fetch = fetch
 ): Promise<EmbeddingResult> {
-  if (!inputs.length) return { embeddings: [], model: profile.model, usage: { inputTokens: 0, totalTokens: 0 } };
+  if (!inputs.length) return {
+    embeddings: [], model: profile.model, responseId: "", usage: { inputTokens: 0, totalTokens: 0 }, reportedCost: null
+  };
   const response = await fetcher(`${openAiRoot(profile.baseUrl)}/embeddings`, {
     method: "POST",
     headers: headers(profile),
@@ -210,7 +234,9 @@ export async function callEmbeddingProvider(
   return {
     embeddings,
     model: String(data.model || profile.model),
-    usage: { inputTokens: Number(data.usage?.prompt_tokens || 0), totalTokens: Number(data.usage?.total_tokens || 0) }
+    responseId: String(data.id || ""),
+    usage: { inputTokens: Number(data.usage?.prompt_tokens || 0), totalTokens: Number(data.usage?.total_tokens || 0) },
+    reportedCost: reportedProviderCost(data.usage)
   };
 }
 
@@ -250,6 +276,7 @@ export async function callImageProvider(
     mimeType: mediaType as ImageProviderResult["mimeType"],
     responseId: String(data.id || image?.id || ""),
     usage: typeof data.usage === "object" && data.usage ? data.usage : {},
+    reportedCost: reportedProviderCost(data.usage),
     rawMetadata: { created: data.created || null, provider: data.provider || "" }
   };
 }
@@ -258,12 +285,8 @@ function inventoryRows(data: Record<string, any>): any[] {
   return Array.isArray(data.models) ? data.models : Array.isArray(data.data) ? data.data : [];
 }
 
-export async function discoverModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
-  const url = profile.providerType === "lmstudio"
-    ? `${lmStudioRoot(profile.baseUrl)}/api/v1/models`
-    : `${openAiRoot(profile.baseUrl)}/models`;
-  const data = await checkedJson(await fetcher(url, { headers: headers(profile) }));
-  return inventoryRows(data).flatMap((model: any) => {
+function inventoryItems(models: any[]): ModelInventoryItem[] {
+  return models.flatMap((model: any) => {
     const instances = Array.isArray(model.loaded_instances) ? model.loaded_instances : [];
     if (instances.length) return instances.map((instance: any) => ({
       id: String(model.key || model.id || instance.id || ""),
@@ -282,8 +305,94 @@ export async function discoverModels(profile: TextProviderProfile, fetcher: Fetc
   }).filter((model: ModelInventoryItem) => model.id);
 }
 
-export async function discoverImageModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
+const IMAGE_GENERATION_PATTERN = /(?:^|[^a-z])(?:image(?:[-_ ]generation)?|text[-_ ]to[-_ ]image|diffusion|stable[-_ ]diffusion|sdxl|flux|dall[-_ ]?e|gpt[-_ ]image|imagen|ideogram|seedream|qwen[-_ ]image|recraft|hidream)(?:$|[^a-z])/i;
+const NON_IMAGE_OUTPUT_PATTERN = /(?:^|[^a-z])(?:text|chat|completion|llm|language|embedding|rerank|audio|speech)(?:$|[^a-z])/i;
+
+function stringValues(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(stringValues);
+  if (typeof value === "string") return [value];
+  return [];
+}
+
+function explicitImageCapability(model: any): boolean | null {
+  const architecture = model?.architecture && typeof model.architecture === "object" ? model.architecture : {};
+  const capabilities = model?.capabilities && typeof model.capabilities === "object" && !Array.isArray(model.capabilities)
+    ? model.capabilities
+    : {};
+  const outputFields = [
+    model?.output_modalities,
+    model?.outputModalities,
+    model?.supported_output_modalities,
+    architecture.output_modalities,
+    architecture.outputModalities,
+    capabilities.output_modalities,
+    capabilities.outputModalities,
+    capabilities.outputs
+  ];
+  const advertisedOutputs = outputFields.filter((value) => value !== undefined && value !== null);
+  if (advertisedOutputs.length) {
+    const values = advertisedOutputs.flatMap(stringValues);
+    return values.some((value) => /(?:^|[^a-z])image(?:$|[^a-z])/i.test(value));
+  }
+
+  const imageFlags = [
+    model?.image_generation,
+    model?.imageGeneration,
+    model?.supports_image_generation,
+    model?.supportsImageGeneration,
+    capabilities.image_generation,
+    capabilities.imageGeneration,
+    capabilities.text_to_image,
+    capabilities.textToImage
+  ].filter((value) => typeof value === "boolean");
+  if (imageFlags.length) return imageFlags.some(Boolean);
+
+  const roleFields = [model?.type, model?.kind, model?.task, model?.pipeline_tag, model?.pipelineTag, architecture.modality, model?.capabilities];
+  const advertisedRoles = roleFields.flatMap(stringValues);
+  if (advertisedRoles.some((value) => IMAGE_GENERATION_PATTERN.test(value))) return true;
+  if (advertisedRoles.some((value) => NON_IMAGE_OUTPUT_PATTERN.test(value))) return false;
+  return null;
+}
+
+function imageInventoryRows(models: any[]): any[] {
+  const assessed = models.map((model) => {
+    const capability = explicitImageCapability(model);
+    const identity = String(model?.id || model?.key || model?.name || model?.display_name || "");
+    return { model, capability, nameMatch: capability === null && IMAGE_GENERATION_PATTERN.test(identity) };
+  });
+  const hasUsableSignal = assessed.some(({ capability, nameMatch }) => capability !== null || nameMatch);
+  if (!hasUsableSignal) return models;
+  return assessed.filter(({ capability, nameMatch }) => capability === true || (capability === null && nameMatch)).map(({ model }) => model);
+}
+
+export async function discoverModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
+  const url = profile.providerType === "lmstudio"
+    ? `${lmStudioRoot(profile.baseUrl)}/api/v1/models`
+    : `${openAiRoot(profile.baseUrl)}/models`;
+  const data = await checkedJson(await fetcher(url, { headers: headers(profile) }));
+  return inventoryItems(inventoryRows(data));
+}
+
+export async function discoverEmbeddingModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
   if (profile.providerType !== "openrouter") return discoverModels(profile, fetcher);
+  const data = await checkedJson(await fetcher(`${rootUrl(profile.baseUrl)}/embeddings/models`, { headers: headers(profile) }));
+  return inventoryRows(data).map((model: any) => ({
+    id: String(model.id || model.canonical_slug || model.key || ""),
+    displayName: String(model.name || model.display_name || model.id || model.canonical_slug || model.key || ""),
+    loaded: true,
+    instanceId: String(model.id || model.canonical_slug || model.key || ""),
+    contextLength: Number(model.context_length || model.top_provider?.context_length || 0)
+  })).filter((model: ModelInventoryItem) => model.id);
+}
+
+export async function discoverImageModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
+  if (profile.providerType !== "openrouter") {
+    const url = profile.providerType === "lmstudio"
+      ? `${lmStudioRoot(profile.baseUrl)}/api/v1/models`
+      : `${openAiRoot(profile.baseUrl)}/models`;
+    const data = await checkedJson(await fetcher(url, { headers: headers(profile) }));
+    return inventoryItems(imageInventoryRows(inventoryRows(data)));
+  }
   const data = await checkedJson(await fetcher(`${rootUrl(profile.baseUrl)}/images/models`, { headers: headers(profile) }));
   return inventoryRows(data).map((model: any) => ({
     id: String(model.id || model.key || ""),

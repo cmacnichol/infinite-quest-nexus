@@ -11,6 +11,7 @@ import { enqueueGeneration, getGenerationJob, runGenerationJob } from "../../ser
 import { getImageJob, listCampaignImageJobs, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
+import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -24,7 +25,11 @@ function storyOutput() {
     custom_action_suggestion: "Inspect the luminous boundary.",
     scratchpad: "Synthetic fiction continuity only.",
     tracker_updates: [],
-    image_prompt: "A quiet violet sky above a luminous stone arch in an empty valley."
+    image_prompt: "A quiet violet sky above a luminous stone arch in an empty valley.",
+    continuity_summary: "A luminous stone arch stands open beneath the violet sky.",
+    canonical_facts: ["The luminous stone arch is open."],
+    superseded_facts: [],
+    open_threads: ["Explore beyond the luminous arch."]
   });
 }
 
@@ -56,7 +61,7 @@ integration("independent illustration pipeline", () => {
             return;
           }
           response.writeHead(200, { "content-type": "application/json" });
-          response.end(JSON.stringify({ id: crypto.randomUUID(), data: [{ b64_json: tinyPng }] }));
+          response.end(JSON.stringify({ id: crypto.randomUUID(), data: [{ b64_json: tinyPng }], usage: { cost: 0.04 } }));
           return;
         }
         response.writeHead(200, { "content-type": "application/json" });
@@ -154,6 +159,8 @@ integration("independent illustration pipeline", () => {
     expect(JSON.stringify(imageRequest)).not.toMatch(/roll|dice|check|scratchpad|Synthetic Location Image opens/i);
     const turn = await pool.query<{ image_url: string }>("SELECT image_url FROM turns WHERE campaign_id = $1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId]);
     expect(turn.rows[0]?.image_url).toMatch(/^\/api\/v1\/assets\//);
+    const costSummary = await getCampaignCostSummary(pool, imported.campaignId);
+    expect(costSummary.totals[0]?.byCategory.image).toBe("0.040000000000");
   });
 
   it("preserves the accepted story when the independent image endpoint fails", async () => {
