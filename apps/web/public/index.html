@@ -109,7 +109,12 @@
             <label>Tone<input id="worldTone" maxlength="2000" disabled></label>
             <label class="wide-field">Premise<textarea id="worldPremise" rows="3" maxlength="200000" disabled></textarea></label>
             <label class="wide-field">Background and canon<textarea id="worldBackground" rows="6" maxlength="200000" disabled></textarea></label>
-            <label class="wide-field">Character defaults<textarea id="worldCharacter" rows="3" maxlength="200000" disabled></textarea></label>
+            <label class="wide-field">Legacy/default character guidance<textarea id="worldCharacter" rows="3" maxlength="200000" disabled></textarea></label>
+            <div class="wide-field character-roster-field">
+              <strong>Playable character roster</strong>
+              <span class="field-note">Imported character options are retained in the world version and selected when a campaign is created.</span>
+              <div id="worldCharacterRoster" class="character-roster"><span class="muted">No structured character roster.</span></div>
+            </div>
             <label class="wide-field">Opening action<textarea id="worldFirstAction" rows="2" maxlength="200000" disabled></textarea></label>
             <label class="wide-field">Rules<textarea id="worldRules" rows="3" maxlength="200000" disabled></textarea></label>
             <label class="wide-field">Release notes<input id="worldReleaseNotes" maxlength="10000" disabled placeholder="Describe this published version without changing canon"></label>
@@ -117,6 +122,10 @@
           <div class="quick-create-fields">
             <label>Fork title<input id="forkWorldTitle" maxlength="200" disabled placeholder="Name an independent fork"></label>
             <label>New campaign title<input id="newCampaignTitle" maxlength="200" disabled placeholder="Name a campaign for the selected version"></label>
+            <label>Campaign player character
+              <select id="newCampaignCharacter" disabled><option value="">Select a published world version</option></select>
+              <span id="newCampaignCharacterNote" class="field-note">The selected character is snapshotted into the new campaign.</span>
+            </label>
           </div>
           <div class="button-row world-actions">
             <button id="saveWorldDraft" class="button primary" type="submit" disabled>Save draft</button>
@@ -308,12 +317,12 @@
             <option value="story_text">Matching story TXT</option>
           </select>
         </label>
-        <label id="infiniteWorldsCharacterField" class="hidden">Player character
+        <label id="infiniteWorldsCharacterField" class="hidden">Story player character
           <select id="infiniteWorldsCharacter"></select>
         </label>
         <label class="toggle-field"><input id="infiniteWorldsEnrichFinal" type="checkbox"> Generate missing final-turn choices with the selected text provider</label>
         <label class="toggle-field"><input id="infiniteWorldsFinalImage" type="checkbox"> Queue an illustration for the latest imported turn</label>
-        <p class="muted">Story TXT attaches to the latest published version of the selected World Library world. World TXT conversion uses the selected text provider below.</p>
+        <p class="muted">World imports retain every playable character. Story TXT attaches to the selected published world version and may require choosing the character used by that story. World TXT conversion uses the selected text provider below.</p>
       </div>
       <div class="import-actions">
         <button id="openClipboardImport" class="button secondary" type="button">Paste copied content</button>

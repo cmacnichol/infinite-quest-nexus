@@ -4,6 +4,8 @@ import type { LegacyStory, LegacyTurn, StoryImportRequest, StoryImportResult } f
 import { storyLengthProfileFromUnknown } from "../../../packages/contracts/src/story-settings.js";
 import { buildTurnFictionMemory, formatLegacySummary, turnNarration } from "../../../packages/story-engine/src/chronicle.js";
 import { estimateTokens, removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
+import { campaignCharacterSeed, characterSnapshot } from "../../../packages/domain/src/world-characters.js";
+import { worldContentSchema, type WorldContent } from "../../../packages/contracts/src/world-library.js";
 import { importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
 
 type ImportRow = {
@@ -38,11 +40,27 @@ function worldTitle(story: LegacyStory): string {
 }
 
 function legacyWorldContent(story: LegacyStory): Record<string, unknown> {
+  const provenance = story.storyImportProvenance && typeof story.storyImportProvenance === "object" && !Array.isArray(story.storyImportProvenance)
+    ? story.storyImportProvenance as Record<string, unknown>
+    : {};
+  const selectedCharacterId = typeof provenance.selectedCharacterId === "string" ? provenance.selectedCharacterId.trim() : "";
+  const characterText = String(story.world.character || "").trim();
+  const characterName = (typeof provenance.selectedCharacterName === "string" && provenance.selectedCharacterName.trim()
+    ? provenance.selectedCharacterName.trim()
+    : characterText.split(/\r?\n/).find((line) => line.trim())?.trim() || "Default character").slice(0, 200);
   return {
-    schemaVersion: 1,
+    schemaVersion: selectedCharacterId ? 3 : 1,
     world: story.world,
-    rpgStats: story.rpgStats ?? [],
-    defaultTriggers: story.defaultTriggers ?? story.baseTrackersAtStart ?? [],
+    ...(selectedCharacterId ? { playableCharacters: [{
+      id: selectedCharacterId,
+      name: characterName,
+      characterText,
+      rpgStats: story.rpgStats ?? [],
+      defaultTriggers: story.defaultTriggers ?? story.baseTrackersAtStart ?? [],
+      source: { type: "nexus-campaign-export" }
+    }] } : {}),
+    rpgStats: selectedCharacterId ? [] : story.rpgStats ?? [],
+    defaultTriggers: selectedCharacterId ? [] : story.defaultTriggers ?? story.baseTrackersAtStart ?? [],
     eventTriggers: story.eventTriggers ?? [],
     importedFromLegacyStory: true
   };
@@ -64,8 +82,17 @@ function sanitizedStoryForHash(story: LegacyStory): Record<string, unknown> {
 function importSourceHash(request: StoryImportRequest): string {
   return sha256(stableStringify({
     story: sanitizedStoryForHash(request.story),
-    targetWorldVersionId: request.targetWorldVersionId ?? null
+    targetWorldVersionId: request.targetWorldVersionId ?? null,
+    selectedCharacterId: requestedCharacterId(request) ?? null
   }));
+}
+
+function requestedCharacterId(request: StoryImportRequest): string | undefined {
+  if (request.selectedCharacterId) return request.selectedCharacterId;
+  const provenance = request.story.storyImportProvenance;
+  if (!provenance || typeof provenance !== "object" || Array.isArray(provenance)) return undefined;
+  const value = (provenance as Record<string, unknown>).selectedCharacterId;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function duplicateResult(row: ImportRow): StoryImportResult {
@@ -123,9 +150,11 @@ async function reconnectMatchingCampaign(
        JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
       WHERE c.owner_user_id = $1 AND c.title = $2 AND c.active_turn_number = $3
         AND ($4::uuid IS NULL OR c.world_version_id = $4)
-      ORDER BY (c.id = $5::uuid) DESC, c.updated_at DESC
+        AND ($5::text IS NULL OR c.selected_character_id = $5)
+      ORDER BY (c.id = $6::uuid) DESC, c.updated_at DESC
       FOR SHARE OF c`,
-    [ownerUserId, worldTitle(request.story), request.story.turns.length, requiredWorldVersionId ?? null, priorImport?.campaign_id ?? null]
+    [ownerUserId, worldTitle(request.story), request.story.turns.length, requiredWorldVersionId ?? null,
+      requestedCharacterId(request) ?? null, priorImport?.campaign_id ?? null]
   );
   const requestedTurns = request.story.turns.map(turnIdentity);
   for (const candidate of candidates.rows) {
@@ -292,6 +321,14 @@ export async function importLegacyStory(
       }
     }
 
+    const pinnedContentResult = await client.query<{ content: WorldContent }>(
+      "SELECT content FROM world_versions WHERE id = $1 AND owner_user_id = $2",
+      [worldVersionId, ownerUserId]
+    );
+    const pinnedContent = worldContentSchema.parse(pinnedContentResult.rows[0]?.content);
+    const characterSeed = campaignCharacterSeed(pinnedContent, requestedCharacterId(request));
+    const selectedCharacterSnapshot = characterSnapshot(characterSeed.character);
+
     const sanitizedSettings = removeProviderSecrets(request.story.settings);
     delete sanitizedSettings.nexusCampaignId;
     delete sanitizedSettings.nexusCampaignTurnCount;
@@ -300,9 +337,12 @@ export async function importLegacyStory(
     delete sanitizedSettings.nexusBranchWorldVersionId;
     const storyLengthProfile = storyLengthProfileFromUnknown(request.story.settings?.storyLength ?? request.story.settings?.story_length);
     const campaignInsert = await client.query<{ id: string }>(
-      `INSERT INTO campaigns (owner_user_id, world_version_id, title, active_turn_number, story_length_profile, legacy_settings)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [ownerUserId, worldVersionId, worldTitle(request.story), request.story.turns.length, storyLengthProfile, json(sanitizedSettings)]
+      `INSERT INTO campaigns (
+         owner_user_id, world_version_id, title, active_turn_number, story_length_profile,
+         legacy_settings, selected_character_id, character_snapshot
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [ownerUserId, worldVersionId, worldTitle(request.story), request.story.turns.length, storyLengthProfile,
+        json(sanitizedSettings), characterSeed.character.id, json(selectedCharacterSnapshot)]
     );
     const campaignId = campaignInsert.rows[0]?.id;
     if (!campaignId) throw new Error("Could not create the imported campaign.");
@@ -325,6 +365,7 @@ export async function importLegacyStory(
           sourceType: request.targetWorldVersionId ? "infinite_worlds_story_txt" : "legacy_story_json",
           sourceName: request.sourceName,
           sourceHash,
+          selectedCharacterId: characterSeed.character.id,
           world: request.story.worldImportProvenance ?? null,
           story: request.story.storyImportProvenance ?? null
         })

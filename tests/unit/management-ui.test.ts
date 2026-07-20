@@ -53,6 +53,17 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('/api/v1/imports/infinite-worlds');
   });
 
+  it("retains imported character rosters and selects a character when creating a campaign", () => {
+    expect(managementHtml).toContain('id="worldCharacterRoster"');
+    expect(managementHtml).toContain('id="newCampaignCharacter"');
+    expect(managementHtml).toContain("World imports retain every playable character.");
+    expect(managementScript).toContain("async function loadWorldVersionPlayableCharacters()");
+    expect(managementScript).toContain('/playable-characters`');
+    expect(managementScript).toContain("selectedCharacterId");
+    expect(managementScript).toContain("all ${preview.characters.length || 1} playable character");
+    expect(managementScript).toContain('elements.infiniteWorldsCharacterField.classList.add("hidden");');
+  });
+
   it("keeps Provider Management dedicated to profiles and campaign provider assignments in World Management", () => {
     expect(managementHtml).toContain('class="card provider-card anchor-section provider-management"');
     expect(managementHtml).toContain('class="card world-library-card anchor-section world-management"');
@@ -125,7 +136,11 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="deleteWorld"');
     expect(managementHtml).toContain('id="deleteDialog"');
     expect(managementScript).toContain("infiniteQuestNexusCampaignResume.v1");
+    expect(managementScript).toContain("autoStart: Number(selectedCampaign.activeTurnNumber || 0) === 0");
     expect(managementScript).toContain("Use “Load story” in Campaigns");
+    expect(playerHtml).toContain("async function maybeAutoStartResumedCampaign()");
+    expect(playerHtml).toContain("await startAdventure({ skipExistingTurnsConfirm: true });");
+    expect(playerHtml).toContain("const startedResumedCampaign = await maybeAutoStartResumedCampaign();");
     expect(managementScript).toContain("function parseImportJson(sourceText)");
     expect(managementScript).not.toContain("window.prompt");
   });

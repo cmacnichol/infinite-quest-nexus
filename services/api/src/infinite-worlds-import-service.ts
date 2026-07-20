@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import type { InfiniteWorldsImportRequest, LegacyStory } from "../../../packages/contracts/src/imports.js";
-import { portableWorldSchema, worldContentSchema, type WorldContent } from "../../../packages/contracts/src/world-library.js";
+import { playableCharacterSchema, portableWorldSchema, worldContentSchema, type WorldContent } from "../../../packages/contracts/src/world-library.js";
 import {
   convertInfiniteWorldsWorld,
   infiniteWorldsCharacters,
@@ -15,8 +15,17 @@ import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js
 import { loadTextProvider } from "./provider-service.js";
 import { importWorld, previewWorldImport } from "./world-service.js";
 import type { FilesystemAssetStore } from "./asset-service.js";
+import { resolvePlayableCharacters } from "../../../packages/domain/src/world-characters.js";
 
 type ResolvedKind = "world_json" | "world_text" | "story_text";
+
+const convertedPlayableCharacterSchema = z.object({
+  id: z.string().trim().max(200).default(""),
+  name: z.string().trim().min(1).max(200),
+  character_text: z.string().max(200_000).default(""),
+  rpg_statistics: z.array(z.unknown()).max(10_000).default([]),
+  default_triggers: z.array(z.unknown()).max(10_000).default([])
+}).passthrough();
 
 const convertedWorldSchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -24,6 +33,7 @@ const convertedWorldSchema = z.object({
   tone: z.string().max(2000).default(""),
   backgroundStory: z.string().max(200_000).default(""),
   player_character: z.string().max(200_000).default(""),
+  playable_characters: z.array(convertedPlayableCharacterSchema).max(1000).default([]),
   premise: z.string().max(200_000).default(""),
   firstAction: z.string().max(200_000).default(""),
   story_rules: z.string().max(200_000).default(""),
@@ -66,11 +76,21 @@ async function targetWorldContent(pool: DatabasePool, targetWorldVersionId: stri
   return { worldId: row.world_id, content: worldContentSchema.parse(row.content) };
 }
 
+function matchedStoryCharacterId(content: WorldContent, characterText: string, requestedId?: string): string | undefined {
+  const characters = resolvePlayableCharacters(content);
+  if (requestedId) return requestedId;
+  if (characters.length === 1) return characters[0]?.id;
+  const firstLine = characterText.split(/\r?\n/).map((line) => line.trim()).find(Boolean)?.toLocaleLowerCase() || "";
+  if (!firstLine) return undefined;
+  const exact = characters.filter((character) => character.name.trim().toLocaleLowerCase() === firstLine);
+  return exact.length === 1 ? exact[0]?.id : undefined;
+}
+
 function worldConversionPrompt(sourceName: string, sourceText: string): { systemPrompt: string; input: string } {
   return {
     systemPrompt: `Convert an Infinite Worlds world-editor text export into one compact JSON object. Return JSON only. Preserve source facts and do not invent lore.
-Required fields: title, genre, tone, backgroundStory, player_character, premise, firstAction, story_rules, default_triggers, event_triggers, rpg_statistics.
-Use only the first listed playable character. Convert skills exactly: 1=20, 2=40, 3=60, 4=80, 5=99. Preserve tracked items as default_triggers. Do not include credentials, model instructions, private reasoning, rolls, checks, dice results, or parser diagnostics in fictional fields.`,
+Required fields: title, genre, tone, backgroundStory, playable_characters, premise, firstAction, story_rules, default_triggers, event_triggers, rpg_statistics.
+Return every listed playable character in playable_characters. Each entry needs id, name, character_text, rpg_statistics, and default_triggers. Character skills and tracked items belong only to that character entry; world-wide defaults remain at the top level. Convert skills exactly: 1=20, 2=40, 3=60, 4=80, 5=99. Do not include credentials, model instructions, private reasoning, rolls, checks, dice results, or parser diagnostics in fictional fields.`,
     input: JSON.stringify({ task: "Convert this Infinite Worlds world text for Infinite Quest Nexus.", sourceName, sourceText })
   };
 }
@@ -101,6 +121,25 @@ function mergeNamed(previous: unknown[], next: unknown[]): unknown[] {
   return [...values.values()];
 }
 
+function mergeConvertedCharacters(
+  previous: z.infer<typeof convertedPlayableCharacterSchema>[],
+  next: z.infer<typeof convertedPlayableCharacterSchema>[]
+): z.infer<typeof convertedPlayableCharacterSchema>[] {
+  const characters = new Map<string, z.infer<typeof convertedPlayableCharacterSchema>>();
+  for (const character of [...previous, ...next]) {
+    const key = String(character.id || character.name).trim().toLocaleLowerCase();
+    const existing = characters.get(key);
+    characters.set(key, convertedPlayableCharacterSchema.parse(existing ? {
+      ...existing,
+      ...character,
+      character_text: preferText(existing.character_text, character.character_text),
+      rpg_statistics: mergeNamed(existing.rpg_statistics, character.rpg_statistics),
+      default_triggers: mergeNamed(existing.default_triggers, character.default_triggers)
+    } : character));
+  }
+  return [...characters.values()];
+}
+
 function mergeConvertedWorld(previous: z.infer<typeof convertedWorldSchema> | null, next: z.infer<typeof convertedWorldSchema>) {
   if (!previous) return next;
   return convertedWorldSchema.parse({
@@ -110,12 +149,69 @@ function mergeConvertedWorld(previous: z.infer<typeof convertedWorldSchema> | nu
     tone: preferText(previous.tone, next.tone),
     backgroundStory: preferText(previous.backgroundStory, next.backgroundStory),
     player_character: preferText(previous.player_character, next.player_character),
+    playable_characters: mergeConvertedCharacters(previous.playable_characters, next.playable_characters),
     premise: preferText(previous.premise, next.premise),
     firstAction: preferText(previous.firstAction, next.firstAction),
     story_rules: preferText(previous.story_rules, next.story_rules),
     default_triggers: mergeNamed(previous.default_triggers, next.default_triggers),
     event_triggers: mergeNamed(previous.event_triggers, next.event_triggers),
     rpg_statistics: mergeNamed(previous.rpg_statistics, next.rpg_statistics)
+  });
+}
+
+function convertedCharacterId(name: string, index: number, supplied = ""): string {
+  if (supplied.trim()) return supplied.trim();
+  const slug = name.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
+  return `iw-text-character-${index + 1}${slug ? `-${slug}` : ""}`;
+}
+
+function convertedRpgStats(items: unknown[], characterId: string) {
+  return items.flatMap((item, index) => {
+    const row = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+    const name = String(row.name || row.skill || row.stat || "").trim();
+    if (!name) return [];
+    const numeric = Math.round(Number(row.value ?? row.score ?? row.rating ?? 50));
+    return [{
+      ...row,
+      id: String(row.id || `${characterId}-stat-${index + 1}`).slice(0, 200),
+      name: name.slice(0, 200),
+      value: Number.isFinite(numeric) ? Math.min(99, Math.max(1, numeric)) : 50,
+      note: String(row.note || row.covers || "").slice(0, 2000)
+    }];
+  });
+}
+
+function convertedDefaultTriggers(items: unknown[], characterId: string) {
+  return items.flatMap((item, index) => {
+    const row = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+    const name = String(row.name || row.label || row.title || "").trim();
+    if (!name) return [];
+    return [{
+      ...row,
+      id: String(row.id || `${characterId}-tracker-${index + 1}`).slice(0, 200),
+      name: name.slice(0, 300),
+      rules: String(row.rules || row.updateRules || row.description || `Track ${name} whenever it changes.`).slice(0, 4000),
+      value: String(row.value ?? row.initialValue ?? "Not yet established.").slice(0, 6000)
+    }];
+  });
+}
+
+function convertedPlayableCharacters(converted: z.infer<typeof convertedWorldSchema>) {
+  const candidates = converted.playable_characters.length
+    ? converted.playable_characters
+    : converted.player_character.trim()
+      ? [{ id: "", name: converted.player_character.split(/\r?\n/).find((line) => line.trim())?.trim() || "Default character", character_text: converted.player_character, rpg_statistics: converted.rpg_statistics, default_triggers: [] }]
+      : [];
+  return candidates.map((character, index) => {
+    const id = convertedCharacterId(character.name, index, character.id);
+    return playableCharacterSchema.parse({
+      id,
+      name: character.name,
+      characterText: character.character_text,
+      rpgStats: convertedRpgStats(character.rpg_statistics, id),
+      defaultTriggers: convertedDefaultTriggers(character.default_triggers, id),
+      source: { type: "infinite-worlds-text", index }
+    });
   });
 }
 
@@ -160,21 +256,26 @@ async function convertWorldText(pool: DatabasePool, request: InfiniteWorldsImpor
     converted = mergeConvertedWorld(converted, partial);
   }
   if (!converted) throw new Error("The text provider did not produce a world import.");
+  const playableCharacters = convertedPlayableCharacters(converted);
   const content = worldContentSchema.parse({
-    schemaVersion: 2,
+    schemaVersion: 3,
     world: {
       title: converted.title,
       genre: converted.genre,
       tone: converted.tone,
       backgroundStory: converted.backgroundStory,
-      character: converted.player_character,
+      character: playableCharacters[0]?.characterText || converted.player_character,
       premise: converted.premise,
       firstAction: converted.firstAction,
       rules: converted.story_rules
     },
-    entities: [], relationships: [], rpgStats: converted.rpg_statistics,
-    defaultTriggers: converted.default_triggers, eventTriggers: converted.event_triggers,
-    assets: [], defaults: { importedFrom: "infinite-worlds-text" }
+    playableCharacters,
+    entities: [], relationships: [], rpgStats: playableCharacters.length ? [] : convertedRpgStats(converted.rpg_statistics, "iw-text-world"),
+    defaultTriggers: convertedDefaultTriggers(converted.default_triggers, "iw-text-world"), eventTriggers: converted.event_triggers,
+    assets: [], defaults: {
+      importedFrom: "infinite-worlds-text",
+      defaultPlayableCharacterId: playableCharacters[0]?.id || ""
+    }
   });
   return portableWorldSchema.parse({ format: "infinite-quest-world", formatVersion: 1, title: converted.title, content });
 }
@@ -201,9 +302,9 @@ export async function previewInfiniteWorldsImport(pool: DatabasePool, request: I
   if (kind === "world_json") {
     const source = parseJsonText(request.sourceText);
     const characters = infiniteWorldsCharacters(source).map((character, index) => ({ index, name: String(character.name || `Character ${index + 1}`) }));
-    const worldExport = convertInfiniteWorldsWorld(source, request.selectedCharacterIndex);
+    const worldExport = convertInfiniteWorldsWorld(source);
     const preview = await previewWorldImport(pool, { sourceName: request.sourceName, worldExport });
-    return { ...preview, kind, valid: true, characters, selectedCharacterIndex: request.selectedCharacterIndex };
+    return { ...preview, kind, valid: true, characters };
   }
   if (kind === "world_text") {
     return {
@@ -219,14 +320,30 @@ export async function previewInfiniteWorldsImport(pool: DatabasePool, request: I
   }
   const target = await targetWorldContent(pool, request.targetWorldVersionId);
   const parsed = parseInfiniteWorldsStory(request.sourceText);
-  const story = infiniteWorldsStoryToLegacyStory(parsed, target.content, request.sourceName);
-  const preview = await previewLegacyStoryImport(pool, { sourceName: request.sourceName, story, targetWorldVersionId: request.targetWorldVersionId });
+  const characters = resolvePlayableCharacters(target.content);
+  const selectedCharacterId = matchedStoryCharacterId(target.content, parsed.characterText, request.selectedCharacterId);
+  if (!selectedCharacterId && characters.length > 1) {
+    return {
+      kind,
+      targetWorldId: target.worldId,
+      diagnostics: parsed.diagnostics,
+      characters: characters.map((character) => ({ id: character.id, name: character.name })),
+      selectedCharacterId: null,
+      valid: false,
+      warnings: ["Choose the playable character used by this story before importing it."],
+      counts: { turns: parsed.turns.length }
+    };
+  }
+  const story = infiniteWorldsStoryToLegacyStory(parsed, target.content, request.sourceName, selectedCharacterId);
+  const preview = await previewLegacyStoryImport(pool, { sourceName: request.sourceName, story, targetWorldVersionId: request.targetWorldVersionId, selectedCharacterId });
   const missingEnrichmentProvider = request.enrichFinalTurn && !request.providerProfileId;
   return {
     ...preview,
     kind,
     targetWorldId: target.worldId,
     diagnostics: parsed.diagnostics,
+    characters: characters.map((character) => ({ id: character.id, name: character.name })),
+    selectedCharacterId,
     valid: preview.valid && !missingEnrichmentProvider,
     warnings: [...preview.warnings, ...(missingEnrichmentProvider ? ["Select a text provider or disable final-turn enrichment."] : [])]
   };
@@ -241,15 +358,17 @@ export async function importInfiniteWorlds(
   const kind = resolveKind(request);
   if (kind === "world_json" || kind === "world_text") {
     const worldExport = kind === "world_json"
-      ? convertInfiniteWorldsWorld(parseJsonText(request.sourceText), request.selectedCharacterIndex)
+      ? convertInfiniteWorldsWorld(parseJsonText(request.sourceText))
       : await convertWorldText(pool, request, credentialSecret);
     const result = await importWorld(pool, { sourceName: request.sourceName, worldExport });
     return { kind: "world" as const, ...result };
   }
   if (!request.targetWorldVersionId) throw Object.assign(new Error("Select a published target world before importing matching story text."), { statusCode: 400 });
   const target = await targetWorldContent(pool, request.targetWorldVersionId);
-  const story = infiniteWorldsStoryToLegacyStory(parseInfiniteWorldsStory(request.sourceText), target.content, request.sourceName);
+  const parsed = parseInfiniteWorldsStory(request.sourceText);
+  const selectedCharacterId = matchedStoryCharacterId(target.content, parsed.characterText, request.selectedCharacterId);
+  const story = infiniteWorldsStoryToLegacyStory(parsed, target.content, request.sourceName, selectedCharacterId);
   await enrichFinalTurn(pool, request, story, credentialSecret);
-  const result = await importLegacyStory(pool, { sourceName: request.sourceName, story, targetWorldVersionId: request.targetWorldVersionId }, assetStore);
+  const result = await importLegacyStory(pool, { sourceName: request.sourceName, story, targetWorldVersionId: request.targetWorldVersionId, selectedCharacterId }, assetStore);
   return { kind: "campaign" as const, ...result };
 }

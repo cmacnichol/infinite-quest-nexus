@@ -62,6 +62,7 @@ import {
   forkWorld,
   getWorld,
   importWorld,
+  listWorldVersionPlayableCharacters,
   listCampaigns,
   listWorlds,
   migrateCampaignWorld,
@@ -266,6 +267,10 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.get("/api/v1/campaigns", async () => {
     return { campaigns: await listCampaigns(pool) };
   });
+
+  app.get<{ Params: { worldVersionId: string } }>("/api/v1/world-versions/:worldVersionId/playable-characters", async (request) => ({
+    characters: await listWorldVersionPlayableCharacters(pool, uuidSchema.parse(request.params.worldVersionId))
+  }));
 
   app.post("/api/v1/campaigns", async (request, reply) => (
     reply.code(201).send(await createCampaign(pool, campaignCreateSchema.parse(request.body)))

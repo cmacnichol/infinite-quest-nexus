@@ -14,6 +14,7 @@ import {
   worldImportRequestSchema,
   worldPublishSchema
 } from "../../packages/contracts/src/world-library.js";
+import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import {
   createCampaign,
   createWorld,
@@ -24,6 +25,7 @@ import {
   forkWorld,
   getWorld,
   importWorld,
+  listWorldVersionPlayableCharacters,
   listCampaigns,
   migrateCampaignWorld,
   previewWorldImport,
@@ -31,6 +33,8 @@ import {
   updateCampaign,
   updateWorldDraft
 } from "../../services/api/src/world-service.js";
+import { buildContextPreview } from "../../services/api/src/memory-service.js";
+import { importLegacyStory } from "../../services/api/src/import-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -127,11 +131,14 @@ integration("World Library and campaign version integration", () => {
     );
     const before = (await listCampaigns(pool)).find((item: any) => item.id === campaign.id);
     expect(before).toMatchObject({ worldVersionNumber: 1, latestWorldVersionNumber: 2, worldUpdateAvailable: true });
+    const characterBefore = await pool.query<{ character_snapshot: unknown }>("SELECT character_snapshot FROM campaigns WHERE id = $1", [campaign.id]);
     const migrated = await migrateCampaignWorld(pool, campaign.id, campaignWorldMigrationSchema.parse({
       worldVersionId: second.worldVersionId,
       note: "Synthetic migration"
     }));
     expect(migrated.worldVersionNumber).toBe(2);
+    const characterAfter = await pool.query<{ character_snapshot: unknown }>("SELECT character_snapshot FROM campaigns WHERE id = $1", [campaign.id]);
+    expect(characterAfter.rows[0]?.character_snapshot).toEqual(characterBefore.rows[0]?.character_snapshot);
     const audit = await pool.query("SELECT * FROM campaign_world_migrations WHERE campaign_id = $1", [campaign.id]);
     expect(audit.rows).toHaveLength(1);
     const turns = await pool.query("SELECT id FROM turns WHERE campaign_id = $1", [campaign.id]);
@@ -154,6 +161,85 @@ integration("World Library and campaign version integration", () => {
     expect(updated.storyLengthProfile).toBe("extended");
     const exported = await exportCampaign(pool, campaign.id);
     expect(exported.settings.storyLength).toBe("extended");
+  });
+
+  it("creates isolated campaign character snapshots from one multi-character world version", async () => {
+    const title = `Synthetic Roster World ${crypto.randomUUID()}`;
+    const rosterContent = worldContentSchema.parse({
+      schemaVersion: 3,
+      world: { title, character: "First character default" },
+      rpgStats: [{ id: "shared-stat", name: "Shared stat", value: 50, note: "" }],
+      defaultTriggers: [{ id: "shared-tracker", name: "Shared tracker", rules: "Track it.", value: "Initial" }],
+      playableCharacters: [
+        {
+          id: "first-character",
+          name: "First Character",
+          characterText: "First character canon.",
+          rpgStats: [{ id: "first-stat", name: "First stat", value: 60, note: "" }],
+          defaultTriggers: [{ id: "first-tracker", name: "First tracker", rules: "Track it.", value: "First" }]
+        },
+        {
+          id: "second-character",
+          name: "Second Character",
+          characterText: "Second character canon.",
+          rpgStats: [{ id: "second-stat", name: "Second stat", value: 70, note: "" }],
+          defaultTriggers: [{ id: "second-tracker", name: "Second tracker", rules: "Track it.", value: "Second" }]
+        }
+      ]
+    });
+    const created = await createWorld(pool, worldCreateSchema.parse({ title, content: rosterContent }));
+    const published = await publishWorld(pool, created.id, worldPublishSchema.parse({ expectedRevision: created.draftRevision }));
+    expect(await listWorldVersionPlayableCharacters(pool, published.worldVersionId)).toMatchObject([
+      { id: "first-character", name: "First Character" },
+      { id: "second-character", name: "Second Character" }
+    ]);
+    await expect(createCampaign(pool, campaignCreateSchema.parse({
+      title: `Missing Selection ${crypto.randomUUID()}`,
+      worldVersionId: published.worldVersionId
+    }))).rejects.toMatchObject({ statusCode: 400 });
+
+    const first = await createCampaign(pool, campaignCreateSchema.parse({
+      title: `First Campaign ${crypto.randomUUID()}`,
+      worldVersionId: published.worldVersionId,
+      selectedCharacterId: "first-character"
+    }));
+    const second = await createCampaign(pool, campaignCreateSchema.parse({
+      title: `Second Campaign ${crypto.randomUUID()}`,
+      worldVersionId: published.worldVersionId,
+      selectedCharacterId: "second-character"
+    }));
+    const rows = await pool.query<any>(
+      `SELECT c.id, c.selected_character_id, c.character_snapshot, cs.rpg_stats, cs.default_triggers
+         FROM campaigns c JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
+        WHERE c.id = ANY($1::uuid[]) ORDER BY c.selected_character_id`,
+      [[first.id, second.id]]
+    );
+    expect(rows.rows[0]).toMatchObject({ selected_character_id: "first-character", character_snapshot: { characterText: "First character canon." } });
+    expect(JSON.stringify(rows.rows[0].rpg_stats)).toContain("first-stat");
+    expect(JSON.stringify(rows.rows[0].rpg_stats)).not.toContain("second-stat");
+    expect(rows.rows[1]).toMatchObject({ selected_character_id: "second-character", character_snapshot: { characterText: "Second character canon." } });
+
+    const firstContext = await buildContextPreview(pool, first.id, { budgetTokens: 8000, compression: "auto", recentTurns: 4, query: "begin" });
+    const secondContext = await buildContextPreview(pool, second.id, { budgetTokens: 8000, compression: "auto", recentTurns: 4, query: "begin" });
+    expect(firstContext.scopes.worldCanon.character).toBe("First character canon.");
+    expect(secondContext.scopes.worldCanon.character).toBe("Second character canon.");
+    expect((await exportCampaign(pool, first.id)).world.character).toBe("First character canon.");
+    expect((await exportCampaign(pool, second.id)).world.character).toBe("Second character canon.");
+
+    const portableCampaign = await exportCampaign(pool, second.id);
+    portableCampaign.world.title = `Roundtrip Character ${crypto.randomUUID()}`;
+    const roundtrip = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: "synthetic-character-roundtrip.story",
+      story: portableCampaign
+    }));
+    const roundtripCampaign = await pool.query<{ selected_character_id: string; character_snapshot: any }>(
+      "SELECT selected_character_id, character_snapshot FROM campaigns WHERE id = $1",
+      [roundtrip.campaignId]
+    );
+    expect(roundtripCampaign.rows[0]).toMatchObject({
+      selected_character_id: "second-character",
+      character_snapshot: { characterText: "Second character canon." }
+    });
   });
 
   it("forks a selected immutable version into an independent draft", async () => {

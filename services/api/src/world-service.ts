@@ -15,6 +15,12 @@ import {
   type WorldStatusUpdateRequest
 } from "../../../packages/contracts/src/world-library.js";
 import { removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
+import {
+  campaignCharacterSeed,
+  characterSnapshot,
+  characterTextFromSnapshot,
+  resolvePlayableCharacters
+} from "../../../packages/domain/src/world-characters.js";
 import { resolveEffectiveProviderId } from "./provider-service.js";
 import { turnReportedCosts } from "./cost-service.js";
 
@@ -70,7 +76,7 @@ function sanitizeWorldValue(value: unknown): unknown {
 
 function normalizeWorldContent(title: string, content?: WorldContent): WorldContent {
   return worldContentSchema.parse(content ?? {
-    schemaVersion: 2,
+    schemaVersion: 3,
     world: {
       title,
       genre: "",
@@ -152,6 +158,8 @@ export async function getWorld(pool: DatabasePool, worldId: string) {
   const campaigns = await pool.query(
     `SELECT c.id, c.title, c.status, c.active_turn_number AS "activeTurnNumber",
             c.world_version_id AS "worldVersionId", wv.version_number AS "worldVersionNumber",
+            c.selected_character_id AS "selectedCharacterId",
+            c.character_snapshot->>'name' AS "selectedCharacterName",
             c.updated_at AS "updatedAt"
        FROM campaigns c
        JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
@@ -414,6 +422,8 @@ export async function listCampaigns(pool: DatabasePool) {
     `SELECT c.id, c.title, c.status, c.active_turn_number AS "activeTurnNumber",
             c.created_at AS "createdAt", c.updated_at AS "updatedAt",
             c.story_length_profile AS "storyLengthProfile",
+            c.selected_character_id AS "selectedCharacterId",
+            c.character_snapshot->>'name' AS "selectedCharacterName",
             w.id AS "worldId", w.title AS "worldTitle", c.world_version_id AS "worldVersionId",
             c.text_provider_profile_id AS "textProviderProfileId",
             c.image_provider_profile_id AS "imageProviderProfileId",
@@ -443,10 +453,16 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
     );
     const source = version.rows[0];
     if (!source) throw httpError(404, "Published world version not found.");
+    const content = worldContentSchema.parse(source.content);
+    const seed = campaignCharacterSeed(content, request.selectedCharacterId);
+    const snapshot = characterSnapshot(seed.character);
     const campaign = await client.query<{ id: string }>(
-      `INSERT INTO campaigns (owner_user_id, world_version_id, title, story_length_profile)
-       VALUES ($1,$2,$3,$4) RETURNING id`,
-      [ownerUserId, request.worldVersionId, request.title, request.storyLengthProfile]
+      `INSERT INTO campaigns (
+         owner_user_id, world_version_id, title, story_length_profile,
+         selected_character_id, character_snapshot, legacy_settings
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+      [ownerUserId, request.worldVersionId, request.title, request.storyLengthProfile,
+        seed.character.id, json(snapshot), json({ useRpgStats: seed.rpgStats.length > 0 })]
     );
     const campaignId = campaign.rows[0]?.id;
     if (!campaignId) throw new Error("Could not create campaign.");
@@ -457,15 +473,33 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
       [
         campaignId,
         ownerUserId,
-        json(source.content.defaults?.trackers ?? []),
-        json(source.content.defaultTriggers),
-        json(source.content.eventTriggers),
-        json(source.content.rpgStats),
-        json({ sourceType: "world_library", worldId: source.world_id, worldVersionId: request.worldVersionId })
+        json(Array.isArray(content.defaults?.trackers) && content.defaults.trackers.length
+          ? content.defaults.trackers : seed.defaultTriggers),
+        json(seed.defaultTriggers),
+        json(content.eventTriggers),
+        json(seed.rpgStats),
+        json({ sourceType: "world_library", worldId: source.world_id, worldVersionId: request.worldVersionId, selectedCharacterId: seed.character.id })
       ]
     );
-    return { id: campaignId, title: request.title, status: "active", activeTurnNumber: 0, storyLengthProfile: request.storyLengthProfile, worldId: source.world_id, worldVersionId: request.worldVersionId, worldVersionNumber: source.version_number, textProviderProfileId: null, imageProviderProfileId: null };
+    return { id: campaignId, title: request.title, status: "active", activeTurnNumber: 0, storyLengthProfile: request.storyLengthProfile, worldId: source.world_id, worldVersionId: request.worldVersionId, worldVersionNumber: source.version_number, selectedCharacterId: seed.character.id, selectedCharacterName: seed.character.name, textProviderProfileId: null, imageProviderProfileId: null };
   });
+}
+
+export async function listWorldVersionPlayableCharacters(pool: DatabasePool, worldVersionId: string) {
+  const ownerUserId = await initialOwnerId(pool);
+  const result = await pool.query<{ content: WorldContent }>(
+    "SELECT content FROM world_versions WHERE id = $1 AND owner_user_id = $2",
+    [worldVersionId, ownerUserId]
+  );
+  const row = result.rows[0];
+  if (!row) throw httpError(404, "Published world version not found.");
+  return resolvePlayableCharacters(worldContentSchema.parse(row.content)).map((character) => ({
+    id: character.id,
+    name: character.name,
+    rpgStatCount: character.rpgStats.length,
+    defaultTriggerCount: character.defaultTriggers.length,
+    legacy: character.legacy
+  }));
 }
 
 export async function updateCampaign(pool: DatabasePool, campaignId: string, request: CampaignUpdateRequest) {
@@ -624,7 +658,7 @@ export async function migrateCampaignWorld(pool: DatabasePool, campaignId: strin
     await client.query(
       `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, correlation_id, details)
        VALUES ($1,$2,'campaign_world_migrated',$3,$4)`,
-      [ownerUserId, campaignId, migration.rows[0]?.id, json({ fromWorldVersionId: current.world_version_id, toWorldVersionId: next.id, fromVersionNumber: current.version_number, toVersionNumber: next.version_number })]
+      [ownerUserId, campaignId, migration.rows[0]?.id, json({ fromWorldVersionId: current.world_version_id, toWorldVersionId: next.id, fromVersionNumber: current.version_number, toVersionNumber: next.version_number, characterSelectionRetained: true })]
     );
     return { migrationId: migration.rows[0]?.id, campaignId, fromWorldVersionId: current.world_version_id, toWorldVersionId: next.id, worldVersionNumber: next.version_number, migratedAt: migration.rows[0]?.created_at };
   });
@@ -633,7 +667,8 @@ export async function migrateCampaignWorld(pool: DatabasePool, campaignId: strin
 export async function exportCampaign(pool: DatabasePool, campaignId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const campaign = await pool.query<any>(
-    `SELECT c.title, c.status, c.active_turn_number, c.story_length_profile, c.legacy_settings, w.title AS world_title,
+    `SELECT c.title, c.status, c.active_turn_number, c.story_length_profile, c.legacy_settings,
+            c.selected_character_id, c.character_snapshot, w.title AS world_title,
             wv.id AS world_version_id, wv.version_number, wv.content, cs.*
        FROM campaigns c
        JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
@@ -661,11 +696,12 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
   );
   const importedHistory = history.rows[0];
   const importProvenance = row.import_provenance && typeof row.import_provenance === "object" ? row.import_provenance : {};
+  const selectedCharacterText = characterTextFromSnapshot(row.character_snapshot);
   return {
     format: "infinite-quest-campaign",
     formatVersion: 1,
     exportedAt: new Date().toISOString(),
-    world: row.content.world,
+    world: { ...row.content.world, ...(selectedCharacterText !== null ? { character: selectedCharacterText } : {}) },
     settings: { ...portableCampaignSettings(row.legacy_settings), storyLength: row.story_length_profile },
     turns: turns.rows.map((turn: any) => ({
       id: turn.id,
@@ -698,7 +734,9 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
       ...(importProvenance.story && typeof importProvenance.story === "object" ? importProvenance.story : {}),
       sourceType: "nexus_campaign_export",
       worldVersionId: row.world_version_id,
-      worldVersionNumber: row.version_number
+      worldVersionNumber: row.version_number,
+      selectedCharacterId: row.selected_character_id ?? null,
+      selectedCharacterName: row.character_snapshot?.name ?? null
     }
   };
 }

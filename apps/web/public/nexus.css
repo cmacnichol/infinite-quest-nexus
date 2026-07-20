@@ -81,8 +81,12 @@ textarea { resize: vertical; }
 .world-editor-heading h3 { margin: 0 0 5px; color: var(--gold); }
 .world-editor-heading label, .world-fields label, .campaign-controls label { display: grid; gap: 7px; color: var(--muted); font-size: .82rem; font-weight: 700; }
 .world-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
-.quick-create-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 0 0 12px; }
+.quick-create-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0 0 12px; }
 .quick-create-fields label { display: grid; gap: 7px; color: var(--muted); font-size: .82rem; font-weight: 700; }
+.character-roster-field { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.02); }
+.character-roster { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
+.character-roster-card { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(0,0,0,.12); }
+.character-roster-card span { color: var(--muted); font-size: .75rem; font-weight: 500; line-height: 1.4; }
 .wide-field { grid-column: 1 / -1; }
 .world-actions { margin-bottom: 12px; }
 .workspace { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 18px; margin: 18px 0 48px; }

@@ -46,4 +46,60 @@ integration("standard database migration runner", () => {
       await rm(migrationDirectory, { recursive: true, force: true });
     }
   });
+
+  it("backfills existing campaigns with their pinned legacy character without changing campaign state", async () => {
+    const databaseName = `infinitequest_character_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-character-migrations-"));
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      for (const file of await readdir(resolve("database/migrations"))) {
+        if (file.endsWith(".sql") && file < "0017_campaign_characters.sql") {
+          await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
+        }
+      }
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await migrateDatabase(isolatedPool, migrationDirectory);
+      const owner = await isolatedPool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'");
+      const world = await isolatedPool.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id, title) VALUES ($1, 'Existing World') RETURNING id",
+        [owner.rows[0]!.id]
+      );
+      const version = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
+         VALUES ($1,$2,1,$3) RETURNING id`,
+        [world.rows[0]!.id, owner.rows[0]!.id, JSON.stringify({
+          schemaVersion: 2,
+          world: { title: "Existing World", character: "Existing Hero\nKeeps the original campaign identity." },
+          rpgStats: [{ id: "existing-stat", name: "Existing Stat", value: 55 }],
+          defaultTriggers: [{ id: "existing-tracker", name: "Existing Tracker", value: "Existing" }]
+        })]
+      );
+      const campaign = await isolatedPool.query<{ id: string }>(
+        "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1,$2,'Existing Campaign') RETURNING id",
+        [owner.rows[0]!.id, version.rows[0]!.id]
+      );
+      await migrateDatabase(isolatedPool, resolve("database/migrations"));
+      const backfilled = await isolatedPool.query<any>(
+        "SELECT selected_character_id, character_snapshot FROM campaigns WHERE id = $1",
+        [campaign.rows[0]!.id]
+      );
+      expect(backfilled.rows[0]).toMatchObject({
+        selected_character_id: "legacy-default",
+        character_snapshot: {
+          name: "Existing Hero",
+          characterText: "Existing Hero\nKeeps the original campaign identity.",
+          rpgStats: [{ id: "existing-stat" }],
+          defaultTriggers: [{ id: "existing-tracker" }],
+          legacy: true
+        }
+      });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await pool.query(`DROP DATABASE IF EXISTS ${databaseName} WITH (FORCE)`);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
 });

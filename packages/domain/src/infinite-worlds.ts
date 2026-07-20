@@ -1,6 +1,7 @@
 import type { LegacyStory } from "../../contracts/src/imports.js";
-import type { WorldContent } from "../../contracts/src/world-library.js";
+import type { PlayableCharacter, WorldContent } from "../../contracts/src/world-library.js";
 import { stripMechanicsLeakage } from "./text.js";
+import { campaignCharacterSeed } from "./world-characters.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -72,6 +73,11 @@ function skillPercent(value: unknown): number {
   return 99;
 }
 
+function identifier(prefix: string, value: string, index: number): string {
+  const slug = value.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
+  return `${prefix}-${index + 1}${slug ? `-${slug}` : ""}`;
+}
+
 function rpgStats(skills: unknown, characterName: string): JsonObject[] {
   const entries: Array<[string, unknown]> = [];
   if (Array.isArray(skills)) {
@@ -85,20 +91,22 @@ function rpgStats(skills: unknown, characterName: string): JsonObject[] {
   } else {
     for (const [name, value] of Object.entries(object(skills))) entries.push([name, value]);
   }
-  return entries.filter(([name]) => name.trim()).map(([name, value]) => ({
+  return entries.filter(([name]) => name.trim()).map(([name, value], index) => ({
+    id: identifier("iw-stat", name, index),
     name: name.trim(),
     value: skillPercent(value),
-    covers: `Imported from Infinite Worlds${characterName ? ` for ${characterName}` : ""}. Original 1–5 rating: ${text(value) || "unknown"}.`
+    note: `Imported from Infinite Worlds${characterName ? ` for ${characterName}` : ""}. Original 1–5 rating: ${text(value) || "unknown"}.`
   }));
 }
 
 function trackers(items: unknown, ownerName: string): JsonObject[] {
   return (Array.isArray(items) ? items : []).map((item, index) => {
-    if (typeof item === "string") return { name: item, rules: `Track this item${ownerName ? ` for ${ownerName}` : ""} whenever it changes.`, value: item };
+    if (typeof item === "string") return { id: identifier("iw-tracker", item, index), name: item, rules: `Track this item${ownerName ? ` for ${ownerName}` : ""} whenever it changes.`, value: item };
     const row = object(item);
     const name = text(row.name ?? row.title ?? row.label ?? row.item ?? row.key) || `Tracked Item ${index + 1}`;
     const description = text(row.description ?? row.details ?? row.context ?? row.prompt ?? row.rules);
     return {
+      id: identifier("iw-tracker", name, index),
       name,
       rules: text(row.updateRules ?? row.update_rules ?? row.whenToUpdate ?? row.when_to_update ?? row.rules) || description || `Track this item${ownerName ? ` for ${ownerName}` : ""} whenever it changes.`,
       value: text(row.value ?? row.initialValue ?? row.initial_value ?? row.currentValue ?? row.current_value ?? row.startingValue ?? row.starting_value) || description || "Not yet established."
@@ -119,20 +127,25 @@ function eventTriggers(events: unknown): JsonObject[] {
       return typeof effect === "string" ? effect : text(row.data ?? row.text ?? row.effect ?? row.instructions) || compact(effect);
     }).filter(Boolean) : [];
     return {
+      id: identifier("iw-trigger", name, index),
+      label: name,
       timing: "before",
       condition: `${name}: ${event.triggerOnStartOfGame ? "At the start of the adventure. " : ""}${conditions.join("\n") || `When the “${name}” trigger should fire.`}`.trim(),
       effect: effects.join("\n\n") || text(event.effect ?? event.instructions ?? event.data) || compact(event),
-      addTextAfter: false
+      addTextAfter: false,
+      triggeredCount: 0,
+      lastTriggeredTurn: null,
+      lastTriggeredAt: null
     };
   }).filter((trigger) => text(trigger.effect));
 }
 
-function conditionTrigger(value: unknown, label: string): JsonObject | null {
+function conditionTrigger(value: unknown, label: string, id: string): JsonObject | null {
   if (!value) return null;
   const row = object(value);
   const condition = typeof value === "string" ? value : text(row.condition ?? row.when ?? row.text ?? row.name) || compact(value);
   const effect = typeof value === "string" ? `Resolve the ${label.toLowerCase()} according to the imported source.` : text(row.effect ?? row.result ?? row.outcome ?? row.data ?? row.text);
-  return { timing: "after", condition: `${label}: ${condition}`, effect: effect || `Resolve the ${label.toLowerCase()} according to the imported source.`, addTextAfter: true };
+  return { id, label, timing: "after", condition: `${label}: ${condition}`, effect: effect || `Resolve the ${label.toLowerCase()} according to the imported source.`, addTextAfter: true, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null };
 }
 
 function inferGenre(source: JsonObject): string {
@@ -146,45 +159,57 @@ function inferGenre(source: JsonObject): string {
   return [...new Set(values)].join(", ") || "Imported Infinite Worlds adventure";
 }
 
-export function convertInfiniteWorldsWorld(value: unknown, selectedCharacterIndex = 0): { format: "infinite-quest-world"; formatVersion: 1; title: string; content: WorldContent } {
+function playableCharacter(character: InfiniteWorldsCharacter, index: number): PlayableCharacter {
+  const name = text(character.name) || `Character ${index + 1}`;
+  return {
+    id: identifier("iw-character", name, index),
+    name,
+    characterText: sections(name, text(character.description), Array.isArray(character.initialTrackedItemValues) ? titled("Initial tracked item values", compact(character.initialTrackedItemValues)) : ""),
+    rpgStats: rpgStats(character.skills, name),
+    defaultTriggers: trackers(character.initialTrackedItemValues, name),
+    source: { type: "infinite-worlds-json", index }
+  };
+}
+
+export function convertInfiniteWorldsWorld(value: unknown): { format: "infinite-quest-world"; formatVersion: 1; title: string; content: WorldContent } {
   if (!isInfiniteWorldsWorld(value)) throw new Error("The JSON does not look like an Infinite Worlds world export.");
   const source = object(value);
   const characters = infiniteWorldsCharacters(source);
-  const character = characters[selectedCharacterIndex] ?? characters[0] ?? {};
-  const characterName = text(character.name);
+  const playableCharacters = characters.map(playableCharacter);
+  const defaultCharacter = playableCharacters[0];
   const title = text(source.title ?? source.name) || "Imported Infinite Worlds Adventure";
   const defaultTriggers: JsonObject[] = text(source.summaryRequest) ? [{ name: "Continuity / source summary request", rules: "Update whenever source-important continuity changes occur.", value: text(source.summaryRequest) }] : [];
-  defaultTriggers.push(...trackers(character.initialTrackedItemValues, characterName));
   const triggers = eventTriggers(source.triggerEvents);
-  const victory = conditionTrigger(source.victoryCondition, "Victory condition");
-  const defeat = conditionTrigger(source.defeatCondition, "Defeat condition");
+  const victory = conditionTrigger(source.victoryCondition, "Victory condition", "iw-victory-condition");
+  const defeat = conditionTrigger(source.defeatCondition, "Defeat condition", "iw-defeat-condition");
   if (victory) triggers.push(victory);
   if (defeat) triggers.push(defeat);
   const instructionBlocks = Array.isArray(source.instructionBlocks)
     ? source.instructionBlocks.map((item, index) => { const row = object(item); return titled(text(row.name) || `Instruction Block ${index + 1}`, row.content ?? row.text ?? row.instructions); }).filter(Boolean).join("\n\n")
     : "";
   const content: WorldContent = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     world: {
       title,
       genre: inferGenre(source),
       tone: text(source.authorStyle) || "Interactive fiction adapted from Infinite Worlds",
       backgroundStory: text(source.background),
-      character: sections(characterName, text(character.description), Array.isArray(character.initialTrackedItemValues) ? titled("Initial tracked item values", compact(character.initialTrackedItemValues)) : ""),
+      character: defaultCharacter?.characterText || "",
       premise: sections(titled("Description", source.description), titled("Objective", source.objective)),
       firstAction: text(source.firstInput),
       rules: sections(titled("Main Infinite Worlds instructions", source.instructions), titled("Summary request", source.summaryRequest), instructionBlocks)
     },
+    playableCharacters,
     entities: [],
     relationships: [],
-    rpgStats: rpgStats(character.skills, characterName),
+    rpgStats: [],
     defaultTriggers,
     eventTriggers: triggers,
     assets: [],
     defaults: {
       importedFrom: "infinite-worlds-json",
-      selectedCharacterName: characterName,
-      useRpgStats: rpgStats(character.skills, characterName).length > 0
+      defaultPlayableCharacterId: defaultCharacter?.id || "",
+      useRpgStats: playableCharacters.some((character) => character.rpgStats.length > 0)
     }
   };
   return { format: "infinite-quest-world", formatVersion: 1, title, content };
@@ -253,9 +278,10 @@ export function parseInfiniteWorldsStory(value: string): InfiniteWorldsStory {
   return { storyBackground: topLevelSection(source, "Story Background"), characterText: topLevelSection(source, "Character"), turns, diagnostics };
 }
 
-export function infiniteWorldsStoryToLegacyStory(parsed: InfiniteWorldsStory, worldContent: WorldContent, sourceName: string): LegacyStory {
+export function infiniteWorldsStoryToLegacyStory(parsed: InfiniteWorldsStory, worldContent: WorldContent, sourceName: string, selectedCharacterId?: string): LegacyStory {
   if (!parsed.turns.length) throw new Error("No '-- Turn N --' sections were found in the Infinite Worlds story text.");
-  const overview = worldContent.world;
+  const seed = campaignCharacterSeed(worldContent, selectedCharacterId);
+  const overview = { ...worldContent.world, character: seed.character.characterText };
   const turns = parsed.turns.map((turn, index) => ({
     turnNumber: index + 1,
     action: stripMechanicsLeakage(turn.action || (index === 0 ? overview.firstAction || "Imported opening scene" : "Continue.")).text,
@@ -268,12 +294,12 @@ export function infiniteWorldsStoryToLegacyStory(parsed: InfiniteWorldsStory, wo
   return {
     world: overview,
     turns,
-    rpgStats: worldContent.rpgStats,
-    defaultTriggers: worldContent.defaultTriggers,
+    rpgStats: seed.rpgStats,
+    defaultTriggers: seed.defaultTriggers,
     eventTriggers: worldContent.eventTriggers,
     scratchpad: "",
     fullHistory: turns.map((turn) => `Turn ${turn.turnNumber}\nAction: ${turn.action}\n${turn.narration}`).join("\n\n"),
     fullHistoryCompressedThroughTurn: turns.length,
-    storyImportProvenance: { sourceType: "infinite_worlds_story_txt", sourceName, diagnostics: parsed.diagnostics }
+    storyImportProvenance: { sourceType: "infinite_worlds_story_txt", sourceName, diagnostics: parsed.diagnostics, selectedCharacterId: seed.character.id, selectedCharacterName: seed.character.name }
   };
 }

@@ -53,7 +53,8 @@ export const legacyStorySchema = z.object({
 export const storyImportRequestSchema = z.object({
   sourceName: z.string().max(512).default("legacy-story.story"),
   story: legacyStorySchema,
-  targetWorldVersionId: z.uuid().optional()
+  targetWorldVersionId: z.uuid().optional(),
+  selectedCharacterId: z.string().trim().min(1).max(200).optional()
 });
 
 export const storyImportPreviewRequestSchema = storyImportRequestSchema;
@@ -68,6 +69,7 @@ export const infiniteWorldsImportRequestSchema = z.object({
   sourceText: z.string().min(1).max(50_000_000),
   sourceKind: z.enum(["auto", "world_json", "world_text", "story_text"]).default("auto"),
   selectedCharacterIndex: z.coerce.number().int().nonnegative().max(1000).default(0),
+  selectedCharacterId: z.string().trim().min(1).max(200).optional(),
   targetWorldVersionId: z.uuid().optional(),
   providerProfileId: z.uuid().optional(),
   model: z.string().trim().max(500).optional(),

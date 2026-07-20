@@ -5,6 +5,7 @@ import { DEFAULT_EMBEDDING_MODEL, type CampaignEmbeddingConfig, type Compression
 import { compressTurnMemory, buildTurnFictionMemory } from "../../../packages/story-engine/src/chronicle.js";
 import { callEmbeddingProvider, logProviderTransportError } from "../../../packages/story-engine/src/providers.js";
 import { estimateTokens, extractEntities, stableStringify, stripMechanicsLeakage, truncateAtBoundary } from "../../../packages/domain/src/text.js";
+import { characterTextFromSnapshot } from "../../../packages/domain/src/world-characters.js";
 import { loadEmbeddingProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
 
@@ -18,6 +19,7 @@ type CampaignScopeRow = {
   active_turn_number: number;
   world_version_id: string;
   world_content: Record<string, unknown>;
+  character_snapshot: Record<string, unknown> | null;
   scratchpad_private: string;
   scratchpad_safe_for_prompt: boolean;
   trackers: unknown;
@@ -288,10 +290,12 @@ function selectWorldItems(items: unknown, query: string, limit: number): unknown
     .filter((item) => item !== undefined);
 }
 
-function worldFictionCanon(content: Record<string, unknown>, query: string, maximumTokens: number): Record<string, unknown> {
-  const world = typeof content.world === "object" && content.world !== null
+function worldFictionCanon(content: Record<string, unknown>, characterSnapshot: unknown, query: string, maximumTokens: number): Record<string, unknown> {
+  const sourceWorld = typeof content.world === "object" && content.world !== null
     ? content.world as Record<string, unknown>
     : content;
+  const selectedCharacterText = characterTextFromSnapshot(characterSnapshot);
+  const world: Record<string, unknown> = { ...sourceWorld, ...(selectedCharacterText !== null ? { character: selectedCharacterText } : {}) };
   const allowed = ["title", "genre", "tone", "backgroundStory", "character", "premise", "firstAction", "rules"];
   const perOverviewLimit = Math.max(300, Math.floor(maximumTokens * 2.6 / allowed.length));
   const overview = Object.fromEntries(allowed.flatMap((key) => {
@@ -336,7 +340,8 @@ function campaignFictionCanon(campaign: CampaignScopeRow, maximumTokens: number)
 
 async function campaignScope(client: DatabaseClient | DatabasePool, ownerUserId: string, campaignId: string): Promise<CampaignScopeRow> {
   const result = await client.query<CampaignScopeRow>(
-    `SELECT c.id, c.title, c.active_turn_number, c.world_version_id, wv.content AS world_content,
+    `SELECT c.id, c.title, c.active_turn_number, c.world_version_id, c.character_snapshot,
+            wv.content AS world_content,
             cs.scratchpad_private, cs.scratchpad_safe_for_prompt, cs.trackers
        FROM campaigns c
        JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
@@ -682,7 +687,7 @@ export async function buildContextPreview(
   const expandedQuery = [options.query, truncateAtBoundary(latestHint, 1200)].filter(Boolean).join("\n");
   const retrieval = await applySemanticRelevance(pool, ownerUserId, campaignId, expandedQuery, memories, credentialSecret, costAttribution);
   const metrics = memoryMetricsFromRows(await metricsRow(pool, ownerUserId, campaignId));
-  const worldCanon = worldFictionCanon(campaign.world_content, expandedQuery, Math.max(384, Math.floor(options.budgetTokens * 0.34)));
+  const worldCanon = worldFictionCanon(campaign.world_content, campaign.character_snapshot, expandedQuery, Math.max(384, Math.floor(options.budgetTokens * 0.34)));
   const campaignCanon = campaignFictionCanon(campaign, Math.max(256, Math.floor(options.budgetTokens * 0.18)));
   const turnMemories = memories.filter((memory) => memory.memory_kind === "turn_fiction");
   const latest = turnMemories.at(-1) ?? null;

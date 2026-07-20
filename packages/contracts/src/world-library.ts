@@ -4,6 +4,16 @@ import { DEFAULT_STORY_LENGTH_PROFILE, storyLengthProfileSchema } from "./story-
 const title = z.string().trim().min(1).max(200);
 const shortText = z.string().max(2000).default("");
 const longText = z.string().max(200_000).default("");
+const characterId = z.string().trim().min(1).max(200);
+
+export const playableCharacterSchema = z.object({
+  id: characterId,
+  name: z.string().trim().min(1).max(200),
+  characterText: longText,
+  rpgStats: z.array(z.unknown()).max(10_000).default([]),
+  defaultTriggers: z.array(z.unknown()).max(10_000).default([]),
+  source: z.record(z.string(), z.unknown()).default({})
+}).passthrough();
 
 export const worldOverviewSchema = z.object({
   title,
@@ -17,8 +27,9 @@ export const worldOverviewSchema = z.object({
 }).passthrough();
 
 export const worldContentSchema = z.object({
-  schemaVersion: z.number().int().positive().default(2),
+  schemaVersion: z.number().int().positive().default(3),
   world: worldOverviewSchema,
+  playableCharacters: z.array(playableCharacterSchema).max(1000).default([]),
   entities: z.array(z.unknown()).max(20_000).default([]),
   relationships: z.array(z.unknown()).max(50_000).default([]),
   rpgStats: z.array(z.unknown()).max(10_000).default([]),
@@ -69,6 +80,7 @@ export const worldImportRequestSchema = z.object({
 export const campaignCreateSchema = z.object({
   worldVersionId: z.uuid(),
   title,
+  selectedCharacterId: characterId.optional(),
   storyLengthProfile: storyLengthProfileSchema.default(DEFAULT_STORY_LENGTH_PROFILE)
 });
 
@@ -91,6 +103,7 @@ export const resourceDeleteSchema = z.object({
 });
 
 export type WorldContent = z.infer<typeof worldContentSchema>;
+export type PlayableCharacter = z.infer<typeof playableCharacterSchema>;
 export type WorldCreateRequest = z.infer<typeof worldCreateSchema>;
 export type WorldDraftUpdateRequest = z.infer<typeof worldDraftUpdateSchema>;
 export type WorldPublishRequest = z.infer<typeof worldPublishSchema>;

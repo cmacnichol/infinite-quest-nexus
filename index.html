@@ -1837,6 +1837,7 @@
       branchChoicePending: false,
       nexusProviderProfiles: [],
       nexusProviderModels: [],
+      autoStartResumedCampaign: false,
       activeActivityOperationId: ""
     };
 
@@ -2676,9 +2677,13 @@
               nexusTurnId: String(turn.nexusTurnId || turn.id || ""),
               nexusCampaignId: campaignId
             }));
+            const autoStartResumedCampaign = resume.autoStart === true
+              && Number(resume.activeTurnNumber || 0) === 0
+              && imported.turns.length === 0;
             imported.viewIndex = imported.turns.length - 1;
             migrateMemoryManagementSetting(imported);
             state = cleanupDeprecatedState(mergeDefaults(deepClone(DEFAULT_STATE), imported));
+            transientUi.autoStartResumedCampaign = autoStartResumedCampaign;
             resetLmStudioStatefulConversation("nexus_campaign_resumed");
             state.unsavedFullExport = false;
             resumedCampaignTitle = String(imported.world?.title || "campaign");
@@ -8984,6 +8989,15 @@ ${missingList}`,
       await generateTurn(firstActionForNewAdventure());
     }
 
+    async function maybeAutoStartResumedCampaign() {
+      if (!transientUi.autoStartResumedCampaign) return false;
+      transientUi.autoStartResumedCampaign = false;
+      if (state.turns.length || !String(state.settings.nexusCampaignId || "")) return false;
+      if (!hasConfiguredProvider()) return false;
+      await startAdventure({ skipExistingTurnsConfirm: true });
+      return true;
+    }
+
     function firstActionForNewAdventure() {
       return String(state.world?.firstAction || "").trim() || "Begin the adventure.";
     }
@@ -10271,6 +10285,8 @@ ${missingList}`,
       const resumedGeneration = await maybeResumePendingNexusGeneration();
       resumePendingNexusIllustrations();
       if (resumedGeneration) return;
+      const startedResumedCampaign = await maybeAutoStartResumedCampaign();
+      if (startedResumedCampaign) return;
       maybeOpenGettingStarted();
     }
 

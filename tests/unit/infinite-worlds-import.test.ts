@@ -6,7 +6,7 @@ import {
 } from "../../packages/domain/src/infinite-worlds.js";
 
 describe("Infinite Worlds import conversion", () => {
-  it("converts a selected character, percentile skills, trackers, and triggers into a portable world", () => {
+  it("retains every character with isolated percentile skills and trackers", () => {
     const converted = convertInfiniteWorldsWorld({
       title: "Sanitized Test World",
       background: "A generic test setting.",
@@ -16,12 +16,18 @@ describe("Infinite Worlds import conversion", () => {
         { name: "Second", description: "The selected test character.", skills: { Insight: 5 }, initialTrackedItemValues: [{ name: "Clue", value: "Unknown" }] }
       ],
       triggerEvents: [{ name: "Arrival", triggerOnStartOfGame: true, triggerEffects: ["Introduce the setting."] }]
-    }, 1);
+    });
 
     expect(converted.format).toBe("infinite-quest-world");
-    expect(converted.content.world.character).toContain("Second");
-    expect(converted.content.rpgStats).toContainEqual(expect.objectContaining({ name: "Insight", value: 99 }));
-    expect(converted.content.defaultTriggers).toContainEqual(expect.objectContaining({ name: "Clue", value: "Unknown" }));
+    expect(converted.content.schemaVersion).toBe(3);
+    expect(converted.content.playableCharacters).toHaveLength(2);
+    expect(converted.content.playableCharacters[0]).toMatchObject({ name: "First", rpgStats: [expect.objectContaining({ name: "Insight", value: 20 })] });
+    expect(converted.content.playableCharacters[1]).toMatchObject({
+      name: "Second",
+      rpgStats: [expect.objectContaining({ name: "Insight", value: 99 })],
+      defaultTriggers: [expect.objectContaining({ name: "Clue", value: "Unknown" })]
+    });
+    expect(converted.content.rpgStats).toEqual([]);
     expect(converted.content.eventTriggers).toHaveLength(1);
     expect(converted.content).not.toHaveProperty("turns");
   });
@@ -49,5 +55,22 @@ The gate opens into a quiet courtyard.`);
     expect(story.turns[0]?.choices).toEqual(["Open the gate"]);
     expect(story.turns[0]?.narration).not.toMatch(/d20|roll|succeeds/i);
     expect(story.fullHistory).not.toMatch(/d20|roll succeeds/i);
+  });
+
+  it("uses the selected roster character when converting matching story text", () => {
+    const world = convertInfiniteWorldsWorld({
+      title: "Roster Test",
+      possibleCharacters: [
+        { name: "First", description: "First description", skills: { FirstSkill: 2 } },
+        { name: "Second", description: "Second description", skills: { SecondSkill: 4 } }
+      ]
+    }).content;
+    const parsed = parseInfiniteWorldsStory(`-- Character --\nSecond\n-- Turn 1 --\nOutcome\n-------\nThe story begins.`);
+    const second = world.playableCharacters[1]!;
+    const story = infiniteWorldsStoryToLegacyStory(parsed, world, "matching.txt", second.id);
+    expect(story.world.character).toContain("Second description");
+    expect(story.rpgStats).toContainEqual(expect.objectContaining({ name: "SecondSkill", value: 80 }));
+    expect(JSON.stringify(story.rpgStats)).not.toContain("FirstSkill");
+    expect(story.storyImportProvenance).toMatchObject({ selectedCharacterId: second.id, selectedCharacterName: "Second" });
   });
 });
