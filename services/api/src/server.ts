@@ -31,6 +31,7 @@ import {
   worldStatusUpdateSchema
 } from "../../../packages/contracts/src/world-library.js";
 import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
+import { formatNarrationParagraphs } from "../../../packages/story-engine/src/narration-formatting.js";
 import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js";
 import { importInfiniteWorlds, previewInfiniteWorldsImport } from "./infinite-worlds-import-service.js";
 import {
@@ -307,7 +308,13 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       [ownerUserId, campaignId]
     );
     const costs = await turnReportedCosts(pool, ownerUserId, result.rows.map((turn: { id: string }) => turn.id));
-    return { turns: result.rows.map((turn: { id: string }) => ({ ...turn, reportedCost: costs.get(turn.id) || null })) };
+    return {
+      turns: result.rows.map((turn: { id: string; narration: string }) => ({
+        ...turn,
+        narration: formatNarrationParagraphs(turn.narration),
+        reportedCost: costs.get(turn.id) || null
+      }))
+    };
   });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/cost-summary", async (request) => (

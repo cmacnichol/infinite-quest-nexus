@@ -1,5 +1,6 @@
 import { storyTurnOutputSchema, type StoryTurnOutput } from "../../contracts/src/generation.js";
 import { containsMechanicsLanguage, mechanicsLanguageMatches } from "../../domain/src/text.js";
+import { formatNarrationParagraphs } from "./narration-formatting.js";
 
 export { containsMechanicsLanguage, mechanicsLanguageMatches } from "../../domain/src/text.js";
 
@@ -95,7 +96,11 @@ export function parseStoryOutput(content: string, memoryDefaults: StoryMemoryDef
   if (!validated.success) {
     return { ok: false, code: "invalid_schema", errors: validated.error.issues.map((issue) => `${issue.path.join(".") || "response"}: ${issue.message}`) };
   }
-  const leakErrors = mechanicsLeakErrors(validated.data);
+  const story = {
+    ...validated.data,
+    narration: formatNarrationParagraphs(validated.data.narration)
+  };
+  const leakErrors = mechanicsLeakErrors(story);
   if (leakErrors.length) return { ok: false, code: "mechanics_leak", errors: leakErrors };
-  return { ok: true, story: validated.data };
+  return { ok: true, story };
 }

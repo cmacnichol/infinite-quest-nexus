@@ -2591,39 +2591,68 @@
       };
     }
 
-    function sentenceLooksComplete(sentence = "") {
-      return /[.!?]["'”’\)\]]*$/.test(String(sentence).trim());
+    function browserSentenceSegments(text = "") {
+      const value = String(text || "");
+      let segments = [];
+      if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
+        segments = [...new Intl.Segmenter("en", { granularity: "sentence" }).segment(value)]
+          .map(item => String(item.segment || "").trim())
+          .filter(Boolean);
+      } else {
+        segments = (value.match(/[^.!?]+[.!?]+(?:["'”’\)\]]+)?|[^.!?]+$/g) || [value])
+          .map(part => part.trim())
+          .filter(Boolean);
+      }
+      const merged = [];
+      segments.forEach(segment => {
+        const previous = merged.at(-1) || "";
+        const abbreviation = /\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Mt|vs|etc)\.$/i.test(previous);
+        const dialogueAttribution = /^["'“‘].*["'”’]$/.test(previous) && /^[a-z]/.test(segment);
+        if (previous && (abbreviation || dialogueAttribution)) merged[merged.length - 1] = `${previous} ${segment}`;
+        else merged.push(segment);
+      });
+      return merged;
     }
 
-    function paragraphizeEveryThreeSentences(text = "") {
+    function paragraphizeStoryText(text = "") {
       const original = String(text || "");
       const trimmed = original.trim();
       if (!trimmed) return original;
       const existingParagraphs = trimmed.split(/\n\s*\n/).filter(part => part.trim());
-      if (existingParagraphs.length > 1) return original;
+      if (existingParagraphs.length > 1) return existingParagraphs.map(part => part.trim().replace(/[ \t]+/g, " ")).join("\n\n");
 
-      const flattened = trimmed.replace(/\s*\n+\s*/g, " ").replace(/[ \t]+/g, " ");
-      const parts = flattened.match(/[^.!?]+[.!?]+(?:["'”’\)\]]+)?|[^.!?]+$/g) || [flattened];
+      const flattened = trimmed.replace(/\s+/g, " ");
+      if (flattened.length < 320) return flattened;
+      const parts = browserSentenceSegments(flattened);
+      if (parts.length < 2) return flattened;
       const paragraphs = [];
       let current = [];
-      let completeSentenceCount = 0;
-
-      parts.map(part => part.trim()).filter(Boolean).forEach(part => {
-        current.push(part);
-        if (sentenceLooksComplete(part)) completeSentenceCount += 1;
-        if (completeSentenceCount >= 3) {
+      let currentLength = 0;
+      let currentDialogue = false;
+      parts.forEach(part => {
+        const dialogue = /^["'“‘«‹]/.test(part);
+        const projectedLength = currentLength + (current.length ? 1 : 0) + part.length;
+        if (current.length && (current.length >= 3 || (projectedLength > 520 && currentLength >= 180) || (dialogue !== currentDialogue && currentLength >= 180))) {
           paragraphs.push(current.join(" "));
           current = [];
-          completeSentenceCount = 0;
+          currentLength = 0;
         }
+        if (!current.length) currentDialogue = dialogue;
+        current.push(part);
+        currentLength += (current.length > 1 ? 1 : 0) + part.length;
       });
-
       if (current.length) paragraphs.push(current.join(" "));
-      return paragraphs.length > 1 ? paragraphs.join("\n\n") : original;
+      if (paragraphs.length > 1 && paragraphs.at(-1).length < 90) {
+        const last = paragraphs.pop();
+        paragraphs[paragraphs.length - 1] = `${paragraphs.at(-1)} ${last}`;
+      }
+      const formatted = paragraphs.join("\n\n");
+      const withoutWhitespace = value => String(value || "").replace(/\s/g, "");
+      return withoutWhitespace(formatted) === withoutWhitespace(trimmed) ? formatted : trimmed;
     }
 
     function maybeParagraphizeStoryText(text = "") {
-      return isFreeTextModelMode() ? paragraphizeEveryThreeSentences(text) : String(text || "");
+      return paragraphizeStoryText(text);
     }
 
     function renderMarkdown(text = "") {
@@ -3433,7 +3462,7 @@
 
       // One-time compatibility with older saved browser states that stored two
       // separate free-mode flags. Current behavior is independent:
-      // - free LLM model => paragraph formatting only
+      // - all LLM models => local paragraph formatting when needed
       // - pollination.ai image model => Pollinations.ai image generation only
       const legacyPollinationsFree = !!state.settings.freeModelsWithPollinations;
       const legacyImagelessFree = !!state.settings.freeModelsOnly && !legacyPollinationsFree;
@@ -3602,9 +3631,7 @@
       if (imageToggle) {
         imageToggle.checked = state.settings.generateImages !== false;
         imageToggle.disabled = false;
-        imageToggle.title = freeTextMode
-          ? "Free LLM selected: narration without paragraph breaks will be grouped every 3 sentences."
-          : "";
+        imageToggle.title = "";
       }
 
       ["imageModel", "imageModelCustom"].forEach(id => {
@@ -6642,6 +6669,7 @@ Required JSON shape:
 }
 
 Design principles:
+- Format narration as readable prose paragraphs separated by two newline characters (\\n\\n). Prefer two to four sentences per paragraph. Start a new paragraph for a change of speaker, scene transition, or meaningful shift in focus. Do not use Markdown inside narration.
 - Respect player agency, but apply plausible limits and consequences.
 - Do not let the player dictate hidden facts for free; interpret attempts as actions, not guaranteed outcomes.
 - Keep continuity with the scratchpad and tracked state.

@@ -32,6 +32,7 @@ import {
   EVENT_TRIGGER_SYSTEM_PROMPT,
   fictionGuidanceForEvents,
   fictionGuidanceForRoll,
+  formatNarrationParagraphs,
   localRpgAssessment,
   logProviderTransportError,
   mechanicsLeakFields,
@@ -252,7 +253,11 @@ export async function getGenerationResult(pool: DatabasePool, jobId: string) {
     throw Object.assign(new Error(row.errorMessage || `Generation is ${row.status}.`), { statusCode: 409 });
   }
   const costs = await turnReportedCosts(pool, ownerUserId, [row.resultTurnId]);
-  return { ...row, reportedCost: costs.get(row.resultTurnId) || null };
+  return {
+    ...row,
+    narration: formatNarrationParagraphs(String(row.narration || "")),
+    reportedCost: costs.get(row.resultTurnId) || null
+  };
 }
 
 export async function retryGeneration(pool: DatabasePool, jobId: string) {
@@ -856,7 +861,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
     }
     const committedStory: StoryTurnOutput = orchestration.extension ? {
       ...parsed.story,
-      narration: `${parsed.story.narration}\n\n${orchestration.extension.additionalText}`.trim(),
+      narration: formatNarrationParagraphs(`${parsed.story.narration}\n\n${orchestration.extension.additionalText}`),
       scratchpad: orchestration.extension.scratchpad ?? parsed.story.scratchpad,
       tracker_updates: [...parsed.story.tracker_updates, ...orchestration.extension.trackerUpdates]
     } : parsed.story;

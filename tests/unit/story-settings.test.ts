@@ -21,4 +21,11 @@ describe("campaign story-length settings", () => {
     expect(migration).toContain("DEFAULT 'standard'");
     expect(migration).toContain("'brief', 'standard', 'long', 'extended'");
   });
+
+  it("applies the legacy-client readability fallback to every text model", () => {
+    const legacyClient = readFileSync("index.html", "utf8");
+    expect(legacyClient).toContain("function paragraphizeStoryText");
+    expect(legacyClient).toContain("return paragraphizeStoryText(text);");
+    expect(legacyClient).not.toContain("return isFreeTextModelMode() ? paragraphize");
+  });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { decryptCredential, encryptCredential } from "../../packages/story-engine/src/credentials.js";
 import { parseStoryOutput } from "../../packages/story-engine/src/output.js";
-import { buildStoryUserPrompt, STORY_SYSTEM_PROMPT, recoveryInstruction } from "../../packages/story-engine/src/prompt.js";
+import { buildStoryUserPrompt, STORY_PROMPT_PROTOCOL_VERSION, STORY_SYSTEM_PROMPT, recoveryInstruction } from "../../packages/story-engine/src/prompt.js";
 
 function story(overrides: Record<string, unknown> = {}) {
   return JSON.stringify({
@@ -74,6 +74,22 @@ describe("story output integrity", () => {
     expect(result).toMatchObject({ ok: true });
   });
 
+  it("formats long accepted narration before it reaches the turn ledger", () => {
+    const narration = [
+      "Location Alpha darkens as Test Character approaches the sealed northern entrance beneath the old observatory.",
+      "A narrow band of violet light passes over Marker One and disappears into the brass frame around the door.",
+      "You follow at a careful distance while rain moves across the glass roof in long silver curtains.",
+      "Something crosses the archive beyond the entrance and stops where the interior latch should be.",
+      "Test Character lowers the lantern and listens until a second, lighter footstep answers the first.",
+      "The speaking tube beside you clicks open, but no voice emerges from its dark metal mouth.",
+      "Three possible routes remain visible while the observatory machinery gathers speed beneath the floor."
+    ].join(" ");
+    const result = parseStoryOutput(story({ narration }));
+    expect(result.ok && result.story.narration).toContain("\n\n");
+    expect(result.ok && result.story.narration.replace(/\s/gu, ""))
+      .toBe(narration.replace(/\s/gu, ""));
+  });
+
   it("detects singular die resolution and returns actionable validation detail", () => {
     expect(parseStoryOutput(story({ narration: "The die shows seventeen, so the door opens." }))).toMatchObject({
       ok: false,
@@ -130,5 +146,11 @@ describe("story output integrity", () => {
     expect(payload.narration_length).toEqual({ profile: "extended", target_min_words: 1200, target_max_words: 2000 });
     expect(payload.task).toContain("1200-2000 narration words");
     expect(recoveryInstruction("output_limit", [], extended)).toContain("450-650 narration words");
+  });
+
+  it("privately requests readable narration paragraphs with a versioned protocol", () => {
+    expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v7-readable-paragraphs");
+    expect(STORY_SYSTEM_PROMPT).toContain("paragraphs separated by two newline characters");
+    expect(STORY_SYSTEM_PROMPT).toContain("change of speaker, scene transition, or meaningful shift in focus");
   });
 });
