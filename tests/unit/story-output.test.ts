@@ -127,6 +127,15 @@ describe("story output integrity", () => {
     expect(repair).toContain('[{"name":"fictional tracker name","value":"new fictional value"}]');
   });
 
+  it("handles invalid json by asking for schema-complete json", () => {
+    const repair = recoveryInstruction("invalid_json");
+    expect(repair).toContain("The preceding response was not a valid complete Infinite Quest story object. Recover the intended events and return one syntactically valid, schema-complete JSON object.");
+    expect(repair).toContain('tracker_updates must be an array of JSON objects such as [{"name":"fictional tracker name","value":"new fictional value"}], or [] when unchanged');
+
+    const repairWithErrors = recoveryInstruction("invalid_json", ["Unexpected end of JSON input"]);
+    expect(repairWithErrors).toContain("Correct these validation errors: Unexpected end of JSON input.");
+  });
+
   it("keeps typed fictional guidance separate from authoritative context", () => {
     const prompt = buildStoryUserPrompt(
       { campaign: { location: "Location Gamma" } },
