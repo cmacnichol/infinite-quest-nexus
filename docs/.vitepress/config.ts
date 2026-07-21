@@ -38,9 +38,21 @@ export default defineConfig({
     siteTitle: "Infinite Quest Nexus",
     nav: [
       { text: "Home", link: "/" },
-      { text: "Getting Started", link: "/getting-started/overview" },
-      { text: "Player Guide", link: "/player-guide/" },
-      { text: "Nexus Guide", link: "/nexus-guide/" },
+      {
+        text: "Guides",
+        items: [
+          { text: "Getting Started", link: "/getting-started/overview" },
+          { text: "Player Guide", link: "/player-guide/" },
+          { text: "Nexus Guide", link: "/nexus-guide/" }
+        ]
+      },
+      {
+        text: "Deploy and operate",
+        items: [
+          { text: "Installation", link: "/installation/" },
+          { text: "Operations", link: "/operations/" }
+        ]
+      },
       { text: "Architecture", link: "/architecture/" },
       { text: "Capabilities", link: "/reference/capabilities" }
     ],
@@ -131,6 +143,70 @@ export default defineConfig({
             { text: "Images", link: "/nexus-guide/providers/images" },
             { text: "Model discovery", link: "/nexus-guide/providers/model-discovery" },
             { text: "Health and errors", link: "/nexus-guide/providers/health-and-errors" }
+          ]
+        }
+      ],
+      "/installation/": [
+        {
+          text: "Installation",
+          items: [
+            { text: "Choose a deployment", link: "/installation/" },
+            { text: "Requirements", link: "/installation/requirements" },
+            { text: "Docker Compose", link: "/installation/docker-compose" },
+            { text: "Runtime configuration", link: "/installation/environment-configuration" },
+            { text: "Provider connectivity", link: "/installation/provider-configuration" },
+            { text: "Verify installation", link: "/installation/verify-installation" },
+            { text: "Initial user", link: "/installation/initial-user" },
+            { text: "Storage", link: "/installation/storage" },
+            { text: "Network access", link: "/installation/network-access" }
+          ]
+        }
+      ],
+      "/operations/": [
+        {
+          text: "Operations",
+          items: [
+            { text: "Overview", link: "/operations/" },
+            { text: "Health and readiness", link: "/operations/health-readiness" },
+            { text: "Logs and correlation", link: "/operations/logs-and-correlation" },
+            { text: "Migrations", link: "/operations/migrations" },
+            { text: "Upgrades", link: "/operations/upgrades" },
+            { text: "Backup and restore", link: "/operations/backup-restore" },
+            { text: "Troubleshooting", link: "/operations/troubleshooting" },
+            { text: "Security", link: "/operations/security" }
+          ]
+        },
+        {
+          text: "Compose",
+          collapsed: true,
+          items: [
+            { text: "Lifecycle", link: "/operations/compose/lifecycle" },
+            { text: "Storage", link: "/operations/compose/storage" },
+            { text: "Reset", link: "/operations/compose/reset" }
+          ]
+        },
+        {
+          text: "Swarm",
+          collapsed: true,
+          items: [
+            { text: "Architecture", link: "/operations/swarm/architecture" },
+            { text: "Prerequisites", link: "/operations/swarm/prerequisites" },
+            { text: "Secrets and configuration", link: "/operations/swarm/secrets-and-configs" },
+            { text: "Deploy", link: "/operations/swarm/deploy" },
+            { text: "Upgrade and rollback", link: "/operations/swarm/upgrade-rollback" },
+            { text: "Scaling", link: "/operations/swarm/scaling" },
+            { text: "Shared assets", link: "/operations/swarm/shared-assets" },
+            { text: "External PostgreSQL", link: "/operations/swarm/external-postgresql" }
+          ]
+        },
+        {
+          text: "Recovery",
+          collapsed: true,
+          items: [
+            { text: "Generation jobs", link: "/operations/recovery/generation-jobs" },
+            { text: "Image jobs", link: "/operations/recovery/image-jobs" },
+            { text: "Chronicle indexing", link: "/operations/recovery/chronicle-indexing" },
+            { text: "Database", link: "/operations/recovery/database" }
           ]
         }
       ],
