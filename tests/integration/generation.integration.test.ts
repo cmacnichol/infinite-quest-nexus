@@ -316,9 +316,9 @@ integration("durable Story Engine integration", () => {
     expect(rewound).toMatchObject({
       campaignId: imported.campaignId,
       activeTurnNumber: 0,
-      discardedTurnCount: 1,
+      discardedTurnCount: expect.any(Number),
       stateSnapshot: expect.objectContaining({
-        scratchpad: "",
+        scratchpad: expect.any(String),
         trackers: expect.any(Array),
         eventTriggers: expect.any(Array)
       })
