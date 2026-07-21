@@ -9,11 +9,11 @@ hero:
   tagline: Learn to play Infinite Quest, author reusable worlds, operate Nexus, and contribute safely.
   actions:
     - theme: brand
-      text: Read the architecture decisions
-      link: /architecture/
+      text: Quick start
+      link: /getting-started/quick-start
     - theme: alt
-      text: Documentation style guide
-      link: /contributing/documentation-style-guide
+      text: Player Guide
+      link: /player-guide/
 
 features:
   - title: Infinite Quest
@@ -26,8 +26,13 @@ features:
     details: Coordinate durable generation, validation, recovery, and optional independent illustrations.
 ---
 
-## Documentation rollout
+## Choose your path
 
-The documentation site is being introduced in phases. Existing architecture decisions are available now. Getting Started, player, Nexus management, installation, operations, and conceptual guides are added in the following documentation pull requests.
+- New installation: follow the [Quick start](./getting-started/quick-start.md).
+- First story: create a [world](./getting-started/first-world.md), [campaign](./getting-started/first-campaign.md), and [accepted turn](./getting-started/first-story-turn.md).
+- Existing campaign: open the [Player Guide](./player-guide/index.md).
+- World author or campaign manager: use the [Nexus Guide](./nexus-guide/index.md).
+- Administrator or operator: start with [Installation](./installation/index.md) and [Operations](./operations/index.md).
+- Design background: read the [current concepts](./concepts/index.md) and [architecture decisions](./architecture/index.md).
 
-For the currently documented command-line startup and repository status, see the [repository README](https://github.com/cmacnichol/infinite-quest-nexus#readme).
+Documentation changes are reviewed with the application source and validated by the documentation build.
