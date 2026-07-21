@@ -1040,38 +1040,32 @@ async function embedCampaignMemories(
     if (dimensions && batchDimensions !== dimensions) throw new Error("Embedding provider changed vector dimensions during the campaign rebuild.");
     dimensions = batchDimensions;
     await withTransaction(pool, async (client) => {
-      const ids: string[] = [];
-      const vectors: string[] = [];
-      const lengths: number[] = [];
-      const hashes: string[] = [];
-      const contents: string[] = [];
+      const updates = [];
       for (let index = 0; index < batch.length; index += 1) {
         const memory = batch[index];
         const vector = response.embeddings[index];
         if (!memory || !vector) throw new Error("Embedding batch response was incomplete.");
-        ids.push(memory.id);
-        vectors.push(vectorLiteral(vector));
-        lengths.push(vector.length);
-        hashes.push(contentHash(memory.content));
-        contents.push(memory.content);
+        updates.push({
+          id: memory.id,
+          embedding: vectorLiteral(vector),
+          dim: vector.length,
+          hash: contentHash(memory.content),
+          content: memory.content
+        });
       }
-      if (ids.length > 0) {
+      if (updates.length > 0) {
         await client.query(
           `UPDATE chronicle_memories AS m
-              SET embedding = v.embedding::vector,
+              SET embedding = (v.data->>'embedding')::vector,
                   embedding_provider_profile_id = $3,
                   embedding_model = $4,
-                  embedding_dimensions = v.dim,
-                  embedding_content_hash = v.hash,
+                  embedding_dimensions = (v.data->>'dim')::int,
+                  embedding_content_hash = v.data->>'hash',
                   embedding_updated_at = now(),
                   embedding_provider_fingerprint = $5
-             FROM (SELECT unnest($1::uuid[]) AS id,
-                          unnest($6::text[]) AS embedding,
-                          unnest($7::int[]) AS dim,
-                          unnest($8::text[]) AS hash,
-                          unnest($9::text[]) AS content) AS v
-            WHERE m.id = v.id AND m.owner_user_id = $2 AND m.campaign_id = $10 AND m.content = v.content`,
-          [ids, ownerUserId, provider.id, provider.model, fingerprint, vectors, lengths, hashes, contents, campaignId]
+             FROM jsonb_array_elements($1::jsonb) AS v(data)
+            WHERE m.id = (v.data->>'id')::uuid AND m.owner_user_id = $2 AND m.campaign_id = $6 AND m.content = v.data->>'content'`,
+          [JSON.stringify(updates), ownerUserId, provider.id, provider.model, fingerprint, campaignId]
         );
       }
       const batchTurnIds = [...new Set(batch.map((memory) => memory.turn_id).filter((turnId): turnId is string => Boolean(turnId)))];
