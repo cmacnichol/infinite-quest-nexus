@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Infinite Quest Nexus">
+  <defs>
+    <linearGradient id="nexus" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7567ff"/>
+      <stop offset="1" stop-color="#d463d7"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="#17152b"/>
+  <path d="M16 45V19h7l18 17V19h7v26h-7L23 28v17z" fill="url(#nexus)"/>
+</svg>
