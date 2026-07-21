@@ -104,7 +104,7 @@ integration("independent illustration pipeline", () => {
   });
 
   afterAll(async () => {
-    await new Promise<void>((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
+    if (server) await new Promise<void>((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
     await pool.end();
     await rm(assetRoot, { recursive: true, force: true });
   });
