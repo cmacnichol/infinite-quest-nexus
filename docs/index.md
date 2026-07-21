@@ -33,6 +33,6 @@ features:
 - Existing campaign: open the [Player Guide](./player-guide/index.md).
 - World author or campaign manager: use the [Nexus Guide](./nexus-guide/index.md).
 - Administrator or operator: start with [Installation](./installation/index.md) and [Operations](./operations/index.md).
-- Design background: browse the [architecture decisions](./architecture/index.md).
+- Design background: read the [current concepts](./concepts/index.md) and [architecture decisions](./architecture/index.md).
 
-Concept and security-architecture guides are added in the following documentation phase.
+Documentation changes are reviewed with the application source and validated by the documentation build.
