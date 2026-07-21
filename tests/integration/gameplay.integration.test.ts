@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { buildServer } from "../../services/api/src/server.js";
@@ -59,6 +59,25 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
   let imageProviderId = "";
   const replies: Array<{ content?: string; b64_json?: string; finishReason?: string }> = [];
   const requests: Array<Record<string, any>> = [];
+
+  async function importCampaign(label: string) {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    const identity = crypto.randomUUID();
+    fixture.world.title = `Integration Gameplay ${label} ${identity}`;
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/imports/legacy-story",
+      payload: { sourceName: `gameplay-${label}-${identity}.json`, story: fixture }
+    });
+    expect(response.statusCode).toBe(201);
+    const imported = response.json();
+    expect(imported).toMatchObject({
+      campaignId: expect.any(String),
+      worldVersionId: expect.any(String),
+      duplicate: false
+    });
+    return { ...imported, worldTitle: fixture.world.title };
+  }
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
@@ -136,29 +155,30 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     await pool.end();
   });
 
+  beforeEach(() => {
+    replies.length = 0;
+    requests.length = 0;
+  });
+
   it("orchestrates end-to-end Story Player turn submission, worker execution, and turn retrieval", async () => {
     // 1. Import a baseline campaign
-    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
-    fixture.world.title = `Integration Story Player ${crypto.randomUUID()}`;
-
-    const importResponse = await app.inject({
-      method: "POST",
-      url: "/api/v1/imports/legacy-story",
-      payload: { sourceName: "gameplay.story", story: fixture }
-    });
-    expect(importResponse.statusCode).toBe(201);
-    const { campaignId, worldVersionId } = importResponse.json();
-    expect(campaignId).toBeDefined();
+    const { campaignId, worldVersionId, worldTitle } = await importCampaign("story-player");
 
     // 2. Fetch campaign initial state as story.js does on load
     const campaignResponse = await app.inject({
       method: "GET",
-      url: `/api/v1/campaigns/${campaignId}`
+      url: `/api/v1/campaigns/${campaignId}/sync-status`
     });
     expect(campaignResponse.statusCode).toBe(200);
     const campaignData = campaignResponse.json();
-    expect(campaignData.id).toBe(campaignId);
-    expect(campaignData.worldVersionId).toBe(worldVersionId);
+    expect(campaignData.campaign).toMatchObject({ id: campaignId, worldVersionId });
+    expect(campaignData.world).toMatchObject({ title: worldTitle });
+    expect(campaignData.playerConfig).toMatchObject({
+      useRpgStats: false,
+      suppressEventTriggers: false,
+      rpgStats: [],
+      eventTriggers: []
+    });
 
     const turnsResponse = await app.inject({
       method: "GET",
@@ -183,7 +203,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(genResponse.statusCode).toBe(202);
     const job = genResponse.json();
     expect(job.id).toBeDefined();
-    expect(job.status).toBe("pending");
+    expect(job.status).toBe("queued");
 
     // 4. Simulate worker executing the generation job
     const workerRan = await runGenerationJob(pool, "worker-gameplay-1", 30, credentialSecret);
@@ -209,43 +229,77 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(latestTurn.choices).toContain("Examine the telescope.");
   });
 
-  it("supports scratchpad and tracker config updates via PUT /api/v1/campaigns/:id/player-config", async () => {
-    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
-    const importResponse = await app.inject({
-      method: "POST",
-      url: "/api/v1/imports/legacy-story",
-      payload: { sourceName: "gameplay.story", story: fixture }
-    });
-    const { campaignId } = importResponse.json();
+  it("synchronizes RPG and event-trigger config via PUT /api/v1/campaigns/:id/player-config", async () => {
+    const { campaignId } = await importCampaign("player-config");
+    const rpgStats = [
+      { id: "artifact-attunement", name: "Artifact Attunement", value: 17, note: "Synthetic gameplay stat." }
+    ];
+    const eventTriggers = [
+      {
+        id: "artifact-charged",
+        label: "Artifact charged",
+        timing: "after",
+        condition: "The artifact absorbs energy.",
+        effect: "The artifact begins to glow.",
+        addTextAfter: true,
+        triggeredCount: 0,
+        lastTriggeredTurn: null,
+        lastTriggeredAt: null
+      }
+    ];
+    const pendingEventTriggers = [
+      {
+        id: "pending-artifact",
+        sourceTriggerId: "artifact-charged",
+        name: "Describe the glow",
+        timing: "after",
+        condition: "The artifact is charged.",
+        effect: "Its light reveals a hidden inscription.",
+        instructions: "Describe the newly visible inscription.",
+        reason: "Deferred synthetic event.",
+        sourceTurn: 2
+      }
+    ];
 
     const configUpdate = await app.inject({
       method: "PUT",
       url: `/api/v1/campaigns/${campaignId}/player-config`,
       payload: {
-        scratchpad: "Updated continuity scratchpad notes.",
-        trackers: [
-          { name: "Artifact Power", value: "Charging", rules: "Update when energy is absorbed." }
-        ]
+        expectedTurnNumber: 2,
+        useRpgStats: true,
+        suppressEventTriggers: true,
+        rpgStats,
+        eventTriggers,
+        pendingEventTriggers
       }
     });
     expect(configUpdate.statusCode).toBe(200);
-    expect(configUpdate.json().scratchpad).toBe("Updated continuity scratchpad notes.");
+    expect(configUpdate.json()).toMatchObject({
+      campaignId,
+      activeTurnNumber: 2,
+      synchronized: true
+    });
 
     const campaignResponse = await app.inject({
       method: "GET",
-      url: `/api/v1/campaigns/${campaignId}`
+      url: `/api/v1/campaigns/${campaignId}/sync-status`
     });
-    expect(campaignResponse.json().playerConfig.scratchpad).toBe("Updated continuity scratchpad notes.");
+    expect(campaignResponse.statusCode).toBe(200);
+    expect(campaignResponse.json().playerConfig).toMatchObject({
+      useRpgStats: true,
+      suppressEventTriggers: true,
+      rpgStats,
+      eventTriggers
+    });
+    const state = await pool.query<{ pending_event_triggers: unknown }>(
+      "SELECT pending_event_triggers FROM campaign_state WHERE campaign_id = $1",
+      [campaignId]
+    );
+    expect(state.rows[0]?.pending_event_triggers).toEqual(pendingEventTriggers);
   });
 
   it("handles campaign rewind via POST /api/v1/campaigns/:id/rewind", async () => {
-    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
-    const importResponse = await app.inject({
-      method: "POST",
-      url: "/api/v1/imports/legacy-story",
-      payload: { sourceName: "gameplay.story", story: fixture }
-    });
-    const { campaignId } = importResponse.json();
+    const { campaignId } = await importCampaign("rewind");
 
     // Rewind back to turn 1
     const rewindResponse = await app.inject({
@@ -264,41 +318,33 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(turns[0].turnNumber).toBe(1);
   });
 
-  it("implements JSON, HTML, and Markdown exports via GET /api/v1/campaigns/:id/export", async () => {
-    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
-    const importResponse = await app.inject({
-      method: "POST",
-      url: "/api/v1/imports/legacy-story",
-      payload: { sourceName: "gameplay.story", story: fixture }
-    });
-    const { campaignId } = importResponse.json();
+  it("exports the portable campaign JSON format via GET /api/v1/campaigns/:id/export", async () => {
+    const { campaignId, worldTitle } = await importCampaign("export");
 
-    // JSON export
     const jsonExport = await app.inject({
       method: "GET",
-      url: `/api/v1/campaigns/${campaignId}/export?format=campaign_json`
+      url: `/api/v1/campaigns/${campaignId}/export`
     });
     expect(jsonExport.statusCode).toBe(200);
-    const exportedJson = JSON.parse(jsonExport.payload);
-    expect(exportedJson.campaign.id).toBe(campaignId);
-    expect(exportedJson.turns).toBeInstanceOf(Array);
-
-    // HTML export
-    const htmlExport = await app.inject({
-      method: "GET",
-      url: `/api/v1/campaigns/${campaignId}/export?format=html`
+    expect(jsonExport.headers["content-type"]).toContain("application/json");
+    expect(jsonExport.headers["content-disposition"]).toBe('attachment; filename="infinite-quest-campaign.json"');
+    const exported = jsonExport.json();
+    expect(exported).toMatchObject({
+      format: "infinite-quest-campaign",
+      formatVersion: 1,
+      world: { title: worldTitle },
+      settings: { storyLength: "long" }
     });
-    expect(htmlExport.statusCode).toBe(200);
-    expect(htmlExport.headers["content-type"]).toContain("text/html");
-    expect(htmlExport.payload).toContain("<!DOCTYPE html>");
-
-    // Markdown export
-    const mdExport = await app.inject({
-      method: "GET",
-      url: `/api/v1/campaigns/${campaignId}/export?format=markdown`
+    expect(exported.exportedAt).toEqual(expect.any(String));
+    expect(exported.turns).toHaveLength(2);
+    expect(exported.turns[0]).toMatchObject({ turnNumber: 1, action: "Inspect Object Beta." });
+    expect(exported.fullHistoryCompressedThroughTurn).toBe(2);
+    expect(exported.storyImportProvenance).toMatchObject({
+      sourceType: "nexus_campaign_export",
+      worldVersionId: expect.any(String),
+      worldVersionNumber: 1
     });
-    expect(mdExport.statusCode).toBe(200);
-    expect(mdExport.headers["content-type"]).toContain("text/markdown");
-    expect(mdExport.payload).toContain("# ");
+    expect(JSON.stringify(exported)).not.toContain("test-credential-placeholder");
+    expect(exported.settings).not.toHaveProperty("apiKey");
   });
 });
