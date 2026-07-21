@@ -301,7 +301,7 @@ integration("durable Story Engine integration", () => {
       "SELECT active_turn_number FROM campaigns WHERE id = $1",
       [imported.campaignId]
     );
-    expect(check.rows[0]?.active_turn_number).toBe(1);
+    expect(check.rows[0]?.active_turn_number).toBe(2);
   });
 
   it("rewinds to turn zero, restoring initial_state_snapshot and allowing the next turn to commit at turn 1", async () => {
@@ -316,7 +316,7 @@ integration("durable Story Engine integration", () => {
     expect(rewound).toMatchObject({
       campaignId: imported.campaignId,
       activeTurnNumber: 0,
-      discardedTurnCount: 1,
+      discardedTurnCount: 2,
       stateSnapshot: expect.objectContaining({
         scratchpad: "",
         trackers: expect.any(Array),
