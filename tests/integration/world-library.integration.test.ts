@@ -7,6 +7,7 @@ import {
   campaignUpdateSchema,
   campaignWorldMigrationSchema,
   resourceDeleteSchema,
+  WORLD_CONTENT_SCHEMA_VERSION,
   worldContentSchema,
   worldCreateSchema,
   worldDraftUpdateSchema,
@@ -23,6 +24,7 @@ import {
   exportCampaign,
   exportWorld,
   forkWorld,
+  getWorldVersionPlayableCharacterSummary,
   getWorld,
   importWorld,
   listWorldVersionPlayableCharacters,
@@ -41,17 +43,21 @@ const integration = databaseUrl ? describe : describe.skip;
 
 function content(title: string, marker: string) {
   return worldContentSchema.parse({
-    schemaVersion: 2,
+    schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
     world: {
       title,
       genre: "test",
       tone: "neutral",
       premise: `Premise ${marker}`,
       backgroundStory: `Background ${marker}`,
-      character: `Character ${marker}`,
       firstAction: `Action ${marker}`,
       rules: `Rules ${marker}`
-    }
+    },
+    playableCharacters: [{
+      id: `character-${marker.toLocaleLowerCase()}`,
+      name: `Character ${marker}`,
+      characterText: `Character ${marker}`
+    }]
   });
 }
 
@@ -93,6 +99,8 @@ integration("World Library and campaign version integration", () => {
     );
     expect(rows.rows[0]?.content.world.backgroundStory).toBe("Background One");
     expect(rows.rows[1]?.content.world.backgroundStory).toBe("Background Two");
+    expect(rows.rows[0]?.content.world).not.toHaveProperty("character");
+    expect(rows.rows[1]?.content.world).not.toHaveProperty("character");
   });
 
   it("rejects stale draft writes", async () => {
@@ -166,8 +174,8 @@ integration("World Library and campaign version integration", () => {
   it("creates isolated campaign character snapshots from one multi-character world version", async () => {
     const title = `Synthetic Roster World ${crypto.randomUUID()}`;
     const rosterContent = worldContentSchema.parse({
-      schemaVersion: 3,
-      world: { title, character: "First character default" },
+      schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
+      world: { title },
       rpgStats: [{ id: "shared-stat", name: "Shared stat", value: 50, note: "" }],
       defaultTriggers: [{ id: "shared-tracker", name: "Shared tracker", rules: "Track it.", value: "Initial" }],
       playableCharacters: [
@@ -219,6 +227,12 @@ integration("World Library and campaign version integration", () => {
     expect(JSON.stringify(rows.rows[0].rpg_stats)).not.toContain("second-stat");
     expect(rows.rows[1]).toMatchObject({ selected_character_id: "second-character", character_snapshot: { characterText: "Second character canon." } });
 
+    // Simulate a historical version that still carries the retired overview key.
+    await pool.query(
+      "UPDATE world_versions SET content = jsonb_set(content, '{world,character}', to_jsonb($2::text), true) WHERE id = $1",
+      [published.worldVersionId, "Historical default that must not override the campaign snapshot."]
+    );
+
     const firstContext = await buildContextPreview(pool, first.id, { budgetTokens: 8000, compression: "auto", recentTurns: 4, query: "begin" });
     const secondContext = await buildContextPreview(pool, second.id, { budgetTokens: 8000, compression: "auto", recentTurns: 4, query: "begin" });
     expect(firstContext.scopes.worldCanon.character).toBe("First character canon.");
@@ -239,6 +253,28 @@ integration("World Library and campaign version integration", () => {
     expect(roundtripCampaign.rows[0]).toMatchObject({
       selected_character_id: "second-character",
       character_snapshot: { characterText: "Second character canon." }
+    });
+  });
+
+  it("publishes incomplete drafts but rejects campaign creation until a playable character exists", async () => {
+    const title = `Synthetic Incomplete World ${crypto.randomUUID()}`;
+    const created = await createWorld(pool, worldCreateSchema.parse({ title }));
+    const published = await publishWorld(pool, created.id, worldPublishSchema.parse({ expectedRevision: created.draftRevision }));
+
+    expect(await listWorldVersionPlayableCharacters(pool, published.worldVersionId)).toEqual([]);
+    expect(await getWorldVersionPlayableCharacterSummary(pool, published.worldVersionId)).toMatchObject({
+      characters: [],
+      readiness: {
+        ready: false,
+        issues: [{ code: "no-playable-characters" }]
+      }
+    });
+    await expect(createCampaign(pool, campaignCreateSchema.parse({
+      title: `Unavailable Campaign ${crypto.randomUUID()}`,
+      worldVersionId: published.worldVersionId
+    }))).rejects.toMatchObject({
+      statusCode: 400,
+      message: "This world version has no playable characters."
     });
   });
 
@@ -279,6 +315,27 @@ integration("World Library and campaign version integration", () => {
     const exported = await exportWorld(pool, imported.worldId, imported.worldVersionId);
     expect(JSON.stringify(exported)).not.toContain("test-credential-placeholder");
     expect(JSON.stringify(exported)).not.toContain("apiKey");
+    expect(exported.content.world).not.toHaveProperty("character");
+    expect(exported.content.schemaVersion).toBe(WORLD_CONTENT_SCHEMA_VERSION);
+  });
+
+  it("rejects portable worlds that depend only on retired character guidance", async () => {
+    const title = `Synthetic Legacy Portable ${crypto.randomUUID()}`;
+    const request = worldImportRequestSchema.parse({
+      sourceName: "legacy-only-world.json",
+      worldExport: {
+        format: "infinite-quest-world",
+        formatVersion: 1,
+        title,
+        content: {
+          schemaVersion: 2,
+          world: { title, character: "Legacy-only guidance that must not be silently discarded." }
+        }
+      }
+    });
+
+    await expect(previewWorldImport(pool, request)).rejects.toMatchObject({ statusCode: 400 });
+    await expect(importWorld(pool, request)).rejects.toMatchObject({ statusCode: 400 });
   });
 
   it("exports campaign state without provider settings or credentials", async () => {

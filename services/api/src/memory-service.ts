@@ -330,8 +330,12 @@ function worldFictionCanon(content: Record<string, unknown>, characterSnapshot: 
   const sourceWorld = typeof content.world === "object" && content.world !== null
     ? content.world as Record<string, unknown>
     : content;
+  const { character: _storedCharacter, ...worldWithoutStoredCharacter } = sourceWorld;
   const selectedCharacterText = characterTextFromSnapshot(characterSnapshot);
-  const world: Record<string, unknown> = { ...sourceWorld, ...(selectedCharacterText !== null ? { character: selectedCharacterText } : {}) };
+  const world: Record<string, unknown> = {
+    ...worldWithoutStoredCharacter,
+    ...(selectedCharacterText !== null ? { character: selectedCharacterText } : {})
+  };
   const allowed = ["title", "genre", "tone", "backgroundStory", "character", "premise", "firstAction", "rules"];
   const perOverviewLimit = Math.max(300, Math.floor(maximumTokens * 2.6 / allowed.length));
   const overview = Object.fromEntries(allowed.flatMap((key) => {

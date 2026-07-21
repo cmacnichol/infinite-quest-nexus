@@ -65,9 +65,9 @@ import {
   exportCampaign,
   exportWorld,
   forkWorld,
+  getWorldVersionPlayableCharacterSummary,
   getWorld,
   importWorld,
-  listWorldVersionPlayableCharacters,
   listCampaigns,
   listWorlds,
   migrateCampaignWorld,
@@ -338,9 +338,9 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     return { campaigns: await listCampaigns(pool) };
   });
 
-  app.get<{ Params: { worldVersionId: string } }>("/api/v1/world-versions/:worldVersionId/playable-characters", async (request) => ({
-    characters: await listWorldVersionPlayableCharacters(pool, uuidSchema.parse(request.params.worldVersionId))
-  }));
+  app.get<{ Params: { worldVersionId: string } }>("/api/v1/world-versions/:worldVersionId/playable-characters", async (request) => (
+    getWorldVersionPlayableCharacterSummary(pool, uuidSchema.parse(request.params.worldVersionId))
+  ));
 
   app.post("/api/v1/campaigns", async (request, reply) => (
     reply.code(201).send(await createCampaign(pool, campaignCreateSchema.parse(request.body)))
@@ -430,7 +430,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       tone: worldOverview.tone || "",
       premise: worldOverview.premise || "",
       backgroundStory: worldOverview.backgroundStory || "",
-      character: worldOverview.character || row.characterSnapshot?.characterText || row.characterSnapshot?.name || "",
+      character: row.characterSnapshot?.characterText || row.characterSnapshot?.name || "",
       firstAction: worldOverview.firstAction || "",
       rules: worldOverview.rules || "",
       playableCharacters: content.playableCharacters || []

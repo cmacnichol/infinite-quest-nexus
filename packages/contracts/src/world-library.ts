@@ -19,6 +19,8 @@ const shortText = z.preprocess(coerceToString, z.string().max(2000).default(""))
 const longText = z.preprocess(coerceToString, z.string().max(200_000).default(""));
 const characterId = z.string().trim().min(1).max(200);
 
+export const WORLD_CONTENT_SCHEMA_VERSION = 4;
+
 export const playableCharacterSchema = z.object({
 
   id: characterId,
@@ -35,13 +37,12 @@ export const worldOverviewSchema = z.object({
   tone: shortText,
   premise: longText,
   backgroundStory: longText,
-  character: longText,
   firstAction: longText,
   rules: longText
 }).passthrough();
 
 export const worldContentSchema = z.object({
-  schemaVersion: z.number().int().positive().default(3),
+  schemaVersion: z.number().int().positive().default(WORLD_CONTENT_SCHEMA_VERSION),
   world: worldOverviewSchema,
   playableCharacters: z.array(playableCharacterSchema).max(1000).default([]),
   entities: z.array(z.unknown()).max(20_000).default([]),
@@ -52,6 +53,25 @@ export const worldContentSchema = z.object({
   assets: z.array(z.unknown()).max(10_000).default([]),
   defaults: z.record(z.string(), z.unknown()).default({})
 }).passthrough();
+
+export type WorldContent = z.infer<typeof worldContentSchema>;
+
+/**
+ * Produces the canonical stored representation for new and updated world content.
+ * Older positive schema versions remain readable through worldContentSchema, while
+ * every write path can converge on the current representation without discarding
+ * passthrough lore fields that this application does not yet understand.
+ */
+export function canonicalizeWorldContent(content: unknown): WorldContent {
+  const parsed = worldContentSchema.parse(content);
+  const world = { ...parsed.world };
+  delete world.character;
+  return {
+    ...parsed,
+    schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
+    world
+  };
+}
 
 export const worldCreateSchema = z.object({
   title,
@@ -116,7 +136,6 @@ export const resourceDeleteSchema = z.object({
   expectedTitle: title
 });
 
-export type WorldContent = z.infer<typeof worldContentSchema>;
 export type PlayableCharacter = z.infer<typeof playableCharacterSchema>;
 export type WorldCreateRequest = z.infer<typeof worldCreateSchema>;
 export type WorldDraftUpdateRequest = z.infer<typeof worldDraftUpdateSchema>;

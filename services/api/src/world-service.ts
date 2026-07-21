@@ -1,6 +1,8 @@
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import {
+  canonicalizeWorldContent,
+  WORLD_CONTENT_SCHEMA_VERSION,
   worldContentSchema,
   type CampaignCreateRequest,
   type CampaignUpdateRequest,
@@ -16,6 +18,7 @@ import {
 } from "../../../packages/contracts/src/world-library.js";
 import { removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import {
+  assessWorldCampaignReadiness,
   campaignCharacterSeed,
   characterSnapshot,
   characterTextFromSnapshot,
@@ -76,15 +79,14 @@ function sanitizeWorldValue(value: unknown): unknown {
 }
 
 function normalizeWorldContent(title: string, content?: WorldContent): WorldContent {
-  return worldContentSchema.parse(content ?? {
-    schemaVersion: 3,
+  return canonicalizeWorldContent(content ?? {
+    schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
     world: {
       title,
       genre: "",
       tone: "",
       premise: "",
       backgroundStory: "",
-      character: "",
       firstAction: "",
       rules: ""
     }
@@ -92,10 +94,17 @@ function normalizeWorldContent(title: string, content?: WorldContent): WorldCont
 }
 
 function contentWithTitle(content: WorldContent, title: string): WorldContent {
-  return worldContentSchema.parse(sanitizeWorldValue({
+  return canonicalizeWorldContent(sanitizeWorldValue({
     ...content,
     world: { ...content.world, title }
   }));
+}
+
+function assertPortableWorldDoesNotDependOnLegacyCharacter(content: WorldContent): void {
+  const legacyCharacter = typeof content.world.character === "string" ? content.world.character.trim() : "";
+  if (legacyCharacter && content.playableCharacters.length === 0) {
+    throw httpError(400, "This portable world uses retired character guidance and has no structured playable-character roster.");
+  }
 }
 
 export async function listWorlds(pool: DatabasePool) {
@@ -147,6 +156,7 @@ export async function getWorld(pool: DatabasePool, worldId: string) {
   );
   const world = worldResult.rows[0];
   if (!world) throw httpError(404, "World not found.");
+  if (world.draftContent) world.draftContent = canonicalizeWorldContent(world.draftContent);
   const versions = await pool.query(
     `SELECT id, version_number AS "versionNumber", source_hash AS "sourceHash",
             release_notes AS "releaseNotes", created_from_revision AS "createdFromRevision",
@@ -203,6 +213,7 @@ async function getWorldFromClient(client: DatabaseClient, ownerUserId: string, w
   );
   const world = result.rows[0];
   if (!world) throw httpError(404, "World not found.");
+  if (world.draftContent) world.draftContent = canonicalizeWorldContent(world.draftContent);
   return world;
 }
 
@@ -245,7 +256,8 @@ export async function publishWorld(pool: DatabasePool, worldId: string, request:
     if (!draft) throw httpError(404, "World draft not found.");
     if (draft.status === "archived") throw httpError(409, "Restore the world before publishing.");
     if (draft.revision !== request.expectedRevision) throw httpError(409, "The world draft changed. Reload it before publishing.");
-    const sourceHash = sha256(stableStringify(draft.content));
+    const content = contentWithTitle(draft.content, draft.title);
+    const sourceHash = sha256(stableStringify(content));
     const latest = await client.query<{ id: string; version_number: number; source_hash: string | null }>(
       `SELECT id, version_number, source_hash FROM world_versions
         WHERE world_id = $1 AND owner_user_id = $2 ORDER BY version_number DESC LIMIT 1`,
@@ -257,7 +269,7 @@ export async function publishWorld(pool: DatabasePool, worldId: string, request:
       `INSERT INTO world_versions (
          world_id, owner_user_id, version_number, content, source_hash, release_notes, created_from_revision
        ) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, published_at`,
-      [worldId, ownerUserId, versionNumber, json(draft.content), sourceHash, request.releaseNotes, draft.revision]
+      [worldId, ownerUserId, versionNumber, json(content), sourceHash, request.releaseNotes, draft.revision]
     );
     const worldVersionId = version.rows[0]?.id;
     if (!worldVersionId) throw new Error("Could not publish world version.");
@@ -353,6 +365,7 @@ export async function exportWorld(pool: DatabasePool, worldId: string, worldVers
 
 export async function previewWorldImport(pool: DatabasePool, request: WorldImportRequest) {
   const ownerUserId = await initialOwnerId(pool);
+  assertPortableWorldDoesNotDependOnLegacyCharacter(request.worldExport.content);
   const scrubbedContent = sanitizeWorldValue(request.worldExport.content);
   const sanitizedContent = contentWithTitle(request.worldExport.content, request.worldExport.title);
   const sourceHash = `world:${sha256(stableStringify(sanitizedContent))}`;
@@ -377,6 +390,7 @@ export async function previewWorldImport(pool: DatabasePool, request: WorldImpor
 }
 
 export async function importWorld(pool: DatabasePool, request: WorldImportRequest) {
+  assertPortableWorldDoesNotDependOnLegacyCharacter(request.worldExport.content);
   const sanitizedContent = contentWithTitle(request.worldExport.content, request.worldExport.title);
   const sourceHash = `world:${sha256(stableStringify(sanitizedContent))}`;
   return withTransaction(pool, async (client) => {
@@ -455,6 +469,8 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
     const source = version.rows[0];
     if (!source) throw httpError(404, "Published world version not found.");
     const content = worldContentSchema.parse(source.content);
+    const readiness = assessWorldCampaignReadiness(content);
+    if (!readiness.ready) throw httpError(400, readiness.issues[0]?.message || "This world version is not ready for a campaign.");
     const seed = campaignCharacterSeed(content, request.selectedCharacterId);
     const snapshot = characterSnapshot(seed.character);
     const campaign = await client.query<{ id: string }>(
@@ -489,7 +505,7 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
   });
 }
 
-export async function listWorldVersionPlayableCharacters(pool: DatabasePool, worldVersionId: string) {
+export async function getWorldVersionPlayableCharacterSummary(pool: DatabasePool, worldVersionId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const result = await pool.query<{ content: WorldContent }>(
     "SELECT content FROM world_versions WHERE id = $1 AND owner_user_id = $2",
@@ -497,13 +513,19 @@ export async function listWorldVersionPlayableCharacters(pool: DatabasePool, wor
   );
   const row = result.rows[0];
   if (!row) throw httpError(404, "Published world version not found.");
-  return resolvePlayableCharacters(worldContentSchema.parse(row.content)).map((character) => ({
+  const content = worldContentSchema.parse(row.content);
+  const readiness = assessWorldCampaignReadiness(content);
+  const characters = resolvePlayableCharacters(content).map((character) => ({
     id: character.id,
     name: character.name,
     rpgStatCount: character.rpgStats.length,
-    defaultTriggerCount: character.defaultTriggers.length,
-    legacy: character.legacy
+    defaultTriggerCount: character.defaultTriggers.length
   }));
+  return { characters, readiness };
+}
+
+export async function listWorldVersionPlayableCharacters(pool: DatabasePool, worldVersionId: string) {
+  return (await getWorldVersionPlayableCharacterSummary(pool, worldVersionId)).characters;
 }
 
 export async function updateCampaign(pool: DatabasePool, campaignId: string, request: CampaignUpdateRequest) {
@@ -701,11 +723,13 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
   const importedHistory = history.rows[0];
   const importProvenance = row.import_provenance && typeof row.import_provenance === "object" ? row.import_provenance : {};
   const selectedCharacterText = characterTextFromSnapshot(row.character_snapshot);
+  const sourceWorld = row.content.world && typeof row.content.world === "object" ? row.content.world : {};
+  const { character: _storedCharacter, ...worldWithoutStoredCharacter } = sourceWorld;
   return {
     format: "infinite-quest-campaign",
     formatVersion: 1,
     exportedAt: new Date().toISOString(),
-    world: { ...row.content.world, ...(selectedCharacterText !== null ? { character: selectedCharacterText } : {}) },
+    world: { ...worldWithoutStoredCharacter, ...(selectedCharacterText !== null ? { character: selectedCharacterText } : {}) },
     settings: { ...portableCampaignSettings(row.legacy_settings), storyLength: row.story_length_profile },
     turns: turns.rows.map((turn: any) => ({
       id: turn.id,

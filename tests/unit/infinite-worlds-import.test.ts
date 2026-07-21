@@ -4,6 +4,9 @@ import {
   infiniteWorldsStoryToLegacyStory,
   parseInfiniteWorldsStory
 } from "../../packages/domain/src/infinite-worlds.js";
+import { infiniteWorldsImportRequestSchema } from "../../packages/contracts/src/imports.js";
+import { WORLD_CONTENT_SCHEMA_VERSION } from "../../packages/contracts/src/world-library.js";
+import { previewInfiniteWorldsImport } from "../../services/api/src/infinite-worlds-import-service.js";
 
 describe("Infinite Worlds import conversion", () => {
   it("retains every character with isolated percentile skills and trackers", () => {
@@ -19,7 +22,8 @@ describe("Infinite Worlds import conversion", () => {
     });
 
     expect(converted.format).toBe("infinite-quest-world");
-    expect(converted.content.schemaVersion).toBe(3);
+    expect(converted.content.schemaVersion).toBe(WORLD_CONTENT_SCHEMA_VERSION);
+    expect(converted.content.world).not.toHaveProperty("character");
     expect(converted.content.playableCharacters).toHaveLength(2);
     expect(converted.content.playableCharacters[0]).toMatchObject({ name: "First", rpgStats: [expect.objectContaining({ name: "Insight", value: 20 })] });
     expect(converted.content.playableCharacters[1]).toMatchObject({
@@ -30,6 +34,31 @@ describe("Infinite Worlds import conversion", () => {
     expect(converted.content.rpgStats).toEqual([]);
     expect(converted.content.eventTriggers).toHaveLength(1);
     expect(converted.content).not.toHaveProperty("turns");
+  });
+
+  it("rejects world exports without a structured character roster", () => {
+    expect(() => convertInfiniteWorldsWorld({
+      title: "Empty Roster",
+      background: "A world without character options.",
+      possibleCharacters: []
+    })).toThrow("has no playable characters");
+  });
+
+  it("reports a zero-character world as an invalid preview", async () => {
+    const request = infiniteWorldsImportRequestSchema.parse({
+      sourceName: "empty-roster.json",
+      sourceKind: "world_json",
+      sourceText: JSON.stringify({ title: "Empty Roster", possibleCharacters: [] })
+    });
+
+    const preview = await previewInfiniteWorldsImport({} as never, request);
+
+    expect(preview).toMatchObject({
+      kind: "world_json",
+      valid: false,
+      characters: [],
+      warnings: [expect.stringContaining("no playable characters")]
+    });
   });
 
   it("parses story turns, reuses the next selected action, and removes mechanic leakage", () => {

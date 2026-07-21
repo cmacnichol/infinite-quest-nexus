@@ -1,6 +1,11 @@
 import { z } from "zod";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import { playableCharacterSchema, worldContentSchema, type WorldContent } from "../../../packages/contracts/src/world-library.js";
+import {
+  canonicalizeWorldContent,
+  playableCharacterSchema,
+  WORLD_CONTENT_SCHEMA_VERSION,
+  type WorldContent
+} from "../../../packages/contracts/src/world-library.js";
 import { buildTemplateWorldPrompt, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
 import { callTextProvider, extractJsonObject } from "../../../packages/story-engine/src/index.js";
 import { loadTextProvider } from "./provider-service.js";
@@ -176,14 +181,13 @@ export async function generateTemplateWorld(
     });
   });
 
-  const content = worldContentSchema.parse({
-    schemaVersion: 3,
+  const content = canonicalizeWorldContent({
+    schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
     world: {
       title: converted.title,
       genre: converted.genre,
       tone: converted.tone,
       backgroundStory: converted.backgroundStory,
-      character: playableCharacters[0]?.characterText || converted.player_character,
       premise: converted.premise,
       firstAction: converted.firstAction,
       rules: converted.story_rules

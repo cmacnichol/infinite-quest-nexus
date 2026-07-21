@@ -80,11 +80,10 @@
           </div>
           <div class="world-fields tab-content" id="tab-mechanics" data-tab-group="world-editor">
             <label class="wide-field">Rules<textarea id="worldRules" rows="3" maxlength="200000" disabled></textarea></label>
-            <label class="wide-field">Legacy/default character guidance<textarea id="worldCharacter" rows="3" maxlength="200000" disabled></textarea></label>
             <div class="wide-field character-roster-field">
               <strong>Playable character roster</strong>
-              <span class="field-note">Imported character options are retained in the world version and selected when a campaign is created.</span>
-              <div id="worldCharacterRoster" class="character-roster"><span class="muted">No structured character roster.</span></div>
+              <span class="field-note">Playable characters can be authored, imported, or generated. A campaign snapshots the selected character from its published world version.</span>
+              <div id="playableCharacterRoster" class="character-roster"><span class="muted">No playable characters yet. This draft can be saved, but a published version without a character is not campaign-ready.</span></div>
             </div>
           </div>
           <div class="button-row world-actions">
@@ -101,6 +100,7 @@
               </div>
             </details>
           </div>
+          <div id="worldCampaignReadiness" class="status" role="status" aria-live="polite">Publish a world version with at least one playable character before creating a campaign.</div>
           <div id="worldStatus" class="status" role="status" aria-live="polite">World content is stored in PostgreSQL, never embedded in this client.</div>
         </form>
       </div>

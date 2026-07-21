@@ -5,7 +5,12 @@ import { storyLengthProfileFromUnknown } from "../../../packages/contracts/src/s
 import { buildTurnFictionMemory, formatLegacySummary, turnNarration } from "../../../packages/story-engine/src/chronicle.js";
 import { estimateTokens, removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { campaignCharacterSeed, characterSnapshot } from "../../../packages/domain/src/world-characters.js";
-import { worldContentSchema, type WorldContent } from "../../../packages/contracts/src/world-library.js";
+import {
+  canonicalizeWorldContent,
+  worldContentSchema,
+  WORLD_CONTENT_SCHEMA_VERSION,
+  type WorldContent
+} from "../../../packages/contracts/src/world-library.js";
 import { importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
 import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
 
@@ -40,31 +45,40 @@ function worldTitle(story: LegacyStory): string {
   return story.world.title?.trim() || "Imported adventure";
 }
 
-function legacyWorldContent(story: LegacyStory): Record<string, unknown> {
+export function legacyWorldContent(story: LegacyStory, requestedSelectedCharacterId?: string): WorldContent {
   const provenance = story.storyImportProvenance && typeof story.storyImportProvenance === "object" && !Array.isArray(story.storyImportProvenance)
     ? story.storyImportProvenance as Record<string, unknown>
     : {};
-  const selectedCharacterId = typeof provenance.selectedCharacterId === "string" ? provenance.selectedCharacterId.trim() : "";
+  const provenanceCharacterId = typeof provenance.selectedCharacterId === "string" ? provenance.selectedCharacterId.trim() : "";
   const characterText = String(story.world.character || "").trim();
   const characterName = (typeof provenance.selectedCharacterName === "string" && provenance.selectedCharacterName.trim()
     ? provenance.selectedCharacterName.trim()
     : characterText.split(/\r?\n/).find((line) => line.trim())?.trim() || "Default character").slice(0, 200);
-  return {
-    schemaVersion: selectedCharacterId ? 3 : 1,
-    world: story.world,
-    ...(selectedCharacterId ? { playableCharacters: [{
+  const selectedCharacterId = requestedSelectedCharacterId?.trim() || provenanceCharacterId || `legacy-import-character-${sha256(stableStringify({
+    characterText,
+    rpgStats: story.rpgStats ?? [],
+    defaultTriggers: story.defaultTriggers ?? story.baseTrackersAtStart ?? []
+  })).slice(0, 24)}`;
+  const world = { ...story.world, title: worldTitle(story) };
+  delete world.character;
+  return canonicalizeWorldContent({
+    schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
+    world,
+    playableCharacters: [{
       id: selectedCharacterId,
       name: characterName,
       characterText,
       rpgStats: story.rpgStats ?? [],
       defaultTriggers: story.defaultTriggers ?? story.baseTrackersAtStart ?? [],
-      source: { type: "nexus-campaign-export" }
-    }] } : {}),
-    rpgStats: selectedCharacterId ? [] : story.rpgStats ?? [],
-    defaultTriggers: selectedCharacterId ? [] : story.defaultTriggers ?? story.baseTrackersAtStart ?? [],
+      source: {
+        type: provenanceCharacterId ? "nexus-campaign-export" : "legacy-campaign-import"
+      }
+    }],
+    rpgStats: [],
+    defaultTriggers: [],
     eventTriggers: story.eventTriggers ?? [],
     importedFromLegacyStory: true
-  };
+  });
 }
 
 function sanitizedStoryForHash(story: LegacyStory): Record<string, unknown> {
@@ -252,13 +266,13 @@ async function reconnectMatchingCampaign(
   return null;
 }
 
-async function matchingWorldVersion(client: DatabaseClient, ownerUserId: string, story: LegacyStory) {
+async function matchingWorldVersion(client: DatabaseClient, ownerUserId: string, story: LegacyStory, selectedCharacterId?: string) {
   const result = await client.query<{ world_id: string; world_version_id: string }>(
     `SELECT world_id, id AS world_version_id
        FROM world_versions
       WHERE owner_user_id = $1 AND content = $2::jsonb
       ORDER BY created_at DESC LIMIT 1`,
-    [ownerUserId, json(legacyWorldContent(story))]
+    [ownerUserId, json(legacyWorldContent(story, selectedCharacterId))]
   );
   return result.rows[0] ?? null;
 }
@@ -308,8 +322,9 @@ export async function importLegacyStory(
       worldId = existingTarget.world_id;
       worldVersionId = existingTarget.world_version_id;
     } else {
-      const worldContent = legacyWorldContent(request.story);
-      const matchingVersion = await matchingWorldVersion(client, ownerUserId, request.story);
+      const selectedCharacterId = requestedCharacterId(request);
+      const worldContent = legacyWorldContent(request.story, selectedCharacterId);
+      const matchingVersion = await matchingWorldVersion(client, ownerUserId, request.story, selectedCharacterId);
       if (matchingVersion) {
         worldId = matchingVersion.world_id;
         worldVersionId = matchingVersion.world_version_id;

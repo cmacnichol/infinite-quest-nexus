@@ -1,20 +1,29 @@
 import type { PlayableCharacter, WorldContent } from "../../contracts/src/world-library.js";
 
-export const LEGACY_CHARACTER_ID = "legacy-default";
-
-export type ResolvedPlayableCharacter = PlayableCharacter & {
-  legacy: boolean;
-};
-
 export type CampaignCharacterSeed = {
-  character: ResolvedPlayableCharacter;
+  character: PlayableCharacter;
   rpgStats: unknown[];
   defaultTriggers: unknown[];
 };
 
-function firstLine(value: string): string {
-  return (value.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "Default character").slice(0, 200);
-}
+export type WorldCampaignReadinessIssueCode =
+  | "no-playable-characters"
+  | "missing-character-id"
+  | "duplicate-character-id"
+  | "missing-character-name"
+  | "missing-character-text";
+
+export type WorldCampaignReadinessIssue = {
+  code: WorldCampaignReadinessIssueCode;
+  message: string;
+  characterIndex?: number;
+  characterId?: string;
+};
+
+export type WorldCampaignReadinessAssessment = {
+  ready: boolean;
+  issues: WorldCampaignReadinessIssue[];
+};
 
 function values(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
@@ -30,24 +39,69 @@ function mergeNamed(shared: unknown[], characterSpecific: unknown[]): unknown[] 
   return [...merged.values()];
 }
 
-export function resolvePlayableCharacters(content: WorldContent): ResolvedPlayableCharacter[] {
-  if (content.playableCharacters.length) {
-    return content.playableCharacters.map((character) => ({ ...character, legacy: false }));
+export function assessWorldCampaignReadiness(content: WorldContent): WorldCampaignReadinessAssessment {
+  const issues: WorldCampaignReadinessIssue[] = [];
+  const characters = content.playableCharacters;
+  if (characters.length === 0) {
+    issues.push({
+      code: "no-playable-characters",
+      message: "This world version has no playable characters."
+    });
   }
-  const characterText = String(content.world.character || "").trim();
-  return [{
-    id: LEGACY_CHARACTER_ID,
-    name: firstLine(characterText),
-    characterText,
-    rpgStats: values(content.rpgStats),
-    defaultTriggers: values(content.defaultTriggers),
-    source: { type: "legacy-world-content" },
-    legacy: true
-  }];
+
+  const seenIds = new Set<string>();
+  for (const [characterIndex, character] of characters.entries()) {
+    const id = typeof character.id === "string" ? character.id.trim() : "";
+    const name = typeof character.name === "string" ? character.name.trim() : "";
+    const characterText = typeof character.characterText === "string" ? character.characterText.trim() : "";
+
+    if (!id) {
+      issues.push({
+        code: "missing-character-id",
+        message: `Playable character ${characterIndex + 1} is missing an ID.`,
+        characterIndex
+      });
+    } else if (seenIds.has(id)) {
+      issues.push({
+        code: "duplicate-character-id",
+        message: `Playable character ID "${id}" is duplicated.`,
+        characterIndex,
+        characterId: id
+      });
+    } else {
+      seenIds.add(id);
+    }
+
+    if (!name) {
+      issues.push({
+        code: "missing-character-name",
+        message: `Playable character ${characterIndex + 1} is missing a name.`,
+        characterIndex,
+        ...(id ? { characterId: id } : {})
+      });
+    }
+    if (!characterText) {
+      issues.push({
+        code: "missing-character-text",
+        message: `Playable character ${name ? `"${name}"` : characterIndex + 1} is missing character guidance.`,
+        characterIndex,
+        ...(id ? { characterId: id } : {})
+      });
+    }
+  }
+
+  return { ready: issues.length === 0, issues };
 }
 
-export function selectPlayableCharacter(content: WorldContent, selectedCharacterId?: string): ResolvedPlayableCharacter {
+export function resolvePlayableCharacters(content: WorldContent): PlayableCharacter[] {
+  return content.playableCharacters;
+}
+
+export function selectPlayableCharacter(content: WorldContent, selectedCharacterId?: string): PlayableCharacter {
   const characters = resolvePlayableCharacters(content);
+  if (characters.length === 0) {
+    throw Object.assign(new Error("This world version has no playable characters."), { statusCode: 400 });
+  }
   if (!selectedCharacterId && characters.length > 1) {
     throw Object.assign(new Error("Select a playable character for this campaign."), { statusCode: 400 });
   }
@@ -62,9 +116,6 @@ export function selectPlayableCharacter(content: WorldContent, selectedCharacter
 
 export function campaignCharacterSeed(content: WorldContent, selectedCharacterId?: string): CampaignCharacterSeed {
   const character = selectPlayableCharacter(content, selectedCharacterId);
-  if (character.legacy) {
-    return { character, rpgStats: values(content.rpgStats), defaultTriggers: values(content.defaultTriggers) };
-  }
   return {
     character,
     rpgStats: mergeNamed(values(content.rpgStats), values(character.rpgStats)),
@@ -72,9 +123,10 @@ export function campaignCharacterSeed(content: WorldContent, selectedCharacterId
   };
 }
 
-export function characterSnapshot(character: ResolvedPlayableCharacter): Record<string, unknown> {
-  const { legacy, ...snapshot } = character;
-  return { ...snapshot, legacy };
+export function characterSnapshot(character: PlayableCharacter): Record<string, unknown> {
+  const snapshot: Record<string, unknown> = { ...character };
+  delete snapshot.legacy;
+  return snapshot;
 }
 
 export function characterTextFromSnapshot(snapshot: unknown): string | null {

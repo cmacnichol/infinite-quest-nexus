@@ -1,5 +1,10 @@
 import type { LegacyStory } from "../../contracts/src/imports.js";
-import type { PlayableCharacter, WorldContent } from "../../contracts/src/world-library.js";
+import {
+  canonicalizeWorldContent,
+  WORLD_CONTENT_SCHEMA_VERSION,
+  type PlayableCharacter,
+  type WorldContent
+} from "../../contracts/src/world-library.js";
 import { stripMechanicsLeakage } from "./text.js";
 import { campaignCharacterSeed } from "./world-characters.js";
 
@@ -175,6 +180,12 @@ export function convertInfiniteWorldsWorld(value: unknown): { format: "infinite-
   if (!isInfiniteWorldsWorld(value)) throw new Error("The JSON does not look like an Infinite Worlds world export.");
   const source = object(value);
   const characters = infiniteWorldsCharacters(source);
+  if (!characters.length) {
+    throw Object.assign(
+      new Error("The Infinite Worlds world export has no playable characters. Add at least one possible character before importing it."),
+      { statusCode: 400 }
+    );
+  }
   const playableCharacters = characters.map(playableCharacter);
   const defaultCharacter = playableCharacters[0];
   const title = text(source.title ?? source.name) || "Imported Infinite Worlds Adventure";
@@ -187,14 +198,13 @@ export function convertInfiniteWorldsWorld(value: unknown): { format: "infinite-
   const instructionBlocks = Array.isArray(source.instructionBlocks)
     ? source.instructionBlocks.map((item, index) => { const row = object(item); return titled(text(row.name) || `Instruction Block ${index + 1}`, row.content ?? row.text ?? row.instructions); }).filter(Boolean).join("\n\n")
     : "";
-  const content: WorldContent = {
-    schemaVersion: 3,
+  const content = canonicalizeWorldContent({
+    schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
     world: {
       title,
       genre: inferGenre(source),
       tone: text(source.authorStyle) || "Interactive fiction adapted from Infinite Worlds",
       backgroundStory: text(source.background),
-      character: defaultCharacter?.characterText || "",
       premise: sections(titled("Description", source.description), titled("Objective", source.objective)),
       firstAction: text(source.firstInput),
       rules: sections(titled("Main Infinite Worlds instructions", source.instructions), titled("Summary request", source.summaryRequest), instructionBlocks)
@@ -211,7 +221,7 @@ export function convertInfiniteWorldsWorld(value: unknown): { format: "infinite-
       defaultPlayableCharacterId: defaultCharacter?.id || "",
       useRpgStats: playableCharacters.some((character) => character.rpgStats.length > 0)
     }
-  };
+  });
   return { format: "infinite-quest-world", formatVersion: 1, title, content };
 }
 

@@ -53,15 +53,47 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('/api/v1/imports/infinite-worlds');
   });
 
-  it("retains imported character rosters and selects a character when creating a campaign", () => {
-    expect(managementHtml).toContain('id="worldCharacterRoster"');
+  it("uses structured playable-character rosters for manual, imported, and generated worlds", () => {
+    expect(managementHtml).toContain('id="playableCharacterRoster"');
     expect(managementHtml).toContain('id="newCampaignCharacter"');
+    expect(managementHtml).toContain("Playable characters can be authored, imported, or generated.");
     expect(managementHtml).toContain("World imports retain every playable character.");
+    expect(managementHtml).not.toContain('id="worldCharacter"');
+    expect(managementHtml).not.toContain("Legacy/default character guidance");
+    expect(managementScript).toContain("function renderPlayableCharacterRoster(characters = [])");
+    expect(managementScript).toContain("playableCharactersFromContent(selectedWorld.draftContent)");
+    expect(managementScript).not.toContain("Legacy/default character");
     expect(managementScript).toContain("async function loadWorldVersionPlayableCharacters()");
     expect(managementScript).toContain('/playable-characters`');
     expect(managementScript).toContain("selectedCharacterId");
-    expect(managementScript).toContain("all ${preview.characters.length || 1} playable character");
+    expect(managementScript).toContain("const characterCount = Array.isArray(preview.characters) ? preview.characters.length : 0;");
+    expect(managementScript).toContain("all ${characterCount} playable character");
+    expect(managementScript).not.toContain("preview.characters.length || 1");
     expect(managementScript).toContain('elements.infiniteWorldsCharacterField.classList.add("hidden");');
+  });
+
+  it("strips legacy overview guidance when saving version-4 drafts", () => {
+    expect(managementScript).toContain("function worldOverviewWithoutLegacyCharacter(world = {})");
+    expect(managementScript).toContain("delete overview.character;");
+    expect(managementScript).toContain("const currentOverview = worldOverviewWithoutLegacyCharacter(current.world);");
+    expect(managementScript).toContain("schemaVersion: 4");
+    expect(managementScript).not.toContain("elements.worldCharacter");
+    expect(managementScript).not.toContain("overview.character ||");
+  });
+
+  it("keeps character loading ordered and blocks campaigns for versions without a roster", () => {
+    expect(managementHtml).toContain('id="worldCampaignReadiness"');
+    expect(managementScript).toContain("let playableCharacterLoadSequence = 0;");
+    expect(managementScript).toContain("let worldVersionCampaignReady = false;");
+    expect(managementScript).not.toContain("worldCharacterLoadSequence");
+    expect(managementScript).toContain("sequence !== playableCharacterLoadSequence || worldVersionId !== selectedWorldVersionId()");
+    expect(managementScript).toContain('worldVersionCampaignReady = hasReadinessAssessment ? response.readiness.ready : worldVersionCharacters.length > 0;');
+    expect(managementScript).toContain('String(firstReadinessIssue?.message || "").trim()');
+    expect(managementScript).toContain("function updateCampaignCreationAvailability()");
+    expect(managementScript).toContain("elements.createCampaignModalBtn.disabled = !hasPublishedVersion || !worldVersionCampaignReady;");
+    expect(managementScript).toContain("elements.confirmCreateCampaign.disabled = !hasPublishedVersion || !worldVersionCampaignReady || !hasRequiredSelection;");
+    expect(managementScript).toContain("This world version is not campaign-ready; update the draft and publish a new version");
+    expect(managementScript).toContain("if (!worldVersionCampaignReady) {");
   });
 
   it("keeps Provider Management dedicated to profiles and campaign provider assignments in World Management", () => {

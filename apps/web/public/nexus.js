@@ -6,7 +6,8 @@ let selectedCampaign = null;
 let worlds = [];
 let selectedWorld = null;
 let worldVersionCharacters = [];
-let worldCharacterLoadSequence = 0;
+let worldVersionCampaignReady = false;
+let playableCharacterLoadSequence = 0;
 const legacyStorageKey = "infiniteQuestNexusClientState.v1";
 let detectedBrowserStory = null;
 let providers = [];
@@ -158,7 +159,6 @@ function setWorldEditorDisabled(disabled) {
     elements.worldTone,
     elements.worldPremise,
     elements.worldBackground,
-    elements.worldCharacter,
     elements.worldFirstAction,
     elements.worldRules,
     elements.worldReleaseNotes,
@@ -167,30 +167,39 @@ function setWorldEditorDisabled(disabled) {
     elements.newCampaignCharacter,
     elements.saveWorldDraft,
     elements.publishWorld,
-    elements.forkWorld,
-    elements.createCampaign,
+    elements.forkWorldModalBtn,
+    elements.confirmForkWorld,
+    elements.createCampaignModalBtn,
+    elements.confirmCreateCampaign,
     elements.exportWorld,
     elements.archiveWorld,
     elements.deleteWorld
   ].forEach((element) => { element.disabled = disabled; });
 }
 
+function worldOverviewWithoutLegacyCharacter(world = {}) {
+  const overview = world && typeof world === "object" && !Array.isArray(world) ? { ...world } : {};
+  delete overview.character;
+  return overview;
+}
+
 function worldContentFromForm() {
   const current = selectedWorld?.draftContent || {};
+  const currentOverview = worldOverviewWithoutLegacyCharacter(current.world);
   return {
     ...current,
-    schemaVersion: Number(current.schemaVersion || 2),
+    schemaVersion: 4,
     world: {
-      ...(current.world || {}),
+      ...currentOverview,
       title: elements.worldTitle.value,
       genre: elements.worldGenre.value,
       tone: elements.worldTone.value,
       premise: elements.worldPremise.value,
       backgroundStory: elements.worldBackground.value,
-      character: elements.worldCharacter.value,
       firstAction: elements.worldFirstAction.value,
       rules: elements.worldRules.value
     },
+    playableCharacters: Array.isArray(current.playableCharacters) ? current.playableCharacters : [],
     entities: Array.isArray(current.entities) ? current.entities : [],
     relationships: Array.isArray(current.relationships) ? current.relationships : [],
     rpgStats: Array.isArray(current.rpgStats) ? current.rpgStats : [],
@@ -201,19 +210,21 @@ function worldContentFromForm() {
   };
 }
 
-function renderWorldCharacterRoster(content = selectedWorld?.draftContent || {}) {
-  const structured = Array.isArray(content.playableCharacters) ? content.playableCharacters : [];
-  const legacyText = String(content.world?.character || "").trim();
-  const characters = structured.length ? structured : legacyText ? [{ name: legacyText.split(/\r?\n/)[0], characterText: legacyText, legacy: true }] : [];
-  elements.worldCharacterRoster.replaceChildren();
-  if (!characters.length) {
+function playableCharactersFromContent(content = {}) {
+  return Array.isArray(content.playableCharacters) ? content.playableCharacters : [];
+}
+
+function renderPlayableCharacterRoster(characters = []) {
+  const roster = Array.isArray(characters) ? characters : [];
+  elements.playableCharacterRoster.replaceChildren();
+  if (!roster.length) {
     const empty = document.createElement("span");
     empty.className = "muted";
-    empty.textContent = "No predefined player character. Campaigns will use the world’s general guidance.";
-    elements.worldCharacterRoster.append(empty);
+    empty.textContent = "No playable characters yet. This draft can be saved, but it is not campaign-ready.";
+    elements.playableCharacterRoster.append(empty);
     return;
   }
-  for (const character of characters) {
+  for (const character of roster) {
     const card = document.createElement("div");
     card.className = "character-roster-card";
     const name = document.createElement("strong");
@@ -221,13 +232,11 @@ function renderWorldCharacterRoster(content = selectedWorld?.draftContent || {})
     const detail = document.createElement("span");
     const stats = Array.isArray(character.rpgStats) ? character.rpgStats.length : 0;
     const trackers = Array.isArray(character.defaultTriggers) ? character.defaultTriggers.length : 0;
-    detail.textContent = character.legacy
-      ? "Legacy/default character"
-      : `${stats} RPG stat${stats === 1 ? "" : "s"} · ${trackers} starting tracker${trackers === 1 ? "" : "s"}`;
+    detail.textContent = `${stats} RPG stat${stats === 1 ? "" : "s"} · ${trackers} starting tracker${trackers === 1 ? "" : "s"}`;
     const description = document.createElement("span");
     description.textContent = String(character.characterText || "").slice(0, 260) || "No character description.";
     card.append(name, detail, description);
-    elements.worldCharacterRoster.append(card);
+    elements.playableCharacterRoster.append(card);
   }
 }
 
@@ -241,8 +250,12 @@ async function loadWorlds(preselectId = "") {
     elements.worldList.append(empty);
     selectedWorld = null;
     worldVersionCharacters = [];
-    renderWorldCharacterRoster({});
+    worldVersionCampaignReady = false;
+    playableCharacterLoadSequence += 1;
+    renderPlayableCharacterRoster([]);
     setWorldEditorDisabled(true);
+    elements.worldCampaignReadiness.textContent = "Select or create a world before checking campaign readiness.";
+    elements.worldCampaignReadiness.className = "status";
     return;
   }
   for (const world of worlds) {
@@ -273,8 +286,7 @@ async function selectWorld(worldId) {
   elements.worldTone.value = overview.tone || "";
   elements.worldPremise.value = overview.premise || "";
   elements.worldBackground.value = overview.backgroundStory || "";
-  elements.worldCharacter.value = overview.character || "";
-  renderWorldCharacterRoster(selectedWorld.draftContent);
+  renderPlayableCharacterRoster(playableCharactersFromContent(selectedWorld.draftContent));
   elements.worldFirstAction.value = overview.firstAction || "";
   elements.worldRules.value = overview.rules || "";
   elements.worldReleaseNotes.value = "";
@@ -288,9 +300,10 @@ async function selectWorld(worldId) {
   elements.archiveWorld.textContent = archived ? "Restore" : "Archive";
   elements.saveWorldDraft.disabled = archived;
   elements.publishWorld.disabled = archived;
-  elements.createCampaign.disabled = !selectedWorld.versions.length;
+  elements.createCampaignModalBtn.disabled = true;
+  elements.confirmCreateCampaign.disabled = true;
   elements.exportWorld.disabled = !selectedWorld.versions.length;
-  elements.forkWorld.disabled = !selectedWorld.versions.length;
+  elements.forkWorldModalBtn.disabled = !selectedWorld.versions.length;
   elements.deleteWorld.disabled = false;
   await loadWorldVersionPlayableCharacters();
   worldMessage(archived ? "This world is archived. Restore it before editing or publishing." : "Draft loaded from authoritative PostgreSQL storage.");
@@ -360,34 +373,71 @@ function selectedWorldVersionId() {
   return elements.worldVersionSelect.value || selectedWorld?.versions?.[0]?.id || "";
 }
 
+function updateCampaignCreationAvailability() {
+  const hasPublishedVersion = Boolean(selectedWorldVersionId());
+  const hasRequiredSelection = worldVersionCharacters.length === 1 || Boolean(elements.newCampaignCharacter.value);
+  elements.createCampaignModalBtn.disabled = !hasPublishedVersion || !worldVersionCampaignReady;
+  elements.confirmCreateCampaign.disabled = !hasPublishedVersion || !worldVersionCampaignReady || !hasRequiredSelection;
+}
+
+function setWorldCampaignReadiness(message, type = "") {
+  elements.worldCampaignReadiness.textContent = message;
+  elements.worldCampaignReadiness.className = `status ${type}`.trim();
+}
+
 async function loadWorldVersionPlayableCharacters() {
-  const sequence = ++worldCharacterLoadSequence;
+  const sequence = ++playableCharacterLoadSequence;
   const worldVersionId = selectedWorldVersionId();
   worldVersionCharacters = [];
+  worldVersionCampaignReady = false;
   elements.newCampaignCharacter.replaceChildren(new Option(worldVersionId ? "Loading characters…" : "Publish a world version first", ""));
   elements.newCampaignCharacter.disabled = true;
-  elements.createCampaign.disabled = true;
-  if (!worldVersionId) return;
+  updateCampaignCreationAvailability();
+  if (!worldVersionId) {
+    setWorldCampaignReadiness("Publish a world version with at least one playable character before creating a campaign.");
+    return;
+  }
+  setWorldCampaignReadiness("Checking whether the selected world version is campaign-ready…");
   try {
     const response = await api(`/api/v1/world-versions/${worldVersionId}/playable-characters`);
-    if (sequence !== worldCharacterLoadSequence || worldVersionId !== selectedWorldVersionId()) return;
+    if (sequence !== playableCharacterLoadSequence || worldVersionId !== selectedWorldVersionId()) return;
     worldVersionCharacters = Array.isArray(response.characters) ? response.characters : [];
+    const hasReadinessAssessment = response.readiness && typeof response.readiness.ready === "boolean";
+    worldVersionCampaignReady = hasReadinessAssessment ? response.readiness.ready : worldVersionCharacters.length > 0;
+    const firstReadinessIssue = Array.isArray(response.readiness?.issues) ? response.readiness.issues[0] : null;
+    const firstReadinessIssueMessage = typeof firstReadinessIssue === "string"
+      ? firstReadinessIssue
+      : String(firstReadinessIssue?.message || "").trim();
     const options = [];
-    if (worldVersionCharacters.length > 1) options.push(new Option("Choose a player character", ""));
+    if (!worldVersionCharacters.length) options.push(new Option("No playable characters available", ""));
+    else if (worldVersionCharacters.length > 1) options.push(new Option("Choose a player character", ""));
     for (const character of worldVersionCharacters) {
       options.push(new Option(`${character.name} · ${character.rpgStatCount} stats · ${character.defaultTriggerCount} trackers`, character.id));
     }
     elements.newCampaignCharacter.replaceChildren(...options);
     if (worldVersionCharacters.length === 1) elements.newCampaignCharacter.value = worldVersionCharacters[0].id;
     elements.newCampaignCharacter.disabled = worldVersionCharacters.length < 2;
-    elements.newCampaignCharacterNote.textContent = worldVersionCharacters.length > 1
-      ? `Choose one of ${worldVersionCharacters.length} retained characters. The choice is snapshotted into the campaign.`
-      : "This world has one character option, which will be snapshotted automatically.";
-    elements.createCampaign.disabled = worldVersionCharacters.length > 1 && !elements.newCampaignCharacter.value;
+    if (!worldVersionCampaignReady) {
+      const issue = firstReadinessIssueMessage || "Add at least one complete playable character.";
+      const message = `${issue} This world version is not campaign-ready; update the draft and publish a new version before creating a campaign.`;
+      elements.newCampaignCharacterNote.textContent = message;
+      setWorldCampaignReadiness(message, "error");
+    } else if (worldVersionCharacters.length > 1) {
+      elements.newCampaignCharacterNote.textContent = `Choose one of ${worldVersionCharacters.length} playable characters. The choice is snapshotted into the campaign.`;
+      setWorldCampaignReadiness(`Campaign-ready with ${worldVersionCharacters.length} playable characters. Choose one when creating a campaign.`, "success");
+    } else {
+      elements.newCampaignCharacterNote.textContent = "This world version has one playable character, which will be snapshotted automatically.";
+      setWorldCampaignReadiness("Campaign-ready with one playable character.", "success");
+    }
+    updateCampaignCreationAvailability();
   } catch (error) {
-    if (sequence !== worldCharacterLoadSequence) return;
+    if (sequence !== playableCharacterLoadSequence || worldVersionId !== selectedWorldVersionId()) return;
+    worldVersionCharacters = [];
+    worldVersionCampaignReady = false;
     elements.newCampaignCharacter.replaceChildren(new Option("Characters unavailable", ""));
     elements.newCampaignCharacterNote.textContent = error.message || String(error);
+    setWorldCampaignReadiness(`Campaign readiness could not be checked: ${elements.newCampaignCharacterNote.textContent}`, "error");
+    updateCampaignCreationAvailability();
     worldMessage(elements.newCampaignCharacterNote.textContent, "error");
   }
 }
@@ -479,6 +529,10 @@ async function exportSelectedWorld() {
 
 async function createCampaignFromWorld() {
   if (!selectedWorld || !selectedWorldVersionId()) return;
+  if (!worldVersionCampaignReady) {
+    worldMessage(elements.worldCampaignReadiness.textContent || "This world version is not campaign-ready.", "error");
+    return;
+  }
   const title = elements.newCampaignTitle.value.trim();
   if (!title) {
     worldMessage("Enter a title for the new campaign.", "error");
@@ -1681,7 +1735,10 @@ async function previewInfiniteWorldsSource(sourceName, sourceText, sourceKind) {
     elements.infiniteWorldsCharacterField.classList.add("hidden");
     elements.infiniteWorldsCharacter.replaceChildren();
     delete request.selectedCharacterId;
-    elements.importPreview.textContent = `${preview.duplicate ? "Duplicate" : "New"} Infinite Worlds world · world details only · no story turns · all ${preview.characters.length || 1} playable character${preview.characters.length === 1 ? "" : "s"} retained · ${preview.counts.entities} entities · ${preview.counts.triggers} triggers`;
+    const characterCount = Array.isArray(preview.characters) ? preview.characters.length : 0;
+    elements.importPreview.textContent = preview.valid
+      ? `${preview.duplicate ? "Duplicate" : "New"} Infinite Worlds world · world details only · no story turns · all ${characterCount} playable character${characterCount === 1 ? "" : "s"} retained · ${preview.counts.entities} entities · ${preview.counts.triggers} triggers`
+      : `Infinite Worlds world is not valid for import · ${preview.warnings?.join(" ") || "Add at least one playable character."}`;
   } else if (preview.kind === "world_text") {
     elements.infiniteWorldsCharacterField.classList.add("hidden");
     elements.importPreview.textContent = `Infinite Worlds world TXT · ${number(preview.counts.sourceWords)} words · LLM conversion will run when imported${preview.warnings.length ? ` · ${preview.warnings.join(" ")}` : ""}`;
@@ -2042,7 +2099,7 @@ elements.worldVersionSelect.addEventListener("change", () => {
   loadWorldVersionPlayableCharacters().catch((error) => worldMessage(error.message || String(error), "error"));
 });
 elements.newCampaignCharacter.addEventListener("change", () => {
-  elements.createCampaign.disabled = worldVersionCharacters.length > 1 && !elements.newCampaignCharacter.value;
+  updateCampaignCreationAvailability();
 });
 elements.publishWorld.addEventListener("click", publishSelectedWorld);
 if (elements.forkWorldModalBtn) {
@@ -2055,8 +2112,13 @@ if (elements.forkWorldModalBtn) {
 }
 if (elements.createCampaignModalBtn) {
   elements.createCampaignModalBtn.addEventListener("click", () => {
+    if (!worldVersionCampaignReady) {
+      worldMessage(elements.worldCampaignReadiness.textContent || "This world version is not campaign-ready.", "error");
+      return;
+    }
     elements.newCampaignTitle.value = "";
-    elements.newCampaignCharacter.value = "";
+    elements.newCampaignCharacter.value = worldVersionCharacters.length === 1 ? worldVersionCharacters[0].id : "";
+    updateCampaignCreationAvailability();
     elements.createCampaignDialog.showModal();
   });
   elements.cancelCreateCampaign.addEventListener("click", () => elements.createCampaignDialog.close());

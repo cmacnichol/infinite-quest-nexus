@@ -1,17 +1,26 @@
 import { describe, expect, it } from "vitest";
 import {
+  WORLD_CONTENT_SCHEMA_VERSION,
   campaignCreateSchema,
+  canonicalizeWorldContent,
   portableWorldSchema,
   worldContentSchema,
-  worldDraftUpdateSchema
+  worldDraftUpdateSchema,
+  type WorldContent
 } from "../../packages/contracts/src/world-library.js";
-import { campaignCharacterSeed, resolvePlayableCharacters } from "../../packages/domain/src/world-characters.js";
+import {
+  assessWorldCampaignReadiness,
+  campaignCharacterSeed,
+  characterSnapshot,
+  resolvePlayableCharacters,
+  selectPlayableCharacter
+} from "../../packages/domain/src/world-characters.js";
 
 describe("World Library contracts", () => {
-  it("normalizes optional world collections", () => {
+  it("normalizes new, incomplete drafts without requiring a playable character", () => {
     const content = worldContentSchema.parse({ world: { title: "Synthetic Test World" } });
     expect(content).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
       playableCharacters: [],
       entities: [],
       relationships: [],
@@ -23,28 +32,38 @@ describe("World Library contracts", () => {
     });
   });
 
-  it("resolves legacy worlds as one character and keeps structured character state isolated", () => {
-    const legacy = worldContentSchema.parse({
+  it("continues to parse older positive schema versions", () => {
+    expect(worldContentSchema.parse({
       schemaVersion: 2,
-      world: { title: "Legacy Test", character: "Legacy Hero" },
-      rpgStats: [{ id: "legacy-stat", name: "Legacy", value: 50 }]
+      world: { title: "Older Test World", character: "Historical guidance" }
+    })).toMatchObject({
+      schemaVersion: 2,
+      world: { title: "Older Test World", character: "Historical guidance" }
     });
-    expect(resolvePlayableCharacters(legacy)).toMatchObject([{ id: "legacy-default", characterText: "Legacy Hero", legacy: true }]);
+    expect(() => worldContentSchema.parse({
+      schemaVersion: 0,
+      world: { title: "Invalid Test World" }
+    })).toThrow();
+  });
 
-    const structured = worldContentSchema.parse({
-      world: { title: "Roster Test", character: "Default" },
-      rpgStats: [{ id: "shared", name: "Shared", value: 50 }],
-      playableCharacters: [
-        { id: "first", name: "First", characterText: "First text", rpgStats: [{ id: "first-stat", name: "First stat", value: 60 }] },
-        { id: "second", name: "Second", characterText: "Second text", rpgStats: [{ id: "second-stat", name: "Second stat", value: 70 }] }
-      ]
-    });
-    expect(() => campaignCharacterSeed(structured)).toThrow(/Select a playable character/);
-    expect(campaignCharacterSeed(structured, "second")).toMatchObject({
-      character: { id: "second", characterText: "Second text" },
-      rpgStats: [{ id: "shared" }, { id: "second-stat" }]
-    });
-    expect(() => campaignCharacterSeed(structured, "missing")).toThrow(/does not belong/);
+  it("canonicalizes writes to version 4 without dropping unknown lore fields", () => {
+    const source = {
+      schemaVersion: 2,
+      world: {
+        title: "Older Test World",
+        character: "Obsolete guidance",
+        cosmology: { moons: 3 }
+      },
+      customLore: { factions: ["Synthetic Guild"] }
+    };
+
+    const canonical = canonicalizeWorldContent(source);
+
+    expect(canonical.schemaVersion).toBe(WORLD_CONTENT_SCHEMA_VERSION);
+    expect("character" in canonical.world).toBe(false);
+    expect(canonical.world.cosmology).toEqual({ moons: 3 });
+    expect(canonical.customLore).toEqual({ factions: ["Synthetic Guild"] });
+    expect(source.world.character).toBe("Obsolete guidance");
   });
 
   it("requires optimistic revision numbers for draft updates", () => {
@@ -60,5 +79,145 @@ describe("World Library contracts", () => {
     });
     expect(portable.content.world.title).toBe("Synthetic Test World");
     expect(() => campaignCreateSchema.parse({ title: "Synthetic Campaign", worldVersionId: "not-a-uuid" })).toThrow();
+  });
+});
+
+describe("playable character campaign readiness", () => {
+  it("reports an empty draft as valid content but not campaign-ready", () => {
+    const content = worldContentSchema.parse({ world: { title: "Incomplete Test World" } });
+    expect(assessWorldCampaignReadiness(content)).toEqual({
+      ready: false,
+      issues: [{
+        code: "no-playable-characters",
+        message: "This world version has no playable characters."
+      }]
+    });
+  });
+
+  it("reports duplicate IDs and incomplete character guidance", () => {
+    const parsed = worldContentSchema.parse({
+      world: { title: "Roster Test" },
+      playableCharacters: [
+        { id: "duplicate", name: "First", characterText: "First guidance" },
+        { id: "duplicate", name: "Second", characterText: "" }
+      ]
+    });
+    const content = {
+      ...parsed,
+      playableCharacters: [
+        parsed.playableCharacters[0],
+        { ...parsed.playableCharacters[1], name: "" }
+      ]
+    } as WorldContent;
+
+    expect(assessWorldCampaignReadiness(content)).toMatchObject({
+      ready: false,
+      issues: [
+        { code: "duplicate-character-id", characterIndex: 1, characterId: "duplicate" },
+        { code: "missing-character-name", characterIndex: 1, characterId: "duplicate" },
+        { code: "missing-character-text", characterIndex: 1, characterId: "duplicate" }
+      ]
+    });
+  });
+
+  it("accepts a complete structured roster", () => {
+    const content = worldContentSchema.parse({
+      world: { title: "Ready Test World" },
+      playableCharacters: [{ id: "hero", name: "Hero", characterText: "Hero guidance" }]
+    });
+    expect(assessWorldCampaignReadiness(content)).toEqual({ ready: true, issues: [] });
+  });
+});
+
+describe("playable character selection", () => {
+  it("never synthesizes a character from historical world guidance", () => {
+    const content = worldContentSchema.parse({
+      schemaVersion: 2,
+      world: { title: "Historical Test World", character: "Historical Hero" }
+    });
+    expect(resolvePlayableCharacters(content)).toBe(content.playableCharacters);
+    expect(resolvePlayableCharacters(content)).toEqual([]);
+    expect(() => selectPlayableCharacter(content)).toThrow("This world version has no playable characters.");
+  });
+
+  it("selects one character automatically and requires a selection for several", () => {
+    const single = worldContentSchema.parse({
+      world: { title: "Single Roster Test" },
+      playableCharacters: [{ id: "only", name: "Only", characterText: "Only guidance" }]
+    });
+    expect(selectPlayableCharacter(single)).toMatchObject({ id: "only", characterText: "Only guidance" });
+
+    const multiple = worldContentSchema.parse({
+      world: { title: "Multiple Roster Test" },
+      playableCharacters: [
+        { id: "first", name: "First", characterText: "First guidance" },
+        { id: "second", name: "Second", characterText: "Second guidance" }
+      ]
+    });
+    expect(() => selectPlayableCharacter(multiple)).toThrow("Select a playable character for this campaign.");
+    expect(selectPlayableCharacter(multiple, "second")).toMatchObject({ id: "second" });
+    expect(() => selectPlayableCharacter(multiple, "missing")).toThrow("The selected playable character does not belong to this world version.");
+  });
+
+  it("merges world defaults with only the selected character defaults", () => {
+    const content = worldContentSchema.parse({
+      world: { title: "Defaults Test" },
+      rpgStats: [
+        { id: "shared-stat", name: "Shared stat", value: 50 },
+        { id: "overridden-stat", name: "Resolve", value: 40 }
+      ],
+      defaultTriggers: [{ id: "shared-trigger", name: "Shared trigger", value: 1 }],
+      playableCharacters: [
+        {
+          id: "first",
+          name: "First",
+          characterText: "First guidance",
+          rpgStats: [{ id: "first-stat", name: "First stat", value: 60 }],
+          defaultTriggers: [{ id: "first-trigger", name: "First trigger", value: 2 }]
+        },
+        {
+          id: "second",
+          name: "Second",
+          characterText: "Second guidance",
+          rpgStats: [
+            { id: "overridden-stat", name: "Resolve", value: 70 },
+            { id: "second-stat", name: "Second stat", value: 80 }
+          ],
+          defaultTriggers: [{ id: "second-trigger", name: "Second trigger", value: 3 }]
+        }
+      ]
+    });
+
+    expect(campaignCharacterSeed(content, "second")).toMatchObject({
+      character: { id: "second", characterText: "Second guidance" },
+      rpgStats: [
+        { id: "shared-stat" },
+        { id: "overridden-stat", value: 70 },
+        { id: "second-stat" }
+      ],
+      defaultTriggers: [{ id: "shared-trigger" }, { id: "second-trigger" }]
+    });
+  });
+
+  it("does not carry the retired legacy marker into new snapshots", () => {
+    const content = worldContentSchema.parse({
+      world: { title: "Snapshot Test" },
+      playableCharacters: [{
+        id: "hero",
+        name: "Hero",
+        characterText: "Hero guidance",
+        legacy: true,
+        source: { type: "campaign-import" }
+      }]
+    });
+
+    expect(characterSnapshot(content.playableCharacters[0]!)).toEqual({
+      id: "hero",
+      name: "Hero",
+      characterText: "Hero guidance",
+      rpgStats: [],
+      defaultTriggers: [],
+      source: { type: "campaign-import" }
+    });
   });
 });

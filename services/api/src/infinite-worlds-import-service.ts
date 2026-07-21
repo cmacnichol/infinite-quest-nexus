@@ -2,7 +2,14 @@ import { z } from "zod";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import type { InfiniteWorldsImportRequest, LegacyStory } from "../../../packages/contracts/src/imports.js";
-import { playableCharacterSchema, portableWorldSchema, worldContentSchema, type WorldContent } from "../../../packages/contracts/src/world-library.js";
+import {
+  canonicalizeWorldContent,
+  playableCharacterSchema,
+  portableWorldSchema,
+  worldContentSchema,
+  WORLD_CONTENT_SCHEMA_VERSION,
+  type WorldContent
+} from "../../../packages/contracts/src/world-library.js";
 import {
   convertInfiniteWorldsWorld,
   infiniteWorldsCharacters,
@@ -282,14 +289,16 @@ async function convertWorldText(pool: DatabasePool, request: InfiniteWorldsImpor
   }
   if (!converted) throw new Error("The text provider did not produce a world import.");
   const playableCharacters = convertedPlayableCharacters(converted);
-  const content = worldContentSchema.parse({
-    schemaVersion: 3,
+  if (!playableCharacters.length) {
+    throw Object.assign(new Error("The converted Infinite Worlds world has no playable characters. Add a character to the source and import it again."), { statusCode: 400 });
+  }
+  const content = canonicalizeWorldContent({
+    schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
     world: {
       title: converted.title,
       genre: converted.genre,
       tone: converted.tone,
       backgroundStory: converted.backgroundStory,
-      character: playableCharacters[0]?.characterText || converted.player_character,
       premise: converted.premise,
       firstAction: converted.firstAction,
       rules: converted.story_rules
@@ -354,6 +363,17 @@ export async function previewInfiniteWorldsImport(pool: DatabasePool, request: I
   if (kind === "world_json") {
     const source = parseJsonText(request.sourceText);
     const characters = infiniteWorldsCharacters(source).map((character, index) => ({ index, name: String(character.name || `Character ${index + 1}`) }));
+    if (!characters.length) {
+      return {
+        kind,
+        valid: false,
+        duplicate: false,
+        existingWorldId: null,
+        characters,
+        counts: { entities: 0, relationships: 0, triggers: 0 },
+        warnings: ["The Infinite Worlds world export has no playable characters. Add at least one possible character before importing it."]
+      };
+    }
     const worldExport = convertInfiniteWorldsWorld(source);
     const preview = await previewWorldImport(pool, { sourceName: request.sourceName, worldExport });
     return { ...preview, kind, valid: true, characters };
