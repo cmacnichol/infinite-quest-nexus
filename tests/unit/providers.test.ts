@@ -354,4 +354,24 @@ describe("text provider adapters", () => {
       contextLength: 8192
     }]);
   });
+
+  it("handles unparseable JSON in a failed provider response", async () => {
+    const fetcher = vi.fn(async () => {
+      return new Response("Internal Server Error - Invalid JSON [", {
+        status: 500,
+        statusText: "Internal Server Error"
+      });
+    });
+
+    let thrownError: unknown;
+    try {
+      await callTextProvider(profile, { systemPrompt: "system", input: "input" }, fetcher as typeof fetch);
+    } catch (error) {
+      thrownError = error;
+    }
+
+    expect(thrownError).toBeInstanceOf(Error);
+    expect((thrownError as Error).message).toContain("Internal Server Error - Invalid JSON [");
+    expect((thrownError as any).statusCode).toBe(500);
+  });
 });
