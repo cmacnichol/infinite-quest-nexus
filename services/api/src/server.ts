@@ -124,15 +124,14 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     const origin = request.headers.origin;
     if (origin) {
       if (config.corsAllowedOrigins.includes("*") || config.corsAllowedOrigins.length === 0) {
-        reply.header("Access-Control-Allow-Origin", origin);
-        reply.header("Vary", "Origin");
+        reply.header("Access-Control-Allow-Origin", "*");
       } else if (config.corsAllowedOrigins.includes(origin)) {
         reply.header("Access-Control-Allow-Origin", origin);
         reply.header("Vary", "Origin");
+        reply.header("Access-Control-Allow-Credentials", "true");
       }
       reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
       reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-Id, X-Correlation-Id");
-      reply.header("Access-Control-Allow-Credentials", "true");
     }
   });
 
