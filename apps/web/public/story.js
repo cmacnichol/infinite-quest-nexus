@@ -47,6 +47,8 @@ const state = {
   imagePollTimer: null,
   activityLog: [],
   toastTimer: null,
+  streamingAutoFollow: true,
+  streamingExpectedScrollY: null,
   user: {
     id: null,
     systemKey: null,
@@ -517,34 +519,69 @@ function renderStreamingPreview(narrationText, action) {
   if (emptyEl) emptyEl.remove();
 
   let card = $("streamingPreviewCard");
+  const isNewPreview = !card;
   if (!card) {
     card = document.createElement("div");
     card.id = "streamingPreviewCard";
     card.className = "scene no-image turn-streaming-preview";
     container.appendChild(card);
+    const actionText = action || "Generating turn...";
+    card.innerHTML = `
+      <div class="scene-narration">
+        <div class="turn-streaming-header">
+          <span class="turn-streaming-badge"><span class="turn-streaming-pulse"></span> Streaming Live</span>
+          <button type="button" class="streaming-follow-button hidden" data-action="follow-stream" aria-label="Resume following live narration">Follow live</button>
+        </div>
+        <div class="turn-meta">
+          <div class="action-tag">➜ ${escapeHtml(actionText)}</div>
+        </div>
+        <div class="narration streaming-narration"></div>
+      </div>
+    `;
   }
 
-  const actionText = action || "Generating turn...";
-  const formattedNarration = sanitizeNarration(narrationText);
-  card.innerHTML = `
-    <div class="scene-narration">
-      <div class="turn-streaming-header">
-        <span class="turn-streaming-badge"><span class="turn-streaming-pulse"></span> Streaming Live</span>
-      </div>
-      <div class="turn-meta">
-        <div class="action-tag">➜ ${escapeHtml(actionText)}</div>
-      </div>
-      <div class="narration">
-        ${formattedNarration}<span class="streaming-cursor" title="Receiving live tokens..."></span>
-      </div>
-    </div>
-  `;
-  scrollToView();
+  const narration = card.querySelector(".streaming-narration");
+  if (narration) {
+    narration.innerHTML = `${sanitizeNarration(narrationText)}<span class="streaming-cursor" title="Receiving live tokens..."></span>`;
+  }
+
+  if (isNewPreview) {
+    state.streamingAutoFollow = true;
+    card.scrollIntoView({ behavior: "auto", block: "start" });
+    state.streamingExpectedScrollY = window.scrollY;
+  } else if (state.streamingAutoFollow) {
+    followStreamingPreview();
+  }
+}
+
+function followStreamingPreview() {
+  const card = $("streamingPreviewCard");
+  if (!card) return;
+  state.streamingAutoFollow = true;
+  const button = card.querySelector('[data-action="follow-stream"]');
+  if (button) button.classList.add("hidden");
+  const cursor = card.querySelector(".streaming-cursor");
+  if (cursor) {
+    cursor.scrollIntoView({ behavior: "auto", block: "end" });
+    state.streamingExpectedScrollY = window.scrollY;
+  }
+}
+
+function pauseStreamingAutoFollow() {
+  if (!state.streamingAutoFollow) return;
+  const card = $("streamingPreviewCard");
+  if (!card) return;
+  state.streamingAutoFollow = false;
+  state.streamingExpectedScrollY = null;
+  const button = card.querySelector('[data-action="follow-stream"]');
+  if (button) button.classList.remove("hidden");
 }
 
 function clearStreamingPreview() {
   const card = $("streamingPreviewCard");
   if (card) card.remove();
+  state.streamingAutoFollow = true;
+  state.streamingExpectedScrollY = null;
 }
 
 async function pollGenerationJob(jobId, action) {
@@ -1546,9 +1583,31 @@ document.addEventListener("DOMContentLoaded", () => {
   if (storyArea) storyArea.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-action]");
     if (!btn) return;
+    if (btn.dataset.action === "follow-stream") {
+      followStreamingPreview();
+      return;
+    }
     const turnId = btn.dataset.turnId;
     if (btn.dataset.action === "edit-image-prompt") openImagePromptEditor(turnId);
     if (btn.dataset.action === "regenerate-image") regenerateIllustration(turnId);
+  });
+
+  // A manual scroll means the reader has chosen their own position. Streaming
+  // updates must not recapture the viewport until they explicitly resume.
+  window.addEventListener("wheel", pauseStreamingAutoFollow, { passive: true });
+  window.addEventListener("touchmove", pauseStreamingAutoFollow, { passive: true });
+  window.addEventListener("scroll", () => {
+    if (!state.streamingAutoFollow || !$("streamingPreviewCard")) return;
+    if (state.streamingExpectedScrollY === null || Math.abs(window.scrollY - state.streamingExpectedScrollY) > 1) {
+      pauseStreamingAutoFollow();
+    }
+  }, { passive: true });
+  document.addEventListener("keydown", (e) => {
+    const target = e.target;
+    if (target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))) return;
+    if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) {
+      pauseStreamingAutoFollow();
+    }
   });
 
   // Activity log

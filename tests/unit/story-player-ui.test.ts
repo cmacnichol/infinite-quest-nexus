@@ -85,6 +85,19 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyCss).not.toContain('.turn-streaming-preview {\n  display: flex;');
   });
 
+  it("pauses streaming auto-follow after manual scrolling and allows explicit resume", () => {
+    expect(storyScript).toContain("streamingAutoFollow: true");
+    expect(storyScript).toContain('window.addEventListener("wheel", pauseStreamingAutoFollow');
+    expect(storyScript).toContain('window.addEventListener("touchmove", pauseStreamingAutoFollow');
+    expect(storyScript).toContain('window.addEventListener("scroll", () => {');
+    expect(storyScript).toContain("streamingExpectedScrollY");
+    expect(storyScript).toContain('function pauseStreamingAutoFollow()');
+    expect(storyScript).toContain('if (state.streamingAutoFollow) {\n    followStreamingPreview();');
+    expect(storyScript).toContain('data-action="follow-stream"');
+    expect(storyScript).not.toContain("  scrollToView();\n}\n\nfunction clearStreamingPreview");
+    expect(storyCss).toContain(".streaming-follow-button {");
+  });
+
   it("provides history navigation with view mode toggling, undo, retry, and branch/reset handling", () => {
     expect(storyScript).toContain('function goToPrevious()');
     expect(storyScript).toContain('function goToNext()');
