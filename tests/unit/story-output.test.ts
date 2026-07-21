@@ -55,6 +55,23 @@ describe("story output integrity", () => {
     expect(result).toMatchObject({ ok: false, code: "invalid_json" });
   });
 
+  it("handles strings with no JSON objects", () => {
+    const result = parseStoryOutput("Just some plain text without any JSON object.");
+    expect(result).toMatchObject({ ok: false, code: "invalid_json" });
+    if (!result.ok && result.code === "invalid_json") {
+      expect(result.errors[0]).toContain("The response did not contain a JSON object.");
+    }
+  });
+
+  it("reports invalid JSON errors when extracted JSON has syntax errors", () => {
+    const result = parseStoryOutput('{ "narration": }');
+    expect(result).toMatchObject({ ok: false, code: "invalid_json" });
+    if (!result.ok && result.code === "invalid_json") {
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(typeof result.errors[0]).toBe("string");
+    }
+  });
+
   it("rejects mechanics leakage in every story field", () => {
     for (const contaminated of [
       { narration: "Test Character rolls a 17 and opens Location Gamma." },
