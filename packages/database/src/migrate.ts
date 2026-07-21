@@ -1,5 +1,6 @@
 import { runner, type RunnerOption } from "node-pg-migrate";
 import type { DatabasePool } from "./pool.js";
+import { logger } from "../../logger/src/index.js";
 
 const MIGRATIONS_TABLE = "schema_migrations";
 const MAINTENANCE_SUFFIX = ".maintenance";
@@ -9,9 +10,9 @@ type MigrationRunOptions = {
 };
 
 const migrationLogger: NonNullable<RunnerOption["logger"]> = {
-  info: (message) => console.log(JSON.stringify({ event: "database_migration", level: "info", message })),
-  warn: (message) => console.warn(JSON.stringify({ event: "database_migration", level: "warn", message })),
-  error: (message) => console.error(JSON.stringify({ event: "database_migration", level: "error", message }))
+  info: (message) => logger.info({ event: "database_migration", message }),
+  warn: (message) => logger.warn({ event: "database_migration", message }),
+  error: (message) => logger.error({ event: "database_migration", message })
 };
 
 const silentMigrationLogger: NonNullable<RunnerOption["logger"]> = {

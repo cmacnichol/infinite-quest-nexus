@@ -1,4 +1,5 @@
 import type { ProviderType } from "../../contracts/src/generation.js";
+import { logger } from "../../logger/src/index.js";
 import { Agent } from "undici";
 
 export type TextProviderProfile = {
@@ -179,7 +180,7 @@ function transportFailure(
     ? `${providerName} ${operation} timed out after ${Math.round(timeoutMs / 60_000 * 10) / 10} minutes before a complete response was received. Nexus closed the provider request; increase Request timeout in the provider's Advanced settings or reduce the request workload.`
     : `${providerName} ${operation} could not complete because the provider connection failed (${transportCode}). Check the endpoint and Docker host logs for transport diagnostics.`;
   const error = new ProviderTransportError(message, details, cause);
-  console.error(JSON.stringify({ event: "provider_transport_error", ...details }));
+  logger.error({ event: "provider_transport_error", ...details });
   return error;
 }
 
@@ -190,7 +191,7 @@ export function providerTransportErrorDetails(error: unknown): ProviderTransport
 export function logProviderTransportError(error: unknown, context: Record<string, unknown>): void {
   const transport = providerTransportErrorDetails(error);
   if (!transport) return;
-  console.error(JSON.stringify({ event: "provider_transport_error_correlated", ...context, ...transport }));
+  logger.error({ event: "provider_transport_error_correlated", ...context, ...transport });
 }
 
 async function providerFetch(

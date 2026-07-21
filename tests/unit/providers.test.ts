@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { providerProfileInputSchema } from "../../packages/contracts/src/generation.js";
 import { callEmbeddingProvider, callImageProvider, callTextProvider, discoverEmbeddingModels, discoverImageModels, discoverModels, providerTransportErrorDetails, reportedProviderCost, type TextProviderProfile } from "../../packages/story-engine/src/providers.js";
+import { logger } from "../../packages/logger/src/index.js";
 
 const profile: TextProviderProfile = {
   providerType: "lmstudio",
@@ -26,7 +27,7 @@ describe("text provider adapters", () => {
   });
 
   it("normalizes header timeouts into explicit safe transport diagnostics", async () => {
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const loggerError = vi.spyOn(logger, "error").mockImplementation(() => undefined);
     const timeoutProfile = { ...profile, requestTimeoutMs: 420_000, apiKey: "synthetic-secret-token" };
     const fetcher = vi.fn(async () => {
       throw new TypeError("fetch failed", { cause: Object.assign(new Error("Headers Timeout Error Bearer synthetic-secret-token"), { code: "UND_ERR_HEADERS_TIMEOUT" }) });
@@ -45,12 +46,12 @@ describe("text provider adapters", () => {
       transportCode: "UND_ERR_HEADERS_TIMEOUT",
       endpoint: "http://lmstudio.test/api/v1/chat"
     });
-    const logged = consoleError.mock.calls.map(([value]) => String(value)).join("\n");
+    const logged = JSON.stringify(loggerError.mock.calls);
     expect(logged).toContain('"event":"provider_transport_error"');
     expect(logged).not.toContain("secret prompt");
     expect(logged).not.toContain("private action");
     expect(logged).not.toContain("synthetic-secret-token");
-    consoleError.mockRestore();
+    loggerError.mockRestore();
   });
 
   it("attaches an abort deadline and configurable dispatcher to outbound requests", async () => {
