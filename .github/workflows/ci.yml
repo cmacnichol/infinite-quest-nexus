@@ -51,8 +51,11 @@ jobs:
       - name: Type check
         run: pnpm check
 
+      - name: Run unit tests
+        run: pnpm test --project unit
+
       - name: Test with PostgreSQL and pgvector
-        run: pnpm test
+        run: pnpm test:integration
 
       - name: Build application
         run: pnpm build

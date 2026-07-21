@@ -16,7 +16,7 @@
     "migrate": "tsx packages/database/src/migrate-cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test:integration": "vitest run --project integration"
   },
   "dependencies": {
     "@fastify/static": "^10.1.0",
