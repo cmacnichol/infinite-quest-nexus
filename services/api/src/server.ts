@@ -30,6 +30,7 @@ import {
   worldForkSchema,
   worldImportRequestSchema,
   worldPublishSchema,
+  worldVersionDeleteSchema,
   worldStatusUpdateSchema
 } from "../../../packages/contracts/src/world-library.js";
 import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
@@ -62,6 +63,7 @@ import {
   createWorld,
   deleteCampaign,
   deleteWorld,
+  deleteWorldVersion,
   exportCampaign,
   exportWorld,
   forkWorld,
@@ -96,13 +98,19 @@ function statusCode(error: unknown): number {
   return 500;
 }
 
-function errorDetails(error: unknown): { name: string; message: string; issues?: unknown } {
+function errorDetails(error: unknown): { name: string; message: string; issues?: unknown; details?: unknown } {
   if (typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === "22P02") {
     return { name: "InvalidUuidError", message: "The provided ID is not a valid UUID." };
   }
   if (error instanceof Error) {
     const issues = "issues" in error ? (error as Error & { issues?: unknown }).issues : undefined;
-    return { name: error.name || "Error", message: error.message, ...(issues === undefined ? {} : { issues }) };
+    const details = "details" in error ? (error as Error & { details?: unknown }).details : undefined;
+    return {
+      name: error.name || "Error",
+      message: error.message,
+      ...(issues === undefined ? {} : { issues }),
+      ...(details === undefined ? {} : { details })
+    };
   }
   return { name: "Error", message: String(error) };
 }
@@ -169,6 +177,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       error: exposed ? details.name || "Provider request failed" : "Internal server error",
       message: exposed ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
       correlationId: request.id,
+      ...(!exposed || details.details === undefined ? {} : { details: details.details }),
       ...(transport ? { details: { code: transport.timedOut ? "provider_request_timeout" : "provider_transport_error", transport } } : {}),
       ...(details.issues === undefined ? {} : { issues: details.issues })
     });
@@ -321,6 +330,15 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.delete<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId", async (request) => (
     deleteWorld(pool, uuidSchema.parse(request.params.worldId), resourceDeleteSchema.parse(request.body))
+  ));
+
+  app.delete<{ Params: { worldId: string; worldVersionId: string } }>("/api/v1/worlds/:worldId/versions/:worldVersionId", async (request) => (
+    deleteWorldVersion(
+      pool,
+      uuidSchema.parse(request.params.worldId),
+      uuidSchema.parse(request.params.worldVersionId),
+      worldVersionDeleteSchema.parse(request.body)
+    )
   ));
 
   app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/fork", async (request, reply) => (

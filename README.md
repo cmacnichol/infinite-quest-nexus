@@ -38,7 +38,7 @@ The current implementation is a production-shaped vertical slice. It serves the 
 - Typed backend RPG assessment, durable private percentile resolution, and retry-safe reuse without rerolling.
 - Typed before/after event evaluation, trigger counters, deferred events, and validated fiction-only after-scene extensions.
 - A migration, provider, generation, and memory-inspection UI at `/nexus/`.
-- A database-backed World Library for editable drafts, immutable publication, version history, fork provenance, archive/restore, and portable world export/import.
+- A database-backed World Library for editable drafts, immutable publication, version history, safe deletion of unused published versions, fork provenance, archive/restore, and portable world export/import.
 - Campaign creation from selected world versions, campaign switching, latest-turn resume into the player view, archive and guarded deletion controls, explicit audited upgrades to newer versions, and credential-free portable campaign exports.
 - Guarded world deletion that refuses to remove canon still referenced by a campaign and clears only the deleted world's import/fork provenance after confirmation.
 - Independently configured image-provider profiles and optional post-commit illustration jobs.
@@ -48,7 +48,7 @@ The current implementation is a production-shaped vertical slice. It serves the 
 
 The player UI can now use the Nexus Story Engine for main story turns from **Active Text Provider & Context**, including campaigns with RPG stats and before/after event triggers. Referee responses, random values, targets, trigger reasons, and orchestration diagnostics remain private. The narrative request receives only selected fictional consequences and authoritative trigger effects after independent sanitization. Illustrations are configured separately in Nexus and run only after accepted story completion.
 
-The Nexus interface at `/nexus/` is the World Management surface. World drafts use optimistic revisions; publication creates immutable numbered versions. Creating or editing a world never alters an existing campaign. When a newer version is available, the campaign panel offers an explicit migration that preserves its append-only accepted-turn ledger and starts the next generation from a fresh database-backed model chain. The same panel stores the campaign's default story response length independently from the provider's maximum-output safety ceiling. Selecting **Load story** passes the server-generated accepted ledger through one-time session storage, reconnects the same campaign ID, and opens the player view at the latest accepted turn without persisting provider credentials in the handoff.
+The Nexus interface at `/nexus/` is the World Management surface. World drafts use optimistic revisions; publication creates immutable numbered versions. An explicitly selected published version can be permanently deleted only while it has no current or historical campaign dependency; draft, fork, and import provenance survives as detached metadata, and deleted version numbers are never reused. Creating or editing a world never alters an existing campaign. When a newer version is available, the campaign panel offers an explicit migration that preserves its append-only accepted-turn ledger and starts the next generation from a fresh database-backed model chain. The same panel stores the campaign's default story response length independently from the provider's maximum-output safety ceiling. Selecting **Load story** passes the server-generated accepted ledger through one-time session storage, reconnects the same campaign ID, and opens the player view at the latest accepted turn without persisting provider credentials in the handoff.
 
 ## Requirements
 
@@ -162,6 +162,7 @@ GET  /api/v1/providers
 POST /api/v1/providers
 GET  /api/v1/providers/:providerId/models
 DELETE /api/v1/worlds/:worldId
+DELETE /api/v1/worlds/:worldId/versions/:worldVersionId
 POST /api/v1/campaigns/:campaignId/generations
 GET  /api/v1/campaigns/:campaignId/sync-status
 PUT  /api/v1/campaigns/:campaignId/player-config

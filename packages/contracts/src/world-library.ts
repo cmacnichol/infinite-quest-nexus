@@ -136,6 +136,11 @@ export const resourceDeleteSchema = z.object({
   expectedTitle: title
 });
 
+export const worldVersionDeleteSchema = z.object({
+  confirmation: z.literal("DELETE"),
+  expectedVersionNumber: z.coerce.number().int().positive()
+});
+
 export type PlayableCharacter = z.infer<typeof playableCharacterSchema>;
 export type WorldCreateRequest = z.infer<typeof worldCreateSchema>;
 export type WorldDraftUpdateRequest = z.infer<typeof worldDraftUpdateSchema>;
@@ -147,3 +152,4 @@ export type CampaignCreateRequest = z.infer<typeof campaignCreateSchema>;
 export type CampaignUpdateRequest = z.infer<typeof campaignUpdateSchema>;
 export type CampaignWorldMigrationRequest = z.infer<typeof campaignWorldMigrationSchema>;
 export type ResourceDeleteRequest = z.infer<typeof resourceDeleteSchema>;
+export type WorldVersionDeleteRequest = z.infer<typeof worldVersionDeleteSchema>;

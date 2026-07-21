@@ -14,6 +14,7 @@ import {
   type WorldForkRequest,
   type WorldImportRequest,
   type WorldPublishRequest,
+  type WorldVersionDeleteRequest,
   type WorldStatusUpdateRequest
 } from "../../../packages/contracts/src/world-library.js";
 import { removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
@@ -32,8 +33,8 @@ function json(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
-function httpError(statusCode: number, message: string): Error {
-  return Object.assign(new Error(message), { statusCode });
+function httpError(statusCode: number, message: string, details?: unknown): Error {
+  return Object.assign(new Error(message), { statusCode, ...(details === undefined ? {} : { details }) });
 }
 
 function portableModelMetadata(value: unknown): Record<string, unknown> {
@@ -160,10 +161,36 @@ export async function getWorld(pool: DatabasePool, worldId: string) {
   const versions = await pool.query(
     `SELECT id, version_number AS "versionNumber", source_hash AS "sourceHash",
             release_notes AS "releaseNotes", created_from_revision AS "createdFromRevision",
-            published_at AS "publishedAt", created_at AS "createdAt"
-       FROM world_versions
-      WHERE world_id = $1 AND owner_user_id = $2
-      ORDER BY version_number DESC`,
+            published_at AS "publishedAt", created_at AS "createdAt",
+            dependencies.current_campaigns AS "currentCampaigns",
+            dependencies.campaign_migrations AS "campaignMigrations",
+            dependencies.chronicle_memories AS "chronicleMemories",
+            dependencies.model_chains AS "modelChains",
+            detachments.drafts, detachments.forks, detachments.imports
+       FROM world_versions wv
+       CROSS JOIN LATERAL (
+         SELECT
+           (SELECT count(*)::int FROM campaigns c
+             WHERE c.owner_user_id = wv.owner_user_id AND c.world_version_id = wv.id) AS current_campaigns,
+           (SELECT count(*)::int FROM campaign_world_migrations cwm
+             WHERE cwm.owner_user_id = wv.owner_user_id
+               AND (cwm.from_world_version_id = wv.id OR cwm.to_world_version_id = wv.id)) AS campaign_migrations,
+           (SELECT count(*)::int FROM chronicle_memories cm
+             WHERE cm.owner_user_id = wv.owner_user_id AND cm.world_version_id = wv.id) AS chronicle_memories,
+           (SELECT count(*)::int FROM model_chains mc
+             WHERE mc.owner_user_id = wv.owner_user_id AND mc.world_version_id = wv.id) AS model_chains
+       ) dependencies
+       CROSS JOIN LATERAL (
+         SELECT
+           (SELECT count(*)::int FROM world_drafts wd
+             WHERE wd.owner_user_id = wv.owner_user_id AND wd.based_on_world_version_id = wv.id) AS drafts,
+           (SELECT count(*)::int FROM worlds fw
+             WHERE fw.owner_user_id = wv.owner_user_id AND fw.forked_from_world_version_id = wv.id) AS forks,
+           (SELECT count(*)::int FROM imports i
+             WHERE i.owner_user_id = wv.owner_user_id AND i.world_version_id = wv.id) AS imports
+       ) detachments
+      WHERE wv.world_id = $1 AND wv.owner_user_id = $2
+      ORDER BY wv.version_number DESC`,
     [worldId, ownerUserId]
   );
   const campaigns = await pool.query(
@@ -178,7 +205,38 @@ export async function getWorld(pool: DatabasePool, worldId: string) {
       ORDER BY c.updated_at DESC`,
     [worldId, ownerUserId]
   );
-  return { ...world, versions: versions.rows, campaigns: campaigns.rows };
+  return {
+    ...world,
+    versions: versions.rows.map((version) => {
+      const {
+        currentCampaigns,
+        campaignMigrations,
+        chronicleMemories,
+        modelChains,
+        drafts,
+        forks,
+        imports,
+        ...publishedVersion
+      } = version;
+      const deletionBlockers = {
+        currentCampaigns: Number(currentCampaigns || 0),
+        campaignMigrations: Number(campaignMigrations || 0),
+        chronicleMemories: Number(chronicleMemories || 0),
+        modelChains: Number(modelChains || 0)
+      };
+      return {
+        ...publishedVersion,
+        deletable: Object.values(deletionBlockers).every((count) => count === 0),
+        deletionBlockers,
+        detachments: {
+          drafts: Number(drafts || 0),
+          forks: Number(forks || 0),
+          imports: Number(imports || 0)
+        }
+      };
+    }),
+    campaigns: campaigns.rows
+  };
 }
 
 export async function createWorld(pool: DatabasePool, request: WorldCreateRequest) {
@@ -264,7 +322,14 @@ export async function publishWorld(pool: DatabasePool, worldId: string, request:
       [worldId, ownerUserId]
     );
     if (latest.rows[0]?.source_hash === sourceHash) throw httpError(409, "The draft is identical to the latest published version.");
-    const versionNumber = (latest.rows[0]?.version_number ?? 0) + 1;
+    const allocation = await client.query<{ version_number: number }>(
+      `UPDATE worlds SET next_version_number = next_version_number + 1
+        WHERE id = $1 AND owner_user_id = $2
+        RETURNING next_version_number - 1 AS version_number`,
+      [worldId, ownerUserId]
+    );
+    const versionNumber = allocation.rows[0]?.version_number;
+    if (!versionNumber) throw new Error("Could not allocate a world version number.");
     const version = await client.query<{ id: string; published_at: Date }>(
       `INSERT INTO world_versions (
          world_id, owner_user_id, version_number, content, source_hash, release_notes, created_from_revision
@@ -645,6 +710,130 @@ export async function deleteWorld(pool: DatabasePool, worldId: string, request: 
     await client.query("DELETE FROM world_versions WHERE world_id = $1 AND owner_user_id = $2", [worldId, ownerUserId]);
     await client.query("DELETE FROM worlds WHERE id = $1 AND owner_user_id = $2", [worldId, ownerUserId]);
     return { deleted: true, id: worldId, title: row.title };
+  });
+}
+
+export async function deleteWorldVersion(
+  pool: DatabasePool,
+  worldId: string,
+  worldVersionId: string,
+  request: WorldVersionDeleteRequest
+) {
+  return withTransaction(pool, async (client) => {
+    const ownerUserId = await initialOwnerId(client);
+    const world = await client.query<{ status: string }>(
+      "SELECT status FROM worlds WHERE id = $1 AND owner_user_id = $2 FOR UPDATE",
+      [worldId, ownerUserId]
+    );
+    if (!world.rows[0]) throw httpError(404, "World not found.");
+
+    const version = await client.query<{ world_id: string; version_number: number }>(
+      `SELECT world_id, version_number
+         FROM world_versions
+        WHERE id = $1 AND owner_user_id = $2
+        FOR UPDATE`,
+      [worldVersionId, ownerUserId]
+    );
+    const selected = version.rows[0];
+    if (!selected) throw httpError(404, "Published world version not found.");
+    if (selected.world_id !== worldId) throw httpError(409, "The selected version does not belong to this world.");
+    if (selected.version_number !== request.expectedVersionNumber) {
+      throw httpError(409, "The selected world version changed. Refresh before deleting it.");
+    }
+
+    const dependencies = await client.query<{
+      current_campaigns: number;
+      campaign_migrations: number;
+      chronicle_memories: number;
+      model_chains: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::int FROM campaigns
+           WHERE owner_user_id = $2 AND world_version_id = $1) AS current_campaigns,
+         (SELECT count(*)::int FROM campaign_world_migrations
+           WHERE owner_user_id = $2
+             AND (from_world_version_id = $1 OR to_world_version_id = $1)) AS campaign_migrations,
+         (SELECT count(*)::int FROM chronicle_memories
+           WHERE owner_user_id = $2 AND world_version_id = $1) AS chronicle_memories,
+         (SELECT count(*)::int FROM model_chains
+           WHERE owner_user_id = $2 AND world_version_id = $1) AS model_chains`,
+      [worldVersionId, ownerUserId]
+    );
+    const counts = dependencies.rows[0];
+    const blockers = {
+      currentCampaigns: Number(counts?.current_campaigns || 0),
+      campaignMigrations: Number(counts?.campaign_migrations || 0),
+      chronicleMemories: Number(counts?.chronicle_memories || 0),
+      modelChains: Number(counts?.model_chains || 0)
+    };
+    if (Object.values(blockers).some((count) => count > 0)) {
+      throw httpError(409, `World version ${selected.version_number} is linked to campaign history.`, {
+        code: "world_version_in_use",
+        blockers
+      });
+    }
+
+    const detachedDrafts = await client.query(
+      `UPDATE world_drafts SET based_on_world_version_id = NULL, updated_at = now()
+        WHERE owner_user_id = $2 AND based_on_world_version_id = $1`,
+      [worldVersionId, ownerUserId]
+    );
+    const detachedForks = await client.query(
+      `UPDATE worlds SET forked_from_world_version_id = NULL, updated_at = now()
+        WHERE owner_user_id = $2 AND forked_from_world_version_id = $1`,
+      [worldVersionId, ownerUserId]
+    );
+    const detachedImports = await client.query(
+      `UPDATE imports SET world_version_id = NULL
+        WHERE owner_user_id = $2 AND world_version_id = $1`,
+      [worldVersionId, ownerUserId]
+    );
+    const detachments = {
+      drafts: detachedDrafts.rowCount || 0,
+      forks: detachedForks.rowCount || 0,
+      imports: detachedImports.rowCount || 0
+    };
+
+    const deleted = await client.query(
+      "DELETE FROM world_versions WHERE id = $1 AND world_id = $2 AND owner_user_id = $3",
+      [worldVersionId, worldId, ownerUserId]
+    );
+    if (!deleted.rowCount) throw httpError(409, "The selected world version was not deleted. Refresh and try again.");
+
+    const remaining = await client.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM world_versions
+        WHERE world_id = $1 AND owner_user_id = $2`,
+      [worldId, ownerUserId]
+    );
+    const remainingVersionCount = Number(remaining.rows[0]?.count || 0);
+    const nextStatus = remainingVersionCount === 0 ? "draft" : world.rows[0].status;
+    await client.query(
+      `UPDATE worlds SET status = $3, updated_at = now()
+        WHERE id = $1 AND owner_user_id = $2`,
+      [worldId, ownerUserId, nextStatus]
+    );
+    await client.query(
+      `INSERT INTO activity_events (owner_user_id, event_type, correlation_id, details)
+       VALUES ($1, 'world_version_deleted', $2, $3)`,
+      [ownerUserId, worldVersionId, json({
+        worldId,
+        worldVersionId,
+        versionNumber: selected.version_number,
+        remainingVersionCount,
+        worldStatus: nextStatus,
+        detachments
+      })]
+    );
+
+    return {
+      deleted: true,
+      worldId,
+      worldVersionId,
+      versionNumber: selected.version_number,
+      remainingVersionCount,
+      worldStatus: nextStatus,
+      detachments
+    };
   });
 }
 

@@ -100,7 +100,7 @@ async function api(path, options = {}) {
     error.name = payload.error || "ApiError";
     error.statusCode = response.status;
     error.correlationId = payload.correlationId || response.headers.get("x-correlation-id") || "";
-    error.details = payload.details || null;
+    error.details = payload.details || payload.issues || (payload.blockers ? { blockers: payload.blockers } : null);
     throw error;
   }
   return payload;
@@ -140,10 +140,16 @@ function campaignMessage(message, type = "") {
   elements.campaignStatusMessage.classList.remove("hidden");
 }
 
-function requestTypedDelete(title, message) {
+function requestTypedDelete(title, message, details = []) {
   if (pendingDeleteResolve) pendingDeleteResolve(false);
   pendingDeleteTitle = title;
   elements.deleteDialogMessage.textContent = message;
+  elements.deleteDialogDetails.replaceChildren(...details.map((detail) => {
+    const item = document.createElement("li");
+    item.textContent = detail;
+    return item;
+  }));
+  elements.deleteDialogDetails.classList.toggle("hidden", !details.length);
   elements.deleteExpectedTitle.textContent = title;
   elements.deleteConfirmationInput.value = "";
   elements.confirmDelete.disabled = true;
@@ -172,6 +178,7 @@ function setWorldEditorDisabled(disabled) {
     elements.createCampaignModalBtn,
     elements.confirmCreateCampaign,
     elements.exportWorld,
+    elements.deleteWorldVersion,
     elements.archiveWorld,
     elements.deleteWorld
   ].forEach((element) => { element.disabled = disabled; });
@@ -304,6 +311,7 @@ async function selectWorld(worldId) {
   elements.confirmCreateCampaign.disabled = true;
   elements.exportWorld.disabled = !selectedWorld.versions.length;
   elements.forkWorldModalBtn.disabled = !selectedWorld.versions.length;
+  updateWorldVersionDeleteAvailability();
   elements.deleteWorld.disabled = false;
   await loadWorldVersionPlayableCharacters();
   worldMessage(archived ? "This world is archived. Restore it before editing or publishing." : "Draft loaded from authoritative PostgreSQL storage.");
@@ -371,6 +379,67 @@ async function publishSelectedWorld() {
 
 function selectedWorldVersionId() {
   return elements.worldVersionSelect.value || selectedWorld?.versions?.[0]?.id || "";
+}
+
+function explicitlySelectedWorldVersion() {
+  const versionId = elements.worldVersionSelect.value;
+  return versionId ? selectedWorld?.versions?.find((version) => version.id === versionId) || null : null;
+}
+
+function worldVersionDeletionMetadata(version) {
+  const metadata = version?.deletion && typeof version.deletion === "object"
+    ? version.deletion
+    : version?.deletionStatus && typeof version.deletionStatus === "object"
+      ? version.deletionStatus
+      : version || {};
+  return {
+    deletable: typeof metadata.deletable === "boolean" ? metadata.deletable : null,
+    blockers: metadata.deletionBlockers || metadata.blockers || version?.deletionBlockers || {},
+    detachments: metadata.detachments || version?.detachments || {}
+  };
+}
+
+function dependencyCount(value) {
+  if (Array.isArray(value)) return value.length;
+  const count = Number(value);
+  return Number.isFinite(count) ? count : value ? 1 : 0;
+}
+
+function namedDependencyCounts(values = {}) {
+  const labels = {
+    currentCampaigns: "current campaign",
+    campaigns: "campaign",
+    historicalCampaignLinks: "historical campaign link",
+    campaignMigrations: "campaign migration record",
+    chronicleMemories: "Chronicle memory",
+    memories: "Chronicle memory",
+    modelChains: "model chain",
+    generationJobs: "generation job",
+    imageJobs: "illustration job",
+    drafts: "draft base reference",
+    forks: "fork reference",
+    imports: "import record"
+  };
+  return Object.entries(values || {}).flatMap(([key, value]) => {
+    const count = dependencyCount(value);
+    if (!count) return [];
+    const label = labels[key] || key.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+    return [`${count} ${label}${count === 1 ? "" : "s"}`];
+  });
+}
+
+function updateWorldVersionDeleteAvailability() {
+  const version = explicitlySelectedWorldVersion();
+  const metadata = worldVersionDeletionMetadata(version);
+  elements.deleteWorldVersion.disabled = !version || metadata.deletable === false;
+  if (!version) {
+    elements.deleteWorldVersion.title = "Choose a specific published version first.";
+    return;
+  }
+  const blockers = namedDependencyCounts(metadata.blockers);
+  elements.deleteWorldVersion.title = metadata.deletable === false
+    ? `Version ${version.versionNumber} cannot be deleted${blockers.length ? ` because it is linked to ${blockers.join(", ")}` : " because it has dependent campaign history"}.`
+    : `Permanently delete version ${version.versionNumber}.`;
 }
 
 function updateCampaignCreationAvailability() {
@@ -499,6 +568,69 @@ async function deleteSelectedWorld() {
   } catch (error) {
     worldMessage(error.message || String(error), "error");
     elements.deleteWorld.disabled = !selectedWorld;
+  }
+}
+
+async function deleteSelectedWorldVersion() {
+  if (!selectedWorld) return;
+  const version = explicitlySelectedWorldVersion();
+  if (!version) {
+    worldMessage("Choose a specific published version before deleting it.", "error");
+    elements.worldVersionSelect.focus();
+    return;
+  }
+
+  const metadata = worldVersionDeletionMetadata(version);
+  const blockers = namedDependencyCounts(metadata.blockers);
+  if (metadata.deletable === false) {
+    worldMessage(
+      `Version ${version.versionNumber} cannot be deleted${blockers.length ? ` because it is linked to ${blockers.join(", ")}` : " because it has dependent campaign history"}.`,
+      "error"
+    );
+    return;
+  }
+
+  const publishedValue = version.publishedAt || version.createdAt;
+  const publishedDate = publishedValue ? new Date(publishedValue) : null;
+  const details = [
+    `Published: ${publishedDate && !Number.isNaN(publishedDate.valueOf()) ? publishedDate.toLocaleString() : "date unavailable"}.`,
+    `Release notes: ${String(version.releaseNotes || "No release notes.")}`,
+    "The immutable version snapshot will be permanently deleted. This cannot be undone.",
+    "Remaining versions keep their existing numbers; gaps are not renumbered or reused."
+  ];
+  const detachments = namedDependencyCounts(metadata.detachments);
+  if (detachments.length) details.push(`Deletion will preserve and detach ${detachments.join(", ")}.`);
+  if (metadata.deletable === true && !blockers.length) details.push("No campaign dependency was found when this World was loaded.");
+
+  const expectedTitle = `Version ${version.versionNumber}`;
+  const confirmed = await requestTypedDelete(
+    expectedTitle,
+    `Permanently delete ${expectedTitle} from “${selectedWorld.title}”?`,
+    details
+  );
+  if (!confirmed) return;
+
+  const worldId = selectedWorld.id;
+  const selectedCampaignId = selectedCampaign?.id || "";
+  elements.deleteWorldVersion.disabled = true;
+  worldMessage(`Deleting world version ${version.versionNumber}…`);
+  try {
+    await api(`/api/v1/worlds/${worldId}/versions/${version.id}`, {
+      method: "DELETE",
+      body: JSON.stringify({ confirmation: "DELETE", expectedVersionNumber: version.versionNumber })
+    });
+    await loadWorlds(worldId);
+    await loadCampaigns(selectedCampaignId);
+    worldMessage(`World version ${version.versionNumber} was permanently deleted. Remaining version numbers were unchanged.`, "success");
+  } catch (error) {
+    const conflictBlockers = namedDependencyCounts(error.details?.blockers || error.details?.deletionBlockers || {});
+    const message = error.statusCode === 409 && conflictBlockers.length
+      ? `Version ${version.versionNumber} cannot be deleted because it is linked to ${conflictBlockers.join(", ")}. Refresh the World to see its current dependency status.`
+      : error.statusCode === 409
+        ? `${error.message || `Version ${version.versionNumber} is still in use.`} Refresh the World to see its current dependency status.`
+        : error.message || String(error);
+    worldMessage(message, "error");
+    updateWorldVersionDeleteAvailability();
   }
 }
 
@@ -2096,6 +2228,7 @@ elements.newWorld.addEventListener("click", newWorld);
 elements.refreshWorlds.addEventListener("click", () => loadWorlds().catch((error) => worldMessage(error.message || String(error), "error")));
 elements.worldForm.addEventListener("submit", saveWorldDraft);
 elements.worldVersionSelect.addEventListener("change", () => {
+  updateWorldVersionDeleteAvailability();
   loadWorldVersionPlayableCharacters().catch((error) => worldMessage(error.message || String(error), "error"));
 });
 elements.newCampaignCharacter.addEventListener("change", () => {
@@ -2125,6 +2258,7 @@ if (elements.createCampaignModalBtn) {
   elements.createCampaignForm.addEventListener("submit", (e) => { e.preventDefault(); createCampaignFromWorld(); });
 }
 elements.exportWorld.addEventListener("click", exportSelectedWorld);
+elements.deleteWorldVersion.addEventListener("click", deleteSelectedWorldVersion);
 elements.archiveWorld.addEventListener("click", toggleWorldArchive);
 elements.deleteWorld.addEventListener("click", deleteSelectedWorld);
 elements.refreshCampaigns.addEventListener("click", () => loadCampaigns().catch((error) => setStatus(error.message, "error")));

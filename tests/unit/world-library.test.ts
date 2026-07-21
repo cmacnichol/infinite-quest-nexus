@@ -6,6 +6,7 @@ import {
   portableWorldSchema,
   worldContentSchema,
   worldDraftUpdateSchema,
+  worldVersionDeleteSchema,
   type WorldContent
 } from "../../packages/contracts/src/world-library.js";
 import {
@@ -68,6 +69,13 @@ describe("World Library contracts", () => {
 
   it("requires optimistic revision numbers for draft updates", () => {
     expect(() => worldDraftUpdateSchema.parse({ expectedRevision: 0, content: { world: { title: "Synthetic Test World" } } })).toThrow();
+  });
+
+  it("requires an explicit confirmation and expected published version number for deletion", () => {
+    expect(worldVersionDeleteSchema.parse({ confirmation: "DELETE", expectedVersionNumber: 2 }))
+      .toEqual({ confirmation: "DELETE", expectedVersionNumber: 2 });
+    expect(() => worldVersionDeleteSchema.parse({ confirmation: "delete", expectedVersionNumber: 2 })).toThrow();
+    expect(() => worldVersionDeleteSchema.parse({ confirmation: "DELETE", expectedVersionNumber: 0 })).toThrow();
   });
 
   it("keeps portable world and campaign references typed", () => {

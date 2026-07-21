@@ -176,6 +176,21 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).not.toContain("window.prompt");
   });
 
+  it("deletes only an explicitly selected unused World version with a typed confirmation", () => {
+    expect(managementHtml).toContain('id="deleteWorldVersion"');
+    expect(managementHtml).toContain("Delete selected version");
+    expect(managementHtml).toContain('id="deleteDialogDetails"');
+    expect(managementScript).toContain("function explicitlySelectedWorldVersion()");
+    expect(managementScript).toContain("function updateWorldVersionDeleteAvailability()");
+    expect(managementScript).toContain("async function deleteSelectedWorldVersion()");
+    expect(managementScript).toContain("expectedVersionNumber: version.versionNumber");
+    expect(managementScript).toContain("Remaining versions keep their existing numbers; gaps are not renumbered or reused.");
+    expect(managementScript).toContain("error.details?.blockers");
+    expect(managementScript).toContain("await loadWorlds(worldId);");
+    expect(managementScript).toContain("await loadCampaigns(selectedCampaignId);");
+    expect(managementScript).toContain('elements.deleteWorldVersion.addEventListener("click", deleteSelectedWorldVersion);');
+  });
+
   it("documents compression and locks only API-supplied context", () => {
     expect(managementHtml.match(/option value="(?:auto|full|balanced|compact|summary)" title=/g)).toHaveLength(5);
     expect(managementScript).toContain("providerContextTokens.readOnly = true");

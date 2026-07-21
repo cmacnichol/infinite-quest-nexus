@@ -13,7 +13,8 @@ import {
   worldDraftUpdateSchema,
   worldForkSchema,
   worldImportRequestSchema,
-  worldPublishSchema
+  worldPublishSchema,
+  worldVersionDeleteSchema
 } from "../../packages/contracts/src/world-library.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import {
@@ -21,6 +22,7 @@ import {
   createWorld,
   deleteCampaign,
   deleteWorld,
+  deleteWorldVersion,
   exportCampaign,
   exportWorld,
   forkWorld,
@@ -80,6 +82,18 @@ integration("World Library and campaign version integration", () => {
     return { title, created, version };
   }
 
+  async function publishNextVersion(worldId: string, title: string, marker: string) {
+    const detail = await getWorld(pool, worldId);
+    const saved = await updateWorldDraft(pool, worldId, worldDraftUpdateSchema.parse({
+      expectedRevision: detail.draftRevision,
+      content: content(title, marker)
+    }));
+    return publishWorld(pool, worldId, worldPublishSchema.parse({
+      expectedRevision: saved.revision,
+      releaseNotes: `Synthetic version ${marker}`
+    }));
+  }
+
   it("keeps published versions immutable while drafts advance by revision", async () => {
     const first = await publishedWorld("Immutable");
     const detail = await getWorld(pool, first.created.id);
@@ -101,6 +115,147 @@ integration("World Library and campaign version integration", () => {
     expect(rows.rows[1]?.content.world.backgroundStory).toBe("Background Two");
     expect(rows.rows[0]?.content.world).not.toHaveProperty("character");
     expect(rows.rows[1]?.content.world).not.toHaveProperty("character");
+  });
+
+  it("deletes an unused intermediate version without renumbering survivors", async () => {
+    const world = await publishedWorld("Delete Intermediate");
+    const second = await publishNextVersion(world.created.id, world.title, "Two");
+    const third = await publishNextVersion(world.created.id, world.title, "Three");
+
+    await deleteWorldVersion(pool, world.created.id, second.worldVersionId, worldVersionDeleteSchema.parse({
+      confirmation: "DELETE",
+      expectedVersionNumber: 2
+    }));
+
+    const detail = await getWorld(pool, world.created.id);
+    expect(detail.versions.map((version: any) => version.versionNumber).sort()).toEqual([1, 3]);
+    expect(detail.draftBasedOnWorldVersionId).toBe(third.worldVersionId);
+  });
+
+  it("does not reuse the number of a deleted latest version", async () => {
+    const world = await publishedWorld("Delete Latest");
+    const second = await publishNextVersion(world.created.id, world.title, "Two");
+    await deleteWorldVersion(pool, world.created.id, second.worldVersionId, worldVersionDeleteSchema.parse({
+      confirmation: "DELETE",
+      expectedVersionNumber: 2
+    }));
+
+    const third = await publishNextVersion(world.created.id, world.title, "Three");
+    expect(third.versionNumber).toBe(3);
+    expect((await getWorld(pool, world.created.id)).versions.map((version: any) => version.versionNumber).sort()).toEqual([1, 3]);
+  });
+
+  it("preserves draft content and returns a World to draft status after deleting its only version", async () => {
+    const world = await publishedWorld("Delete Only");
+    const before = await getWorld(pool, world.created.id);
+
+    await deleteWorldVersion(pool, world.created.id, world.version.worldVersionId, worldVersionDeleteSchema.parse({
+      confirmation: "DELETE",
+      expectedVersionNumber: 1
+    }));
+
+    const after = await getWorld(pool, world.created.id);
+    expect(after).toMatchObject({ status: "draft", draftBasedOnWorldVersionId: null });
+    expect(after.versions).toEqual([]);
+    expect(after.draftContent).toEqual(before.draftContent);
+  });
+
+  it("rejects deletion of a version used by a current campaign", async () => {
+    const world = await publishedWorld("Delete Current Campaign");
+    await createCampaign(pool, campaignCreateSchema.parse({
+      title: `Synthetic Version Blocker ${crypto.randomUUID()}`,
+      worldVersionId: world.version.worldVersionId
+    }));
+
+    await expect(deleteWorldVersion(
+      pool,
+      world.created.id,
+      world.version.worldVersionId,
+      worldVersionDeleteSchema.parse({ confirmation: "DELETE", expectedVersionNumber: 1 })
+    )).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("rejects deletion of a version retained by campaign migration history", async () => {
+    const world = await publishedWorld("Delete Migration History");
+    const campaign = await createCampaign(pool, campaignCreateSchema.parse({
+      title: `Synthetic Historical Blocker ${crypto.randomUUID()}`,
+      worldVersionId: world.version.worldVersionId
+    }));
+    const second = await publishNextVersion(world.created.id, world.title, "Two");
+    await migrateCampaignWorld(pool, campaign.id, campaignWorldMigrationSchema.parse({ worldVersionId: second.worldVersionId }));
+
+    await expect(deleteWorldVersion(
+      pool,
+      world.created.id,
+      world.version.worldVersionId,
+      worldVersionDeleteSchema.parse({ confirmation: "DELETE", expectedVersionNumber: 1 })
+    )).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("detaches draft, fork, and import provenance when deleting an otherwise unused version", async () => {
+    const source = await publishedWorld("Delete Provenance");
+    const fork = await forkWorld(pool, source.created.id, worldForkSchema.parse({
+      title: `Synthetic Detached Fork ${crypto.randomUUID()}`,
+      sourceWorldVersionId: source.version.worldVersionId
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const imported = await pool.query<{ id: string }>(
+      `INSERT INTO imports (
+         owner_user_id, source_type, source_name, source_hash, status, world_id, world_version_id, stats, completed_at
+       ) VALUES ($1,'world','synthetic-delete-provenance.json',$2,'completed',$3,$4,'{}'::jsonb,now())
+       RETURNING id`,
+      [ownerUserId, crypto.randomUUID(), source.created.id, source.version.worldVersionId]
+    );
+    const draftBefore = (await getWorld(pool, source.created.id)).draftContent;
+
+    await deleteWorldVersion(pool, source.created.id, source.version.worldVersionId, worldVersionDeleteSchema.parse({
+      confirmation: "DELETE",
+      expectedVersionNumber: 1
+    }));
+
+    expect(await getWorld(pool, source.created.id)).toMatchObject({
+      draftBasedOnWorldVersionId: null,
+      draftContent: draftBefore
+    });
+    expect(await getWorld(pool, fork.worldId)).toMatchObject({
+      forkedFromWorldId: source.created.id,
+      forkedFromWorldVersionId: null
+    });
+    const importRow = await pool.query<{ world_id: string; world_version_id: string | null }>(
+      "SELECT world_id, world_version_id FROM imports WHERE id = $1",
+      [imported.rows[0]!.id]
+    );
+    expect(importRow.rows[0]).toEqual({ world_id: source.created.id, world_version_id: null });
+  });
+
+  it("rejects stale version selection, wrong-World access, and versions owned by another user", async () => {
+    const first = await publishedWorld("Delete Boundary A");
+    const second = await publishedWorld("Delete Boundary B");
+    const request = worldVersionDeleteSchema.parse({ confirmation: "DELETE", expectedVersionNumber: 1 });
+
+    await expect(deleteWorldVersion(pool, first.created.id, first.version.worldVersionId, worldVersionDeleteSchema.parse({
+      confirmation: "DELETE",
+      expectedVersionNumber: 2
+    }))).rejects.toMatchObject({ statusCode: 409 });
+    await expect(deleteWorldVersion(pool, second.created.id, first.version.worldVersionId, request))
+      .rejects.toMatchObject({ statusCode: 409 });
+
+    const otherUser = await pool.query<{ id: string }>(
+      "INSERT INTO users (display_name, status) VALUES ($1, 'active') RETURNING id",
+      [`Synthetic Other Owner ${crypto.randomUUID()}`]
+    );
+    const otherWorld = await pool.query<{ id: string }>(
+      "INSERT INTO worlds (owner_user_id, title, status) VALUES ($1,$2,'active') RETURNING id",
+      [otherUser.rows[0]!.id, `Synthetic Other World ${crypto.randomUUID()}`]
+    );
+    const otherVersion = await pool.query<{ id: string }>(
+      `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
+       VALUES ($1,$2,1,$3) RETURNING id`,
+      [otherWorld.rows[0]!.id, otherUser.rows[0]!.id, JSON.stringify(content("Other Owner", "One"))]
+    );
+
+    await expect(deleteWorldVersion(pool, otherWorld.rows[0]!.id, otherVersion.rows[0]!.id, request))
+      .rejects.toMatchObject({ statusCode: 404 });
   });
 
   it("rejects stale draft writes", async () => {

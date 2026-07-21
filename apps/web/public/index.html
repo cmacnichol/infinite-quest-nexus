@@ -95,6 +95,7 @@
                 <button id="forkWorldModalBtn" class="button secondary" type="button" disabled>Fork selected version</button>
                 <button id="createCampaignModalBtn" class="button secondary" type="button" disabled>Create campaign</button>
                 <button id="exportWorld" class="button secondary" type="button" disabled>Export version</button>
+                <button id="deleteWorldVersion" class="button danger" type="button" disabled>Delete selected version</button>
                 <button id="archiveWorld" class="button danger" type="button" disabled>Archive</button>
                 <button id="deleteWorld" class="button danger" type="button" disabled>Delete world</button>
               </div>
@@ -372,6 +373,7 @@
     <form id="deleteForm" method="dialog">
       <h2 id="deleteDialogTitle">Confirm permanent deletion</h2>
       <p id="deleteDialogMessage"></p>
+      <ul id="deleteDialogDetails" class="delete-dialog-details hidden"></ul>
       <label>Type <strong id="deleteExpectedTitle"></strong> to confirm
         <input id="deleteConfirmationInput" autocomplete="off" spellcheck="false">
       </label>

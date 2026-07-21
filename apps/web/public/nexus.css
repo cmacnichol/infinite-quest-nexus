@@ -144,6 +144,8 @@ textarea { resize: vertical; }
 .confirm-dialog h2, .confirm-dialog p { margin: 0; }
 .confirm-dialog label { display: grid; gap: 8px; color: var(--muted); font-weight: 700; }
 .confirm-dialog strong { color: var(--gold); overflow-wrap: anywhere; }
+.delete-dialog-details { margin: 0; padding-left: 20px; color: var(--muted); display: grid; gap: 6px; line-height: 1.4; }
+.delete-dialog-details.hidden { display: none; }
 .paste-dialog { width: min(760px, calc(100% - 28px)); }
 .provider-model-dialog { width: min(820px, calc(100% - 28px)); }
 .provider-model-dialog-body { display: grid; gap: 14px; padding: 24px; }
