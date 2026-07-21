@@ -170,7 +170,7 @@ async function reconnectMatchingCampaign(
     image_prompt: string;
   }>(
     `SELECT campaign_id, action, narration, choices, custom_action_suggestion, image_prompt
-       FROM turns WHERE campaign_id = ANY($1) AND owner_user_id = $2 ORDER BY turn_number`,
+       FROM turns WHERE campaign_id = ANY($1::uuid[]) AND owner_user_id = $2 ORDER BY turn_number`,
     [candidateIds, ownerUserId]
   );
 
