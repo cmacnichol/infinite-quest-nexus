@@ -1,14 +1,23 @@
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
+import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import {
   canonicalizeWorldContent,
   playableCharacterSchema,
   WORLD_CONTENT_SCHEMA_VERSION,
+  worldContentSchema,
+  type PlayableCharacterGenerationRequest,
   type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
+import {
+  buildPlayableCharacterGenerationPrompt,
+  normalizeGeneratedPlayableCharacter,
+  playableCharacterRecoveryInput
+} from "../../../packages/domain/src/character-authoring.js";
 import { buildTemplateWorldPrompt, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
 import { callTextProvider, extractJsonObject } from "../../../packages/story-engine/src/index.js";
-import { loadTextProvider } from "./provider-service.js";
+import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
 
 const coerceText = (val: unknown): string => {
   if (val === null || val === undefined) return "";
@@ -210,4 +219,100 @@ export async function generateTemplateWorld(
     title: converted.title || input.title,
     content
   };
+}
+
+function characterGenerationError(message: string, statusCode: number, code: string): Error {
+  return Object.assign(new Error(message), { statusCode, details: { code } });
+}
+
+export async function generatePlayableCharacter(
+  pool: DatabasePool,
+  worldId: string,
+  request: PlayableCharacterGenerationRequest,
+  credentialSecret: string
+): Promise<{ character: ReturnType<typeof normalizeGeneratedPlayableCharacter> }> {
+  const ownerUserId = await initialOwnerId(pool);
+  const result = await pool.query<{
+    status: string;
+    revision: number;
+    content: WorldContent;
+  }>(
+    `SELECT w.status, wd.revision, wd.content
+       FROM worlds w
+       JOIN world_drafts wd ON wd.world_id = w.id AND wd.owner_user_id = w.owner_user_id
+      WHERE w.id = $1 AND w.owner_user_id = $2`,
+    [worldId, ownerUserId]
+  );
+  const draft = result.rows[0];
+  if (!draft) throw characterGenerationError("World draft not found.", 404, "world_draft_not_found");
+  if (draft.status === "archived") {
+    throw characterGenerationError("Restore the world before generating a character.", 409, "world_archived");
+  }
+  if (draft.revision !== request.expectedRevision) {
+    throw characterGenerationError("The world draft changed. Reload it before generating a character.", 409, "world_draft_revision_conflict");
+  }
+
+  const content = worldContentSchema.parse(draft.content);
+  const currentCharacter = request.characterId
+    ? content.playableCharacters.find((character) => character.id === request.characterId)
+    : undefined;
+  if (request.characterId && !currentCharacter) {
+    throw characterGenerationError("The selected playable character does not belong to this world draft.", 404, "playable_character_not_found");
+  }
+
+  const providerProfileId = await resolveEffectiveProviderId(pool, ownerUserId, "text");
+  if (!providerProfileId) {
+    throw characterGenerationError(
+      "Add a text provider or mark one as default in Provider Management before generating a character.",
+      409,
+      "default_text_provider_unavailable"
+    );
+  }
+  const profile = await loadTextProvider(pool, ownerUserId, providerProfileId, credentialSecret);
+  const prompt = buildPlayableCharacterGenerationPrompt(content, request.prompt, currentCharacter);
+  let generatedId = currentCharacter?.id || randomUUID();
+  while (!currentCharacter && content.playableCharacters.some((character) => character.id === generatedId)) {
+    generatedId = randomUUID();
+  }
+  const providerResult = await callTextProvider(profile, prompt);
+
+  try {
+    return {
+      character: normalizeGeneratedPlayableCharacter(
+        extractJsonObject(providerResult.content),
+        generatedId,
+        currentCharacter
+      )
+    };
+  } catch (error) {
+    if (!providerResult.outputLimited) {
+      throw characterGenerationError(
+        "The text provider returned an invalid character. Revise the prompt and try again.",
+        502,
+        "invalid_generated_character"
+      );
+    }
+
+    const recovered = await callTextProvider(profile, {
+      ...prompt,
+      ...(providerResult.responseId ? { previousResponseId: providerResult.responseId } : {}),
+      rejectedResponse: providerResult.content,
+      recoveryInput: playableCharacterRecoveryInput()
+    });
+    try {
+      return {
+        character: normalizeGeneratedPlayableCharacter(
+          extractJsonObject(recovered.content),
+          generatedId,
+          currentCharacter
+        )
+      };
+    } catch {
+      throw characterGenerationError(
+        "The text provider could not return a complete character after one recovery attempt.",
+        502,
+        recovered.outputLimited ? "character_generation_output_limit" : "invalid_generated_character"
+      );
+    }
+  }
 }

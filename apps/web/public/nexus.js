@@ -8,6 +8,10 @@ let selectedWorld = null;
 let worldVersionCharacters = [];
 let worldVersionCampaignReady = false;
 let playableCharacterLoadSequence = 0;
+let editingCharacterId = "";
+let characterModalWorkingCharacter = null;
+let characterModalBusy = false;
+const characterRowOriginals = new WeakMap();
 const legacyStorageKey = "infiniteQuestNexusClientState.v1";
 let detectedBrowserStory = null;
 let providers = [];
@@ -168,6 +172,7 @@ function setWorldEditorDisabled(disabled) {
     elements.worldFirstAction,
     elements.worldRules,
     elements.worldReleaseNotes,
+    elements.addPlayableCharacter,
     elements.forkWorldTitle,
     elements.newCampaignTitle,
     elements.newCampaignCharacter,
@@ -221,6 +226,183 @@ function playableCharactersFromContent(content = {}) {
   return Array.isArray(content.playableCharacters) ? content.playableCharacters : [];
 }
 
+function copyJsonValue(value) {
+  if (typeof structuredClone === "function") return structuredClone(value);
+  return JSON.parse(JSON.stringify(value));
+}
+
+function opaqueCharacterId() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
+
+function configuredDefaultTextProvider() {
+  const provider = defaultProvider("text");
+  return provider && String(provider.defaultModel || "").trim() ? provider : null;
+}
+
+function updateCharacterGeneratorAvailability() {
+  const available = Boolean(configuredDefaultTextProvider()) && selectedWorld?.status !== "archived";
+  elements.characterGenerator.classList.toggle("hidden", !available);
+  if (!available) elements.characterGenerator.open = false;
+  elements.generateCharacter.disabled = !available || characterModalBusy;
+  return available;
+}
+
+function setCharacterStatus(message = "", type = "") {
+  elements.characterStatus.textContent = message;
+  elements.characterStatus.className = `status ${type}${message ? "" : " hidden"}`.trim();
+}
+
+function addCharacterEditorRow(kind, row = {}, readOnly = false) {
+  const isStat = kind === "stat";
+  const container = isStat ? elements.characterStats : elements.characterTrackers;
+  const editor = document.createElement("div");
+  editor.className = `character-edit-row${isStat ? "" : " tracker-row"}`;
+  characterRowOriginals.set(editor, copyJsonValue(row));
+
+  const fields = isStat
+    ? [
+      { key: "name", label: "Name", value: row.name ?? row.skill ?? row.stat ?? "", maxlength: 200 },
+      { key: "value", label: "Value (1–99)", value: row.value ?? row.score ?? row.rating ?? "", type: "number", min: 1, max: 99 },
+      { key: "note", label: "Note", value: row.note ?? row.covers ?? "", maxlength: 2000 }
+    ]
+    : [
+      { key: "name", label: "Name", value: row.name ?? row.label ?? row.title ?? "", maxlength: 300 },
+      { key: "value", label: "Starting value", value: row.value ?? row.initialValue ?? "", maxlength: 6000 },
+      { key: "rules", label: "Update rules", value: row.rules ?? row.updateRules ?? row.description ?? "", maxlength: 4000 }
+    ];
+  for (const field of fields) {
+    const label = document.createElement("label");
+    label.textContent = field.label;
+    const input = document.createElement("input");
+    input.dataset.characterField = field.key;
+    input.type = field.type || "text";
+    input.value = String(field.value);
+    if (field.maxlength) input.maxLength = field.maxlength;
+    if (field.min) input.min = String(field.min);
+    if (field.max) input.max = String(field.max);
+    input.disabled = readOnly;
+    label.append(input);
+    editor.append(label);
+  }
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "button secondary character-row-remove";
+  remove.textContent = "×";
+  remove.setAttribute("aria-label", `Remove ${isStat ? "statistic" : "tracker"}`);
+  remove.disabled = readOnly;
+  remove.addEventListener("click", () => editor.remove());
+  editor.append(remove);
+  container.append(editor);
+}
+
+function populateCharacterForm(character, readOnly = false) {
+  characterModalWorkingCharacter = copyJsonValue(character);
+  elements.characterName.value = String(character.name || "");
+  elements.characterGuidance.value = String(character.characterText || "");
+  elements.characterStats.replaceChildren();
+  elements.characterTrackers.replaceChildren();
+  for (const stat of Array.isArray(character.rpgStats) ? character.rpgStats : []) addCharacterEditorRow("stat", stat, readOnly);
+  for (const tracker of Array.isArray(character.defaultTriggers) ? character.defaultTriggers : []) addCharacterEditorRow("tracker", tracker, readOnly);
+}
+
+function setCharacterModalControls(readOnly, busy = false) {
+  characterModalBusy = busy;
+  elements.characterDialog.dataset.readOnly = String(readOnly);
+  for (const control of [elements.characterName, elements.characterGuidance, elements.addCharacterStat, elements.addCharacterTracker]) {
+    control.disabled = readOnly || busy;
+  }
+  elements.characterDialog.querySelectorAll(".character-edit-row input, .character-row-remove").forEach((control) => {
+    control.disabled = readOnly || busy;
+  });
+  elements.characterGeneratorPrompt.disabled = busy;
+  elements.saveCharacter.disabled = readOnly || busy;
+  elements.deleteCharacter.disabled = readOnly || busy;
+  elements.cancelCharacter.disabled = busy;
+  updateCharacterGeneratorAvailability();
+}
+
+function openCharacterDialog(characterId = "") {
+  if (!selectedWorld) return;
+  const readOnly = selectedWorld.status === "archived";
+  const character = characterId
+    ? playableCharactersFromContent(selectedWorld.draftContent).find((item) => item.id === characterId)
+    : null;
+  if (characterId && !character) {
+    worldMessage("That character is no longer present in this world draft.", "error");
+    return;
+  }
+  editingCharacterId = character?.id || "";
+  const initial = character || { id: "", name: "", characterText: "", rpgStats: [], defaultTriggers: [], source: { type: "world-library-editor" } };
+  populateCharacterForm(initial, readOnly);
+  elements.characterGeneratorPrompt.value = "";
+  elements.characterDialogTitle.textContent = readOnly ? "View character" : character ? "Edit character" : "Add character";
+  elements.characterDialogDescription.textContent = readOnly
+    ? "This world is archived. Restore it before changing this character."
+    : character
+      ? "Update this character in the current world draft."
+      : "Create a playable character for this world draft.";
+  elements.saveCharacter.textContent = character ? "Save changes" : "Add character";
+  elements.saveCharacter.classList.toggle("hidden", readOnly);
+  elements.deleteCharacter.classList.toggle("hidden", !character || readOnly);
+  elements.cancelCharacter.textContent = readOnly ? "Close" : "Cancel";
+  setCharacterStatus();
+  setCharacterModalControls(readOnly);
+  elements.characterDialog.showModal();
+  if (!readOnly) elements.characterName.focus();
+}
+
+function characterRowsFromForm(kind, characterId) {
+  const isStat = kind === "stat";
+  const container = isStat ? elements.characterStats : elements.characterTrackers;
+  const result = [];
+  for (const editor of container.querySelectorAll(".character-edit-row")) {
+    const values = Object.fromEntries([...editor.querySelectorAll("[data-character-field]")].map((input) => [input.dataset.characterField, input.value.trim()]));
+    const hasContent = Object.values(values).some(Boolean);
+    if (!hasContent) continue;
+    if (!values.name) throw new Error(`${isStat ? "Every statistic" : "Every tracker"} with content needs a name.`);
+    const original = characterRowOriginals.get(editor) || {};
+    const id = String(original.id || opaqueCharacterId());
+    if (isStat) {
+      const numeric = values.value === "" ? 50 : Number(values.value);
+      if (!Number.isInteger(numeric) || numeric < 1 || numeric > 99) throw new Error(`The value for “${values.name}” must be a whole number from 1 to 99.`);
+      result.push({ ...original, id, name: values.name, value: numeric, note: values.note || "" });
+    } else {
+      result.push({
+        ...original,
+        id,
+        name: values.name,
+        value: values.value || "Not yet established.",
+        rules: values.rules || `Track ${values.name} whenever it changes.`
+      });
+    }
+  }
+  return result;
+}
+
+function characterFromForm() {
+  const name = elements.characterName.value.trim();
+  const characterText = elements.characterGuidance.value.trim();
+  if (!name) throw new Error("Enter a character name.");
+  if (!characterText) throw new Error("Enter character guidance covering who this character is and how they should be portrayed.");
+  const base = characterModalWorkingCharacter || {};
+  const id = String(base.id || opaqueCharacterId());
+  return {
+    ...base,
+    id,
+    name,
+    characterText,
+    rpgStats: characterRowsFromForm("stat", id),
+    defaultTriggers: characterRowsFromForm("tracker", id),
+    source: base.source && typeof base.source === "object" ? base.source : {}
+  };
+}
+
 function renderPlayableCharacterRoster(characters = []) {
   const roster = Array.isArray(characters) ? characters : [];
   elements.playableCharacterRoster.replaceChildren();
@@ -232,8 +414,10 @@ function renderPlayableCharacterRoster(characters = []) {
     return;
   }
   for (const character of roster) {
-    const card = document.createElement("div");
+    const card = document.createElement("button");
+    card.type = "button";
     card.className = "character-roster-card";
+    card.setAttribute("aria-label", `${selectedWorld?.status === "archived" ? "View" : "Edit"} ${String(character.name || "unnamed character")}`);
     const name = document.createElement("strong");
     name.textContent = String(character.name || "Unnamed character");
     const detail = document.createElement("span");
@@ -243,6 +427,7 @@ function renderPlayableCharacterRoster(characters = []) {
     const description = document.createElement("span");
     description.textContent = String(character.characterText || "").slice(0, 260) || "No character description.";
     card.append(name, detail, description);
+    card.addEventListener("click", () => openCharacterDialog(character.id));
     elements.playableCharacterRoster.append(card);
   }
 }
@@ -261,6 +446,7 @@ async function loadWorlds(preselectId = "") {
     playableCharacterLoadSequence += 1;
     renderPlayableCharacterRoster([]);
     setWorldEditorDisabled(true);
+    updateCharacterGeneratorAvailability();
     elements.worldCampaignReadiness.textContent = "Select or create a world before checking campaign readiness.";
     elements.worldCampaignReadiness.className = "status";
     return;
@@ -307,12 +493,14 @@ async function selectWorld(worldId) {
   elements.archiveWorld.textContent = archived ? "Restore" : "Archive";
   elements.saveWorldDraft.disabled = archived;
   elements.publishWorld.disabled = archived;
+  elements.addPlayableCharacter.disabled = archived;
   elements.createCampaignModalBtn.disabled = true;
   elements.confirmCreateCampaign.disabled = true;
   elements.exportWorld.disabled = !selectedWorld.versions.length;
   elements.forkWorldModalBtn.disabled = !selectedWorld.versions.length;
   updateWorldVersionDeleteAvailability();
   elements.deleteWorld.disabled = false;
+  updateCharacterGeneratorAvailability();
   await loadWorldVersionPlayableCharacters();
   worldMessage(archived ? "This world is archived. Restore it before editing or publishing." : "Draft loaded from authoritative PostgreSQL storage.");
 }
@@ -341,20 +529,144 @@ async function saveWorldDraft(event) {
   elements.saveWorldDraft.disabled = true;
   worldMessage("Saving world draft…");
   try {
-    const saved = await api(`/api/v1/worlds/${selectedWorld.id}/draft`, {
-      method: "PUT",
-      body: JSON.stringify({
-        expectedRevision: selectedWorld.draftRevision,
-        title: elements.worldTitle.value,
-        content: worldContentFromForm()
-      })
-    });
-    await loadWorlds(selectedWorld.id);
+    const saved = await persistWorldDraft(worldContentFromForm());
     worldMessage(`Draft revision ${saved.revision} saved. Existing campaigns remain unchanged.`, "success");
   } catch (error) {
     worldMessage(error.message || String(error), "error");
   } finally {
     elements.saveWorldDraft.disabled = selectedWorld?.status === "archived";
+  }
+}
+
+async function persistWorldDraft(content) {
+  if (!selectedWorld) throw new Error("Select a world draft first.");
+  const worldId = selectedWorld.id;
+  const saved = await api(`/api/v1/worlds/${worldId}/draft`, {
+    method: "PUT",
+    body: JSON.stringify({
+      expectedRevision: selectedWorld.draftRevision,
+      title: elements.worldTitle.value,
+      content
+    })
+  });
+  await loadWorlds(worldId);
+  return saved;
+}
+
+async function generateCharacterFromPrompt() {
+  if (!selectedWorld || characterModalBusy || selectedWorld.status === "archived") return;
+  const prompt = elements.characterGeneratorPrompt.value.trim();
+  if (!prompt) {
+    setCharacterStatus("Describe the character you want the default text model to create.", "error");
+    elements.characterGeneratorPrompt.focus();
+    return;
+  }
+  if (!configuredDefaultTextProvider()) {
+    updateCharacterGeneratorAvailability();
+    setCharacterStatus("Configure an enabled default text provider and model before generating a character.", "error");
+    return;
+  }
+  const previousName = elements.characterName.value;
+  const previousGuidance = elements.characterGuidance.value;
+  setCharacterModalControls(false, true);
+  setCharacterStatus("Generating a complete character from the current world draft…");
+  try {
+    const result = await api(`/api/v1/worlds/${selectedWorld.id}/draft/playable-characters/generate`, {
+      method: "POST",
+      body: JSON.stringify({
+        expectedRevision: selectedWorld.draftRevision,
+        prompt,
+        ...(editingCharacterId ? { characterId: editingCharacterId } : {})
+      })
+    });
+    const candidate = result?.character;
+    if (!candidate || typeof candidate !== "object" || !String(candidate.name || "").trim() || !String(candidate.characterText || "").trim()) {
+      throw new Error("The text model did not return a complete character.");
+    }
+    const base = characterModalWorkingCharacter || {};
+    const merged = {
+      ...base,
+      ...candidate,
+      id: editingCharacterId || String(candidate.id || base.id || opaqueCharacterId()),
+      ...(editingCharacterId && base.source !== undefined ? { source: base.source } : {})
+    };
+    populateCharacterForm(merged, false);
+    setCharacterStatus("Character generated. Review every field, then save to update the world draft.", "success");
+  } catch (error) {
+    // Fields are populated only after a complete response has passed the client boundary checks.
+    elements.characterName.value = previousName;
+    elements.characterGuidance.value = previousGuidance;
+    setCharacterStatus(error.statusCode === 409
+      ? "The world draft changed while this modal was open. Your entries are still here; close and reload the world before trying again."
+      : error.message || String(error), "error");
+  } finally {
+    setCharacterModalControls(false, false);
+  }
+}
+
+async function saveCharacterFromModal(event) {
+  event.preventDefault();
+  if (!selectedWorld || characterModalBusy || selectedWorld.status === "archived") return;
+  let character;
+  try {
+    character = characterFromForm();
+  } catch (error) {
+    setCharacterStatus(error.message || String(error), "error");
+    return;
+  }
+  const content = worldContentFromForm();
+  const roster = playableCharactersFromContent(content).map((item) => copyJsonValue(item));
+  if (editingCharacterId) {
+    const index = roster.findIndex((item) => item.id === editingCharacterId);
+    if (index < 0) {
+      setCharacterStatus("This character is no longer present in the selected draft.", "error");
+      return;
+    }
+    character.id = editingCharacterId;
+    roster[index] = character;
+  } else {
+    if (roster.some((item) => item.id === character.id)) {
+      setCharacterStatus("The generated character ID conflicts with an existing character. Generate again or reopen the modal.", "error");
+      return;
+    }
+    roster.push(character);
+  }
+  setCharacterModalControls(false, true);
+  setCharacterStatus(editingCharacterId ? "Saving character changes…" : "Adding character to the world draft…");
+  try {
+    const saved = await persistWorldDraft({ ...content, playableCharacters: roster });
+    const action = editingCharacterId ? "updated" : "added";
+    elements.characterDialog.close();
+    worldMessage(`${character.name} ${action} in draft revision ${saved.revision}. Published versions and existing campaigns remain unchanged.`, "success");
+  } catch (error) {
+    setCharacterStatus(error.statusCode === 409
+      ? "The world draft changed while this modal was open. Your entries are still here; close and reload the world before saving."
+      : error.message || String(error), "error");
+    setCharacterModalControls(false, false);
+  }
+}
+
+async function deleteCharacterFromModal() {
+  if (!selectedWorld || !editingCharacterId || characterModalBusy || selectedWorld.status === "archived") return;
+  const name = elements.characterName.value.trim() || "this character";
+  if (!window.confirm(`Delete “${name}” from the current draft? Published versions and existing campaigns remain unchanged. Removing the last character makes this world unavailable for new campaigns until another character is added and published.`)) return;
+  const content = worldContentFromForm();
+  const roster = playableCharactersFromContent(content).filter((item) => item.id !== editingCharacterId);
+  if (roster.length === playableCharactersFromContent(content).length) {
+    setCharacterStatus("This character is no longer present in the selected draft.", "error");
+    return;
+  }
+  setCharacterModalControls(false, true);
+  setCharacterStatus("Deleting character from the world draft…");
+  try {
+    const saved = await persistWorldDraft({ ...content, playableCharacters: roster });
+    elements.characterDialog.close();
+    worldMessage(`${name} deleted from draft revision ${saved.revision}. Published versions and existing campaigns remain unchanged.`, "success");
+  } catch (error) {
+    setCharacterStatus(error.statusCode === 409
+      ? "The world draft changed while this modal was open. Your entries are still here; close and reload the world before deleting."
+      : error.message || String(error), "error");
+    setCharacterModalControls(false, false);
   }
 }
 
@@ -1181,6 +1493,7 @@ function beginProviderEdit(provider) {
 async function loadProviders(preselectId = "") {
   ({ providers } = await api("/api/v1/providers"));
   renderProviderProfiles();
+  updateCharacterGeneratorAvailability();
   const currentImportProviderId = elements.providerSelect.value;
   elements.providerSelect.replaceChildren(new Option(defaultProvider("text") ? `Use default · ${defaultProvider("text").name}` : "Use the default text provider", ""));
   for (const provider of providers.filter((item) => item.providerRole === "text" && item.enabled)) {
@@ -2227,6 +2540,26 @@ elements.importBrowserState.addEventListener("click", importBrowserState);
 elements.newWorld.addEventListener("click", newWorld);
 elements.refreshWorlds.addEventListener("click", () => loadWorlds().catch((error) => worldMessage(error.message || String(error), "error")));
 elements.worldForm.addEventListener("submit", saveWorldDraft);
+elements.addPlayableCharacter.addEventListener("click", () => openCharacterDialog());
+elements.characterForm.addEventListener("submit", saveCharacterFromModal);
+elements.cancelCharacter.addEventListener("click", () => elements.characterDialog.close());
+elements.deleteCharacter.addEventListener("click", deleteCharacterFromModal);
+elements.generateCharacter.addEventListener("click", generateCharacterFromPrompt);
+elements.addCharacterStat.addEventListener("click", () => addCharacterEditorRow("stat"));
+elements.addCharacterTracker.addEventListener("click", () => addCharacterEditorRow("tracker"));
+elements.characterDialog.addEventListener("close", () => {
+  editingCharacterId = "";
+  characterModalWorkingCharacter = null;
+  characterModalBusy = false;
+  elements.characterGenerator.open = false;
+  elements.characterGeneratorPrompt.value = "";
+  elements.characterStats.replaceChildren();
+  elements.characterTrackers.replaceChildren();
+  setCharacterStatus();
+});
+elements.characterDialog.addEventListener("cancel", (event) => {
+  if (characterModalBusy) event.preventDefault();
+});
 elements.worldVersionSelect.addEventListener("change", () => {
   updateWorldVersionDeleteAvailability();
   loadWorldVersionPlayableCharacters().catch((error) => worldMessage(error.message || String(error), "error"));

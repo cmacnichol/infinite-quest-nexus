@@ -117,6 +117,95 @@ integration("World Library and campaign version integration", () => {
     expect(rows.rows[1]?.content.world).not.toHaveProperty("character");
   });
 
+  it("adds, edits, and deletes draft characters without changing published versions or campaign snapshots", async () => {
+    const title = `Synthetic Character Authoring ${crypto.randomUUID()}`;
+    const originalContent = worldContentSchema.parse({
+      ...content(title, "Original"),
+      playableCharacters: [{
+        id: "imported-character",
+        name: "Imported Character",
+        characterText: "Original imported guidance.",
+        rpgStats: [{ id: "imported-stat", name: "Resolve", value: 61, note: "Imported note", importMarker: "keep-stat" }],
+        defaultTriggers: [{ id: "imported-tracker", name: "Oath", value: "Unbroken", rules: "Track the oath.", importMarker: "keep-tracker" }],
+        source: { type: "world-import", externalId: "legacy-42" },
+        importMarker: "keep-character"
+      }]
+    });
+    const created = await createWorld(pool, worldCreateSchema.parse({ title, content: originalContent }));
+    const published = await publishWorld(pool, created.id, worldPublishSchema.parse({ expectedRevision: created.draftRevision }));
+    const campaign = await createCampaign(pool, campaignCreateSchema.parse({
+      title: `Synthetic Character Snapshot ${crypto.randomUUID()}`,
+      worldVersionId: published.worldVersionId
+    }));
+
+    const beforeAdd = await getWorld(pool, created.id);
+    const added = await updateWorldDraft(pool, created.id, worldDraftUpdateSchema.parse({
+      expectedRevision: beforeAdd.draftRevision,
+      content: {
+        ...beforeAdd.draftContent,
+        playableCharacters: [
+          ...beforeAdd.draftContent.playableCharacters,
+          {
+            id: "new-character",
+            name: "New Character",
+            characterText: "Newly authored guidance.",
+            rpgStats: [{ id: "new-stat", name: "Insight", value: 72, note: "Notices hidden paths." }],
+            defaultTriggers: [{ id: "new-tracker", name: "Clues", value: "None", rules: "Record discovered clues." }]
+          }
+        ]
+      }
+    }));
+    expect(added.revision).toBe(beforeAdd.draftRevision + 1);
+
+    const beforeEdit = await getWorld(pool, created.id);
+    const editedCharacters = beforeEdit.draftContent.playableCharacters.map((character: any) => character.id === "imported-character"
+      ? { ...character, name: "Renamed Character", characterText: "Edited character guidance." }
+      : character);
+    const edited = await updateWorldDraft(pool, created.id, worldDraftUpdateSchema.parse({
+      expectedRevision: beforeEdit.draftRevision,
+      content: { ...beforeEdit.draftContent, playableCharacters: editedCharacters }
+    }));
+    expect(edited.revision).toBe(beforeEdit.draftRevision + 1);
+
+    const beforeDelete = await getWorld(pool, created.id);
+    const deleted = await updateWorldDraft(pool, created.id, worldDraftUpdateSchema.parse({
+      expectedRevision: beforeDelete.draftRevision,
+      content: {
+        ...beforeDelete.draftContent,
+        playableCharacters: beforeDelete.draftContent.playableCharacters.filter((character: any) => character.id !== "new-character")
+      }
+    }));
+    expect(deleted.revision).toBe(beforeDelete.draftRevision + 1);
+
+    const draft = (await getWorld(pool, created.id)).draftContent;
+    expect(draft.playableCharacters).toHaveLength(1);
+    expect(draft.playableCharacters[0]).toMatchObject({
+      id: "imported-character",
+      name: "Renamed Character",
+      characterText: "Edited character guidance.",
+      source: { type: "world-import", externalId: "legacy-42" },
+      importMarker: "keep-character",
+      rpgStats: [{ id: "imported-stat", importMarker: "keep-stat" }],
+      defaultTriggers: [{ id: "imported-tracker", importMarker: "keep-tracker" }]
+    });
+
+    const publishedContent = await pool.query<{ content: any }>("SELECT content FROM world_versions WHERE id = $1", [published.worldVersionId]);
+    expect(publishedContent.rows[0]?.content.playableCharacters).toMatchObject([{
+      id: "imported-character",
+      name: "Imported Character",
+      characterText: "Original imported guidance."
+    }]);
+    const campaignSnapshot = await pool.query<{ character_snapshot: any }>(
+      "SELECT character_snapshot FROM campaigns WHERE id = $1",
+      [campaign.id]
+    );
+    expect(campaignSnapshot.rows[0]?.character_snapshot).toMatchObject({
+      id: "imported-character",
+      name: "Imported Character",
+      characterText: "Original imported guidance."
+    });
+  });
+
   it("deletes an unused intermediate version without renumbering survivors", async () => {
     const world = await publishedWorld("Delete Intermediate");
     const second = await publishNextVersion(world.created.id, world.title, "Two");

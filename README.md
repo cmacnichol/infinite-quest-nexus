@@ -38,7 +38,7 @@ The current implementation is a production-shaped vertical slice. It serves the 
 - Typed backend RPG assessment, durable private percentile resolution, and retry-safe reuse without rerolling.
 - Typed before/after event evaluation, trigger counters, deferred events, and validated fiction-only after-scene extensions.
 - A migration, provider, generation, and memory-inspection UI at `/nexus/`.
-- A database-backed World Library for editable drafts, immutable publication, version history, safe deletion of unused published versions, fork provenance, archive/restore, and portable world export/import.
+- A database-backed World Library for editable drafts, reviewed manual or default-text-model character authoring, immutable publication, version history, safe deletion of unused published versions, fork provenance, archive/restore, and portable world export/import.
 - Campaign creation from selected world versions, campaign switching, latest-turn resume into the player view, archive and guarded deletion controls, explicit audited upgrades to newer versions, and credential-free portable campaign exports.
 - Guarded world deletion that refuses to remove canon still referenced by a campaign and clears only the deleted world's import/fork provenance after confirmation.
 - Independently configured image-provider profiles and optional post-commit illustration jobs.

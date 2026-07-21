@@ -89,6 +89,12 @@ export const worldPublishSchema = z.object({
   releaseNotes: z.string().trim().max(10_000).default("")
 });
 
+export const playableCharacterGenerationRequestSchema = z.object({
+  expectedRevision: z.coerce.number().int().positive(),
+  prompt: z.string().trim().min(1).max(20_000),
+  characterId: characterId.optional()
+}).strict();
+
 export const worldForkSchema = z.object({
   title,
   sourceWorldVersionId: z.uuid().optional()
@@ -145,6 +151,7 @@ export type PlayableCharacter = z.infer<typeof playableCharacterSchema>;
 export type WorldCreateRequest = z.infer<typeof worldCreateSchema>;
 export type WorldDraftUpdateRequest = z.infer<typeof worldDraftUpdateSchema>;
 export type WorldPublishRequest = z.infer<typeof worldPublishSchema>;
+export type PlayableCharacterGenerationRequest = z.infer<typeof playableCharacterGenerationRequestSchema>;
 export type WorldForkRequest = z.infer<typeof worldForkSchema>;
 export type WorldStatusUpdateRequest = z.infer<typeof worldStatusUpdateSchema>;
 export type WorldImportRequest = z.infer<typeof worldImportRequestSchema>;

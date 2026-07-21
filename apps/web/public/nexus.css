@@ -73,9 +73,12 @@ textarea { resize: vertical; }
 .quick-create-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0 0 12px; }
 .quick-create-fields label { display: grid; gap: 7px; color: var(--muted); font-size: .82rem; font-weight: 700; }
 .character-roster-field { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.02); }
+.character-roster-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .character-roster { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
-.character-roster-card { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(0,0,0,.12); }
+.character-roster-card { display: grid; gap: 4px; width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(0,0,0,.12); color: var(--text); text-align: left; cursor: pointer; font: inherit; }
+.character-roster-card:hover, .character-roster-card:focus-visible { border-color: var(--purple); background: #292445; outline: none; }
 .character-roster-card span { color: var(--muted); font-size: .75rem; font-weight: 500; line-height: 1.4; }
+.compact-button { min-height: 34px; padding: 6px 10px; font-size: .76rem; }
 .wide-field { grid-column: 1 / -1; }
 .world-actions { margin-bottom: 12px; }
 .workspace { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 18px; margin: 18px 0 48px; }
@@ -197,6 +200,26 @@ code { color: var(--gold); }
 
 /* Dialog specific */
 .provider-dialog-modal { width: min(860px, calc(100% - 28px)); }
+.character-dialog-modal { width: min(900px, calc(100% - 28px)); max-height: calc(100vh - 28px); overflow: auto; }
+.character-dialog-modal form { gap: 18px; }
+.character-dialog-heading { border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+.character-dialog-heading .eyebrow { margin-bottom: 4px; }
+.character-dialog-heading p:last-child { margin: 6px 0 0; }
+.character-generator { border: 1px solid var(--purple); border-radius: 12px; padding: 12px 14px; background: rgba(142, 98, 238, .08); }
+.character-generator summary { color: var(--purple); cursor: pointer; font-weight: 800; }
+.character-generator-fields { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; margin-top: 12px; }
+.character-generator-fields label, .character-core-fields label { display: grid; gap: 7px; color: var(--muted); font-size: .82rem; font-weight: 700; }
+.character-generator .field-note { display: block; margin: 8px 0 0; }
+.character-core-fields { display: grid; gap: 12px; }
+.character-collection { margin: 0; }
+.character-row-list { display: grid; gap: 8px; margin-bottom: 10px; }
+.character-edit-row { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(110px, .45fr) minmax(180px, 1.4fr) auto; gap: 8px; align-items: end; }
+.character-edit-row.tracker-row { grid-template-columns: minmax(150px, .8fr) minmax(150px, .8fr) minmax(180px, 1.4fr) auto; }
+.character-edit-row label { display: grid; gap: 5px; color: var(--muted); font-size: .74rem; font-weight: 700; }
+.character-row-remove { width: 36px; min-height: 38px; padding: 0; color: var(--danger); }
+.character-dialog-actions { position: sticky; bottom: -24px; margin: 0 -24px -24px; padding: 14px 24px 24px; border-top: 1px solid var(--line); background: var(--panel); }
+.character-action-spacer { flex: 1; }
+.character-dialog-modal[data-read-only="true"] .character-collection > .button { display: none; }
 .provider-dialog-header { border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-bottom: 16px; }
 fieldset { border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 0 0 16px; }
 legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
@@ -233,4 +256,9 @@ legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 80
   .field-help dl { grid-template-columns: 1fr; }
   .field-help dd { margin-bottom: 5px; }
   .provider-model-picker-tools, .provider-custom-model-row { grid-template-columns: 1fr; }
+  .character-roster-heading { align-items: stretch; flex-direction: column; }
+  .character-generator-fields, .character-edit-row, .character-edit-row.tracker-row { grid-template-columns: 1fr; }
+  .character-row-remove { width: 100%; }
+  .character-dialog-actions { position: static; margin: 0; padding: 14px 0 0; }
+  .character-action-spacer { display: none; }
 }

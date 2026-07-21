@@ -24,6 +24,7 @@ import {
   campaignCreateSchema,
   campaignUpdateSchema,
   campaignWorldMigrationSchema,
+  playableCharacterGenerationRequestSchema,
   resourceDeleteSchema,
   worldCreateSchema,
   worldDraftUpdateSchema,
@@ -79,6 +80,7 @@ import {
   updateWorld,
   updateWorldDraft
 } from "./world-service.js";
+import { generatePlayableCharacter } from "./world-generator-service.js";
 import { getCampaignCostSummary, turnReportedCosts } from "./cost-service.js";
 
 type BuildServerOptions = {
@@ -318,6 +320,15 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.put<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/draft", async (request) => (
     updateWorldDraft(pool, uuidSchema.parse(request.params.worldId), worldDraftUpdateSchema.parse(request.body))
+  ));
+
+  app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/draft/playable-characters/generate", async (request) => (
+    generatePlayableCharacter(
+      pool,
+      uuidSchema.parse(request.params.worldId),
+      playableCharacterGenerationRequestSchema.parse(request.body),
+      config.credentialEncryptionKey
+    )
   ));
 
   app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/publish", async (request, reply) => (

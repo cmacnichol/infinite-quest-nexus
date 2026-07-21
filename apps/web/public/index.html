@@ -81,7 +81,10 @@
           <div class="world-fields tab-content" id="tab-mechanics" data-tab-group="world-editor">
             <label class="wide-field">Rules<textarea id="worldRules" rows="3" maxlength="200000" disabled></textarea></label>
             <div class="wide-field character-roster-field">
-              <strong>Playable character roster</strong>
+              <div class="character-roster-heading">
+                <strong>Playable character roster</strong>
+                <button id="addPlayableCharacter" class="button secondary compact-button" type="button" disabled>+ Add character</button>
+              </div>
               <span class="field-note">Playable characters can be authored, imported, or generated. A campaign snapshots the selected character from its published world version.</span>
               <div id="playableCharacterRoster" class="character-roster"><span class="muted">No playable characters yet. This draft can be saved, but a published version without a character is not campaign-ready.</span></div>
             </div>
@@ -448,6 +451,51 @@
       <div class="button-row confirm-actions">
         <button id="cancelProviderEdit" class="button secondary" type="button">Cancel</button>
         <button id="saveProvider" class="button primary" type="submit">Save provider</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="characterDialog" class="confirm-dialog character-dialog-modal" aria-labelledby="characterDialogTitle">
+    <form id="characterForm" novalidate>
+      <div class="character-dialog-heading">
+        <div>
+          <p class="eyebrow">World Library</p>
+          <h2 id="characterDialogTitle">Add character</h2>
+          <p id="characterDialogDescription">Create a playable character for this world draft.</p>
+        </div>
+      </div>
+      <details id="characterGenerator" class="character-generator hidden">
+        <summary>Generate with default text model</summary>
+        <div class="character-generator-fields">
+          <label>Character concept or prompt
+            <textarea id="characterGeneratorPrompt" rows="3" maxlength="10000" placeholder="Describe the role, personality, background, appearance, and place in this world."></textarea>
+          </label>
+          <button id="generateCharacter" class="button secondary" type="button">Generate character</button>
+        </div>
+        <p class="field-note">Generation fills this form only. Review and save the result to change the draft.</p>
+      </details>
+      <div class="character-core-fields">
+        <label>Character name<input id="characterName" required maxlength="200" autocomplete="off"></label>
+        <label>Character guidance
+          <textarea id="characterGuidance" required rows="8" maxlength="200000" placeholder="Background, personality, appearance, motivations, and narrative guidance"></textarea>
+        </label>
+      </div>
+      <fieldset class="character-collection">
+        <legend>RPG statistics</legend>
+        <div id="characterStats" class="character-row-list"></div>
+        <button id="addCharacterStat" class="button secondary compact-button" type="button">+ Add statistic</button>
+      </fieldset>
+      <fieldset class="character-collection">
+        <legend>Starting trackers</legend>
+        <div id="characterTrackers" class="character-row-list"></div>
+        <button id="addCharacterTracker" class="button secondary compact-button" type="button">+ Add tracker</button>
+      </fieldset>
+      <div id="characterStatus" class="status hidden" role="status" aria-live="polite"></div>
+      <div class="button-row character-dialog-actions">
+        <button id="deleteCharacter" class="button danger" type="button">Delete character</button>
+        <span class="character-action-spacer"></span>
+        <button id="cancelCharacter" class="button secondary" type="button">Cancel</button>
+        <button id="saveCharacter" class="button primary" type="submit">Add character</button>
       </div>
     </form>
   </dialog>

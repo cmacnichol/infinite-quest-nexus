@@ -55,6 +55,7 @@ describe("Nexus management UI contracts", () => {
 
   it("uses structured playable-character rosters for manual, imported, and generated worlds", () => {
     expect(managementHtml).toContain('id="playableCharacterRoster"');
+    expect(managementHtml).toContain('id="addPlayableCharacter"');
     expect(managementHtml).toContain('id="newCampaignCharacter"');
     expect(managementHtml).toContain("Playable characters can be authored, imported, or generated.");
     expect(managementHtml).toContain("World imports retain every playable character.");
@@ -70,6 +71,50 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("all ${characterCount} playable character");
     expect(managementScript).not.toContain("preview.characters.length || 1");
     expect(managementScript).toContain('elements.infiniteWorldsCharacterField.classList.add("hidden");');
+  });
+
+  it("uses one reviewed character modal for adding, editing, generating, and deleting", () => {
+    expect(managementHtml.match(/id="characterDialog"/g)).toHaveLength(1);
+    expect(managementHtml).toContain('id="characterForm"');
+    expect(managementHtml).toContain('id="characterName" required');
+    expect(managementHtml).toContain('id="characterGuidance" required');
+    expect(managementHtml).toContain('id="characterStats"');
+    expect(managementHtml).toContain('id="addCharacterStat"');
+    expect(managementHtml).toContain('id="characterTrackers"');
+    expect(managementHtml).toContain('id="addCharacterTracker"');
+    expect(managementHtml).toContain('id="deleteCharacter"');
+    expect(managementHtml).toContain('id="saveCharacter"');
+    expect(managementHtml).toContain('id="characterGenerator" class="character-generator hidden"');
+    expect(managementHtml).toContain('id="characterGeneratorPrompt"');
+    expect(managementHtml).toContain('id="generateCharacter"');
+    expect(managementHtml).toContain("Generation fills this form only. Review and save the result to change the draft.");
+    expect(managementCss).toContain(".character-dialog-modal");
+    expect(managementCss).toContain(".character-edit-row");
+    expect(managementCss).toContain(".character-roster-card:hover");
+    expect(managementScript).toContain("function openCharacterDialog(characterId = \"\")");
+    expect(managementScript).toContain('card.addEventListener("click", () => openCharacterDialog(character.id));');
+    expect(managementScript).toContain('elements.addPlayableCharacter.addEventListener("click", () => openCharacterDialog());');
+    expect(managementScript).toContain("async function persistWorldDraft(content)");
+    expect(managementScript).toContain("async function saveCharacterFromModal(event)");
+    expect(managementScript).toContain("async function deleteCharacterFromModal()");
+    expect(managementScript).toContain("Published versions and existing campaigns remain unchanged.");
+    expect(managementScript).toContain("if (!name) throw new Error(\"Enter a character name.\");");
+    expect(managementScript).toContain("if (!characterText) throw new Error");
+    expect(managementScript).toContain("must be a whole number from 1 to 99");
+  });
+
+  it("offers character generation only through an available default text model and never auto-saves it", () => {
+    expect(managementScript).toContain('const provider = defaultProvider("text");');
+    expect(managementScript).toContain('String(provider.defaultModel || "").trim()');
+    expect(managementScript).toContain('elements.characterGenerator.classList.toggle("hidden", !available);');
+    expect(managementScript).toContain("async function generateCharacterFromPrompt()");
+    expect(managementScript).toContain("/draft/playable-characters/generate");
+    expect(managementScript).toContain("expectedRevision: selectedWorld.draftRevision");
+    expect(managementScript).toContain("Character generated. Review every field, then save to update the world draft.");
+    const generator = managementScript.match(/async function generateCharacterFromPrompt\(\) \{[\s\S]*?\n\}/)?.[0] || "";
+    expect(generator).not.toContain("persistWorldDraft(");
+    expect(generator).toContain("elements.characterName.value = previousName;");
+    expect(generator).toContain("elements.characterGuidance.value = previousGuidance;");
   });
 
   it("strips legacy overview guidance when saving version-4 drafts", () => {
