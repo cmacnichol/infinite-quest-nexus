@@ -120,8 +120,29 @@ export function truncateAtBoundary(text: string, maximumCharacters: number): str
   const value = String(text ?? "").trim();
   if (value.length <= maximumCharacters) return value;
   const candidate = value.slice(0, Math.max(0, maximumCharacters - 1));
-  const boundary = Math.max(candidate.lastIndexOf(". "), candidate.lastIndexOf("! "), candidate.lastIndexOf("? "), candidate.lastIndexOf("\n"));
-  const cut = boundary >= maximumCharacters * 0.55 ? candidate.slice(0, boundary + 1) : candidate;
+
+  let boundary = -1;
+  // We must scan down to lower bounds such that even boundary = i - 1 is >= maximumCharacters * 0.55
+  // Actually, the original checked `boundary >= maximumCharacters * 0.55`.
+  const minBoundary = Math.ceil(maximumCharacters * 0.55);
+  for (let i = candidate.length - 1; i >= minBoundary; i--) {
+    const code = candidate.charCodeAt(i);
+    if (code === 10) { // \n
+      boundary = i;
+      break;
+    }
+    if (code === 32 && i > 0) { // space
+      const prevCode = candidate.charCodeAt(i - 1);
+      if (prevCode === 46 || prevCode === 33 || prevCode === 63) { // . ! ?
+        if (i - 1 >= maximumCharacters * 0.55) {
+          boundary = i - 1;
+          break;
+        }
+      }
+    }
+  }
+
+  const cut = boundary !== -1 ? candidate.slice(0, boundary + 1) : candidate;
   return `${cut.trimEnd()}…`;
 }
 
