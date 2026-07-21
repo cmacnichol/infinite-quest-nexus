@@ -2,6 +2,8 @@ node_modules/
 .pnpm-store/
 dist/
 coverage/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
 .env
 .env.*
 !.env.example
