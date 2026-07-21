@@ -1,4 +1,4 @@
-import { defineConfig } from "vitepress";
+import { withMermaid } from "vitepress-plugin-mermaid";
 
 const repositoryName = "infinite-quest-nexus";
 const repositoryUrl = "https://github.com/cmacnichol/infinite-quest-nexus";
@@ -10,7 +10,7 @@ const base = configuredBase === "/"
     : `/${repositoryName}/`;
 const siteUrl = process.env.DOCS_SITE_URL ?? "https://cmacnichol.github.io/infinite-quest-nexus/";
 
-export default defineConfig({
+export default withMermaid({
   title: "Infinite Quest Nexus",
   description: "Create reusable story worlds and run persistent AI-assisted campaigns.",
   lang: "en-US",
@@ -53,7 +53,13 @@ export default defineConfig({
           { text: "Operations", link: "/operations/" }
         ]
       },
-      { text: "Architecture", link: "/architecture/" },
+      {
+        text: "Architecture",
+        items: [
+          { text: "Concepts", link: "/concepts/" },
+          { text: "Decision records", link: "/architecture/" }
+        ]
+      },
       { text: "Capabilities", link: "/reference/capabilities" }
     ],
     sidebar: {
@@ -210,6 +216,27 @@ export default defineConfig({
           ]
         }
       ],
+      "/concepts/": [
+        {
+          text: "Concepts",
+          items: [
+            { text: "Overview", link: "/concepts/" },
+            { text: "Platform overview", link: "/concepts/platform-overview" },
+            { text: "Worlds and versions", link: "/concepts/worlds-and-versions" },
+            { text: "Campaigns and turns", link: "/concepts/campaigns-and-turns" },
+            { text: "Authoritative state", link: "/concepts/authoritative-state" },
+            { text: "Chronicle memory", link: "/concepts/chronicle-memory" },
+            { text: "Context construction", link: "/concepts/context-construction" },
+            { text: "Story Engine", link: "/concepts/story-engine" },
+            { text: "Generation integrity", link: "/concepts/generation-integrity" },
+            { text: "Mechanics and fiction", link: "/concepts/mechanics-and-fiction-separation" },
+            { text: "Illustration pipeline", link: "/concepts/illustration-pipeline" },
+            { text: "Provider model", link: "/concepts/provider-model" },
+            { text: "Identity and ownership", link: "/concepts/identity-and-ownership" },
+            { text: "Security boundaries", link: "/concepts/security-boundaries" }
+          ]
+        }
+      ],
       "/architecture/": [
         {
           text: "Architecture decisions",
@@ -282,5 +309,9 @@ export default defineConfig({
       dark: "github-dark"
     },
     lineNumbers: true
+  },
+  mermaid: {
+    securityLevel: "strict",
+    theme: "neutral"
   }
 });
