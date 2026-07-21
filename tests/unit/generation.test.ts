@@ -38,8 +38,8 @@ describe("generation contracts", () => {
 
       const result = providerProfileInputSchema.safeParse(input);
       expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error.issues[0].message).toContain("Text output reserve must leave at least 512 tokens");
+      if (!result.success && result.error) {
+        expect(result.error.issues[0]?.message).toContain("Text output reserve must leave at least 512 tokens");
       }
     });
 
@@ -66,8 +66,8 @@ describe("generation contracts", () => {
 
       const result = providerProfileInputSchema.safeParse(input);
       expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error.issues[0].message).toContain("Base URL must use HTTP or HTTPS");
+      if (!result.success && result.error) {
+        expect(result.error.issues[0]?.message).toContain("Base URL must use HTTP or HTTPS");
       }
     });
   });
@@ -76,8 +76,8 @@ describe("generation contracts", () => {
     it("requires at least one field to update", () => {
       const result = providerProfileUpdateSchema.safeParse({});
       expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error.issues[0].message).toContain("At least one provider field is required");
+      if (!result.success && result.error) {
+        expect(result.error.issues[0]?.message).toContain("At least one provider field is required");
       }
     });
 
@@ -103,7 +103,7 @@ describe("generation contracts", () => {
 
       const result = illustrationConfigSchema.safeParse(input);
       expect(result.success).toBe(false);
-      if (!result.success) {
+      if (!result.success && result.error) {
         expect(result.error.issues.some(i => i.message.includes("Select an image provider"))).toBe(true);
       }
     });
@@ -116,7 +116,7 @@ describe("generation contracts", () => {
 
       const result = illustrationConfigSchema.safeParse(input);
       expect(result.success).toBe(false);
-      if (!result.success) {
+      if (!result.success && result.error) {
         expect(result.error.issues.some(i => i.message.includes("Select an image model"))).toBe(true);
       }
     });
