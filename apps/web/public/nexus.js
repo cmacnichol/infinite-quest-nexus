@@ -719,7 +719,7 @@ async function refreshCampaignCostSummary() {
     appendCostMetric(money(total.byCategory?.story || 0, total.currency), `story${suffix}`);
     appendCostMetric(money(total.byCategory?.image || 0, total.currency), `images${suffix}`);
     appendCostMetric(money(total.byCategory?.memory || 0, total.currency), `semantic memory${suffix}`);
-    appendCostMetric(money(total.otherCampaignOperations || 0, total.currency), `other operations${suffix}`);
+    appendCostMetric(money(total.historicalAndUnattributedOperations || total.otherCampaignOperations || 0, total.currency), `historical & unattributed operations${suffix}`);
   }
   return summary;
 }
@@ -1654,10 +1654,16 @@ function showInfiniteWorldsOptions(show) {
 }
 
 async function previewInfiniteWorldsSource(sourceName, sourceText, sourceKind) {
+  elements.importProgressContainer.classList.add("hidden");
   showInfiniteWorldsOptions(true);
   const request = infiniteWorldsRequest(sourceName, sourceText, sourceKind);
   const preview = await api("/api/v1/imports/infinite-worlds/preview", { method: "POST", body: JSON.stringify(request) });
-  if (preview.kind === "world_json") {
+  if (preview.kind === "cyoa_json") {
+    elements.infiniteWorldsCharacterField.classList.add("hidden");
+    elements.infiniteWorldsCharacter.replaceChildren();
+    delete request.selectedCharacterId;
+    elements.importPreview.textContent = `Valid Choose Your Own Adventure export · "${preview.counts.topLevelTitle}" · top-level description + ${preview.counts.layer1ChaptersCount} branch choice${preview.counts.layer1ChaptersCount === 1 ? "" : "s"} detected · LLM will synthesize world and ${preview.counts.characterTarget} upon import${preview.warnings.length ? ` · ${preview.warnings.join(" ")}` : ""}`;
+  } else if (preview.kind === "world_json") {
     elements.infiniteWorldsCharacterField.classList.add("hidden");
     elements.infiniteWorldsCharacter.replaceChildren();
     delete request.selectedCharacterId;
@@ -1681,11 +1687,13 @@ async function previewInfiniteWorldsSource(sourceName, sourceText, sourceKind) {
   }
   selectedImport = { kind: "infinite_worlds", request, preview };
   elements.importStory.disabled = !preview.valid;
-  const readyMessage = preview.kind === "world_json"
-    ? "Infinite Worlds world JSON validated with every playable character retained. This imports world details only; import the matching story TXT separately to restore story history."
-    : preview.kind === "story_text"
-      ? "Infinite Worlds story TXT validated and ready to attach to the selected published world."
-      : "Infinite Worlds export validated and ready to import.";
+  const readyMessage = preview.kind === "cyoa_json"
+    ? "Choose Your Own Adventure export validated. Upon import, the selected text provider will generate a Story World with 3-4 playable characters for your review."
+    : preview.kind === "world_json"
+      ? "Infinite Worlds world JSON validated with every playable character retained. This imports world details only; import the matching story TXT separately to restore story history."
+      : preview.kind === "story_text"
+        ? "Infinite Worlds story TXT validated and ready to attach to the selected published world."
+        : "Infinite Worlds export validated and ready to import.";
   setStatus(preview.valid ? readyMessage : preview.warnings?.join(" ") || "This Infinite Worlds export needs more information before import.", preview.valid ? "success" : "error");
 }
 
@@ -1693,13 +1701,15 @@ async function previewImportSource(sourceName, sourceText, sourceKind = "auto", 
   selectedImportSource = { sourceName, sourceText, sourceKind, origin };
   selectedImport = null;
   elements.importStory.disabled = true;
+  elements.importProgressContainer.classList.add("hidden");
   elements.importPreview.textContent = "Validating content without writing to the database…";
   let parsed = null;
   try { parsed = parseImportJson(sourceText); } catch { /* TXT imports are validated by the server */ }
   const forcedInfiniteWorlds = sourceKind !== "auto";
   const looksLikeInfiniteWorldsJson = parsed && (Array.isArray(parsed.possibleCharacters) || (Array.isArray(parsed.triggerEvents) && ("background" in parsed || "instructions" in parsed)));
-  if (forcedInfiniteWorlds || looksLikeInfiniteWorldsJson || sourceName.toLowerCase().endsWith(".txt")) {
-    await previewInfiniteWorldsSource(sourceName, sourceText, sourceKind);
+  const looksLikeCyoaJson = parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.chapters && parsed.info && typeof parsed.chapters === "object";
+  if (forcedInfiniteWorlds || looksLikeInfiniteWorldsJson || looksLikeCyoaJson || sourceName.toLowerCase().endsWith(".txt")) {
+    await previewInfiniteWorldsSource(sourceName, sourceText, looksLikeCyoaJson && sourceKind === "auto" ? "cyoa_json" : sourceKind);
     return;
   }
   showInfiniteWorldsOptions(false);
@@ -1733,6 +1743,7 @@ function clipboardGuidance(kind = elements.clipboardImportKind.value) {
   const guidance = {
     auto: ["Choose the complete export.", "Automatic detection accepts Infinite Quest .story JSON or Infinite Worlds world JSON. Select matching story TXT explicitly because it is not JSON."],
     campaign_json: ["Infinite Quest .story includes both parts.", "The pasted JSON should contain world details and accepted story turns. Importing it creates a World Library world and a campaign with Chronicle history."],
+    cyoa_json: ["Choose Your Own Adventure JSON export.", "The pasted JSON should contain the info summary and chapters. Importing it will use your selected text provider to generate an editable Story World with 3-4 playable characters."],
     world_json: ["Infinite Worlds world JSON contains no story history.", "This creates only the reusable World Library world. Afterwards, select that published world and import the separate matching story TXT to create the campaign."],
     story_text: ["Infinite Worlds story TXT must be attached to its world.", "First import and select the matching Infinite Worlds world JSON. This TXT then creates the campaign and Chronicle history against that published world version."]
   }[kind] || ["Choose the complete export.", "Paste the complete copied content before validating it."];
@@ -1775,6 +1786,10 @@ async function validateClipboardImport(event) {
       sourceName = "infinite-worlds-world-clipboard.json";
       sourceKind = "world_json";
       elements.infiniteWorldsKind.value = "world_json";
+    } else if (kind === "cyoa_json") {
+      sourceName = "cyoa-story-clipboard.json";
+      sourceKind = "cyoa_json";
+      elements.infiniteWorldsKind.value = "cyoa_json";
     } else if (kind === "story_text") {
       sourceName = "infinite-worlds-story-clipboard.txt";
       sourceKind = "story_text";
@@ -1799,10 +1814,41 @@ async function validateClipboardImport(event) {
 async function importStory() {
   if (!selectedImport) return;
   elements.importStory.disabled = true;
+  let progressTimer = null;
   try {
     if (selectedImport.kind === "infinite_worlds") {
-      setStatus(selectedImport.preview.kind === "world_text" ? "Converting and importing the Infinite Worlds world with the selected text provider…" : "Importing the validated Infinite Worlds export…");
+      if (selectedImport.preview.kind === "cyoa_json") {
+        setStatus("Synthesizing world and 3-4 playable characters via text provider…");
+        elements.importProgressContainer.classList.remove("hidden");
+        elements.importProgressBar.value = 5;
+        elements.importProgressPercent.textContent = "5%";
+        elements.importProgressLabel.textContent = "Parsing CYOA story description and branch choices…";
+        const progressKey = selectedImport.request.sourceName + ":" + selectedImport.request.sourceText.length;
+        progressTimer = setInterval(async () => {
+          try {
+            const progress = await api(`/api/v1/imports/progress?key=${encodeURIComponent(progressKey)}`);
+            if (progress && progress.progressPercent) {
+              elements.importProgressBar.value = progress.progressPercent;
+              elements.importProgressPercent.textContent = `${progress.progressPercent}%`;
+              if (progress.message) elements.importProgressLabel.textContent = progress.message;
+            }
+          } catch { /* ignore polling errors */ }
+        }, 300);
+      } else {
+        setStatus(selectedImport.preview.kind === "world_text" ? "Converting and importing the Infinite Worlds world with the selected text provider…" : "Importing the validated Infinite Worlds export…");
+      }
       const result = await api("/api/v1/imports/infinite-worlds", { method: "POST", body: JSON.stringify(selectedImport.request) });
+      if (progressTimer) clearInterval(progressTimer);
+      if (selectedImport.preview.kind === "cyoa_json") {
+        elements.importProgressBar.value = 100;
+        elements.importProgressPercent.textContent = "100%";
+        elements.importProgressLabel.textContent = "World and character generation completed.";
+        await loadWorlds(result.worldId);
+        setStatus(result.duplicate
+          ? "The Choose Your Own Adventure world was already imported; the existing record was loaded into the World Editor below."
+          : "Choose Your Own Adventure story imported and converted into a new Story World with 3-4 playable characters. Review and edit any fields below before publishing or saving.", "success");
+        return;
+      }
       await loadWorlds(result.worldId);
       if (result.kind === "campaign") {
         await loadCampaigns(result.campaignId);
@@ -1837,8 +1883,10 @@ async function importStory() {
       await importStoryObject(selectedImport.request.story, selectedImport.request.sourceName);
     }
   } catch (error) {
+    if (progressTimer) clearInterval(progressTimer);
     setStatus(error.message || String(error), "error");
   } finally {
+    if (progressTimer) clearInterval(progressTimer);
     elements.importStory.disabled = !selectedImport;
   }
 }

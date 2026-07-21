@@ -45,9 +45,33 @@ async function runMigrations(
   }
 }
 
+const MIGRATION_ADVISORY_LOCK_ID = 482910481;
+
+async function withMigrationLock<T>(pool: DatabasePool, action: () => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("SELECT pg_advisory_lock($1)", [MIGRATION_ADVISORY_LOCK_ID]);
+    return await action();
+  } finally {
+    try {
+      await client.query("SELECT pg_advisory_unlock($1)", [MIGRATION_ADVISORY_LOCK_ID]);
+    } catch {
+      // ignore unlock failure if connection broke
+    }
+    client.release();
+  }
+}
+
 async function appliedMigrationCount(pool: DatabasePool): Promise<number> {
-  const result = await pool.query<{ count: string }>(`SELECT count(*)::text AS count FROM ${MIGRATIONS_TABLE}`);
-  return Number.parseInt(result.rows[0]?.count ?? "0", 10);
+  try {
+    const result = await pool.query<{ count: string }>(`SELECT count(*)::text AS count FROM ${MIGRATIONS_TABLE}`);
+    return Number.parseInt(result.rows[0]?.count ?? "0", 10);
+  } catch (error: any) {
+    if (error?.code === "42P01") {
+      return 0;
+    }
+    throw error;
+  }
 }
 
 export async function pendingDatabaseMigrations(pool: DatabasePool, migrationDirectory: string): Promise<string[]> {
@@ -59,17 +83,19 @@ export async function migrateDatabase(
   migrationDirectory: string,
   options: MigrationRunOptions = {}
 ): Promise<string[]> {
-  const pending = await pendingDatabaseMigrations(pool, migrationDirectory);
-  if (pending.length === 0) return [];
-  const maintenance = pending.filter((name) => name.endsWith(MAINTENANCE_SUFFIX));
-  const isNewDatabase = (await appliedMigrationCount(pool)) === 0;
-  if (maintenance.length > 0 && !isNewDatabase && !options.allowMaintenanceMigrations) {
-    throw new Error(
-      `Database maintenance migration required: ${maintenance.join(", ")}. ` +
-      "Back up the database and run the migrate role or set ALLOW_MAINTENANCE_MIGRATIONS=true."
-    );
-  }
-  return runMigrations(pool, migrationDirectory, false);
+  return withMigrationLock(pool, async () => {
+    const pending = await pendingDatabaseMigrations(pool, migrationDirectory);
+    if (pending.length === 0) return [];
+    const maintenance = pending.filter((name) => name.endsWith(MAINTENANCE_SUFFIX));
+    const isNewDatabase = (await appliedMigrationCount(pool)) === 0;
+    if (maintenance.length > 0 && !isNewDatabase && !options.allowMaintenanceMigrations) {
+      throw new Error(
+        `Database maintenance migration required: ${maintenance.join(", ")}. ` +
+        "Back up the database and run the migrate role or set ALLOW_MAINTENANCE_MIGRATIONS=true."
+      );
+    }
+    return runMigrations(pool, migrationDirectory, false);
+  });
 }
 
 export async function waitForDatabaseMigrations(

@@ -59,7 +59,8 @@ export const generationRequestSchema = z.object({
 });
 
 export const campaignRewindSchema = z.object({
-  targetTurnNumber: z.coerce.number().int().min(1)
+  targetTurnNumber: z.coerce.number().int().min(0),
+  expectedCurrentTurnNumber: z.coerce.number().int().min(1).optional()
 });
 
 export const illustrationConfigSchema = z.object({

@@ -306,6 +306,20 @@ export async function syncPlayerCampaignConfig(pool: DatabasePool, campaignId: s
         WHERE campaign_id = $1 AND owner_user_id = $2`,
       [campaignId, ownerUserId, json(config.rpgStats), json(config.eventTriggers), json(config.pendingEventTriggers)]
     );
+    if (row.active_turn_number === 0) {
+      await client.query(
+        `UPDATE campaign_state
+            SET initial_state_snapshot = jsonb_build_object(
+              'scratchpad', ''::text,
+              'trackers', trackers,
+              'eventTriggers', $3::jsonb,
+              'pendingEventTriggers', $4::jsonb,
+              'rpgStats', $5::jsonb
+            )
+          WHERE campaign_id = $1 AND owner_user_id = $2`,
+        [campaignId, ownerUserId, json(config.eventTriggers), json(config.pendingEventTriggers), json(config.rpgStats)]
+      );
+    }
     return { campaignId, activeTurnNumber: row.active_turn_number, synchronized: true };
   });
 }
@@ -320,25 +334,48 @@ export async function rewindCampaign(pool: DatabasePool, campaignId: string, req
     );
     const campaign = campaignResult.rows[0];
     if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    if (request.expectedCurrentTurnNumber !== undefined
+        && request.expectedCurrentTurnNumber !== campaign.active_turn_number) {
+      throw Object.assign(
+        new Error(`Campaign is at turn ${campaign.active_turn_number}, not ${request.expectedCurrentTurnNumber}.`),
+        { statusCode: 409 }
+      );
+    }
     if (request.targetTurnNumber > campaign.active_turn_number) {
       throw Object.assign(new Error(`Campaign has only ${campaign.active_turn_number} accepted turns.`), { statusCode: 409 });
     }
-    const target = await client.query<{
-      state_snapshot_private: Record<string, unknown>;
-      model_metadata: Record<string, unknown>;
-    }>(
-      `SELECT state_snapshot_private, model_metadata FROM turns
-        WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number = $3`,
-      [campaignId, ownerUserId, request.targetTurnNumber]
-    );
-    const targetTurn = target.rows[0];
-    if (!targetTurn) throw Object.assign(new Error("The requested rewind turn was not found."), { statusCode: 404 });
+
+    // Resolve the target state snapshot — either from a turn row or the initial snapshot.
+    let targetSnapshot: Record<string, unknown>;
+    let targetModelMetadata: Record<string, unknown> | null = null;
+    if (request.targetTurnNumber === 0) {
+      const initialResult = await client.query<{ initial_state_snapshot: Record<string, unknown> }>(
+        `SELECT initial_state_snapshot FROM campaign_state
+          WHERE campaign_id = $1 AND owner_user_id = $2 FOR UPDATE`,
+        [campaignId, ownerUserId]
+      );
+      if (!initialResult.rows[0]) throw new Error("Campaign state was not found.");
+      targetSnapshot = initialResult.rows[0].initial_state_snapshot || {};
+    } else {
+      const target = await client.query<{
+        state_snapshot_private: Record<string, unknown>;
+        model_metadata: Record<string, unknown>;
+      }>(
+        `SELECT state_snapshot_private, model_metadata FROM turns
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number = $3`,
+        [campaignId, ownerUserId, request.targetTurnNumber]
+      );
+      const targetTurn = target.rows[0];
+      if (!targetTurn) throw Object.assign(new Error("The requested rewind turn was not found."), { statusCode: 404 });
+      targetSnapshot = targetTurn.state_snapshot_private || {};
+      targetModelMetadata = targetTurn.model_metadata || null;
+    }
     if (request.targetTurnNumber === campaign.active_turn_number) {
       return {
         campaignId,
         activeTurnNumber: campaign.active_turn_number,
         discardedTurnCount: 0,
-        stateSnapshot: targetTurn.state_snapshot_private
+        stateSnapshot: targetSnapshot
       };
     }
     const activeGeneration = await client.query(
@@ -375,13 +412,13 @@ export async function rewindCampaign(pool: DatabasePool, campaignId: string, req
     );
     const currentState = currentStateResult.rows[0];
     if (!currentState) throw new Error("Campaign state was not found.");
-    const snapshot = targetTurn.state_snapshot_private || {};
+    const snapshot = targetSnapshot;
     const scratchpad = typeof snapshot.scratchpad === "string" ? snapshot.scratchpad : "";
     const trackers = Array.isArray(snapshot.trackers) ? snapshot.trackers : [];
     const eventTriggers = Array.isArray(snapshot.eventTriggers) ? snapshot.eventTriggers : currentState.event_triggers;
     const pendingEventTriggers = Array.isArray(snapshot.pendingEventTriggers) ? snapshot.pendingEventTriggers : [];
     const rpgStats = Array.isArray(snapshot.rpgStats) ? snapshot.rpgStats : currentState.rpg_stats;
-    const scratchpadSafeForPrompt = typeof targetTurn.model_metadata?.promptProtocolVersion === "string";
+    const scratchpadSafeForPrompt = typeof targetModelMetadata?.promptProtocolVersion === "string";
     const discardedTurnCount = campaign.active_turn_number - request.targetTurnNumber;
 
     await client.query(

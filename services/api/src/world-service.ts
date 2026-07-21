@@ -22,6 +22,7 @@ import {
   resolvePlayableCharacters
 } from "../../../packages/domain/src/world-characters.js";
 import { resolveEffectiveProviderId } from "./provider-service.js";
+import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
 import { turnReportedCosts } from "./cost-service.js";
 
 function json(value: unknown): string {
@@ -466,21 +467,24 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
     );
     const campaignId = campaign.rows[0]?.id;
     if (!campaignId) throw new Error("Could not create campaign.");
+    const initialTrackers = Array.isArray(content.defaults?.trackers) && content.defaults.trackers.length
+      ? content.defaults.trackers : seed.defaultTriggers;
     await client.query(
       `INSERT INTO campaign_state (
-         campaign_id, owner_user_id, trackers, default_triggers, event_triggers, rpg_stats, import_provenance
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+         campaign_id, owner_user_id, trackers, default_triggers, event_triggers, rpg_stats, import_provenance, initial_state_snapshot
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [
         campaignId,
         ownerUserId,
-        json(Array.isArray(content.defaults?.trackers) && content.defaults.trackers.length
-          ? content.defaults.trackers : seed.defaultTriggers),
+        json(initialTrackers),
         json(seed.defaultTriggers),
         json(content.eventTriggers),
         json(seed.rpgStats),
-        json({ sourceType: "world_library", worldId: source.world_id, worldVersionId: request.worldVersionId, selectedCharacterId: seed.character.id })
+        json({ sourceType: "world_library", worldId: source.world_id, worldVersionId: request.worldVersionId, selectedCharacterId: seed.character.id }),
+        json({ scratchpad: "", trackers: initialTrackers, eventTriggers: content.eventTriggers, pendingEventTriggers: [], rpgStats: seed.rpgStats })
       ]
     );
+    await autoEnableCampaignEmbeddingIfAvailable(client, ownerUserId, campaignId);
     return { id: campaignId, title: request.title, status: "active", activeTurnNumber: 0, storyLengthProfile: request.storyLengthProfile, worldId: source.world_id, worldVersionId: request.worldVersionId, worldVersionNumber: source.version_number, selectedCharacterId: seed.character.id, selectedCharacterName: seed.character.name, textProviderProfileId: null, imageProviderProfileId: null };
   });
 }

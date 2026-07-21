@@ -289,6 +289,85 @@ integration("durable Story Engine integration", () => {
     });
   });
 
+  it("rejects rewinds with HTTP 409 when expectedCurrentTurnNumber does not match active_turn_number", async () => {
+    const imported = await campaign();
+    await expect(
+      rewindCampaign(pool, imported.campaignId, {
+        targetTurnNumber: 0,
+        expectedCurrentTurnNumber: 99
+      })
+    ).rejects.toMatchObject({ statusCode: 409 });
+    const check = await pool.query<{ active_turn_number: number }>(
+      "SELECT active_turn_number FROM campaigns WHERE id = $1",
+      [imported.campaignId]
+    );
+    expect(check.rows[0]?.active_turn_number).toBe(1);
+  });
+
+  it("rewinds to turn zero, restoring initial_state_snapshot and allowing the next turn to commit at turn 1", async () => {
+    const imported = await campaign();
+    const costBefore = await pool.query<{ count: string; amount: string }>(
+      `SELECT count(*)::text AS count, coalesce(sum(amount), 0)::text AS amount
+         FROM provider_cost_events WHERE campaign_id = $1`,
+      [imported.campaignId]
+    );
+
+    const rewound = await rewindCampaign(pool, imported.campaignId, { targetTurnNumber: 0 });
+    expect(rewound).toMatchObject({
+      campaignId: imported.campaignId,
+      activeTurnNumber: 0,
+      discardedTurnCount: 1,
+      stateSnapshot: expect.objectContaining({
+        scratchpad: "",
+        trackers: expect.any(Array),
+        eventTriggers: expect.any(Array)
+      })
+    });
+
+    const check = await pool.query<{ active_turn_number: number }>(
+      "SELECT active_turn_number FROM campaigns WHERE id = $1",
+      [imported.campaignId]
+    );
+    expect(check.rows[0]?.active_turn_number).toBe(0);
+
+    const costAfter = await pool.query<{ count: string; amount: string; attributed: string }>(
+      `SELECT count(*)::text AS count, coalesce(sum(amount), 0)::text AS amount,
+              count(*) FILTER (WHERE turn_id IS NOT NULL)::text AS attributed
+         FROM provider_cost_events WHERE campaign_id = $1`,
+      [imported.campaignId]
+    );
+    expect(costAfter.rows[0]).toMatchObject({
+      count: costBefore.rows[0]?.count,
+      amount: costBefore.rows[0]?.amount,
+      attributed: "0"
+    });
+
+    replies.push({ content: validStory("The turn one action after turn-zero rewind.") });
+    const job = await queue(imported.campaignId, "Begin new turn 1 action.");
+    await runGenerationJob(pool, "story-worker-rewind-zero", 30, credentialSecret);
+    const result = await getGenerationResult(pool, job.id);
+    expect(result).toMatchObject({ status: "completed", turnNumber: 1 });
+  });
+
+  it("refreshes initial_state_snapshot when player configuration is synced while at turn zero", async () => {
+    const imported = await campaign();
+    await rewindCampaign(pool, imported.campaignId, { targetTurnNumber: 0 });
+    await syncPlayerCampaignConfig(pool, imported.campaignId, {
+      expectedTurnNumber: 0,
+      useRpgStats: true,
+      suppressEventTriggers: false,
+      rpgStats: [{ id: "stat1", name: "Strength", value: 18, note: "" }],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    });
+    const stateRow = await pool.query<{ initial_state_snapshot: { rpgStats: Array<{ id: string; name: string; value: number; note: string }> } }>(
+      "SELECT initial_state_snapshot FROM campaign_state WHERE campaign_id = $1",
+      [imported.campaignId]
+    );
+    expect(stateRow.rows[0]?.initial_state_snapshot?.rpgStats).toEqual([{ id: "stat1", name: "Strength", value: 18, note: "" }]);
+  });
+
+
   it("accepts a post-rewind story when the provider omits only derived Chronicle fields", async () => {
     const imported = await campaign();
     replies.push({ content: validStory("The first path reaches Marker Three.") });

@@ -1445,6 +1445,23 @@
       <div class="row wrap" style="justify-content:flex-end;">
         <button id="btnWorldGenCancel" type="submit">Cancel</button>
         <button id="btnWorldGenRun" class="primary" type="button">✨ Generate and fill setup</button>
+
+  <dialog id="worldGenDialog" class="world-gen-dialog">
+    <form method="dialog" class="world-gen-card">
+      <div>
+        <h3>Generate world setup</h3>
+        <p class="mini">Describe the adventure you want. A few words is enough; more detail gives the LLM more to preserve.</p>
+      </div>
+      <label>World prompt
+        <textarea id="worldGenPrompt" placeholder="Examples: cozy magical academy mystery with a shy alchemist; post-apocalyptic train journey; haunted Mars colony noir..." style="min-height:160px;"></textarea>
+      </label>
+      <label class="checkline"><input id="worldGenGenerateTrackers" type="checkbox" /> Automatically generate trackers</label>
+      <p class="mini">Leave unchecked to leave trackers blank for the generated setup. When checked, the generator creates tailored default trackers for the new setup.</p>
+      <label class="checkline"><input id="worldGenUseRpgStats" type="checkbox" /> Use RPG d% statistics for this generated world</label>
+      <p class="mini">Leave unchecked for a purely narrative game. When checked, the generator fills RPG percentile stats and enables stat rolls.</p>
+      <div class="row wrap" style="justify-content:flex-end;">
+        <button id="btnWorldGenCancel" type="submit">Cancel</button>
+        <button id="btnWorldGenRun" class="primary" type="button">✨ Generate and fill setup</button>
       </div>
     </form>
   </dialog>
@@ -1500,11 +1517,29 @@
     </div>
   </dialog>
 
+  <dialog id="retryPromptDialog" class="world-gen-dialog app-dialog wide-dialog">
+    <div class="world-gen-card">
+      <div class="dialog-header">
+        <div>
+          <h3>Retry Turn with Edited Prompt</h3>
+          <p class="mini">Review and edit the prompt for the turn you are retrying before submitting to generate a new response.</p>
+        </div>
+        <button id="btnRetryPromptClose" class="small ghost" type="button" aria-label="Cancel retry">✕</button>
+      </div>
+      <label>Turn prompt
+        <textarea id="retryPromptEditor" placeholder="Edit the turn prompt text before retrying." style="min-height:140px;"></textarea>
+      </label>
+      <div class="row wrap dialog-actions" style="justify-content: flex-end;">
+        <button id="btnRetryPromptSubmit" class="primary" type="button">Submit</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog id="worldTextImportDialog" class="world-gen-dialog">
     <form method="dialog" class="world-gen-card">
       <div>
         <h3>Load world from text</h3>
-          <p class="mini">Paste JSON from a saved .world or .story file, then load it into the world fields, RPG stats, and default trackers. External formats are imported through World Management.</p>
+        <p class="mini">Paste JSON from a saved .world or .story file, then load it into the world fields, RPG stats, and default trackers. External formats are imported through World Management.</p>
       </div>
       <label>World setup JSON
         <textarea id="worldTextImportEditor" placeholder='Paste saved .world or .story JSON here, for example: { "world": { "title": "..." } }' style="min-height:240px;"></textarea>
@@ -1515,7 +1550,6 @@
       </div>
     </form>
   </dialog>
-
 
   <dialog id="worldHashImportDialog" class="world-gen-dialog app-dialog wide-dialog">
     <div class="world-gen-card">
@@ -3031,6 +3065,51 @@
       if (!endpoint) return;
       lmStudioRuntimeCapabilityIndexes.delete(endpoint);
       await ensureLmStudioModelCapability(modelId);
+    }
+
+    async function attemptToLoadLmStudioModelIfNeeded(modelId = state.settings?.llmModel, options = {}) {
+      if (selectedAiProvider() !== PROVIDER_LM_STUDIO) return false;
+      const endpoint = normalizeLmStudioEndpoint(state.settings?.lmStudioEndpoint || "");
+      const requested = String(modelId || "").trim();
+      if (!endpoint || !requested) return false;
+      const capability = selectedLmStudioModelCapability(requested);
+      if (!capability || capability.loaded) return false;
+      const loadUrl = `${endpoint}/api/v1/models/load`;
+      const targetModelKey = capability.key || requested;
+      const operationId = options.activityOperationId || activityOperationId("lmstudio_load");
+      const requestLabel = String(options.requestLabel || "model").trim() || "model";
+      recordActivity("llm", `Loading LM Studio model into memory: ${targetModelKey}`, "info", {
+        operationLabel: requestLabel,
+        model: targetModelKey,
+        endpoint
+      }, { operationId });
+      try {
+        const res = await fetch(loadUrl, {
+          method: "POST",
+          headers: providerRequestHeaders({ json: true, apiKey: providerApiKey() }),
+          body: JSON.stringify({ model: targetModelKey })
+        });
+        if (res.ok) {
+          const loadData = await res.json().catch(() => null);
+          capability.loaded = true;
+          if (loadData?.instance_id || loadData?.id) {
+            capability.instanceId = String(loadData.instance_id || loadData.id);
+          } else if (!capability.instanceId) {
+            capability.instanceId = targetModelKey;
+          }
+          if (loadData?.config?.context_length) {
+            capability.loadedContextLength = Number(loadData.config.context_length);
+          } else if (loadData?.context_length || loadData?.max_context_length) {
+            capability.loadedContextLength = Number(loadData.context_length || loadData.max_context_length);
+          }
+          applySelectedLmStudioLoadedContext();
+          renderLmStudioModelCapabilityStatus();
+          return true;
+        }
+      } catch (err) {
+        console.warn(`Could not load LM Studio model ${requested} into memory before request:`, err);
+      }
+      return false;
     }
 
     function lmStudioReasoningRequestValue(modelId = state.settings?.llmModel) {
@@ -5114,6 +5193,70 @@
       transientUi.editingResponseTurnId = null;
     }
 
+    function scrollViewportToTop() {
+      try {
+        window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      } catch (_) {
+        window.scrollTo(0, 0);
+      }
+    }
+
+    function showGenerationTransition(action) {
+      transientUi.generatingTurn = true;
+      transientUi.pendingAction = String(action || "").trim();
+      scrollViewportToTop();
+      renderStory();
+      renderChoices();
+    }
+
+    function clearGenerationTransition() {
+      transientUi.generatingTurn = false;
+      transientUi.pendingAction = "";
+    }
+
+    function openImagePromptDialog(turn = state.turns[state.viewIndex]) {
+      if (!turn) return;
+      transientUi.editingImageTurnId = turn.id;
+      const dialog = $("imagePromptDialog");
+      const editor = $("imagePromptEditor");
+      if (!dialog || !editor || typeof dialog.showModal !== "function") {
+        const updated = prompt("Edit the image prompt for this turn:", turn.imagePrompt || "");
+        if (updated != null) regenerateImageForTurn(turn.id, updated);
+        return;
+      }
+      editor.value = turn.imagePrompt || "";
+      dialog.showModal();
+      setTimeout(() => editor.focus(), 40);
+    }
+
+    function closeImagePromptDialog() {
+      const dialog = $("imagePromptDialog");
+      if (dialog && dialog.open) dialog.close();
+      transientUi.editingImageTurnId = null;
+    }
+
+    function openEditResponseDialog(turn = viewedTurn()) {
+      if (!state.settings.enableResponseEditing) return toast("Enable response editing in World Set Up first.");
+      if (!turn) return toast("No turn is selected to edit.");
+      transientUi.editingResponseTurnId = turn.id;
+      const dialog = $("editResponseDialog");
+      const editor = $("responseEditor");
+      if (!dialog || !editor || typeof dialog.showModal !== "function") {
+        const updated = prompt("Edit the response text for this turn:", turn.narration || "");
+        if (updated != null) saveEditedResponse(turn.id, updated);
+        return;
+      }
+      editor.value = turn.narration || "";
+      dialog.showModal();
+      setTimeout(() => editor.focus(), 40);
+    }
+
+    function closeEditResponseDialog() {
+      const dialog = $("editResponseDialog");
+      if (dialog && dialog.open) dialog.close();
+      transientUi.editingResponseTurnId = null;
+    }
+
     function saveEditedResponse(turnId, updatedText) {
       const turn = state.turns.find(t => t.id === turnId) || viewedTurn();
       if (!turn) return toast("Could not find that turn.");
@@ -5124,6 +5267,75 @@
       saveState();
       renderAll();
       toast(`Updated response for turn ${turn.turnNumber}.`);
+    }
+
+    function openRetryPromptDialog(originalPrompt) {
+      const dialog = $("retryPromptDialog");
+      const editor = $("retryPromptEditor");
+      if (!dialog || !editor || typeof dialog.showModal !== "function") {
+        const updated = prompt("Edit the prompt text before retrying:", originalPrompt || "");
+        if (updated != null) executeRetryWithPrompt(updated);
+        return;
+      }
+      editor.value = originalPrompt || "";
+      dialog.showModal();
+      setTimeout(() => editor.focus(), 40);
+    }
+
+    function closeRetryPromptDialog() {
+      const dialog = $("retryPromptDialog");
+      if (dialog && dialog.open) dialog.close();
+    }
+
+    async function executeRetryWithPrompt(submittedPromptText) {
+      if (!state.turns.length || busy) return;
+      const campaignId = String(state.settings.nexusCampaignId || "");
+      if (!campaignId) {
+        toast("No active campaign. Cannot retry.", 5000);
+        return;
+      }
+      const removed = state.turns[state.turns.length - 1];
+      const action = String(submittedPromptText || "").trim() || removed.action || firstActionForNewAdventure();
+      try {
+        busy = true;
+        renderAll();
+        const currentTurnNumber = state.turns.length;
+        const targetTurnNumber = currentTurnNumber - 1;
+        const rewind = await nexusApi(
+          "/campaigns/" + encodeURIComponent(campaignId) + "/rewind",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              targetTurnNumber,
+              expectedCurrentTurnNumber: currentTurnNumber
+            })
+          }
+        );
+        state.turns.pop();
+        state.viewIndex = state.turns.length - 1;
+        restoreAuthoritativeTurnState(rewind.stateSnapshot || {});
+        state.settings.nexusCampaignTurnCount = targetTurnNumber;
+        state.settings.nexusPendingGeneration = null;
+        markUnsavedForFullExport();
+        saveState();
+        renderAll();
+        recordActivity("story", `Retrying turn ${removed.turnNumber}`, "info", {
+          action,
+          remainingTurns: state.turns.length
+        });
+      } catch (error) {
+        if (Number(error?.status) === 409) {
+          toast("The campaign has changed. Please reload to retry.", 5000);
+        } else {
+          toast("Could not retry: " + (error?.message || String(error)), 5000);
+        }
+        busy = false;
+        renderAll();
+        return;
+      } finally {
+        busy = false;
+      }
+      await generateTurn(action);
     }
 
     async function regenerateImageForTurn(turnId, promptText) {
@@ -5465,6 +5677,81 @@
     }
 
     function areEventTriggersSuppressed() {
+        saveState();
+        renderEventTriggers();
+      }));
+      list.querySelectorAll("input[data-event-trigger-timing]").forEach(input => input.addEventListener("change", () => updateEventTrigger(input.dataset.eventTriggerTiming, { timing: input.value })));
+      list.querySelectorAll("textarea[data-event-trigger-condition]").forEach(area => area.addEventListener("change", () => updateEventTrigger(area.dataset.eventTriggerCondition, { condition: area.value.trim() })));
+      list.querySelectorAll("textarea[data-event-trigger-effect]").forEach(area => area.addEventListener("change", () => updateEventTrigger(area.dataset.eventTriggerEffect, { effect: area.value.trim() })));
+      list.querySelectorAll("input[data-event-trigger-append]").forEach(input => input.addEventListener("change", () => updateEventTrigger(input.dataset.eventTriggerAppend, { addTextAfter: input.checked })));
+      setAddEventTriggerAppendEnabled();
+    }
+
+    function updateEventTrigger(id, patch) {
+      const trigger = state.eventTriggers.find(t => t.id === id);
+      if (!trigger) return;
+      Object.assign(trigger, patch);
+      trigger.timing = normalizeEventTriggerTiming(trigger.timing);
+      if (trigger.timing !== "after") trigger.addTextAfter = false;
+      trigger.updatedAt = nowIso();
+      state.eventTriggers = normalizeEventTriggers(state.eventTriggers);
+      saveState();
+      renderEventTriggers();
+    }
+
+    function addEventTrigger() {
+      const timing = $("eventTriggerTimingAfter")?.checked ? "after" : "before";
+      const condition = $("eventTriggerCondition")?.value.trim() || "";
+      const effect = $("eventTriggerEffect")?.value.trim() || "";
+      const addTextAfter = timing === "after" && $("eventTriggerAppendAfter")?.checked === true;
+      if (!condition || !effect) {
+        toast("Event trigger needs both an activation condition and an effect.");
+        return;
+      }
+      state.eventTriggers.push({
+        id: uid("event_trigger"),
+        timing,
+        condition,
+        effect,
+        addTextAfter,
+        createdAt: nowIso(),
+        updatedAt: null,
+        triggeredCount: 0,
+        lastTriggeredTurn: null,
+        lastTriggeredAt: null,
+        label: `Event Trigger ${state.eventTriggers.length + 1}`
+      });
+      if ($("eventTriggerCondition")) $("eventTriggerCondition").value = "";
+      if ($("eventTriggerEffect")) $("eventTriggerEffect").value = "";
+      if ($("eventTriggerTimingBefore")) $("eventTriggerTimingBefore").checked = true;
+      if ($("eventTriggerTimingAfter")) $("eventTriggerTimingAfter").checked = false;
+      if ($("eventTriggerAppendAfter")) $("eventTriggerAppendAfter").checked = false;
+      setAddEventTriggerAppendEnabled();
+      saveState();
+      renderEventTriggers();
+    }
+
+    function syncEventTriggerEditorState() {
+      document.querySelectorAll("input[data-event-trigger-timing]:checked").forEach(input => {
+        const trigger = state.eventTriggers.find(t => t.id === input.dataset.eventTriggerTiming);
+        if (trigger) trigger.timing = normalizeEventTriggerTiming(input.value);
+      });
+      document.querySelectorAll("textarea[data-event-trigger-condition]").forEach(area => {
+        const trigger = state.eventTriggers.find(t => t.id === area.dataset.eventTriggerCondition);
+        if (trigger) trigger.condition = area.value.trim();
+      });
+      document.querySelectorAll("textarea[data-event-trigger-effect]").forEach(area => {
+        const trigger = state.eventTriggers.find(t => t.id === area.dataset.eventTriggerEffect);
+        if (trigger) trigger.effect = area.value.trim();
+      });
+      document.querySelectorAll("input[data-event-trigger-append]").forEach(input => {
+        const trigger = state.eventTriggers.find(t => t.id === input.dataset.eventTriggerAppend);
+        if (trigger) trigger.addTextAfter = trigger.timing === "after" && input.checked;
+      });
+      state.eventTriggers = normalizeEventTriggers(state.eventTriggers);
+    }
+
+    function areEventTriggersSuppressed() {
       return !!state.world?.suppressTriggers;
     }
 
@@ -5488,11 +5775,11 @@
         card.innerHTML = `
           <div class="row" style="justify-content:space-between;align-items:flex-start;">
             <h4>${escapeHtml(tracker.name)}</h4>
-            <button class="small danger" data-del="${tracker.id}">Delete</button>
+            <button class="small danger" data-del="${escapeHtml(tracker.id)}">Delete</button>
           </div>
           <p><strong>Update rule:</strong> ${escapeHtml(tracker.rules)}</p>
           <label>Value
-            <textarea data-tracker-value="${tracker.id}">${escapeHtml(tracker.value || "")}</textarea>
+            <textarea data-tracker-value="${escapeHtml(tracker.id)}">${escapeHtml(tracker.value || "")}</textarea>
           </label>
         `;
         list.appendChild(card);
@@ -7452,6 +7739,7 @@ ${addition}`.trim();
       const requestLabel = String(options.requestLabel || "request").trim() || "request";
       const requestedModel = String(payload?.model || "").trim();
       await ensureLmStudioModelCapability(requestedModel);
+      await attemptToLoadLmStudioModelIfNeeded(requestedModel, { activityOperationId: requestOperationId, requestLabel });
       const advertisedCapability = selectedLmStudioModelCapability(requestedModel);
       const resolvedModel = resolveLmStudioModelInstance(requestedModel);
       let attempt = 0;
@@ -7946,33 +8234,38 @@ ${addition}`.trim();
       const configuredId = String(state.settings.nexusCampaignId || "");
       const pending = state.settings.nexusPendingGeneration;
       if (configuredId) {
+        let status;
         try {
-          const status = await nexusApi("/campaigns/" + encodeURIComponent(configuredId) + "/sync-status");
-          const activeTurn = Number(status.activeTurnNumber || 0);
-          state.settings.nexusCampaignWorldVersionId = String(status.worldVersionId || state.settings.nexusCampaignWorldVersionId || "");
-          const pendingForCurrentTurn = pending
-            && pending.campaignId === configuredId
-            && Number(pending.baseTurnCount) === state.turns.length;
-          const pendingCommittedTurn = pendingForCurrentTurn && activeTurn === state.turns.length + 1;
-          if (activeTurn === state.turns.length || pendingCommittedTurn) {
-            state.settings.nexusCampaignTurnCount = activeTurn;
-            if (!pendingForCurrentTurn) await syncNexusPlayerConfig(configuredId);
-            return configuredId;
-          }
-          recordActivity("story", "Nexus campaign detached after browser/database history divergence", "warn", {
-            campaignId: configuredId,
-            browserTurns: state.turns.length,
-            databaseTurns: activeTurn
-          });
+          status = await nexusApi("/campaigns/" + encodeURIComponent(configuredId) + "/sync-status");
         } catch (error) {
-          if (Number(error?.status) !== 404) throw error;
+          if (Number(error?.status) === 404) {
+            throw Object.assign(
+              new Error("The Nexus campaign was not found. It may have been deleted or archived."),
+              { status: 404 }
+            );
+          }
+          throw error;
         }
-        state.settings.nexusBranchWorldVersionId = String(state.settings.nexusBranchWorldVersionId || state.settings.nexusCampaignWorldVersionId || "");
-        state.settings.nexusCampaignId = "";
-        state.settings.nexusCampaignWorldVersionId = "";
-        state.settings.nexusCampaignTurnCount = 0;
-        state.settings.nexusPendingGeneration = null;
-        saveState();
+        const activeTurn = Number(status.activeTurnNumber || 0);
+        state.settings.nexusCampaignWorldVersionId = String(status.worldVersionId || state.settings.nexusCampaignWorldVersionId || "");
+        const pendingForCurrentTurn = pending
+          && pending.campaignId === configuredId
+          && Number(pending.baseTurnCount) === state.turns.length;
+        const pendingCommittedTurn = pendingForCurrentTurn && activeTurn === state.turns.length + 1;
+        if (activeTurn === state.turns.length || pendingCommittedTurn) {
+          state.settings.nexusCampaignTurnCount = activeTurn;
+          if (!pendingForCurrentTurn) await syncNexusPlayerConfig(configuredId);
+          return configuredId;
+        }
+        recordActivity("story", "Nexus campaign history divergence detected", "error", {
+          campaignId: configuredId,
+          browserTurns: state.turns.length,
+          databaseTurns: activeTurn
+        });
+        throw Object.assign(
+          new Error("Browser and campaign history have diverged. Reload to resync."),
+          { status: 409 }
+        );
       }
 
       updateTurnGenerationDetail("Importing the current browser story into the authoritative Nexus campaign ledger.");
@@ -8597,33 +8890,22 @@ Rewrite rules:
         const stateBeforeBranch = deepClone(state);
         const originallyConfiguredCampaignId = String(state.settings.nexusCampaignId || "");
         let activeCampaignId = "";
-        let recoveredMissingCampaign = false;
         try {
           const resolvedCampaign = originallyConfiguredCampaignId
             ? await resolveNexusCampaignForEarlierTurn(targetTurnNumber)
             : null;
           activeCampaignId = String(resolvedCampaign?.campaignId || "");
           if (activeCampaignId && choice === "reset") {
-            try {
-              const rewind = await nexusApi("/campaigns/" + encodeURIComponent(activeCampaignId) + "/rewind", {
-                method: "POST",
-                body: JSON.stringify({ targetTurnNumber })
-              });
-              restoreAuthoritativeTurnState(rewind.stateSnapshot || {});
-              state.settings.nexusCampaignTurnCount = targetTurnNumber;
-              state.settings.nexusPendingGeneration = null;
-            } catch (error) {
-              if (Number(error?.status) !== 404) throw error;
-              activeCampaignId = "";
-            }
+            const rewind = await nexusApi("/campaigns/" + encodeURIComponent(activeCampaignId) + "/rewind", {
+              method: "POST",
+              body: JSON.stringify({ targetTurnNumber, expectedCurrentTurnNumber: state.turns.length })
+            });
+            restoreAuthoritativeTurnState(rewind.stateSnapshot || {});
+            state.settings.nexusCampaignTurnCount = targetTurnNumber;
+            state.settings.nexusPendingGeneration = null;
           }
           if (!activeCampaignId && originallyConfiguredCampaignId) {
-            state.settings.nexusBranchWorldVersionId = knownNexusWorldVersionId();
-            state.settings.nexusCampaignId = "";
-            state.settings.nexusCampaignWorldVersionId = "";
-            state.settings.nexusCampaignTurnCount = 0;
-            state.settings.nexusPendingGeneration = null;
-            recoveredMissingCampaign = choice === "reset";
+            throw new Error("The campaign could not be found. It may have been deleted.");
           } else if (activeCampaignId && choice === "copy") {
             state.settings.nexusBranchWorldVersionId = String(resolvedCampaign.status.worldVersionId || knownNexusWorldVersionId());
             state.storyImportProvenance = {
@@ -8651,10 +8933,6 @@ Rewrite rules:
             state.fullHistoryCompressionRetryAfterTurn = 0;
           }
           restoreStateAfterTurnIndex(state.viewIndex);
-          if (recoveredMissingCampaign) {
-            updateTurnGenerationDetail("Rebuilding the missing campaign ledger at the selected turn.");
-            activeCampaignId = await ensureNexusCampaignForCurrentStory();
-          }
         } catch (error) {
           state = stateBeforeBranch;
           saveState();
@@ -8663,12 +8941,11 @@ Rewrite rules:
           return false;
         }
         saveState();
-        recordActivity("story", recoveredMissingCampaign ? "Missing Nexus campaign rebuilt at an earlier turn" : (choice === "copy" ? "Separate campaign branch selected" : "Campaign reset to an earlier turn"), "warn", {
+        recordActivity("story", choice === "copy" ? "Separate campaign branch selected" : "Campaign reset to an earlier turn", "warn", {
           branchTurn: targetTurnNumber,
           discardedTurnCount,
           branchMode: choice,
-          campaignId: choice === "reset" ? activeCampaignId : "",
-          replacedCampaignId: recoveredMissingCampaign ? originallyConfiguredCampaignId : ""
+          campaignId: choice === "reset" ? activeCampaignId : ""
         });
       }
       return true;
@@ -9096,36 +9373,63 @@ ${missingList}`,
       toast("Discarded the incomplete generation. The current completed turn remains unchanged.", 5500);
     }
 
-    function undoLatest() {
+    async function undoLatest() {
       if (!state.turns.length || busy) return;
-      const removed = state.turns.pop();
-      state.viewIndex = state.turns.length - 1;
-      restoreStateAfterTurnIndex(state.viewIndex);
-      markUnsavedForFullExport();
-      saveState();
-      renderAll();
-      recordActivity("story", `Turn ${removed.turnNumber} undone`, "warn", {
-        action: removed.action || "",
-        remainingTurns: state.turns.length
-      });
-      toast(`Undid turn ${removed.turnNumber}.`);
+      const campaignId = String(state.settings.nexusCampaignId || "");
+      if (!campaignId) {
+        toast("No active campaign. Cannot undo.", 5000);
+        return;
+      }
+      try {
+        busy = true;
+        renderAll();
+        const currentTurnNumber = state.turns.length;
+        const targetTurnNumber = currentTurnNumber - 1;
+        const rewind = await nexusApi(
+          "/campaigns/" + encodeURIComponent(campaignId) + "/rewind",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              targetTurnNumber,
+              expectedCurrentTurnNumber: currentTurnNumber
+            })
+          }
+        );
+        const removed = state.turns.pop();
+        state.viewIndex = state.turns.length - 1;
+        restoreAuthoritativeTurnState(rewind.stateSnapshot || {});
+        state.settings.nexusCampaignTurnCount = targetTurnNumber;
+        state.settings.nexusPendingGeneration = null;
+        markUnsavedForFullExport();
+        saveState();
+        renderAll();
+        recordActivity("story", `Turn ${removed.turnNumber} undone`, "warn", {
+          action: removed.action || "",
+          remainingTurns: state.turns.length
+        });
+        toast(`Undid turn ${removed.turnNumber}.`);
+      } catch (error) {
+        if (Number(error?.status) === 409) {
+          toast("The campaign has changed. Please reload to continue.", 5000);
+        } else {
+          toast("Could not undo: " + (error?.message || String(error)), 5000);
+        }
+      } finally {
+        busy = false;
+        renderAll();
+      }
     }
 
     async function retryLatest() {
       if (!state.turns.length || busy) return;
+      const campaignId = String(state.settings.nexusCampaignId || "");
+      if (!campaignId) {
+        toast("No active campaign. Cannot retry.", 5000);
+        return;
+      }
       const removed = state.turns[state.turns.length - 1];
       const action = removed.action || firstActionForNewAdventure();
-      state.turns.pop();
-      state.viewIndex = state.turns.length - 1;
-      restoreStateAfterTurnIndex(state.viewIndex);
-      markUnsavedForFullExport();
-      saveState();
-      renderAll();
-      recordActivity("story", `Retrying turn ${removed.turnNumber}`, "info", {
-        action,
-        remainingTurns: state.turns.length
-      });
-      await generateTurn(action);
+      openRetryPromptDialog(action);
     }
 
     async function loadModels({ showSuccessToast = true, preferFirstActiveLmStudioModel = true } = {}) {
@@ -9158,6 +9462,7 @@ ${missingList}`,
           const endpoint = normalizeLmStudioEndpoint(state.settings.lmStudioEndpoint || "");
           lmStudioRuntimeCapabilityIndexes.set(endpoint, lmStudioCapabilities);
           Object.entries(lmStudioCapabilities).forEach(([modelId, capability]) => syncLmStudioReasoningControlCache(modelId, capability));
+          await attemptToLoadLmStudioModelIfNeeded(state.settings.llmModel);
         }
         const loadedModelIds = uniqueModelIds(modelRecords).sort();
         if (!loadedModelIds.length) throw new Error("Model list returned no model IDs.");
@@ -10200,6 +10505,7 @@ ${missingList}`,
       ["fallbackLlmModel1", "fallbackLlmModel2"].forEach(id => $(id)?.addEventListener("change", () => { syncFormToState(); renderAll(); }));
       $("filterFreeOptions")?.addEventListener("change", () => {
         syncFormToState();
+        syncFormToState();
         populateModelSelects();
         syncStateToForm();
         renderAll();
@@ -10246,6 +10552,12 @@ ${missingList}`,
       $("btnEditResponseCancel")?.addEventListener("click", closeEditResponseDialog);
       $("btnEditResponseSave")?.addEventListener("click", () => saveEditedResponse(transientUi.editingResponseTurnId, $("responseEditor")?.value || ""));
       addCtrlEnter("responseEditor", () => $("btnEditResponseSave")?.click());
+      $("btnRetryPromptClose")?.addEventListener("click", closeRetryPromptDialog);
+      $("btnRetryPromptSubmit")?.addEventListener("click", () => {
+        closeRetryPromptDialog();
+        executeRetryWithPrompt($("retryPromptEditor")?.value || "");
+      });
+      addCtrlEnter("retryPromptEditor", () => $("btnRetryPromptSubmit")?.click());
       bindSetupSummary("btnToggleAdvancedStart", "advancedStartPanel");
       bindSetupSummary("btnToggleDefaultTrackers", "defaultTrackersPanel");
       bindSetupSummary("btnToggleEventTriggers", "eventTriggersPanel");

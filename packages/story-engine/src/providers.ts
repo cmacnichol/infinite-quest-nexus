@@ -276,7 +276,30 @@ export function reportedProviderCost(usage: unknown): ReportedProviderCost | nul
   return { amount: String(rawCost).trim(), currency };
 }
 
+export async function ensureLmStudioModelLoaded(profile: TextProviderProfile, operation: string, fetcher: Fetch = fetch): Promise<void> {
+  if (profile.providerType !== "lmstudio" || !profile.model.trim()) return;
+  try {
+    const models = await discoverModels(profile, fetcher);
+    const requested = profile.model.trim().toLowerCase();
+    const matches = models.filter((item) => item.id.trim().toLowerCase() === requested || item.instanceId.trim().toLowerCase() === requested);
+    if (!matches.length) return;
+    if (matches.some((item) => item.loaded)) return;
+    const targetModelId = matches[0]?.id || profile.model.trim();
+    const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/models/load`;
+    const response = await providerFetch(profile, operation, url, {
+      method: "POST",
+      headers: headers(profile),
+      body: JSON.stringify({ model: targetModelId })
+    }, fetcher);
+    if (!response.ok) return;
+    await checkedJson(response, profile, operation, url);
+  } catch {
+    // If discovery or loading fails, allow the actual request to execute or report its own error.
+  }
+}
+
 async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, fetcher: Fetch): Promise<ProviderResult> {
+  await ensureLmStudioModelLoaded(profile, "story generation model loading", fetcher);
   const rejectedResponse = String(request.rejectedResponse || "").trim()
     .slice(0, Math.max(4000, Math.min(80_000, profile.maxOutputTokens * 4)));
   const payload: Record<string, unknown> = {
@@ -380,6 +403,7 @@ export async function callEmbeddingProvider(
   if (!inputs.length) return {
     embeddings: [], model: profile.model, responseId: "", usage: { inputTokens: 0, totalTokens: 0 }, reportedCost: null
   };
+  await ensureLmStudioModelLoaded(profile, "embedding model loading", fetcher);
   const url = `${openAiRoot(profile.baseUrl)}/embeddings`;
   const response = await providerFetch(profile, "embedding generation", url, {
     method: "POST",
@@ -412,6 +436,7 @@ export async function callImageProvider(
   request: ImageProviderRequest,
   fetcher: Fetch = fetch
 ): Promise<ImageProviderResult> {
+  await ensureLmStudioModelLoaded(profile, "image model loading", fetcher);
   const base = profile.providerType === "openrouter" ? rootUrl(profile.baseUrl) : openAiRoot(profile.baseUrl);
   const url = profile.providerType === "openrouter" ? `${base}/images` : `${base}/images/generations`;
   const payload: Record<string, unknown> = {

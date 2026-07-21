@@ -73,6 +73,12 @@ describe("text provider adapters", () => {
 
   it("pins LM Studio to the selected loaded instance without a context_length load override", async () => {
     const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const urlString = String(_url);
+      if (urlString.endsWith("/api/v1/models")) {
+        return new Response(JSON.stringify({
+          models: [{ key: "loaded-instance-id", loaded_instances: [{ id: "loaded-instance-id" }] }]
+        }), { status: 200 });
+      }
       const body = JSON.parse(String(init?.body));
       expect(body.model).toBe("loaded-instance-id");
       expect(body.context_length).toBeUndefined();
@@ -85,7 +91,52 @@ describe("text provider adapters", () => {
       }), { status: 200 });
     });
     await callTextProvider(profile, { systemPrompt: "system", input: "input" }, fetcher as typeof fetch);
-    expect(fetcher.mock.calls[0]?.[0]).toBe("http://lmstudio.test/api/v1/chat");
+    expect(fetcher.mock.calls.find((call) => String(call[0]).endsWith("/api/v1/chat"))?.[0]).toBe("http://lmstudio.test/api/v1/chat");
+  });
+
+  it("attempts to load the LM Studio campaign provider if it is available from the model list but not currently loaded", async () => {
+    const unloadedProfile: TextProviderProfile = {
+      ...profile,
+      model: "qwen2.5-7b-instruct"
+    };
+    const calls: string[] = [];
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const urlString = String(_url);
+      calls.push(`${init?.method || "GET"} ${urlString}`);
+      if (urlString.endsWith("/api/v1/models") && (!init?.method || init.method === "GET")) {
+        return new Response(JSON.stringify({
+          models: [{
+            key: "qwen2.5-7b-instruct",
+            display_name: "Qwen 2.5 7B",
+            loaded_instances: []
+          }]
+        }), { status: 200 });
+      }
+      if (urlString.endsWith("/api/v1/models/load") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        expect(body.model).toBe("qwen2.5-7b-instruct");
+        return new Response(JSON.stringify({
+          instance_id: "qwen2.5-7b-instruct",
+          config: { context_length: 32768 }
+        }), { status: 200 });
+      }
+      if (urlString.endsWith("/api/v1/chat") && init?.method === "POST") {
+        return new Response(JSON.stringify({
+          model_instance_id: "qwen2.5-7b-instruct",
+          response_id: "resp-load-1",
+          output: [{ type: "message", content: '{"narration":"Successfully loaded and generated."}' }],
+          stats: { input_tokens: 50, total_output_tokens: 20 }
+        }), { status: 200 });
+      }
+      throw new Error(`Unexpected request: ${init?.method || "GET"} ${urlString}`);
+    });
+    const result = await callTextProvider(unloadedProfile, { systemPrompt: "system", input: "input" }, fetcher as typeof fetch);
+    expect(result.content).toBe('{"narration":"Successfully loaded and generated."}');
+    expect(calls).toEqual([
+      "GET http://lmstudio.test/api/v1/models",
+      "POST http://lmstudio.test/api/v1/models/load",
+      "POST http://lmstudio.test/api/v1/chat"
+    ]);
   });
 
   it("uses the advertised loaded context length and instance ID from model inventory", async () => {
@@ -167,7 +218,13 @@ describe("text provider adapters", () => {
 
   it("uses the OpenAI-compatible embeddings endpoint and preserves input order", async () => {
     const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      expect(String(url)).toBe("http://lmstudio.test/v1/embeddings");
+      const urlString = String(url);
+      if (urlString.endsWith("/api/v1/models")) {
+        return new Response(JSON.stringify({
+          models: [{ key: "loaded-instance-id", loaded_instances: [{ id: "loaded-instance-id" }] }]
+        }), { status: 200 });
+      }
+      expect(urlString).toBe("http://lmstudio.test/v1/embeddings");
       expect(JSON.parse(String(init?.body))).toEqual({ model: "loaded-instance-id", input: ["first", "second"] });
       return new Response(JSON.stringify({
         model: "embedding-model",

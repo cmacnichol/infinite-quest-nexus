@@ -294,7 +294,10 @@
         </details>
 
         <div id="contextSummary" class="status hidden"></div>
-        <pre id="contextPreview" class="context-preview" tabindex="0">The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.</pre>
+        <details class="context-preview-details">
+          <summary>View context preview</summary>
+          <pre id="contextPreview" class="context-preview" tabindex="0">The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.</pre>
+        </details>
         </section>
       </section>
     </section>
@@ -312,6 +315,7 @@
         <label>Infinite Worlds file type
           <select id="infiniteWorldsKind">
             <option value="auto">Detect automatically</option>
+            <option value="cyoa_json">Choose Your Own Adventure (Writing.com JSON)</option>
             <option value="world_json">World raw JSON</option>
             <option value="world_text">World editor TXT (LLM conversion)</option>
             <option value="story_text">Matching story TXT</option>
@@ -322,7 +326,7 @@
         </label>
         <label class="toggle-field"><input id="infiniteWorldsEnrichFinal" type="checkbox"> Generate missing final-turn choices with the selected text provider</label>
         <label class="toggle-field"><input id="infiniteWorldsFinalImage" type="checkbox"> Queue an illustration for the latest imported turn</label>
-        <p class="muted">World imports retain every playable character. Story TXT attaches to the selected published world version and may require choosing the character used by that story. World TXT conversion uses the selected text provider below.</p>
+        <p class="muted">World imports retain every playable character. CYOA export imports convert the story description and top-level choices into a new world with 3-4 playable characters using the selected text provider below. Story TXT attaches to the selected published world version and may require choosing the character used by that story. World TXT conversion uses the selected text provider below.</p>
       </div>
       <div class="import-actions">
         <button id="openClipboardImport" class="button secondary" type="button">Paste copied content</button>
@@ -333,6 +337,14 @@
         <label>World import text provider<select id="providerSelect"><option value="">Use the default text provider</option></select></label>
         <button id="discoverModels" class="button secondary" type="button" disabled>Discover models</button>
         <label>Conversion model<select id="modelSelect" disabled><option value="">Discover models or use the profile default</option></select></label>
+      </div>
+      <div id="importProgressContainer" class="import-progress hidden">
+        <div class="import-progress-header">
+          <strong>Generating World & Characters</strong>
+          <span id="importProgressPercent">0%</span>
+        </div>
+        <progress id="importProgressBar" max="100" value="0"></progress>
+        <span id="importProgressLabel" class="field-note">Starting import…</span>
       </div>
       <div id="importPreview" class="import-preview muted">No file has been validated.</div>
       <div id="importStatus" class="status" role="status" aria-live="polite">Choose a story file to begin.</div>
@@ -349,6 +361,7 @@
         <select id="clipboardImportKind">
           <option value="auto">Detect Infinite Quest or Infinite Worlds JSON</option>
           <option value="campaign_json">Infinite Quest .story JSON — world and story history</option>
+          <option value="cyoa_json">Choose Your Own Adventure (Writing.com JSON)</option>
           <option value="world_json">Infinite Worlds world JSON — world details only</option>
           <option value="story_text">Infinite Worlds matching story TXT — story history only</option>
         </select>

@@ -16,8 +16,29 @@ import { loadTextProvider } from "./provider-service.js";
 import { importWorld, previewWorldImport } from "./world-service.js";
 import type { FilesystemAssetStore } from "./asset-service.js";
 import { resolvePlayableCharacters } from "../../../packages/domain/src/world-characters.js";
+import { extractCyoaLayers, parseCyoaExport } from "../../../packages/domain/src/world-template.js";
+import { generateTemplateWorld } from "./world-generator-service.js";
 
-type ResolvedKind = "world_json" | "world_text" | "story_text";
+
+export type ImportProgressReport = {
+  status: "processing" | "completed" | "failed";
+  phase: string;
+  progressPercent: number;
+  message: string;
+  worldId?: string;
+  worldVersionId?: string;
+  duplicate?: boolean;
+  errorMessage?: string;
+};
+
+export const activeProgressMap = new Map<string, ImportProgressReport>();
+
+export function getImportProgress(key: string): ImportProgressReport | null {
+  return activeProgressMap.get(key) || null;
+}
+
+type ResolvedKind = "world_json" | "world_text" | "story_text" | "cyoa_json";
+
 
 const convertedPlayableCharacterSchema = z.object({
   id: z.string().trim().max(200).default(""),
@@ -56,10 +77,14 @@ function parseJsonText(source: string): unknown {
 }
 
 function resolveKind(request: InfiniteWorldsImportRequest): ResolvedKind {
-  if (request.sourceKind !== "auto") return request.sourceKind;
+  if (request.sourceKind !== "auto") return request.sourceKind as ResolvedKind;
   if (/--\s*Turn\s+\d+\s*--/i.test(request.sourceText)) return "story_text";
   try {
-    return isInfiniteWorldsWorld(parseJsonText(request.sourceText)) ? "world_json" : "world_text";
+    const parsed = parseJsonText(request.sourceText);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && (parsed as Record<string, unknown>).chapters && (parsed as Record<string, unknown>).info) {
+      return "cyoa_json";
+    }
+    return isInfiniteWorldsWorld(parsed) ? "world_json" : "world_text";
   } catch {
     return "world_text";
   }
@@ -299,6 +324,33 @@ async function enrichFinalTurn(pool: DatabasePool, request: InfiniteWorldsImport
 
 export async function previewInfiniteWorldsImport(pool: DatabasePool, request: InfiniteWorldsImportRequest) {
   const kind = resolveKind(request);
+  if (kind === "cyoa_json") {
+    let parsed;
+    try {
+      parsed = parseCyoaExport(request.sourceText);
+    } catch (error) {
+      return {
+        kind: "cyoa_json" as const,
+        valid: false,
+        requiresProvider: true,
+        warnings: [`Invalid Choose Your Own Adventure JSON structure: ${error instanceof Error ? error.message : String(error)}`],
+        counts: { topLevelTitle: "Unknown", layer1ChaptersCount: 0, characterTarget: "3-4 playable characters" }
+      };
+    }
+    const extracted = extractCyoaLayers(parsed, request.sourceName);
+    const validProvider = Boolean(request.providerProfileId);
+    return {
+      kind: "cyoa_json" as const,
+      valid: validProvider,
+      requiresProvider: true,
+      warnings: validProvider ? [] : ["Select a text provider before importing this Choose Your Own Adventure story export."],
+      counts: {
+        topLevelTitle: extracted.title,
+        layer1ChaptersCount: Math.max(0, extracted.excerpts.length - 1),
+        characterTarget: "3-4 playable characters"
+      }
+    };
+  }
   if (kind === "world_json") {
     const source = parseJsonText(request.sourceText);
     const characters = infiniteWorldsCharacters(source).map((character, index) => ({ index, name: String(character.name || `Character ${index + 1}`) }));
@@ -356,6 +408,67 @@ export async function importInfiniteWorlds(
   assetStore?: FilesystemAssetStore
 ) {
   const kind = resolveKind(request);
+  const progressKey = request.sourceName + ":" + request.sourceText.length;
+  if (kind === "cyoa_json") {
+    try {
+      activeProgressMap.set(progressKey, {
+        status: "processing",
+        phase: "extracting",
+        progressPercent: 5,
+        message: "Parsing CYOA story description and branch choices…"
+      });
+      const parsed = parseCyoaExport(request.sourceText);
+      const extracted = extractCyoaLayers(parsed, request.sourceName);
+      const generated = await generateTemplateWorld(
+        pool,
+        await initialOwnerId(pool),
+        request.providerProfileId || "",
+        credentialSecret,
+        extracted,
+        request.model,
+        async (phase, progressPercent, message) => {
+          activeProgressMap.set(progressKey, {
+            status: "processing",
+            phase,
+            progressPercent,
+            message
+          });
+        }
+      );
+      const worldExport = portableWorldSchema.parse({
+        format: "infinite-quest-world",
+        formatVersion: 1,
+        title: generated.title,
+        content: generated.content
+      });
+      activeProgressMap.set(progressKey, {
+        status: "processing",
+        phase: "saving_draft",
+        progressPercent: 95,
+        message: "Saving generated world and character roster to authoritative storage…"
+      });
+      const result = await importWorld(pool, { sourceName: request.sourceName, worldExport });
+      activeProgressMap.set(progressKey, {
+        status: "completed",
+        phase: "completed",
+        progressPercent: 100,
+        message: "World and 3-4 playable characters generated from CYOA story.",
+        worldId: result.worldId,
+        worldVersionId: result.worldVersionId,
+        duplicate: result.duplicate
+      });
+      return { kind: "world" as const, ...result };
+    } catch (error) {
+      activeProgressMap.set(progressKey, {
+        status: "failed",
+        phase: "failed",
+        progressPercent: 100,
+        message: error instanceof Error ? error.message : String(error),
+        errorMessage: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+  }
   if (kind === "world_json" || kind === "world_text") {
     const worldExport = kind === "world_json"
       ? convertInfiniteWorldsWorld(parseJsonText(request.sourceText))

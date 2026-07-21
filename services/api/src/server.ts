@@ -33,7 +33,7 @@ import {
 import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
 import { formatNarrationParagraphs } from "../../../packages/story-engine/src/narration-formatting.js";
 import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js";
-import { importInfiniteWorlds, previewInfiniteWorldsImport } from "./infinite-worlds-import-service.js";
+import { getImportProgress, importInfiniteWorlds, previewInfiniteWorldsImport } from "./infinite-worlds-import-service.js";
 import {
   buildContextPreview,
   enqueueChronicleReindex,
@@ -88,10 +88,14 @@ function statusCode(error: unknown): number {
     if (Number.isInteger(value) && value >= 400 && value <= 599) return value;
   }
   if (typeof error === "object" && error !== null && "issues" in error) return 400;
+  if (typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === "22P02") return 400;
   return 500;
 }
 
 function errorDetails(error: unknown): { name: string; message: string; issues?: unknown } {
+  if (typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === "22P02") {
+    return { name: "InvalidUuidError", message: "The provided ID is not a valid UUID." };
+  }
   if (error instanceof Error) {
     const issues = "issues" in error ? (error as Error & { issues?: unknown }).issues : undefined;
     return { name: error.name || "Error", message: error.message, ...(issues === undefined ? {} : { issues }) };
@@ -110,6 +114,32 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
+
+  app.addHook("onRequest", async (request, reply) => {
+    reply.header("X-Content-Type-Options", "nosniff");
+    reply.header("X-Frame-Options", "DENY");
+    reply.header("Content-Security-Policy", "default-src 'self' 'unsafe-inline' data: blob:; img-src * data: blob:; connect-src *");
+    reply.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+
+    const origin = request.headers.origin;
+    if (origin) {
+      if (config.corsAllowedOrigins.includes("*") || config.corsAllowedOrigins.length === 0) {
+        reply.header("Access-Control-Allow-Origin", origin);
+        reply.header("Vary", "Origin");
+      } else if (config.corsAllowedOrigins.includes(origin)) {
+        reply.header("Access-Control-Allow-Origin", origin);
+        reply.header("Vary", "Origin");
+      }
+      reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+      reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-Id, X-Correlation-Id");
+      reply.header("Access-Control-Allow-Credentials", "true");
+    }
+  });
+
+  app.options("*", async (_request, reply) => {
+    return reply.code(204).send();
+  });
+
   await mkdir(config.assetStorageRoot, { recursive: true });
   const assetStore: FilesystemAssetStore = { root: config.assetStorageRoot };
   await app.register(fastifyStatic, {
@@ -226,6 +256,13 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       assetStore
     );
     return reply.code(result.duplicate ? 200 : 201).send(result);
+  });
+
+  app.get<{ Querystring: { key?: string } }>("/api/v1/imports/progress", async (request, reply) => {
+    const key = String(request.query.key || "").trim();
+    const progress = getImportProgress(key);
+    if (!progress) return reply.code(404).send({ error: "No active import found for the provided key." });
+    return progress;
   });
 
   app.get("/api/v1/worlds", async () => ({ worlds: await listWorlds(pool) }));

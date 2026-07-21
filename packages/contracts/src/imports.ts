@@ -1,29 +1,45 @@
 import { z } from "zod";
 
+const coerceToString = (val: unknown): string | undefined => {
+  if (val === null || val === undefined) return undefined;
+  if (typeof val === "string") return val;
+  if (Array.isArray(val)) {
+    return val
+      .map((item) => (typeof item === "string" ? item : JSON.stringify(item)))
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  if (typeof val === "object") return JSON.stringify(val);
+  return String(val);
+};
+
+const flexibleOptionalString = z.preprocess(coerceToString, z.string().optional());
+
 const legacyWorldSchema = z.object({
-  title: z.string().optional(),
-  genre: z.string().optional(),
-  tone: z.string().optional(),
-  backgroundStory: z.string().optional(),
-  character: z.string().optional(),
-  premise: z.string().optional(),
-  firstAction: z.string().optional(),
-  rules: z.string().optional(),
+  title: flexibleOptionalString,
+  genre: flexibleOptionalString,
+  tone: flexibleOptionalString,
+  backgroundStory: flexibleOptionalString,
+  character: flexibleOptionalString,
+  premise: flexibleOptionalString,
+  firstAction: flexibleOptionalString,
+  rules: flexibleOptionalString,
   suppressTriggers: z.boolean().optional()
 }).passthrough();
 
 const legacyTurnSchema = z.object({
   id: z.string().optional(),
   turnNumber: z.number().int().positive().optional(),
-  action: z.string().optional(),
-  narration: z.string().optional(),
-  story: z.string().optional(),
-  text: z.string().optional(),
+  action: flexibleOptionalString,
+  narration: flexibleOptionalString,
+  story: flexibleOptionalString,
+  text: flexibleOptionalString,
   choices: z.array(z.unknown()).optional(),
-  customActionSuggestion: z.string().optional(),
-  custom_action_suggestion: z.string().optional(),
-  imagePrompt: z.string().optional(),
-  imageUrl: z.string().optional(),
+  customActionSuggestion: flexibleOptionalString,
+  custom_action_suggestion: flexibleOptionalString,
+  imagePrompt: flexibleOptionalString,
+  imageUrl: flexibleOptionalString,
+
   roll: z.unknown().optional(),
   scratchpadSnapshot: z.string().optional(),
   trackersSnapshot: z.array(z.unknown()).optional(),
@@ -67,7 +83,7 @@ export type StoryImportPreviewRequest = z.infer<typeof storyImportPreviewRequest
 export const infiniteWorldsImportRequestSchema = z.object({
   sourceName: z.string().trim().max(512).default("infinite-worlds-export.txt"),
   sourceText: z.string().min(1).max(50_000_000),
-  sourceKind: z.enum(["auto", "world_json", "world_text", "story_text"]).default("auto"),
+  sourceKind: z.enum(["auto", "world_json", "world_text", "story_text", "cyoa_json"]).default("auto"),
   selectedCharacterIndex: z.coerce.number().int().nonnegative().max(1000).default(0),
   selectedCharacterId: z.string().trim().min(1).max(200).optional(),
   targetWorldVersionId: z.uuid().optional(),
@@ -92,4 +108,59 @@ export type StoryImportResult = {
     importedSummary: boolean;
     sanitizedMemoryCount: number;
   };
+};
+
+export const cyoaChapterSchema = z.object({
+  id: z.string().optional(),
+  title: z.string().optional(),
+  author_id: z.string().optional(),
+  author_name: z.string().optional(),
+  content: z.string().optional(),
+  choices: z.array(z.string()).default([]),
+  created: z.number().optional()
+}).passthrough();
+
+export const cyoaInfoSchema = z.object({
+  id: z.union([z.string(), z.number()]).optional(),
+  pretty_title: z.string().optional(),
+  brief_description: z.string().optional(),
+  description: z.string().optional(),
+  keywords: z.array(z.string()).default([]),
+  author_name: z.string().optional(),
+  image_url: z.string().nullable().optional(),
+  rating: z.string().optional()
+}).passthrough();
+
+export const cyoaExportSchema = z.object({
+  chapters: z.record(z.string(), cyoaChapterSchema).default({}),
+  info: cyoaInfoSchema.optional(),
+  complete: z.boolean().optional()
+}).passthrough();
+
+export type CyoaChapter = z.infer<typeof cyoaChapterSchema>;
+export type CyoaInfo = z.infer<typeof cyoaInfoSchema>;
+export type CyoaExport = z.infer<typeof cyoaExportSchema>;
+
+export type CyoaImportPreviewResult = {
+  kind: "cyoa_json";
+  valid: boolean;
+  requiresProvider: boolean;
+  warnings: string[];
+  counts: {
+    topLevelTitle: string;
+    layer1ChaptersCount: number;
+    characterTarget: string;
+  };
+};
+
+export type ImportProgressReport = {
+  importId: string;
+  status: "processing" | "completed" | "failed";
+  phase: string;
+  progressPercent: number;
+  message: string;
+  worldId?: string;
+  worldVersionId?: string;
+  duplicate?: boolean;
+  errorMessage?: string;
 };

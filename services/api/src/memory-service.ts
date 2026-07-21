@@ -112,7 +112,7 @@ function publicEmbeddingConfig(row?: EmbeddingConfigRow) {
   };
 }
 
-async function resolveCampaignEmbeddingProviderId(
+export async function resolveCampaignEmbeddingProviderId(
   client: DatabaseClient | DatabasePool,
   ownerUserId: string,
   campaignId: string,
@@ -160,6 +160,42 @@ async function embeddingConfig(
       row.embedding_provider_profile_id
     )
   };
+}
+
+export async function autoEnableCampaignEmbeddingIfAvailable(
+  client: DatabaseClient | DatabasePool,
+  ownerUserId: string,
+  campaignId: string
+) {
+  const providerProfileId = await resolveCampaignEmbeddingProviderId(client, ownerUserId, campaignId);
+  if (!providerProfileId) {
+    const row = await embeddingConfig(client, ownerUserId, campaignId);
+    return publicEmbeddingConfig(row);
+  }
+  const providerRow = await client.query<{ default_model: string }>(
+    "SELECT default_model FROM provider_profiles WHERE id = $1 AND owner_user_id = $2",
+    [providerProfileId, ownerUserId]
+  );
+  const embeddingModel = providerRow.rows[0]?.default_model?.trim() || DEFAULT_EMBEDDING_MODEL;
+  const saved = await client.query<EmbeddingConfigRow>(
+    `INSERT INTO campaign_memory_configs (
+       campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
+       embedding_document_prefix, embedding_query_prefix
+     ) VALUES ($1,$2,true,$3,$4,16,null,null)
+     ON CONFLICT (campaign_id) DO UPDATE SET
+       embedding_enabled = EXCLUDED.embedding_enabled,
+       embedding_provider_profile_id = EXCLUDED.embedding_provider_profile_id,
+       embedding_model = EXCLUDED.embedding_model,
+       embedding_batch_size = EXCLUDED.embedding_batch_size,
+       embedding_document_prefix = EXCLUDED.embedding_document_prefix,
+       embedding_query_prefix = EXCLUDED.embedding_query_prefix,
+       updated_at = now()
+     RETURNING embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
+               embedding_document_prefix, embedding_query_prefix, updated_at`,
+    [campaignId, ownerUserId, providerProfileId, embeddingModel]
+  );
+  await enqueueEmbeddingReindex(client, campaignId);
+  return publicEmbeddingConfig(saved.rows[0]);
 }
 
 export async function getCampaignEmbeddingConfig(pool: DatabasePool, campaignId: string) {

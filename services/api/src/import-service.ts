@@ -7,6 +7,7 @@ import { estimateTokens, removeProviderSecrets, sha256, stableStringify } from "
 import { campaignCharacterSeed, characterSnapshot } from "../../../packages/domain/src/world-characters.js";
 import { worldContentSchema, type WorldContent } from "../../../packages/contracts/src/world-library.js";
 import { importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
+import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
 
 type ImportRow = {
   id: string;
@@ -347,20 +348,26 @@ export async function importLegacyStory(
     const campaignId = campaignInsert.rows[0]?.id;
     if (!campaignId) throw new Error("Could not create the imported campaign.");
 
+    const initialTrackers = request.story.trackers ?? [];
+    const defaultTriggers = request.story.defaultTriggers ?? request.story.baseTrackersAtStart ?? [];
+    const eventTriggers = request.story.eventTriggers ?? [];
+    const pendingEventTriggers = request.story.pendingEventTriggers ?? [];
+    const rpgStats = request.story.rpgStats ?? [];
+
     await client.query(
       `INSERT INTO campaign_state (
          campaign_id, owner_user_id, scratchpad_private, trackers, default_triggers,
-         event_triggers, pending_event_triggers, rpg_stats, import_provenance
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+         event_triggers, pending_event_triggers, rpg_stats, import_provenance, initial_state_snapshot
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         campaignId,
         ownerUserId,
         request.story.scratchpad ?? "",
-        json(request.story.trackers ?? []),
-        json(request.story.defaultTriggers ?? request.story.baseTrackersAtStart ?? []),
-        json(request.story.eventTriggers ?? []),
-        json(request.story.pendingEventTriggers ?? []),
-        json(request.story.rpgStats ?? []),
+        json(initialTrackers),
+        json(defaultTriggers),
+        json(eventTriggers),
+        json(pendingEventTriggers),
+        json(rpgStats),
         json({
           sourceType: request.targetWorldVersionId ? "infinite_worlds_story_txt" : "legacy_story_json",
           sourceName: request.sourceName,
@@ -368,7 +375,8 @@ export async function importLegacyStory(
           selectedCharacterId: characterSeed.character.id,
           world: request.story.worldImportProvenance ?? null,
           story: request.story.storyImportProvenance ?? null
-        })
+        }),
+        json({ scratchpad: "", trackers: initialTrackers, eventTriggers, pendingEventTriggers: [], rpgStats })
       ]
     );
 
@@ -469,6 +477,8 @@ export async function importLegacyStory(
       );
       memoryCount += 1;
     }
+
+    await autoEnableCampaignEmbeddingIfAvailable(client, ownerUserId, campaignId);
 
     const stats: StoryImportResult["stats"] = {
       turnCount: request.story.turns.length,

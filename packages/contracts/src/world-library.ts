@@ -1,12 +1,26 @@
 import { z } from "zod";
 import { DEFAULT_STORY_LENGTH_PROFILE, storyLengthProfileSchema } from "./story-settings.js";
 
-const title = z.string().trim().min(1).max(200);
-const shortText = z.string().max(2000).default("");
-const longText = z.string().max(200_000).default("");
+const coerceToString = (val: unknown): string => {
+  if (val === null || val === undefined) return "";
+  if (typeof val === "string") return val;
+  if (Array.isArray(val)) {
+    return val
+      .map((item) => (typeof item === "string" ? item : JSON.stringify(item)))
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  if (typeof val === "object") return JSON.stringify(val);
+  return String(val);
+};
+
+const title = z.preprocess((v) => (typeof v === "string" ? v : coerceToString(v)), z.string().trim().min(1).max(200));
+const shortText = z.preprocess(coerceToString, z.string().max(2000).default(""));
+const longText = z.preprocess(coerceToString, z.string().max(200_000).default(""));
 const characterId = z.string().trim().min(1).max(200);
 
 export const playableCharacterSchema = z.object({
+
   id: characterId,
   name: z.string().trim().min(1).max(200),
   characterText: longText,

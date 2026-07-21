@@ -1,0 +1,58 @@
+{
+  "info": {
+    "id": "123456",
+    "pretty_title": "The Mystery of the Sunken Citadel",
+    "brief_description": "An interactive fantasy adventure exploring an ancient underwater fortress.",
+    "description": "<p>Long ago, the high elves built a floating citadel of crystal and bronze. When the great cataclysm occurred, it plunged deep beneath the Sapphire Sea. You are among the first expedition in centuries to reach its submerged gates.</p>",
+    "keywords": ["fantasy", "exploration", "underwater", "magic"],
+    "author_name": "Generic Author"
+  },
+  "chapters": {
+    "1": {
+      "id": "1",
+      "title": "The Submerged Entrance",
+      "author_id": "GENERIC_AUTHOR_ID",
+      "author_name": "Generic Author",
+      "choices": [
+        "Examine the glowing runes on the brass archway.",
+        "Swim toward the shattered glass dome above.",
+        "Signal the surface boat and prepare your diving gear."
+      ],
+      "content": "<div>You float before the massive bronze gates of the citadel. Schools of bioluminescent tetra dart between the kelp stalks flanking the entrance. The water here is cold and heavy with ancient enchantment.</div>"
+    },
+    "1-1": {
+      "id": "1-1",
+      "title": "The Glowing Runes",
+      "author_id": "GENERIC_AUTHOR_ID",
+      "author_name": "Generic Author",
+      "choices": [
+        "Touch the center rune."
+      ],
+      "content": "<div>The brass archway is inscribed with flowing elven script. As you brush away the silt, the runes flare with a soft azure luminescence, whispering forgotten secrets into your mind.</div>"
+    },
+    "1-2": {
+      "id": "1-2",
+      "title": "The Shattered Dome",
+      "author_id": "GENERIC_AUTHOR_ID",
+      "author_name": "Generic Author",
+      "choices": [],
+      "content": "<div>Above the gates looms a vast dome of reinforced crystal, cracked from centuries of oceanic pressure. Through the fracture, you can see the shadowed outlines of a grand botanical atrium.</div>"
+    },
+    "1-3": {
+      "id": "1-3",
+      "title": "Signaling the Surface",
+      "author_id": "GENERIC_AUTHOR_ID",
+      "author_name": "Generic Author",
+      "choices": [],
+      "content": "<div>You give three quick tugs on your tether line. A moment later, your companions on the support schooner above acknowledge your signal and lower the heavy salvage basket into the depths.</div>"
+    },
+    "1-1-1": {
+      "id": "1-1-1",
+      "title": "Beyond Layer 1",
+      "author_id": "GENERIC_AUTHOR_ID",
+      "author_name": "Generic Author",
+      "choices": [],
+      "content": "<div>This deeper layer should not be included when extracting 1 layer deep into top-level choices.</div>"
+    }
+  }
+}

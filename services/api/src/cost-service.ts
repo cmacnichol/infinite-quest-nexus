@@ -198,6 +198,7 @@ export async function getCampaignCostSummary(pool: DatabasePool, campaignId: str
       currency: summary.currency,
       amount: summary.total,
       turnAttributed: summary.turnAttributed,
+      historicalAndUnattributedOperations: summary.otherCampaignOperations,
       otherCampaignOperations: summary.otherCampaignOperations,
       byCategory: summary.byCategory,
       lastReportedAt: summary.lastReportedAt

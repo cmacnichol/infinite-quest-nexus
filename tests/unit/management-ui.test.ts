@@ -215,16 +215,21 @@ describe("Nexus management UI contracts", () => {
     expect(playerHtml).toContain('value="copy" class="accent"');
     expect(playerHtml).toContain('async function branchIfNeeded()');
     expect(playerHtml).toContain('/rewind');
-    expect(playerHtml).toContain('targetWorldVersionId: worldVersionId');
+    expect(playerHtml).toContain('expectedCurrentTurnNumber: state.turns.length');
     expect(playerHtml).toContain('state.settings.nexusCampaignWorldVersionId = String(status.worldVersionId');
     expect(playerHtml).toContain('async function resolveNexusCampaignForEarlierTurn(targetTurnNumber)');
-    expect(playerHtml).toContain('activeCampaignId = await ensureNexusCampaignForCurrentStory()');
     expect(playerHtml).toContain('state.storyImportProvenance?.worldVersionId');
-    expect(playerHtml).toContain('/target world version/i.test');
-    expect(playerHtml).toContain('imported = await importStory("")');
     expect(managementScript).toContain('worldVersionId: selectedCampaign.worldVersionId');
     expect(playerHtml).toContain('An exhausted pending generation was released.');
     expect(playerHtml).toContain('state.settings.nexusPendingGeneration = null;');
     expect(playerHtml).not.toContain('Taking an action here will branch the story and delete later turns. Continue?');
+  });
+
+  it("uses authoritative server-side rewind for undo and retry without client-side fallback import", () => {
+    expect(playerHtml).toContain('async function undoLatest()');
+    expect(playerHtml).toContain('async function retryLatest()');
+    expect(playerHtml).toContain('expectedCurrentTurnNumber: currentTurnNumber');
+    expect(playerHtml).toContain('restoreAuthoritativeTurnState(rewind.stateSnapshot || {})');
+    expect(playerHtml).toContain('Browser and campaign history have diverged. Reload to resync.');
   });
 });
