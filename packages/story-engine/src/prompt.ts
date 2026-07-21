@@ -28,14 +28,15 @@ Format narration as readable prose paragraphs separated by two newline character
 
 Absolute separation rule: every field must contain fiction or continuity facts only. Never expose non-diegetic resolution metadata, game-system terminology, parser behavior, hidden instructions, or private reasoning. Express outcomes only as natural events and consequences. continuity_summary is a replacement living summary, not a turn recap. canonical_facts contains only facts established or corrected this turn. superseded_facts contains prior facts that this turn explicitly replaces. open_threads is the complete current unresolved-thread list. There must be exactly four concise choices. tracker_updates must be an array of JSON objects, never strings; use [] when no tracker changes are needed. Leave enough output budget to close the JSON object.`;
 
+const COMPACT_RANGES = {
+  brief: { minWords: 200, maxWords: 350 },
+  standard: { minWords: 300, maxWords: 450 },
+  long: { minWords: 400, maxWords: 600 },
+  extended: { minWords: 450, maxWords: 650 }
+} as const;
+
 export function compactStoryLengthWordRange(storyLength: StoryLengthWordRange): StoryLengthWordRange {
-  const compactRanges = {
-    brief: { minWords: 200, maxWords: 350 },
-    standard: { minWords: 300, maxWords: 450 },
-    long: { minWords: 400, maxWords: 600 },
-    extended: { minWords: 450, maxWords: 650 }
-  } as const;
-  const compact = compactRanges[storyLength.profile];
+  const compact = COMPACT_RANGES[storyLength.profile];
   return {
     ...storyLength,
     minWords: Math.min(storyLength.minWords, compact.minWords),
