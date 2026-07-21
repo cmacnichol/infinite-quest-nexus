@@ -111,9 +111,9 @@ export type StoryImportResult = {
 };
 
 export const cyoaChapterSchema = z.object({
-  id: z.string().optional(),
+  id: z.coerce.string().optional(),
   title: z.string().optional(),
-  author_id: z.string().optional(),
+  author_id: z.coerce.string().optional(),
   author_name: z.string().optional(),
   content: z.string().optional(),
   choices: z.array(z.string()).default([]),
