@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM node:24-bookworm-slim AS build
+FROM node:26-bookworm-slim AS build
 WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-workspace.yaml tsconfig.json tsconfig.build.json ./
@@ -17,7 +17,7 @@ RUN pnpm build
 FROM build AS production-dependencies
 RUN pnpm prune --prod
 
-FROM node:24-bookworm-slim AS runtime
+FROM node:26-bookworm-slim AS runtime
 ENV NODE_ENV=production \
     APP_HOST=0.0.0.0 \
     APP_PORT=8080 \
