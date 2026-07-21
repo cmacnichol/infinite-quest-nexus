@@ -38,11 +38,43 @@ export default defineConfig({
     siteTitle: "Infinite Quest Nexus",
     nav: [
       { text: "Home", link: "/" },
+      { text: "Getting Started", link: "/getting-started/overview" },
+      { text: "Player Guide", link: "/player-guide/" },
       { text: "Architecture", link: "/architecture/" },
-      { text: "Capabilities", link: "/reference/capabilities" },
-      { text: "Documentation", link: "/contributing/documentation-style-guide" }
+      { text: "Capabilities", link: "/reference/capabilities" }
     ],
     sidebar: {
+      "/getting-started/": [
+        {
+          text: "Getting Started",
+          items: [
+            { text: "Platform overview", link: "/getting-started/overview" },
+            { text: "Quick start", link: "/getting-started/quick-start" },
+            { text: "Create your first world", link: "/getting-started/first-world" },
+            { text: "Create your first campaign", link: "/getting-started/first-campaign" },
+            { text: "Generate your first turn", link: "/getting-started/first-story-turn" }
+          ]
+        }
+      ],
+      "/player-guide/": [
+        {
+          text: "Player Guide",
+          items: [
+            { text: "Overview", link: "/player-guide/" },
+            { text: "Player interface", link: "/player-guide/interface" },
+            { text: "Start or resume", link: "/player-guide/starting-a-story" },
+            { text: "Actions and choices", link: "/player-guide/actions-and-choices" },
+            { text: "Characters and statistics", link: "/player-guide/characters-and-stats" },
+            { text: "Story response length", link: "/player-guide/story-length" },
+            { text: "Switch text models", link: "/player-guide/switching-models" },
+            { text: "Continuity and history", link: "/player-guide/campaign-continuity" },
+            { text: "Illustrations", link: "/player-guide/illustrations" },
+            { text: "Save and export", link: "/player-guide/saving-and-exporting" },
+            { text: "Recover a generation", link: "/player-guide/recovering-a-generation" },
+            { text: "Troubleshooting", link: "/player-guide/troubleshooting" }
+          ]
+        }
+      ],
       "/architecture/": [
         {
           text: "Architecture decisions",
