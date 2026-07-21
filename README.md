@@ -4,6 +4,8 @@
 
 Infinite Quest Nexus is the server-backed evolution of Infinite Quest. PostgreSQL owns worlds, campaigns, accepted turns, and Chronicle memory so story continuity no longer depends on a browser session, a model instance, or an LLM context chain.
 
+This project was inspired by Infinite Worlds and the stand-alone [Infinite Quest project by Anostus](https://github.com/Anostus/InfiniteQuest).
+
 The current implementation is a production-shaped vertical slice. It serves the existing Infinite Quest client, imports portable `.story` JSON into PostgreSQL, constructs fiction-only local Chronicle memory, and can generate validated database-backed turns through LM Studio, OpenRouter, Manifest, or another OpenAI-compatible text endpoint. The same application image runs in combined, API, worker, or recovery migration roles.
 
 ## What works now
