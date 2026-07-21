@@ -14,7 +14,8 @@
     "dev": "tsx watch services/runtime/src/main.ts",
     "start": "node dist/services/runtime/src/main.js",
     "migrate": "tsx packages/database/src/migrate-cli.ts",
-    "test": "vitest run",
+    "test": "pnpm test:unit && pnpm test:integration",
+    "test:unit": "vitest run tests/unit",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
