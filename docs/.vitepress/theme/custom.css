@@ -30,6 +30,18 @@
   border-radius: 10px;
 }
 
+.vp-doc .mermaid {
+  overflow-x: auto;
+  padding: 8px 0;
+  text-align: center;
+}
+
+.vp-doc .mermaid svg {
+  height: auto;
+  max-width: 100%;
+  min-width: 560px;
+}
+
 .vp-doc .custom-block.warning {
   border-color: var(--vp-c-warning-1);
 }
