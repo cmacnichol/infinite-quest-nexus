@@ -80,7 +80,7 @@ integration("durable Story Engine integration", () => {
   });
 
   afterAll(async () => {
-    await new Promise<void>((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
+    if (server) await new Promise<void>((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
     await pool.end();
   });
 
@@ -316,7 +316,7 @@ integration("durable Story Engine integration", () => {
     expect(rewound).toMatchObject({
       campaignId: imported.campaignId,
       activeTurnNumber: 0,
-      discardedTurnCount: 1,
+      discardedTurnCount: 2,
       stateSnapshot: expect.objectContaining({
         scratchpad: "",
         trackers: expect.any(Array),

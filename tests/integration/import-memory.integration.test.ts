@@ -293,7 +293,10 @@ integration("legacy import and Chronicle integration", () => {
     const firstBatchStarted = new Promise<void>((resolveStarted) => { markStarted = resolveStarted; });
     const release = new Promise<void>((resolveRelease) => { releaseFirstBatch = resolveRelease; });
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      const { input } = JSON.parse(String(init?.body)) as { input: string[] };
+      if (!init?.body) {
+        return new Response(JSON.stringify({ data: [{ id: "text-embedding-nomic-embed-text-v1.5" }] }), { status: 200 });
+      }
+      const { input } = JSON.parse(String(init.body)) as { input: string[] };
       markStarted();
       await release;
       return new Response(JSON.stringify({
@@ -320,7 +323,10 @@ integration("legacy import and Chronicle integration", () => {
     expect(queued.rows[0]?.status).toBe("queued");
 
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      const { input } = JSON.parse(String(init?.body)) as { input: string[] };
+      if (!init?.body) {
+        return new Response(JSON.stringify({ data: [{ id: "text-embedding-nomic-embed-text-v1.5" }] }), { status: 200 });
+      }
+      const { input } = JSON.parse(String(init.body)) as { input: string[] };
       return new Response(JSON.stringify({
         model: "text-embedding-nomic-embed-text-v1.5",
         data: input.map((_content, index) => ({ index, embedding: [1, 0, 0] }))
