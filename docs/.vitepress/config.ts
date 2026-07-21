@@ -40,6 +40,7 @@ export default defineConfig({
       { text: "Home", link: "/" },
       { text: "Getting Started", link: "/getting-started/overview" },
       { text: "Player Guide", link: "/player-guide/" },
+      { text: "Nexus Guide", link: "/nexus-guide/" },
       { text: "Architecture", link: "/architecture/" },
       { text: "Capabilities", link: "/reference/capabilities" }
     ],
@@ -72,6 +73,64 @@ export default defineConfig({
             { text: "Save and export", link: "/player-guide/saving-and-exporting" },
             { text: "Recover a generation", link: "/player-guide/recovering-a-generation" },
             { text: "Troubleshooting", link: "/player-guide/troubleshooting" }
+          ]
+        }
+      ],
+      "/nexus-guide/": [
+        {
+          text: "Nexus Guide",
+          items: [
+            { text: "Overview", link: "/nexus-guide/" },
+            { text: "Navigate Nexus", link: "/nexus-guide/navigating-nexus" }
+          ]
+        },
+        {
+          text: "World Library",
+          collapsed: false,
+          items: [
+            { text: "Create a world", link: "/nexus-guide/worlds/create" },
+            { text: "Edit drafts", link: "/nexus-guide/worlds/edit-drafts" },
+            { text: "Playable characters", link: "/nexus-guide/worlds/characters" },
+            { text: "Publish a version", link: "/nexus-guide/worlds/publish" },
+            { text: "Version history", link: "/nexus-guide/worlds/version-history" },
+            { text: "Fork a version", link: "/nexus-guide/worlds/fork" },
+            { text: "Archive and restore", link: "/nexus-guide/worlds/archive-restore" },
+            { text: "Delete worlds or versions", link: "/nexus-guide/worlds/delete" },
+            { text: "Import and export", link: "/nexus-guide/worlds/import-export" }
+          ]
+        },
+        {
+          text: "Campaigns",
+          collapsed: false,
+          items: [
+            { text: "Create a campaign", link: "/nexus-guide/campaigns/create" },
+            { text: "Select and load", link: "/nexus-guide/campaigns/select-and-load" },
+            { text: "Configure", link: "/nexus-guide/campaigns/configure" },
+            { text: "Upgrade world version", link: "/nexus-guide/campaigns/upgrade-world-version" },
+            { text: "Archive or delete", link: "/nexus-guide/campaigns/archive-delete" },
+            { text: "Import and export", link: "/nexus-guide/campaigns/import-export" }
+          ]
+        },
+        {
+          text: "Chronicle",
+          collapsed: true,
+          items: [
+            { text: "Inspect health", link: "/nexus-guide/chronicle/inspect" },
+            { text: "Context preview", link: "/nexus-guide/chronicle/context-preview" },
+            { text: "Retrieval modes", link: "/nexus-guide/chronicle/retrieval-modes" },
+            { text: "Rebuild memory", link: "/nexus-guide/chronicle/reindex" },
+            { text: "Embeddings", link: "/nexus-guide/chronicle/embeddings" }
+          ]
+        },
+        {
+          text: "Providers",
+          collapsed: true,
+          items: [
+            { text: "Story text", link: "/nexus-guide/providers/text" },
+            { text: "Embeddings", link: "/nexus-guide/providers/embeddings" },
+            { text: "Images", link: "/nexus-guide/providers/images" },
+            { text: "Model discovery", link: "/nexus-guide/providers/model-discovery" },
+            { text: "Health and errors", link: "/nexus-guide/providers/health-and-errors" }
           ]
         }
       ],

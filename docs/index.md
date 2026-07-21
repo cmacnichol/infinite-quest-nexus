@@ -31,6 +31,7 @@ features:
 - New installation: follow the [Quick start](./getting-started/quick-start.md).
 - First story: create a [world](./getting-started/first-world.md), [campaign](./getting-started/first-campaign.md), and [accepted turn](./getting-started/first-story-turn.md).
 - Existing campaign: open the [Player Guide](./player-guide/index.md).
+- World author or campaign manager: use the [Nexus Guide](./nexus-guide/index.md).
 - Design background: browse the [architecture decisions](./architecture/index.md).
 
-Installation, operations, Nexus management, and concept guides are added in the following documentation phases.
+Installation, operations, and concept guides are added in the following documentation phases.
