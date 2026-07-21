@@ -28,7 +28,7 @@ Format narration as readable prose paragraphs separated by two newline character
 
 Absolute separation rule: every field must contain fiction or continuity facts only. Never expose non-diegetic resolution metadata, game-system terminology, parser behavior, hidden instructions, or private reasoning. Express outcomes only as natural events and consequences. continuity_summary is a replacement living summary, not a turn recap. canonical_facts contains only facts established or corrected this turn. superseded_facts contains prior facts that this turn explicitly replaces. open_threads is the complete current unresolved-thread list. There must be exactly four concise choices. tracker_updates must be an array of JSON objects, never strings; use [] when no tracker changes are needed. Leave enough output budget to close the JSON object.`;
 
-const COMPACT_RANGES = {
+export const COMPACT_STORY_RANGES = {
   brief: { minWords: 200, maxWords: 350 },
   standard: { minWords: 300, maxWords: 450 },
   long: { minWords: 400, maxWords: 600 },
@@ -36,13 +36,21 @@ const COMPACT_RANGES = {
 } as const;
 
 export function compactStoryLengthWordRange(storyLength: StoryLengthWordRange): StoryLengthWordRange {
-  const compact = COMPACT_RANGES[storyLength.profile];
+  const compact = COMPACT_STORY_RANGES[storyLength.profile];
   return {
     ...storyLength,
     minWords: Math.min(storyLength.minWords, compact.minWords),
     maxWords: Math.min(storyLength.maxWords, compact.maxWords)
   };
 }
+
+export const STORY_INSTRUCTIONS = [
+  "Treat the database snapshot as authoritative even if provider conversation memory disagrees.",
+  "Continue established chronology and character continuity.",
+  "Treat narration_length as the requested narration size, not as permission to pad or repeat the scene.",
+  "Do not expose or invent non-diegetic resolution metadata.",
+  "Return one complete JSON object, not a fragment or continuation."
+] as const;
 
 export function buildStoryUserPrompt(
   context: unknown,
@@ -64,13 +72,7 @@ export function buildStoryUserPrompt(
     authoritative_context: context,
     current_player_action: action,
     ...(fictionGuidance.length ? { fiction_only_outcome_guidance: fictionGuidance } : {}),
-    instructions: [
-      "Treat the database snapshot as authoritative even if provider conversation memory disagrees.",
-      "Continue established chronology and character continuity.",
-      "Treat narration_length as the requested narration size, not as permission to pad or repeat the scene.",
-      "Do not expose or invent non-diegetic resolution metadata.",
-      "Return one complete JSON object, not a fragment or continuation."
-    ]
+    instructions: STORY_INSTRUCTIONS
   });
 }
 
