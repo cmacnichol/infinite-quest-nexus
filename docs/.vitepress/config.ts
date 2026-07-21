@@ -39,6 +39,7 @@ export default defineConfig({
     nav: [
       { text: "Home", link: "/" },
       { text: "Architecture", link: "/architecture/" },
+      { text: "Capabilities", link: "/reference/capabilities" },
       { text: "Documentation", link: "/contributing/documentation-style-guide" }
     ],
     sidebar: {
@@ -50,10 +51,32 @@ export default defineConfig({
             { text: "PostgreSQL Chronicle", link: "/architecture/0001-postgresql-chronicle" },
             { text: "Durable worker jobs", link: "/architecture/0002-postgresql-worker-jobs" },
             { text: "Story Engine ownership", link: "/architecture/0003-worker-owned-story-engine" },
+            { text: "Player bridge", link: "/architecture/0004-player-story-engine-bridge" },
+            { text: "Private orchestration", link: "/architecture/0005-typed-private-story-orchestration" },
+            { text: "Semantic Chronicle", link: "/architecture/0006-campaign-scoped-semantic-chronicle" },
             { text: "World Library versioning", link: "/architecture/0007-world-library-versioning" },
             { text: "Illustration pipeline", link: "/architecture/0008-independent-illustration-pipeline" },
-            { text: "Schema migrations", link: "/architecture/0009-automatic-schema-migrations" }
+            { text: "Schema migrations", link: "/architecture/0009-automatic-schema-migrations" },
+            { text: "Dynamic Chronicle", link: "/architecture/0010-dynamic-chronicle-context" },
+            { text: "Provider costs", link: "/architecture/0011-provider-reported-campaign-costs" },
+            { text: "Transport deadlines", link: "/architecture/0012-provider-transport-deadlines" },
+            { text: "Character rosters", link: "/architecture/0013-playable-character-rosters" },
+            { text: "Roster-only guidance", link: "/architecture/0014-roster-only-world-character-guidance" },
+            { text: "World-version deletion", link: "/architecture/0015-deletable-unused-world-versions" },
+            { text: "Reviewed character authoring", link: "/architecture/0016-reviewed-character-authoring" }
           ]
+        }
+      ],
+      "/reference/": [
+        {
+          text: "Reference",
+          items: [{ text: "Current capabilities", link: "/reference/capabilities" }]
+        }
+      ],
+      "/project-history/": [
+        {
+          text: "Project history",
+          items: [{ text: "Checkpoints and planning", link: "/project-history/" }]
         }
       ],
       "/contributing/": [
