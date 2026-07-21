@@ -32,6 +32,7 @@ features:
 - First story: create a [world](./getting-started/first-world.md), [campaign](./getting-started/first-campaign.md), and [accepted turn](./getting-started/first-story-turn.md).
 - Existing campaign: open the [Player Guide](./player-guide/index.md).
 - World author or campaign manager: use the [Nexus Guide](./nexus-guide/index.md).
+- Administrator or operator: start with [Installation](./installation/index.md) and [Operations](./operations/index.md).
 - Design background: browse the [architecture decisions](./architecture/index.md).
 
-Installation, operations, and concept guides are added in the following documentation phases.
+Concept and security-architecture guides are added in the following documentation phase.
