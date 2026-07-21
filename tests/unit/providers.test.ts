@@ -375,4 +375,36 @@ describe("text provider adapters", () => {
     expect((thrownError as Error).message).toContain("Internal Server Error - Invalid JSON [");
     expect((thrownError as any).statusCode).toBe(500);
   });
+
+  it("sets stream: true when onChunk callback is supplied to callTextProvider", async () => {
+    const streamChunks: string[] = [];
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body.stream).toBe(true);
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'));
+          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":" world"},"finish_reason":"stop"}]}\n\n'));
+          controller.close();
+        }
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" }
+      });
+    });
+    const openAiProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "openai_compatible",
+      baseUrl: "https://api.openai.com/v1"
+    };
+    const result = await callTextProvider(openAiProfile, {
+      systemPrompt: "system",
+      input: "input",
+      onChunk: (_delta, accumulated) => { streamChunks.push(accumulated); }
+    }, fetcher as typeof fetch);
+    expect(streamChunks).toEqual(["Hello", "Hello world"]);
+    expect(result.content).toBe("Hello world");
+  });
 });

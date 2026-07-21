@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Infinite Quest</title>
+  <link rel="stylesheet" href="/nexus/story.css" />
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="brand">
+        <div class="sigil" aria-hidden="true">📖</div>
+        <div>
+          <h1>Infinite Quest</h1>
+        </div>
+      </div>
+      <div class="menu-wrap">
+        <span class="pill" id="autosaveStatus">Autosaved</span>
+        <button id="btnMenu" class="menu-button primary" type="button" aria-expanded="false" aria-controls="menuDropdown">☰ Menu</button>
+        <div id="menuDropdown" class="menu-dropdown hidden" role="menu" aria-label="Main menu">
+          <!-- TODO: Enhancement - Implement dedicated Nexus Dashboard -->
+          <a id="btnNexusDashboard" href="/story" class="buttonish" role="menuitem">Nexus Dashboard</a>
+          <a id="btnProviderSetup" href="/nexus/#providers" class="buttonish" role="menuitem">Provider Setup</a>
+          <a id="btnWorldManagement" href="/nexus/#world-library" class="buttonish" role="menuitem">World Management</a>
+          <button id="btnOpenWorldSetup" type="button" role="menuitem">Current World Setup</button>
+          <button id="btnExportJson" type="button" role="menuitem">Save Story File</button>
+          <button id="btnExportMarkdown" type="button" role="menuitem">Export to Markdown</button>
+          <button id="btnExportHtml" type="button" role="menuitem">Export to HTML</button>
+          <button id="btnOpenEditState" type="button" role="menuitem">Edit State</button>
+          <button id="btnOpenActivityLog" type="button" role="menuitem">Activity Log</button>
+        </div>
+        <button id="btnOpenUserProfile" class="profile-icon-btn" type="button" aria-label="User Profile" title="User Profile">👤</button>
+      </div>
+    </header>
+
+    <main class="layout" id="appLayout">
+      <section class="panel story-shell">
+        <div class="story-top">
+          <h2 id="storyTitle">No adventure yet</h2>
+          <div class="statusbar">
+            <span class="pill clickable-pill" id="turnPill" role="button" tabindex="0" title="Click to view and navigate turns">Turn 0</span>
+            <span class="pill clickable-pill" id="viewPill" role="button" tabindex="0" title="Click to view and navigate turns">Viewing latest</span>
+            <span class="pill" id="busyPill">Ready</span>
+          </div>
+        </div>
+
+        <div class="story-area" id="storyArea">
+          <div class="empty">
+            <div>
+              <div style="font-size:3rem;margin-bottom:10px;">🗝️</div>
+              <h2 style="margin:0 0 8px;color:#fff;">Create a world, then begin.</h2>
+              <p style="max-width:620px;margin:0 auto;line-height:1.55;">The engine will write a scene, produce an illustration prompt and image, offer four choices, keep a hidden scratchpad, and update your custom trackers.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="input-action">
+          <div class="choices" id="choiceArea"></div>
+          <label>Or type any action you want below
+            <textarea id="freeAction" placeholder="A different story-aware suggestion will appear here after each turn..."></textarea>
+          </label>
+          <div class="row wrap">
+            <button id="btnTakeAction" class="primary">➜ Take action</button>
+            <button id="btnPrev">← Previous turn</button>
+            <button id="btnNext">Next turn →</button>
+            <button id="btnUndo">Undo latest</button>
+            <button id="btnRetry">Retry latest generation</button>
+            <button id="btnEditResponse" class="accent hidden" type="button">Edit Response</button>
+          </div>
+
+          <div id="generationProgress" class="generation-progress hidden" role="status" aria-live="polite">
+            <p>Generating...</p>
+          </div>
+
+          <div id="lmStudioRecoveryPanel" class="generation-recovery hidden" role="status" aria-live="polite">
+            <p id="lmStudioRecoveryMessage">LM Studio stopped before completing the next turn.</p>
+            <div class="row wrap">
+              <button id="btnContinueLmStudioGeneration" class="primary" type="button">Continue incomplete generation</button>
+              <button id="btnRetryLmStudioShorter" class="accent" type="button">Retry with a shorter response</button>
+              <button id="btnDiscardLmStudioRecovery" class="ghost" type="button">Discard incomplete generation</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <p class="footer-note">Nexus campaigns are stored in PostgreSQL. Portable story files remain available for backup and migration.</p>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <div class="llm-wait-indicator" id="llmWaitIndicator" aria-live="polite" aria-atomic="true">
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="llmWaitIndicatorText" class="llm-wait-indicator-text">Waiting for response.</span>
+  </div>
+
+  <dialog id="messagePopupDialog" class="world-gen-dialog message-popup-dialog">
+    <form method="dialog" class="world-gen-card">
+      <div>
+        <h3 id="messagePopupTitle">Notice</h3>
+        <p id="messagePopupBody" class="mini" style="white-space:pre-wrap;"></p>
+      </div>
+      <div class="row wrap" style="justify-content:flex-end;">
+        <button id="btnMessagePopupClose" class="primary" type="submit">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="branchStoryDialog" class="world-gen-dialog app-dialog">
+    <form method="dialog" class="world-gen-card">
+      <div>
+        <h3>Start again from an earlier turn?</h3>
+        <p id="branchStoryMessage" class="mini"></p>
+      </div>
+      <div class="world-gen-box stack">
+        <p><strong>Reset this campaign</strong> rewinds the authoritative campaign to the selected turn and removes its later accepted turns. This is the default.</p>
+        <p><strong>Create a separate campaign</strong> keeps this campaign unchanged and starts an independent branch using the same immutable world version.</p>
+      </div>
+      <div class="row wrap dialog-actions" style="justify-content:flex-end;">
+        <button value="cancel" type="submit">Cancel</button>
+        <button value="copy" class="accent" type="submit">Create separate campaign</button>
+        <button value="reset" class="primary" type="submit" autofocus>Reset this campaign</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="gettingStartedDialog" class="world-gen-dialog app-dialog getting-started-dialog">
+    <div class="world-gen-card">
+      <div class="dialog-header">
+        <div>
+          <h3>Getting Started</h3>
+          <p class="mini">Add a backend provider profile before starting a story.</p>
+        </div>
+      </div>
+      <div class="world-gen-box stack">
+        <p>Provider connections, credentials, models, context limits, and defaults are managed centrally in Infinite Quest Nexus.</p>
+        <div class="row wrap">
+          <button id="btnGettingConfigureProviders" class="accent grow" type="button" onclick="window.location.href='/nexus/'">Open Provider Management in Nexus</button>
+        </div>
+      </div>
+      <button id="btnSkipGettingStartedToStory" class="ghost hidden" type="button">Take Me to My Story (Skip Key Set Up For Now)</button>
+    </div>
+  </dialog>
+
+  <dialog id="worldSetupDialog" class="world-gen-dialog app-dialog wide-dialog">
+    <div class="world-gen-card">
+      <div class="dialog-header">
+        <div>
+          <h3>Current World Setup</h3>
+          <p class="mini">Static information pulled from the authoritative database for the current campaign and world version.</p>
+        </div>
+        <button id="btnCloseWorldSetup" class="small ghost" type="button" aria-label="Close world setup">✕</button>
+      </div>
+      <div class="dialog-scroll stack static-world-setup">
+        <div class="two-col">
+          <div>
+            <span class="field-label-row"><span>Campaign Title</span></span>
+            <div id="setupCampaignTitle" class="world-gen-box"></div>
+          </div>
+          <div>
+            <span class="field-label-row"><span>World & Version</span></span>
+            <div id="setupWorldVersion" class="world-gen-box"></div>
+          </div>
+        </div>
+        <div class="two-col">
+          <div>
+            <span class="field-label-row"><span>Genre</span></span>
+            <div id="setupGenre" class="world-gen-box"></div>
+          </div>
+          <div>
+            <span class="field-label-row"><span>Tone</span></span>
+            <div id="setupTone" class="world-gen-box"></div>
+          </div>
+        </div>
+        <div>
+          <span class="field-label-row"><span>Player Character</span></span>
+          <div id="setupCharacter" class="world-gen-box" style="white-space: pre-wrap;"></div>
+        </div>
+        <div>
+          <span class="field-label-row"><span>Premise & Starting Situation</span></span>
+          <div id="setupPremise" class="world-gen-box" style="white-space: pre-wrap;"></div>
+        </div>
+        <div>
+          <span class="field-label-row"><span>Background Story</span></span>
+          <div id="setupBackgroundStory" class="world-gen-box" style="white-space: pre-wrap;"></div>
+        </div>
+        <div>
+          <span class="field-label-row"><span>Story Rules / Style Guide</span></span>
+          <div id="setupRules" class="world-gen-box" style="white-space: pre-wrap;"></div>
+        </div>
+        <div>
+          <span class="field-label-row"><span>RPG Statistics & Trackers</span></span>
+          <div id="setupRpgStats" class="world-gen-box"></div>
+        </div>
+      </div>
+      <div class="row wrap dialog-actions" style="justify-content: flex-end;">
+        <button id="btnDoneWorldSetup" class="primary" type="button">Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="editStateDialog" class="world-gen-dialog app-dialog wide-dialog">
+    <div class="world-gen-card">
+      <div class="dialog-header">
+        <div>
+          <h3>Edit State</h3>
+          <p class="mini">Edit the scratchpad, current trackers, and history view.</p>
+        </div>
+        <button id="btnCloseEditState" class="small ghost" type="button" aria-label="Close edit state">✕</button>
+      </div>
+      <div class="dialog-scroll">
+        <div class="tabs" role="tablist" aria-label="side panels">
+          <button class="tab active" data-tab="scratch">Scratchpad</button>
+          <button class="tab" data-tab="trackers">Trackers</button>
+          <button class="tab" data-tab="history">History</button>
+        </div>
+        <div class="panel-body">
+          <section id="tab-scratch" class="stack">
+            <p class="mini">The LLM updates this private continuity scratchpad after every turn.</p>
+            <textarea id="scratchpad" placeholder="NPC secrets, unresolved hooks, character descriptions..."></textarea>
+            <button id="btnSaveScratch" class="accent">Save scratchpad edits</button>
+          </section>
+
+          <section id="tab-trackers" class="stack hidden">
+            <p class="mini">These trackers are the world state for the turn currently being viewed.</p>
+            <label>Tracker name
+              <input id="trackerName" placeholder="Relationship: character name" />
+            </label>
+            <label>When/how should the LLM update it?
+              <textarea id="trackerRules" placeholder="Update after meaningful interactions. Track trust, debts, secrets shared, and attitude."></textarea>
+            </label>
+            <label>Current value
+              <textarea id="trackerValue" placeholder="Neutral; curious about the player."></textarea>
+            </label>
+            <button id="btnAddTracker" class="accent">＋ Add tracker</button>
+            <div id="trackerList" class="stack"></div>
+          </section>
+
+          <section id="tab-history" class="stack hidden">
+            <p class="mini">Jump to any previous turn. Acting from an older turn asks whether to reset this campaign there or create a separate campaign branch.</p>
+            <div id="historyList" class="stack"></div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="turnHistoryDialog" class="world-gen-dialog app-dialog wide-dialog">
+    <div class="world-gen-card">
+      <div class="dialog-header">
+        <div>
+          <h3>Turn History & Navigation</h3>
+          <p class="mini">Select any previous turn to jump directly to that scene. Acting from an earlier turn allows resetting or branching the campaign.</p>
+        </div>
+        <button id="btnCloseTurnHistory" class="small ghost" type="button" aria-label="Close turn history">✕</button>
+      </div>
+      <div class="dialog-scroll">
+        <div id="turnHistoryModalList" class="stack"></div>
+      </div>
+      <div class="row wrap dialog-actions" style="justify-content: flex-end;">
+        <button id="btnTurnHistoryJumpLatest" class="accent" type="button">Jump to Latest Turn</button>
+        <button id="btnTurnHistoryDone" class="primary" type="button">Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="activityLogDialog" class="world-gen-dialog app-dialog wide-dialog">
+    <div class="world-gen-card">
+      <div class="dialog-header">
+        <div>
+          <h3>Activity Log</h3>
+          <p class="mini">Recent actions, provider calls, parsing decisions, and results. Stored only in memory and cleared when this page reloads.</p>
+        </div>
+        <button id="btnCloseActivityLog" class="small ghost" type="button" aria-label="Close activity log">✕</button>
+      </div>
+      <div class="activity-log-toolbar">
+        <button id="btnCopyActivityLog" type="button">Copy Diagnostics</button>
+        <button id="btnClearActivityLog" type="button">Clear Log</button>
+      </div>
+      <div class="dialog-scroll">
+        <div id="activityLogList" class="activity-log-list" role="log" aria-live="polite"></div>
+      </div>
+      <div class="row wrap dialog-actions">
+        <button id="btnActivityLogDone" class="primary" type="button">Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="worldGenDialog" class="world-gen-dialog">
+    <form method="dialog" class="world-gen-card">
+      <div>
+        <h3>Generate world setup</h3>
+        <p class="mini">Describe the adventure you want. A few words is enough; more detail gives the LLM more to preserve.</p>
+      </div>
+      <label>World prompt
+        <textarea id="worldGenPrompt" placeholder="Examples: cozy magical academy mystery with a shy alchemist; post-apocalyptic train journey; haunted Mars colony noir..." style="min-height:160px;"></textarea>
+      </label>
+      <div class="row wrap" style="justify-content:flex-end;">
+        <button id="btnWorldGenCancel" type="submit">Cancel</button>
+        <button id="btnWorldGenRun" class="primary" type="button">✨ Generate and fill setup</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="characterSelectDialog" class="world-gen-dialog app-dialog wide-dialog">
+    <div class="world-gen-card">
+      <div class="dialog-header">
+        <div>
+          <h3>Choose a player character</h3>
+          <p class="mini">Pick one of the generated character options to use in the current world setup.</p>
+        </div>
+        <button id="btnCloseCharacterSelect" class="small ghost" type="button" aria-label="Close character select">✕</button>
+      </div>
+      <div id="characterSelectList" class="character-select-grid"></div>
+      <div class="row wrap dialog-actions">
+        <button id="btnGenerateCharacterSelectModal" class="primary" type="button">Generate Options</button>
+        <button id="btnCharacterSelectCancel" type="button">Cancel</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="imagePromptDialog" class="world-gen-dialog">
+    <form method="dialog" class="world-gen-card">
+      <div>
+        <h3>Edit image prompt</h3>
+        <p class="mini">Adjust the illustration prompt for this turn, then regenerate only the image. The story text and choices will stay the same.</p>
+      </div>
+      <label>Image prompt
+        <textarea id="imagePromptEditor" placeholder="Describe the scene you want the image model to render."></textarea>
+      </label>
+      <div class="row wrap" style="justify-content:flex-end;">
+        <button id="btnImagePromptCancel" type="button">Cancel</button>
+        <button id="btnRegenerateImageConfirm" class="primary" type="button">🖼️ Regenerate image</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="editResponseDialog" class="world-gen-dialog app-dialog wide-dialog">
+    <div class="world-gen-card">
+      <div class="dialog-header">
+        <div>
+          <h3>Edit Response</h3>
+          <p class="mini">Edit the narration for the turn you are currently viewing. Saving replaces the text for that turn.</p>
+        </div>
+        <button id="btnEditResponseClose" class="small ghost" type="button" aria-label="Close edit response">✕</button>
+      </div>
+      <label>Response text
+        <textarea id="responseEditor" placeholder="Edit the story response for this turn."></textarea>
+      </label>
+      <div class="row wrap dialog-actions">
+        <button id="btnEditResponseCancel" type="button">Cancel</button>
+        <button id="btnEditResponseSave" class="primary" type="button">Save changes</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="retryPromptDialog" class="world-gen-dialog app-dialog wide-dialog">
+    <div class="world-gen-card">
+      <div class="dialog-header">
+        <div>
+          <h3>Retry Turn with Edited Prompt</h3>
+          <p class="mini">Review and edit the prompt for the turn you are retrying before submitting to generate a new response.</p>
+        </div>
+        <button id="btnRetryPromptClose" class="small ghost" type="button" aria-label="Cancel retry">✕</button>
+      </div>
+      <label>Turn prompt
+        <textarea id="retryPromptEditor" placeholder="Edit the turn prompt text before retrying." style="min-height:140px;"></textarea>
+      </label>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="userProfileDialog" class="world-gen-dialog app-dialog">
+    <div class="world-gen-card">
+      <div class="dialog-header">
+        <div>
+          <h3>User Profile & Settings</h3>
+          <p class="mini">Manage your profile and adventure preferences.</p>
+        </div>
+        <button id="btnCloseUserProfile" class="small ghost" type="button" aria-label="Close user profile">✕</button>
+      </div>
+      <div class="settings-section-card">
+        <div class="settings-section-header">
+          <span class="settings-section-title">Profile Identity</span>
+        </div>
+        <label class="settings-field">
+          <span>Display name</span>
+          <input type="text" id="userProfileDisplayName" placeholder="e.g. Initial Owner" maxlength="120" autocomplete="off">
+        </label>
+      </div>
+      <div class="settings-section-card">
+        <div class="settings-section-header">
+          <span class="settings-section-title">Adventure Preferences</span>
+        </div>
+        <div class="settings-options-list">
+          <label class="settings-option-row" title="When unchecked, clicking a story choice will copy it into your custom action box so you can review and edit before submitting.">
+            <span class="settings-option-label">Auto-submit story turns when selecting a choice</span>
+            <input type="checkbox" id="userProfileAutoSubmitChoices" checked>
+          </label>
+          <label class="settings-option-row" title="When True, it enables the current behavior where the story continues endlessly on a single page. When false, the story only displays the new turn content once it has been generated and confirmed.">
+            <span class="settings-option-label">Continuous Reading</span>
+            <input type="checkbox" id="userProfileContinuousReading">
+          </label>
+        </div>
+      </div>
+      <div class="row wrap dialog-actions" style="justify-content: flex-end; margin-top: 6px;">
+        <button id="btnCancelUserProfile" type="button">Cancel</button>
+        <button id="btnSaveUserProfile" class="primary" type="button">Save Profile</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="/nexus/story.js"></script>
+</body>
+</html>

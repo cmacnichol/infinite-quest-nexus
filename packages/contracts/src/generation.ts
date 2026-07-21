@@ -33,7 +33,8 @@ export const providerProfileUpdateSchema = z.object({
   requestTimeoutMs: z.coerce.number().int().min(60_000).max(3_600_000).optional(),
   apiKey: z.string().trim().max(16_384).optional(),
   enabled: z.boolean().optional(),
-  isDefault: z.boolean().optional()
+  isDefault: z.boolean().optional(),
+  configuration: z.record(z.string(), z.unknown()).optional()
 }).refine((value) => Object.values(value).some((item) => item !== undefined), "At least one provider field is required.");
 
 export const providerTextRequestSchema = z.object({
@@ -60,6 +61,12 @@ export const generationRequestSchema = z.object({
 
 export const campaignRewindSchema = z.object({
   targetTurnNumber: z.coerce.number().int().min(0),
+  expectedCurrentTurnNumber: z.coerce.number().int().min(1).optional()
+});
+
+export const campaignBranchSchema = z.object({
+  targetTurnNumber: z.coerce.number().int().min(0),
+  title: z.string().trim().min(1).max(200).optional(),
   expectedCurrentTurnNumber: z.coerce.number().int().min(1).optional()
 });
 
@@ -156,12 +163,35 @@ export const storyTurnOutputSchema = z.object({
   open_threads: z.array(z.string().trim().min(1).max(4000)).max(100)
 });
 
+export const generationJobStatusSchema = z.object({
+  id: z.string().uuid(),
+  campaignId: z.string().uuid(),
+  providerProfileId: z.string().uuid().nullable().optional(),
+  expectedTurnNumber: z.coerce.number().int().min(1),
+  action: z.string(),
+  status: z.enum(["queued", "assessing", "generating", "validating", "committing", "completed", "recoverable", "failed"]),
+  attempts: z.coerce.number().int().min(0),
+  requestedModel: z.string().optional(),
+  providerResponseId: z.string().nullable().optional(),
+  providerFinishReason: z.string().nullable().optional(),
+  resultTurnId: z.string().uuid().nullable().optional(),
+  errorCode: z.string().nullable().optional(),
+  errorMessage: z.string().nullable().optional(),
+  recoveryMetadata: z.record(z.string(), z.unknown()).optional(),
+  createdAt: z.union([z.string(), z.date()]),
+  updatedAt: z.union([z.string(), z.date()]),
+  completedAt: z.union([z.string(), z.date()]).nullable().optional(),
+  partialOutput: z.string().nullable().optional(),
+  partialNarration: z.string().nullable().optional()
+});
+
 export type ProviderProfileInput = z.infer<typeof providerProfileInputSchema>;
 export type ProviderProfileUpdate = z.infer<typeof providerProfileUpdateSchema>;
 export type ProviderTextRequest = z.infer<typeof providerTextRequestSchema>;
 export type ProviderType = z.infer<typeof providerTypeSchema>;
 export type GenerationRequest = z.infer<typeof generationRequestSchema>;
 export type CampaignRewindRequest = z.infer<typeof campaignRewindSchema>;
+export type CampaignBranchRequest = z.infer<typeof campaignBranchSchema>;
 export type IllustrationConfig = z.infer<typeof illustrationConfigSchema>;
 export type IllustrationRequest = z.infer<typeof illustrationRequestSchema>;
 export type StoryTurnOutput = z.infer<typeof storyTurnOutputSchema>;
@@ -170,3 +200,4 @@ export type PlayerRpgStat = z.infer<typeof playerRpgStatSchema>;
 export type PlayerEventTrigger = z.infer<typeof playerEventTriggerSchema>;
 export type PendingEventTrigger = z.infer<typeof pendingEventTriggerSchema>;
 export type RpgAssessmentOutput = z.infer<typeof rpgAssessmentOutputSchema>;
+export type GenerationJobStatus = z.infer<typeof generationJobStatusSchema>;

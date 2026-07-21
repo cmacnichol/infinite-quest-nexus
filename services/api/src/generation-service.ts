@@ -4,6 +4,7 @@ import {
   pendingEventTriggerSchema,
   playerEventTriggerSchema,
   playerRpgStatSchema,
+  type CampaignBranchRequest,
   type CampaignRewindRequest,
   type GenerationRequest,
   type PlayerCampaignConfig,
@@ -39,6 +40,7 @@ import {
   parseEventExtension,
   parseRpgAssessment,
   parseStoryOutput,
+  extractPartialNarration,
   performPrivateRoll,
   recoveryInstruction,
   RPG_ASSESSMENT_SYSTEM_PROMPT,
@@ -49,7 +51,7 @@ import {
   type PrivateRollResolution
 } from "../../../packages/story-engine/src/index.js";
 import { estimateTokens, sha256, stableStringify, stripMechanicsLeakage } from "../../../packages/domain/src/text.js";
-import { buildContextPreview, enqueueEmbeddingReindex, rebuildCampaignMemories, storeDerivedTurnMemories } from "./memory-service.js";
+import { autoEnableCampaignEmbeddingIfAvailable, buildContextPreview, enqueueEmbeddingReindex, rebuildCampaignMemories, storeDerivedTurnMemories } from "./memory-service.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
 import { enqueueAcceptedTurnIllustration } from "./image-service.js";
 import { attributeGenerationCostsToTurn, recordProfileCost, turnReportedCosts } from "./cost-service.js";
@@ -217,11 +219,13 @@ export async function getGenerationJob(pool: DatabasePool, jobId: string) {
             requested_model AS "requestedModel", provider_response_id AS "providerResponseId",
             provider_finish_reason AS "providerFinishReason", result_turn_id AS "resultTurnId",
             error_code AS "errorCode", error_message AS "errorMessage", recovery_metadata AS "recoveryMetadata",
-            created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt"
+            created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt",
+            partial_output AS "partialOutput"
        FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`, [jobId, ownerUserId]
   );
   const row = result.rows[0];
   if (!row) throw Object.assign(new Error("Generation job not found."), { statusCode: 404 });
+  row.partialNarration = row.partialOutput ? extractPartialNarration(row.partialOutput) : null;
   return row;
 }
 
@@ -469,6 +473,176 @@ export async function rewindCampaign(pool: DatabasePool, campaignId: string, req
       activeTurnNumber: request.targetTurnNumber,
       discardedTurnCount,
       stateSnapshot: { scratchpad, trackers, eventTriggers, pendingEventTriggers, rpgStats }
+    };
+  });
+}
+
+export async function branchCampaign(pool: DatabasePool, campaignId: string, request: CampaignBranchRequest) {
+  const ownerUserId = await initialOwnerId(pool);
+  return withTransaction(pool, async (client) => {
+    const campaignResult = await client.query<{
+      active_turn_number: number;
+      world_version_id: string;
+      title: string;
+      story_length_profile: string;
+      selected_character_id: string | null;
+      character_snapshot: Record<string, unknown> | null;
+      legacy_settings: Record<string, unknown>;
+      text_provider_profile_id: string | null;
+      image_provider_profile_id: string | null;
+    }>(
+      `SELECT active_turn_number, world_version_id, title, story_length_profile,
+              selected_character_id, character_snapshot, legacy_settings,
+              text_provider_profile_id, image_provider_profile_id
+         FROM campaigns
+        WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
+      [campaignId, ownerUserId]
+    );
+    const campaign = campaignResult.rows[0];
+    if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    if (request.expectedCurrentTurnNumber !== undefined
+        && request.expectedCurrentTurnNumber !== campaign.active_turn_number) {
+      throw Object.assign(
+        new Error(`Campaign is at turn ${campaign.active_turn_number}, not ${request.expectedCurrentTurnNumber}.`),
+        { statusCode: 409 }
+      );
+    }
+    if (request.targetTurnNumber > campaign.active_turn_number) {
+      throw Object.assign(new Error(`Campaign has only ${campaign.active_turn_number} accepted turns.`), { statusCode: 409 });
+    }
+
+    const parentStateResult = await client.query<{
+      default_triggers: unknown;
+      initial_state_snapshot: Record<string, unknown>;
+    }>(
+      `SELECT default_triggers, initial_state_snapshot FROM campaign_state
+        WHERE campaign_id = $1 AND owner_user_id = $2 FOR UPDATE`,
+      [campaignId, ownerUserId]
+    );
+    const parentState = parentStateResult.rows[0] || { default_triggers: [], initial_state_snapshot: {} };
+
+    let targetSnapshot: Record<string, unknown>;
+    let targetModelMetadata: Record<string, unknown> | null = null;
+    if (request.targetTurnNumber === 0) {
+      targetSnapshot = parentState.initial_state_snapshot || {};
+    } else {
+      const target = await client.query<{
+        state_snapshot_private: Record<string, unknown>;
+        model_metadata: Record<string, unknown>;
+      }>(
+        `SELECT state_snapshot_private, model_metadata FROM turns
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number = $3`,
+        [campaignId, ownerUserId, request.targetTurnNumber]
+      );
+      const targetTurn = target.rows[0];
+      if (!targetTurn) throw Object.assign(new Error("The requested branch turn was not found."), { statusCode: 404 });
+      targetSnapshot = targetTurn.state_snapshot_private || {};
+      targetModelMetadata = targetTurn.model_metadata || null;
+    }
+
+    const branchTitle = request.title?.trim() || `${campaign.title} (Branch Turn ${request.targetTurnNumber})`;
+    const newCampaignRes = await client.query<{ id: string }>(
+      `INSERT INTO campaigns (
+         owner_user_id, world_version_id, title, status, active_turn_number,
+         story_length_profile, selected_character_id, character_snapshot, legacy_settings,
+         text_provider_profile_id, image_provider_profile_id
+       ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+      [
+        ownerUserId, campaign.world_version_id, branchTitle, request.targetTurnNumber,
+        campaign.story_length_profile, campaign.selected_character_id, json(campaign.character_snapshot), json(campaign.legacy_settings),
+        campaign.text_provider_profile_id, campaign.image_provider_profile_id
+      ]
+    );
+    const newCampaignId = newCampaignRes.rows[0]?.id;
+    if (!newCampaignId) throw new Error("Could not create campaign branch.");
+
+    const scratchpad = typeof targetSnapshot.scratchpad === "string" ? targetSnapshot.scratchpad : "";
+    const trackers = Array.isArray(targetSnapshot.trackers) ? targetSnapshot.trackers : [];
+    const eventTriggers = Array.isArray(targetSnapshot.eventTriggers) ? targetSnapshot.eventTriggers : [];
+    const pendingEventTriggers = Array.isArray(targetSnapshot.pendingEventTriggers) ? targetSnapshot.pendingEventTriggers : [];
+    const rpgStats = Array.isArray(targetSnapshot.rpgStats) ? targetSnapshot.rpgStats : [];
+    const scratchpadSafeForPrompt = typeof targetModelMetadata?.promptProtocolVersion === "string";
+
+    const branchProvenance = {
+      sourceType: "nexus_campaign_branch",
+      parentCampaignId: campaignId,
+      branchTurnNumber: request.targetTurnNumber,
+      branchId: crypto.randomUUID()
+    };
+
+    await client.query(
+      `INSERT INTO campaign_state (
+         campaign_id, owner_user_id, scratchpad_private, scratchpad_safe_for_prompt,
+         trackers, default_triggers, event_triggers, pending_event_triggers, rpg_stats,
+         import_provenance, initial_state_snapshot
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [
+        newCampaignId, ownerUserId, scratchpad, scratchpadSafeForPrompt,
+        json(trackers), json(parentState.default_triggers), json(eventTriggers), json(pendingEventTriggers), json(rpgStats),
+        json(branchProvenance), json(parentState.initial_state_snapshot)
+      ]
+    );
+
+    await client.query(
+      `INSERT INTO campaign_illustration_configs (
+         campaign_id, owner_user_id, enabled, provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
+       ) SELECT $1, owner_user_id, enabled, provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
+           FROM campaign_illustration_configs WHERE campaign_id = $2 AND owner_user_id = $3 ON CONFLICT DO NOTHING`,
+      [newCampaignId, campaignId, ownerUserId]
+    );
+
+    await client.query(
+      `INSERT INTO campaign_memory_configs (
+         campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
+         embedding_document_prefix, embedding_query_prefix
+       ) SELECT $1, owner_user_id, embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
+                embedding_document_prefix, embedding_query_prefix
+           FROM campaign_memory_configs WHERE campaign_id = $2 AND owner_user_id = $3 ON CONFLICT DO NOTHING`,
+      [newCampaignId, campaignId, ownerUserId]
+    );
+    await autoEnableCampaignEmbeddingIfAvailable(client, ownerUserId, newCampaignId);
+
+    if (request.targetTurnNumber > 0) {
+      await client.query(
+        `INSERT INTO turns (
+           campaign_id, owner_user_id, turn_number, source_turn_id, action, narration,
+           choices, custom_action_suggestion, image_prompt, image_url, mechanics_private,
+           state_snapshot_private, model_metadata, import_metadata, accepted_at, created_at
+         ) SELECT $1, owner_user_id, turn_number, source_turn_id, action, narration,
+                  choices, custom_action_suggestion, image_prompt, image_url, mechanics_private,
+                  state_snapshot_private, model_metadata, import_metadata, accepted_at, created_at
+             FROM turns WHERE campaign_id = $2 AND owner_user_id = $3 AND turn_number <= $4
+            ORDER BY turn_number ASC`,
+        [newCampaignId, campaignId, ownerUserId, request.targetTurnNumber]
+      );
+      await client.query(
+        `INSERT INTO summary_checkpoints (
+           owner_user_id, campaign_id, through_turn, summary_kind, content, token_estimate, created_at
+         ) SELECT owner_user_id, $1, through_turn, summary_kind, content, token_estimate, created_at
+             FROM summary_checkpoints WHERE campaign_id = $2 AND owner_user_id = $3 AND through_turn <= $4`,
+        [newCampaignId, campaignId, ownerUserId, request.targetTurnNumber]
+      );
+    }
+
+    await rebuildCampaignMemories(client, ownerUserId, newCampaignId);
+    await enqueueEmbeddingReindex(client, newCampaignId);
+
+    await client.query(
+      `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, details)
+       VALUES ($1,$2,'campaign_branched',$3)`,
+      [ownerUserId, newCampaignId, json({ parentCampaignId: campaignId, branchTurnNumber: request.targetTurnNumber })]
+    );
+
+    return {
+      id: newCampaignId,
+      title: branchTitle,
+      status: "active",
+      activeTurnNumber: request.targetTurnNumber,
+      storyLengthProfile: campaign.story_length_profile,
+      worldVersionId: campaign.world_version_id,
+      selectedCharacterId: campaign.selected_character_id,
+      textProviderProfileId: campaign.text_provider_profile_id,
+      imageProviderProfileId: campaign.image_provider_profile_id
     };
   });
 }
@@ -802,7 +976,25 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
       ...storyMemoryDefaultsFromContext(promptContext),
       ...inputs.storyMemoryDefaults
     };
-    const baseRequest = { systemPrompt: STORY_SYSTEM_PROMPT, input: storyInput };
+    let lastPartialUpdate = 0;
+    let lastPartialContent = "";
+    const onChunk = async (_delta: string, accumulated: string) => {
+      const now = Date.now();
+      if (now - lastPartialUpdate >= 350 && accumulated !== lastPartialContent) {
+        lastPartialUpdate = now;
+        lastPartialContent = accumulated;
+        try {
+          await pool.query(
+            `UPDATE generation_jobs SET partial_output = $2, updated_at = now() WHERE id = $1 AND lease_owner = $3`,
+            [job.id, accumulated, workerId]
+          );
+        } catch {
+          // ignore transient update errors during active streaming
+        }
+      }
+    };
+    const supportsStreaming = Boolean(provider.configuration && (provider.configuration.streaming === true || provider.configuration.streamingSupport === true));
+    const baseRequest = { systemPrompt: STORY_SYSTEM_PROMPT, input: storyInput, ...(supportsStreaming ? { onChunk } : {}) };
     let result = await callCampaignTextProvider(pool, provider, job, "story_generation", baseRequest);
     let parsed = parseStoryOutput(result.content, storyMemoryDefaults);
     const firstReason = result.outputLimited ? "output_limit" : (!parsed.ok ? parsed.code : null);

@@ -8,7 +8,6 @@ let selectedWorld = null;
 let worldVersionCharacters = [];
 let worldCharacterLoadSequence = 0;
 const legacyStorageKey = "infiniteQuestNexusClientState.v1";
-const campaignResumeStorageKey = "infiniteQuestNexusCampaignResume.v1";
 let detectedBrowserStory = null;
 let providers = [];
 let selectedProvider = null;
@@ -55,14 +54,34 @@ function applyEmbeddingModelContextBudget(model) {
   elements.budgetTokensSource.className = "field-note api-supplied";
 }
 
+function updateStoryViewLink() {
+  if (!elements.storyViewLink) return;
+  const lastCampaignId = localStorage.getItem("infiniteQuestLastCampaignId");
+  if (selectedCampaign) {
+    elements.storyViewLink.href = "/story/" + encodeURIComponent(selectedCampaign.id);
+  } else if (lastCampaignId) {
+    elements.storyViewLink.href = "/story/" + encodeURIComponent(lastCampaignId);
+  } else {
+    elements.storyViewLink.href = "/story";
+  }
+}
+
 function applyManagementView() {
-  const providerView = window.location.hash === "#providers";
+  const hash = window.location.hash || "#world-library";
+  const providerView = hash === "#providers";
   document.body.dataset.managementView = providerView ? "providers" : "worlds";
   elements.managementTitle.textContent = providerView ? "Provider Management" : "World Management";
   elements.managementDescription.textContent = providerView
     ? "Add and manage provider profiles independently for text, image generation, and Chronicle embeddings."
     : "Author reusable versioned worlds, configure campaigns, and inspect the fiction-only memory selected for generation.";
   document.title = `${elements.managementTitle.textContent} · Infinite Quest Nexus`;
+
+  // UI Pass on navigation active states
+  if (elements.navProviders) elements.navProviders.className = hash === "#providers" ? "button primary" : "button secondary";
+  if (elements.navWorlds) elements.navWorlds.className = hash === "#world-library" || hash === "" ? "button primary" : "button secondary";
+  if (elements.navCampaigns) elements.navCampaigns.className = hash === "#campaigns" ? "button primary" : "button secondary";
+
+  updateStoryViewLink();
 }
 
 applyManagementView();
@@ -389,6 +408,7 @@ async function forkSelectedWorld() {
     elements.forkWorldTitle.value = "";
     await loadWorlds(fork.worldId);
     worldMessage("Fork created as an unpublished independent draft.", "success");
+    if (elements.forkWorldDialog) elements.forkWorldDialog.close();
   } catch (error) {
     worldMessage(error.message || String(error), "error");
   }
@@ -479,6 +499,7 @@ async function createCampaignFromWorld() {
     elements.newCampaignTitle.value = "";
     await loadCampaigns(campaign.id);
     worldMessage(`Campaign created for ${campaign.selectedCharacterName || "the selected character"} from the selected immutable world version.`, "success");
+    if (elements.createCampaignDialog) elements.createCampaignDialog.close();
   } catch (error) {
     worldMessage(error.message || String(error), "error");
   }
@@ -490,6 +511,7 @@ async function loadCampaigns(preselectId = "") {
   if (!campaigns.length) {
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
     selectedCampaign = null;
+    updateStoryViewLink();
     [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationEnabled, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.saveIllustrationConfig, elements.discoverIllustrationModels].forEach((element) => { element.disabled = true; });
     elements.illustrationEnabled.checked = false;
     renderIllustrationSettingsVisibility();
@@ -517,6 +539,7 @@ async function selectCampaign(campaign) {
   embeddingJobPollSequence += 1;
   elements.embeddingProgress.classList.add("hidden");
   selectedCampaign = campaign;
+  updateStoryViewLink();
   document.querySelectorAll(".campaign-button").forEach((button) => button.classList.toggle("active", button.dataset.campaignId === campaign.id));
   elements.memoryTitle.textContent = campaign.title;
   elements.reindexMemory.disabled = false;
@@ -608,23 +631,7 @@ async function exportSelectedCampaign() {
 
 async function loadSelectedCampaign() {
   if (!selectedCampaign) return;
-  elements.loadCampaign.disabled = true;
-  campaignMessage("Preparing the accepted campaign ledger for the story view…");
-  try {
-    const story = await api(`/api/v1/campaigns/${selectedCampaign.id}/export`);
-    sessionStorage.setItem(campaignResumeStorageKey, JSON.stringify({
-      campaignId: selectedCampaign.id,
-      worldVersionId: selectedCampaign.worldVersionId,
-      activeTurnNumber: selectedCampaign.activeTurnNumber,
-      autoStart: Number(selectedCampaign.activeTurnNumber || 0) === 0,
-      providerProfileId: effectiveCampaignProvider("text")?.id || "",
-      story
-    }));
-    window.location.assign("/");
-  } catch (error) {
-    campaignMessage(error.message || String(error), "error");
-    elements.loadCampaign.disabled = !selectedCampaign;
-  }
+  window.location.assign("/story/" + encodeURIComponent(selectedCampaign.id));
 }
 
 async function deleteSelectedCampaign() {
@@ -640,6 +647,7 @@ async function deleteSelectedCampaign() {
       body: JSON.stringify({ confirmation: "DELETE", expectedTitle })
     });
     selectedCampaign = null;
+    updateStoryViewLink();
     await loadCampaigns();
     await loadWorlds(selectedWorld?.id || "");
     campaignMessage(`Campaign “${expectedTitle}” was permanently deleted.`, "success");
@@ -945,6 +953,7 @@ function resetProviderForm() {
   elements.providerTemperature.value = "0.8";
   elements.providerRequestTimeoutMinutes.value = "5";
   elements.providerAdvancedSettings.open = false;
+  elements.providerStreaming.checked = false;
   elements.providerEnabled.checked = true;
   elements.providerType.disabled = false;
   elements.providerRole.disabled = false;
@@ -969,6 +978,7 @@ function beginProviderEdit(provider) {
   elements.providerOutputTokens.value = String(provider.maxOutputTokens);
   elements.providerTemperature.value = String(provider.temperature);
   elements.providerRequestTimeoutMinutes.value = String(Number(provider.requestTimeoutMs || 300000) / 60000);
+  elements.providerStreaming.checked = Boolean(provider.configuration?.streaming || provider.configuration?.streamingSupport);
   elements.providerEnabled.checked = provider.enabled;
   elements.providerIsDefault.checked = provider.isDefault;
   elements.providerType.disabled = true;
@@ -978,6 +988,7 @@ function beginProviderEdit(provider) {
   discoveredProfileModels = [];
   elements.providerModelPickerList.replaceChildren();
   elements.providerName.focus();
+  if (elements.providerDialog) elements.providerDialog.showModal();
   providerMessage(`Editing ${provider.name}. Leave the API key blank to keep the stored credential.`);
 }
 
@@ -1011,6 +1022,7 @@ async function saveProvider(event) {
   event.preventDefault();
   providerMessage("Saving provider profile…");
   try {
+    const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
     const provider = await api(editingProviderId ? `/api/v1/providers/${editingProviderId}` : "/api/v1/providers", {
       method: editingProviderId ? "PATCH" : "POST",
       body: JSON.stringify({
@@ -1025,7 +1037,7 @@ async function saveProvider(event) {
         temperature: elements.providerTemperature.value,
         requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
         enabled: elements.providerEnabled.checked,
-        ...(!editingProviderId ? { configuration: {} } : {})
+        configuration: { ...existingConfig, streaming: elements.providerStreaming.checked }
       })
     });
     const wasEditing = Boolean(editingProviderId);
@@ -1044,6 +1056,7 @@ async function saveProvider(event) {
       elements.discoverIllustrationModels.disabled = false;
     }
     providerMessage(`${provider.name} ${wasEditing ? "updated" : "saved"}. Credentials, if supplied, were encrypted before database storage.`, "success");
+    if (elements.providerDialog) elements.providerDialog.close();
   } catch (error) {
     providerMessage(error.message || String(error), "error");
   }
@@ -1057,6 +1070,7 @@ async function refreshProviderModelsFromForm() {
   elements.providerModelPickerStatus.className = "status";
   try {
     const useStoredProfile = editingProviderId && !elements.providerApiKey.value;
+    const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
     const result = useStoredProfile
       ? await api(`/api/v1/providers/${editingProviderId}/models`)
       : await api("/api/v1/providers/discover-models", {
@@ -1074,7 +1088,7 @@ async function refreshProviderModelsFromForm() {
           requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
           enabled: elements.providerEnabled.checked,
           isDefault: elements.providerIsDefault.checked,
-          configuration: {}
+          configuration: { ...existingConfig, streaming: elements.providerStreaming.checked }
         })
     });
     discoveredProfileModels = result.models || [];
@@ -2031,8 +2045,23 @@ elements.newCampaignCharacter.addEventListener("change", () => {
   elements.createCampaign.disabled = worldVersionCharacters.length > 1 && !elements.newCampaignCharacter.value;
 });
 elements.publishWorld.addEventListener("click", publishSelectedWorld);
-elements.forkWorld.addEventListener("click", forkSelectedWorld);
-elements.createCampaign.addEventListener("click", createCampaignFromWorld);
+if (elements.forkWorldModalBtn) {
+  elements.forkWorldModalBtn.addEventListener("click", () => {
+    elements.forkWorldTitle.value = `Fork of ${selectedWorld?.world?.title || "World"}`;
+    elements.forkWorldDialog.showModal();
+  });
+  elements.cancelForkWorld.addEventListener("click", () => elements.forkWorldDialog.close());
+  elements.forkWorldForm.addEventListener("submit", (e) => { e.preventDefault(); forkSelectedWorld(); });
+}
+if (elements.createCampaignModalBtn) {
+  elements.createCampaignModalBtn.addEventListener("click", () => {
+    elements.newCampaignTitle.value = "";
+    elements.newCampaignCharacter.value = "";
+    elements.createCampaignDialog.showModal();
+  });
+  elements.cancelCreateCampaign.addEventListener("click", () => elements.createCampaignDialog.close());
+  elements.createCampaignForm.addEventListener("submit", (e) => { e.preventDefault(); createCampaignFromWorld(); });
+}
 elements.exportWorld.addEventListener("click", exportSelectedWorld);
 elements.archiveWorld.addEventListener("click", toggleWorldArchive);
 elements.deleteWorld.addEventListener("click", deleteSelectedWorld);
@@ -2047,8 +2076,33 @@ elements.campaignWorldVersion.addEventListener("change", () => {
 });
 elements.contextForm.addEventListener("submit", previewContext);
 elements.reindexMemory.addEventListener("click", rebuildMemory);
+if (elements.newProviderButton) {
+  elements.newProviderButton.addEventListener("click", () => {
+    resetProviderForm();
+    if (elements.providerDialog) elements.providerDialog.showModal();
+  });
+}
 elements.providerForm.addEventListener("submit", saveProvider);
-elements.cancelProviderEdit.addEventListener("click", resetProviderForm);
+elements.cancelProviderEdit.addEventListener("click", () => {
+  resetProviderForm();
+  if (elements.providerDialog) elements.providerDialog.close();
+});
+
+// Setup tab behavior for world editor
+document.querySelectorAll(".tab-button").forEach(button => {
+  button.addEventListener("click", () => {
+    const group = button.closest(".world-tabs").dataset.tabGroup;
+    const target = button.dataset.tabTarget;
+    // Un-highlight all tabs in this group
+    document.querySelectorAll(`.world-tabs[data-tab-group="${group}"] .tab-button`).forEach(btn => btn.classList.remove("active"));
+    button.classList.add("active");
+    // Hide all content panels in this group
+    document.querySelectorAll(`.tab-content[data-tab-group="${group}"]`).forEach(content => content.classList.remove("active"));
+    // Show the target panel
+    const targetPanel = document.getElementById(target);
+    if (targetPanel) targetPanel.classList.add("active");
+  });
+});
 elements.refreshProviderModels.addEventListener("click", async (event) => { event.stopPropagation(); await openProviderModelPicker(true); });
 elements.providerDefaultModel.addEventListener("click", () => { void openProviderModelPicker(); });
 elements.providerDefaultModel.addEventListener("keydown", (event) => {

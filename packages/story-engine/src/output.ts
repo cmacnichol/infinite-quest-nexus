@@ -40,6 +40,51 @@ export function extractJsonObject(content: string): unknown {
   throw new SyntaxError("The JSON object ended before its closing brace.");
 }
 
+function unescapeJsonString(str: string): string {
+  let cleaned = str.replace(/\\(?:u[0-9a-fA-F]{0,3}|[0-9a-fA-F]{0,3})?$/u, "");
+  if (cleaned.endsWith("\\")) cleaned = cleaned.slice(0, -1);
+  return cleaned
+    .replace(/\\u([0-9a-fA-F]{4})/gu, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\n/gu, "\n")
+    .replace(/\\r/gu, "\r")
+    .replace(/\\t/gu, "\t")
+    .replace(/\\"/gu, '"')
+    .replace(/\\\\/gu, "\\")
+    .replace(/\\\//gu, "/")
+    .replace(/\\b/gu, "\b")
+    .replace(/\\f/gu, "\f");
+}
+
+export function extractPartialNarration(content: string): string {
+  const raw = String(content ?? "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  if (!raw) return "";
+  if (raw.startsWith("{")) {
+    const match = /["']narration["']\s*:\s*"/i.exec(raw);
+    if (!match) return "";
+    const start = match.index + match[0].length;
+    let end = raw.length;
+    let escaped = false;
+    for (let index = start; index < raw.length; index += 1) {
+      const character = raw[index];
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        end = index;
+        break;
+      }
+    }
+    const slice = raw.slice(start, end);
+    const unescaped = unescapeJsonString(slice);
+    if (containsMechanicsLanguage(unescaped)) return "";
+    return formatNarrationParagraphs(unescaped);
+  }
+  const unescaped = unescapeJsonString(raw);
+  if (containsMechanicsLanguage(unescaped)) return "";
+  return formatNarrationParagraphs(unescaped);
+}
+
 function storyTextFields(story: StoryTurnOutput): Array<[string, string]> {
   return [
     ["narration", story.narration],

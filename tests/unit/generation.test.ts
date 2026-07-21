@@ -85,6 +85,12 @@ describe("generation contracts", () => {
       const result = providerProfileUpdateSchema.safeParse({ name: "New Name" });
       expect(result.success).toBe(true);
     });
+
+    it("accepts configuration updates containing streaming preferences", () => {
+      const result = providerProfileUpdateSchema.safeParse({ configuration: { streaming: true } });
+      expect(result.success).toBe(true);
+      expect(result.success && result.data.configuration).toEqual({ streaming: true });
+    });
   });
 
   describe("illustrationConfigSchema", () => {

@@ -14,7 +14,7 @@ The product domains are:
 - **Story Engine**: coordinate mechanics assessment, prompt construction, LM Studio generation, validation, recovery, and memory indexing.
 - **Illustration Pipeline**: optionally turn validated fiction-only image prompts into campaign artwork through a separately configured compatible endpoint.
 
-The existing `index.html` application is the migration baseline and initial web client. Preserve its working experience while moving authoritative state and generation orchestration into backend services incrementally.
+The legacy `index.html` application no longer needs to be kept in parity with the new application (`apps/web`). It is kept for reference only now. Preserve its existing state for historical reference while authoritative state, management workflows, and story generation operate in the backend services and new web application.
 
 Do not embed sample worlds, campaign records, accepted turns, story history, imported lore, or other user content in `index.html` or application source. Runtime world and campaign data belongs in the authoritative database; sanitized regression content belongs only in test fixtures. Legacy exports may be imported through explicit migration code but must not be silently bundled or restored by the client.
 
@@ -147,9 +147,9 @@ Keep mechanics and fiction in separate typed prompt paths. Rolls, dice, checks, 
 
 ## Repository Structure
 
-The repository currently contains the legacy self-contained client:
+The repository contains the legacy self-contained client for reference only:
 
-- `index.html`: primary Infinite Quest application and migration reference.
+- `index.html`: legacy self-contained Infinite Quest application, kept for reference only and no longer kept in parity with the new application (`apps/web`).
 - `demo_version.html`: smaller demonstration variant.
 
 As the service is scaffolded, prefer this organization:
@@ -180,13 +180,13 @@ Prefer TypeScript for new application services and shared packages so validated 
 
 ## Development and Migration
 
-No backend scaffold or package build currently exists. Until it does, serve the existing client with:
+To inspect the legacy client directly without the full backend stack, serve it statically:
 
 ```powershell
 python -m http.server 8000
 ```
 
-Open `http://localhost:8000/index.html`. When introducing the application scaffold, document exact local, test, migration, container-build, and Swarm-deployment commands here and in the root README. Do not leave undocumented scripts as the only way to operate the project.
+Open `http://localhost:8000/index.html` to view the legacy client (kept for reference only; it no longer needs to be kept in parity with the new application). For the active application and API, run the containerized stack or local development services as documented in the root README. Do not leave undocumented scripts as the only way to operate the project.
 
 The future baseline commands should support `docker compose up --build` for local startup and `docker stack deploy` for Swarm using the same built image. Validate both rendered configurations in CI before deployment.
 
@@ -202,7 +202,7 @@ Keep JSON import and export as a portable backup and migration format even after
 
 ## Coding and Contract Conventions
 
-Match the existing two-space indentation in the legacy HTML. Use `camelCase` for JavaScript and TypeScript values, `PascalCase` for types and components, and `UPPER_SNAKE_CASE` for constants. Prefer `const`; use `let` only for reassignment. Avoid wholesale formatting of `index.html`.
+Match the existing two-space indentation across HTML, CSS, and TypeScript code. Use `camelCase` for JavaScript and TypeScript values, `PascalCase` for types and components, and `UPPER_SNAKE_CASE` for constants. Prefer `const`; use `let` only for reassignment. The legacy `index.html` is kept for reference only, no longer needs to be kept in parity with the new application, and should not undergo wholesale formatting or maintenance edits.
 
 Define shared schemas for API payloads, database-derived events, model responses, and job states. Validate untrusted data at every boundary: browser to API, database to domain model, worker to LM Studio, and model output to accepted turn. Keep prompts versioned and make prompt-protocol changes explicit because they invalidate saved LM Studio chains.
 

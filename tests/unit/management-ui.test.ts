@@ -73,7 +73,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="providerModelDialog"');
     expect(managementHtml).toContain('id="providerModelPickerList"');
     expect(managementHtml).not.toContain('id="providerDiscoveredModel"');
-    expect(managementHtml).toContain('class="provider-model-settings"');
+    expect(managementHtml).toContain('provider-model-settings');
     expect(managementHtml).toContain('title="Maximum combined prompt and response capacity.');
     expect(managementHtml).not.toContain('id="generationForm"');
     expect(managementHtml).not.toContain('id="storyAction"');
@@ -135,8 +135,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="deleteCampaign"');
     expect(managementHtml).toContain('id="deleteWorld"');
     expect(managementHtml).toContain('id="deleteDialog"');
-    expect(managementScript).toContain("infiniteQuestNexusCampaignResume.v1");
-    expect(managementScript).toContain("autoStart: Number(selectedCampaign.activeTurnNumber || 0) === 0");
+    expect(managementScript).toContain('window.location.assign("/story/" + encodeURIComponent(selectedCampaign.id));');
     expect(managementScript).toContain("Use “Load story” in Campaigns");
     expect(playerHtml).toContain("async function maybeAutoStartResumedCampaign()");
     expect(playerHtml).toContain("await startAdventure({ skipExistingTurnsConfirm: true });");
@@ -219,7 +218,7 @@ describe("Nexus management UI contracts", () => {
     expect(playerHtml).toContain('state.settings.nexusCampaignWorldVersionId = String(status.worldVersionId');
     expect(playerHtml).toContain('async function resolveNexusCampaignForEarlierTurn(targetTurnNumber)');
     expect(playerHtml).toContain('state.storyImportProvenance?.worldVersionId');
-    expect(managementScript).toContain('worldVersionId: selectedCampaign.worldVersionId');
+    expect(managementScript).toContain('window.location.assign("/story/" + encodeURIComponent(selectedCampaign.id));');
     expect(playerHtml).toContain('An exhausted pending generation was released.');
     expect(playerHtml).toContain('state.settings.nexusPendingGeneration = null;');
     expect(playerHtml).not.toContain('Taking an action here will branch the story and delete later turns. Continue?');

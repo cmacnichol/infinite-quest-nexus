@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { decryptCredential, encryptCredential } from "../../packages/story-engine/src/credentials.js";
-import { parseStoryOutput } from "../../packages/story-engine/src/output.js";
+import { extractPartialNarration, parseStoryOutput } from "../../packages/story-engine/src/output.js";
 import { buildStoryUserPrompt, STORY_PROMPT_PROTOCOL_VERSION, STORY_SYSTEM_PROMPT, recoveryInstruction } from "../../packages/story-engine/src/prompt.js";
 
 function story(overrides: Record<string, unknown> = {}) {
@@ -178,5 +178,27 @@ describe("story output integrity", () => {
     expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v7-readable-paragraphs");
     expect(STORY_SYSTEM_PROMPT).toContain("paragraphs separated by two newline characters");
     expect(STORY_SYSTEM_PROMPT).toContain("change of speaker, scene transition, or meaningful shift in focus");
+  });
+
+  it("extracts partial narration safely from incomplete streaming JSON", () => {
+    const partial = `{"narration": "The heavy stone door creaked open.\\n\\nA shadow moved ahead`;
+    const extracted = extractPartialNarration(partial);
+    expect(extracted).toBe("The heavy stone door creaked open.\n\nA shadow moved ahead");
+  });
+
+  it("extracts finished narration from JSON that is still streaming choices", () => {
+    const partial = `{"narration": "The heavy stone door creaked open.", "choices": ["Enter the tunnel."`;
+    const extracted = extractPartialNarration(partial);
+    expect(extracted).toBe("The heavy stone door creaked open.");
+  });
+
+  it("suppresses partial narration if mechanics terms appear during streaming", () => {
+    const partialWithMechanics = `{"narration": "You attempt to open the chest. d100 check required`;
+    expect(extractPartialNarration(partialWithMechanics)).toBe("");
+  });
+
+  it("safely handles incomplete escape sequences at chunk boundaries", () => {
+    const chunkAtEscape = `{"narration": "The door\\`;
+    expect(extractPartialNarration(chunkAtEscape)).toBe("The door");
   });
 });

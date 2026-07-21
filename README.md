@@ -1,5 +1,7 @@
 # Infinite Quest Nexus
 
+[![AI Assisted](https://img.shields.io/badge/AI-Assisted-7c3aed?style=flat-square)](#ai-assisted-development)
+
 Infinite Quest Nexus is the server-backed evolution of Infinite Quest. PostgreSQL owns worlds, campaigns, accepted turns, and Chronicle memory so story continuity no longer depends on a browser session, a model instance, or an LLM context chain.
 
 The current implementation is a production-shaped vertical slice. It serves the existing Infinite Quest client, imports portable `.story` JSON into PostgreSQL, constructs fiction-only local Chronicle memory, and can generate validated database-backed turns through LM Studio, OpenRouter, Manifest, or another OpenAI-compatible text endpoint. The same application image runs in combined, API, worker, or recovery migration roles.
@@ -282,6 +284,10 @@ The repository workflows validate the TypeScript project, migrations, PostgreSQL
 - Text-provider credentials are not shared with the independently configured image provider.
 - Rejected and incomplete generation output is retained only in private operational attempt records and never enters accepted turns or Chronicle memory.
 - Do not commit `.env`, `.story` exports, database dumps, or provider keys.
+
+## AI-assisted development
+
+AI tools were used in the creation and ongoing development of Infinite Quest Nexus, including assistance with design exploration, implementation, testing, debugging, and documentation. AI-assisted contributions are reviewed and validated before they are accepted into the project.
 
 ## Next implementation milestones
 

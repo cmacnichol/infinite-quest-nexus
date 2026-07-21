@@ -8,7 +8,7 @@ import { storyImportRequestSchema } from "../../packages/contracts/src/imports.j
 import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
-import { enqueueGeneration, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, runGenerationJob, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
+import { branchCampaign, enqueueGeneration, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, runGenerationJob, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
 import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/api/src/memory-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 
@@ -287,6 +287,33 @@ integration("durable Story Engine integration", () => {
       amount: costBefore.rows[0]?.amount,
       attributed: "0"
     });
+  });
+
+  it("branches an existing campaign up to a specific turn into a separate independent campaign", async () => {
+    const imported = await campaign();
+    replies.push({ content: validStory() });
+    await queue(imported.campaignId);
+    await runGenerationJob(pool, "story-worker-branch", 30, credentialSecret);
+
+    const branched = await branchCampaign(pool, imported.campaignId, { targetTurnNumber: 2, title: "My Branch Story" });
+    expect(branched).toMatchObject({
+      title: "My Branch Story",
+      status: "active",
+      activeTurnNumber: 2
+    });
+    expect(branched.id).not.toBe(imported.campaignId);
+
+    const parentCampaign = await pool.query<{ active_turn_number: number }>(
+      "SELECT active_turn_number FROM campaigns WHERE id = $1",
+      [imported.campaignId]
+    );
+    expect(parentCampaign.rows[0]?.active_turn_number).toBe(3);
+
+    const branchTurns = await pool.query<{ turn_number: number }>(
+      "SELECT turn_number FROM turns WHERE campaign_id = $1 ORDER BY turn_number ASC",
+      [branched.id]
+    );
+    expect(branchTurns.rows.map((row) => row.turn_number)).toEqual([1, 2]);
   });
 
   it("rejects rewinds with HTTP 409 when expectedCurrentTurnNumber does not match active_turn_number", async () => {

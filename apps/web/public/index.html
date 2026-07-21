@@ -14,66 +14,25 @@
       <p id="managementDescription">Author reusable versioned worlds, run persistent campaigns, and inspect the fiction-only memory selected for generation.</p>
     </div>
     <nav class="header-actions" aria-label="Nexus sections">
-      <a class="button secondary" href="#providers">Providers</a>
-      <a class="button secondary" href="#world-library">Worlds</a>
-      <a class="button secondary" href="#campaigns">Campaigns</a>
-      <a class="button primary" href="/">Story view</a>
+      <a id="navProviders" class="button secondary" href="#providers">Providers</a>
+      <a id="navWorlds" class="button secondary" href="#world-library">Worlds</a>
+      <a id="navCampaigns" class="button secondary" href="#campaigns">Campaigns</a>
+      <a id="storyViewLink" class="button accent" href="/story">Story view ➜</a>
     </nav>
   </header>
 
   <main>
     <section id="providers" class="card provider-card anchor-section provider-management" aria-labelledby="provider-title">
-      <div>
-        <p class="eyebrow">Story Engine</p>
-        <h2 id="provider-title">Provider profiles</h2>
-        <p>Add independent profiles for story text, Chronicle embeddings, and image generation. API keys are encrypted before storage and are never returned to this browser.</p>
-      </div>
-      <form id="providerForm" class="provider-form">
-        <label title="A unique, recognizable name used when assigning this provider profile to campaigns.">Profile name<input id="providerName" required maxlength="120" value="Local LM Studio"></label>
-        <label title="The API protocol and provider-specific adapter Nexus uses for model discovery and generation.">Provider
-          <select id="providerType">
-            <option value="lmstudio">LM Studio native</option>
-            <option value="openrouter">OpenRouter</option>
-            <option value="manifest">Manifest</option>
-            <option value="openai_compatible">OpenAI-compatible</option>
-          </select>
-        </label>
-        <label title="Limits this profile to story text, Chronicle embeddings, or illustration generation so credentials and endpoints remain independent.">Role
-          <select id="providerRole">
-            <option value="text">Story text</option>
-            <option value="embedding">Chronicle embeddings</option>
-            <option value="image">Illustrations</option>
-          </select>
-        </label>
-        <label title="The endpoint root Nexus calls from the server. Do not include a model-specific path.">Base URL<input id="providerBaseUrl" required type="url" value="http://host.docker.internal:1234"></label>
-        <label title="Bearer credential sent only to this provider. Leave blank for unauthenticated local endpoints or while editing to retain the stored key.">API key (optional for local endpoints)<input id="providerApiKey" type="password" autocomplete="off"></label>
-        <div class="provider-model-settings">
-          <label class="model-discovery-field" title="The model Nexus uses when a campaign does not request a model override. Refresh to load the endpoint inventory.">
-            <span class="field-label-row"><span>Default model</span><button id="refreshProviderModels" class="mini-icon-button" type="button" aria-label="Refresh models from endpoint" title="Refresh active and inactive models from this endpoint">↻</button></span>
-            <input id="providerDefaultModel" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog" placeholder="Click to choose a model">
-          </label>
-          <label title="Maximum combined prompt and response capacity. Selecting a discovered model applies the endpoint-advertised value automatically.">Context window
-            <input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768" aria-describedby="providerContextSource">
-            <span id="providerContextSource" class="field-note">Editable until model discovery supplies a context length.</span>
-          </label>
-          <label title="Maximum tokens the provider may generate in one response. This must leave enough context capacity for the prompt.">Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Story Engine</p>
+          <h2 id="provider-title">Provider profiles</h2>
+          <p>Add independent profiles for story text, Chronicle embeddings, and image generation. API keys are encrypted before storage and are never returned to this browser.</p>
         </div>
-        <label title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
-        <details id="providerAdvancedSettings" class="provider-advanced-settings">
-          <summary>Advanced request settings</summary>
-          <div class="provider-advanced-fields">
-            <label title="Maximum wall-clock time Nexus waits for one provider HTTP request, including response headers and body. Increase this for slower local generation.">
-              Request timeout (minutes)
-              <input id="providerRequestTimeoutMinutes" type="number" min="1" max="60" step="0.5" value="5" required>
-              <span class="field-note">Defaults to 5 minutes. When reached, Nexus closes the request and records an explicit timeout diagnostic.</span>
-            </label>
-          </div>
-        </details>
-        <label class="toggle-field" title="Disabled profiles remain stored but cannot be selected for new provider work."><input id="providerEnabled" type="checkbox" checked> Profile enabled</label>
-        <label class="toggle-field" title="Used when a campaign leaves this provider role unassigned. A role with only one enabled profile treats it as the default automatically."><input id="providerIsDefault" type="checkbox"> Make this the default profile for its role</label>
-        <button id="saveProvider" class="button primary" type="submit">Save provider</button>
-        <button id="cancelProviderEdit" class="button secondary hidden" type="button">Cancel edit</button>
-      </form>
+        <div class="button-row">
+          <button id="newProviderButton" class="button primary" type="button">New provider profile</button>
+        </div>
+      </div>
       <div id="providerProfileList" class="provider-profile-list"><p class="muted">Loading provider profiles…</p></div>
       <div id="providerStatus" class="status" role="status" aria-live="polite">LM Studio and compatible provider calls are server-side, so browser CORS does not apply.</div>
     </section>
@@ -103,38 +62,44 @@
             </div>
             <label>Published version<select id="worldVersionSelect" disabled><option value="">No published versions</option></select></label>
           </div>
-          <div class="world-fields">
+          <div class="world-tabs" data-tab-group="world-editor">
+            <button type="button" class="tab-button active" data-tab-target="tab-overview">Overview</button>
+            <button type="button" class="tab-button" data-tab-target="tab-lore">Lore</button>
+            <button type="button" class="tab-button" data-tab-target="tab-mechanics">Mechanics & Characters</button>
+          </div>
+          <div class="world-fields tab-content active" id="tab-overview" data-tab-group="world-editor">
             <label>Title<input id="worldTitle" required maxlength="200" disabled></label>
             <label>Genre<input id="worldGenre" maxlength="2000" disabled></label>
             <label>Tone<input id="worldTone" maxlength="2000" disabled></label>
+            <label class="wide-field">Release notes<input id="worldReleaseNotes" maxlength="10000" disabled placeholder="Describe this published version without changing canon"></label>
+          </div>
+          <div class="world-fields tab-content" id="tab-lore" data-tab-group="world-editor">
             <label class="wide-field">Premise<textarea id="worldPremise" rows="3" maxlength="200000" disabled></textarea></label>
             <label class="wide-field">Background and canon<textarea id="worldBackground" rows="6" maxlength="200000" disabled></textarea></label>
+            <label class="wide-field">Opening action<textarea id="worldFirstAction" rows="2" maxlength="200000" disabled></textarea></label>
+          </div>
+          <div class="world-fields tab-content" id="tab-mechanics" data-tab-group="world-editor">
+            <label class="wide-field">Rules<textarea id="worldRules" rows="3" maxlength="200000" disabled></textarea></label>
             <label class="wide-field">Legacy/default character guidance<textarea id="worldCharacter" rows="3" maxlength="200000" disabled></textarea></label>
             <div class="wide-field character-roster-field">
               <strong>Playable character roster</strong>
               <span class="field-note">Imported character options are retained in the world version and selected when a campaign is created.</span>
               <div id="worldCharacterRoster" class="character-roster"><span class="muted">No structured character roster.</span></div>
             </div>
-            <label class="wide-field">Opening action<textarea id="worldFirstAction" rows="2" maxlength="200000" disabled></textarea></label>
-            <label class="wide-field">Rules<textarea id="worldRules" rows="3" maxlength="200000" disabled></textarea></label>
-            <label class="wide-field">Release notes<input id="worldReleaseNotes" maxlength="10000" disabled placeholder="Describe this published version without changing canon"></label>
-          </div>
-          <div class="quick-create-fields">
-            <label>Fork title<input id="forkWorldTitle" maxlength="200" disabled placeholder="Name an independent fork"></label>
-            <label>New campaign title<input id="newCampaignTitle" maxlength="200" disabled placeholder="Name a campaign for the selected version"></label>
-            <label>Campaign player character
-              <select id="newCampaignCharacter" disabled><option value="">Select a published world version</option></select>
-              <span id="newCampaignCharacterNote" class="field-note">The selected character is snapshotted into the new campaign.</span>
-            </label>
           </div>
           <div class="button-row world-actions">
             <button id="saveWorldDraft" class="button primary" type="submit" disabled>Save draft</button>
             <button id="publishWorld" class="button secondary" type="button" disabled>Publish version</button>
-            <button id="forkWorld" class="button secondary" type="button" disabled>Fork selected version</button>
-            <button id="createCampaign" class="button secondary" type="button" disabled>Create campaign</button>
-            <button id="exportWorld" class="button secondary" type="button" disabled>Export version</button>
-            <button id="archiveWorld" class="button danger" type="button" disabled>Archive</button>
-            <button id="deleteWorld" class="button danger" type="button" disabled>Delete world</button>
+            <details class="dropdown-menu">
+              <summary class="button secondary">More actions</summary>
+              <div class="dropdown-content">
+                <button id="forkWorldModalBtn" class="button secondary" type="button" disabled>Fork selected version</button>
+                <button id="createCampaignModalBtn" class="button secondary" type="button" disabled>Create campaign</button>
+                <button id="exportWorld" class="button secondary" type="button" disabled>Export version</button>
+                <button id="archiveWorld" class="button danger" type="button" disabled>Archive</button>
+                <button id="deleteWorld" class="button danger" type="button" disabled>Delete world</button>
+              </div>
+            </details>
           </div>
           <div id="worldStatus" class="status" role="status" aria-live="polite">World content is stored in PostgreSQL, never embedded in this client.</div>
         </form>
@@ -413,6 +378,100 @@
       <div class="button-row confirm-actions">
         <button class="button secondary" type="submit" value="cancel">Cancel</button>
         <button id="confirmDelete" class="button danger" type="submit" value="confirm" disabled>Permanently delete</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="providerDialog" class="confirm-dialog provider-dialog-modal" aria-labelledby="providerDialogTitle">
+    <div class="provider-dialog-header section-heading" style="padding: 24px 24px 0;">
+      <h2 id="providerDialogTitle">Provider Profile</h2>
+    </div>
+    <form id="providerForm" class="provider-form">
+      <fieldset>
+        <legend>Connection Settings</legend>
+        <div class="fieldset-content">
+          <label title="A unique, recognizable name used when assigning this provider profile to campaigns.">Profile name<input id="providerName" required maxlength="120" value="Local LM Studio"></label>
+          <label title="The API protocol and provider-specific adapter Nexus uses for model discovery and generation.">Provider
+            <select id="providerType">
+              <option value="lmstudio">LM Studio native</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="manifest">Manifest</option>
+              <option value="openai_compatible">OpenAI-compatible</option>
+            </select>
+          </label>
+          <label title="Limits this profile to story text, Chronicle embeddings, or illustration generation so credentials and endpoints remain independent.">Role
+            <select id="providerRole">
+              <option value="text">Story text</option>
+              <option value="embedding">Chronicle embeddings</option>
+              <option value="image">Illustrations</option>
+            </select>
+          </label>
+          <label title="The endpoint root Nexus calls from the server. Do not include a model-specific path.">Base URL<input id="providerBaseUrl" required type="url" value="http://host.docker.internal:1234"></label>
+          <label title="Bearer credential sent only to this provider. Leave blank for unauthenticated local endpoints or while editing to retain the stored key.">API key (optional for local endpoints)<input id="providerApiKey" type="password" autocomplete="off"></label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Model Configuration</legend>
+        <div class="fieldset-content provider-model-settings">
+          <label class="model-discovery-field" title="The model Nexus uses when a campaign does not request a model override. Refresh to load the endpoint inventory.">
+            <span class="field-label-row"><span>Default model</span><button id="refreshProviderModels" class="mini-icon-button" type="button" aria-label="Refresh models from endpoint" title="Refresh active and inactive models from this endpoint">↻</button></span>
+            <input id="providerDefaultModel" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog" placeholder="Click to choose a model">
+          </label>
+          <label title="Maximum combined prompt and response capacity. Selecting a discovered model applies the endpoint-advertised value automatically.">Context window
+            <input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768" aria-describedby="providerContextSource">
+            <span id="providerContextSource" class="field-note">Editable until model discovery supplies a context length.</span>
+          </label>
+          <label title="Maximum tokens the provider may generate in one response. This must leave enough context capacity for the prompt.">Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
+          <label title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
+        </div>
+      </fieldset>
+      <details id="providerAdvancedSettings" class="provider-advanced-settings">
+        <summary>Advanced request settings</summary>
+        <div class="provider-advanced-fields">
+          <label title="Maximum wall-clock time Nexus waits for one provider HTTP request, including response headers and body. Increase this for slower local generation.">
+            Request timeout (minutes)
+            <input id="providerRequestTimeoutMinutes" type="number" min="1" max="60" step="0.5" value="5" required>
+            <span class="field-note">Defaults to 5 minutes. When reached, Nexus closes the request and records an explicit timeout diagnostic.</span>
+          </label>
+        </div>
+      </details>
+      <fieldset>
+        <legend>Preferences</legend>
+        <div class="fieldset-content">
+          <label class="toggle-field" title="Enables real-time token streaming for compatible models during story turn generation, allowing live narration text updates on the frontend."><input id="providerStreaming" type="checkbox"> Streaming</label>
+          <label class="toggle-field" title="Disabled profiles remain stored but cannot be selected for new provider work."><input id="providerEnabled" type="checkbox" checked> Profile enabled</label>
+          <label class="toggle-field" title="Used when a campaign leaves this provider role unassigned. A role with only one enabled profile treats it as the default automatically."><input id="providerIsDefault" type="checkbox"> Make this the default profile for its role</label>
+        </div>
+      </fieldset>
+      <div class="button-row confirm-actions">
+        <button id="cancelProviderEdit" class="button secondary" type="button">Cancel</button>
+        <button id="saveProvider" class="button primary" type="submit">Save provider</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="forkWorldDialog" class="confirm-dialog" aria-labelledby="forkWorldTitleLabel">
+    <form id="forkWorldForm">
+      <h2 id="forkWorldTitleLabel">Fork Selected Version</h2>
+      <label>Fork title<input id="forkWorldTitle" maxlength="200" placeholder="Name an independent fork" required></label>
+      <div class="button-row confirm-actions">
+        <button id="cancelForkWorld" class="button secondary" type="button">Cancel</button>
+        <button id="confirmForkWorld" class="button primary" type="submit">Fork world</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="createCampaignDialog" class="confirm-dialog" aria-labelledby="createCampaignTitleLabel">
+    <form id="createCampaignForm">
+      <h2 id="createCampaignTitleLabel">Create Campaign</h2>
+      <label>New campaign title<input id="newCampaignTitle" maxlength="200" placeholder="Name a campaign for the selected version" required></label>
+      <label>Campaign player character
+        <select id="newCampaignCharacter"><option value="">Select a published world version</option></select>
+        <span id="newCampaignCharacterNote" class="field-note">The selected character is snapshotted into the new campaign.</span>
+      </label>
+      <div class="button-row confirm-actions">
+        <button id="cancelCreateCampaign" class="button secondary" type="button">Cancel</button>
+        <button id="confirmCreateCampaign" class="button primary" type="submit">Create campaign</button>
       </div>
     </form>
   </dialog>

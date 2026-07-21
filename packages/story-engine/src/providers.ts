@@ -20,6 +20,7 @@ export type ProviderRequest = {
   previousResponseId?: string;
   recoveryInput?: string;
   rejectedResponse?: string;
+  onChunk?: (delta: string, accumulated: string) => void | Promise<void>;
 };
 
 export type ProviderResult = {
@@ -299,6 +300,65 @@ export async function ensureLmStudioModelLoaded(profile: TextProviderProfile, op
   }
 }
 
+async function readSseStream(
+  response: Response,
+  onChunk: (delta: string, accumulated: string) => void | Promise<void>
+): Promise<{ content: string; finalData: Record<string, any>; allData: Record<string, any>[] }> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Response body stream is not readable.");
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let accumulated = "";
+  let finalData: Record<string, any> = {};
+  const allData: Record<string, any>[] = [];
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n\r?\n/);
+    buffer = lines.pop() || "";
+    for (const block of lines) {
+      const dataLines = block
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+      for (const dataStr of dataLines) {
+        if (!dataStr || dataStr === "[DONE]") continue;
+        try {
+          const parsed = JSON.parse(dataStr);
+          allData.push(parsed);
+          finalData = { ...finalData, ...parsed };
+          let delta = "";
+          if (typeof parsed.content === "string" && parsed.type?.includes("delta")) {
+            delta = parsed.content;
+          } else if (parsed.choices?.[0]?.delta?.content !== undefined) {
+            delta = String(parsed.choices[0].delta.content || "");
+          } else if (typeof parsed.choices?.[0]?.text === "string") {
+            delta = parsed.choices[0].text;
+          } else if (Array.isArray(parsed.output)) {
+            const lastMsg = parsed.output.findLast?.((item: any) => item?.type === "message" || item?.type === "message.delta");
+            if (lastMsg?.content && typeof lastMsg.content === "string") {
+              if (lastMsg.content.startsWith(accumulated)) {
+                delta = lastMsg.content.slice(accumulated.length);
+              } else if (!accumulated.startsWith(lastMsg.content)) {
+                delta = lastMsg.content;
+              }
+            }
+          }
+          if (delta) {
+            accumulated += delta;
+            await onChunk(delta, accumulated);
+          }
+        } catch {
+          // ignore malformed or non-json SSE event data
+        }
+      }
+    }
+  }
+  return { content: accumulated, finalData, allData };
+}
+
 async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, fetcher: Fetch): Promise<ProviderResult> {
   await ensureLmStudioModelLoaded(profile, "story generation model loading", fetcher);
   const rejectedResponse = String(request.rejectedResponse || "").trim()
@@ -311,16 +371,37 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
         ? `${request.input}${rejectedResponse ? `\n\nREJECTED RESPONSE TO REWRITE:\n${rejectedResponse}` : ""}\n\nRECOVERY REQUIREMENT:\n${request.recoveryInput}`
         : request.input,
     store: true,
-    stream: false,
+    stream: Boolean(request.onChunk),
     temperature: request.recoveryInput ? 0.2 : profile.temperature,
     max_output_tokens: profile.maxOutputTokens
   };
   if (request.previousResponseId) payload.previous_response_id = request.previousResponseId;
   else payload.system_prompt = request.systemPrompt;
-  // Supplying context_length while targeting an already loaded LM Studio instance can load a duplicate.
-  // The selected model/instance from inventory is therefore sent without a load-time override.
   const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`;
   const response = await providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile), body: JSON.stringify(payload) }, fetcher);
+  if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
+    const { content, finalData, allData } = await readSseStream(response, request.onChunk);
+    const stats = allData.findLast((item) => item.stats)?.stats || finalData.stats || {};
+    const outputTokens = Number(stats.total_output_tokens || 0);
+    const finishValues = [
+      finalData.status, finalData.finish_reason, finalData.stop_reason, finalData.incomplete_details?.reason,
+      ...allData.flatMap((item: any) => [
+        item.status, item.finish_reason, item.stop_reason, item.incomplete_details?.reason,
+        ...(Array.isArray(item.output) ? item.output.flatMap((out: any) => [out?.status, out?.finish_reason, out?.stop_reason, out?.incomplete_details?.reason]) : [])
+      ])
+    ];
+    const responseId = String(allData.map((item) => item.response_id).find(Boolean) || finalData.response_id || "");
+    return {
+      content: content.trim(),
+      responseId,
+      finishReason: String(finishValues.find(Boolean) || ""),
+      outputLimited: limitReason(finishValues) || (outputTokens > 0 && outputTokens >= profile.maxOutputTokens),
+      modelInstanceId: String(finalData.model_instance_id || profile.model),
+      usage: { inputTokens: Number(stats.input_tokens || 0), outputTokens, totalTokens: Number(stats.input_tokens || 0) + outputTokens },
+      reportedCost: null,
+      rawMetadata: { status: finalData.status || "", modelInstanceId: finalData.model_instance_id || "" }
+    };
+  }
   const data = await checkedJson(response, profile, "story generation", url);
   const messages = (Array.isArray(data.output) ? data.output : []).filter((item: any) => item?.type === "message");
   const content = String(messages.at(-1)?.content ?? "").trim();
@@ -357,6 +438,10 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     max_tokens: profile.maxOutputTokens,
     response_format: { type: "json_object" }
   };
+  if (request.onChunk) {
+    payload.stream = true;
+    payload.stream_options = { include_usage: true };
+  }
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
   const send = () => providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile), body: JSON.stringify(payload) }, fetcher);
   let response = await send();
@@ -367,6 +452,27 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       delete payload.response_format;
       response = await send();
     }
+  }
+  if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
+    const { content, finalData, allData } = await readSseStream(response, request.onChunk);
+    const usageObj = allData.findLast((item) => item.usage)?.usage || finalData.usage || {};
+    const finishReason = String(allData.map((item) => item.choices?.[0]?.finish_reason).find(Boolean) || finalData.finish_reason || "");
+    const responseId = String(allData.map((item) => item.id).find(Boolean) || finalData.id || "");
+    const modelInstanceId = String(allData.map((item) => item.model).find(Boolean) || finalData.model || profile.model);
+    return {
+      content: content.trim(),
+      responseId,
+      finishReason,
+      outputLimited: limitReason([finishReason]),
+      modelInstanceId,
+      usage: {
+        inputTokens: Number(usageObj.prompt_tokens || 0),
+        outputTokens: Number(usageObj.completion_tokens || 0),
+        totalTokens: Number(usageObj.total_tokens || 0)
+      },
+      reportedCost: reportedProviderCost(usageObj),
+      rawMetadata: { model: modelInstanceId, provider: finalData.provider || "" }
+    };
   }
   const data = await checkedJson(response, profile, "story generation", url);
   const choice = data.choices?.[0] || {};

@@ -301,6 +301,8 @@
       color: var(--muted);
       font-size: .82rem;
     }
+    .clickable-pill { cursor: pointer; transition: all 0.2s ease; user-select: none; }
+    .clickable-pill:hover, .clickable-pill:focus-visible { border-color: var(--gold); background: rgba(255,255,255,.14); color: #fff; outline: none; }
 
     .story-area {
       padding: 20px;
@@ -457,6 +459,8 @@
       display: grid;
       gap: 8px;
     }
+    button.history-card, .history-card[role="button"] { text-align: left; width: 100%; cursor: pointer; transition: border-color 0.18s ease, background 0.18s ease; font-family: inherit; }
+    button.history-card:hover, button.history-card:focus-visible, .history-card[role="button"]:hover, .history-card[role="button"]:focus-visible { border-color: var(--gold); background: rgba(255,255,255,.085); outline: none; }
 
     .track-card h4, .history-card h4 { margin: 0; font-size: .95rem; color: #fff; }
     .track-card p, .history-card p { margin: 0; color: var(--dim); font-size: .86rem; line-height: 1.45; }
@@ -1041,6 +1045,27 @@
       align-self: center;
       min-width: 120px;
     }
+
+    .profile-icon-btn {
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text, #f0f4f8);
+      font-size: 1.15rem;
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      padding: 0;
+      line-height: 1;
+    }
+    .profile-icon-btn:hover {
+      background: rgba(255, 255, 255, 0.18);
+      border-color: var(--accent, #82beff);
+      transform: scale(1.04);
+    }
   </style>
 </head>
 <body>
@@ -1067,6 +1092,7 @@
           <button id="btnOpenActivityLog" type="button" role="menuitem">Activity Log</button>
           <button id="btnRestartGettingStarted" type="button" role="menuitem">Restart Getting Started Dialogue</button>
         </div>
+        <button id="btnOpenUserProfile" class="profile-icon-btn" type="button" aria-label="User Profile" title="User Profile">👤</button>
       </div>
     </header>
 
@@ -1075,8 +1101,8 @@
         <div class="story-top">
           <h2 id="storyTitle">No adventure yet</h2>
           <div class="statusbar">
-            <span class="pill" id="turnPill">Turn 0</span>
-            <span class="pill" id="viewPill">Viewing latest</span>
+            <span class="pill clickable-pill" id="turnPill" role="button" tabindex="0" title="Click to view and navigate turns">Turn 0</span>
+            <span class="pill clickable-pill" id="viewPill" role="button" tabindex="0" title="Click to view and navigate turns">Viewing latest</span>
             <span class="pill" id="busyPill">Ready</span>
           </div>
         </div>
@@ -1425,6 +1451,24 @@
       </div>
       <div class="row wrap dialog-actions">
         <button id="btnActivityLogDone" class="primary" type="button">Done</button>
+    </div>
+  </dialog>
+
+  <dialog id="turnHistoryDialog" class="world-gen-dialog app-dialog wide-dialog">
+    <div class="world-gen-card">
+      <div class="dialog-header">
+        <div>
+          <h3>Turn History & Navigation</h3>
+          <p class="mini">Select any previous turn to jump directly to that scene. Acting from an earlier turn allows resetting or branching the campaign.</p>
+        </div>
+        <button id="btnCloseTurnHistory" class="small ghost" type="button" aria-label="Close turn history">✕</button>
+      </div>
+      <div class="dialog-scroll">
+        <div id="turnHistoryModalList" class="stack"></div>
+      </div>
+      <div class="row wrap dialog-actions" style="justify-content: flex-end;">
+        <button id="btnTurnHistoryJumpLatest" class="accent" type="button">Jump to Latest Turn</button>
+        <button id="btnTurnHistoryDone" class="primary" type="button">Done</button>
       </div>
     </div>
   </dialog>
@@ -1628,7 +1672,29 @@
     </div>
   </dialog>
 
-
+  <dialog id="userProfileDialog" class="world-gen-dialog app-dialog">
+    <div class="world-gen-card">
+      <div class="dialog-header">
+        <div>
+          <h3>User Profile & Settings</h3>
+          <p class="mini">Manage your profile and adventure preferences.</p>
+        </div>
+        <button id="btnCloseUserProfile" class="small ghost" type="button" aria-label="Close user profile">✕</button>
+      </div>
+      <label>Display name
+        <input type="text" id="userProfileDisplayName" placeholder="e.g. Initial Owner" maxlength="120">
+      </label>
+      <label class="checkbox" style="margin-top: 14px; display: flex; align-items: center; gap: 8px; cursor: pointer;">
+        <input type="checkbox" id="userProfileAutoSubmitChoices" checked>
+        <span>Auto-submit story turns when selecting a choice</span>
+      </label>
+      <p class="mini" style="margin-top: 4px; color: var(--text-dim, #9fb3c8);">When unchecked, clicking a story choice will copy it into your custom action box so you can review and edit before submitting.</p>
+      <div class="row wrap dialog-actions" style="justify-content: flex-end; margin-top: 20px;">
+        <button id="btnCancelUserProfile" type="button">Cancel</button>
+        <button id="btnSaveUserProfile" class="primary" type="button">Save Profile</button>
+      </div>
+    </div>
+  </dialog>
 
   <script>
     const STORAGE_KEY = "infiniteQuestNexusClientState.v1";
@@ -1817,7 +1883,13 @@
         nexusCampaignWorldVersionId: "",
         nexusBranchWorldVersionId: "",
         nexusCampaignTurnCount: 0,
-        nexusPendingGeneration: null
+        nexusPendingGeneration: null,
+        autoSubmitTurnChoices: true
+      },
+      userProfile: {
+        id: null,
+        systemKey: null,
+        displayName: "Initial Owner"
       },
       world: {
         title: "",
@@ -5069,8 +5141,15 @@
         const btn = document.createElement("button");
         btn.className = "choice";
         btn.innerHTML = `<span>${escapeHtml(choice)}</span>`;
-        btn.title = "Copy this option into the action box";
-        btn.addEventListener("click", () => copyChoiceToAction(choice));
+        const autoSubmit = state.settings?.autoSubmitTurnChoices !== false;
+        btn.title = autoSubmit ? "Click to submit this option immediately" : "Copy this option into the action box";
+        btn.addEventListener("click", () => {
+          if (state.settings?.autoSubmitTurnChoices !== false) {
+            takeAction(choice);
+          } else {
+            copyChoiceToAction(choice);
+          }
+        });
         choiceArea.appendChild(btn);
       });
     }
@@ -5802,26 +5881,43 @@
 
     function renderHistory() {
       const list = $("historyList");
+      const modalList = $("turnHistoryModalList");
+      if (list) populateHistoryContainer(list);
+      if (modalList) populateHistoryContainer(modalList);
+    }
+
+    function populateHistoryContainer(list) {
       list.innerHTML = "";
       if (!state.turns.length) {
         list.innerHTML = `<p class="mini">No turns generated yet.</p>`;
         return;
       }
+      const currentIdx = state.viewIndex === -1 ? state.turns.length - 1 : state.viewIndex;
       state.turns.forEach((turn, idx) => {
         const card = document.createElement("button");
         card.className = "history-card";
         card.style.textAlign = "left";
         card.innerHTML = `
-          <h4>${idx === state.viewIndex ? "◆ " : ""}Turn ${turn.turnNumber}</h4>
+          <h4>${idx === currentIdx ? "◆ " : ""}Turn ${turn.turnNumber || idx + 1}</h4>
           <p>${escapeHtml((turn.action || "Begin").slice(0, 130))}</p>
         `;
         card.addEventListener("click", () => {
           state.viewIndex = idx;
           renderAll();
           saveState();
+          const dlg = $("turnHistoryDialog");
+          if (dlg && dlg.open && dlg.close) dlg.close();
+          const editDlg = $("editStateDialog");
+          if (editDlg && editDlg.open && editDlg.close) editDlg.close();
         });
         list.appendChild(card);
       });
+    }
+
+    function openTurnHistoryModal() {
+      renderHistory();
+      const dlg = $("turnHistoryDialog");
+      if (dlg && dlg.showModal) dlg.showModal();
     }
 
     function normalizeContent(content) {
@@ -10408,6 +10504,65 @@ ${missingList}`,
       });
     }
 
+    function openUserProfile() {
+      const dlg = $("userProfileDialog");
+      if (!dlg) return;
+      const nameInput = $("userProfileDisplayName");
+      const cbSubmit = $("userProfileAutoSubmitChoices");
+      if (nameInput) nameInput.value = state.userProfile?.displayName || "Initial Owner";
+      if (cbSubmit) cbSubmit.checked = state.settings?.autoSubmitTurnChoices !== false;
+      if (dlg.showModal) dlg.showModal();
+    }
+
+    async function saveUserProfile() {
+      const nameInput = $("userProfileDisplayName");
+      const cbSubmit = $("userProfileAutoSubmitChoices");
+      const displayName = nameInput ? nameInput.value.trim() : "";
+      const autoSubmitTurnChoices = cbSubmit ? cbSubmit.checked : true;
+
+      if (!displayName) {
+        toast("Display name is required.", 2600);
+        return;
+      }
+
+      try {
+        const res = await nexusApi("/users/me/profile", {
+          method: "PATCH",
+          body: JSON.stringify({
+            displayName,
+            settings: {
+              autoSubmitTurnChoices
+            }
+          })
+        });
+        if (res && res.user) {
+          state.userProfile = res.user;
+          if (!state.settings) state.settings = {};
+          if (res.user.settings?.autoSubmitTurnChoices !== undefined) {
+            state.settings.autoSubmitTurnChoices = res.user.settings.autoSubmitTurnChoices;
+          }
+        } else {
+          if (!state.userProfile) state.userProfile = {};
+          state.userProfile.displayName = displayName;
+          if (!state.settings) state.settings = {};
+          state.settings.autoSubmitTurnChoices = autoSubmitTurnChoices;
+        }
+        saveState();
+        const dlg = $("userProfileDialog");
+        if (dlg && dlg.close) dlg.close();
+        toast("Profile saved.", 2600);
+      } catch (err) {
+        if (!state.userProfile) state.userProfile = {};
+        state.userProfile.displayName = displayName;
+        if (!state.settings) state.settings = {};
+        state.settings.autoSubmitTurnChoices = autoSubmitTurnChoices;
+        saveState();
+        const dlg = $("userProfileDialog");
+        if (dlg && dlg.close) dlg.close();
+        toast("Saved profile settings locally.", 2600);
+      }
+    }
+
     function bindEvents() {
       const autosaveInputs = ["aiProvider", "apiKey", "customEndpoint", "customApiKey", "lmStudioEndpoint", "lmStudioApiKey", "llmModel", "llmModelCustom", "addFallbackModels", "fallbackLlmModel1", "fallbackLlmModel2", "imageModel", "imageModelCustom", "imageAspectRatio", "imageSize", "temperature", "contextWindowTokens", "maxOutputTokens", "storyLength", "worldTitle", "genre", "tone", "backgroundStory", "character", "premise", "firstAction", "rules", "suppressTriggers", "enableResponseEditing", "memoryManagementMode", "storyHistoryTokenLimit", "storyHistoryCompression"];
       autosaveInputs.forEach(id => {
@@ -10421,6 +10576,10 @@ ${missingList}`,
       $("apiKey")?.addEventListener("input", scheduleSpecialApiKeyPresetCheck);
       $("apiKey")?.addEventListener("change", () => { maybeApplySpecialApiKeyPreset(); });
       addClick("btnMenu", (event) => { event.stopPropagation(); toggleMenu(); });
+      $("btnOpenUserProfile")?.addEventListener("click", openUserProfile);
+      $("btnCloseUserProfile")?.addEventListener("click", () => $("userProfileDialog")?.close());
+      $("btnCancelUserProfile")?.addEventListener("click", () => $("userProfileDialog")?.close());
+      $("btnSaveUserProfile")?.addEventListener("click", saveUserProfile);
       document.addEventListener("click", (event) => {
         if (!$("menuDropdown") || $("menuDropdown").classList.contains("hidden")) return;
         if (!event.target.closest(".menu-wrap")) closeMenu();
@@ -10540,6 +10699,27 @@ ${missingList}`,
         takeAction(action);
       });
       addCtrlEnter("freeAction", () => $("btnTakeAction")?.click());
+      ["turnPill", "viewPill"].forEach(id => {
+        const el = $(id);
+        if (el) {
+          el.addEventListener("click", openTurnHistoryModal);
+          el.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              openTurnHistoryModal();
+            }
+          });
+        }
+      });
+      $("btnCloseTurnHistory")?.addEventListener("click", () => { const d = $("turnHistoryDialog"); if (d && d.close) d.close(); });
+      $("btnTurnHistoryDone")?.addEventListener("click", () => { const d = $("turnHistoryDialog"); if (d && d.close) d.close(); });
+      $("btnTurnHistoryJumpLatest")?.addEventListener("click", () => {
+        state.viewIndex = state.turns.length ? state.turns.length - 1 : -1;
+        renderAll();
+        saveState();
+        const d = $("turnHistoryDialog");
+        if (d && d.close) d.close();
+      });
       $("btnPrev").addEventListener("click", () => { if (state.viewIndex > 0) { state.viewIndex--; renderAll(); saveState(); } });
       $("btnNext").addEventListener("click", () => { if (state.viewIndex < state.turns.length - 1) { state.viewIndex++; renderAll(); saveState(); } });
       $("btnUndo").addEventListener("click", undoLatest);
@@ -10615,6 +10795,18 @@ ${missingList}`,
     async function bootApp() {
       bindEvents();
       loadState();
+      try {
+        const sessionRes = await nexusApi("/session");
+        if (sessionRes && sessionRes.user) {
+          state.userProfile = sessionRes.user;
+          if (sessionRes.user.settings?.autoSubmitTurnChoices !== undefined) {
+            if (!state.settings) state.settings = {};
+            state.settings.autoSubmitTurnChoices = sessionRes.user.settings.autoSubmitTurnChoices;
+          }
+        }
+      } catch (err) {
+        console.warn("Could not load session user profile:", err);
+      }
       recordActivity("system", "Application started", "success", {
         provider: providerName(),
         savedTurns: state.turns.length,

@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { mkdir } from "node:fs/promises";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -9,6 +10,7 @@ import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema, storyImportRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
 import {
+  campaignBranchSchema,
   campaignRewindSchema,
   generationRequestSchema,
   illustrationConfigSchema,
@@ -32,8 +34,10 @@ import {
 } from "../../../packages/contracts/src/world-library.js";
 import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
 import { formatNarrationParagraphs } from "../../../packages/story-engine/src/narration-formatting.js";
+import { userProfileUpdateSchema } from "../../../packages/contracts/src/users.js";
 import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js";
 import { getImportProgress, importInfiniteWorlds, previewInfiniteWorldsImport } from "./infinite-worlds-import-service.js";
+import { getSessionUserProfile, updateSessionUserProfile } from "./user-service.js";
 import {
   buildContextPreview,
   enqueueChronicleReindex,
@@ -44,7 +48,7 @@ import {
 } from "./memory-service.js";
 import { readAsset, type FilesystemAssetStore } from "./asset-service.js";
 import { createProvider, deleteProvider, discoverUnsavedProviderModels, generateProviderText, listProviders, providerModels, setDefaultProvider, updateProvider } from "./provider-service.js";
-import { enqueueGeneration, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, syncPlayerCampaignConfig } from "./generation-service.js";
+import { branchCampaign, enqueueGeneration, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, syncPlayerCampaignConfig } from "./generation-service.js";
 import {
   enqueueIllustration,
   getIllustrationConfig,
@@ -172,6 +176,18 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.get("/", async (_request, reply) => reply.type("text/html; charset=utf-8").send(await legacyIndex()));
   app.get("/index.html", async (_request, reply) => reply.type("text/html; charset=utf-8").send(await legacyIndex()));
+
+  // Story Player — clean URL for campaign gameplay
+  const storyHtml = async () => {
+    return readFile(resolve(config.webRoot, "story.html"), "utf8");
+  };
+  let storyHtmlCache: string | null = null;
+  const cachedStoryHtml = async () => {
+    storyHtmlCache ??= await storyHtml();
+    return storyHtmlCache;
+  };
+  app.get("/story", async (_request, reply) => reply.type("text/html; charset=utf-8").send(await cachedStoryHtml()));
+  app.get("/story/:campaignId", async (_request, reply) => reply.type("text/html; charset=utf-8").send(await cachedStoryHtml()));
   app.get("/health/live", async () => ({ status: "ok", role: config.role }));
   app.get("/health/ready", async (_request, reply) => {
     try {
@@ -189,9 +205,25 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   });
 
   app.get("/api/v1/session", async () => {
-    const userId = await initialOwnerId(pool);
-    return { user: { id: userId, systemKey: "initial-owner", displayName: "Initial Owner" }, authentication: "deferred" };
+    const user = await getSessionUserProfile(pool);
+    return { user, authentication: "deferred" };
   });
+
+  app.get("/api/v1/users/me", async () => ({ user: await getSessionUserProfile(pool) }));
+  app.get("/api/v1/user/profile", async () => ({ user: await getSessionUserProfile(pool) }));
+
+  app.patch("/api/v1/users/me/profile", async (request) => ({
+    user: await updateSessionUserProfile(pool, userProfileUpdateSchema.parse(request.body))
+  }));
+  app.put("/api/v1/users/me/profile", async (request) => ({
+    user: await updateSessionUserProfile(pool, userProfileUpdateSchema.parse(request.body))
+  }));
+  app.patch("/api/v1/user/profile", async (request) => ({
+    user: await updateSessionUserProfile(pool, userProfileUpdateSchema.parse(request.body))
+  }));
+  app.put("/api/v1/user/profile", async (request) => ({
+    user: await updateSessionUserProfile(pool, userProfileUpdateSchema.parse(request.body))
+  }));
 
   app.get("/api/v1/providers", async () => ({ providers: await listProviders(pool) }));
 
@@ -361,12 +393,58 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/sync-status", async (request, reply) => {
     const ownerUserId = await initialOwnerId(pool);
     const result = await pool.query(
-      `SELECT id, title, active_turn_number AS "activeTurnNumber", world_version_id AS "worldVersionId",
-              story_length_profile AS "storyLengthProfile", updated_at AS "updatedAt"
-         FROM campaigns WHERE id = $1 AND owner_user_id = $2`,
+      `SELECT c.id, c.title, c.active_turn_number AS "activeTurnNumber", c.world_version_id AS "worldVersionId",
+              c.story_length_profile AS "storyLengthProfile", c.updated_at AS "updatedAt",
+              c.selected_character_id AS "selectedCharacterId", c.character_snapshot AS "characterSnapshot",
+              c.legacy_settings AS "legacySettings", c.status,
+              w.id AS "worldId", w.title AS "worldTitle", wv.version_number AS "worldVersionNumber",
+              wv.content AS "worldContent",
+              cs.rpg_stats AS "rpgStats", cs.event_triggers AS "eventTriggers", cs.trackers AS "trackers"
+         FROM campaigns c
+         JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
+         JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
+         LEFT JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
+        WHERE c.id = $1 AND c.owner_user_id = $2`,
       [uuidSchema.parse(request.params.campaignId), ownerUserId]
     );
-    return result.rows[0] || reply.code(404).send({ error: "Not found", message: "Campaign not found." });
+    const row = result.rows[0];
+    if (!row) return reply.code(404).send({ error: "Not found", message: "Campaign not found." });
+    const content = typeof row.worldContent === "string" ? JSON.parse(row.worldContent) : (row.worldContent || {});
+    const worldOverview = content.world || {};
+    const campaign = {
+      id: row.id,
+      title: row.title,
+      activeTurnNumber: row.activeTurnNumber,
+      worldVersionId: row.worldVersionId,
+      storyLengthProfile: row.storyLengthProfile,
+      updatedAt: row.updatedAt,
+      selectedCharacterId: row.selectedCharacterId,
+      characterSnapshot: row.characterSnapshot,
+      status: row.status
+    };
+    const world = {
+      id: row.worldId,
+      title: row.worldTitle || worldOverview.title || "",
+      versionNumber: row.worldVersionNumber,
+      genre: worldOverview.genre || "",
+      tone: worldOverview.tone || "",
+      premise: worldOverview.premise || "",
+      backgroundStory: worldOverview.backgroundStory || "",
+      character: worldOverview.character || row.characterSnapshot?.characterText || row.characterSnapshot?.name || "",
+      firstAction: worldOverview.firstAction || "",
+      rules: worldOverview.rules || "",
+      playableCharacters: content.playableCharacters || []
+    };
+    const playerConfig = {
+      selectedCharacterId: row.selectedCharacterId,
+      characterSnapshot: row.characterSnapshot,
+      rpgStats: row.rpgStats || [],
+      trackers: row.trackers || [],
+      eventTriggers: row.eventTriggers || [],
+      useRpgStats: Boolean(row.legacySettings?.useRpgStats),
+      suppressEventTriggers: Boolean(row.legacySettings?.suppressEventTriggers)
+    };
+    return { ...campaign, campaign, world, playerConfig };
   });
 
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/player-config", async (request) => (
@@ -385,6 +463,16 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     )
   ));
 
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/branch", async (request, reply) => (
+    reply.code(201).send(
+      await branchCampaign(
+        pool,
+        uuidSchema.parse(request.params.campaignId),
+        campaignBranchSchema.parse(request.body)
+      )
+    )
+  ));
+
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations", async (request, reply) => {
     const body = generationRequestSchema.parse(request.body);
     const job = await enqueueGeneration(pool, uuidSchema.parse(request.params.campaignId), body);
@@ -394,6 +482,47 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId", async (request) => (
     getGenerationJob(pool, uuidSchema.parse(request.params.jobId))
   ));
+
+  app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/stream", async (request, reply) => {
+    const jobId = uuidSchema.parse(request.params.jobId);
+    reply.raw.setHeader("Content-Type", "text/event-stream");
+    reply.raw.setHeader("Cache-Control", "no-cache");
+    reply.raw.setHeader("Connection", "keep-alive");
+    if (typeof reply.raw.flushHeaders === "function") reply.raw.flushHeaders();
+
+    let isClosed = false;
+    request.raw.on("close", () => { isClosed = true; });
+
+    let lastSentJson = "";
+    while (!isClosed) {
+      try {
+        const job = await getGenerationJob(pool, jobId);
+        const currentJson = JSON.stringify({
+          id: job.id,
+          status: job.status,
+          action: job.action,
+          partialOutput: job.partialOutput || null,
+          partialNarration: job.partialNarration || null,
+          errorMessage: job.errorMessage || null,
+          errorCode: job.errorCode || null
+        });
+        if (currentJson !== lastSentJson) {
+          lastSentJson = currentJson;
+          reply.raw.write(`data: ${currentJson}\n\n`);
+        }
+        if (["completed", "failed", "recoverable"].includes(job.status)) {
+          break;
+        }
+      } catch (error) {
+        if (!isClosed) {
+          reply.raw.write(`data: ${JSON.stringify({ status: "failed", errorMessage: error instanceof Error ? error.message : String(error) })}\n\n`);
+        }
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
+    if (!isClosed) reply.raw.end();
+  });
 
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/result", async (request) => (
     getGenerationResult(pool, uuidSchema.parse(request.params.jobId))

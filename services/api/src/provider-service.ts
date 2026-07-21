@@ -154,13 +154,15 @@ export async function updateProvider(pool: DatabasePool, providerProfileId: stri
          credential_nonce = CASE WHEN $13 THEN $15 ELSE credential_nonce END,
          credential_auth_tag = CASE WHEN $13 THEN $16 ELSE credential_auth_tag END,
          credential_key_version = CASE WHEN $13 THEN $17 ELSE credential_key_version END,
+         configuration = CASE WHEN $18::boolean THEN $19::jsonb ELSE configuration END,
          updated_at = now()
        WHERE id = $1 AND owner_user_id = $2 RETURNING ${selectColumns}`,
       [providerProfileId, ownerUserId, input.name ?? null, input.baseUrl?.replace(/\/+$/, "") ?? null,
         input.defaultModel ?? null, input.contextWindowTokens ?? null, input.maxOutputTokens ?? null,
         input.temperature ?? null, input.requestTimeoutMs ?? null, input.enabled ?? null, input.isDefault !== undefined, input.isDefault ?? false,
         input.apiKey !== undefined, encrypted?.ciphertext ?? null, encrypted?.nonce ?? null,
-        encrypted?.authTag ?? null, encrypted?.keyVersion ?? null]
+        encrypted?.authTag ?? null, encrypted?.keyVersion ?? null,
+        input.configuration !== undefined, input.configuration !== undefined ? JSON.stringify(input.configuration) : null]
     );
     const updated = result.rows[0];
     if (!updated) throw new Error("Provider profile was not updated.");
