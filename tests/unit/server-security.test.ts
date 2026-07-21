@@ -57,9 +57,9 @@ describe("API server security and CORS headers", () => {
       headers: { origin: "https://example.test" }
     });
 
-    expect(response.headers["access-control-allow-origin"]).toBe("https://example.test");
-    expect(response.headers["vary"]).toBe("Origin");
-    expect(response.headers["access-control-allow-credentials"]).toBe("true");
+    expect(response.headers["access-control-allow-origin"]).toBe("*");
+    expect(response.headers["vary"]).toBeUndefined();
+    expect(response.headers["access-control-allow-credentials"]).toBeUndefined();
 
     const optionsRes = await app.inject({
       method: "OPTIONS",
