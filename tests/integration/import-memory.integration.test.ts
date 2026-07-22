@@ -63,7 +63,7 @@ integration("legacy import and Chronicle integration", () => {
     expect(draft.rows[0]).toMatchObject({ revision: 1 });
   });
 
-  it.skip("reconnects an exact ledger when its saved world-version id is stale", async () => {
+  it("reconnects an exact ledger when its saved world-version id is stale", async () => {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     const before = await pool.query<{ worlds: string; campaigns: string; world_id: string }>(
       `SELECT (SELECT count(*) FROM worlds)::text AS worlds,
@@ -129,7 +129,7 @@ integration("legacy import and Chronicle integration", () => {
     expect(results.map((result) => result.duplicate).sort()).toEqual([false, true]);
   });
 
-  it.skip("retains complete history metrics", async () => {
+  it("retains complete history metrics", async () => {
     const metrics = await getChronicleMetrics(pool, campaignId);
     expect(metrics.turns).toBe(2);
     expect(metrics.memoryCount).toBe(3);
@@ -251,7 +251,7 @@ integration("legacy import and Chronicle integration", () => {
     expect(await readFile(resolve(assetRoot, result.rows[0]!.storage_path))).toBeInstanceOf(Buffer);
   });
 
-  it.skip("deduplicates active reindex requests and lets worker replicas claim different campaigns", async () => {
+  it("deduplicates active reindex requests and lets worker replicas claim different campaigns", async () => {
     const firstJob = await enqueueChronicleReindex(pool, campaignId);
     const duplicateJob = await enqueueChronicleReindex(pool, campaignId);
     expect(duplicateJob).toBe(firstJob);
@@ -278,7 +278,7 @@ integration("legacy import and Chronicle integration", () => {
     expect(jobs.rows.every((job) => job.status === "completed" && job.attempts === 1)).toBe(true);
   });
 
-  it.skip("indexes fresh vectors and uses hybrid retrieval with a safe lexical fallback", async () => {
+  it("indexes fresh vectors and uses hybrid retrieval with a safe lexical fallback", async () => {
     const ownerUserId = await initialOwnerId(pool);
     const provider = await pool.query<{ id: string }>(
       `INSERT INTO provider_profiles (
@@ -346,7 +346,7 @@ integration("legacy import and Chronicle integration", () => {
     expect(JSON.stringify(fallback.scopes)).toContain("Location Beta");
   });
 
-  it.skip("requeues a running embedding job when Chronicle content changes concurrently", async () => {
+  it("requeues a running embedding job when Chronicle content changes concurrently", async () => {
     await pool.query(
       `UPDATE chronicle_memories SET content = content || E'\\nRace preparation.'
         WHERE id = (SELECT id FROM chronicle_memories WHERE campaign_id = $1 ORDER BY ordinal LIMIT 1)`,
