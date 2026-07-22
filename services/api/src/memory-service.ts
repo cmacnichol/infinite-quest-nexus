@@ -629,7 +629,8 @@ async function applySemanticRelevance(
   query: string,
   memories: MemoryRow[],
   credentialSecret: string,
-  costAttribution: { generationJobId?: string; operation?: "retrieval_embedding" | "context_preview_embedding" }
+  costAttribution: { generationJobId?: string; operation?: "retrieval_embedding" | "context_preview_embedding" },
+  throughTurnNumber?: number
 ) {
   const normalizedQuery = query.toLocaleLowerCase();
   const newestOrdinal = memories.reduce((maximum, memory) => Math.max(maximum, memory.ordinal), 0);
@@ -675,12 +676,15 @@ async function applySemanticRelevance(
               (1 - (embedding <=> $5::vector))::real AS semantic_relevance
          FROM chronicle_memories
         WHERE owner_user_id = $1 AND campaign_id = $2
+           AND ($8::integer IS NULL OR ordinal <= $8::integer)
+           AND ($8::integer IS NULL OR memory_kind <> 'legacy_summary')
            AND embedding_provider_profile_id = $3 AND embedding_model = $4
            AND embedding_dimensions = $6 AND embedding_provider_fingerprint = $7
            AND embedding IS NOT NULL
          ORDER BY embedding <=> $5::vector
          LIMIT 96`,
-      [ownerUserId, campaignId, config.embedding_provider_profile_id, config.embedding_model, vectorLiteral(queryVector), queryVector.length, fingerprint]
+      [ownerUserId, campaignId, config.embedding_provider_profile_id, config.embedding_model, vectorLiteral(queryVector), queryVector.length, fingerprint,
+        throughTurnNumber ?? null]
     );
     const freshScores = scored.rows.filter((row) => row.embedding_content_hash === contentHash(row.content));
     const existingIds = new Set(memories.map((memory) => memory.id));
@@ -738,7 +742,16 @@ export async function buildContextPreview(
   const memories = await allMemories(pool, ownerUserId, campaignId, options.query, options.recentTurns, scope.throughTurnNumber);
   const latestHint = memories.filter((memory) => memory.memory_kind === "turn_fiction").at(-1)?.content ?? "";
   const expandedQuery = [options.query, truncateAtBoundary(latestHint, 1200)].filter(Boolean).join("\n");
-  const retrieval = await applySemanticRelevance(pool, ownerUserId, campaignId, expandedQuery, memories, credentialSecret, costAttribution);
+  const retrieval = await applySemanticRelevance(
+    pool,
+    ownerUserId,
+    campaignId,
+    expandedQuery,
+    memories,
+    credentialSecret,
+    costAttribution,
+    scope.throughTurnNumber
+  );
   const metrics = memoryMetricsFromRows(await metricsRow(pool, ownerUserId, campaignId, scope.throughTurnNumber));
   const sourceWorld = typeof campaign.world_content.world === "object" && campaign.world_content.world !== null
     ? campaign.world_content.world as Record<string, unknown>

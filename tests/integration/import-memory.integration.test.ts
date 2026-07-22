@@ -171,6 +171,68 @@ integration("legacy import and Chronicle integration", () => {
     expect(serialized).not.toContain("Private synthetic state");
   });
 
+  it("keeps semantic retrieval inside a historical turn cutoff", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Temporal semantic fixture ${crypto.randomUUID()}`;
+    const imported = await importLegacyStory(
+      pool,
+      storyImportRequestSchema.parse({ sourceName: "temporal-semantic.story", story: fixture })
+    );
+    const ownerUserId = await initialOwnerId(pool);
+    const campaign = await pool.query<{ world_version_id: string }>(
+      "SELECT world_version_id FROM campaigns WHERE id = $1 AND owner_user_id = $2",
+      [imported.campaignId, ownerUserId]
+    );
+    await pool.query(
+      `INSERT INTO chronicle_memories (
+         owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content,
+         token_estimate, importance, entities, metadata
+       ) VALUES ($1,$2,$3,'canonical_fact',99,$4,8,1,$5,'{}'::jsonb)`,
+      [ownerUserId, imported.campaignId, campaign.rows[0]!.world_version_id,
+        "Canonical facts established at future turn\n- Future Semantic Marker", ["Future Semantic Marker"]]
+    );
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id, name, provider_type, provider_role, base_url, default_model
+       ) VALUES ($1,$2,'lmstudio','embedding','http://embedding.test','text-embedding-nomic-embed-text-v1.5') RETURNING id`,
+      [ownerUserId, `Temporal embedding fixture ${crypto.randomUUID()}`]
+    );
+    await setCampaignEmbeddingConfig(pool, imported.campaignId, {
+      enabled: true,
+      providerProfileId: provider.rows[0]!.id,
+      model: "text-embedding-nomic-embed-text-v1.5",
+      batchSize: 8
+    });
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const { input } = JSON.parse(String(init?.body)) as { input: string[] };
+      return new Response(JSON.stringify({
+        model: "text-embedding-nomic-embed-text-v1.5",
+        data: input.map((_content, index) => ({ index, embedding: [1, 0, 0] }))
+      }), { status: 200 });
+    }));
+    expect(await enqueueEmbeddingReindex(pool, imported.campaignId)).toBeTruthy();
+    expect(await runChronicleJob(pool, "temporal-embedding-worker", 30, "")).toBe(true);
+
+    const historical = await buildContextPreview(
+      pool,
+      imported.campaignId,
+      { budgetTokens: 4096, compression: "auto", query: "Future Semantic Marker", recentTurns: 8 },
+      "",
+      {},
+      { throughTurnNumber: 1 }
+    );
+    expect(historical.retrieval.mode).toBe("hybrid");
+    expect(JSON.stringify(historical.scopes)).not.toContain("Future Semantic Marker");
+
+    const current = await buildContextPreview(pool, imported.campaignId, {
+      budgetTokens: 4096,
+      compression: "auto",
+      query: "Future Semantic Marker",
+      recentTurns: 8
+    });
+    expect(JSON.stringify(current.scopes)).toContain("Future Semantic Marker");
+  });
+
   it("moves imported data-URL illustrations into filesystem asset storage", async () => {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `Asset import fixture ${crypto.randomUUID()}`;
