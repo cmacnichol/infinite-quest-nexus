@@ -7,8 +7,17 @@ import { callEmbeddingProvider, logProviderTransportError } from "../../../packa
 import { estimateTokens, stableStringify, stripMechanicsLeakage, truncateAtBoundary } from "../../../packages/domain/src/text.js";
 import {
   buildCanonicalFactProjection,
-  canonicalFactDeduplicationKey
+  canonicalFactDeduplicationKey,
+  createCanonicalFactId
 } from "../../../packages/domain/src/canonical-facts.js";
+import {
+  buildChronicleCheckpoint,
+  parseChronicleCheckpoint,
+  validateChronicleCheckpoint,
+  type ChronicleCheckpointFact,
+  type ChronicleFictionSnapshot,
+  type ParsedChronicleCheckpoint
+} from "../../../packages/domain/src/chronicle-checkpoints.js";
 import {
   buildScopedEntityCatalog,
   expandEntityQuery,
@@ -790,6 +799,25 @@ export async function buildContextPreview(
     options.recentTurns,
     scope.throughTurnNumber
   );
+  if (scope.throughTurnNumber !== undefined
+      && !memories.some((memory) => memory.memory_kind === "campaign_summary")) {
+    const recovered = await latestValidCheckpoint(pool, ownerUserId, campaignId, scope.throughTurnNumber);
+    if (recovered?.checkpoint.continuitySummary) {
+      const checkpointEntities = resolveEntityMetadata(recovered.checkpoint.continuitySummary, entityCatalog);
+      memories.push({
+        id: recovered.id,
+        turn_id: null,
+        memory_kind: "campaign_summary",
+        ordinal: recovered.checkpoint.throughTurn,
+        content: recovered.checkpoint.continuitySummary,
+        token_estimate: recovered.tokenEstimate,
+        importance: 0.9,
+        entities: checkpointEntities.entities,
+        entity_ids: checkpointEntities.entityIds,
+        relevance: 0
+      });
+    }
+  }
   const latestHint = memories.filter((memory) => memory.memory_kind === "turn_fiction").at(-1)?.content ?? "";
   const expandedQuery = [entityExpandedQuery, truncateAtBoundary(latestHint, 1200)].filter(Boolean).join("\n");
   const retrieval = await applySemanticRelevance(
@@ -970,6 +998,98 @@ function sanitizedMemoryLines(values: string[] | undefined, limit = 100): string
   }))].slice(0, limit);
 }
 
+type StoredTurnRow = {
+  id: string;
+  turn_number: number;
+  action: string;
+  narration: string;
+  state_snapshot_private: Record<string, unknown>;
+};
+
+type ValidCheckpoint = {
+  id: string;
+  tokenEstimate: number;
+  checkpoint: ParsedChronicleCheckpoint;
+};
+
+function fictionSnapshotFromState(state: Record<string, unknown> | null | undefined): ChronicleFictionSnapshot {
+  const canonicalFactUpdates = Array.isArray(state?.canonicalFactUpdates)
+    ? state.canonicalFactUpdates.flatMap((value) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+        const update = value as Record<string, unknown>;
+        if (typeof update.content !== "string") return [];
+        return [{
+          content: update.content,
+          supersedesFactIds: Array.isArray(update.supersedesFactIds)
+            ? update.supersedesFactIds.filter((id): id is string => typeof id === "string")
+            : []
+        }];
+      })
+    : [];
+  return {
+    continuitySummary: typeof state?.continuitySummary === "string" ? state.continuitySummary : "",
+    canonicalFacts: Array.isArray(state?.canonicalFacts)
+      ? state.canonicalFacts.filter((value): value is string => typeof value === "string") : [],
+    supersededFacts: Array.isArray(state?.supersededFacts)
+      ? state.supersededFacts.filter((value): value is string => typeof value === "string") : [],
+    canonicalFactUpdates,
+    openThreads: Array.isArray(state?.openThreads)
+      ? state.openThreads.filter((value): value is string => typeof value === "string") : []
+  };
+}
+
+function derivedMemoryFromState(state: Record<string, unknown>, entityCatalog: EntityReference[]): DerivedStoryMemory {
+  return { ...fictionSnapshotFromState(state), entityCatalog };
+}
+
+async function validCheckpoints(
+  client: DatabaseClient | DatabasePool,
+  ownerUserId: string,
+  campaignId: string,
+  throughTurn: number
+): Promise<ValidCheckpoint[]> {
+  const result = await client.query<{
+    id: string;
+    through_turn: number;
+    content: unknown;
+    token_estimate: number;
+    state_snapshot_private: Record<string, unknown>;
+  }>(
+    `SELECT sc.id, sc.through_turn, sc.content, sc.token_estimate, t.state_snapshot_private
+       FROM summary_checkpoints sc
+       JOIN turns t ON t.campaign_id = sc.campaign_id
+                   AND t.owner_user_id = sc.owner_user_id
+                   AND t.turn_number = sc.through_turn
+      WHERE sc.owner_user_id = $1 AND sc.campaign_id = $2
+        AND sc.summary_kind = 'campaign_continuity' AND sc.through_turn <= $3
+      ORDER BY sc.through_turn DESC, sc.created_at DESC`,
+    [ownerUserId, campaignId, throughTurn]
+  );
+  const valid: ValidCheckpoint[] = [];
+  for (const row of result.rows) {
+    if (!validateChronicleCheckpoint(row.content, row.through_turn, row.state_snapshot_private)) continue;
+    try {
+      valid.push({
+        id: row.id,
+        tokenEstimate: row.token_estimate,
+        checkpoint: parseChronicleCheckpoint(row.content, row.through_turn)
+      });
+    } catch {
+      // Continue to the next older validated checkpoint.
+    }
+  }
+  return valid;
+}
+
+async function latestValidCheckpoint(
+  client: DatabaseClient | DatabasePool,
+  ownerUserId: string,
+  campaignId: string,
+  throughTurn: number
+): Promise<ValidCheckpoint | null> {
+  return (await validCheckpoints(client, ownerUserId, campaignId, throughTurn))[0] ?? null;
+}
+
 type ProjectedFactRow = {
   id: string;
   source_turn_id: string;
@@ -1116,6 +1236,67 @@ async function projectCanonicalFacts(
   await syncCanonicalFactMemories(client, ownerUserId, campaignId, worldVersionId, affectedTurnIds);
 }
 
+async function writeSummaryCheckpoint(
+  client: DatabaseClient,
+  ownerUserId: string,
+  campaignId: string,
+  ordinal: number,
+  sourceSnapshot: ChronicleFictionSnapshot
+): Promise<void> {
+  const facts = await client.query<{
+    id: string;
+    source_turn_id: string;
+    source_turn_number: number;
+    source_fact_index: number;
+    content: string;
+    normalized_content: string;
+    entities: string[];
+    entity_ids: string[];
+    valid_from_turn: number;
+    valid_until_turn: number | null;
+    superseded_by_fact_id: string | null;
+    metadata: Record<string, unknown>;
+  }>(
+    `SELECT id, source_turn_id, source_turn_number, source_fact_index, content, normalized_content,
+            entities, entity_ids, valid_from_turn, valid_until_turn, superseded_by_fact_id, metadata
+       FROM campaign_canonical_facts
+      WHERE owner_user_id = $1 AND campaign_id = $2 AND source_turn_number <= $3
+      ORDER BY source_turn_number, source_fact_index`,
+    [ownerUserId, campaignId, ordinal]
+  );
+  const factProjection: ChronicleCheckpointFact[] = facts.rows.map((fact) => ({
+    id: fact.id,
+    sourceTurnId: fact.source_turn_id,
+    sourceTurnNumber: fact.source_turn_number,
+    sourceFactIndex: fact.source_fact_index,
+    content: fact.content,
+    normalizedContent: fact.normalized_content,
+    entities: fact.entities,
+    entityIds: fact.entity_ids,
+    validFromTurn: fact.valid_from_turn,
+    validUntilTurn: fact.valid_until_turn,
+    supersededByFactId: fact.superseded_by_fact_id,
+    metadata: fact.metadata
+  }));
+  const checkpoint = buildChronicleCheckpoint({
+    throughTurn: ordinal,
+    sourceSnapshot,
+    continuitySummary: sourceSnapshot.continuitySummary,
+    openThreads: sourceSnapshot.openThreads,
+    factProjection
+  });
+  const content = json(checkpoint);
+  await client.query(
+    `INSERT INTO summary_checkpoints (
+       owner_user_id, campaign_id, through_turn, summary_kind, content, token_estimate
+     ) VALUES ($1,$2,$3,'campaign_continuity',$4,$5)
+     ON CONFLICT (campaign_id, summary_kind, through_turn) DO UPDATE SET
+       owner_user_id = EXCLUDED.owner_user_id, content = EXCLUDED.content,
+       token_estimate = EXCLUDED.token_estimate, created_at = now()`,
+    [ownerUserId, campaignId, ordinal, content, estimateTokens(content)]
+  );
+}
+
 export async function storeDerivedTurnMemories(
   client: DatabaseClient,
   ownerUserId: string,
@@ -1150,13 +1331,6 @@ export async function storeDerivedTurnMemories(
       [ownerUserId, campaignId, worldVersionId, ordinal, summary, estimateTokens(summary), summaryEntities.entities, summaryEntities.entityIds,
         json({ throughTurn: ordinal, generatedFromAcceptedTurn: true })]
     );
-    if (ordinal % 8 === 0) {
-      await client.query(
-        `INSERT INTO summary_checkpoints (owner_user_id, campaign_id, through_turn, summary_kind, content, token_estimate)
-         VALUES ($1,$2,$3,'campaign_continuity',$4,$5)`,
-        [ownerUserId, campaignId, ordinal, json({ summary }), estimateTokens(summary)]
-      );
-    }
   }
   if (threads.length) {
     const content = [`Open story threads after turn ${ordinal}`, ...threads.map((thread) => `- ${thread}`)].join("\n");
@@ -1181,6 +1355,18 @@ export async function storeDerivedTurnMemories(
         WHERE owner_user_id = $1 AND campaign_id = $2 AND memory_kind = 'open_thread' AND turn_id IS NULL`,
       [ownerUserId, campaignId]
     );
+  }
+  if (ordinal % 8 === 0) {
+    await writeSummaryCheckpoint(client, ownerUserId, campaignId, ordinal, {
+      continuitySummary: summary,
+      canonicalFacts: sanitizedMemoryLines(derived.canonicalFacts),
+      supersededFacts: sanitizedMemoryLines(derived.supersededFacts),
+      canonicalFactUpdates: (derived.canonicalFactUpdates ?? []).map((update) => ({
+        content: update.content,
+        supersedesFactIds: update.supersedesFactIds ?? []
+      })),
+      openThreads: threads
+    });
   }
 }
 
@@ -1304,17 +1490,30 @@ export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserI
     worldContent: scope.world_content,
     characterSnapshot: scope.character_snapshot
   });
-  const turns = await client.query<{
-    id: string;
-    turn_number: number;
-    action: string;
-    narration: string;
-    state_snapshot_private: Record<string, unknown>;
-  }>(
+  const turns = await client.query<StoredTurnRow>(
     `SELECT id, turn_number, action, narration, state_snapshot_private
        FROM turns WHERE owner_user_id = $1 AND campaign_id = $2 ORDER BY turn_number`,
     [ownerUserId, campaignId]
   );
+  const retainedCheckpoints = await validCheckpoints(client, ownerUserId, campaignId, scope.active_turn_number);
+  const recoverable = retainedCheckpoints[0] ?? null;
+  const checkpoint = recoverable?.checkpoint.schemaVersion === 2 ? recoverable.checkpoint : null;
+  const turnByNumber = new Map(turns.rows.map((turn) => [turn.turn_number, turn]));
+  const checkpointFactIds = new Set(checkpoint?.factProjection.map((fact) => fact.id) ?? []);
+  const checkpointCanSeed = checkpoint !== null && checkpoint.factProjection.every((fact) => {
+    const sourceTurn = turnByNumber.get(fact.sourceTurnNumber);
+    return fact.sourceTurnNumber <= checkpoint.throughTurn
+      && sourceTurn?.id === fact.sourceTurnId
+      && fact.validFromTurn === fact.sourceTurnNumber
+      && fact.normalizedContent === canonicalFactDeduplicationKey(fact.content)
+      && fact.id === createCanonicalFactId({
+        campaignId,
+        sourceTurnId: fact.sourceTurnId,
+        factIndex: fact.sourceFactIndex,
+        content: fact.content
+      })
+      && (fact.supersededByFactId === null || checkpointFactIds.has(fact.supersededByFactId));
+  });
   await client.query(
     "DELETE FROM campaign_canonical_facts WHERE owner_user_id = $1 AND campaign_id = $2",
     [ownerUserId, campaignId]
@@ -1336,6 +1535,75 @@ export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserI
         AND metadata->>'generatedFromAcceptedTurn' = 'true'`,
     [ownerUserId, campaignId]
   );
+  for (const retained of retainedCheckpoints) {
+    await client.query(
+      `INSERT INTO summary_checkpoints (
+         owner_user_id, campaign_id, through_turn, summary_kind, content, token_estimate
+       ) VALUES ($1,$2,$3,'campaign_continuity',$4,$5)`,
+      [ownerUserId, campaignId, retained.checkpoint.throughTurn, json(retained.checkpoint), retained.tokenEstimate]
+    );
+  }
+  if (checkpointCanSeed && checkpoint) {
+    for (const fact of checkpoint.factProjection) {
+      await client.query(
+        `INSERT INTO campaign_canonical_facts (
+           id, owner_user_id, campaign_id, world_version_id, source_turn_id, source_turn_number,
+           source_fact_index, content, normalized_content, entities, entity_ids, valid_from_turn,
+           valid_until_turn, metadata
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+        [fact.id, ownerUserId, campaignId, scope.world_version_id, fact.sourceTurnId, fact.sourceTurnNumber,
+          fact.sourceFactIndex, fact.content, fact.normalizedContent, fact.entities, fact.entityIds,
+          fact.validFromTurn, fact.validUntilTurn, json(fact.metadata)]
+      );
+    }
+    for (const fact of checkpoint.factProjection) {
+      if (!fact.supersededByFactId) continue;
+      await client.query(
+        `UPDATE campaign_canonical_facts SET superseded_by_fact_id = $4, updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3`,
+        [fact.id, ownerUserId, campaignId, fact.supersededByFactId]
+      );
+    }
+    await syncCanonicalFactMemories(
+      client,
+      ownerUserId,
+      campaignId,
+      scope.world_version_id,
+      new Set(checkpoint.factProjection.map((fact) => fact.sourceTurnId))
+    );
+    const checkpointTurn = turnByNumber.get(checkpoint.throughTurn)!;
+    const summaryEntities = resolveEntityMetadata(checkpoint.continuitySummary, entityCatalog);
+    if (checkpoint.continuitySummary) {
+      await client.query(
+        `INSERT INTO chronicle_memories (
+           owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content,
+           token_estimate, importance, entities, entity_ids, metadata
+         ) VALUES ($1,$2,$3,'campaign_summary',$4,$5,$6,0.9,$7,$8,$9)`,
+        [ownerUserId, campaignId, scope.world_version_id, checkpoint.throughTurn, checkpoint.continuitySummary,
+          estimateTokens(checkpoint.continuitySummary), summaryEntities.entities, summaryEntities.entityIds,
+          json({ throughTurn: checkpoint.throughTurn, generatedFromAcceptedTurn: true, restoredFromCheckpoint: true })]
+      );
+    }
+    if (checkpoint.openThreads.length) {
+      const content = [
+        `Open story threads after turn ${checkpoint.throughTurn}`,
+        ...checkpoint.openThreads.map((thread) => `- ${thread}`)
+      ].join("\n");
+      const threadEntities = resolveEntityMetadata(content, entityCatalog);
+      await client.query(
+        `INSERT INTO chronicle_memories (
+           owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content,
+           token_estimate, importance, entities, entity_ids, metadata
+         ) VALUES ($1,$2,$3,'open_thread',$4,$5,$6,0.95,$7,$8,$9)`,
+        [ownerUserId, campaignId, scope.world_version_id, checkpoint.throughTurn, content, estimateTokens(content),
+          threadEntities.entities, threadEntities.entityIds,
+          json({ throughTurn: checkpoint.throughTurn, replacesPriorOpenThreads: true,
+            generatedFromAcceptedTurn: true, restoredFromCheckpoint: true })]
+      );
+    }
+    await writeSummaryCheckpoint(client, ownerUserId, campaignId, checkpoint.throughTurn,
+      fictionSnapshotFromState(checkpointTurn.state_snapshot_private));
+  }
   for (const turn of turns.rows) {
     const memory = buildTurnFictionMemory({ action: turn.action, narration: turn.narration }, turn.turn_number);
     const memoryEntities = resolveEntityMetadata(memory.content, entityCatalog);
@@ -1358,31 +1626,10 @@ export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserI
         json({ sanitized: memory.sanitized, removedMechanicsSegments: memory.removedMechanicsSegments, reindexed: true })
       ]
     );
-    const openThreads = Array.isArray(turn.state_snapshot_private?.openThreads)
-      ? turn.state_snapshot_private.openThreads.filter((value): value is string => typeof value === "string") : undefined;
-    await storeDerivedTurnMemories(client, ownerUserId, campaignId, scope.world_version_id, turn.id, turn.turn_number, {
-      continuitySummary: typeof turn.state_snapshot_private?.continuitySummary === "string"
-        ? turn.state_snapshot_private.continuitySummary : "",
-      canonicalFacts: Array.isArray(turn.state_snapshot_private?.canonicalFacts)
-        ? turn.state_snapshot_private.canonicalFacts.filter((value): value is string => typeof value === "string") : [],
-      supersededFacts: Array.isArray(turn.state_snapshot_private?.supersededFacts)
-        ? turn.state_snapshot_private.supersededFacts.filter((value): value is string => typeof value === "string") : [],
-      canonicalFactUpdates: Array.isArray(turn.state_snapshot_private?.canonicalFactUpdates)
-        ? turn.state_snapshot_private.canonicalFactUpdates.flatMap((value) => {
-            if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-            const update = value as Record<string, unknown>;
-            if (typeof update.content !== "string") return [];
-            return [{
-              content: update.content,
-              supersedesFactIds: Array.isArray(update.supersedesFactIds)
-                ? update.supersedesFactIds.filter((id): id is string => typeof id === "string")
-                : []
-            }];
-          })
-        : [],
-      entityCatalog,
-      ...(openThreads ? { openThreads } : {})
-    });
+    if (!checkpointCanSeed || !checkpoint || turn.turn_number > checkpoint.throughTurn) {
+      await storeDerivedTurnMemories(client, ownerUserId, campaignId, scope.world_version_id, turn.id, turn.turn_number,
+        derivedMemoryFromState(turn.state_snapshot_private, entityCatalog));
+    }
   }
   return turns.rows.length;
 }
