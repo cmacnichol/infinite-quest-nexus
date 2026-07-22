@@ -13,6 +13,7 @@ docs/.vitepress/dist/
 Thumbs.db
 compose.override.yaml
 local-data/
+data/
 docs/OPEN_ISSUES.local.md
 docs/ENHANCEMENTS.local.md
 docs/*.local.md
