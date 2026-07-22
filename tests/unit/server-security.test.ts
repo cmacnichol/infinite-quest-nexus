@@ -26,6 +26,21 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
 }
 
 describe("API server security and CORS headers", () => {
+  it("exposes public application metadata without querying the database", async () => {
+    const config = makeConfig();
+    const mockPool = { query: async () => { throw new Error("Metadata must not query the database."); } } as unknown as DatabasePool;
+    const app = await buildServer({ config, pool: mockPool });
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/meta" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      application: { name: "Infinite Quest Nexus", version: expect.any(String) }
+    });
+
+    await app.close();
+  });
+
   it.each(["/", "/index.html"])("redirects %s to the active Nexus client without serving legacy HTML", async (url) => {
     const config = makeConfig();
     const mockPool = { query: async () => ({ rows: [] }) } as unknown as DatabasePool;

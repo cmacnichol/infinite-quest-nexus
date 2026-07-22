@@ -50,8 +50,11 @@ Open:
 - Nexus World Management: `http://localhost:8080/nexus/`
 - Infinite Quest player: `http://localhost:8080/story`
 - Readiness check: `http://localhost:8080/health/ready`
+- Application metadata: `http://localhost:8080/api/v1/meta`
 
 Requests to `/` or `/index.html` redirect permanently to the active Nexus application at `/nexus/`.
+
+The Nexus header displays the application release version. Published container images also expose their source commit and build timestamp in the player view's **About Infinite Quest Nexus** dialog. World versions, database migrations, export formats, and prompt protocols retain their own independent version numbers.
 
 The first startup creates the database schema and credential-free initial owner. Configure a text provider in **Providers**, create or import a world, publish a version, create a campaign, and select **Load story**.
 
