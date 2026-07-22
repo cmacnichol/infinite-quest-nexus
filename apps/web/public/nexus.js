@@ -37,25 +37,19 @@ function clampedMemoryContextBudget(value) {
   return Math.min(MAX_MEMORY_CONTEXT_BUDGET_TOKENS, Math.max(MIN_MEMORY_CONTEXT_BUDGET_TOKENS, Math.trunc(numeric)));
 }
 
-function applyEmbeddingModelContextBudget(model) {
-  const modelContextTokens = Number(model?.contextLength || 0);
-  if (!modelContextTokens) {
-    elements.budgetTokensSource.textContent = "This embedding model did not advertise a context limit; the memory context budget remains editable.";
+function applyStoryProviderContextBudget() {
+  const textProvider = effectiveCampaignProvider("text");
+  const storyInputCapacity = Number(textProvider?.contextWindowTokens || 0)
+    - Number(textProvider?.maxOutputTokens || 0)
+    - 1024;
+  if (!textProvider || storyInputCapacity < MIN_MEMORY_CONTEXT_BUDGET_TOKENS) {
+    elements.budgetTokensSource.textContent = "Enter a memory context budget; the Story Engine will enforce the text provider's input limit.";
     elements.budgetTokensSource.className = "field-note manual-entry";
     return;
   }
-  const textProvider = effectiveCampaignProvider("text");
-  const storyInputCapacity = textProvider
-    ? Number(textProvider.contextWindowTokens || 0) - Number(textProvider.maxOutputTokens || 0) - 1024
-    : 0;
-  const embeddingCapacity = Math.max(MIN_MEMORY_CONTEXT_BUDGET_TOKENS, modelContextTokens - 512);
-  const safeBudget = clampedMemoryContextBudget(storyInputCapacity >= MIN_MEMORY_CONTEXT_BUDGET_TOKENS
-    ? Math.min(embeddingCapacity, storyInputCapacity)
-    : embeddingCapacity);
+  const safeBudget = clampedMemoryContextBudget(storyInputCapacity);
   elements.budgetTokens.value = String(safeBudget);
-  elements.budgetTokensSource.textContent = storyInputCapacity >= MIN_MEMORY_CONTEXT_BUDGET_TOKENS && storyInputCapacity < embeddingCapacity
-    ? `Automatically set to ${number(safeBudget)} tokens: capped by the story provider after reserving output and protocol space.`
-    : `Automatically set to ${number(safeBudget)} tokens from the model's advertised ${number(modelContextTokens)}-token context, with a 512-token safety reserve.`;
+  elements.budgetTokensSource.textContent = `Automatically set to ${number(safeBudget)} tokens from the ${textProvider.name} story provider after reserving output and protocol space.`;
   elements.budgetTokensSource.className = "field-note api-supplied";
 }
 
@@ -1050,6 +1044,7 @@ async function selectCampaign(campaign) {
   elements.campaignTextProvider.value = campaign.textProviderProfileId || "";
   elements.campaignImageProvider.value = campaign.imageProviderProfileId || "";
   elements.campaignStoryLengthProfile.value = campaign.storyLengthProfile || "standard";
+  applyStoryProviderContextBudget();
   populateEmbeddingProviderSelect();
   const world = await api(`/api/v1/worlds/${campaign.worldId}`);
   elements.campaignWorldVersion.replaceChildren();
@@ -1309,9 +1304,6 @@ function applyDiscoveredProviderContext() {
     elements.providerContextTokens.setAttribute("aria-readonly", "true");
     elements.providerContextSource.textContent = `Locked to ${number(contextLength)} tokens advertised by the selected model.`;
     elements.providerContextSource.className = "field-note api-supplied";
-    if (selectedProvider?.providerRole === "text") {
-      elements.budgetTokens.value = String(clampedMemoryContextBudget(contextLength - selectedProvider.maxOutputTokens - 1024));
-    }
   } else {
     elements.providerContextTokens.readOnly = false;
     elements.providerContextTokens.removeAttribute("aria-readonly");
@@ -1634,10 +1626,9 @@ function chooseProviderModel(value) {
   if (providerModelPickerTarget === "embedding") {
     elements.embeddingModel.value = value;
     const model = discoveredEmbeddingModels.find((item) => profileModelValue(item) === value || item.id === value);
-    applyEmbeddingModelContextBudget(model);
     elements.providerModelDialog.close();
     elements.embeddingStatus.className = "status";
-    elements.embeddingStatus.textContent = `${value} selected for campaign embeddings. Save & index to apply this change${model?.contextLength ? " and the advertised context budget" : ""}.`;
+    elements.embeddingStatus.textContent = `${value} selected for campaign embeddings. Save & index to apply this change${model?.contextLength ? `; its advertised ${number(model.contextLength)}-token limit applies only to embedding requests` : ""}.`;
     return;
   }
   elements.providerDefaultModel.value = value;
@@ -1819,10 +1810,6 @@ elements.embeddingProvider.addEventListener("change", () => {
   elements.discoverEmbeddingModels.disabled = !provider;
   elements.embeddingModel.disabled = !provider;
   elements.embeddingModel.value = provider?.defaultModel || "";
-  elements.budgetTokensSource.textContent = provider
-    ? "Open the embedding model picker to apply an advertised context limit automatically."
-    : "Select a discovered embedding model to apply an advertised context limit automatically.";
-  elements.budgetTokensSource.className = "field-note";
   elements.embeddingStatus.className = "status";
   elements.embeddingStatus.textContent = provider
     ? `${provider.name} selected. Open the embedding model picker to inspect its endpoint inventory.`
@@ -1830,6 +1817,7 @@ elements.embeddingProvider.addEventListener("change", () => {
 });
 
 elements.campaignTextProvider.addEventListener("change", () => {
+  applyStoryProviderContextBudget();
   if (!enabledProviders("embedding").length) populateEmbeddingProviderSelect();
 });
 
@@ -1852,7 +1840,6 @@ async function discoverEmbeddingModels() {
       || discoveredEmbeddingModels[0]
       || null;
     if (selected && !current) elements.embeddingModel.value = profileModelValue(selected);
-    if (selected && (!current || profileModelValue(selected) === current || selected.id === current)) applyEmbeddingModelContextBudget(selected);
     renderProviderModelPicker();
     elements.providerModelPickerStatus.textContent = `${discoveredEmbeddingModels.length} model entr${discoveredEmbeddingModels.length === 1 ? "y" : "ies"} found. Select an embedding-capable model.`;
     elements.providerModelPickerStatus.className = "status success";
@@ -2647,7 +2634,7 @@ elements.compression.addEventListener("change", () => {
   elements.compression.title = elements.compression.selectedOptions[0]?.title || "Choose how Chronicle fits history into the context budget.";
 });
 elements.budgetTokens.addEventListener("input", () => {
-  elements.budgetTokensSource.textContent = "Manual memory context budget. Selecting a discovered embedding model can recalculate it from advertised limits.";
+  elements.budgetTokensSource.textContent = "Manual memory context budget. The Story Engine will cap it to the selected text provider's available input space.";
   elements.budgetTokensSource.className = "field-note manual-entry";
 });
 elements.discoverEmbeddingModels.addEventListener("click", async (event) => { event.stopPropagation(); await openEmbeddingModelPicker(true); });

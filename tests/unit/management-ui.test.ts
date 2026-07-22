@@ -241,7 +241,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("providerContextTokens.readOnly = true");
     expect(managementScript).toContain("providerContextTokens.readOnly = false");
     expect(managementScript).toContain("did not advertise a context length");
-    expect(managementScript).toContain('selectedProvider?.providerRole === "text"');
+    expect(managementScript).toContain('const textProvider = effectiveCampaignProvider("text")');
     expect(managementScript).toContain("clampedMemoryContextBudget(elements.budgetTokens.value)");
   });
 
@@ -261,7 +261,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('body: JSON.stringify({ imageProviderProfileId: elements.campaignImageProvider.value || null })');
   });
 
-  it("shows durable semantic indexing progress, health, and model-derived context budgeting", () => {
+  it("shows durable semantic indexing progress, health, and story-provider context budgeting", () => {
     expect(managementHtml).toContain('id="semanticMemoryHealth"');
     expect(managementHtml).toContain('id="embeddingProgress" class="embedding-progress hidden"');
     expect(managementHtml).toContain('id="embeddingProgressBar"');
@@ -269,8 +269,11 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("async function monitorEmbeddingJob(jobId, campaignId, sequence)");
     expect(managementScript).toContain("renderEmbeddingJobProgress(job)");
     expect(managementScript).toContain("await refreshCampaignMemoryMetrics()");
-    expect(managementScript).toContain("function applyEmbeddingModelContextBudget(model)");
-    expect(managementScript).toContain("modelContextTokens - 512");
+    expect(managementScript).toContain("function applyStoryProviderContextBudget()");
+    expect(managementScript).toContain("textProvider?.contextWindowTokens");
+    expect(managementScript).toContain("text provider's available input space");
+    expect(managementScript).not.toContain("applyEmbeddingModelContextBudget");
+    expect(managementScript).not.toContain("modelContextTokens - 512");
   });
 
   it("shows provider-reported turn and campaign costs without adding a reporting page", () => {
