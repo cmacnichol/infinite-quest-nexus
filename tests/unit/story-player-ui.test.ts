@@ -168,8 +168,10 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('async function undoLatest()');
     expect(storyScript).toContain('/campaigns/${state.campaignId}/rewind');
     expect(storyScript).toContain('/campaigns/${state.campaignId}/branch');
-    expect(storyScript).toContain('history-branch-btn');
-    expect(storyScript).toContain('Restart / Branch from Here…');
+    expect(storyScript).not.toContain('history-branch-btn');
+    expect(storyScript).not.toContain('history-state-btn');
+    expect(storyScript).not.toContain('history-jump-btn');
+    expect(storyHtml).toContain('Restart / Branch from Here…');
     expect(storyScript).toContain('async function retryLatest()');
     expect(storyScript).toContain('function openRetryPromptDialog(originalPrompt)');
     expect(storyScript).toContain('async function executeRetryWithPrompt(submittedPromptText)');
@@ -180,6 +182,28 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('body: JSON.stringify({ targetTurnNumber: branchDlg._turnIndex + 1 })');
     expect(storyScript).toContain('function openTurnHistoryModal()');
     expect(storyScript).toContain('el.addEventListener("click", openTurnHistoryModal);');
+  });
+
+  it("selects accessible history cards and routes footer actions to the selected turn", () => {
+    expect(storyHtml).toContain('id="btnTurnHistoryInspect"');
+    expect(storyHtml).toContain('id="btnTurnHistoryJump"');
+    expect(storyHtml).toContain('id="btnTurnHistoryBranch"');
+    expect(storyHtml).toContain('class="row wrap dialog-actions history-dialog-actions"');
+    expect(storyScript).toContain('state.historySelectedIndex = null;');
+    expect(storyScript).toContain('const currentIdx = state.viewIndex === -1 ? state.turns.length - 1 : state.viewIndex;');
+    expect(storyScript).toContain('selectHistoryTurn(currentIdx);');
+    expect(storyScript).toContain('card.setAttribute("role", "button");');
+    expect(storyScript).toContain('card.setAttribute("tabindex", "0");');
+    expect(storyScript).toContain('card.setAttribute("aria-pressed", "false");');
+    expect(storyScript).toContain('if (event.key === "Enter" || event.key === " ")');
+    expect(storyScript).toContain('card.classList.toggle("selected", selected);');
+    expect(storyScript).toContain('inspectTurnState(turnIndex + 1);');
+    expect(storyScript).toContain('inspectBtn.disabled = !hasSelection;');
+    expect(storyScript).toContain('jumpBtn.disabled = !hasSelection;');
+    expect(storyScript).toContain('branchBtn.classList.toggle("hidden", !hasSelection || state.historySelectedIndex >= state.turns.length - 1);');
+    expect(storyScript).toContain('navigateTo(state.historySelectedIndex);');
+    expect(storyScript).toContain('promptBranchOrReset(turnIndex);');
+    expect(storyCss).toContain('.history-card.selected, .history-card[aria-pressed="true"]');
   });
 
   it("manages inline illustrations, prompt editing, polling, and per-scene regeneration", () => {

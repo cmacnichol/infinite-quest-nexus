@@ -166,14 +166,13 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .track-card, .history-card { border: 1px solid rgba(255,255,255,.12); border-radius: 15px; padding: 12px; background: rgba(255,255,255,.045); display: grid; gap: 8px; }
 button.history-card, .history-card[role="button"] { text-align: left; width: 100%; cursor: pointer; transition: border-color 0.18s ease, background 0.18s ease; font-family: inherit; }
 button.history-card:hover, button.history-card:focus-visible, .history-card[role="button"]:hover, .history-card[role="button"]:focus-visible { border-color: var(--gold); background: rgba(255,255,255,.085); outline: none; }
+.history-card.selected, .history-card[aria-pressed="true"] { border-color: var(--gold); background: rgba(241,194,50,.1); box-shadow: 0 0 0 1px rgba(241,194,50,.18); }
 .track-card h4, .history-card h4 { margin: 0; font-size: .95rem; color: #fff; }
 .track-card p, .history-card p { margin: 0; color: var(--dim); font-size: .86rem; line-height: 1.45; }
 .history-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .history-card-heading h4 { min-width: 0; overflow-wrap: anywhere; }
 .turn-input-mode-pill { flex: none; border: 1px solid #6c81b8; border-radius: 999px; padding: 4px 9px; background: #32416766; color: #cbd8ff; font-size: .7rem; font-weight: 850; letter-spacing: .04em; text-transform: uppercase; }
 .turn-input-mode-pill.scene { border-color: #9171c6; background: #4b326766; color: #e2ceff; }
-.history-card-actions { border-top: 1px solid rgba(255,255,255,.08); padding-top: 8px; }
-.history-card-actions button { min-height: 32px; font-size: .82rem; }
 .runtime-tracker-card { grid-template-columns: minmax(160px, .8fr) minmax(220px, 1fr) minmax(220px, 1fr) auto; align-items: end; }
 .runtime-tracker-card label { min-width: 0; }
 .runtime-tracker-card textarea { min-height: 72px; }
@@ -349,6 +348,12 @@ dialog.getting-started-dialog { width: min(680px, calc(100vw - 28px)); }
 .dialog-header { display: flex; justify-content: space-between; align-items: start; gap: 14px; }
 .dialog-scroll { max-height: min(72vh, 760px); overflow-y: auto; padding-right: 4px; }
 .dialog-actions { justify-content: flex-end; }
+.history-dialog-actions { justify-content: space-between; align-items: center; }
+.history-selection-actions, .history-dialog-close-actions { gap: 8px; }
+@media (max-width: 720px) {
+  .history-dialog-actions, .history-selection-actions, .history-dialog-close-actions { width: 100%; }
+  .history-dialog-close-actions { justify-content: flex-end; }
+}
 
 .activity-log-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
 .activity-log-toolbar label { min-width: 180px; }

@@ -8,7 +8,7 @@ The story header shows:
 - **Viewing latest** or **Viewing turn N**
 - **Ready** or **Busy** generation state
 
-Selecting the turn/view controls opens **Turn History & Navigation**.
+Selecting the turn/view controls opens **Turn History & State**. Select a turn card, then use the actions at the bottom of the dialog to inspect its state, jump to its scene, or restart/branch from an earlier turn.
 
 ## Story scene
 

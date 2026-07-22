@@ -2,13 +2,13 @@
 
 ## Browse accepted history
 
-Select the turn/view control to open **Turn History & Navigation**. Each card can **Jump to Scene**. Browsing does not mutate the campaign.
+Select the turn/view control to open **Turn History & State**. Select a turn card to inspect its recorded state, then use the actions at the bottom of the dialog to inspect the state again, jump to that scene, or restart/branch from an earlier turn. Browsing does not mutate the campaign.
 
 Use **← Previous turn** and **Next turn →** for sequential reading. **Continuous Reading** in the user profile controls presentation, not authoritative history.
 
 ## Rewind the current campaign
 
-At an earlier history card, select **Restart / Branch from Here…**, then choose **Reset this campaign** when you intend to discard later accepted story progress from this campaign.
+Select an earlier history card, choose **Restart / Branch from Here…** at the bottom of the dialog, then choose **Reset this campaign** when you intend to discard later accepted story progress from this campaign.
 
 This is destructive campaign history editing. Read the confirmation carefully. Provider-reported cost events remain an audit ledger even when related turns are no longer visible.
 
