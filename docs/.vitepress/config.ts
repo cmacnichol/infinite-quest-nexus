@@ -257,7 +257,9 @@ export default withMermaid({
             { text: "Character rosters", link: "/architecture/0013-playable-character-rosters" },
             { text: "Roster-only guidance", link: "/architecture/0014-roster-only-world-character-guidance" },
             { text: "World-version deletion", link: "/architecture/0015-deletable-unused-world-versions" },
-            { text: "Reviewed character authoring", link: "/architecture/0016-reviewed-character-authoring" }
+            { text: "Reviewed character authoring", link: "/architecture/0016-reviewed-character-authoring" },
+            { text: "Validated summary checkpoints", link: "/architecture/0020-validated-summary-checkpoints" },
+            { text: "Backup and staged restore", link: "/architecture/0021-web-backup-and-restore" }
           ]
         }
       ],

@@ -21,6 +21,7 @@ Architecture decision records (ADRs) preserve consequential design decisions and
 - [ADR 0018: Canonical facts use structured, rebuildable projections](./0018-structured-canonical-fact-projections.md)
 - [ADR 0019: Chronicle entity identity is scoped and derived](./0019-scoped-chronicle-entity-identity.md)
 - [ADR 0020: Summary checkpoints are validated rebuild seeds](./0020-validated-summary-checkpoints.md)
+- [ADR 0021: Web-managed staged restore and complete Nexus recovery bundles](./0021-web-backup-and-restore.md)
 
 ## World Library and characters
 
