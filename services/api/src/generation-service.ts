@@ -52,6 +52,7 @@ import {
   type PrivateRollResolution
 } from "../../../packages/story-engine/src/index.js";
 import { estimateTokens, sha256, stableStringify, stripMechanicsLeakage } from "../../../packages/domain/src/text.js";
+import { buildScopedEntityCatalog, resolveEntityMetadata } from "../../../packages/domain/src/entity-references.js";
 import { autoEnableCampaignEmbeddingIfAvailable, buildContextPreview, enqueueEmbeddingReindex, rebuildCampaignMemories, storeDerivedTurnMemories } from "./memory-service.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
 import { enqueueAcceptedTurnIllustration } from "./image-service.js";
@@ -1020,11 +1021,23 @@ async function commitStory(
     [job.id, job.owner_user_id]
   );
   if (lease.rows[0]?.lease_owner !== workerId) throw Object.assign(new Error("Generation lease was lost before commit."), { code: "lease_lost" });
-  const campaignResult = await client.query<{ active_turn_number: number; world_version_id: string }>(
-    `SELECT active_turn_number, world_version_id FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [job.campaign_id, job.owner_user_id]
+  const campaignResult = await client.query<{
+    active_turn_number: number;
+    world_version_id: string;
+    character_snapshot: Record<string, unknown> | null;
+    world_content: Record<string, unknown>;
+  }>(
+    `SELECT c.active_turn_number, c.world_version_id, c.character_snapshot, wv.content AS world_content
+       FROM campaigns c
+       JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
+      WHERE c.id = $1 AND c.owner_user_id = $2 FOR UPDATE OF c`, [job.campaign_id, job.owner_user_id]
   );
   const campaign = campaignResult.rows[0];
   if (!campaign) throw new Error("Campaign disappeared before story commit.");
+  const entityCatalog = buildScopedEntityCatalog({
+    worldContent: campaign.world_content,
+    characterSnapshot: campaign.character_snapshot
+  });
   const isReplacement = job.operation_kind === "replace_latest";
   const expectedCampaignTurn = isReplacement ? job.expected_turn_number : job.expected_turn_number - 1;
   if (campaign.active_turn_number !== expectedCampaignTurn) {
@@ -1137,14 +1150,17 @@ async function commitStory(
           content: update.content,
           supersedesFactIds: update.supersedes_fact_ids
         })),
-        openThreads: story.open_threads
+        openThreads: story.open_threads,
+        entityCatalog
       });
     const memory = buildTurnFictionMemory({ action: fictionAction, narration: story.narration }, job.expected_turn_number);
+    const memoryEntities = resolveEntityMetadata(memory.content, entityCatalog);
     await client.query(
-      `INSERT INTO chronicle_memories (owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, metadata)
-       VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,$7,$8,$9,$10)`,
+      `INSERT INTO chronicle_memories (owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids, metadata)
+       VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,$7,$8,$9,$10,$11)`,
       [job.owner_user_id, job.campaign_id, campaign.world_version_id, turnId, job.expected_turn_number, memory.content, memory.tokenEstimate,
-        Math.min(1, 0.5 + job.expected_turn_number / 100), memory.entities, json({ sanitized: memory.sanitized, removedMechanicsSegments: memory.removedMechanicsSegments, generated: true })]
+        Math.min(1, 0.5 + job.expected_turn_number / 100), memoryEntities.entities, memoryEntities.entityIds,
+        json({ sanitized: memory.sanitized, removedMechanicsSegments: memory.removedMechanicsSegments, generated: true })]
     );
   }
   await enqueueAcceptedTurnIllustration(client, job.owner_user_id, job.campaign_id, turnId, story.image_prompt);
