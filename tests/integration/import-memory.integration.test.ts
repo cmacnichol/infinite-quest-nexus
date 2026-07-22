@@ -2,8 +2,9 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { sha256 } from "../../packages/domain/src/text.js";
+import { createCanonicalFactId } from "../../packages/domain/src/canonical-facts.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
@@ -13,6 +14,7 @@ import {
   enqueueChronicleReindex,
   enqueueEmbeddingReindex,
   getChronicleMetrics,
+  rebuildCampaignMemories,
   runChronicleJob,
   setCampaignEmbeddingConfig
 } from "../../services/api/src/memory-service.js";
@@ -194,7 +196,7 @@ integration("legacy import and Chronicle integration", () => {
     const provider = await pool.query<{ id: string }>(
       `INSERT INTO provider_profiles (
          owner_user_id, name, provider_type, provider_role, base_url, default_model
-       ) VALUES ($1,$2,'lmstudio','embedding','http://embedding.test','text-embedding-nomic-embed-text-v1.5') RETURNING id`,
+       ) VALUES ($1,$2,'openai_compatible','embedding','http://embedding.test','text-embedding-nomic-embed-text-v1.5') RETURNING id`,
       [ownerUserId, `Temporal embedding fixture ${crypto.randomUUID()}`]
     );
     await setCampaignEmbeddingConfig(pool, imported.campaignId, {
@@ -204,14 +206,34 @@ integration("legacy import and Chronicle integration", () => {
       batchSize: 8
     });
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (!init?.body) {
+        return new Response(JSON.stringify({ data: [{ id: "text-embedding-nomic-embed-text-v1.5" }] }), { status: 200 });
+      }
       const { input } = JSON.parse(String(init?.body)) as { input: string[] };
       return new Response(JSON.stringify({
         model: "text-embedding-nomic-embed-text-v1.5",
         data: input.map((_content, index) => ({ index, embedding: [1, 0, 0] }))
       }), { status: 200 });
     }));
-    expect(await enqueueEmbeddingReindex(pool, imported.campaignId)).toBeTruthy();
-    expect(await runChronicleJob(pool, "temporal-embedding-worker", 30, "")).toBe(true);
+    const embeddingJobId = await enqueueEmbeddingReindex(pool, imported.campaignId);
+    expect(embeddingJobId).toBeTruthy();
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const pending = await pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM chronicle_jobs
+          WHERE campaign_id = $1 AND status IN ('queued','running')`,
+        [imported.campaignId]
+      );
+      if (Number(pending.rows[0]?.count) === 0) break;
+      expect(await runChronicleJob(pool, `temporal-embedding-worker-${attempt}`, 30, "")).toBe(true);
+    }
+    const completed = await pool.query<{ status: string }>("SELECT status FROM chronicle_jobs WHERE id = $1", [embeddingJobId]);
+    expect(completed.rows[0]?.status).toBe("completed");
+    const remaining = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM chronicle_jobs
+        WHERE campaign_id = $1 AND status IN ('queued','running')`,
+      [imported.campaignId]
+    );
+    expect(Number(remaining.rows[0]?.count)).toBe(0);
 
     const historical = await buildContextPreview(
       pool,
@@ -223,7 +245,6 @@ integration("legacy import and Chronicle integration", () => {
     );
     expect(historical.retrieval.mode).toBe("hybrid");
     expect(JSON.stringify(historical.scopes)).not.toContain("Future Semantic Marker");
-
     const current = await buildContextPreview(pool, imported.campaignId, {
       budgetTokens: 4096,
       compression: "auto",
@@ -231,6 +252,104 @@ integration("legacy import and Chronicle integration", () => {
       recentTurns: 8
     });
     expect(JSON.stringify(current.scopes)).toContain("Future Semantic Marker");
+    await setCampaignEmbeddingConfig(pool, imported.campaignId, {
+      enabled: false,
+      providerProfileId: provider.rows[0]!.id,
+      model: "text-embedding-nomic-embed-text-v1.5",
+      batchSize: 8
+    });
+    await pool.query("UPDATE provider_profiles SET enabled = false WHERE id = $1", [provider.rows[0]!.id]);
+  });
+
+  it("rebuilds stable canonical facts and supersedes paraphrased facts by id", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Structured facts ${crypto.randomUUID()}`;
+    const imported = await importLegacyStory(
+      pool,
+      storyImportRequestSchema.parse({ sourceName: "structured-facts.story", story: fixture })
+    );
+    const ownerUserId = await initialOwnerId(pool);
+    const turns = await pool.query<{ id: string; turn_number: number }>(
+      "SELECT id, turn_number FROM turns WHERE campaign_id = $1 ORDER BY turn_number",
+      [imported.campaignId]
+    );
+    const firstTurn = turns.rows.find((turn) => turn.turn_number === 1)!;
+    const secondTurn = turns.rows.find((turn) => turn.turn_number === 2)!;
+    const originalContent = "The eastern gate is open to travelers.";
+    const replacementContent = "No traveler can pass through the eastern gate now.";
+    const originalFactId = createCanonicalFactId({
+      campaignId: imported.campaignId,
+      sourceTurnId: firstTurn.id,
+      factIndex: 0,
+      content: originalContent
+    });
+    const replacementFactId = createCanonicalFactId({
+      campaignId: imported.campaignId,
+      sourceTurnId: secondTurn.id,
+      factIndex: 0,
+      content: replacementContent
+    });
+    await pool.query(
+      `UPDATE turns SET state_snapshot_private = state_snapshot_private || $3::jsonb
+        WHERE campaign_id = $1 AND id = $2`,
+      [imported.campaignId, firstTurn.id, JSON.stringify({
+        canonicalFacts: [originalContent],
+        supersededFacts: [],
+        canonicalFactUpdates: [{ content: originalContent, supersedesFactIds: [] }]
+      })]
+    );
+    await pool.query(
+      `UPDATE turns SET state_snapshot_private = state_snapshot_private || $3::jsonb
+        WHERE campaign_id = $1 AND id = $2`,
+      [imported.campaignId, secondTurn.id, JSON.stringify({
+        canonicalFacts: [replacementContent],
+        supersededFacts: [],
+        canonicalFactUpdates: [{ content: replacementContent, supersedesFactIds: [originalFactId] }]
+      })]
+    );
+
+    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, imported.campaignId));
+    const facts = await pool.query<{
+      id: string;
+      content: string;
+      valid_until_turn: number | null;
+      superseded_by_fact_id: string | null;
+    }>(
+      `SELECT id, content, valid_until_turn, superseded_by_fact_id
+         FROM campaign_canonical_facts
+        WHERE owner_user_id = $1 AND campaign_id = $2 ORDER BY source_turn_number`,
+      [ownerUserId, imported.campaignId]
+    );
+    expect(facts.rows).toEqual([
+      { id: originalFactId, content: originalContent, valid_until_turn: 2, superseded_by_fact_id: replacementFactId },
+      { id: replacementFactId, content: replacementContent, valid_until_turn: null, superseded_by_fact_id: null }
+    ]);
+
+    const current = await buildContextPreview(pool, imported.campaignId, {
+      budgetTokens: 4096,
+      compression: "auto",
+      query: "eastern gate",
+      recentTurns: 8
+    });
+    expect(JSON.stringify(current.scopes)).toContain(replacementContent);
+    expect(JSON.stringify(current.scopes)).not.toContain(originalContent);
+    const historical = await buildContextPreview(
+      pool,
+      imported.campaignId,
+      { budgetTokens: 4096, compression: "auto", query: "eastern gate", recentTurns: 8 },
+      "",
+      {},
+      { throughTurnNumber: 1 }
+    );
+    expect(JSON.stringify(historical.scopes)).toContain(originalContent);
+    expect(JSON.stringify(historical.scopes)).not.toContain(replacementContent);
+
+    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, imported.campaignId));
+    const rebuiltIds = await pool.query<{ id: string }>(
+      "SELECT id FROM campaign_canonical_facts WHERE campaign_id = $1 ORDER BY source_turn_number",
+      [imported.campaignId]
+    );
+    expect(rebuiltIds.rows.map((fact) => fact.id)).toEqual([originalFactId, replacementFactId]);
   });
 
   it("moves imported data-URL illustrations into filesystem asset storage", async () => {

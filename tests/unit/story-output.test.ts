@@ -14,6 +14,7 @@ function story(overrides: Record<string, unknown> = {}) {
     continuity_summary: "Object Delta is visible at Location Alpha.",
     canonical_facts: ["Marker One is visible."],
     superseded_facts: [],
+    canonical_fact_updates: [],
     open_threads: ["Determine what Marker One indicates."],
     ...overrides
   });
@@ -55,6 +56,33 @@ describe("story output integrity", () => {
 
   it("still rejects malformed Chronicle metadata when the model supplies it", () => {
     expect(parseStoryOutput(story({ canonical_facts: "not an array" }))).toMatchObject({ ok: false, code: "invalid_schema" });
+  });
+
+  it("accepts structured canonical fact updates and defaults the optional field", () => {
+    const factId = "11111111-1111-4111-8111-111111111111";
+    const structured = parseStoryOutput(story({
+      canonical_fact_updates: [{ content: "Marker One is now dark.", supersedes_fact_ids: [factId] }]
+    }));
+    expect(structured).toMatchObject({
+      ok: true,
+      story: { canonical_fact_updates: [{ content: "Marker One is now dark.", supersedes_fact_ids: [factId] }] }
+    });
+
+    const legacy = JSON.parse(story());
+    delete legacy.canonical_fact_updates;
+    expect(parseStoryOutput(JSON.stringify(legacy))).toMatchObject({
+      ok: true,
+      story: { canonical_fact_updates: [] }
+    });
+  });
+
+  it("validates structured canonical fact updates and their fiction boundary", () => {
+    expect(parseStoryOutput(story({
+      canonical_fact_updates: [{ content: "Marker One is dark.", supersedes_fact_ids: ["invented-id"] }]
+    }))).toMatchObject({ ok: false, code: "invalid_schema" });
+    expect(parseStoryOutput(story({
+      canonical_fact_updates: [{ content: "A successful d20 check opens Marker One.", supersedes_fact_ids: [] }]
+    }))).toMatchObject({ ok: false, code: "mechanics_leak" });
   });
 
   it("refuses truncated JSON rather than accepting a partial turn", () => {
@@ -146,6 +174,9 @@ describe("story output integrity", () => {
     expect(STORY_SYSTEM_PROMPT).toContain("continuity_summary");
     expect(STORY_SYSTEM_PROMPT).toContain("canonical_facts");
     expect(STORY_SYSTEM_PROMPT).toContain("superseded_facts");
+    expect(STORY_SYSTEM_PROMPT).toContain("canonical_fact_updates");
+    expect(STORY_SYSTEM_PROMPT).toContain("copy only exact IDs shown on visible canonical facts");
+    expect(STORY_SYSTEM_PROMPT).toContain("Never invent, infer, alter, or reuse an ID");
     expect(STORY_SYSTEM_PROMPT).toContain("open_threads");
     expect(repair).toContain("tracker_updates.0: expected record, received string");
     expect(repair).toContain('[{"name":"fictional tracker name","value":"new fictional value"}]');
@@ -192,7 +223,7 @@ describe("story output integrity", () => {
   });
 
   it("privately requests readable narration paragraphs with a versioned protocol", () => {
-    expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v8-authoritative-rules");
+    expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v9-structured-facts");
     expect(STORY_SYSTEM_PROMPT).toContain("paragraphs separated by two newline characters");
     expect(STORY_SYSTEM_PROMPT).toContain("change of speaker, scene transition, or meaningful shift in focus");
   });
