@@ -37,16 +37,16 @@ When Auto resolves clearly, the player briefly shows **Auto → Action** or **Au
 
 You cannot submit a new canonical turn while browsing an older scene. Return to the latest turn or use the explicit restart/branch workflow.
 
-## Main menu
+## Universal navigation
 
-The player menu provides links or controls for:
+The slim navigation bar remains visible while you play:
 
-- **Provider Setup**
-- **World Management**
-- **Current World Setup**
-- **Save Story File**
-- **Export to Markdown**
-- **Export to HTML**
-- **Activity Log**
+**Dashboard** and **Story** form the primary destination group on the left side of the navigation. A divider separates them from the Story-specific Setup, Export, and About menus. The selected destination and open menu are highlighted without caret indicators.
 
-**Current World Setup** is a read-only view of the campaign's pinned world version, character, premise, background, rules, statistics, and trackers.
+- Select the themed logo or **Dashboard** to browse worlds and campaigns.
+- **Story** returns to the active campaign, or opens the empty Story page when none is active.
+- **Setup** groups provider, world, campaign, Import, Chronicle, and current-world controls.
+- **Export** is Story-only and offers **Markdown** or **PDF with images**. Available scene illustrations are carried into the readable export.
+- **About** displays application and release information.
+
+The story-specific activity and turn controls remain in the player interface. **Setup → Current World Setup** is a read-only view of the campaign's pinned world version, character, premise, background, rules, statistics, and trackers.

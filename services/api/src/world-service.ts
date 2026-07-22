@@ -117,12 +117,12 @@ export async function listWorlds(pool: DatabasePool) {
             w.created_at AS "createdAt", w.updated_at AS "updatedAt",
             wd.revision AS "draftRevision", wd.updated_at AS "draftUpdatedAt",
             latest.id AS "latestVersionId", latest.version_number AS "latestVersionNumber",
-            latest.published_at AS "latestPublishedAt",
+            latest.published_at AS "latestPublishedAt", latest.content -> 'world' AS "latestPreview",
             COALESCE(counts.campaign_count, 0) AS "campaignCount"
        FROM worlds w
        LEFT JOIN world_drafts wd ON wd.world_id = w.id AND wd.owner_user_id = w.owner_user_id
        LEFT JOIN LATERAL (
-         SELECT id, version_number, published_at
+         SELECT id, version_number, published_at, content
            FROM world_versions
           WHERE world_id = w.id AND owner_user_id = w.owner_user_id
           ORDER BY version_number DESC LIMIT 1

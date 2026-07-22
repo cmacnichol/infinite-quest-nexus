@@ -66,7 +66,7 @@ async function api(path, options = {}) {
   const url = "/api/v1" + path;
   const headers = { "Content-Type": "application/json" };
   if (options.headers) Object.assign(headers, options.headers);
-  const response = await fetch(url, { ...options, headers });
+  const response = await fetch(url, { ...options, cache: "no-store", headers });
   if (!response.ok) {
     let body = {};
     try { body = await response.json(); } catch (_) { /* ignore */ }
@@ -113,21 +113,22 @@ function syncInputState() {
   const btnAction = $("btnTakeAction");
   const freeAction = $("freeAction");
   const generationLocked = state.busy || Boolean(state.pendingGeneration);
-  if (btnAction) btnAction.disabled = generationLocked;
-  if (freeAction) freeAction.disabled = generationLocked;
+  const turnCount = state.turns ? state.turns.length : 0;
+  const curr = state.viewIndex === -1 ? turnCount - 1 : state.viewIndex;
+  const isLatest = state.viewIndex === -1 || state.viewIndex >= turnCount - 1;
+  const storyInputLocked = generationLocked || !isLatest;
+  if (btnAction) btnAction.disabled = storyInputLocked;
+  if (freeAction) freeAction.disabled = storyInputLocked;
   document.querySelectorAll("[data-turn-input-mode]").forEach((button) => {
-    button.disabled = generationLocked || campaignTurnControlStyle() === "action_only";
+    button.disabled = storyInputLocked || campaignTurnControlStyle() === "action_only";
   });
-  document.querySelectorAll("#choiceArea .choice").forEach(b => { b.disabled = generationLocked; });
+  document.querySelectorAll("#choiceArea .choice").forEach(b => { b.disabled = storyInputLocked; });
 
   const btnPrev = $("btnPrev");
   const btnNext = $("btnNext");
   const btnUndo = $("btnUndo");
   const btnRetry = $("btnRetry");
 
-  const turnCount = state.turns ? state.turns.length : 0;
-  const curr = state.viewIndex === -1 ? turnCount - 1 : state.viewIndex;
-  const isLatest = state.viewIndex === -1 || state.viewIndex >= turnCount - 1;
   const lastTurnHasAction = turnCount > 0 && Boolean(state.turns[turnCount - 1] && state.turns[turnCount - 1].action);
 
   if (btnPrev) btnPrev.disabled = generationLocked || turnCount === 0 || curr <= 0;
@@ -911,6 +912,17 @@ async function finalizeCompletedGeneration(result) {
   recordActivity("success", "Turn generated", `Turn ${result.turnNumber || ""} completed.`);
   clearStreamingPreview();
   await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });
+  if (result.resultTurnId && !state.turns.some((turn) => turn.id === result.resultTurnId)) {
+    const completedTurn = { ...result, id: result.resultTurnId };
+    state.turns = state.turns
+      .filter((turn) => Number(turn.turnNumber) !== Number(result.turnNumber))
+      .concat(completedTurn)
+      .sort((left, right) => Number(left.turnNumber) - Number(right.turnNumber));
+    state.viewIndex = -1;
+    renderAllScenes({ autoScroll: !preserveViewport });
+    renderChoices(completedTurn.choices || [], completedTurn.customActionSuggestion || "");
+    recordActivity("system", "Completed turn applied from generation result", `Turn ${result.turnNumber || ""} was applied while campaign state caught up.`);
+  }
 
   if (viewport) {
     window.requestAnimationFrame(() => {
@@ -1157,17 +1169,6 @@ function updateStatusBar() {
     viewPill.textContent = isLatest
       ? "Viewing latest"
       : `Viewing turn ${state.viewIndex + 1}`;
-  }
-  // Show/hide input action based on view mode
-  const inputAction = document.querySelector(".input-action");
-  if (inputAction) {
-    if (!isLatest) {
-      inputAction.style.opacity = "0.4";
-      inputAction.style.pointerEvents = "none";
-    } else {
-      inputAction.style.opacity = "";
-      inputAction.style.pointerEvents = "";
-    }
   }
   syncInputState();
 }
@@ -1573,8 +1574,13 @@ function populateHistoryContainer(container, dialogId) {
     card.className = "history-card";
     const preview = (t.narration || "").slice(0, 140) + ((t.narration || "").length > 140 ? "…" : "");
     const isPastTurn = i < state.turns.length - 1;
+    const inputMode = t.inputMode === "scene" ? "scene" : "action";
+    const inputModeLabel = inputMode === "scene" ? "Scene direction" : "Action";
     card.innerHTML = `
-      <h4>${i === currentIdx ? "◆ " : ""}Turn ${i + 1}${t.action ? `: ${escapeHtml(t.action.slice(0, 60))}` : (i === 0 ? ": Adventure Begin" : "")}</h4>
+      <div class="history-card-heading">
+        <h4>${i === currentIdx ? "◆ " : ""}Turn ${i + 1}${t.action ? `: ${escapeHtml(t.action.slice(0, 60))}` : (i === 0 ? ": Adventure Begin" : "")}</h4>
+        <span class="turn-input-mode-pill ${inputMode}" title="Story Engine interpreted this prompt as ${inputModeLabel}" aria-label="Prompt interpretation: ${inputModeLabel}">${inputModeLabel}</span>
+      </div>
       <p>${escapeHtml(preview)}</p>
       <div class="row wrap history-card-actions" style="margin-top: 8px; gap: 8px; justify-content: flex-end;">
         <button type="button" class="history-state-btn mini">Inspect State</button>
@@ -1704,51 +1710,72 @@ function openWorldSetup() {
 }
 
 // ── Export Functions ──────────────────────────────────────────
-async function exportJson() {
-  if (!state.campaignId) return;
-  try {
-    const data = await api(`/campaigns/${state.campaignId}/export`);
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const name = (state.campaign?.title || "story").replace(/[^a-zA-Z0-9_-]/g, "_");
-    downloadBlob(blob, `${name}.story`);
-    toast("Story file downloaded.");
-  } catch (err) {
-    toast(`Export failed: ${err.message}`);
-  }
-}
-
-async function exportHtml() {
-  if (!state.campaignId) return;
-  try {
-    const data = await api(`/campaigns/${state.campaignId}/export`);
-    const title = escapeHtml(data.title || state.campaign?.title || "Infinite Quest Story");
-    const turns = (data.turns || state.turns).map((t, i) => {
-      let s = `<div class="turn"><h2>Turn ${i + 1}${t.action ? ": " + escapeHtml(t.action) : ""}</h2>`;
-      if (t.narration) s += t.narration.split("\n").filter(p => p.trim()).map(p => `<p>${escapeHtml(p)}</p>`).join("");
-      s += `</div>`;
-      return s;
-    }).join("");
-    const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{font-family:Georgia,serif;max-width:860px;margin:40px auto;padding:0 20px;line-height:1.6;background:#10131c;color:#f8f1ff}img{max-width:100%;border-radius:18px}.turn{border-top:1px solid #444;padding:24px 0}h1,h2{color:#ffdc66}</style></head><body><h1>${title}</h1>${turns}</body></html>`;
-    downloadBlob(new Blob([html], { type: "text/html" }), `${(data.title || "story").replace(/[^a-zA-Z0-9_-]/g, "_")}.html`);
-    toast("HTML export downloaded.");
-  } catch (err) {
-    toast(`Export failed: ${err.message}`);
-  }
-}
-
 async function exportMarkdown() {
   if (!state.campaignId) return;
   try {
     const data = await api(`/campaigns/${state.campaignId}/export`);
-    const title = data.title || state.campaign?.title || "Story";
+    const title = String(data.campaign?.title || state.campaign?.title || "Story").replace(/[\r\n]+/g, " ");
     let md = `# ${title}\n\n`;
     (data.turns || state.turns).forEach((t, i) => {
-      md += `## Turn ${i + 1}${t.action ? ": " + t.action : ""}\n\n`;
+      const action = String(t.action || "").replace(/[\r\n]+/g, " ");
+      const imageUrl = String(t.imageAssetUrl || t.imageUrl || "").trim().replace(/>/g, "%3E");
+      md += `## Turn ${i + 1}${action ? ": " + action : ""}\n\n`;
       if (t.narration) md += t.narration + "\n\n";
+      if (imageUrl) md += `![Turn ${i + 1} illustration](<${imageUrl}>)\n\n`;
     });
     downloadBlob(new Blob([md], { type: "text/markdown" }), `${title.replace(/[^a-zA-Z0-9_-]/g, "_")}.md`);
     toast("Markdown export downloaded.");
   } catch (err) {
+    toast(`Export failed: ${err.message}`);
+  }
+}
+
+async function exportPdfWithImages() {
+  if (!state.campaignId) return;
+  const printWindow = window.open("", "_blank", "width=1000,height=800");
+  if (!printWindow) {
+    toast("Allow pop-ups to export the story as PDF.");
+    return;
+  }
+  printWindow.opener = null;
+  printWindow.document.write("<!doctype html><title>Preparing story…</title><p>Preparing your story for PDF export…</p>");
+
+  try {
+    const data = await api(`/campaigns/${state.campaignId}/export`);
+    const titleText = data.campaign?.title || state.campaign?.title || "Infinite Quest Story";
+    const title = escapeHtml(titleText);
+    const turns = (data.turns || state.turns).map((turn, index) => {
+      const action = turn.action ? `: ${escapeHtml(turn.action)}` : "";
+      const narration = String(turn.narration || "")
+        .split("\n")
+        .filter((paragraph) => paragraph.trim())
+        .map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`)
+        .join("");
+      const imageUrl = String(turn.imageAssetUrl || turn.imageUrl || "").trim();
+      const illustration = imageUrl
+        ? `<figure><img src="${escapeHtml(imageUrl)}" alt="Illustration for turn ${index + 1}"><figcaption>Turn ${index + 1} illustration</figcaption></figure>`
+        : "";
+      return `<section class="turn"><h2>Turn ${index + 1}${action}</h2>${narration}${illustration}</section>`;
+    }).join("");
+    const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>@page{margin:.7in}*{box-sizing:border-box}body{max-width:8.2in;margin:0 auto;color:#17131f;font:12pt/1.58 Georgia,serif}h1{margin:0 0 28px;color:#3f286b;font-size:28pt}h2{margin:0 0 14px;color:#543482;font-size:17pt}.turn{break-inside:avoid;border-top:1px solid #cfc7dc;padding:24px 0}.turn p{orphans:3;widows:3}figure{margin:22px 0 0;break-inside:avoid}img{display:block;max-width:100%;max-height:7.2in;margin:auto;border-radius:10px;object-fit:contain}figcaption{margin-top:7px;color:#70687d;font:9pt/1.3 system-ui,sans-serif;text-align:center}@media print{body{max-width:none}.turn{break-inside:auto}figure{break-inside:avoid}}</style></head><body><h1>${title}</h1>${turns || "<p>No accepted story turns are available yet.</p>"}</body></html>`;
+
+    printWindow.document.open();
+    printWindow.document.write(html);
+    printWindow.document.close();
+    const waitForImages = () => Promise.all([...printWindow.document.images].map((image) => (
+      image.complete
+        ? Promise.resolve()
+        : new Promise((resolve) => {
+            image.addEventListener("load", resolve, { once: true });
+            image.addEventListener("error", resolve, { once: true });
+          })
+    )));
+    await Promise.race([waitForImages(), new Promise((resolve) => setTimeout(resolve, 4000))]);
+    printWindow.focus();
+    printWindow.print();
+    toast("Print dialog opened. Choose Save as PDF.");
+  } catch (err) {
+    printWindow.close();
     toast(`Export failed: ${err.message}`);
   }
 }
@@ -1762,14 +1789,40 @@ function downloadBlob(blob, filename) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 100);
 }
 
-// ── Menu & Dialog Management ──────────────────────────────────
-function toggleMenu() {
-  const dd = $("menuDropdown");
-  const btn = $("btnMenu");
-  if (!dd) return;
-  const open = !dd.classList.contains("hidden");
-  dd.classList.toggle("hidden");
-  if (btn) btn.setAttribute("aria-expanded", String(!open));
+// ── Navigation & Dialog Management ────────────────────────────
+function closeNavigationMenus(except = null) {
+  document.querySelectorAll(".nav-menu.open").forEach((menu) => {
+    if (menu !== except) setNavigationMenuState(menu, false);
+  });
+}
+
+function setNavigationMenuState(menu, open) {
+  const trigger = menu.querySelector(".nav-menu-trigger");
+  const panel = menu.querySelector(".nav-menu-panel");
+  menu.classList.toggle("open", open);
+  if (trigger) trigger.setAttribute("aria-expanded", String(open));
+  if (panel) panel.hidden = !open;
+}
+
+function initializeNavigationMenus() {
+  document.querySelectorAll(".nav-menu-trigger").forEach((trigger) => {
+    trigger.addEventListener("click", () => {
+      const menu = trigger.closest(".nav-menu");
+      if (!menu) return;
+      const open = !menu.classList.contains("open");
+      closeNavigationMenus(menu);
+      setNavigationMenuState(menu, open);
+    });
+  });
+  document.querySelectorAll(".nav-menu-panel a").forEach((link) => {
+    link.addEventListener("click", () => closeNavigationMenus());
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!(event.target instanceof Element) || !event.target.closest(".nav-menu")) closeNavigationMenus();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeNavigationMenus();
+  });
 }
 
 // ── Initialization ────────────────────────────────────────────
@@ -1785,10 +1838,14 @@ async function init() {
   const match = window.location.pathname.match(/\/story\/([^/]+)/);
   if (match) {
     state.campaignId = decodeURIComponent(match[1]);
+    const navStoryLink = $("navStoryLink");
+    if (navStoryLink) navStoryLink.href = `/story/${encodeURIComponent(state.campaignId)}`;
     localStorage.setItem("infiniteQuestLastCampaignId", state.campaignId);
   } else {
     localStorage.removeItem("infiniteQuestLastCampaignId");
-    window.location.href = "/nexus/#campaigns";
+    await checkOnboarding();
+    updateStatusBar();
+    recordActivity("system", "Empty Story page opened", "Choose a world from the Nexus dashboard to begin a campaign.");
     return;
   }
   await checkOnboarding();
@@ -1867,42 +1924,28 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Menu
-  const btnMenu = $("btnMenu");
-  if (btnMenu) btnMenu.addEventListener("click", toggleMenu);
+  initializeNavigationMenus();
 
-  // Close menu on outside click
-  document.addEventListener("click", (e) => {
-    const dd = $("menuDropdown");
-    const btn = $("btnMenu");
-    if (dd && !dd.classList.contains("hidden") && !dd.contains(e.target) && e.target !== btn) {
-      dd.classList.add("hidden");
-      if (btn) btn.setAttribute("aria-expanded", "false");
-    }
-  });
-
-  // Menu items
+  // Navigation menu items
   const btnOpenWorldSetup = $("btnOpenWorldSetup");
-  if (btnOpenWorldSetup) btnOpenWorldSetup.addEventListener("click", () => { toggleMenu(); openWorldSetup(); });
-  const btnExportJson = $("btnExportJson");
-  if (btnExportJson) btnExportJson.addEventListener("click", () => { toggleMenu(); exportJson(); });
+  if (btnOpenWorldSetup) btnOpenWorldSetup.addEventListener("click", () => { closeNavigationMenus(); openWorldSetup(); });
   const btnExportMarkdown = $("btnExportMarkdown");
-  if (btnExportMarkdown) btnExportMarkdown.addEventListener("click", () => { toggleMenu(); exportMarkdown(); });
-  const btnExportHtml = $("btnExportHtml");
-  if (btnExportHtml) btnExportHtml.addEventListener("click", () => { toggleMenu(); exportHtml(); });
+  if (btnExportMarkdown) btnExportMarkdown.addEventListener("click", () => { closeNavigationMenus(); exportMarkdown(); });
+  const btnExportPdf = $("btnExportPdf");
+  if (btnExportPdf) btnExportPdf.addEventListener("click", () => { closeNavigationMenus(); exportPdfWithImages(); });
   const btnOpenEditState = $("btnOpenEditState");
-  if (btnOpenEditState) btnOpenEditState.addEventListener("click", () => { toggleMenu(); openEditState(); });
+  if (btnOpenEditState) btnOpenEditState.addEventListener("click", () => { closeNavigationMenus(); openEditState(); });
   const btnOpenActivityLog = $("btnOpenActivityLog");
-  if (btnOpenActivityLog) btnOpenActivityLog.addEventListener("click", () => { toggleMenu(); openActivityLog(); });
+  if (btnOpenActivityLog) btnOpenActivityLog.addEventListener("click", () => { closeNavigationMenus(); openActivityLog(); });
   const btnAboutNexus = $("btnAboutNexus");
   if (btnAboutNexus) btnAboutNexus.addEventListener("click", () => {
-    toggleMenu();
+    closeNavigationMenus();
     const dialog = $("aboutNexusDialog");
     if (dialog?.showModal) dialog.showModal();
   });
 
   const btnOpenUserProfile = $("btnOpenUserProfile");
-  if (btnOpenUserProfile) btnOpenUserProfile.addEventListener("click", openUserProfile);
+  if (btnOpenUserProfile) btnOpenUserProfile.addEventListener("click", () => { closeNavigationMenus(); openUserProfile(); });
   const btnCloseUserProfile = $("btnCloseUserProfile");
   if (btnCloseUserProfile) btnCloseUserProfile.addEventListener("click", () => { const d = $("userProfileDialog"); if (d && d.close) d.close(); });
   const btnCancelUserProfile = $("btnCancelUserProfile");
@@ -2102,16 +2145,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnEditResponseClose = $("btnEditResponseClose");
   if (btnEditResponseClose) btnEditResponseClose.addEventListener("click", () => { const d = $("editResponseDialog"); if (d && d.close) d.close(); });
 
-  // Keyboard: Escape closes dialogs
+  // Keyboard: Escape closes dialogs and returns navigation to its compact state.
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       document.querySelectorAll("dialog[open]").forEach(d => { if (d.close) d.close(); });
-      const dd = $("menuDropdown");
-      if (dd && !dd.classList.contains("hidden")) {
-        dd.classList.add("hidden");
-        const btn = $("btnMenu");
-        if (btn) btn.setAttribute("aria-expanded", "false");
-      }
+      closeNavigationMenus();
     }
   });
 

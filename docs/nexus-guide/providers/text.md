@@ -1,6 +1,6 @@
 # Configure a story text provider
 
-1. Select **Providers** and **New provider profile**.
+1. Open **Setup → Provider Setup** and select **New provider profile**.
 2. Enter a **Profile name**.
 3. Choose LM Studio native, OpenRouter, Manifest, or OpenAI-compatible.
 4. Select the **Story text** role.

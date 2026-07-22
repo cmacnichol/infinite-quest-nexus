@@ -6,7 +6,7 @@ Select a campaign and choose **Export campaign**. The portable file contains cam
 
 Format version 3 carries the campaign turn-control style and accepted turns' resolved input modes in addition to the complete character snapshot and state revision. Provider profiles, Intent assignments, classifier records, confidence values, and credentials are excluded. Older formats remain importable; missing turn-mode data defaults to Action.
 
-The player menu also provides `.story`, Markdown, and HTML exports. Those formats serve portability or reading; they do not replace a coordinated PostgreSQL, asset, and encryption-key backup.
+The Story-only **Export** menu provides readable Markdown and print-to-PDF exports for the active story, including available illustrations. Use **Export campaign** in Campaign Management when you need a portable campaign backup. These formats do not replace a coordinated PostgreSQL, asset, and encryption-key backup.
 
 ## Import
 

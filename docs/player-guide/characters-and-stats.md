@@ -4,7 +4,7 @@ The campaign's player character is selected when the campaign is created. Nexus 
 
 ## View the campaign character
 
-Open the player menu and select **Current World Setup**. The read-only view includes:
+Open **Setup** in the universal navigation and select **Current World Setup**. The read-only view includes:
 
 - Character name and guidance
 - RPG statistics

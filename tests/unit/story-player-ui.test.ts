@@ -5,6 +5,7 @@ const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/public/story.js", "utf8");
 const storyCss = readFileSync("apps/web/public/story.css", "utf8");
 const tokensCss = readFileSync("apps/web/public/tokens.css", "utf8");
+const navigationCss = readFileSync("apps/web/public/navigation.css", "utf8");
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("shows turn costs to four decimal places without a generated label", () => {
@@ -48,7 +49,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("implements clean URL loading from /story/:campaignId without requiring sessionStorage", () => {
     expect(storyScript).toContain('const match = window.location.pathname.match(/\\/story\\/([^/]+)/);');
     expect(storyScript).toContain('state.campaignId = decodeURIComponent(match[1]);');
-    expect(storyScript).toContain('window.location.href = "/nexus/#campaigns";');
+    expect(storyScript).toContain('recordActivity("system", "Empty Story page opened"');
+    expect(storyScript).not.toContain('window.location.href = "/nexus/#campaigns";');
     expect(storyScript).toContain('await loadCampaign(state.campaignId);');
   });
 
@@ -117,6 +119,13 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('if (job.status === "recoverable") {');
     expect(storyScript).toContain('The original turn was preserved.');
     expect(storyScript).toContain('class="replacement-pending-banner"');
+  });
+
+  it("reloads authoritative campaign state without reusing a stale pre-generation response", () => {
+    expect(storyScript).toContain('fetch(url, { ...options, cache: "no-store", headers })');
+    expect(storyScript).toContain('result.resultTurnId && !state.turns.some((turn) => turn.id === result.resultTurnId)');
+    expect(storyScript).toContain('const completedTurn = { ...result, id: result.resultTurnId };');
+    expect(storyScript).toContain('renderChoices(completedTurn.choices || [], completedTurn.customActionSuggestion || "");');
   });
 
   it("renders streaming narration full-width in the same scene structure as a completed turn", () => {
@@ -195,6 +204,15 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('const btnSaveEditState = $("btnSaveEditState") || $("btnSaveScratch");');
   });
 
+  it("shows the recorded Story Engine prompt interpretation on every turn-history card", () => {
+    expect(storyScript).toContain('const inputMode = t.inputMode === "scene" ? "scene" : "action";');
+    expect(storyScript).toContain('const inputModeLabel = inputMode === "scene" ? "Scene direction" : "Action";');
+    expect(storyScript).toContain('class="turn-input-mode-pill ${inputMode}"');
+    expect(storyScript).toContain('aria-label="Prompt interpretation: ${inputModeLabel}"');
+    expect(storyCss).toContain('.turn-input-mode-pill {');
+    expect(storyCss).toContain('.turn-input-mode-pill.scene {');
+  });
+
   it("manages World Setup fields and RPG percentile stats view as static read-only modal", () => {
     expect(storyScript).toContain('function openWorldSetup()');
     expect(storyHtml).toContain('id="setupCampaignTitle"');
@@ -203,10 +221,60 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('const btnDoneWorldSetup = $("btnDoneWorldSetup");');
   });
 
-  it("includes menu navigation links for Provider Setup and World Management, and disables action buttons when invalid", () => {
+  it("uses the shared slim navigation with dashboard and story first, grouped utilities, and the themed brand mark", () => {
+    const dashboardIndex = storyHtml.indexOf('id="btnNexusDashboard"');
+    const storyIndex = storyHtml.indexOf('id="navStoryLink"');
+    const setupIndex = storyHtml.indexOf('aria-controls="storySetupMenu">Setup</button>');
+    expect(storyHtml).toContain('class="universal-nav"');
+    expect(storyHtml).toContain('class="universal-nav-links"');
+    expect(storyHtml).toContain('src="/nexus/nexus-mark.png"');
+    expect(storyHtml).toContain('href="/nexus/" aria-label="Infinite Quest Nexus dashboard"');
+    expect(dashboardIndex).toBeGreaterThan(-1);
+    expect(storyIndex).toBeGreaterThan(dashboardIndex);
+    expect(setupIndex).toBeGreaterThan(storyIndex);
+    expect(storyHtml).toContain('aria-controls="storyExportMenu">Export</button>');
+    expect(storyHtml).toContain('aria-controls="storyAboutMenu">About</button>');
+    expect(storyHtml).toContain('class="nav-section-divider"');
+    expect(storyHtml).not.toContain('<summary>');
+    expect(storyHtml).not.toContain('id="btnMenu"');
+    expect(storyHtml).not.toContain('☰ Menu');
+    expect(storyCss).toContain("@import url('navigation.css');");
+    expect(navigationCss).toContain('position: sticky;');
+    expect(navigationCss).toContain('.universal-nav {');
+    expect(navigationCss).toContain('.nav-section-divider');
+    expect(navigationCss).not.toContain('content: "⌄"');
+    expect(storyScript).toContain('function closeNavigationMenus(except = null)');
+    expect(storyScript).toContain('function setNavigationMenuState(menu, open)');
+    expect(storyScript).toContain('function initializeNavigationMenus()');
+    expect(storyScript).toContain('trigger.setAttribute("aria-expanded", String(open))');
+    expect(storyScript).toContain('document.addEventListener("pointerdown"');
+    expect(storyScript).toContain('document.addEventListener("keydown"');
+  });
+
+  it("keeps all Story Player utilities in the universal navigation and disables action buttons when invalid", () => {
     expect(storyHtml).toContain('id="btnProviderSetup"');
     expect(storyHtml).toContain('id="btnWorldManagement"');
+    expect(storyHtml).toContain('id="btnCampaignManagement" href="/nexus/#campaigns"');
+    expect(storyHtml).toContain('id="btnImportSection" href="/nexus/#imports"');
+    expect(storyHtml).toContain('id="btnOpenWorldSetup"');
+    expect(storyHtml).toContain('id="btnOpenEditState"');
+    expect(storyHtml).toContain('id="btnExportMarkdown"');
+    expect(storyHtml).toContain('id="btnExportPdf"');
+    expect(storyHtml).not.toContain('id="btnExportJson"');
+    expect(storyHtml).not.toContain('id="btnExportHtml"');
+    expect(storyHtml).toContain('id="btnOpenActivityLog"');
+    expect(storyHtml).toContain('id="btnAboutNexus"');
+    expect(storyHtml).toContain('id="btnOpenUserProfile" class="nav-profile-button"');
+    expect(storyHtml).toContain('title="User profile and settings"');
+    expect(storyHtml).not.toContain('<button id="btnOpenUserProfile" type="button"><strong>User Profile</strong>');
+    expect(storyHtml).toContain('id="btnOpenWorldSetup" type="button"');
+    expect(storyHtml).toContain('id="btnOpenEditState" type="button"');
+    expect(storyHtml).not.toContain('nav-menu-item-flush');
+    expect(navigationCss).toContain('.nav-profile-button {');
     expect(storyScript).toContain('const generationLocked = state.busy || Boolean(state.pendingGeneration);');
+    expect(storyScript).toContain('const storyInputLocked = generationLocked || !isLatest;');
+    expect(storyScript).toContain('if (btnAction) btnAction.disabled = storyInputLocked;');
+    expect(storyScript).not.toContain('inputAction.style.pointerEvents = "none";');
     expect(storyScript).toContain('if (btnPrev) btnPrev.disabled = generationLocked || turnCount === 0 || curr <= 0;');
     expect(storyScript).toContain('if (btnNext) btnNext.disabled = generationLocked || turnCount === 0 || isLatest;');
     expect(storyScript).toContain('if (btnUndo) btnUndo.disabled = generationLocked || turnCount === 0 || !isLatest;');
@@ -222,12 +290,16 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).not.toContain('/provider-text/generate');
   });
 
-  it("implements JSON, HTML, and Markdown exports directly from gameplay", () => {
-    expect(storyScript).toContain('async function exportJson()');
-    expect(storyScript).toContain('async function exportHtml()');
+  it("implements Markdown and print-to-PDF exports with available story illustrations", () => {
     expect(storyScript).toContain('async function exportMarkdown()');
+    expect(storyScript).toContain('async function exportPdfWithImages()');
     expect(storyScript).toContain('/campaigns/${state.campaignId}/export');
+    expect(storyScript).toContain('t.imageAssetUrl || t.imageUrl');
+    expect(storyScript).toContain('turn.imageAssetUrl || turn.imageUrl');
+    expect(storyScript).toContain('printWindow.print()');
     expect(storyScript).toContain('function downloadBlob(blob, filename)');
+    expect(storyScript).not.toContain('async function exportJson()');
+    expect(storyScript).not.toContain('async function exportHtml()');
   });
 
   it("provides toast notifications, activity logging, and onboarding verification", () => {

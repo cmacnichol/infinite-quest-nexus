@@ -7,34 +7,62 @@
   <link rel="stylesheet" href="/nexus/story.css" />
 </head>
 <body>
+  <header class="universal-nav">
+    <a class="nexus-brand" href="/nexus/" aria-label="Infinite Quest Nexus dashboard">
+      <img src="/nexus/nexus-mark.png" alt="" />
+      <span><strong>Infinite Quest</strong><small>Nexus</small></span>
+    </a>
+
+    <nav class="universal-nav-links" aria-label="Primary navigation">
+      <div class="nav-primary-links">
+        <a id="btnNexusDashboard" href="/nexus/">Dashboard</a>
+        <a id="navStoryLink" class="active" href="/story" aria-current="page">Story</a>
+      </div>
+      <span class="nav-section-divider" aria-hidden="true"></span>
+
+      <div class="nav-menu">
+        <button class="nav-menu-trigger" type="button" aria-expanded="false" aria-controls="storySetupMenu">Setup</button>
+        <div id="storySetupMenu" class="nav-menu-panel" hidden>
+          <p class="nav-menu-label">Nexus setup</p>
+          <a id="btnWorldManagement" href="/nexus/#world-library"><strong>World Management</strong><span>Author and publish reusable worlds</span></a>
+          <a id="btnCampaignManagement" href="/nexus/#campaigns"><strong>Campaign Management</strong><span>Advanced campaign and Chronicle settings</span></a>
+          <a id="btnProviderSetup" href="/nexus/#providers"><strong>Provider Setup</strong><span>Text, embedding, intent, and image endpoints</span></a>
+          <a id="btnImportSection" href="/nexus/#imports"><strong>Import</strong><span>Bring in portable worlds and campaign backups</span></a>
+          <hr />
+          <p class="nav-menu-label">Current campaign</p>
+          <button id="btnOpenWorldSetup" type="button"><strong>Current World Setup</strong><span>Review the pinned world and character</span></button>
+          <button id="btnOpenEditState" type="button"><strong>Edit State</strong><span>Update current campaign state</span></button>
+        </div>
+      </div>
+
+      <div class="nav-menu">
+        <button class="nav-menu-trigger" type="button" aria-expanded="false" aria-controls="storyExportMenu">Export</button>
+        <div id="storyExportMenu" class="nav-menu-panel compact-panel" hidden>
+          <button id="btnExportMarkdown" type="button"><strong>Markdown</strong><span>Download a readable story with image references</span></button>
+          <button id="btnExportPdf" type="button"><strong>PDF with images</strong><span>Open a print-ready story with available illustrations</span></button>
+        </div>
+      </div>
+
+      <div class="nav-menu nav-menu-end">
+        <button class="nav-menu-trigger" type="button" aria-expanded="false" aria-controls="storyAboutMenu">About</button>
+        <div id="storyAboutMenu" class="nav-menu-panel" hidden>
+          <button id="btnOpenActivityLog" type="button"><strong>Activity Log</strong><span>Review recent Story Engine activity</span></button>
+          <button id="btnAboutNexus" type="button"><strong>About Infinite Quest Nexus</strong><span>Application and release information</span></button>
+        </div>
+      </div>
+    </nav>
+
+    <div class="nav-meta story-save-meta topbar-status" aria-label="Story status and user profile">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span class="pill" id="autosaveStatus">Autosaved</span>
+      <button id="btnOpenUserProfile" class="nav-profile-button" type="button" aria-label="User profile and settings" title="User profile and settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0" /></svg>
+      </button>
+    </div>
+  </header>
+
   <div class="app">
-    <header>
-      <div class="brand">
-        <div class="sigil" aria-hidden="true">📖</div>
-        <div>
-          <h1>Infinite Quest</h1>
-          <p id="storyNexusVersion" class="story-product-version hidden"></p>
-        </div>
-      </div>
-      <div class="menu-wrap">
-        <span class="pill" id="autosaveStatus">Autosaved</span>
-        <button id="btnMenu" class="menu-button primary" type="button" aria-expanded="false" aria-controls="menuDropdown">☰ Menu</button>
-        <div id="menuDropdown" class="menu-dropdown hidden" role="menu" aria-label="Main menu">
-          <!-- TODO: Enhancement - Implement dedicated Nexus Dashboard -->
-          <a id="btnNexusDashboard" href="/story" class="buttonish" role="menuitem">Nexus Dashboard</a>
-          <a id="btnProviderSetup" href="/nexus/#providers" class="buttonish" role="menuitem">Provider Setup</a>
-          <a id="btnWorldManagement" href="/nexus/#world-library" class="buttonish" role="menuitem">World Management</a>
-          <button id="btnOpenWorldSetup" type="button" role="menuitem">Current World Setup</button>
-          <button id="btnExportJson" type="button" role="menuitem">Save Story File</button>
-          <button id="btnExportMarkdown" type="button" role="menuitem">Export to Markdown</button>
-          <button id="btnExportHtml" type="button" role="menuitem">Export to HTML</button>
-          <button id="btnOpenEditState" type="button" role="menuitem">Edit State</button>
-          <button id="btnOpenActivityLog" type="button" role="menuitem">Activity Log</button>
-          <button id="btnAboutNexus" type="button" role="menuitem">About Infinite Quest Nexus</button>
-        </div>
-        <button id="btnOpenUserProfile" class="profile-icon-btn" type="button" aria-label="User Profile" title="User Profile">👤</button>
-      </div>
-    </header>
+    <p id="storyNexusVersion" class="story-product-version hidden"></p>
 
     <main class="layout" id="appLayout">
       <section class="panel story-shell">
@@ -108,7 +136,7 @@
       </section>
     </main>
 
-    <p class="footer-note">Nexus campaigns are stored in PostgreSQL. Portable story files remain available for backup and migration.</p>
+    <p class="footer-note">Nexus campaigns are stored in PostgreSQL. Portable campaign backups remain available in Campaign Management.</p>
   </div>
 
   <div class="toast" id="toast"></div>

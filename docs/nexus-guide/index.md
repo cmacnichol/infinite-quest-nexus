@@ -2,9 +2,12 @@
 
 Infinite Quest Nexus provides the management workflows for reusable worlds, persistent campaigns, Chronicle memory, and independent provider profiles.
 
+The [Nexus dashboard](./dashboard.md) is the main landing page. It provides library and campaign totals, searchable world and campaign carousels, quick campaign creation, and one-click campaign resume. Detailed authoring and administration remain in the management workspaces under **Setup**.
+
 ## Management areas
 
 - [Navigate Nexus](./navigating-nexus.md)
+- [Nexus dashboard](./dashboard.md)
 - [World Library](./worlds/create.md)
 - [Campaigns](./campaigns/create.md)
 - [Chronicle](./chronicle/inspect.md)

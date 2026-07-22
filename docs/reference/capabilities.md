@@ -10,6 +10,18 @@ This page summarizes behavior implemented in the current repository. It is not a
 - File-based secret inputs for database and credential-encryption values
 - User ownership and campaign/world isolation constraints
 - Content-addressed generated-asset storage
+- Slim universal navigation across Dashboard, Story, Setup, and About, with Story-only Markdown and illustrated PDF export
+
+## Nexus dashboard
+
+- Activity summary for available worlds, open campaigns, accepted turns, and provider-reported API fees
+- Searchable horizontal world and campaign card carousels
+- World details with direct handoff to World Management
+- Basic campaign creation with name and character selection while other settings use system defaults
+- Advanced-creation handoff to Campaign Management
+- Immediate Story launch and opening-turn submission after basic campaign creation
+- Campaign-card resume at the latest accepted scene
+- Prepared world and campaign artwork slots; user-supplied card-picture wiring remains deferred
 
 ## World Library
 

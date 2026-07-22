@@ -4,7 +4,7 @@ A world draft is editable. Publishing creates an immutable numbered version that
 
 ## 1. Create the draft
 
-1. Open `http://localhost:8080/nexus/` and select **Worlds**.
+1. Open `http://localhost:8080/nexus/` and select **Setup → World Management**.
 2. Enter a **New world title**.
 3. Select **New world**.
 

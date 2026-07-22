@@ -100,6 +100,7 @@ export default withMermaid({
           text: "Nexus Guide",
           items: [
             { text: "Overview", link: "/nexus-guide/" },
+            { text: "Dashboard", link: "/nexus-guide/dashboard" },
             { text: "Navigate Nexus", link: "/nexus-guide/navigating-nexus" }
           ]
         },

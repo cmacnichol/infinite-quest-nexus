@@ -1,6 +1,6 @@
 # Quick start
 
-This tutorial starts the two-container local deployment and takes you to a ready Nexus management screen.
+This tutorial starts the two-container local deployment and takes you to the Nexus dashboard.
 
 ## Prerequisites
 
@@ -30,11 +30,11 @@ The first startup downloads the PostgreSQL/pgvector image, builds the applicatio
 
 Open `http://localhost:8080/health/ready`. A ready response confirms that PostgreSQL is reachable and the `vector` extension is installed. It does not test provider connectivity or generated-asset storage.
 
-Open Nexus World Management at `http://localhost:8080/nexus/`.
+Open the Nexus dashboard at `http://localhost:8080/nexus/`.
 
 ## 3. Configure story text
 
-1. Select **Providers**.
+1. Select **Setup → Provider Setup**.
 2. Select **New provider profile**.
 3. Enter a **Profile name**.
 4. Select the provider type and choose the **Story text** role.
@@ -48,7 +48,7 @@ For LM Studio running on the Docker Desktop host, the usual base URL is `http://
 
 ## 4. Verify the next step
 
-Return to **Worlds**. The **World Library** area should let you enter a new world title.
+Select **Setup → World Management**. The **World Library** area should let you enter a new world title. The dashboard remains the main landing page and will show published worlds after they are available.
 
 Continue with [Create your first world](./first-world.md).
 

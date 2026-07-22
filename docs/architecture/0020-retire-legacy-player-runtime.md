@@ -23,7 +23,7 @@ Active browser code must use same-origin Nexus API routes for provider and autho
 ## Consequences
 
 - ADR 0004 remains the record of the migration bridge but no longer describes current runtime routing.
-- A root URL consistently enters World Library and Campaign management instead of exposing two competing players.
+- A root URL consistently enters the active Nexus dashboard, with explicit paths to World and Campaign Management, instead of exposing two competing players.
 - Provider credentials and authoritative story state cannot fall back to the historical browser implementation.
 - Legacy portable files and browser saves remain importable without retaining the legacy runtime.
 - Tests target the active management application, Story Player, API, and domain contracts.

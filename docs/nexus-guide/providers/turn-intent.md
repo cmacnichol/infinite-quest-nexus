@@ -16,7 +16,7 @@ Story narration always uses the campaign's Story text provider, even when a sepa
 
 ## Configure a small classifier model
 
-1. Select **Providers** and **New provider profile**.
+1. Open **Setup → Provider Setup** and select **New provider profile**.
 2. Choose **Turn intent classification** as the role.
 3. Configure a text-capable provider endpoint and its own credential.
 4. Discover and select a model that reliably follows structured-output instructions.

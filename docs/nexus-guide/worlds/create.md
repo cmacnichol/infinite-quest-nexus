@@ -1,6 +1,6 @@
 # Create a world
 
-1. Open Nexus and select **Worlds**.
+1. Open **Setup → World Management**.
 2. Enter a **New world title**.
 3. Select **New world**.
 

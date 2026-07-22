@@ -2,6 +2,8 @@
 
 Infinite Quest is the player-facing story experience backed by an authoritative Nexus campaign. Use this guide after an administrator or world author has configured a provider, published a world, and created a campaign.
 
+The Nexus dashboard is the normal starting point: select a campaign card to resume, or select a world card to create a campaign and begin its first turn. The same slim navigation bar remains available throughout the Story experience.
+
 ## Learn the player experience
 
 - [Player interface](./interface.md)
