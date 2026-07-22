@@ -352,6 +352,57 @@ integration("legacy import and Chronicle integration", () => {
     expect(rebuiltIds.rows.map((fact) => fact.id)).toEqual([originalFactId, replacementFactId]);
   });
 
+  it("retrieves canonical entity mentions through scoped aliases", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Alias memory ${crypto.randomUUID()}`;
+    const imported = await importLegacyStory(
+      pool,
+      storyImportRequestSchema.parse({ sourceName: "alias-memory.story", story: fixture })
+    );
+    const ownerUserId = await initialOwnerId(pool);
+    const campaign = await pool.query<{ world_version_id: string }>(
+      "SELECT world_version_id FROM campaigns WHERE id = $1",
+      [imported.campaignId]
+    );
+    await pool.query(
+      `UPDATE world_versions
+          SET content = jsonb_set(content, '{entities}', $2::jsonb, true)
+        WHERE id = $1`,
+      [campaign.rows[0]!.world_version_id, JSON.stringify([
+        { id: "warden", name: "Lady Seraphine", aliases: ["the warden"], kind: "character" }
+      ])]
+    );
+    await pool.query(
+      "UPDATE turns SET narration = $2 WHERE campaign_id = $1 AND turn_number = 1",
+      [imported.campaignId, "Lady Seraphine sealed the moonlit archive before dawn."]
+    );
+    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, imported.campaignId));
+
+    const indexed = await pool.query<{ entity_ids: string[] }>(
+      `SELECT entity_ids FROM chronicle_memories
+        WHERE campaign_id = $1 AND memory_kind = 'turn_fiction' AND ordinal = 1`,
+      [imported.campaignId]
+    );
+    expect(indexed.rows[0]?.entity_ids).toContain("world:warden");
+    const context = await buildContextPreview(pool, imported.campaignId, {
+      budgetTokens: 4096,
+      compression: "auto",
+      query: "What did the warden seal?",
+      recentTurns: 1
+    });
+    const serialized = JSON.stringify(context.scopes);
+    expect(serialized).toContain("Lady Seraphine sealed the moonlit archive");
+    expect(serialized).not.toContain("world:warden");
+
+    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, imported.campaignId));
+    const rebuilt = await pool.query<{ entity_ids: string[] }>(
+      `SELECT entity_ids FROM chronicle_memories
+        WHERE campaign_id = $1 AND memory_kind = 'turn_fiction' AND ordinal = 1`,
+      [imported.campaignId]
+    );
+    expect(rebuilt.rows[0]?.entity_ids).toEqual(indexed.rows[0]?.entity_ids);
+  });
+
   it("moves imported data-URL illustrations into filesystem asset storage", async () => {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `Asset import fixture ${crypto.randomUUID()}`;

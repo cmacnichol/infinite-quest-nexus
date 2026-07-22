@@ -19,6 +19,7 @@ Architecture decision records (ADRs) preserve consequential design decisions and
 - [ADR 0012: Provider transport deadlines](./0012-provider-transport-deadlines.md)
 - [ADR 0017: Staged latest-turn replacement](./0017-staged-latest-turn-replacement.md)
 - [ADR 0018: Canonical facts use structured, rebuildable projections](./0018-structured-canonical-fact-projections.md)
+- [ADR 0019: Chronicle entity identity is scoped and derived](./0019-scoped-chronicle-entity-identity.md)
 
 ## World Library and characters
 
