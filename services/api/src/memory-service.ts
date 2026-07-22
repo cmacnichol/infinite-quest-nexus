@@ -5,6 +5,10 @@ import { DEFAULT_EMBEDDING_MODEL, type CampaignEmbeddingConfig, type Compression
 import { compressTurnMemory, buildTurnFictionMemory } from "../../../packages/story-engine/src/chronicle.js";
 import { callEmbeddingProvider, logProviderTransportError } from "../../../packages/story-engine/src/providers.js";
 import { estimateTokens, extractEntities, stableStringify, stripMechanicsLeakage, truncateAtBoundary } from "../../../packages/domain/src/text.js";
+import {
+  buildCanonicalFactProjection,
+  canonicalFactDeduplicationKey
+} from "../../../packages/domain/src/canonical-facts.js";
 import { characterTextFromSnapshot } from "../../../packages/domain/src/world-characters.js";
 import { loadEmbeddingProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
@@ -411,6 +415,7 @@ async function allMemories(
         WHERE owner_user_id = $1 AND campaign_id = $2
           AND ($5::integer IS NULL OR ordinal <= $5::integer)
           AND ($5::integer IS NULL OR memory_kind <> 'legacy_summary')
+          AND ($5::integer IS NULL OR memory_kind <> 'canonical_fact')
      ), ranked AS (
        SELECT *,
               row_number() OVER (PARTITION BY memory_kind ORDER BY ordinal DESC, created_at DESC) AS recent_rank,
@@ -433,7 +438,24 @@ async function allMemories(
       LIMIT 512`,
     [ownerUserId, campaignId, query.trim(), recentTurns, throughTurnNumber ?? null]
   );
-  return result.rows;
+  if (throughTurnNumber === undefined) return result.rows;
+  const historicalFacts = await client.query<MemoryRow>(
+    `SELECT id, source_turn_id AS turn_id, 'canonical_fact'::text AS memory_kind,
+            source_turn_number AS ordinal,
+            '- [fact_id: ' || id || '] ' || content AS content,
+            GREATEST(1, CEIL(length(content) / 4.0))::integer AS token_estimate,
+            0.85::real AS importance, entities,
+            CASE WHEN $3 = '' THEN 0::real
+                 ELSE ts_rank_cd(to_tsvector('english', content), websearch_to_tsquery('english', $3)) END AS relevance
+       FROM campaign_canonical_facts
+      WHERE owner_user_id = $1 AND campaign_id = $2
+        AND valid_from_turn <= $4
+        AND (valid_until_turn IS NULL OR valid_until_turn > $4)
+      ORDER BY source_turn_number DESC, source_fact_index
+      LIMIT 256`,
+    [ownerUserId, campaignId, query.trim(), throughTurnNumber]
+  );
+  return [...result.rows, ...historicalFacts.rows];
 }
 
 function selectAutomaticLevel(metrics: ChronicleMetricCounts, availableTokens: number): Exclude<CompressionLevel, "auto"> {
@@ -907,6 +929,7 @@ export type DerivedStoryMemory = {
   continuitySummary?: string;
   canonicalFacts?: string[];
   supersededFacts?: string[];
+  canonicalFactUpdates?: Array<{ content: string; supersedesFactIds?: string[] }>;
   openThreads?: string[];
 };
 
@@ -915,6 +938,147 @@ function sanitizedMemoryLines(values: string[] | undefined, limit = 100): string
     const sanitized = sanitizedFictionString(value, 4000);
     return sanitized ? [sanitized] : [];
   }))].slice(0, limit);
+}
+
+type ProjectedFactRow = {
+  id: string;
+  source_turn_id: string;
+  source_turn_number: number;
+  content: string;
+  entities: string[];
+};
+
+async function syncCanonicalFactMemories(
+  client: DatabaseClient,
+  ownerUserId: string,
+  campaignId: string,
+  worldVersionId: string,
+  sourceTurnIds: Set<string>
+): Promise<void> {
+  if (!sourceTurnIds.size) return;
+  const turnIds = [...sourceTurnIds];
+  const active = await client.query<ProjectedFactRow>(
+    `SELECT id, source_turn_id, source_turn_number, content, entities
+       FROM campaign_canonical_facts
+      WHERE owner_user_id = $1 AND campaign_id = $2
+        AND source_turn_id = ANY($3::uuid[]) AND valid_until_turn IS NULL
+      ORDER BY source_turn_number, source_fact_index`,
+    [ownerUserId, campaignId, turnIds]
+  );
+  await client.query(
+    `DELETE FROM chronicle_memories
+      WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_id = ANY($3::uuid[])
+        AND memory_kind = 'canonical_fact' AND metadata->>'generatedFromAcceptedTurn' = 'true'`,
+    [ownerUserId, campaignId, turnIds]
+  );
+  const grouped = new Map<string, ProjectedFactRow[]>();
+  for (const fact of active.rows) {
+    const facts = grouped.get(fact.source_turn_id) ?? [];
+    facts.push(fact);
+    grouped.set(fact.source_turn_id, facts);
+  }
+  for (const [sourceTurnId, facts] of grouped) {
+    const ordinal = facts[0]!.source_turn_number;
+    const content = [
+      `Canonical facts established or corrected at turn ${ordinal}`,
+      ...facts.map((fact) => `- [fact_id: ${fact.id}] ${fact.content}`)
+    ].join("\n");
+    const entities = [...new Set(facts.flatMap((fact) => fact.entities))].slice(0, 100);
+    await client.query(
+      `INSERT INTO chronicle_memories (
+         owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content,
+         token_estimate, importance, entities, metadata
+       ) VALUES ($1,$2,$3,$4,'canonical_fact',$5,$6,$7,0.85,$8,$9)`,
+      [ownerUserId, campaignId, worldVersionId, sourceTurnId, ordinal, content, estimateTokens(content), entities,
+        json({ sourceTurn: ordinal, generatedFromAcceptedTurn: true, structuredFactIds: facts.map((fact) => fact.id) })]
+    );
+  }
+}
+
+async function projectCanonicalFacts(
+  client: DatabaseClient,
+  ownerUserId: string,
+  campaignId: string,
+  worldVersionId: string,
+  turnId: string,
+  ordinal: number,
+  derived: DerivedStoryMemory
+): Promise<void> {
+  const legacyFacts = sanitizedMemoryLines(derived.canonicalFacts);
+  const structuredUpdates = (derived.canonicalFactUpdates ?? []).flatMap((update) => {
+    const content = sanitizedFictionString(update.content, 4000);
+    return content ? [{ content, supersedesFactIds: [...new Set(update.supersedesFactIds ?? [])].slice(0, 100) }] : [];
+  });
+  const sourceUpdates = structuredUpdates.length
+    ? structuredUpdates
+    : legacyFacts.map((content) => ({ content, supersedesFactIds: [] as string[] }));
+  const uniqueUpdates = new Map<string, { content: string; supersedesFactIds: string[] }>();
+  for (const update of sourceUpdates) {
+    const key = canonicalFactDeduplicationKey(update.content);
+    if (!uniqueUpdates.has(key)) uniqueUpdates.set(key, update);
+  }
+  const updates = [...uniqueUpdates.values()];
+  const projections = buildCanonicalFactProjection(updates.map((update, factIndex) => ({
+    campaignId,
+    sourceTurnId: turnId,
+    factIndex,
+    content: update.content
+  })));
+  const affectedTurnIds = new Set<string>([turnId]);
+  for (let index = 0; index < projections.length; index += 1) {
+    const projection = projections[index]!;
+    const update = updates[index]!;
+    await client.query(
+      `INSERT INTO campaign_canonical_facts (
+         id, owner_user_id, campaign_id, world_version_id, source_turn_id, source_turn_number,
+         source_fact_index, content, normalized_content, entities, valid_from_turn, metadata
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$6,$11)
+       ON CONFLICT (campaign_id, source_turn_id, source_fact_index) DO UPDATE SET
+         content = EXCLUDED.content, normalized_content = EXCLUDED.normalized_content,
+         entities = EXCLUDED.entities, metadata = EXCLUDED.metadata, updated_at = now()`,
+      [projection.id, ownerUserId, campaignId, worldVersionId, turnId, ordinal, projection.factIndex,
+        projection.content, canonicalFactDeduplicationKey(projection.content), extractEntities(projection.content),
+        json({ generatedFromAcceptedTurn: true })]
+    );
+    if (update.supersedesFactIds.length) {
+      const superseded = await client.query<{ id: string; source_turn_id: string }>(
+        `UPDATE campaign_canonical_facts
+            SET valid_until_turn = $4, superseded_by_fact_id = $5, updated_at = now()
+          WHERE owner_user_id = $1 AND campaign_id = $2 AND id = ANY($3::uuid[])
+            AND source_turn_number < $4 AND valid_until_turn IS NULL
+        RETURNING id, source_turn_id`,
+        [ownerUserId, campaignId, update.supersedesFactIds, ordinal, projection.id]
+      );
+      superseded.rows.forEach((fact) => affectedTurnIds.add(fact.source_turn_id));
+      const matched = new Set(superseded.rows.map((fact) => fact.id));
+      const unmatched = update.supersedesFactIds.filter((id) => !matched.has(id));
+      if (unmatched.length) {
+        await client.query(
+          `UPDATE campaign_canonical_facts
+              SET metadata = metadata || $4::jsonb, updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3`,
+          [projection.id, ownerUserId, campaignId, json({ unmatchedSupersedesFactIds: unmatched })]
+        );
+      }
+    }
+  }
+  const legacySuperseded = sanitizedMemoryLines(derived.supersededFacts)
+    .map((fact) => canonicalFactDeduplicationKey(fact.replace(/^[-•]\s*/, "")));
+  if (legacySuperseded.length) {
+    const superseded = await client.query<{ source_turn_id: string }>(
+      `UPDATE campaign_canonical_facts
+          SET valid_until_turn = $4, updated_at = now(),
+              metadata = metadata || $5::jsonb
+        WHERE owner_user_id = $1 AND campaign_id = $2
+          AND normalized_content = ANY($3::text[])
+          AND source_turn_number < $4 AND valid_until_turn IS NULL
+      RETURNING source_turn_id`,
+      [ownerUserId, campaignId, legacySuperseded, ordinal,
+        json({ legacyTextSupersededAtTurn: ordinal })]
+    );
+    superseded.rows.forEach((fact) => affectedTurnIds.add(fact.source_turn_id));
+  }
+  await syncCanonicalFactMemories(client, ownerUserId, campaignId, worldVersionId, affectedTurnIds);
 }
 
 export async function storeDerivedTurnMemories(
@@ -927,38 +1091,8 @@ export async function storeDerivedTurnMemories(
   derived: DerivedStoryMemory
 ): Promise<void> {
   const summary = sanitizedFictionString(derived.continuitySummary, 20_000);
-  const facts = sanitizedMemoryLines(derived.canonicalFacts);
-  const supersededFacts = sanitizedMemoryLines(derived.supersededFacts);
   const threads = sanitizedMemoryLines(derived.openThreads);
-  if (supersededFacts.length) {
-    const priorFacts = await client.query<{ id: string; content: string; metadata: Record<string, unknown> }>(
-      `SELECT id, content, metadata FROM chronicle_memories
-        WHERE owner_user_id = $1 AND campaign_id = $2 AND memory_kind = 'canonical_fact' AND ordinal < $3`,
-      [ownerUserId, campaignId, ordinal]
-    );
-    const normalizedSuperseded = new Set(supersededFacts.map((fact) => fact.toLocaleLowerCase().replace(/^[-•]\s*/, "").trim()));
-    for (const prior of priorFacts.rows) {
-      const header = prior.content.split("\n")[0] ?? "Canonical facts";
-      const remaining = prior.content.split("\n").slice(1).filter((line) => {
-        const normalized = line.toLocaleLowerCase().replace(/^[-•]\s*/, "").trim();
-        return !normalizedSuperseded.has(normalized);
-      });
-      if (!remaining.length) {
-        await client.query("DELETE FROM chronicle_memories WHERE id = $1 AND owner_user_id = $2", [prior.id, ownerUserId]);
-      } else if (remaining.length !== prior.content.split("\n").slice(1).length) {
-        const content = [header, ...remaining].join("\n");
-        await client.query(
-          `UPDATE chronicle_memories SET content = $3, token_estimate = $4, entities = $5,
-                  metadata = metadata || $6::jsonb, embedding = NULL, embedding_provider_profile_id = NULL,
-                  embedding_model = NULL, embedding_dimensions = NULL, embedding_content_hash = NULL,
-                  embedding_updated_at = NULL, embedding_provider_fingerprint = NULL, updated_at = now()
-            WHERE id = $1 AND owner_user_id = $2`,
-          [prior.id, ownerUserId, content, estimateTokens(content), extractEntities(content),
-            json({ supersededAtTurn: ordinal, supersededFacts })]
-        );
-      }
-    }
-  }
+  await projectCanonicalFacts(client, ownerUserId, campaignId, worldVersionId, turnId, ordinal, derived);
   if (summary) {
     await client.query(
       `INSERT INTO chronicle_memories (
@@ -981,22 +1115,6 @@ export async function storeDerivedTurnMemories(
         [ownerUserId, campaignId, ordinal, json({ summary }), estimateTokens(summary)]
       );
     }
-  }
-  if (facts.length) {
-    const content = [`Canonical facts established or corrected at turn ${ordinal}`, ...facts.map((fact) => `- ${fact}`)].join("\n");
-    await client.query(
-      `INSERT INTO chronicle_memories (
-         owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content,
-         token_estimate, importance, entities, metadata
-       ) VALUES ($1,$2,$3,$4,'canonical_fact',$5,$6,$7,0.85,$8,$9)
-       ON CONFLICT (campaign_id, turn_id, memory_kind) DO UPDATE SET
-         content = EXCLUDED.content, token_estimate = EXCLUDED.token_estimate, entities = EXCLUDED.entities,
-         metadata = EXCLUDED.metadata, embedding = NULL, embedding_provider_profile_id = NULL,
-         embedding_model = NULL, embedding_dimensions = NULL, embedding_content_hash = NULL,
-         embedding_updated_at = NULL, embedding_provider_fingerprint = NULL, updated_at = now()`,
-      [ownerUserId, campaignId, worldVersionId, turnId, ordinal, content, estimateTokens(content), extractEntities(content),
-        json({ sourceTurn: ordinal, generatedFromAcceptedTurn: true })]
-    );
   }
   if (threads.length) {
     const content = [`Open story threads after turn ${ordinal}`, ...threads.map((thread) => `- ${thread}`)].join("\n");
@@ -1151,6 +1269,10 @@ export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserI
     [ownerUserId, campaignId]
   );
   await client.query(
+    "DELETE FROM campaign_canonical_facts WHERE owner_user_id = $1 AND campaign_id = $2",
+    [ownerUserId, campaignId]
+  );
+  await client.query(
     `DELETE FROM chronicle_memories
       WHERE owner_user_id = $1 AND campaign_id = $2 AND memory_kind = 'turn_fiction'`,
     [ownerUserId, campaignId]
@@ -1196,6 +1318,19 @@ export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserI
         ? turn.state_snapshot_private.canonicalFacts.filter((value): value is string => typeof value === "string") : [],
       supersededFacts: Array.isArray(turn.state_snapshot_private?.supersededFacts)
         ? turn.state_snapshot_private.supersededFacts.filter((value): value is string => typeof value === "string") : [],
+      canonicalFactUpdates: Array.isArray(turn.state_snapshot_private?.canonicalFactUpdates)
+        ? turn.state_snapshot_private.canonicalFactUpdates.flatMap((value) => {
+            if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+            const update = value as Record<string, unknown>;
+            if (typeof update.content !== "string") return [];
+            return [{
+              content: update.content,
+              supersedesFactIds: Array.isArray(update.supersedesFactIds)
+                ? update.supersedesFactIds.filter((id): id is string => typeof id === "string")
+                : []
+            }];
+          })
+        : [],
       ...(openThreads ? { openThreads } : {})
     });
   }

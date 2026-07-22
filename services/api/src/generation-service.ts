@@ -1100,7 +1100,12 @@ async function commitStory(
       story.custom_action_suggestion, story.image_prompt, json(mechanicsPrivate),
       json({ scratchpad: story.scratchpad, trackers, eventTriggers, pendingEventTriggers, rpgStats: inputs.rpgStats,
         continuitySummary: story.continuity_summary, canonicalFacts: story.canonical_facts,
-        supersededFacts: story.superseded_facts, openThreads: story.open_threads }),
+        supersededFacts: story.superseded_facts,
+        canonicalFactUpdates: story.canonical_fact_updates.map((update) => ({
+          content: update.content,
+          supersedesFactIds: update.supersedes_fact_ids
+        })),
+        openThreads: story.open_threads }),
       json({ providerProfileId: provider.id, providerType: provider.providerType, model: provider.model, modelInstanceId: response.modelInstanceId,
         responseId: response.responseId, usage: response.usage, promptProtocolVersion: job.prompt_protocol_version,
         contextFingerprint, contextDiagnostics })]
@@ -1128,6 +1133,10 @@ async function commitStory(
         continuitySummary: story.continuity_summary,
         canonicalFacts: story.canonical_facts,
         supersededFacts: story.superseded_facts,
+        canonicalFactUpdates: story.canonical_fact_updates.map((update) => ({
+          content: update.content,
+          supersedesFactIds: update.supersedes_fact_ids
+        })),
         openThreads: story.open_threads
       });
     const memory = buildTurnFictionMemory({ action: fictionAction, narration: story.narration }, job.expected_turn_number);

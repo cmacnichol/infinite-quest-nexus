@@ -185,6 +185,11 @@ export const eventExtensionOutputSchema = z.object({
   tracker_updates: z.array(z.record(z.string(), z.unknown())).max(200).default([])
 });
 
+export const canonicalFactUpdateSchema = z.object({
+  content: z.string().trim().min(1).max(4000),
+  supersedes_fact_ids: z.array(z.uuid()).max(100).default([])
+});
+
 export const storyTurnOutputSchema = z.object({
   narration: z.string().trim().min(1).max(200_000),
   choices: z.array(z.string().trim().min(1).max(2000)).length(4),
@@ -195,6 +200,7 @@ export const storyTurnOutputSchema = z.object({
   continuity_summary: z.string().trim().min(1).max(20_000),
   canonical_facts: z.array(z.string().trim().min(1).max(4000)).max(100),
   superseded_facts: z.array(z.string().trim().min(1).max(4000)).max(100),
+  canonical_fact_updates: z.array(canonicalFactUpdateSchema).max(100).default([]),
   open_threads: z.array(z.string().trim().min(1).max(4000)).max(100)
 });
 

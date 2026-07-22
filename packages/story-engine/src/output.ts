@@ -96,6 +96,7 @@ function storyTextFields(story: StoryTurnOutput): Array<[string, string]> {
     ["continuity_summary", story.continuity_summary],
     ["canonical_facts", JSON.stringify(story.canonical_facts)],
     ["superseded_facts", JSON.stringify(story.superseded_facts)],
+    ["canonical_fact_updates", JSON.stringify(story.canonical_fact_updates)],
     ["open_threads", JSON.stringify(story.open_threads)]
   ];
 }
