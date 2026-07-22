@@ -9,7 +9,6 @@ COPY services ./services
 COPY apps ./apps
 COPY tests ./tests
 COPY vitest.integration.config.ts ./vitest.integration.config.ts
-COPY index.html ./index.html
 COPY pnpm-lock.yaml ./pnpm-lock.yaml
 RUN pnpm install --frozen-lockfile
 RUN pnpm build
@@ -22,7 +21,6 @@ ENV NODE_ENV=production \
     APP_HOST=0.0.0.0 \
     APP_PORT=8080 \
     WEB_ROOT=/app/apps/web/public \
-    LEGACY_INDEX_PATH=/app/index.html \
     MIGRATION_DIRECTORY=/app/database/migrations \
     ASSET_STORAGE_ROOT=/var/lib/infinitequest/assets
 WORKDIR /app
@@ -34,7 +32,6 @@ COPY --from=production-dependencies --chown=infinitequest:infinitequest /app/nod
 COPY --from=build --chown=infinitequest:infinitequest /app/dist ./dist
 COPY --from=build --chown=infinitequest:infinitequest /app/database/migrations ./database/migrations
 COPY --from=build --chown=infinitequest:infinitequest /app/apps/web/public ./apps/web/public
-COPY --from=build --chown=infinitequest:infinitequest /app/index.html ./index.html
 USER infinitequest
 EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=4 \

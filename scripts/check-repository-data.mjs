@@ -82,11 +82,11 @@ for (const file of files) {
 }
 
 if (violations.length > 0) {
-  console.error("Repository data-safety check failed:");
+  process.stderr.write("Repository data-safety check failed:\n");
   for (const violation of violations) {
-    console.error(`- ${violation}`);
+    process.stderr.write(`- ${violation}\n`);
   }
   process.exitCode = 1;
 } else {
-  console.log(`Repository data-safety check passed for ${files.length} candidate files.`);
+  process.stdout.write(`Repository data-safety check passed for ${files.length} candidate files.\n`);
 }

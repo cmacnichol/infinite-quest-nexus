@@ -32,8 +32,6 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("contains all necessary dialog shells for in-game modals and setup", () => {
     expect(storyHtml).toContain('id="editStateDialog"');
     expect(storyHtml).toContain('id="worldSetupDialog"');
-    expect(storyHtml).toContain('id="worldGenDialog"');
-    expect(storyHtml).toContain('id="characterSelectDialog"');
     expect(storyHtml).toContain('id="imagePromptDialog"');
     expect(storyHtml).toContain('id="editResponseDialog"');
     expect(storyHtml).toContain('id="retryPromptDialog"');
@@ -174,14 +172,13 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('if (btnRetry) btnRetry.disabled = generationLocked || turnCount === 0 || !isLatest || !lastTurnHasAction;');
   });
 
-  it("supports character selection and ad-hoc world generation from prompt via API", () => {
-    expect(storyScript).toContain('async function openCharacterSelect()');
-    expect(storyScript).toContain('/world-versions/${state.campaign.worldVersionId}/playable-characters');
-    expect(storyScript).toContain('async function generateCharacterCandidates()');
-    expect(storyScript).toContain('function openWorldGen()');
-    expect(storyScript).toContain('async function generateWorld()');
-    expect(storyScript).toContain('/provider-text/generate');
-    expect(storyScript).toContain('const btnWorldGenSubmit = $("btnWorldGenSubmit") || $("btnWorldGenRun");');
+  it("keeps world and character authoring in World Management", () => {
+    expect(storyHtml).toContain('id="btnWorldManagement" href="/nexus/#world-library"');
+    expect(storyHtml).not.toContain('id="worldGenDialog"');
+    expect(storyHtml).not.toContain('id="characterSelectDialog"');
+    expect(storyScript).not.toContain('async function generateCharacterCandidates()');
+    expect(storyScript).not.toContain('async function generateWorld()');
+    expect(storyScript).not.toContain('/provider-text/generate');
   });
 
   it("implements JSON, HTML, and Markdown exports directly from gameplay", () => {

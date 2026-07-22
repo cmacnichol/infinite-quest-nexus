@@ -95,4 +95,4 @@ This page summarizes behavior implemented in the current repository. It is not a
 
 - Interactive login and OIDC are deferred; deployments must remain on the intended trusted network.
 - Image and embedding providers are optional and never required for accepted text generation.
-- The root legacy client remains for historical reference and is not kept in feature parity.
+- The root legacy source is retained only as an unshipped historical reference; `/` and `/index.html` enter the active Nexus application.

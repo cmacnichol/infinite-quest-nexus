@@ -1,46 +1,35 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const playerHtml = readFileSync("index.html", "utf8");
+const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
+const storyScript = readFileSync("apps/web/public/story.js", "utf8");
 const managementHtml = readFileSync("apps/web/public/index.html", "utf8");
 const managementScript = readFileSync("apps/web/public/nexus.js", "utf8");
 const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
 
 describe("Nexus management UI contracts", () => {
   it("leaves fiction-boundary validation exclusively to the Nexus Story Engine", () => {
-    expect(playerHtml).not.toContain("STORY_RPG_MECHANIC_PATTERNS");
-    expect(playerHtml).not.toContain("storyRpgMechanicLeakFields");
-    expect(playerHtml).not.toContain("repairStatelessStoryRpgLeak");
-    expect(playerHtml).not.toContain("sanitizeFullHistoryRpgMechanics");
+    expect(storyScript).not.toContain("STORY_RPG_MECHANIC_PATTERNS");
+    expect(storyScript).not.toContain("storyRpgMechanicLeakFields");
+    expect(storyScript).not.toContain("repairStatelessStoryRpgLeak");
+    expect(storyScript).not.toContain("sanitizeFullHistoryRpgMechanics");
   });
 
   it("uses Nexus branding and focused management navigation", () => {
-    expect(playerHtml).toContain("<h1>Infinite Quest Nexus</h1>");
-    expect(playerHtml).not.toMatch(/single-page AI-powered choose-your-own-adventure story engine/i);
-    expect(playerHtml).toContain('id="btnOpenNexusImport" type="button" role="menuitem">World Management');
-    expect(playerHtml).toContain('id="btnOpenProviderManagement" type="button" role="menuitem">Provider Management');
-    expect(playerHtml).not.toContain("Active Text Provider &amp; Context");
-    expect(playerHtml).not.toContain("btnOpenModelSettings");
-    expect(playerHtml).not.toContain("modelSettingsDialog");
-    expect(playerHtml).not.toContain("openModelSettingsDialog");
-    expect(playerHtml).not.toContain("btnOpenInfiniteWorldsImport");
-    expect(playerHtml).not.toContain("infiniteWorldsImportDialog");
-    expect(playerHtml).not.toContain("Load Story File");
-    expect(playerHtml).not.toContain('id="importFile"');
-    expect(playerHtml).not.toContain("function loadStory(file)");
+    expect(storyHtml).toContain("<h1>Infinite Quest</h1>");
+    expect(storyHtml).toContain('href="/nexus/#world-library"');
+    expect(storyHtml).toContain('href="/nexus/#providers"');
+    expect(storyHtml).not.toContain("modelSettingsDialog");
+    expect(storyHtml).not.toContain("infiniteWorldsImportDialog");
+    expect(storyHtml).not.toContain('id="importFile"');
+    expect(storyScript).not.toContain("function loadStory(file)");
   });
 
-  it("autosaves before leaving the story for Nexus management", () => {
-    const navigationHelper = playerHtml.match(/function navigateFromStory\(url\) \{[\s\S]*?\n    \}/)?.[0] || "";
-    expect(navigationHelper).toContain("syncFormToState();");
-    expect(navigationHelper).toContain("syncInlineWorldEditorState();");
-    expect(navigationHelper).toContain("saveState();");
-    expect(navigationHelper.indexOf("saveState();")).toBeLessThan(navigationHelper.indexOf("navigatingAfterAutosave = true;"));
-    expect(navigationHelper.indexOf("navigatingAfterAutosave = true;")).toBeLessThan(navigationHelper.indexOf("window.location.assign(url);"));
-    expect(playerHtml).toContain("if (navigatingAfterAutosave) return;");
-    expect(playerHtml).toContain('navigateFromStory("/nexus/#world-library")');
-    expect(playerHtml).toContain('navigateFromStory("/nexus/#providers")');
-    expect(playerHtml).not.toContain('closeMenu(); window.location.assign("/nexus/');
+  it("keeps management navigation separate from authoritative story persistence", () => {
+    expect(storyHtml).toContain('id="btnWorldManagement" href="/nexus/#world-library"');
+    expect(storyHtml).toContain('id="btnProviderSetup" href="/nexus/#providers"');
+    expect(storyScript).not.toContain("localStorage.setItem(\"storyState\"");
+    expect(storyScript).not.toContain("syncInlineWorldEditorState");
   });
 
   it("consolidates Infinite Worlds files into the World Management importer", () => {
@@ -191,7 +180,8 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('method: "DELETE"');
     expect(managementScript).toContain('const hasBody = options.body !== undefined && options.body !== null');
     expect(managementScript).toContain('method: editingProviderId ? "PATCH" : "POST"');
-    expect(playerHtml).toContain('/provider-text/generate');
+    expect(storyScript).not.toContain('/provider-text/generate');
+    expect(storyScript).toContain('/generation-jobs/${jobId}');
     expect(managementHtml).toContain('value="text-embedding-nomic-embed-text-v1.5"');
     expect(managementHtml).toContain('id="embeddingDocumentPrefix"');
     expect(managementHtml).toContain('id="embeddingQueryPrefix"');
@@ -225,9 +215,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="deleteDialog"');
     expect(managementScript).toContain('window.location.assign("/story/" + encodeURIComponent(selectedCampaign.id));');
     expect(managementScript).toContain("Use “Load story” in Campaigns");
-    expect(playerHtml).toContain("async function maybeAutoStartResumedCampaign()");
-    expect(playerHtml).toContain("await startAdventure({ skipExistingTurnsConfirm: true });");
-    expect(playerHtml).toContain("const startedResumedCampaign = await maybeAutoStartResumedCampaign();");
+    expect(storyScript).toContain("async function resumePendingGeneration()");
+    expect(storyScript).toContain("const resumed = await resumePendingGeneration();");
+    expect(storyScript).toContain("if (!resumed && state.turns.length === 0 && !state.busy)");
     expect(managementScript).toContain("function parseImportJson(sourceText)");
     expect(managementScript).not.toContain("window.prompt");
   });
@@ -311,9 +301,8 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("shows provider-reported turn and campaign costs without adding a reporting page", () => {
-    expect(playerHtml).toContain('class="pill turn-cost-pill"');
-    expect(playerHtml).toContain("formatReportedCost(turn.reportedCost)");
-    expect(playerHtml).toContain("refreshNexusTurnReportedCost(turn)");
+    expect(storyScript).toContain('class="pill turn-cost-pill"');
+    expect(storyScript).toContain("formatReportedCost(turn.reportedCost)");
     expect(managementHtml).toContain('id="campaignCostSection"');
     expect(managementHtml).toContain('id="campaignCostMetrics"');
     expect(managementScript).toContain("async function refreshCampaignCostSummary()");
@@ -327,37 +316,30 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("tracks durable Story Engine phases and renders live phase detail", () => {
-    expect(playerHtml).toContain('{ id: "queue", label: "Queueing turn" }');
-    expect(playerHtml).toContain('{ id: "assess", label: "Preparing context" }');
-    expect(playerHtml).toContain('{ id: "validate", label: "Validating turn" }');
-    expect(playerHtml).toContain('committing: { id: "finalize", detail: "Atomically accepting the turn');
-    expect(playerHtml).toContain('progress.detail = loggedDetail');
-    expect(playerHtml).toContain('class="turn-progress-detail"');
-    expect(playerHtml).toContain("updateNexusGenerationProgress(job)");
-    expect(playerHtml).not.toContain('indexing: { id:');
+    expect(storyScript).toContain('{ id: "queued", label: "Queued" }');
+    expect(storyScript).toContain('{ id: "prepare", label: "Reading state" }');
+    expect(storyScript).toContain('{ id: "mechanics", label: "Resolving action" }');
+    expect(storyScript).toContain('{ id: "scene", label: "Writing scene" }');
+    expect(storyScript).toContain('{ id: "finalize", label: "Saving turn" }');
+    expect(storyScript).toContain("updateGenerationProgress(job)");
   });
 
   it("asks whether an earlier turn should rewind or create a separate campaign", () => {
-    expect(playerHtml).toContain('id="branchStoryDialog"');
-    expect(playerHtml).toContain('value="reset" class="primary"');
-    expect(playerHtml).toContain('value="copy" class="accent"');
-    expect(playerHtml).toContain('async function branchIfNeeded()');
-    expect(playerHtml).toContain('/rewind');
-    expect(playerHtml).toContain('expectedCurrentTurnNumber: state.turns.length');
-    expect(playerHtml).toContain('state.settings.nexusCampaignWorldVersionId = String(status.worldVersionId');
-    expect(playerHtml).toContain('async function resolveNexusCampaignForEarlierTurn(targetTurnNumber)');
-    expect(playerHtml).toContain('state.storyImportProvenance?.worldVersionId');
+    expect(storyHtml).toContain('id="branchStoryDialog"');
+    expect(storyHtml).toContain('value="reset" class="primary"');
+    expect(storyHtml).toContain('value="copy" class="accent"');
+    expect(storyScript).toContain('function promptBranchOrReset(turnIndex)');
+    expect(storyScript).toContain('/rewind`');
+    expect(storyScript).toContain('/branch`');
     expect(managementScript).toContain('window.location.assign("/story/" + encodeURIComponent(selectedCampaign.id));');
-    expect(playerHtml).toContain('An exhausted pending generation was released.');
-    expect(playerHtml).toContain('state.settings.nexusPendingGeneration = null;');
-    expect(playerHtml).not.toContain('Taking an action here will branch the story and delete later turns. Continue?');
+    expect(storyScript).toContain('async function resumePendingGeneration()');
   });
 
   it("uses authoritative server-side rewind for undo and retry without client-side fallback import", () => {
-    expect(playerHtml).toContain('async function undoLatest()');
-    expect(playerHtml).toContain('async function retryLatest()');
-    expect(playerHtml).toContain('expectedCurrentTurnNumber: currentTurnNumber');
-    expect(playerHtml).toContain('restoreAuthoritativeTurnState(rewind.stateSnapshot || {})');
-    expect(playerHtml).toContain('Browser and campaign history have diverged. Reload to resync.');
+    expect(storyScript).toContain('async function undoLatest()');
+    expect(storyScript).toContain('async function retryLatest()');
+    expect(storyScript).toContain('expectedCurrentTurnNumber: currentTurnNumber');
+    expect(storyScript).toContain('operationKind: "replace_latest"');
+    expect(storyScript).not.toContain("client-side fallback import");
   });
 });

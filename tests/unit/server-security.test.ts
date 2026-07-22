@@ -17,7 +17,6 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
     workerPollIntervalMs: 1000,
     workerLeaseSeconds: 60,
     webRoot: resolve("apps/web/public"),
-    legacyIndexPath: resolve("index.html"),
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve("local-data/assets"),
     credentialEncryptionKey: "",
@@ -27,6 +26,21 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
 }
 
 describe("API server security and CORS headers", () => {
+  it.each(["/", "/index.html"])("redirects %s to the active Nexus client without serving legacy HTML", async (url) => {
+    const config = makeConfig();
+    const mockPool = { query: async () => ({ rows: [] }) } as unknown as DatabasePool;
+    const app = await buildServer({ config, pool: mockPool });
+
+    const response = await app.inject({ method: "GET", url });
+
+    expect(response.statusCode).toBe(308);
+    expect(response.headers.location).toBe("/nexus/");
+    expect(response.headers["content-type"] ?? "").not.toContain("text/html");
+    expect(response.payload).not.toContain("<!DOCTYPE html>");
+
+    await app.close();
+  });
+
   it("sets standard security headers on requests", async () => {
     const config = makeConfig();
     const mockPool = { query: async () => ({ rows: [] }) } as unknown as DatabasePool;

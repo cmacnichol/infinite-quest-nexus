@@ -19,6 +19,7 @@ Architecture decision records (ADRs) preserve consequential design decisions and
 - [ADR 0012: Provider transport deadlines](./0012-provider-transport-deadlines.md)
 - [ADR 0017: Staged latest-turn replacement](./0017-staged-latest-turn-replacement.md)
 - [ADR 0018: Canonical facts use structured, rebuildable projections](./0018-structured-canonical-fact-projections.md)
+- [ADR 0020: Retire the legacy player from the runtime](./0020-retire-legacy-player-runtime.md)
 
 ## World Library and characters
 
@@ -38,3 +39,5 @@ ADR 0014 supersedes only the backward-compatibility portions of ADR 0013 that al
 ## Reading historical decisions
 
 Some early ADRs refer to the legacy player bridge or to provider work that was implemented later. Preserve that chronology when reading the records. For current deployment and product behavior, use the active guides and concept pages and follow their links back to the relevant decisions.
+
+ADR 0020 supersedes ADR 0004's runtime-routing decision. ADR 0004 remains the historical record of the temporary migration bridge.
