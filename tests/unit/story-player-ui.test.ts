@@ -112,6 +112,18 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyCss).toContain(".streaming-follow-button {");
   });
 
+  it("preserves a manually positioned viewport when streaming becomes an accepted turn", () => {
+    expect(storyScript).toContain("async function loadCampaign(campaignId, options = {})");
+    expect(storyScript).toContain("function renderAllScenes(options = {})");
+    expect(storyScript).toContain("if (options.autoScroll !== false) scrollToView();");
+    expect(storyScript).toContain("async function finalizeCompletedGeneration(result)");
+    expect(storyScript).toContain('const preserveViewport = Boolean($("streamingPreviewCard")) && !state.streamingAutoFollow;');
+    expect(storyScript).toContain("await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });");
+    expect(storyScript).toContain("window.requestAnimationFrame(() => {");
+    expect(storyScript).toContain('window.scrollTo({ ...viewport, behavior: "auto" });');
+    expect(storyScript.match(/await finalizeCompletedGeneration\(result\);/g)).toHaveLength(2);
+  });
+
   it("provides history navigation with view mode toggling, undo, retry, and branch/reset handling", () => {
     expect(storyScript).toContain('function goToPrevious()');
     expect(storyScript).toContain('function goToNext()');

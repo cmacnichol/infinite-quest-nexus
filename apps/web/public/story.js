@@ -181,7 +181,7 @@ async function checkOnboarding() {
 }
 
 // ── Campaign Loading ──────────────────────────────────────────
-async function loadCampaign(campaignId) {
+async function loadCampaign(campaignId, options = {}) {
   showBusy("Loading campaign…");
   try {
     const syncData = await api(`/campaigns/${campaignId}/sync-status`);
@@ -201,7 +201,7 @@ async function loadCampaign(campaignId) {
     document.title = `${name} — Infinite Quest`;
 
     state.viewIndex = -1;
-    renderAllScenes();
+    renderAllScenes({ autoScroll: options.autoScroll });
     updateStatusBar();
 
     // Show latest choices if available
@@ -371,7 +371,7 @@ function renderScene(turn, index) {
   return sceneDiv;
 }
 
-function renderAllScenes() {
+function renderAllScenes(options = {}) {
   const container = $("storyArea");
   if (!container) return;
 
@@ -405,7 +405,7 @@ function renderAllScenes() {
     }
   }
 
-  scrollToView();
+  if (options.autoScroll !== false) scrollToView();
 }
 
 function scrollToView() {
@@ -737,6 +737,27 @@ async function discardRecoveryJob() {
   }
 }
 
+async function finalizeCompletedGeneration(result) {
+  const preserveViewport = Boolean($("streamingPreviewCard")) && !state.streamingAutoFollow;
+  const viewport = preserveViewport
+    ? { left: window.scrollX, top: window.scrollY }
+    : null;
+
+  clearPendingSubmission();
+  state.pendingGeneration = null;
+  recordActivity("success", "Turn generated", `Turn ${result.turnNumber || ""} completed.`);
+  clearStreamingPreview();
+  await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });
+
+  if (viewport) {
+    window.requestAnimationFrame(() => {
+      window.scrollTo({ ...viewport, behavior: "auto" });
+    });
+  }
+
+  pollImageJobs();
+}
+
 async function pollGenerationJob(jobId, action) {
   let retriesUsed = 0;
   clearStreamingPreview();
@@ -785,12 +806,7 @@ async function pollGenerationJob(jobId, action) {
               cleanup();
               try {
                 const result = await api(`/generation-jobs/${jobId}/result`);
-                clearPendingSubmission();
-                state.pendingGeneration = null;
-                recordActivity("success", "Turn generated", `Turn ${result.turnNumber || ""} completed.`);
-                clearStreamingPreview();
-                await loadCampaign(state.campaignId);
-                pollImageJobs();
+                await finalizeCompletedGeneration(result);
                 resolve(true);
               } catch (err) {
                 reject(err);
@@ -851,12 +867,7 @@ async function pollGenerationJob(jobId, action) {
 
     if (job.status === "completed") {
       const result = await api(`/generation-jobs/${jobId}/result`);
-      clearPendingSubmission();
-      state.pendingGeneration = null;
-      recordActivity("success", "Turn generated", `Turn ${result.turnNumber || ""} completed.`);
-      clearStreamingPreview();
-      await loadCampaign(state.campaignId);
-      pollImageJobs();
+      await finalizeCompletedGeneration(result);
       return;
     }
     if (job.status === "failed") {
