@@ -25,6 +25,13 @@ describe("story output integrity", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("requires an explicit replacement scratchpad instead of silently clearing continuity", () => {
+    const parsed = JSON.parse(story());
+    delete parsed.scratchpad;
+    const result = parseStoryOutput(JSON.stringify(parsed));
+    expect(result).toMatchObject({ ok: false, code: "invalid_schema" });
+  });
+
   it("recovers omitted Chronicle metadata without discarding a valid story turn", () => {
     const incomplete = JSON.parse(story());
     delete incomplete.continuity_summary;
@@ -165,6 +172,16 @@ describe("story output integrity", () => {
     expect(prompt).not.toMatch(/\broll(?:s|ed|ing)?\b|\bdice?\b/i);
   });
 
+  it("frames world rules as mandatory turn constraints", () => {
+    const prompt = buildStoryUserPrompt(
+      { authoritativeRules: "Doors open only when their true names are spoken.", worldCanon: {} },
+      "Force the door open."
+    );
+    expect(STORY_SYSTEM_PROMPT).toContain("authoritativeRules scope contains mandatory world-specific constraints");
+    expect(prompt).toContain("Obey every applicable constraint in authoritative_context.authoritativeRules");
+    expect(prompt).toContain("Doors open only when their true names are spoken.");
+  });
+
   it("places the campaign story-length profile in normal and recovery prompts", () => {
     const extended = { profile: "extended" as const, minWords: 1200, maxWords: 2000 };
     const prompt = buildStoryUserPrompt({ campaign: { location: "Location Gamma" } }, "Continue.", false, [], extended);
@@ -175,7 +192,7 @@ describe("story output integrity", () => {
   });
 
   it("privately requests readable narration paragraphs with a versioned protocol", () => {
-    expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v7-readable-paragraphs");
+    expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v8-authoritative-rules");
     expect(STORY_SYSTEM_PROMPT).toContain("paragraphs separated by two newline characters");
     expect(STORY_SYSTEM_PROMPT).toContain("change of speaker, scene transition, or meaningful shift in focus");
   });

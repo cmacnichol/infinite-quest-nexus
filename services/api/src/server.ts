@@ -11,8 +11,10 @@ import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema, sto
 import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
 import {
   campaignBranchSchema,
+  campaignRuntimeStateUpdateSchema,
   campaignRewindSchema,
   generationRequestSchema,
+  generationRetryLatestRequestSchema,
   illustrationConfigSchema,
   illustrationRequestSchema,
   playerCampaignConfigSchema,
@@ -50,7 +52,8 @@ import {
 } from "./memory-service.js";
 import { readAsset, type FilesystemAssetStore } from "./asset-service.js";
 import { createProvider, deleteProvider, discoverUnsavedProviderModels, generateProviderText, listProviders, providerModels, setDefaultProvider, updateProvider } from "./provider-service.js";
-import { branchCampaign, enqueueGeneration, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, syncPlayerCampaignConfig } from "./generation-service.js";
+import { branchCampaign, discardGeneration, enqueueGeneration, enqueueLatestReplacement, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, syncPlayerCampaignConfig } from "./generation-service.js";
+import { getCampaignRuntimeState, updateCampaignRuntimeState } from "./campaign-state-service.js";
 import {
   enqueueIllustration,
   getIllustrationConfig,
@@ -415,6 +418,22 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     };
   });
 
+  app.get<{ Params: { campaignId: string }; Querystring: { turnNumber?: string } }>("/api/v1/campaigns/:campaignId/state", async (request) => (
+    getCampaignRuntimeState(
+      pool,
+      uuidSchema.parse(request.params.campaignId),
+      request.query.turnNumber === undefined ? undefined : z.coerce.number().int().min(0).parse(request.query.turnNumber)
+    )
+  ));
+
+  app.patch<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/state", async (request) => (
+    updateCampaignRuntimeState(
+      pool,
+      uuidSchema.parse(request.params.campaignId),
+      campaignRuntimeStateUpdateSchema.parse(request.body)
+    )
+  ));
+
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/cost-summary", async (request) => (
     getCampaignCostSummary(pool, uuidSchema.parse(request.params.campaignId))
   ));
@@ -428,11 +447,22 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
               c.legacy_settings AS "legacySettings", c.status,
               w.id AS "worldId", w.title AS "worldTitle", wv.version_number AS "worldVersionNumber",
               wv.content AS "worldContent",
-              cs.rpg_stats AS "rpgStats", cs.event_triggers AS "eventTriggers", cs.trackers AS "trackers"
+              cs.rpg_stats AS "rpgStats", cs.event_triggers AS "eventTriggers", cs.trackers AS "trackers",
+              pending.id AS "pendingGenerationId", pending.status AS "pendingGenerationStatus",
+              pending.action AS "pendingGenerationAction", pending.operation_kind AS "pendingGenerationOperationKind",
+              pending.expected_turn_number AS "pendingGenerationExpectedTurnNumber",
+              pending.created_at AS "pendingGenerationCreatedAt", pending.updated_at AS "pendingGenerationUpdatedAt"
          FROM campaigns c
          JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
          JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
          LEFT JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
+         LEFT JOIN LATERAL (
+           SELECT id, status, action, operation_kind, expected_turn_number, created_at, updated_at
+             FROM generation_jobs
+            WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
+              AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
+            ORDER BY created_at DESC LIMIT 1
+         ) pending ON true
         WHERE c.id = $1 AND c.owner_user_id = $2`,
       [uuidSchema.parse(request.params.campaignId), ownerUserId]
     );
@@ -473,7 +503,16 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       useRpgStats: Boolean(row.legacySettings?.useRpgStats),
       suppressEventTriggers: Boolean(row.legacySettings?.suppressEventTriggers)
     };
-    return { ...campaign, campaign, world, playerConfig };
+    const pendingGeneration = row.pendingGenerationId ? {
+      id: row.pendingGenerationId,
+      status: row.pendingGenerationStatus,
+      action: row.pendingGenerationAction,
+      operationKind: row.pendingGenerationOperationKind,
+      expectedTurnNumber: row.pendingGenerationExpectedTurnNumber,
+      createdAt: row.pendingGenerationCreatedAt,
+      updatedAt: row.pendingGenerationUpdatedAt
+    } : null;
+    return { ...campaign, campaign, world, playerConfig, pendingGeneration };
   });
 
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/player-config", async (request) => (
@@ -508,6 +547,12 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     return reply.code(job.duplicate ? 200 : 202).send(job);
   });
 
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations/retry-latest", async (request, reply) => {
+    const body = generationRetryLatestRequestSchema.parse(request.body);
+    const job = await enqueueLatestReplacement(pool, uuidSchema.parse(request.params.campaignId), body);
+    return reply.code(job.duplicate ? 200 : 202).send(job);
+  });
+
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId", async (request) => (
     getGenerationJob(pool, uuidSchema.parse(request.params.jobId))
   ));
@@ -539,7 +584,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
           lastSentJson = currentJson;
           reply.raw.write(`data: ${currentJson}\n\n`);
         }
-        if (["completed", "failed", "recoverable"].includes(job.status)) {
+        if (["completed", "failed", "recoverable", "discarded"].includes(job.status)) {
           break;
         }
       } catch (error) {
@@ -559,6 +604,10 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/retry", async (request, reply) => (
     reply.code(202).send(await retryGeneration(pool, uuidSchema.parse(request.params.jobId)))
+  ));
+
+  app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/discard", async (request) => (
+    discardGeneration(pool, uuidSchema.parse(request.params.jobId))
   ));
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-config", async (request) => (

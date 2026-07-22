@@ -5,12 +5,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
-import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
+import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
-import { branchCampaign, enqueueGeneration, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, runGenerationJob, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
+import { branchCampaign, enqueueGeneration, enqueueLatestReplacement, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, runGenerationJob, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
 import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/api/src/memory-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
+import { getCampaignRuntimeState, updateCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -100,6 +101,16 @@ integration("durable Story Engine integration", () => {
     }));
   }
 
+  function replacementRequest(action: string, expectedCurrentTurnNumber = 2, selectedProviderId = providerId, idempotencyKey = crypto.randomUUID()) {
+    return generationRetryLatestRequestSchema.parse({
+      action,
+      expectedCurrentTurnNumber,
+      providerProfileId: selectedProviderId,
+      idempotencyKey,
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    });
+  }
+
   it("sends the authoritative Chronicle snapshot and atomically commits fiction-only output", async () => {
     const imported = await campaign();
     replies.push({ content: validStory() });
@@ -142,6 +153,137 @@ integration("durable Story Engine integration", () => {
     expect(nextSerialized).toContain("Private synthetic continuity marker");
     expect(nextSerialized).toContain("Location Gamma");
     expect(nextSerialized).toContain("Determine what Marker Three unlocks");
+  });
+
+  it("stages an idempotent latest-turn replacement and swaps it only after validated commit", async () => {
+    const imported = await campaign();
+    const before = await pool.query<{ id: string; narration: string }>(
+      "SELECT id, narration FROM turns WHERE campaign_id = $1 AND turn_number = 2",
+      [imported.campaignId]
+    );
+    const request = replacementRequest("Take the eastern path instead.");
+    const job = await enqueueLatestReplacement(pool, imported.campaignId, request);
+    const replay = await enqueueLatestReplacement(pool, imported.campaignId, request);
+
+    expect(replay).toMatchObject({ id: job.id, duplicate: true, operationKind: "replace_latest" });
+    await expect(enqueueLatestReplacement(pool, imported.campaignId, {
+      ...request,
+      action: "Attempt to reuse the key with different content."
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(await pool.query("SELECT id FROM turns WHERE campaign_id = $1 AND turn_number = 2", [imported.campaignId]))
+      .toMatchObject({ rows: [{ id: before.rows[0]?.id }] });
+
+    replies.push({ content: validStory("The eastern path opens into a newly validated replacement scene.") });
+    const requestCount = requests.length;
+    expect(await runGenerationJob(pool, "story-worker-replacement", 30, credentialSecret)).toBe(true);
+
+    const after = await pool.query<{ id: string; action: string; narration: string }>(
+      "SELECT id, action, narration FROM turns WHERE campaign_id = $1 AND turn_number = 2",
+      [imported.campaignId]
+    );
+    expect(after.rows[0]).toMatchObject({
+      action: "Take the eastern path instead."
+    });
+    expect(after.rows[0]?.narration).not.toBe(before.rows[0]?.narration);
+    expect(after.rows[0]?.id).not.toBe(before.rows[0]?.id);
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", operationKind: "replace_latest" });
+
+    const replacementRequests = requests.slice(requestCount).map((entry) => JSON.stringify(entry)).join("\n");
+    expect(replacementRequests).toContain("Marker One");
+    expect(replacementRequests).not.toContain("Marker Two becomes visible");
+    expect(replacementRequests).not.toContain("Object Gamma remains at Location Beta");
+    expect(replacementRequests).not.toContain("Private synthetic state");
+  });
+
+  it("preserves the accepted latest turn when replacement generation has a provider transport failure", async () => {
+    const imported = await campaign();
+    const unavailableProvider = await createProvider(pool, {
+      name: `Unavailable replacement provider ${crypto.randomUUID()}`,
+      providerType: "openai_compatible",
+      providerRole: "text",
+      baseUrl: "http://127.0.0.1:1",
+      defaultModel: "unavailable-model",
+      contextWindowTokens: 32768,
+      maxOutputTokens: 4096,
+      temperature: 0,
+      enabled: true,
+      configuration: {}
+    }, credentialSecret);
+    const before = await pool.query<{ id: string; narration: string; active_turn_number: number }>(
+      `SELECT t.id, t.narration, c.active_turn_number
+         FROM turns t JOIN campaigns c ON c.id = t.campaign_id
+        WHERE t.campaign_id = $1 AND t.turn_number = 2`,
+      [imported.campaignId]
+    );
+    const job = await enqueueLatestReplacement(
+      pool,
+      imported.campaignId,
+      replacementRequest("Try a replacement that cannot reach its provider.", 2, unavailableProvider.id)
+    );
+
+    expect(await runGenerationJob(pool, "story-worker-replacement-transport", 30, credentialSecret)).toBe(true);
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "failed", errorCode: "provider_transport_error" });
+    expect(await pool.query(
+      `SELECT t.id, t.narration, c.active_turn_number
+         FROM turns t JOIN campaigns c ON c.id = t.campaign_id
+        WHERE t.campaign_id = $1 AND t.turn_number = 2`,
+      [imported.campaignId]
+    )).toMatchObject({ rows: [before.rows[0]] });
+  });
+
+  it("replaces turn one from the initial campaign snapshot", async () => {
+    const imported = await campaign();
+    await rewindCampaign(pool, imported.campaignId, { targetTurnNumber: 1 });
+    const before = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id = $1 AND turn_number = 1",
+      [imported.campaignId]
+    );
+    const job = await enqueueLatestReplacement(
+      pool,
+      imported.campaignId,
+      replacementRequest("Begin the adventure along a different path.", 1)
+    );
+    replies.push({ content: validStory("A different opening scene begins at Location Alpha.") });
+    expect(await runGenerationJob(pool, "story-worker-replacement-turn-one", 30, credentialSecret)).toBe(true);
+    const turns = await pool.query<{ id: string; turn_number: number; action: string }>(
+      "SELECT id, turn_number, action FROM turns WHERE campaign_id = $1 ORDER BY turn_number",
+      [imported.campaignId]
+    );
+    expect(turns.rows).toHaveLength(1);
+    expect(turns.rows[0]).toMatchObject({ turn_number: 1, action: "Begin the adventure along a different path." });
+    expect(turns.rows[0]?.id).not.toBe(before.rows[0]?.id);
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+  });
+
+  it("rolls back the replacement commit completely when its turn swap fails", async () => {
+    const imported = await campaign();
+    const before = await pool.query<{ id: string; narration: string }>(
+      "SELECT id, narration FROM turns WHERE campaign_id = $1 AND turn_number = 2",
+      [imported.campaignId]
+    );
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const functionName = `reject_replacement_delete_${suffix}`;
+    const triggerName = `reject_replacement_delete_trigger_${suffix}`;
+    await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF OLD.campaign_id::text = '${imported.campaignId}' THEN RAISE EXCEPTION 'synthetic replacement delete failure'; END IF;
+        RETURN OLD;
+      END
+    $$`);
+    await pool.query(`CREATE TRIGGER ${triggerName} BEFORE DELETE ON turns FOR EACH ROW EXECUTE FUNCTION ${functionName}()`);
+    try {
+      const job = await enqueueLatestReplacement(pool, imported.campaignId, replacementRequest("Trigger a rollback-safe replacement."));
+      replies.push({ content: validStory("This response must not survive the synthetic commit failure.") });
+      expect(await runGenerationJob(pool, "story-worker-replacement-rollback", 30, credentialSecret)).toBe(true);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "failed" });
+      expect(await pool.query(
+        "SELECT id, narration FROM turns WHERE campaign_id = $1 AND turn_number = 2",
+        [imported.campaignId]
+      )).toMatchObject({ rows: [before.rows[0]] });
+    } finally {
+      await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON turns`);
+      await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+    }
   });
 
   it("continues remote story generation when a separate local embedding provider is unavailable", async () => {
@@ -392,6 +534,46 @@ integration("durable Story Engine integration", () => {
       [imported.campaignId]
     );
     expect(stateRow.rows[0]?.initial_state_snapshot?.rpgStats).toEqual([{ id: "stat1", name: "Strength", value: 18, note: "" }]);
+  });
+
+  it("edits current runtime state with revision checks and preserves the accepted turn snapshot", async () => {
+    const imported = await campaign();
+    const before = await getCampaignRuntimeState(pool, imported.campaignId);
+    const historicalBefore = await getCampaignRuntimeState(pool, imported.campaignId, 1);
+    const edited = await updateCampaignRuntimeState(pool, imported.campaignId, {
+      expectedTurnNumber: before.activeTurnNumber,
+      expectedRevision: before.revision,
+      scratchpad: "Location Beta contains a hidden silver doorway.",
+      trackers: [{ id: "doorway", name: "Silver doorway", value: "hidden", rules: "Update when its visibility changes." }]
+    });
+
+    expect(edited).toMatchObject({
+      scratchpad: "Location Beta contains a hidden silver doorway.",
+      revision: before.revision + 1,
+      trackers: [{ id: "doorway", name: "Silver doorway", value: "hidden" }]
+    });
+    await expect(updateCampaignRuntimeState(pool, imported.campaignId, {
+      expectedTurnNumber: before.activeTurnNumber,
+      expectedRevision: before.revision,
+      scratchpad: "A stale edit.",
+      trackers: []
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(await getCampaignRuntimeState(pool, imported.campaignId, 1)).toMatchObject({
+      scratchpad: historicalBefore.scratchpad
+    });
+
+    const requestOffset = requests.length;
+    replies.push({ content: validStory("The silver doorway becomes visible in Location Beta.") });
+    const job = await queue(imported.campaignId, "Search Location Beta.");
+    await runGenerationJob(pool, "story-worker-edited-state", 30, credentialSecret);
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+    const storyRequest = requests.slice(requestOffset).find((request) => JSON.stringify(request).includes("fiction writer for Infinite Quest"));
+    expect(JSON.stringify(storyRequest)).toContain("hidden silver doorway");
+
+    await rewindCampaign(pool, imported.campaignId, { targetTurnNumber: before.activeTurnNumber });
+    expect(await getCampaignRuntimeState(pool, imported.campaignId)).toMatchObject({
+      scratchpad: "Location Beta contains a hidden silver doorway."
+    });
   });
 
 

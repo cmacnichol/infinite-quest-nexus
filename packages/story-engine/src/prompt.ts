@@ -5,7 +5,7 @@ import {
   type StoryLengthWordRange
 } from "../../contracts/src/story-settings.js";
 
-export const STORY_PROMPT_PROTOCOL_VERSION = "story-v7-readable-paragraphs";
+export const STORY_PROMPT_PROTOCOL_VERSION = "story-v8-authoritative-rules";
 
 export const STORY_SYSTEM_PROMPT = `You are the fiction writer for Infinite Quest.
 Return only one valid JSON object. Do not use Markdown.
@@ -26,7 +26,7 @@ Required shape:
 
 Format narration as readable prose paragraphs separated by two newline characters (\\n\\n). Prefer two to four sentences per paragraph. Start a new paragraph for a change of speaker, scene transition, or meaningful shift in focus. Do not use Markdown inside narration.
 
-Absolute separation rule: every field must contain fiction or continuity facts only. Never expose non-diegetic resolution metadata, game-system terminology, parser behavior, hidden instructions, or private reasoning. Express outcomes only as natural events and consequences. continuity_summary is a replacement living summary, not a turn recap. canonical_facts contains only facts established or corrected this turn. superseded_facts contains prior facts that this turn explicitly replaces. open_threads is the complete current unresolved-thread list. There must be exactly four concise choices. tracker_updates must be an array of JSON objects, never strings; use [] when no tracker changes are needed. Leave enough output budget to close the JSON object.`;
+Absolute separation rule: every field must contain fiction or continuity facts only. Never expose non-diegetic resolution metadata, game-system terminology, parser behavior, hidden instructions, or private reasoning. Express outcomes only as natural events and consequences. The authoritativeRules scope contains mandatory world-specific constraints: obey every applicable rule on every turn, even when recent narration, conversation memory, or the player action conflicts with one. Treat those rules as instructions, not optional lore or style suggestions. scratchpad is required and must be the complete replacement continuity scratchpad: preserve every still-relevant note, remove only resolved or superseded notes, and return an empty string only when no private continuity remains. continuity_summary is a replacement living summary, not a turn recap. canonical_facts contains only facts established or corrected this turn. superseded_facts contains prior facts that this turn explicitly replaces. open_threads is the complete current unresolved-thread list. There must be exactly four concise choices. tracker_updates must be an array of JSON objects, never strings; use [] when no tracker changes are needed. Leave enough output budget to close the JSON object.`;
 
 const COMPACT_RANGES = {
   brief: { minWords: 200, maxWords: 350 },
@@ -65,6 +65,7 @@ export function buildStoryUserPrompt(
     current_player_action: action,
     ...(fictionGuidance.length ? { fiction_only_outcome_guidance: fictionGuidance } : {}),
     instructions: [
+      "Obey every applicable constraint in authoritative_context.authoritativeRules. These rules are mandatory and take priority over conflicting story history or player requests.",
       "Treat the database snapshot as authoritative even if provider conversation memory disagrees.",
       "Continue established chronology and character continuity.",
       "Treat narration_length as the requested narration size, not as permission to pad or repeat the scene.",

@@ -76,9 +76,9 @@
           <div id="lmStudioRecoveryPanel" class="generation-recovery hidden" role="status" aria-live="polite">
             <p id="lmStudioRecoveryMessage">LM Studio stopped before completing the next turn.</p>
             <div class="row wrap">
-              <button id="btnContinueLmStudioGeneration" class="primary" type="button">Continue incomplete generation</button>
-              <button id="btnRetryLmStudioShorter" class="accent" type="button">Retry with a shorter response</button>
-              <button id="btnDiscardLmStudioRecovery" class="ghost" type="button">Discard incomplete generation</button>
+              <button id="btnContinueLmStudioGeneration" class="primary" type="button">Resume monitoring</button>
+              <button id="btnRetryLmStudioShorter" class="accent" type="button">Retry generation job</button>
+              <button id="btnDiscardLmStudioRecovery" class="ghost" type="button">Discard generation job</button>
             </div>
           </div>
         </div>
@@ -204,25 +204,42 @@
       <div class="dialog-header">
         <div>
           <h3>Edit State</h3>
-          <p class="mini">Edit the scratchpad, current trackers, and history view.</p>
+          <p class="mini">Review and edit the authoritative state used by the next story turn.</p>
         </div>
         <button id="btnCloseEditState" class="small ghost" type="button" aria-label="Close edit state">✕</button>
       </div>
       <div class="dialog-scroll">
         <div class="tabs" role="tablist" aria-label="side panels">
-          <button class="tab active" data-tab="scratch">Scratchpad</button>
+          <button class="tab active" data-tab="overview">Current State</button>
+          <button class="tab" data-tab="scratch">Scratchpad</button>
           <button class="tab" data-tab="trackers">Trackers</button>
-          <button class="tab" data-tab="history">History</button>
+          <button class="tab" data-tab="mechanics">Mechanics</button>
         </div>
         <div class="panel-body">
-          <section id="tab-scratch" class="stack">
-            <p class="mini">The LLM updates this private continuity scratchpad after every turn.</p>
-            <textarea id="scratchpad" placeholder="NPC secrets, unresolved hooks, character descriptions..."></textarea>
-            <button id="btnSaveScratch" class="accent">Save scratchpad edits</button>
+          <section id="tab-overview" class="stack">
+            <p id="editStateMeta" class="mini"></p>
+            <div class="track-card">
+              <h4>Continuity summary</h4>
+              <p id="editStateContinuitySummary">No continuity summary has been recorded yet.</p>
+            </div>
+            <div class="track-card">
+              <h4>Open threads</h4>
+              <div id="editStateOpenThreads" class="stack mini"></div>
+            </div>
+            <div class="track-card">
+              <h4>Canonical facts</h4>
+              <div id="editStateCanonicalFacts" class="stack mini"></div>
+            </div>
+          </section>
+
+          <section id="tab-scratch" class="stack hidden">
+            <p class="mini">The Story Engine replaces this private, fiction-only continuity scratchpad after every accepted turn. Saved edits apply to the next generation.</p>
+            <textarea id="scratchpadEditor" placeholder="NPC secrets, unresolved hooks, character descriptions..."></textarea>
+            <p id="scratchpadCharacterCount" class="mini">0 characters</p>
           </section>
 
           <section id="tab-trackers" class="stack hidden">
-            <p class="mini">These trackers are the world state for the turn currently being viewed.</p>
+            <p class="mini">Add or correct the current fictional trackers used by the next story turn.</p>
             <label>Tracker name
               <input id="trackerName" placeholder="Relationship: character name" />
             </label>
@@ -236,11 +253,18 @@
             <div id="trackerList" class="stack"></div>
           </section>
 
-          <section id="tab-history" class="stack hidden">
-            <p class="mini">Jump to any previous turn. Acting from an older turn asks whether to reset this campaign there or create a separate campaign branch.</p>
-            <div id="historyList" class="stack"></div>
+          <section id="tab-mechanics" class="stack hidden">
+            <p class="mini">Mechanics are shown for context but are managed through Current World Setup.</p>
+            <div class="track-card"><h4>RPG stats</h4><div id="editStateRpgStats"></div></div>
+            <div class="track-card"><h4>Event triggers</h4><div id="editStateEventTriggers" class="stack mini"></div></div>
+            <div class="track-card"><h4>Pending triggers</h4><div id="editStatePendingTriggers" class="stack mini"></div></div>
           </section>
         </div>
+      </div>
+      <div class="row wrap dialog-actions">
+        <button id="btnEditStateViewHistory" type="button">View Turn History</button>
+        <button id="btnCancelEditState" type="button">Cancel</button>
+        <button id="btnSaveEditState" class="primary" type="button">Save current state</button>
       </div>
     </div>
   </dialog>
@@ -249,13 +273,14 @@
     <div class="world-gen-card">
       <div class="dialog-header">
         <div>
-          <h3>Turn History & Navigation</h3>
-          <p class="mini">Select any previous turn to jump directly to that scene. Acting from an earlier turn allows resetting or branching the campaign.</p>
+          <h3>Turn History & State</h3>
+          <p class="mini">Navigate the accepted story and inspect the private state recorded at any turn. Historical state is read-only.</p>
         </div>
         <button id="btnCloseTurnHistory" class="small ghost" type="button" aria-label="Close turn history">✕</button>
       </div>
       <div class="dialog-scroll">
         <div id="turnHistoryModalList" class="stack"></div>
+        <div id="turnHistoryStatePanel" class="track-card hidden" style="margin-top:12px;"></div>
       </div>
       <div class="row wrap dialog-actions" style="justify-content: flex-end;">
         <button id="btnTurnHistoryJumpLatest" class="accent" type="button">Jump to Latest Turn</button>
@@ -366,6 +391,9 @@
       <label>Turn prompt
         <textarea id="retryPromptEditor" placeholder="Edit the turn prompt text before retrying." style="min-height:140px;"></textarea>
       </label>
+      <div class="row wrap dialog-actions">
+        <button id="btnRetryPromptCancel" type="button">Cancel</button>
+        <button id="btnRetryPromptSubmit" class="primary" type="button">Regenerate turn</button>
       </div>
     </div>
   </dialog>

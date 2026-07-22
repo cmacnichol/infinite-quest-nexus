@@ -641,7 +641,7 @@ export async function deleteCampaign(pool: DatabasePool, campaignId: string, req
     const activeWork = await client.query(
       `SELECT 'generation' AS kind FROM generation_jobs
         WHERE campaign_id = $1 AND owner_user_id = $2
-          AND status IN ('queued','assessing','generating','validating','committing')
+          AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
        UNION ALL
        SELECT 'illustration' AS kind FROM image_jobs
         WHERE campaign_id = $1 AND owner_user_id = $2 AND status IN ('queued','generating')
@@ -858,7 +858,7 @@ export async function migrateCampaignWorld(pool: DatabasePool, campaignId: strin
     if (next.version_number <= current.version_number) throw httpError(409, "Select a newer published world version.");
     const active = await client.query(
       `SELECT 1 FROM generation_jobs WHERE campaign_id = $1 AND owner_user_id = $2
-        AND status IN ('queued','assessing','generating','validating','committing') LIMIT 1`,
+        AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`,
       [campaignId, ownerUserId]
     );
     if (active.rowCount) throw httpError(409, "Wait for the active story generation job before migrating the campaign.");

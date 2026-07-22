@@ -336,7 +336,7 @@ function worldFictionCanon(content: Record<string, unknown>, characterSnapshot: 
     ...worldWithoutStoredCharacter,
     ...(selectedCharacterText !== null ? { character: selectedCharacterText } : {})
   };
-  const allowed = ["title", "genre", "tone", "backgroundStory", "character", "premise", "firstAction", "rules"];
+  const allowed = ["title", "genre", "tone", "backgroundStory", "character", "premise", "firstAction"];
   const perOverviewLimit = Math.max(300, Math.floor(maximumTokens * 2.6 / allowed.length));
   const overview = Object.fromEntries(allowed.flatMap((key) => {
     const value = world[key];
@@ -399,7 +399,8 @@ async function allMemories(
   ownerUserId: string,
   campaignId: string,
   query: string,
-  recentTurns = 8
+  recentTurns = 8,
+  throughTurnNumber?: number
 ): Promise<MemoryRow[]> {
   const result = await client.query<MemoryRow>(
     `WITH base AS (
@@ -408,6 +409,8 @@ async function allMemories(
                    ELSE ts_rank_cd(search_document, websearch_to_tsquery('english', $3)) END AS relevance
          FROM chronicle_memories
         WHERE owner_user_id = $1 AND campaign_id = $2
+          AND ($5::integer IS NULL OR ordinal <= $5::integer)
+          AND ($5::integer IS NULL OR memory_kind <> 'legacy_summary')
      ), ranked AS (
        SELECT *,
               row_number() OVER (PARTITION BY memory_kind ORDER BY ordinal DESC, created_at DESC) AS recent_rank,
@@ -428,7 +431,7 @@ async function allMemories(
             ))
       ORDER BY ordinal ASC, memory_kind, id
       LIMIT 512`,
-    [ownerUserId, campaignId, query.trim(), recentTurns]
+    [ownerUserId, campaignId, query.trim(), recentTurns, throughTurnNumber ?? null]
   );
   return result.rows;
 }
@@ -460,12 +463,12 @@ function memoryMetricsFromRows(row: CompleteMetricsRow): ChronicleMetricCounts {
   };
 }
 
-async function metricsRow(client: DatabaseClient | DatabasePool, ownerUserId: string, campaignId: string): Promise<CompleteMetricsRow> {
+async function metricsRow(client: DatabaseClient | DatabasePool, ownerUserId: string, campaignId: string, throughTurnNumber?: number): Promise<CompleteMetricsRow> {
   const result = await client.query<CompleteMetricsRow>(
     `SELECT
-       (SELECT count(*) FROM turns WHERE owner_user_id = $1 AND campaign_id = $2)::text AS turns,
-       (SELECT COALESCE(sum(length(action) + length(narration)), 0) FROM turns WHERE owner_user_id = $1 AND campaign_id = $2)::text AS characters,
-       (SELECT COALESCE(sum(CEIL((length(action) + length(narration))::numeric / 4)), 0) FROM turns WHERE owner_user_id = $1 AND campaign_id = $2)::text AS estimated_tokens,
+       (SELECT count(*) FROM turns WHERE owner_user_id = $1 AND campaign_id = $2 AND ($3::integer IS NULL OR turn_number <= $3::integer))::text AS turns,
+       (SELECT COALESCE(sum(length(action) + length(narration)), 0) FROM turns WHERE owner_user_id = $1 AND campaign_id = $2 AND ($3::integer IS NULL OR turn_number <= $3::integer))::text AS characters,
+       (SELECT COALESCE(sum(CEIL((length(action) + length(narration))::numeric / 4)), 0) FROM turns WHERE owner_user_id = $1 AND campaign_id = $2 AND ($3::integer IS NULL OR turn_number <= $3::integer))::text AS estimated_tokens,
        count(*)::text AS memory_count,
        COALESCE(sum(token_estimate), 0)::text AS memory_tokens,
        count(embedding)::text AS embedded_memories,
@@ -473,11 +476,13 @@ async function metricsRow(client: DatabaseClient | DatabasePool, ownerUserId: st
        (SELECT COALESCE(sum(token_estimate), 0) FROM (
           SELECT token_estimate FROM chronicle_memories
            WHERE owner_user_id = $1 AND campaign_id = $2 AND memory_kind = 'turn_fiction'
+             AND ($3::integer IS NULL OR ordinal <= $3::integer)
            ORDER BY ordinal DESC LIMIT 4
         ) recent)::text AS recent_turn_tokens,
        COALESCE(
          (SELECT token_estimate FROM chronicle_memories
            WHERE owner_user_id = $1 AND campaign_id = $2 AND memory_kind = 'campaign_summary'
+             AND ($3::integer IS NULL OR ordinal <= $3::integer)
            ORDER BY ordinal DESC, updated_at DESC LIMIT 1),
          (SELECT token_estimate FROM chronicle_memories
            WHERE owner_user_id = $1 AND campaign_id = $2 AND memory_kind = 'legacy_summary'
@@ -485,8 +490,9 @@ async function metricsRow(client: DatabaseClient | DatabasePool, ownerUserId: st
          0
        )::text AS summary_tokens
      FROM chronicle_memories
-     WHERE owner_user_id = $1 AND campaign_id = $2`,
-    [ownerUserId, campaignId]
+     WHERE owner_user_id = $1 AND campaign_id = $2
+       AND ($3::integer IS NULL OR ordinal <= $3::integer)`,
+    [ownerUserId, campaignId, throughTurnNumber ?? null]
   );
   const row = result.rows[0];
   if (!row) throw new Error("Could not calculate Chronicle metrics.");
@@ -718,16 +724,30 @@ export async function buildContextPreview(
   campaignId: string,
   options: MemoryContextQuery,
   credentialSecret = "",
-  costAttribution: { generationJobId?: string; operation?: "retrieval_embedding" | "context_preview_embedding" } = {}
+  costAttribution: { generationJobId?: string; operation?: "retrieval_embedding" | "context_preview_embedding" } = {},
+  scope: { throughTurnNumber?: number; stateOverride?: Record<string, unknown>; scratchpadSafeForPrompt?: boolean } = {}
 ) {
   const ownerUserId = await initialOwnerId(pool);
   const campaign = await campaignScope(pool, ownerUserId, campaignId);
-  const memories = await allMemories(pool, ownerUserId, campaignId, options.query, options.recentTurns);
+  if (scope.throughTurnNumber !== undefined) campaign.active_turn_number = scope.throughTurnNumber;
+  if (scope.stateOverride) {
+    campaign.scratchpad_private = typeof scope.stateOverride.scratchpad === "string" ? scope.stateOverride.scratchpad : "";
+    campaign.scratchpad_safe_for_prompt = scope.scratchpadSafeForPrompt === true;
+    campaign.trackers = Array.isArray(scope.stateOverride.trackers) ? scope.stateOverride.trackers : [];
+  }
+  const memories = await allMemories(pool, ownerUserId, campaignId, options.query, options.recentTurns, scope.throughTurnNumber);
   const latestHint = memories.filter((memory) => memory.memory_kind === "turn_fiction").at(-1)?.content ?? "";
   const expandedQuery = [options.query, truncateAtBoundary(latestHint, 1200)].filter(Boolean).join("\n");
   const retrieval = await applySemanticRelevance(pool, ownerUserId, campaignId, expandedQuery, memories, credentialSecret, costAttribution);
-  const metrics = memoryMetricsFromRows(await metricsRow(pool, ownerUserId, campaignId));
-  const worldCanon = worldFictionCanon(campaign.world_content, campaign.character_snapshot, expandedQuery, Math.max(384, Math.floor(options.budgetTokens * 0.34)));
+  const metrics = memoryMetricsFromRows(await metricsRow(pool, ownerUserId, campaignId, scope.throughTurnNumber));
+  const sourceWorld = typeof campaign.world_content.world === "object" && campaign.world_content.world !== null
+    ? campaign.world_content.world as Record<string, unknown>
+    : campaign.world_content;
+  const authoritativeRules = sanitizedFictionString(
+    sourceWorld.rules,
+    Math.max(1200, Math.floor(options.budgetTokens * 0.18 * 3.2))
+  );
+  const worldCanon = worldFictionCanon(campaign.world_content, campaign.character_snapshot, expandedQuery, Math.max(384, Math.floor(options.budgetTokens * 0.30)));
   const campaignCanon = campaignFictionCanon(campaign, Math.max(256, Math.floor(options.budgetTokens * 0.18)));
   const turnMemories = memories.filter((memory) => memory.memory_kind === "turn_fiction");
   const latest = turnMemories.at(-1) ?? null;
@@ -735,7 +755,7 @@ export async function buildContextPreview(
     ? truncateAtBoundary(latest.content, Math.max(800, Math.floor(options.budgetTokens * 0.18 * 3.2)))
     : "";
   const currentScene = latest ? { memoryId: latest.id, ordinal: latest.ordinal, content: currentSceneContent } : null;
-  const fixedScopes = { worldCanon, campaignCanon, chronicle: [], currentScene };
+  const fixedScopes = { authoritativeRules, worldCanon, campaignCanon, chronicle: [], currentScene };
   const fixedScopeTokens = budgetTokenEstimate(stableStringify(fixedScopes));
   const availableTokens = Math.max(0, options.budgetTokens - fixedScopeTokens);
   const selectedLevel = options.compression === "auto"
@@ -808,7 +828,7 @@ export async function buildContextPreview(
       content: rendered,
       estimatedTokens: estimateTokens(rendered)
     }));
-  const scopes = { worldCanon, campaignCanon, chronicle: chronicleEntries, currentScene };
+  const scopes = { authoritativeRules, worldCanon, campaignCanon, chronicle: chronicleEntries, currentScene };
   const actualTokens = budgetTokenEstimate(stableStringify(scopes));
   const expectedForLevel = metrics.compressionEstimates[selectedLevel];
 

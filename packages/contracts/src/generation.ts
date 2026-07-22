@@ -59,6 +59,10 @@ export const generationRequestSchema = z.object({
   }).default({ budgetTokens: 32000, compression: "auto", recentTurns: 8 })
 });
 
+export const generationRetryLatestRequestSchema = generationRequestSchema.extend({
+  expectedCurrentTurnNumber: z.coerce.number().int().min(1)
+});
+
 export const campaignRewindSchema = z.object({
   targetTurnNumber: z.coerce.number().int().min(0),
   expectedCurrentTurnNumber: z.coerce.number().int().min(1).optional()
@@ -131,6 +135,37 @@ export const playerCampaignConfigSchema = z.object({
   pendingEventTriggers: z.array(pendingEventTriggerSchema).max(200).default([])
 });
 
+export const campaignTrackerSchema = z.object({
+  id: z.string().trim().min(1).max(200),
+  name: z.string().trim().min(1).max(300),
+  value: z.string().max(10_000).default(""),
+  rules: z.string().max(4000).default("")
+});
+
+export const campaignRuntimeStateUpdateSchema = z.object({
+  expectedTurnNumber: z.coerce.number().int().min(0),
+  expectedRevision: z.coerce.number().int().min(0),
+  scratchpad: z.string().max(100_000),
+  trackers: z.array(campaignTrackerSchema).max(200)
+});
+
+export const campaignRuntimeStateSchema = z.object({
+  campaignId: z.uuid(),
+  activeTurnNumber: z.coerce.number().int().min(0),
+  viewedTurnNumber: z.coerce.number().int().min(0),
+  isCurrent: z.boolean(),
+  revision: z.coerce.number().int().min(0),
+  updatedAt: z.union([z.string(), z.date()]),
+  scratchpad: z.string(),
+  trackers: z.array(campaignTrackerSchema),
+  rpgStats: z.array(z.unknown()),
+  eventTriggers: z.array(z.unknown()),
+  pendingEventTriggers: z.array(z.unknown()),
+  continuitySummary: z.string(),
+  canonicalFacts: z.array(z.string()),
+  openThreads: z.array(z.string())
+});
+
 export const rpgAssessmentOutputSchema = z.object({
   stat_id: z.string().trim().min(1).max(200),
   difficulty_modifier: z.coerce.number().int().min(-50).max(40),
@@ -154,7 +189,7 @@ export const storyTurnOutputSchema = z.object({
   narration: z.string().trim().min(1).max(200_000),
   choices: z.array(z.string().trim().min(1).max(2000)).length(4),
   custom_action_suggestion: z.string().trim().min(1).max(2000),
-  scratchpad: z.string().max(100_000).default(""),
+  scratchpad: z.string().max(100_000),
   tracker_updates: z.array(z.record(z.string(), z.unknown())).max(200).default([]),
   image_prompt: z.string().max(20_000).default(""),
   continuity_summary: z.string().trim().min(1).max(20_000),
@@ -169,7 +204,10 @@ export const generationJobStatusSchema = z.object({
   providerProfileId: z.string().uuid().nullable().optional(),
   expectedTurnNumber: z.coerce.number().int().min(1),
   action: z.string(),
-  status: z.enum(["queued", "assessing", "generating", "validating", "committing", "completed", "recoverable", "failed"]),
+  operationKind: z.enum(["append", "replace_latest"]).default("append"),
+  replacementTurnId: z.string().uuid().nullable().optional(),
+  baseTurnNumber: z.coerce.number().int().min(0).nullable().optional(),
+  status: z.enum(["queued", "replacement_queued", "assessing", "generating", "validating", "committing", "completed", "recoverable", "failed", "discarded"]),
   attempts: z.coerce.number().int().min(0),
   requestedModel: z.string().optional(),
   providerResponseId: z.string().nullable().optional(),
@@ -190,12 +228,16 @@ export type ProviderProfileUpdate = z.infer<typeof providerProfileUpdateSchema>;
 export type ProviderTextRequest = z.infer<typeof providerTextRequestSchema>;
 export type ProviderType = z.infer<typeof providerTypeSchema>;
 export type GenerationRequest = z.infer<typeof generationRequestSchema>;
+export type GenerationRetryLatestRequest = z.infer<typeof generationRetryLatestRequestSchema>;
 export type CampaignRewindRequest = z.infer<typeof campaignRewindSchema>;
 export type CampaignBranchRequest = z.infer<typeof campaignBranchSchema>;
 export type IllustrationConfig = z.infer<typeof illustrationConfigSchema>;
 export type IllustrationRequest = z.infer<typeof illustrationRequestSchema>;
 export type StoryTurnOutput = z.infer<typeof storyTurnOutputSchema>;
 export type PlayerCampaignConfig = z.infer<typeof playerCampaignConfigSchema>;
+export type CampaignRuntimeStateUpdate = z.infer<typeof campaignRuntimeStateUpdateSchema>;
+export type CampaignRuntimeState = z.infer<typeof campaignRuntimeStateSchema>;
+export type CampaignTracker = z.infer<typeof campaignTrackerSchema>;
 export type PlayerRpgStat = z.infer<typeof playerRpgStatSchema>;
 export type PlayerEventTrigger = z.infer<typeof playerEventTriggerSchema>;
 export type PendingEventTrigger = z.infer<typeof pendingEventTriggerSchema>;

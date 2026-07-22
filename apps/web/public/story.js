@@ -13,6 +13,7 @@ const escapeHtml = (text) => {
   div.textContent = text;
   return div.innerHTML;
 };
+const escapeAttribute = (text) => escapeHtml(text).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 const sanitizeNarration = (text) => {
   if (!text) return "";
   return text.split("\n")
@@ -39,11 +40,13 @@ const state = {
   campaign: null,
   world: null,
   playerConfig: null,
+  runtimeState: null,
   turns: [],
   viewIndex: -1,
   busy: false,
   providers: [],
   abortController: null,
+  pendingGeneration: null,
   imagePollTimer: null,
   activityLog: [],
   toastTimer: null,
@@ -111,9 +114,10 @@ function hideBusy() {
 function syncInputState() {
   const btnAction = $("btnTakeAction");
   const freeAction = $("freeAction");
-  if (btnAction) btnAction.disabled = state.busy;
-  if (freeAction) freeAction.disabled = state.busy;
-  document.querySelectorAll("#choiceArea .choice").forEach(b => { b.disabled = state.busy; });
+  const generationLocked = state.busy || Boolean(state.pendingGeneration);
+  if (btnAction) btnAction.disabled = generationLocked;
+  if (freeAction) freeAction.disabled = generationLocked;
+  document.querySelectorAll("#choiceArea .choice").forEach(b => { b.disabled = generationLocked; });
 
   const btnPrev = $("btnPrev");
   const btnNext = $("btnNext");
@@ -125,10 +129,10 @@ function syncInputState() {
   const isLatest = state.viewIndex === -1 || state.viewIndex >= turnCount - 1;
   const lastTurnHasAction = turnCount > 0 && Boolean(state.turns[turnCount - 1] && state.turns[turnCount - 1].action);
 
-  if (btnPrev) btnPrev.disabled = state.busy || turnCount === 0 || curr <= 0;
-  if (btnNext) btnNext.disabled = state.busy || turnCount === 0 || isLatest;
-  if (btnUndo) btnUndo.disabled = state.busy || turnCount === 0 || !isLatest;
-  if (btnRetry) btnRetry.disabled = state.busy || turnCount === 0 || !isLatest || !lastTurnHasAction;
+  if (btnPrev) btnPrev.disabled = generationLocked || turnCount === 0 || curr <= 0;
+  if (btnNext) btnNext.disabled = generationLocked || turnCount === 0 || isLatest;
+  if (btnUndo) btnUndo.disabled = generationLocked || turnCount === 0 || !isLatest;
+  if (btnRetry) btnRetry.disabled = generationLocked || turnCount === 0 || !isLatest || !lastTurnHasAction;
 }
 
 // ── Activity Log ──────────────────────────────────────────────
@@ -190,9 +194,11 @@ async function loadCampaign(campaignId) {
     state.campaign = syncData.campaign || syncData;
     state.world = syncData.world || state.campaign.world || null;
     state.playerConfig = syncData.playerConfig || state.campaign.playerConfig || null;
+    state.pendingGeneration = syncData.pendingGeneration || null;
 
     const turnData = await api(`/campaigns/${campaignId}/turns`);
     state.turns = turnData.turns || [];
+    state.runtimeState = await api(`/campaigns/${campaignId}/state`);
 
     // Set title
     const titleEl = $("storyTitle");
@@ -271,8 +277,8 @@ function formatReportedCost(cost) {
   return new Intl.NumberFormat(undefined, {
     style: "currency",
     currency,
-    minimumFractionDigits: amount < 0.01 ? 4 : 2,
-    maximumFractionDigits: amount < 0.01 ? 6 : 2
+    minimumFractionDigits: 4,
+    maximumFractionDigits: 4
   }).format(amount);
 }
 
@@ -296,10 +302,19 @@ function renderScene(turn, index) {
   let narrationHtml = "";
 
   // Action tag (what the player did)
+  const isPendingReplacement = index === state.turns.length - 1
+    && state.pendingGeneration?.operationKind === "replace_latest";
+  if (isPendingReplacement) {
+    narrationHtml += `<div class="replacement-pending-banner" role="status">
+      <strong>Replacement in progress</strong>
+      <span>The accepted turn is preserved until its replacement is validated.</span>
+    </div>`;
+  }
+
   if (turn.action) {
     const reportedCost = formatReportedCost(turn.reportedCost);
     const reportedCostHtml = reportedCost
-      ? `<span class="pill turn-cost-pill" title="${escapeHtml(reportedCostTooltip(turn.reportedCost))}">${escapeHtml(reportedCost)} generated</span>`
+      ? `<span class="pill turn-cost-pill" title="${escapeHtml(reportedCostTooltip(turn.reportedCost))}">${escapeHtml(reportedCost)}</span>`
       : "";
 
     narrationHtml += `<div class="turn-meta">
@@ -464,43 +479,134 @@ async function submitAction(actionText) {
 }
 
 // ── Generation Pipeline ───────────────────────────────────────
-async function runGeneration(action) {
+function pendingSubmissionStorageKey() {
+  return state.campaignId ? `infiniteQuestPendingGeneration:${state.campaignId}` : "";
+}
+
+function savePendingSubmission(submission) {
+  const key = pendingSubmissionStorageKey();
+  if (key) localStorage.setItem(key, JSON.stringify(submission));
+}
+
+function loadPendingSubmission() {
+  const key = pendingSubmissionStorageKey();
+  if (!key) return null;
+  try {
+    const submission = JSON.parse(localStorage.getItem(key) || "null");
+    if (!submission || typeof submission !== "object") return null;
+    if (!Number.isFinite(Number(submission.createdAt)) || Date.now() - Number(submission.createdAt) > 15 * 60 * 1000) return null;
+    return submission;
+  } catch (_) {
+    return null;
+  }
+}
+
+function clearPendingSubmission() {
+  const key = pendingSubmissionStorageKey();
+  if (key) localStorage.removeItem(key);
+}
+
+function pendingGenerationFromError(error) {
+  return error?.body?.details?.pendingGeneration || null;
+}
+
+function pendingGenerationMatches(pending, submission) {
+  return Boolean(pending
+    && pending.action === submission.action
+    && pending.operationKind === submission.operationKind
+    && Number(pending.expectedTurnNumber) === Number(submission.expectedTurnNumber));
+}
+
+async function enqueueGenerationSubmission(submission) {
+  const endpoint = submission.operationKind === "replace_latest"
+    ? `/campaigns/${state.campaignId}/generations/retry-latest`
+    : `/campaigns/${state.campaignId}/generations`;
+  const payload = {
+    action: submission.action,
+    idempotencyKey: submission.idempotencyKey,
+    context: submission.context,
+    ...(submission.operationKind === "replace_latest"
+      ? { expectedCurrentTurnNumber: submission.expectedTurnNumber }
+      : {})
+  };
+  try {
+    return await api(endpoint, {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal: state.abortController.signal
+    });
+  } catch (error) {
+    const reportedPending = pendingGenerationFromError(error);
+    if (pendingGenerationMatches(reportedPending, submission)) return reportedPending;
+    if (error.name === "AbortError") throw error;
+
+    try {
+      const syncData = await api(`/campaigns/${state.campaignId}/sync-status`);
+      if (pendingGenerationMatches(syncData.pendingGeneration, submission)) return syncData.pendingGeneration;
+      if (syncData.pendingGeneration) {
+        throw Object.assign(new Error("Another story generation is already active."), {
+          status: 409,
+          pendingGeneration: syncData.pendingGeneration
+        });
+      }
+    } catch (reconcileError) {
+      if (reconcileError.status === 409 || reconcileError.pendingGeneration) throw reconcileError;
+      if (error.status) throw error;
+    }
+
+    // Replaying the exact request is safe because the server keys it by campaign and idempotency key.
+    return api(endpoint, {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal: state.abortController.signal
+    });
+  }
+}
+
+async function runGeneration(action, options = {}) {
   showBusy("Queueing turn with the Story Engine…");
   state.abortController = new AbortController();
   const progressEl = $("generationProgress");
   if (progressEl) progressEl.classList.remove("hidden");
 
   try {
-    const idempotencyKey = crypto.randomUUID();
-    const payload = {
+    const operationKind = options.operationKind || "append";
+    const expectedTurnNumber = operationKind === "replace_latest"
+      ? Number(options.expectedCurrentTurnNumber)
+      : state.turns.length + 1;
+    const submission = {
       action,
-      idempotencyKey,
+      operationKind,
+      expectedTurnNumber,
+      idempotencyKey: options.idempotencyKey || crypto.randomUUID(),
+      createdAt: Number(options.createdAt) || Date.now(),
       context: {
         budgetTokens: 32000,
         compression: "auto",
         recentTurns: 8
       }
     };
+    savePendingSubmission(submission);
     recordActivity("generation", "Generation queued", `Action: "${action}"`);
 
-    const jobRes = await api(`/campaigns/${state.campaignId}/generations`, {
-      method: "POST",
-      body: JSON.stringify(payload),
-      signal: state.abortController.signal
-    });
+    const jobRes = await enqueueGenerationSubmission(submission);
 
     const jobId = jobRes.id || jobRes.jobId;
     if (!jobId) throw new Error("No job ID returned from generation request.");
 
+    state.pendingGeneration = { ...jobRes, id: jobId, action, operationKind, expectedTurnNumber };
+    renderAllScenes();
     await pollGenerationJob(jobId, action);
   } catch (err) {
     clearStreamingPreview();
+    if (err.pendingGeneration) state.pendingGeneration = err.pendingGeneration;
     renderAllScenes();
     if (err.name === "AbortError") {
       toast("Generation cancelled.");
       recordActivity("system", "Generation cancelled");
     } else {
-      toast(`Generation failed: ${err.message}`);
+      const preserved = options.operationKind === "replace_latest" ? " The original turn was preserved." : "";
+      toast(`Generation failed: ${err.message}${preserved}`);
       recordActivity("error", "Generation failed", err.message);
     }
   } finally {
@@ -584,6 +690,59 @@ function clearStreamingPreview() {
   state.streamingExpectedScrollY = null;
 }
 
+function showGenerationRecovery(jobId, message) {
+  const panel = $("lmStudioRecoveryPanel");
+  const messageEl = $("lmStudioRecoveryMessage");
+  if (panel) {
+    panel.dataset.jobId = jobId;
+    panel.classList.remove("hidden");
+  }
+  if (messageEl) messageEl.textContent = message || "The durable generation needs attention.";
+}
+
+function hideGenerationRecovery() {
+  const panel = $("lmStudioRecoveryPanel");
+  if (panel) {
+    panel.dataset.jobId = "";
+    panel.classList.add("hidden");
+  }
+}
+
+async function monitorRecoveryJob(retryFirst) {
+  const panel = $("lmStudioRecoveryPanel");
+  const jobId = panel?.dataset.jobId || state.pendingGeneration?.id;
+  if (!jobId || state.busy) return;
+  hideGenerationRecovery();
+  showBusy(retryFirst ? "Retrying durable generation…" : "Resuming generation monitoring…");
+  try {
+    if (retryFirst) await api(`/generation-jobs/${jobId}/retry`, { method: "POST", body: "{}" });
+    await pollGenerationJob(jobId, state.pendingGeneration?.action || "");
+  } catch (error) {
+    toast(`Generation recovery failed: ${error.message}`);
+  } finally {
+    hideBusy();
+  }
+}
+
+async function discardRecoveryJob() {
+  const panel = $("lmStudioRecoveryPanel");
+  const jobId = panel?.dataset.jobId || state.pendingGeneration?.id;
+  if (!jobId || state.busy) return;
+  showBusy("Discarding generation job…");
+  try {
+    await api(`/generation-jobs/${jobId}/discard`, { method: "POST", body: "{}" });
+    clearPendingSubmission();
+    state.pendingGeneration = null;
+    hideGenerationRecovery();
+    renderAllScenes();
+    toast("Generation job discarded. The accepted turn was preserved.");
+  } catch (error) {
+    toast(`Could not discard generation: ${error.message}`);
+  } finally {
+    hideBusy();
+  }
+}
+
 async function pollGenerationJob(jobId, action) {
   let retriesUsed = 0;
   clearStreamingPreview();
@@ -632,6 +791,8 @@ async function pollGenerationJob(jobId, action) {
               cleanup();
               try {
                 const result = await api(`/generation-jobs/${jobId}/result`);
+                clearPendingSubmission();
+                state.pendingGeneration = null;
                 recordActivity("success", "Turn generated", `Turn ${result.turnNumber || ""} completed.`);
                 clearStreamingPreview();
                 await loadCampaign(state.campaignId);
@@ -643,7 +804,15 @@ async function pollGenerationJob(jobId, action) {
             } else if (job.status === "failed") {
               cleanup();
               clearStreamingPreview();
+              clearPendingSubmission();
+              state.pendingGeneration = null;
               reject(new Error(job.errorMessage || job.error || "Generation job failed."));
+            } else if (job.status === "discarded") {
+              cleanup();
+              clearStreamingPreview();
+              clearPendingSubmission();
+              state.pendingGeneration = null;
+              reject(new Error("Generation job was discarded."));
             } else if (job.status === "recoverable") {
               if (retriesUsed < 1) {
                 retriesUsed++;
@@ -653,6 +822,7 @@ async function pollGenerationJob(jobId, action) {
               } else {
                 cleanup();
                 clearStreamingPreview();
+                showGenerationRecovery(jobId, "Generation is recoverable but needs your direction.");
                 reject(new Error("Generation could not recover a complete story turn after retry."));
               }
             }
@@ -687,6 +857,8 @@ async function pollGenerationJob(jobId, action) {
 
     if (job.status === "completed") {
       const result = await api(`/generation-jobs/${jobId}/result`);
+      clearPendingSubmission();
+      state.pendingGeneration = null;
       recordActivity("success", "Turn generated", `Turn ${result.turnNumber || ""} completed.`);
       clearStreamingPreview();
       await loadCampaign(state.campaignId);
@@ -695,8 +867,16 @@ async function pollGenerationJob(jobId, action) {
     }
     if (job.status === "failed") {
       clearStreamingPreview();
+      clearPendingSubmission();
+      state.pendingGeneration = null;
       const msg = job.errorMessage || job.error || "Generation job failed.";
       throw new Error(msg);
+    }
+    if (job.status === "discarded") {
+      clearStreamingPreview();
+      clearPendingSubmission();
+      state.pendingGeneration = null;
+      throw new Error("Generation job was discarded.");
     }
     if (job.status === "recoverable") {
       if (retriesUsed < 1) {
@@ -707,6 +887,7 @@ async function pollGenerationJob(jobId, action) {
         continue;
       }
       clearStreamingPreview();
+      showGenerationRecovery(jobId, "Generation is recoverable but needs your direction.");
       throw new Error("Generation could not recover a complete story turn after retry.");
     }
     await new Promise(r => setTimeout(r, 400));
@@ -759,13 +940,16 @@ async function resumePendingGeneration() {
   if (!state.campaignId || !state.campaign) return false;
   try {
     const syncData = await api(`/campaigns/${state.campaignId}/sync-status`);
-    if (syncData.pendingGenerationJobId) {
+    const pending = syncData.pendingGeneration;
+    state.pendingGeneration = pending || null;
+    if (pending?.id) {
       showBusy("Resuming pending generation…");
-      recordActivity("system", "Resuming pending generation", `jobId=${syncData.pendingGenerationJobId}`);
+      recordActivity("system", "Resuming pending generation", `jobId=${pending.id}`);
+      renderAllScenes();
       const progressEl = $("generationProgress");
       if (progressEl) progressEl.classList.remove("hidden");
       try {
-        await pollGenerationJob(syncData.pendingGenerationJobId, "");
+        await pollGenerationJob(pending.id, pending.action || "");
         return true;
       } finally {
         clearStreamingPreview();
@@ -773,6 +957,20 @@ async function resumePendingGeneration() {
         hideBusy();
       }
     }
+    const stored = loadPendingSubmission();
+    const storedTurnStillMatches = stored?.operationKind === "replace_latest"
+      ? Number(stored.expectedTurnNumber) === state.turns.length
+      : Number(stored?.expectedTurnNumber) === state.turns.length + 1;
+    if (stored && storedTurnStillMatches) {
+      await runGeneration(stored.action, {
+        operationKind: stored.operationKind,
+        expectedCurrentTurnNumber: stored.expectedTurnNumber,
+        idempotencyKey: stored.idempotencyKey,
+        createdAt: stored.createdAt
+      });
+      return true;
+    }
+    clearPendingSubmission();
   } catch (_) { /* ignore — no pending job */ }
   return false;
 }
@@ -856,21 +1054,48 @@ async function retryLatest() {
   const isLatest = state.viewIndex === -1 || state.viewIndex >= state.turns.length - 1;
   const lastTurnHasAction = state.turns.length > 0 && Boolean(state.turns[state.turns.length - 1] && state.turns[state.turns.length - 1].action);
   if (state.busy || state.turns.length === 0 || !isLatest || !lastTurnHasAction) return;
-  if (!confirm("Retry the last turn? The current outcome will be replaced.")) return;
   const lastAction = state.turns[state.turns.length - 1].action;
-  showBusy("Retrying…");
-  try {
-    await api(`/campaigns/${state.campaignId}/rewind`, {
-      method: "POST",
-      body: JSON.stringify({ targetTurnNumber: state.turns.length - 1 })
-    });
-    await loadCampaign(state.campaignId);
-    if (lastAction) await runGeneration(lastAction);
-  } catch (err) {
-    toast(`Retry failed: ${err.message}`);
-    recordActivity("error", "Retry failed", err.message);
-    hideBusy();
+  openRetryPromptDialog(lastAction);
+}
+
+function openRetryPromptDialog(originalPrompt) {
+  const dialog = $("retryPromptDialog");
+  const editor = $("retryPromptEditor");
+  if (!dialog || !editor || typeof dialog.showModal !== "function") {
+    const editedPrompt = prompt("Edit the prompt text before retrying:", originalPrompt || "");
+    if (editedPrompt !== null) executeRetryWithPrompt(editedPrompt);
+    return;
   }
+  editor.value = originalPrompt || "";
+  dialog.showModal();
+  setTimeout(() => {
+    editor.focus();
+    editor.select();
+  }, 40);
+}
+
+function closeRetryPromptDialog() {
+  const dialog = $("retryPromptDialog");
+  if (dialog && dialog.open) dialog.close();
+}
+
+async function executeRetryWithPrompt(submittedPromptText) {
+  const isLatest = state.viewIndex === -1 || state.viewIndex >= state.turns.length - 1;
+  if (state.busy || state.turns.length === 0 || !isLatest) return;
+  const action = String(submittedPromptText || "").trim();
+  if (!action) {
+    toast("Turn prompt cannot be empty.");
+    const editor = $("retryPromptEditor");
+    if (editor) editor.focus();
+    return;
+  }
+
+  const currentTurnNumber = state.turns.length;
+  closeRetryPromptDialog();
+  await runGeneration(action, {
+    operationKind: "replace_latest",
+    expectedCurrentTurnNumber: currentTurnNumber
+  });
 }
 
 function promptBranchOrReset(turnIndex) {
@@ -962,48 +1187,124 @@ async function regenerateIllustration(turnId, prompt) {
 }
 
 // ── Edit State Dialog ─────────────────────────────────────────
-function openEditState() {
+async function openEditState() {
   const dlg = $("editStateDialog");
-  if (!dlg) return;
-  // Populate scratchpad
-  const scratchpadEl = $("scratchpadEditor");
-  if (scratchpadEl) scratchpadEl.value = state.playerConfig?.scratchpad || "";
-  // Populate trackers
-  const trackersEl = $("trackersEditor");
-  if (trackersEl) {
-    const trackers = state.playerConfig?.trackers || [];
-    trackersEl.value = JSON.stringify(trackers, null, 2);
+  if (!dlg || !state.campaignId) return;
+  try {
+    showBusy("Loading current state…");
+    state.runtimeState = await api(`/campaigns/${state.campaignId}/state`);
+    renderCurrentRuntimeState();
+    switchEditStateTab("overview");
+    if (dlg.showModal) dlg.showModal();
+  } catch (err) {
+    toast(`State could not be loaded: ${err.message}`);
+  } finally {
+    hideBusy();
   }
-  renderRpgStatsInEditState();
-  renderHistoryTab();
-  switchEditStateTab("scratch");
-  if (dlg.showModal) dlg.showModal();
 }
 
 function switchEditStateTab(tabName) {
   document.querySelectorAll("#editStateDialog .tab").forEach(t => {
     t.classList.toggle("active", t.dataset.tab === tabName);
   });
-  ["tab-scratch", "tab-trackers", "tab-history"].forEach(id => {
-    const el = $(id);
-    if (el) {
-      const sectionTab = id.replace("tab-", "");
-      el.classList.toggle("hidden", sectionTab !== tabName);
-    }
+  ["overview", "scratch", "trackers", "mechanics"].forEach(sectionTab => {
+    const el = $(`tab-${sectionTab}`);
+    if (el) el.classList.toggle("hidden", sectionTab !== tabName);
   });
+}
+
+function renderTextCollection(containerId, values, emptyText) {
+  const container = $(containerId);
+  if (!container) return;
+  container.innerHTML = values && values.length
+    ? values.map(value => `<div>• ${escapeHtml(String(value))}</div>`).join("")
+    : `<span class="dim">${escapeHtml(emptyText)}</span>`;
+}
+
+function renderCurrentRuntimeState() {
+  const runtime = state.runtimeState || {};
+  const meta = $("editStateMeta");
+  if (meta) meta.textContent = `Current authoritative state after turn ${runtime.activeTurnNumber || 0} · revision ${runtime.revision || 0}`;
+  const summary = $("editStateContinuitySummary");
+  if (summary) summary.textContent = runtime.continuitySummary || "No continuity summary has been recorded yet.";
+  renderTextCollection("editStateOpenThreads", runtime.openThreads || [], "No open threads recorded.");
+  renderTextCollection("editStateCanonicalFacts", runtime.canonicalFacts || [], "No canonical facts recorded.");
+
+  const scratchpad = $("scratchpadEditor");
+  if (scratchpad) scratchpad.value = runtime.scratchpad || "";
+  updateScratchpadCharacterCount();
+  renderTrackerEditor();
+  renderRpgStatsInEditState();
+  renderTextCollection("editStateEventTriggers", (runtime.eventTriggers || []).map(trigger => trigger.label || trigger.name || trigger.id || "Unnamed trigger"), "No event triggers configured.");
+  renderTextCollection("editStatePendingTriggers", (runtime.pendingEventTriggers || []).map(trigger => trigger.name || trigger.label || trigger.instructions || trigger.id || "Pending trigger"), "No pending triggers.");
+}
+
+function updateScratchpadCharacterCount() {
+  const editor = $("scratchpadEditor");
+  const count = $("scratchpadCharacterCount");
+  if (count) count.textContent = `${editor ? editor.value.length : 0} characters`;
+}
+
+function renderTrackerEditor() {
+  const container = $("trackerList");
+  if (!container) return;
+  const trackers = state.runtimeState?.trackers || [];
+  container.innerHTML = trackers.length ? "" : `<p class="dim mini">No current trackers.</p>`;
+  trackers.forEach(tracker => {
+    const card = document.createElement("div");
+    card.className = "track-card runtime-tracker-card";
+    card.dataset.trackerId = tracker.id;
+    card.innerHTML = `
+      <label>Name<input data-field="name" value="${escapeAttribute(tracker.name || "")}" /></label>
+      <label>Current value<textarea data-field="value">${escapeHtml(tracker.value || "")}</textarea></label>
+      <label>Update rules<textarea data-field="rules">${escapeHtml(tracker.rules || "")}</textarea></label>
+      <button type="button" class="small danger" data-action="remove-tracker">Remove tracker</button>
+    `;
+    const remove = card.querySelector('[data-action="remove-tracker"]');
+    if (remove) remove.addEventListener("click", () => {
+      state.runtimeState.trackers = state.runtimeState.trackers.filter(item => item.id !== tracker.id);
+      renderTrackerEditor();
+    });
+    container.appendChild(card);
+  });
+}
+
+function collectTrackerEditorValues() {
+  return [...document.querySelectorAll("#trackerList .runtime-tracker-card")].map(card => ({
+    id: card.dataset.trackerId,
+    name: card.querySelector('[data-field="name"]')?.value.trim() || "",
+    value: card.querySelector('[data-field="value"]')?.value || "",
+    rules: card.querySelector('[data-field="rules"]')?.value || ""
+  })).filter(tracker => tracker.name);
+}
+
+function addTrackerFromEditor() {
+  if (!state.runtimeState) return;
+  const name = $("trackerName")?.value.trim() || "";
+  if (!name) {
+    toast("Tracker name is required.");
+    return;
+  }
+  state.runtimeState.trackers = [
+    ...collectTrackerEditorValues(),
+    {
+      id: globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `tracker-${Date.now()}`,
+      name,
+      value: $("trackerValue")?.value || "",
+      rules: $("trackerRules")?.value || ""
+    }
+  ];
+  ["trackerName", "trackerValue", "trackerRules"].forEach(id => { const input = $(id); if (input) input.value = ""; });
+  renderTrackerEditor();
 }
 
 function renderRpgStatsInEditState() {
   const container = $("editStateRpgStats");
   if (!container) return;
-  const stats = state.playerConfig?.rpgStats || [];
-  if (stats.length === 0) {
-    container.innerHTML = `<p class="dim mini">No RPG stats configured for this campaign.</p>`;
-    return;
-  }
-  container.innerHTML = `<div class="stat-block">${stats.map(s =>
-    `<span class="stat-pill"><strong>${escapeHtml(s.name)}</strong> ${s.value}</span>`
-  ).join("")}</div>`;
+  const stats = state.runtimeState?.rpgStats || [];
+  container.innerHTML = stats.length
+    ? `<div class="stat-block">${stats.map(stat => `<span class="stat-pill"><strong>${escapeHtml(stat.name || stat.id || "Stat")}</strong> ${escapeHtml(String(stat.value ?? ""))}</span>`).join("")}</div>`
+    : `<p class="dim mini">No RPG stats configured for this campaign.</p>`;
 }
 
 function openActivityLog() {
@@ -1068,17 +1369,12 @@ async function saveUserProfile() {
   }
 }
 
-function openTurnHistoryModal() {
-  renderHistoryTab();
+async function openTurnHistoryModal() {
   const dlg = $("turnHistoryDialog");
   if (dlg && dlg.showModal) dlg.showModal();
-}
-
-function renderHistoryTab() {
-  const listContainer = $("historyList");
-  const modalContainer = $("turnHistoryModalList");
-  if (listContainer) populateHistoryContainer(listContainer, "editStateDialog");
-  if (modalContainer) populateHistoryContainer(modalContainer, "turnHistoryDialog");
+  populateHistoryContainer($("turnHistoryModalList"), "turnHistoryDialog");
+  const turnNumber = state.viewIndex === -1 ? state.turns.length : state.viewIndex + 1;
+  await inspectTurnState(turnNumber);
 }
 
 function populateHistoryContainer(container, dialogId) {
@@ -1098,10 +1394,13 @@ function populateHistoryContainer(container, dialogId) {
       <h4>${i === currentIdx ? "◆ " : ""}Turn ${i + 1}${t.action ? `: ${escapeHtml(t.action.slice(0, 60))}` : (i === 0 ? ": Adventure Begin" : "")}</h4>
       <p>${escapeHtml(preview)}</p>
       <div class="row wrap history-card-actions" style="margin-top: 8px; gap: 8px; justify-content: flex-end;">
+        <button type="button" class="history-state-btn mini">Inspect State</button>
         <button type="button" class="history-jump-btn mini">Jump to Scene</button>
         ${isPastTurn ? `<button type="button" class="history-branch-btn mini accent">Restart / Branch from Here…</button>` : ""}
       </div>
     `;
+    const stateBtn = card.querySelector(".history-state-btn");
+    if (stateBtn) stateBtn.addEventListener("click", () => inspectTurnState(i + 1));
     const jumpBtn = card.querySelector(".history-jump-btn");
     if (jumpBtn) {
       jumpBtn.addEventListener("click", () => {
@@ -1124,24 +1423,45 @@ function populateHistoryContainer(container, dialogId) {
   });
 }
 
-async function saveEditState() {
-  if (!state.campaignId || !state.playerConfig) return;
-  const scratchpadEl = $("scratchpadEditor");
-  const trackersEl = $("trackersEditor");
-  const config = { ...state.playerConfig };
-  if (scratchpadEl) config.scratchpad = scratchpadEl.value;
-  if (trackersEl) {
-    try { config.trackers = JSON.parse(trackersEl.value); } catch (_) { toast("Invalid tracker JSON."); return; }
+async function inspectTurnState(turnNumber) {
+  const panel = $("turnHistoryStatePanel");
+  if (!panel || !state.campaignId) return;
+  panel.classList.remove("hidden");
+  panel.innerHTML = `<p class="mini">Loading state after turn ${turnNumber}…</p>`;
+  try {
+    const runtime = await api(`/campaigns/${state.campaignId}/state?turnNumber=${turnNumber}`);
+    const list = (values, empty) => values && values.length
+      ? `<ul>${values.map(value => `<li>${escapeHtml(String(value))}</li>`).join("")}</ul>`
+      : `<p class="mini dim">${escapeHtml(empty)}</p>`;
+    panel.innerHTML = `
+      <h4>${runtime.isCurrent ? "Current state" : `Historical state after turn ${runtime.viewedTurnNumber}`}</h4>
+      <p class="mini">${runtime.isCurrent ? "Editable from Menu → Edit State." : "Read-only. Reset or branch here to make this state current."}</p>
+      <details open><summary>Continuity summary</summary><div>${escapeHtml(runtime.continuitySummary || "No summary recorded.")}</div></details>
+      <details><summary>Private scratchpad</summary><div class="state-inspector-pre">${escapeHtml(runtime.scratchpad || "No scratchpad recorded.")}</div></details>
+      <details><summary>Trackers</summary><div>${list((runtime.trackers || []).map(tracker => `${tracker.name}: ${tracker.value}`), "No trackers recorded.")}</div></details>
+      <details><summary>Open threads</summary><div>${list(runtime.openThreads, "No open threads recorded.")}</div></details>
+      <details><summary>Canonical facts</summary><div>${list(runtime.canonicalFacts, "No canonical facts recorded.")}</div></details>
+    `;
+  } catch (err) {
+    panel.innerHTML = `<p class="mini">State could not be loaded: ${escapeHtml(err.message)}</p>`;
   }
-  config.expectedTurnNumber = state.turns.length;
+}
+
+async function saveEditState() {
+  if (!state.campaignId || !state.runtimeState) return;
+  const scratchpadEl = $("scratchpadEditor");
   try {
     showBusy("Saving state…");
-    await api(`/campaigns/${state.campaignId}/player-config`, {
-      method: "PUT",
-      body: JSON.stringify(config)
+    state.runtimeState = await api(`/campaigns/${state.campaignId}/state`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        expectedTurnNumber: state.runtimeState.activeTurnNumber,
+        expectedRevision: state.runtimeState.revision,
+        scratchpad: scratchpadEl?.value || "",
+        trackers: collectTrackerEditorValues()
+      })
     });
-    state.playerConfig = config;
-    toast("State saved.");
+    toast("Current state saved. The next story turn will use these changes.");
     const dlg = $("editStateDialog");
     if (dlg && dlg.close) dlg.close();
   } catch (err) {
@@ -1416,6 +1736,22 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnUndo) btnUndo.addEventListener("click", undoLatest);
   const btnRetry = $("btnRetry");
   if (btnRetry) btnRetry.addEventListener("click", retryLatest);
+  const btnRetryPromptClose = $("btnRetryPromptClose");
+  if (btnRetryPromptClose) btnRetryPromptClose.addEventListener("click", closeRetryPromptDialog);
+  const btnRetryPromptCancel = $("btnRetryPromptCancel");
+  if (btnRetryPromptCancel) btnRetryPromptCancel.addEventListener("click", closeRetryPromptDialog);
+  const btnRetryPromptSubmit = $("btnRetryPromptSubmit");
+  if (btnRetryPromptSubmit) btnRetryPromptSubmit.addEventListener("click", () => {
+    const editor = $("retryPromptEditor");
+    executeRetryWithPrompt(editor ? editor.value : "");
+  });
+  const retryPromptEditor = $("retryPromptEditor");
+  if (retryPromptEditor) retryPromptEditor.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      executeRetryWithPrompt(retryPromptEditor.value);
+    }
+  });
 
   // Menu
   const btnMenu = $("btnMenu");
@@ -1457,6 +1793,18 @@ document.addEventListener("DOMContentLoaded", () => {
   // Edit State dialog
   const btnSaveEditState = $("btnSaveEditState") || $("btnSaveScratch");
   if (btnSaveEditState) btnSaveEditState.addEventListener("click", saveEditState);
+  const btnCancelEditState = $("btnCancelEditState");
+  if (btnCancelEditState) btnCancelEditState.addEventListener("click", () => { const d = $("editStateDialog"); if (d && d.close) d.close(); });
+  const btnEditStateViewHistory = $("btnEditStateViewHistory");
+  if (btnEditStateViewHistory) btnEditStateViewHistory.addEventListener("click", () => {
+    const d = $("editStateDialog");
+    if (d && d.close) d.close();
+    openTurnHistoryModal();
+  });
+  const scratchpadEditor = $("scratchpadEditor");
+  if (scratchpadEditor) scratchpadEditor.addEventListener("input", updateScratchpadCharacterCount);
+  const btnAddTracker = $("btnAddTracker");
+  if (btnAddTracker) btnAddTracker.addEventListener("click", addTrackerFromEditor);
   const btnCloseEditState = $("btnCloseEditState");
   if (btnCloseEditState) btnCloseEditState.addEventListener("click", () => { const d = $("editStateDialog"); if (d && d.close) d.close(); });
   document.querySelectorAll("#editStateDialog .tab").forEach(tab => {
@@ -1632,7 +1980,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnSkipGettingStartedToStory = $("btnSkipGettingStartedToStory");
   if (btnSkipGettingStartedToStory) btnSkipGettingStartedToStory.addEventListener("click", () => { const d = $("gettingStartedDialog"); if (d && d.close) d.close(); });
   const btnDiscardLmStudioRecovery = $("btnDiscardLmStudioRecovery");
-  if (btnDiscardLmStudioRecovery) btnDiscardLmStudioRecovery.addEventListener("click", () => { const p = $("lmStudioRecoveryPanel"); if (p) p.classList.add("hidden"); });
+  if (btnDiscardLmStudioRecovery) btnDiscardLmStudioRecovery.addEventListener("click", discardRecoveryJob);
+  const btnContinueLmStudioGeneration = $("btnContinueLmStudioGeneration");
+  if (btnContinueLmStudioGeneration) btnContinueLmStudioGeneration.addEventListener("click", () => monitorRecoveryJob(false));
+  const btnRetryLmStudioShorter = $("btnRetryLmStudioShorter");
+  if (btnRetryLmStudioShorter) btnRetryLmStudioShorter.addEventListener("click", () => monitorRecoveryJob(true));
 
   // Edit Response dialog
   const btnEditResponse = $("btnEditResponse");

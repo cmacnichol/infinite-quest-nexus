@@ -7,6 +7,7 @@ import {
   type CampaignBranchRequest,
   type CampaignRewindRequest,
   type GenerationRequest,
+  type GenerationRetryLatestRequest,
   type PlayerCampaignConfig,
   type PlayerEventTrigger,
   type PlayerRpgStat,
@@ -95,6 +96,11 @@ type ClaimedJob = {
   campaign_id: string;
   provider_profile_id: string;
   expected_turn_number: number;
+  operation_kind: "append" | "replace_latest";
+  replacement_turn_id: string | null;
+  base_turn_number: number | null;
+  base_state_private: Record<string, unknown>;
+  base_scratchpad_safe_for_prompt: boolean;
   action: string;
   requested_model: string;
   context_options: MemoryContextQuery & {
@@ -176,8 +182,16 @@ type OrchestrationInputs = {
 export async function enqueueGeneration(pool: DatabasePool, campaignId: string, request: GenerationRequest) {
   const ownerUserId = await initialOwnerId(pool);
   return withTransaction(pool, async (client) => {
-    const existing = await client.query(`SELECT id, status, result_turn_id AS "resultTurnId" FROM generation_jobs WHERE campaign_id = $1 AND idempotency_key = $2 AND owner_user_id = $3`, [campaignId, request.idempotencyKey, ownerUserId]);
-    if (existing.rows[0]) return { ...existing.rows[0], duplicate: true };
+    const requestFingerprint = sha256(stableStringify(request));
+    const existing = await client.query(`SELECT id, status, result_turn_id AS "resultTurnId", action, operation_kind AS "operationKind", recovery_metadata AS "recoveryMetadata" FROM generation_jobs WHERE campaign_id = $1 AND idempotency_key = $2 AND owner_user_id = $3`, [campaignId, request.idempotencyKey, ownerUserId]);
+    if (existing.rows[0]) {
+      const savedFingerprint = existing.rows[0].recoveryMetadata?.requestFingerprint;
+      if (existing.rows[0].action !== request.action || existing.rows[0].operationKind !== "append"
+          || (savedFingerprint && savedFingerprint !== requestFingerprint)) {
+        throw Object.assign(new Error("The idempotency key was already used for a different generation request."), { statusCode: 409 });
+      }
+      return { ...existing.rows[0], duplicate: true };
+    }
     const campaign = await client.query<{ active_turn_number: number; text_provider_profile_id: string | null; story_length_profile: string }>(`SELECT active_turn_number, text_provider_profile_id, story_length_profile FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [campaignId, ownerUserId]);
     const row = campaign.rows[0];
     if (!row) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
@@ -199,12 +213,172 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
          RETURNING id, status, expected_turn_number AS "expectedTurnNumber", created_at AS "createdAt"`,
         [ownerUserId, campaignId, providerProfileId, request.idempotencyKey, row.active_turn_number + 1,
-          request.action, request.model || "", json(contextSnapshot), STORY_PROMPT_PROTOCOL_VERSION, json({})]
+          request.action, request.model || "", json(contextSnapshot), STORY_PROMPT_PROTOCOL_VERSION, json({ requestFingerprint })]
       );
       return { ...result.rows[0], duplicate: false };
     } catch (error) {
       if (typeof error === "object" && error !== null && "code" in error && (error as { code: string }).code === "23505") {
-        throw Object.assign(new Error("This campaign already has an active story generation."), { statusCode: 409 });
+        const active = await client.query(
+          `SELECT id, status, action, operation_kind AS "operationKind", expected_turn_number AS "expectedTurnNumber"
+             FROM generation_jobs WHERE campaign_id = $1 AND owner_user_id = $2
+              AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`,
+          [campaignId, ownerUserId]
+        );
+        throw Object.assign(new Error("This campaign already has an active story generation."), {
+          statusCode: 409,
+          details: { code: "active_generation_exists", pendingGeneration: active.rows[0] || null }
+        });
+      }
+      throw error;
+    }
+  });
+}
+
+export async function enqueueLatestReplacement(pool: DatabasePool, campaignId: string, request: GenerationRetryLatestRequest) {
+  const ownerUserId = await initialOwnerId(pool);
+  return withTransaction(pool, async (client) => {
+    const existing = await client.query<{
+      id: string;
+      status: string;
+      resultTurnId: string | null;
+      action: string;
+      operationKind: string;
+      expectedTurnNumber: number;
+      recoveryMetadata: Record<string, unknown>;
+    }>(
+      `SELECT id, status, result_turn_id AS "resultTurnId", action,
+              operation_kind AS "operationKind", expected_turn_number AS "expectedTurnNumber",
+              recovery_metadata AS "recoveryMetadata"
+         FROM generation_jobs
+        WHERE campaign_id = $1 AND idempotency_key = $2 AND owner_user_id = $3`,
+      [campaignId, request.idempotencyKey, ownerUserId]
+    );
+    if (existing.rows[0]) {
+      const job = existing.rows[0];
+      const requestFingerprint = sha256(stableStringify(request));
+      if (job.action !== request.action || job.operationKind !== "replace_latest"
+          || job.expectedTurnNumber !== request.expectedCurrentTurnNumber
+          || (job.recoveryMetadata?.requestFingerprint && job.recoveryMetadata.requestFingerprint !== requestFingerprint)) {
+        throw Object.assign(new Error("The idempotency key was already used for a different generation request."), { statusCode: 409 });
+      }
+      return { ...job, duplicate: true };
+    }
+
+    const campaignResult = await client.query<{
+      active_turn_number: number;
+      text_provider_profile_id: string | null;
+      story_length_profile: string;
+    }>(
+      `SELECT active_turn_number, text_provider_profile_id, story_length_profile
+         FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
+      [campaignId, ownerUserId]
+    );
+    const campaign = campaignResult.rows[0];
+    if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    if (campaign.active_turn_number !== request.expectedCurrentTurnNumber) {
+      throw Object.assign(
+        new Error(`Campaign is at turn ${campaign.active_turn_number}, not ${request.expectedCurrentTurnNumber}.`),
+        { statusCode: 409 }
+      );
+    }
+
+    const replacement = await client.query<{ id: string }>(
+      `SELECT id FROM turns
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number = $3 FOR UPDATE`,
+      [campaignId, ownerUserId, campaign.active_turn_number]
+    );
+    const replacementTurnId = replacement.rows[0]?.id;
+    if (!replacementTurnId) throw Object.assign(new Error("The latest accepted turn was not found."), { statusCode: 404 });
+
+    const activeImage = await client.query(
+      `SELECT id FROM image_jobs
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_id = $3
+          AND status = 'generating' LIMIT 1`,
+      [campaignId, ownerUserId, replacementTurnId]
+    );
+    if (activeImage.rows[0]) {
+      throw Object.assign(new Error("Wait for the latest turn illustration to finish before retrying the turn."), { statusCode: 409 });
+    }
+    await client.query(
+      `DELETE FROM image_jobs
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_id = $3 AND status = 'queued'`,
+      [campaignId, ownerUserId, replacementTurnId]
+    );
+
+    const providerProfileId = await resolveEffectiveProviderId(
+      client,
+      ownerUserId,
+      "text",
+      request.providerProfileId || campaign.text_provider_profile_id
+    );
+    if (!providerProfileId) {
+      throw Object.assign(new Error("Select a text provider for this campaign or mark a default text provider."), { statusCode: 409 });
+    }
+
+    const baseTurnNumber = campaign.active_turn_number - 1;
+    let baseState: Record<string, unknown> = {};
+    let baseScratchpadSafeForPrompt = false;
+    if (baseTurnNumber === 0) {
+      const initial = await client.query<{ initial_state_snapshot: Record<string, unknown> }>(
+        `SELECT initial_state_snapshot FROM campaign_state
+          WHERE campaign_id = $1 AND owner_user_id = $2`,
+        [campaignId, ownerUserId]
+      );
+      baseState = initial.rows[0]?.initial_state_snapshot || {};
+    } else {
+      const baseTurn = await client.query<{ state_snapshot_private: Record<string, unknown>; model_metadata: Record<string, unknown> }>(
+        `SELECT state_snapshot_private, model_metadata FROM turns
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number = $3`,
+        [campaignId, ownerUserId, baseTurnNumber]
+      );
+      if (!baseTurn.rows[0]) throw new Error("The replacement base turn was not found.");
+      baseState = baseTurn.rows[0].state_snapshot_private || {};
+      baseScratchpadSafeForPrompt = typeof baseTurn.rows[0].model_metadata?.promptProtocolVersion === "string";
+    }
+    const baseEdit = await client.query<{ state_snapshot_private: Record<string, unknown> }>(
+      `SELECT state_snapshot_private FROM campaign_state_edits
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND effective_turn_number = $3
+        ORDER BY revision DESC LIMIT 1`,
+      [campaignId, ownerUserId, baseTurnNumber]
+    );
+    if (baseEdit.rows[0]) {
+      baseState = baseEdit.rows[0].state_snapshot_private || baseState;
+      baseScratchpadSafeForPrompt = true;
+    }
+
+    const storyLength = storyLengthWordRange(storyLengthProfileFromUnknown(campaign.story_length_profile));
+    const contextSnapshot = {
+      ...request.context,
+      storyLengthProfile: storyLength.profile,
+      narrationMinWords: storyLength.minWords,
+      narrationMaxWords: storyLength.maxWords
+    };
+    try {
+      const inserted = await client.query(
+        `INSERT INTO generation_jobs (
+           owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
+           action, requested_model, context_options, prompt_protocol_version, recovery_metadata,
+           operation_kind, replacement_turn_id, base_turn_number, base_state_private, base_scratchpad_safe_for_prompt, status
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'replace_latest',$11,$12,$13,$14,'replacement_queued')
+         RETURNING id, status, expected_turn_number AS "expectedTurnNumber",
+                   operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", created_at AS "createdAt"`,
+        [ownerUserId, campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number,
+          request.action, request.model || "", json(contextSnapshot), STORY_PROMPT_PROTOCOL_VERSION,
+          json({ requestFingerprint: sha256(stableStringify(request)) }), replacementTurnId, baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt]
+      );
+      return { ...inserted.rows[0], duplicate: false };
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && (error as { code: string }).code === "23505") {
+        const active = await client.query(
+          `SELECT id, status, action, operation_kind AS "operationKind", expected_turn_number AS "expectedTurnNumber"
+             FROM generation_jobs WHERE campaign_id = $1 AND owner_user_id = $2
+              AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`,
+          [campaignId, ownerUserId]
+        );
+        throw Object.assign(new Error("This campaign already has an active story generation."), {
+          statusCode: 409,
+          details: { code: "active_generation_exists", pendingGeneration: active.rows[0] || null }
+        });
       }
       throw error;
     }
@@ -216,6 +390,8 @@ export async function getGenerationJob(pool: DatabasePool, jobId: string) {
   const result = await pool.query(
     `SELECT id, campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
             expected_turn_number AS "expectedTurnNumber", action, status, attempts,
+            operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId",
+            base_turn_number AS "baseTurnNumber",
             requested_model AS "requestedModel", provider_response_id AS "providerResponseId",
             provider_finish_reason AS "providerFinishReason", result_turn_id AS "resultTurnId",
             error_code AS "errorCode", error_message AS "errorMessage", recovery_metadata AS "recoveryMetadata",
@@ -267,12 +443,26 @@ export async function getGenerationResult(pool: DatabasePool, jobId: string) {
 export async function retryGeneration(pool: DatabasePool, jobId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const result = await pool.query(
-    `UPDATE generation_jobs SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL,
+    `UPDATE generation_jobs SET status = CASE WHEN operation_kind = 'replace_latest' THEN 'replacement_queued' ELSE 'queued' END,
+            lease_owner = NULL, lease_expires_at = NULL,
             error_code = NULL, error_message = NULL, prompt_protocol_version = $3, updated_at = now()
       WHERE id = $1 AND owner_user_id = $2 AND status IN ('recoverable', 'failed')
       RETURNING id, status`, [jobId, ownerUserId, STORY_PROMPT_PROTOCOL_VERSION]
   );
   if (!result.rows[0]) throw Object.assign(new Error("Only recoverable or failed generation jobs can be retried."), { statusCode: 409 });
+  return result.rows[0];
+}
+
+export async function discardGeneration(pool: DatabasePool, jobId: string) {
+  const ownerUserId = await initialOwnerId(pool);
+  const result = await pool.query(
+    `UPDATE generation_jobs SET status = 'discarded', lease_owner = NULL, lease_expires_at = NULL,
+            partial_output = NULL, updated_at = now()
+      WHERE id = $1 AND owner_user_id = $2 AND status IN ('recoverable', 'failed')
+      RETURNING id, status, campaign_id AS "campaignId", operation_kind AS "operationKind"`,
+    [jobId, ownerUserId]
+  );
+  if (!result.rows[0]) throw Object.assign(new Error("Only recoverable or failed generation jobs can be discarded."), { statusCode: 409 });
   return result.rows[0];
 }
 
@@ -291,7 +481,7 @@ export async function syncPlayerCampaignConfig(pool: DatabasePool, campaignId: s
     const activeJob = await client.query(
       `SELECT id FROM generation_jobs
         WHERE campaign_id = $1 AND owner_user_id = $2
-          AND status IN ('queued','assessing','generating','validating','committing')
+          AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
         LIMIT 1`,
       [campaignId, ownerUserId]
     );
@@ -306,7 +496,8 @@ export async function syncPlayerCampaignConfig(pool: DatabasePool, campaignId: s
     );
     await client.query(
       `UPDATE campaign_state
-          SET rpg_stats = $3, event_triggers = $4, pending_event_triggers = $5, updated_at = now()
+          SET rpg_stats = $3, event_triggers = $4, pending_event_triggers = $5,
+              revision = revision + 1, updated_at = now()
         WHERE campaign_id = $1 AND owner_user_id = $2`,
       [campaignId, ownerUserId, json(config.rpgStats), json(config.eventTriggers), json(config.pendingEventTriggers)]
     );
@@ -314,7 +505,7 @@ export async function syncPlayerCampaignConfig(pool: DatabasePool, campaignId: s
       await client.query(
         `UPDATE campaign_state
             SET initial_state_snapshot = jsonb_build_object(
-              'scratchpad', ''::text,
+              'scratchpad', scratchpad_private,
               'trackers', trackers,
               'eventTriggers', $3::jsonb,
               'pendingEventTriggers', $4::jsonb,
@@ -352,6 +543,7 @@ export async function rewindCampaign(pool: DatabasePool, campaignId: string, req
     // Resolve the target state snapshot — either from a turn row or the initial snapshot.
     let targetSnapshot: Record<string, unknown>;
     let targetModelMetadata: Record<string, unknown> | null = null;
+    let targetStateEdited = false;
     if (request.targetTurnNumber === 0) {
       const initialResult = await client.query<{ initial_state_snapshot: Record<string, unknown> }>(
         `SELECT initial_state_snapshot FROM campaign_state
@@ -374,6 +566,16 @@ export async function rewindCampaign(pool: DatabasePool, campaignId: string, req
       targetSnapshot = targetTurn.state_snapshot_private || {};
       targetModelMetadata = targetTurn.model_metadata || null;
     }
+    const targetEdit = await client.query<{ state_snapshot_private: Record<string, unknown> }>(
+      `SELECT state_snapshot_private FROM campaign_state_edits
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND effective_turn_number = $3
+        ORDER BY revision DESC LIMIT 1`,
+      [campaignId, ownerUserId, request.targetTurnNumber]
+    );
+    if (targetEdit.rows[0]) {
+      targetSnapshot = targetEdit.rows[0].state_snapshot_private || targetSnapshot;
+      targetStateEdited = true;
+    }
     if (request.targetTurnNumber === campaign.active_turn_number) {
       return {
         campaignId,
@@ -385,7 +587,7 @@ export async function rewindCampaign(pool: DatabasePool, campaignId: string, req
     const activeGeneration = await client.query(
       `SELECT id FROM generation_jobs
         WHERE campaign_id = $1 AND owner_user_id = $2
-          AND status IN ('queued','assessing','generating','validating','committing')
+          AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
         LIMIT 1 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
@@ -422,12 +624,17 @@ export async function rewindCampaign(pool: DatabasePool, campaignId: string, req
     const eventTriggers = Array.isArray(snapshot.eventTriggers) ? snapshot.eventTriggers : currentState.event_triggers;
     const pendingEventTriggers = Array.isArray(snapshot.pendingEventTriggers) ? snapshot.pendingEventTriggers : [];
     const rpgStats = Array.isArray(snapshot.rpgStats) ? snapshot.rpgStats : currentState.rpg_stats;
-    const scratchpadSafeForPrompt = typeof targetModelMetadata?.promptProtocolVersion === "string";
+    const scratchpadSafeForPrompt = targetStateEdited || typeof targetModelMetadata?.promptProtocolVersion === "string";
     const discardedTurnCount = campaign.active_turn_number - request.targetTurnNumber;
 
     await client.query(
       `DELETE FROM generation_jobs
         WHERE campaign_id = $1 AND owner_user_id = $2 AND expected_turn_number > $3`,
+      [campaignId, ownerUserId, request.targetTurnNumber]
+    );
+    await client.query(
+      `DELETE FROM campaign_state_edits
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND effective_turn_number > $3`,
       [campaignId, ownerUserId, request.targetTurnNumber]
     );
     await client.query(
@@ -453,7 +660,8 @@ export async function rewindCampaign(pool: DatabasePool, campaignId: string, req
     );
     await client.query(
       `UPDATE campaign_state SET scratchpad_private = $3, scratchpad_safe_for_prompt = $4,
-         trackers = $5, event_triggers = $6, pending_event_triggers = $7, rpg_stats = $8, updated_at = now()
+         trackers = $5, event_triggers = $6, pending_event_triggers = $7, rpg_stats = $8,
+         revision = revision + 1, updated_at = now()
         WHERE campaign_id = $1 AND owner_user_id = $2`,
       [campaignId, ownerUserId, scratchpad, scratchpadSafeForPrompt, json(trackers), json(eventTriggers),
         json(pendingEventTriggers), json(rpgStats)]
@@ -523,6 +731,7 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
 
     let targetSnapshot: Record<string, unknown>;
     let targetModelMetadata: Record<string, unknown> | null = null;
+    let targetStateEdited = false;
     if (request.targetTurnNumber === 0) {
       targetSnapshot = parentState.initial_state_snapshot || {};
     } else {
@@ -538,6 +747,16 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
       if (!targetTurn) throw Object.assign(new Error("The requested branch turn was not found."), { statusCode: 404 });
       targetSnapshot = targetTurn.state_snapshot_private || {};
       targetModelMetadata = targetTurn.model_metadata || null;
+    }
+    const targetEdit = await client.query<{ state_snapshot_private: Record<string, unknown> }>(
+      `SELECT state_snapshot_private FROM campaign_state_edits
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND effective_turn_number = $3
+        ORDER BY revision DESC LIMIT 1`,
+      [campaignId, ownerUserId, request.targetTurnNumber]
+    );
+    if (targetEdit.rows[0]) {
+      targetSnapshot = targetEdit.rows[0].state_snapshot_private || targetSnapshot;
+      targetStateEdited = true;
     }
 
     const branchTitle = request.title?.trim() || `${campaign.title} (Branch Turn ${request.targetTurnNumber})`;
@@ -561,7 +780,7 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
     const eventTriggers = Array.isArray(targetSnapshot.eventTriggers) ? targetSnapshot.eventTriggers : [];
     const pendingEventTriggers = Array.isArray(targetSnapshot.pendingEventTriggers) ? targetSnapshot.pendingEventTriggers : [];
     const rpgStats = Array.isArray(targetSnapshot.rpgStats) ? targetSnapshot.rpgStats : [];
-    const scratchpadSafeForPrompt = typeof targetModelMetadata?.promptProtocolVersion === "string";
+    const scratchpadSafeForPrompt = targetStateEdited || typeof targetModelMetadata?.promptProtocolVersion === "string";
 
     const branchProvenance = {
       sourceType: "nexus_campaign_branch",
@@ -582,6 +801,18 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
         json(branchProvenance), json(parentState.initial_state_snapshot)
       ]
     );
+    if (targetStateEdited) {
+      await client.query(
+        `INSERT INTO campaign_state_edits (
+           owner_user_id, campaign_id, effective_turn_number, revision, state_snapshot_private, changed_fields
+         ) VALUES ($1,$2,$3,1,$4,$5)`,
+        [ownerUserId, newCampaignId, request.targetTurnNumber, json(targetSnapshot), json(["branchedState"])]
+      );
+      await client.query(
+        `UPDATE campaign_state SET revision = 1 WHERE campaign_id = $1 AND owner_user_id = $2`,
+        [newCampaignId, ownerUserId]
+      );
+    }
 
     await client.query(
       `INSERT INTO campaign_illustration_configs (
@@ -652,14 +883,16 @@ async function claimGeneration(pool: DatabasePool, workerId: string, leaseSecond
     const result = await client.query<ClaimedJob>(
       `WITH candidate AS (
          SELECT id FROM generation_jobs
-          WHERE status = 'queued' OR (status IN ('assessing','generating','validating','committing') AND lease_expires_at < now())
+          WHERE status IN ('queued','replacement_queued') OR (status IN ('assessing','generating','validating','committing') AND lease_expires_at < now())
           ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
        )
        UPDATE generation_jobs j SET status = 'assessing', attempts = attempts + 1, lease_owner = $1,
               lease_expires_at = now() + ($2::text || ' seconds')::interval, updated_at = now()
          FROM candidate WHERE j.id = candidate.id
        RETURNING j.id, j.owner_user_id, j.campaign_id, j.provider_profile_id, j.expected_turn_number,
-                 j.action, j.requested_model, j.context_options, j.prompt_protocol_version, j.attempts,
+                 j.action, j.operation_kind, j.replacement_turn_id, j.base_turn_number, j.base_state_private,
+                 j.base_scratchpad_safe_for_prompt,
+                 j.requested_model, j.context_options, j.prompt_protocol_version, j.attempts,
                  j.orchestration_private`,
       [workerId, leaseSeconds]
     );
@@ -699,19 +932,23 @@ async function loadOrchestrationInputs(pool: DatabasePool, job: ClaimedJob): Pro
   );
   const row = result.rows[0];
   if (!row) throw new Error("Campaign orchestration state was not found.");
-  const rpgStats = (Array.isArray(row.rpg_stats) ? row.rpg_stats : []).flatMap((entry) => {
+  const stagedState = job.operation_kind === "replace_latest" ? job.base_state_private || {} : null;
+  const rpgSource = stagedState && Array.isArray(stagedState.rpgStats) ? stagedState.rpgStats : row.rpg_stats;
+  const eventSource = stagedState && Array.isArray(stagedState.eventTriggers) ? stagedState.eventTriggers : row.event_triggers;
+  const pendingSource = stagedState && Array.isArray(stagedState.pendingEventTriggers) ? stagedState.pendingEventTriggers : row.pending_event_triggers;
+  const rpgStats = (Array.isArray(rpgSource) ? rpgSource : []).flatMap((entry) => {
     const parsed = playerRpgStatSchema.safeParse(entry);
     return parsed.success ? [parsed.data] : [];
   });
-  const eventTriggers = (Array.isArray(row.event_triggers) ? row.event_triggers : []).flatMap((entry) => {
+  const eventTriggers = (Array.isArray(eventSource) ? eventSource : []).flatMap((entry) => {
     const parsed = playerEventTriggerSchema.safeParse(entry);
     return parsed.success ? [parsed.data] : [];
   });
-  const pendingEventTriggers = (Array.isArray(row.pending_event_triggers) ? row.pending_event_triggers : []).flatMap((entry) => {
+  const pendingEventTriggers = (Array.isArray(pendingSource) ? pendingSource : []).flatMap((entry) => {
     const parsed = pendingEventTriggerSchema.safeParse(entry);
     return parsed.success ? [{ ...parsed.data, addTextAfter: false }] : [];
   });
-  const latestSnapshot = row.state_snapshot_private || {};
+  const latestSnapshot = stagedState || row.state_snapshot_private || {};
   const continuitySummary = typeof latestSnapshot.continuitySummary === "string"
     ? latestSnapshot.continuitySummary.trim()
     : "";
@@ -788,9 +1025,36 @@ async function commitStory(
   );
   const campaign = campaignResult.rows[0];
   if (!campaign) throw new Error("Campaign disappeared before story commit.");
-  if (campaign.active_turn_number + 1 !== job.expected_turn_number) throw Object.assign(new Error("Campaign advanced before this generation could commit."), { code: "stale_campaign" });
+  const isReplacement = job.operation_kind === "replace_latest";
+  const expectedCampaignTurn = isReplacement ? job.expected_turn_number : job.expected_turn_number - 1;
+  if (campaign.active_turn_number !== expectedCampaignTurn) {
+    throw Object.assign(new Error("Campaign advanced before this generation could commit."), { code: "stale_campaign" });
+  }
+  if (isReplacement) {
+    const replacement = await client.query<{ id: string }>(
+      `SELECT id FROM turns
+        WHERE id = $1 AND campaign_id = $2 AND owner_user_id = $3 AND turn_number = $4 FOR UPDATE`,
+      [job.replacement_turn_id, job.campaign_id, job.owner_user_id, job.expected_turn_number]
+    );
+    if (!replacement.rows[0]) throw Object.assign(new Error("The turn selected for replacement changed before commit."), { code: "stale_campaign" });
+    const conflictingWork = await client.query(
+      `SELECT 'image' AS kind FROM image_jobs
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_id = $3 AND status IN ('queued','generating')
+       UNION ALL
+       SELECT 'chronicle' AS kind FROM chronicle_jobs
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND status = 'running'
+       LIMIT 1`,
+      [job.campaign_id, job.owner_user_id, job.replacement_turn_id]
+    );
+    if (conflictingWork.rows[0]) {
+      throw Object.assign(new Error("Active derived work prevented the replacement from committing safely."), { code: "replacement_work_active" });
+    }
+  }
   const stateResult = await client.query<{ trackers: unknown }>(`SELECT trackers FROM campaign_state WHERE campaign_id = $1 AND owner_user_id = $2 FOR UPDATE`, [job.campaign_id, job.owner_user_id]);
-  const trackers = mergedTrackers(stateResult.rows[0]?.trackers, story.tracker_updates);
+  const trackerBase = isReplacement && Array.isArray(job.base_state_private?.trackers)
+    ? job.base_state_private.trackers
+    : stateResult.rows[0]?.trackers;
+  const trackers = mergedTrackers(trackerBase, story.tracker_updates);
   const allEvents = [...(orchestration.beforeEvents || []), ...(orchestration.afterEvents || [])];
   const newlyActivated = allEvents.filter((event) => event.sourceTurn === job.expected_turn_number);
   const eventTriggers = applyTriggerHits(inputs.eventTriggers, newlyActivated, new Date().toISOString());
@@ -803,6 +1067,31 @@ async function commitStory(
     afterEvents: orchestration.afterEvents || [],
     extensionApplied: Boolean((orchestration.afterEvents || []).some((event) => event.addTextAfter) && !orchestration.extensionError)
   };
+  if (isReplacement) {
+    await client.query(
+      `DELETE FROM campaign_state_edits
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND effective_turn_number > $3`,
+      [job.campaign_id, job.owner_user_id, job.base_turn_number ?? 0]
+    );
+    await client.query(
+      `DELETE FROM summary_checkpoints
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND through_turn > $3`,
+      [job.campaign_id, job.owner_user_id, job.base_turn_number ?? 0]
+    );
+    await client.query(
+      `DELETE FROM chronicle_jobs
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND status <> 'running'`,
+      [job.campaign_id, job.owner_user_id]
+    );
+    await client.query(
+      `DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2`,
+      [job.campaign_id, job.owner_user_id]
+    );
+    await client.query(
+      `DELETE FROM turns WHERE id = $1 AND campaign_id = $2 AND owner_user_id = $3`,
+      [job.replacement_turn_id, job.campaign_id, job.owner_user_id]
+    );
+  }
   const turnResult = await client.query<{ id: string }>(
     `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration, choices,
        custom_action_suggestion, image_prompt, mechanics_private, state_snapshot_private, model_metadata)
@@ -821,25 +1110,34 @@ async function commitStory(
   await attributeGenerationCostsToTurn(client, job.owner_user_id, job.campaign_id, job.id, turnId);
   await client.query(
     `UPDATE campaign_state SET scratchpad_private = $3, scratchpad_safe_for_prompt = true, trackers = $4, event_triggers = $5,
-       pending_event_triggers = $6, updated_at = now()
+       pending_event_triggers = $6, rpg_stats = $7, revision = revision + 1, updated_at = now()
       WHERE campaign_id = $1 AND owner_user_id = $2`,
-    [job.campaign_id, job.owner_user_id, story.scratchpad, json(trackers), json(eventTriggers), json(pendingEventTriggers)]
+    [job.campaign_id, job.owner_user_id, story.scratchpad, json(trackers), json(eventTriggers), json(pendingEventTriggers), json(inputs.rpgStats)]
   );
-  await storeDerivedTurnMemories(client, job.owner_user_id, job.campaign_id, campaign.world_version_id, turnId,
-    job.expected_turn_number, {
-      continuitySummary: story.continuity_summary,
-      canonicalFacts: story.canonical_facts,
-      supersededFacts: story.superseded_facts,
-      openThreads: story.open_threads
-    });
   await client.query(`UPDATE campaigns SET active_turn_number = $3, updated_at = now() WHERE id = $1 AND owner_user_id = $2`, [job.campaign_id, job.owner_user_id, job.expected_turn_number]);
-  const memory = buildTurnFictionMemory({ action: fictionAction, narration: story.narration }, job.expected_turn_number);
-  await client.query(
-    `INSERT INTO chronicle_memories (owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, metadata)
-     VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,$7,$8,$9,$10)`,
-    [job.owner_user_id, job.campaign_id, campaign.world_version_id, turnId, job.expected_turn_number, memory.content, memory.tokenEstimate,
-      Math.min(1, 0.5 + job.expected_turn_number / 100), memory.entities, json({ sanitized: memory.sanitized, removedMechanicsSegments: memory.removedMechanicsSegments, generated: true })]
-  );
+  if (isReplacement) {
+    await rebuildCampaignMemories(client, job.owner_user_id, job.campaign_id);
+    await client.query(
+      `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, correlation_id, details)
+       VALUES ($1,$2,'campaign_turn_replaced',$3,$4)`,
+      [job.owner_user_id, job.campaign_id, job.id, json({ turnNumber: job.expected_turn_number, replacementTurnId: turnId })]
+    );
+  } else {
+    await storeDerivedTurnMemories(client, job.owner_user_id, job.campaign_id, campaign.world_version_id, turnId,
+      job.expected_turn_number, {
+        continuitySummary: story.continuity_summary,
+        canonicalFacts: story.canonical_facts,
+        supersededFacts: story.superseded_facts,
+        openThreads: story.open_threads
+      });
+    const memory = buildTurnFictionMemory({ action: fictionAction, narration: story.narration }, job.expected_turn_number);
+    await client.query(
+      `INSERT INTO chronicle_memories (owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, metadata)
+       VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,$7,$8,$9,$10)`,
+      [job.owner_user_id, job.campaign_id, campaign.world_version_id, turnId, job.expected_turn_number, memory.content, memory.tokenEstimate,
+        Math.min(1, 0.5 + job.expected_turn_number / 100), memory.entities, json({ sanitized: memory.sanitized, removedMechanicsSegments: memory.removedMechanicsSegments, generated: true })]
+    );
+  }
   await enqueueAcceptedTurnIllustration(client, job.owner_user_id, job.campaign_id, turnId, story.image_prompt);
   await enqueueEmbeddingReindex(client, job.campaign_id);
   await client.query(
@@ -888,7 +1186,14 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
       job.campaign_id,
       { ...job.context_options, budgetTokens: safeContextBudget, query: safeAction },
       credentialSecret,
-      { generationJobId: job.id, operation: "retrieval_embedding" }
+      { generationJobId: job.id, operation: "retrieval_embedding" },
+      job.operation_kind === "replace_latest"
+        ? {
+            throughTurnNumber: job.base_turn_number ?? 0,
+            stateOverride: job.base_state_private,
+            scratchpadSafeForPrompt: job.base_scratchpad_safe_for_prompt
+          }
+        : {}
     );
     const promptContext = context.scopes;
     const inputs = await loadOrchestrationInputs(pool, job);

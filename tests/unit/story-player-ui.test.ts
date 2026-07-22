@@ -7,6 +7,13 @@ const storyCss = readFileSync("apps/web/public/story.css", "utf8");
 const tokensCss = readFileSync("apps/web/public/tokens.css", "utf8");
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
+  it("shows turn costs to four decimal places without a generated label", () => {
+    expect(storyScript).toContain("minimumFractionDigits: 4");
+    expect(storyScript).toContain("maximumFractionDigits: 4");
+    expect(storyScript).toContain("${escapeHtml(reportedCost)}</span>");
+    expect(storyScript).not.toContain("${escapeHtml(reportedCost)} generated</span>");
+  });
+
   it("defines the complete Story Player DOM layout with story area, title bar, and input controls", () => {
     expect(storyHtml).toContain('id="storyArea"');
     expect(storyHtml).toContain('id="storyTitle"');
@@ -30,6 +37,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('id="imagePromptDialog"');
     expect(storyHtml).toContain('id="editResponseDialog"');
     expect(storyHtml).toContain('id="retryPromptDialog"');
+    expect(storyHtml).toContain('id="retryPromptEditor"');
+    expect(storyHtml).toContain('id="btnRetryPromptCancel"');
+    expect(storyHtml).toContain('id="btnRetryPromptSubmit"');
     expect(storyHtml).toContain('id="branchStoryDialog"');
     expect(storyHtml).toContain('id="activityLogDialog"');
     expect(storyHtml).toContain('id="messagePopupDialog"');
@@ -67,13 +77,19 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   });
 
   it("orchestrates turn generation via Nexus API polling with progress updates, crash recovery, and retry", () => {
-    expect(storyScript).toContain('async function runGeneration(action)');
+    expect(storyScript).toContain('async function runGeneration(action, options = {})');
     expect(storyScript).toContain('/campaigns/${state.campaignId}/generations');
+    expect(storyScript).toContain('/campaigns/${state.campaignId}/generations/retry-latest');
     expect(storyScript).toContain('/generation-jobs/${jobId}');
-    expect(storyScript).toContain('const idempotencyKey = crypto.randomUUID();');
+    expect(storyScript).toContain('idempotencyKey: options.idempotencyKey || crypto.randomUUID()');
+    expect(storyScript).toContain('async function enqueueGenerationSubmission(submission)');
+    expect(storyScript).toContain('pendingGenerationMatches(syncData.pendingGeneration, submission)');
     expect(storyScript).toContain('function updateGenerationProgress(job)');
     expect(storyScript).toContain('async function resumePendingGeneration()');
+    expect(storyScript).toContain('const pending = syncData.pendingGeneration;');
     expect(storyScript).toContain('if (job.status === "recoverable") {');
+    expect(storyScript).toContain('The original turn was preserved.');
+    expect(storyScript).toContain('class="replacement-pending-banner"');
   });
 
   it("renders streaming narration full-width in the same scene structure as a completed turn", () => {
@@ -107,6 +123,11 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('history-branch-btn');
     expect(storyScript).toContain('Restart / Branch from Here…');
     expect(storyScript).toContain('async function retryLatest()');
+    expect(storyScript).toContain('function openRetryPromptDialog(originalPrompt)');
+    expect(storyScript).toContain('async function executeRetryWithPrompt(submittedPromptText)');
+    expect(storyScript).toContain('expectedCurrentTurnNumber: currentTurnNumber');
+    expect(storyScript).toContain('await runGeneration(action);');
+    expect(storyScript).not.toContain('confirm("Retry the last turn? The current outcome will be replaced.")');
     expect(storyScript).toContain('branchDlg.addEventListener("close"');
     expect(storyScript).toContain('body: JSON.stringify({ targetTurnNumber: branchDlg._turnIndex + 1 })');
     expect(storyScript).toContain('function openTurnHistoryModal()');
@@ -122,11 +143,16 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('data-action="regenerate-image"');
   });
 
-  it("handles Edit State tabs for continuity scratchpad, JSON trackers, and turn history", () => {
-    expect(storyScript).toContain('function openEditState()');
+  it("edits authoritative current state while keeping history inspection under the Turn Pill", () => {
+    expect(storyScript).toContain('async function openEditState()');
     expect(storyScript).toContain('function switchEditStateTab(tabName)');
     expect(storyScript).toContain('async function saveEditState()');
-    expect(storyScript).toContain('/campaigns/${state.campaignId}/player-config');
+    expect(storyScript).toContain('/campaigns/${state.campaignId}/state');
+    expect(storyScript).toContain('async function inspectTurnState(turnNumber)');
+    expect(storyScript).toContain('expectedRevision: state.runtimeState.revision');
+    expect(storyHtml).toContain('id="scratchpadEditor"');
+    expect(storyHtml).toContain('id="turnHistoryStatePanel"');
+    expect(storyHtml).not.toContain('id="tab-history"');
     expect(storyScript).toContain('const btnSaveEditState = $("btnSaveEditState") || $("btnSaveScratch");');
   });
 
@@ -141,10 +167,11 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("includes menu navigation links for Provider Setup and World Management, and disables action buttons when invalid", () => {
     expect(storyHtml).toContain('id="btnProviderSetup"');
     expect(storyHtml).toContain('id="btnWorldManagement"');
-    expect(storyScript).toContain('if (btnPrev) btnPrev.disabled = state.busy || turnCount === 0 || curr <= 0;');
-    expect(storyScript).toContain('if (btnNext) btnNext.disabled = state.busy || turnCount === 0 || isLatest;');
-    expect(storyScript).toContain('if (btnUndo) btnUndo.disabled = state.busy || turnCount === 0 || !isLatest;');
-    expect(storyScript).toContain('if (btnRetry) btnRetry.disabled = state.busy || turnCount === 0 || !isLatest || !lastTurnHasAction;');
+    expect(storyScript).toContain('const generationLocked = state.busy || Boolean(state.pendingGeneration);');
+    expect(storyScript).toContain('if (btnPrev) btnPrev.disabled = generationLocked || turnCount === 0 || curr <= 0;');
+    expect(storyScript).toContain('if (btnNext) btnNext.disabled = generationLocked || turnCount === 0 || isLatest;');
+    expect(storyScript).toContain('if (btnUndo) btnUndo.disabled = generationLocked || turnCount === 0 || !isLatest;');
+    expect(storyScript).toContain('if (btnRetry) btnRetry.disabled = generationLocked || turnCount === 0 || !isLatest || !lastTurnHasAction;');
   });
 
   it("supports character selection and ad-hoc world generation from prompt via API", () => {

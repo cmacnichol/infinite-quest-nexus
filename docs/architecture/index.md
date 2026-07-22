@@ -17,6 +17,7 @@ Architecture decision records (ADRs) preserve consequential design decisions and
 - [ADR 0010: Dynamic Chronicle context](./0010-dynamic-chronicle-context.md)
 - [ADR 0011: Provider-reported campaign costs](./0011-provider-reported-campaign-costs.md)
 - [ADR 0012: Provider transport deadlines](./0012-provider-transport-deadlines.md)
+- [ADR 0017: Staged latest-turn replacement](./0017-staged-latest-turn-replacement.md)
 
 ## World Library and characters
 

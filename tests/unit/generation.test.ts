@@ -188,6 +188,7 @@ describe("generation contracts", () => {
         narration: "The story continues...",
         choices: ["Choice 1", "Choice 2", "Choice 3", "Choice 4"],
         custom_action_suggestion: "Do something else",
+        scratchpad: "Private continuity notes.",
         continuity_summary: "Summary",
         canonical_facts: [],
         superseded_facts: [],

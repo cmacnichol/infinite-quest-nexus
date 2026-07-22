@@ -162,6 +162,8 @@ integration("legacy import and Chronicle integration", () => {
     });
     const serialized = JSON.stringify(context.scopes);
     expect(context.budget.estimatedSelectedTokens).toBeLessThanOrEqual(context.budget.configuredTokens);
+    expect(context.scopes.authoritativeRules).toBe("Use synthetic fixture markers only.");
+    expect(context.scopes.worldCanon).not.toHaveProperty("rules");
     expect(serialized).toContain("Location Beta");
     expect(serialized).toContain("Object Gamma");
     expect(serialized).not.toContain("d100");

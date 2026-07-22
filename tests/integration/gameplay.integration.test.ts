@@ -229,6 +229,54 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(latestTurn.choices).toContain("Examine the telescope.");
   });
 
+  it("exposes and idempotently resumes a staged latest-turn replacement through sync-status", async () => {
+    const { campaignId } = await importCampaign("retry-latest");
+    const beforeResponse = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/turns` });
+    const beforeTurns = beforeResponse.json().turns;
+    const originalLatest = beforeTurns.at(-1);
+    const payload = {
+      action: "Choose a different route through the observatory.",
+      expectedCurrentTurnNumber: beforeTurns.length,
+      providerProfileId: textProviderId,
+      idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "auto", recentTurns: 10 }
+    };
+
+    const queued = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${campaignId}/generations/retry-latest`,
+      payload
+    });
+    expect(queued.statusCode).toBe(202);
+    expect(queued.json()).toMatchObject({ operationKind: "replace_latest" });
+
+    const replay = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${campaignId}/generations/retry-latest`,
+      payload
+    });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json()).toMatchObject({ id: queued.json().id, duplicate: true });
+
+    const pending = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/sync-status` });
+    expect(pending.json().pendingGeneration).toMatchObject({
+      id: queued.json().id,
+      operationKind: "replace_latest",
+      action: payload.action,
+      expectedTurnNumber: beforeTurns.length
+    });
+    const preserved = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/turns` });
+    expect(preserved.json().turns.at(-1)).toMatchObject({ id: originalLatest.id, narration: originalLatest.narration });
+
+    replies.push({ content: validStory("A different route now leads beneath the Ancient Observatory.") });
+    expect(await runGenerationJob(pool, "worker-gameplay-replacement", 30, credentialSecret)).toBe(true);
+    const completedStatus = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/sync-status` });
+    expect(completedStatus.json().pendingGeneration).toBeNull();
+    const replaced = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/turns` });
+    expect(replaced.json().turns.at(-1)).toMatchObject({ action: payload.action });
+    expect(replaced.json().turns.at(-1).id).not.toBe(originalLatest.id);
+  });
+
   it("synchronizes RPG and event-trigger config via PUT /api/v1/campaigns/:id/player-config", async () => {
     const { campaignId } = await importCampaign("player-config");
     const rpgStats = [
