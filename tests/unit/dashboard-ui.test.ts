@@ -75,7 +75,7 @@ describe("Nexus central dashboard", () => {
     expect(dashboardHtml).toContain('id="worldDetailsDialog"');
     expect(dashboardHtml).toContain('id="editWorldDetails" class="button secondary" href="#world-library"');
     expect(dashboardScript).toContain("async function openWorldDetails(worldId)");
-    expect(dashboardScript).toContain("elements.worldDetailsDialog.showModal()");
+    expect(dashboardScript).toContain("openManagedModal(elements.worldDetailsDialog)");
   });
 
   it("creates a basic campaign with system defaults and immediately opens the story", () => {

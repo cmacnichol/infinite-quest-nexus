@@ -8,6 +8,18 @@ const tokensCss = readFileSync("apps/web/public/tokens.css", "utf8");
 const navigationCss = readFileSync("apps/web/public/navigation.css", "utf8");
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
+  it("dismisses player modals from their backdrop while protecting unsaved form edits", () => {
+    expect(storyHtml).toContain('id="discardChangesDialog"');
+    expect(storyHtml).toContain("Discard unsaved changes?");
+    expect(storyScript).toContain("function modalFormSnapshot(dialog)");
+    expect(storyScript).toContain("function openManagedModal(dialog)");
+    expect(storyScript).toContain("function clickedDialogBackdrop(dialog, event)");
+    expect(storyScript).toContain("function requestModalDismissal(dialog)");
+    expect(storyScript).toContain("function installClickAwayModalDismissal()");
+    expect(storyScript).toContain('discardModalTarget?.open');
+    expect(storyScript).toContain('modalBaselines.get(dialog) !== modalFormSnapshot(dialog)');
+  });
+
   it("shows turn costs to four decimal places without a generated label", () => {
     expect(storyScript).toContain("minimumFractionDigits: 4");
     expect(storyScript).toContain("maximumFractionDigits: 4");
