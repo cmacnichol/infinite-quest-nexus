@@ -212,6 +212,8 @@ Favor pure domain functions for state transitions, prompt assembly, retrieval ra
 
 Until automated infrastructure exists, manually exercise startup, world and character selection, story generation, choice handling, model switching, output-limit recovery, save/load, import/export, and responsive layout.
 
+Every code change must include a review of the tests associated with each changed file. Update or add those tests whenever behavior, contracts, fixtures, or expectations change; do not consider the change complete until the related tests reflect it.
+
 New services should introduce:
 
 - Unit tests for domain transitions, prompt sanitization, parser recovery, retrieval ranking, and context budgeting.

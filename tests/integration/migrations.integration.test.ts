@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDatabase, pendingDatabaseMigrations } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
+import { dropTestDatabaseWhenIdle } from "./database-test-helpers.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -98,7 +99,7 @@ integration("standard database migration runner", () => {
       });
     } finally {
       if (isolatedPool) await isolatedPool.end();
-      await pool.query(`DROP DATABASE IF EXISTS ${databaseName} WITH (FORCE)`);
+      await dropTestDatabaseWhenIdle(pool, databaseName);
       await rm(migrationDirectory, { recursive: true, force: true });
     }
   });

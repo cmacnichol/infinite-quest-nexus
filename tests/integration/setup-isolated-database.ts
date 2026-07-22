@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll } from "vitest";
 import { createDatabasePool } from "../../packages/database/src/pool.js";
+import { dropTestDatabaseWhenIdle } from "./database-test-helpers.js";
 
 const rootDatabaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -20,7 +21,7 @@ if (rootDatabaseUrl) {
   afterAll(async () => {
     process.env.TEST_DATABASE_URL = rootDatabaseUrl;
     try {
-      await adminPool.query(`DROP DATABASE IF EXISTS ${databaseName} WITH (FORCE)`);
+      await dropTestDatabaseWhenIdle(adminPool, databaseName);
     } finally {
       await adminPool.end();
     }

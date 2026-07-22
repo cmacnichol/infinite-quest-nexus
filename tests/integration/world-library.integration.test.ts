@@ -609,7 +609,7 @@ integration("World Library and campaign version integration", () => {
     const serialized = JSON.stringify(exported);
     expect(exported).toMatchObject({
       format: "infinite-quest-campaign",
-      formatVersion: 2,
+      formatVersion: 3,
       campaign: {
         sourceCampaignId: campaign.id,
         sourceWorldVersionId: world.version.worldVersionId,
