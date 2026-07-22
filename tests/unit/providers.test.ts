@@ -539,7 +539,7 @@ describe("text provider adapters", () => {
     });
   });
 
-  it("discovers only Sogni models with image capability signals", async () => {
+  it("filters Sogni inventories when image capability signals are available", async () => {
     const sogniProfile: TextProviderProfile = {
       ...profile,
       providerType: "sogni",
@@ -556,5 +556,38 @@ describe("text provider adapters", () => {
       { id: "flux2", displayName: "flux2", loaded: false, instanceId: "flux2", contextLength: 0 },
       { id: "vendor/custom-image-renderer", displayName: "vendor/custom-image-renderer", loaded: false, instanceId: "vendor/custom-image-renderer", contextLength: 0 }
     ]);
+  });
+
+  it("preserves Sogni's documented opaque model inventory", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni",
+      baseUrl: "https://api.sogni.ai/v1",
+      model: "flux2",
+      apiKey: "sogni-secret"
+    };
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe("https://api.sogni.ai/v1/models");
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer sogni-secret");
+      return new Response(JSON.stringify({
+        object: "list",
+        data: [
+          {
+            id: "qwen3.6-35b-a3b-gguf-iq4xs",
+            object: "model",
+            created: 1_776_384_000,
+            owned_by: "qwen",
+            capabilities: { reasoning: true }
+          }
+        ]
+      }), { status: 200 });
+    });
+    expect(await discoverImageModels(sogniProfile, fetcher as typeof fetch)).toEqual([{
+      id: "qwen3.6-35b-a3b-gguf-iq4xs",
+      displayName: "qwen3.6-35b-a3b-gguf-iq4xs",
+      loaded: false,
+      instanceId: "qwen3.6-35b-a3b-gguf-iq4xs",
+      contextLength: 0
+    }]);
   });
 });
