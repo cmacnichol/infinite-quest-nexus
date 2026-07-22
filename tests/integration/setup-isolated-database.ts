@@ -4,6 +4,10 @@ import { createDatabasePool } from "../../packages/database/src/pool.js";
 
 const rootDatabaseUrl = process.env.TEST_DATABASE_URL;
 
+if (process.env.CI && !rootDatabaseUrl) {
+  throw new Error("TEST_DATABASE_URL is required for integration tests in CI; refusing to report a fully skipped database suite as successful.");
+}
+
 if (rootDatabaseUrl) {
   const databaseName = `infinitequest_test_${randomUUID().replaceAll("-", "")}`;
   const adminPool = createDatabasePool(rootDatabaseUrl, 1);
