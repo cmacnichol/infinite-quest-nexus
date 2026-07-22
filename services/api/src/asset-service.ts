@@ -91,6 +91,27 @@ export async function persistTurnImage(
   bytes: Buffer,
   mimeType: string
 ): Promise<StoredAsset> {
+  return persistImage(client, store, ownerUserId, bytes, mimeType, { campaignId, turnId });
+}
+
+export async function persistWorldCover(
+  client: DatabaseClient,
+  store: FilesystemAssetStore,
+  ownerUserId: string,
+  bytes: Buffer,
+  mimeType: string
+): Promise<StoredAsset> {
+  return persistImage(client, store, ownerUserId, bytes, mimeType);
+}
+
+async function persistImage(
+  client: DatabaseClient,
+  store: FilesystemAssetStore,
+  ownerUserId: string,
+  bytes: Buffer,
+  mimeType: string,
+  provenance?: { campaignId: string; turnId: string }
+): Promise<StoredAsset> {
   const extension = ALLOWED_IMAGE_TYPES.get(mimeType);
   if (!extension) throw new Error(`Generated image type '${mimeType}' is not supported.`);
   if (!bytes.length) throw new Error("Generated image data was empty.");
@@ -105,15 +126,17 @@ export async function persistTurnImage(
      ON CONFLICT (owner_user_id, content_hash)
      DO UPDATE SET content_hash = EXCLUDED.content_hash
      RETURNING id`,
-    [ownerUserId, campaignId, turnId, contentHash, storagePath, mimeType, bytes.length]
+    [ownerUserId, provenance?.campaignId ?? null, provenance?.turnId ?? null, contentHash, storagePath, mimeType, bytes.length]
   );
   const assetId = assetResult.rows[0]?.id;
   if (!assetId) throw new Error("Could not persist imported image metadata.");
-  await client.query(
-    `INSERT INTO asset_references (owner_user_id, asset_id, campaign_id, turn_id, asset_role)
-     VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
-    [ownerUserId, assetId, campaignId, turnId]
-  );
+  if (provenance) {
+    await client.query(
+      `INSERT INTO asset_references (owner_user_id, asset_id, campaign_id, turn_id, asset_role)
+       VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
+      [ownerUserId, assetId, provenance.campaignId, provenance.turnId]
+    );
+  }
   return { id: assetId, publicUrl: `/api/v1/assets/${assetId}`, contentHash };
 }
 

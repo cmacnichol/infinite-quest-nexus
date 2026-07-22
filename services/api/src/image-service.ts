@@ -1,4 +1,4 @@
-import type { IllustrationConfig, IllustrationRequest } from "../../../packages/contracts/src/generation.js";
+import type { IllustrationConfig, IllustrationRequest, WorldCoverRequest } from "../../../packages/contracts/src/generation.js";
 import { isIP } from "node:net";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
@@ -12,7 +12,7 @@ import {
   type ImageProviderResult,
   type TextProviderProfile
 } from "../../../packages/story-engine/src/index.js";
-import { persistTurnImage, type FilesystemAssetStore } from "./asset-service.js";
+import { persistTurnImage, persistWorldCover, type FilesystemAssetStore } from "./asset-service.js";
 import { loadImageProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
 
@@ -30,8 +30,10 @@ type IllustrationConfigRow = {
 type ImageJobRow = {
   id: string;
   owner_user_id: string;
-  campaign_id: string;
-  turn_id: string;
+  campaign_id: string | null;
+  turn_id: string | null;
+  world_id: string | null;
+  target_type: "turn_illustration" | "world_cover";
   provider_profile_id: string;
   requested_model: string;
   prompt: string;
@@ -79,6 +81,8 @@ function publicJob(row: ImageJobRow) {
     id: row.id,
     campaignId: row.campaign_id,
     turnId: row.turn_id,
+    worldId: row.world_id,
+    targetType: row.target_type,
     providerProfileId: row.provider_profile_id,
     model: row.requested_model,
     status: row.status,
@@ -107,7 +111,7 @@ function publicJob(row: ImageJobRow) {
   };
 }
 
-const jobColumns = `id, owner_user_id, campaign_id, turn_id, provider_profile_id, requested_model,
+const jobColumns = `id, owner_user_id, campaign_id, turn_id, world_id, target_type, provider_profile_id, requested_model,
   prompt, status, attempts, max_attempts, size, aspect_ratio, quality, output_format, asset_id,
   provider_type, generation_revision, remote_job_id, provider_status, provider_progress, submitted_at, last_polled_at,
   next_poll_at, generation_deadline, provider_request_metadata, provider_result_metadata,
@@ -160,24 +164,93 @@ export async function setIllustrationConfig(pool: DatabasePool, campaignId: stri
 
 async function insertImageJob(
   client: DatabaseClient | DatabasePool,
-  values: { ownerUserId: string; campaignId: string; turnId: string; prompt: string; config: ReturnType<typeof publicConfig> }
+  values: {
+    ownerUserId: string;
+    campaignId?: string | null;
+    turnId?: string | null;
+    worldId?: string | null;
+    targetType?: ImageJobRow["target_type"];
+    prompt: string;
+    config: ReturnType<typeof publicConfig>;
+  }
 ) {
   const prompt = values.prompt.trim();
   if (!prompt || containsMechanicsLanguage(prompt)) return null;
   const jobId = crypto.randomUUID();
   const result = await client.query<ImageJobRow>(
     `INSERT INTO image_jobs (
-       id, owner_user_id, campaign_id, turn_id, provider_profile_id, requested_model, prompt, prompt_hash,
+       id, owner_user_id, campaign_id, turn_id, world_id, target_type, provider_profile_id, requested_model, prompt, prompt_hash,
        size, aspect_ratio, quality, output_format, max_attempts, provider_type, provider_request_metadata
-     ) SELECT $1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, provider_type,
-              jsonb_build_object('idempotencyKey', ($1::uuid)::text || ':0', 'requestedModel', $6::text)
-         FROM provider_profiles WHERE id = $5 AND owner_user_id = $2
+     ) SELECT $1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, provider_type,
+              jsonb_build_object('idempotencyKey', ($1::uuid)::text || ':0', 'requestedModel', $8::text, 'targetType', $6::text)
+         FROM provider_profiles WHERE id = $7 AND owner_user_id = $2
      RETURNING ${jobColumns}`,
-    [jobId, values.ownerUserId, values.campaignId, values.turnId, values.config.providerProfileId, values.config.model,
+    [jobId, values.ownerUserId, values.campaignId ?? null, values.turnId ?? null, values.worldId ?? null,
+      values.targetType ?? "turn_illustration", values.config.providerProfileId, values.config.model,
       prompt, sha256(prompt), values.config.size, values.config.aspectRatio, values.config.quality,
       values.config.outputFormat, values.config.maxAttempts]
   );
   return result.rows[0] || null;
+}
+
+export async function enqueueWorldCover(pool: DatabasePool, worldId: string, request: WorldCoverRequest) {
+  const ownerUserId = await initialOwnerId(pool);
+  return withTransaction(pool, async (client) => {
+    const worldResult = await client.query<{ title: string; status: string; content: Record<string, any> }>(
+      `SELECT worlds.title, worlds.status, drafts.content
+         FROM worlds JOIN world_drafts drafts
+           ON drafts.world_id = worlds.id AND drafts.owner_user_id = worlds.owner_user_id
+        WHERE worlds.id = $1 AND worlds.owner_user_id = $2 FOR UPDATE OF worlds, drafts`,
+      [worldId, ownerUserId]
+    );
+    const world = worldResult.rows[0];
+    if (!world) throw Object.assign(new Error("World not found."), { statusCode: 404 });
+    if (world.status === "archived") throw Object.assign(new Error("Restore the world before generating its cover."), { statusCode: 409 });
+    const existing = await client.query<ImageJobRow>(
+      `SELECT ${jobColumns} FROM image_jobs
+        WHERE world_id = $1 AND owner_user_id = $2 ORDER BY created_at DESC LIMIT 1`,
+      [worldId, ownerUserId]
+    );
+    if (existing.rows[0] && (["queued", "generating", "provider_pending", "downloading"].includes(existing.rows[0].status)
+      || (existing.rows[0].status === "completed" && !request.replace))) {
+      return { ...publicJob(existing.rows[0]), duplicate: true };
+    }
+    const providerProfileId = await resolveEffectiveProviderId(client, ownerUserId, "image", null);
+    if (!providerProfileId) throw Object.assign(new Error("Configure a default image provider before generating a world cover."), { statusCode: 409 });
+    const provider = await client.query<{ default_model: string }>(
+      `SELECT default_model FROM provider_profiles
+        WHERE id = $1 AND owner_user_id = $2 AND provider_role = 'image' AND enabled = true`,
+      [providerProfileId, ownerUserId]
+    );
+    const model = provider.rows[0]?.default_model.trim();
+    if (!model) throw Object.assign(new Error("Select a default model on the default image provider before generating a world cover."), { statusCode: 409 });
+    const overview = world.content?.world || {};
+    const prompt = request.prompt || [
+      `Create a polished vertical fantasy book cover for the story world “${world.title}”.`,
+      overview.genre ? `Genre: ${String(overview.genre).slice(0, 500)}.` : "",
+      overview.tone ? `Tone: ${String(overview.tone).slice(0, 500)}.` : "",
+      overview.premise ? `Premise: ${String(overview.premise).slice(0, 2000)}.` : "",
+      "Show only evocative diegetic scenery and characters. Do not include typography, logos, interface elements, statistics, dice, or game mechanics."
+    ].filter(Boolean).join("\n");
+    const job = await insertImageJob(client, {
+      ownerUserId,
+      worldId,
+      targetType: "world_cover",
+      prompt,
+      config: publicConfig({
+        enabled: true,
+        provider_profile_id: providerProfileId,
+        model,
+        size: request.size,
+        aspect_ratio: request.aspectRatio,
+        quality: request.quality,
+        output_format: request.outputFormat,
+        max_attempts: 3
+      })
+    });
+    if (!job) throw Object.assign(new Error("The world cover prompt failed the fiction-only boundary."), { statusCode: 409 });
+    return { ...publicJob(job), duplicate: false };
+  });
 }
 
 export async function enqueueAcceptedTurnIllustration(
@@ -395,28 +468,41 @@ async function completeImageJob(
     const lease = await client.query<{ lease_owner: string | null }>("SELECT lease_owner FROM image_jobs WHERE id = $1 FOR UPDATE", [job.id]);
     if (lease.rows[0]?.lease_owner !== workerId) throw Object.assign(new Error("Image job lease was lost before commit."), { code: "lease_lost" });
     const assets = [];
-    for (const image of downloaded) assets.push(await persistTurnImage(client, store, job.owner_user_id, job.campaign_id, job.turn_id, image.bytes, image.mimeType));
+    for (const image of downloaded) {
+      assets.push(job.target_type === "world_cover"
+        ? await persistWorldCover(client, store, job.owner_user_id, image.bytes, image.mimeType)
+        : await persistTurnImage(client, store, job.owner_user_id, job.campaign_id!, job.turn_id!, image.bytes, image.mimeType));
+    }
     const primary = assets[0]!;
     const usageQuantity = Number(result.usage.quantity ?? result.usage.images ?? result.usage.image_count);
     const persistedUsageQuantity = Number.isFinite(usageQuantity) && usageQuantity >= 0 ? usageQuantity : assets.length;
     const usageUnit = String(result.usage.unit || "image").slice(0, 100);
-    await client.query("UPDATE turns SET image_url = $3 WHERE id = $1 AND owner_user_id = $2", [job.turn_id, job.owner_user_id, primary.publicUrl]);
+    const providerResponseId = String(result.providerMetadata.responseId || job.remote_job_id || "");
+    if (job.target_type === "world_cover") {
+      await client.query("UPDATE worlds SET cover_asset_id = $3, updated_at = now() WHERE id = $1 AND owner_user_id = $2", [job.world_id, job.owner_user_id, primary.id]);
+    } else {
+      await client.query("UPDATE turns SET image_url = $3 WHERE id = $1 AND owner_user_id = $2", [job.turn_id, job.owner_user_id, primary.publicUrl]);
+    }
     await client.query(
-      `UPDATE image_jobs SET status = 'completed', asset_id = $3, provider_response_id = COALESCE(remote_job_id, provider_response_id),
+      `UPDATE image_jobs SET status = 'completed', asset_id = $3,
+         provider_response_id = COALESCE(NULLIF($10, ''), remote_job_id, provider_response_id),
          response_metadata = $4, provider_result_metadata = $5, provider_progress = 100,
          usage_quantity = $6, usage_unit = $7, reported_cost = $8, reported_currency = $9,
          completed_at = now(), updated_at = now(), lease_owner = NULL, lease_expires_at = NULL,
          next_poll_at = NULL, error_code = NULL, error_message = NULL
-       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $10`,
+       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $11`,
       [job.id, job.owner_user_id, primary.id,
         JSON.stringify({ usage: result.usage, provider: result.providerMetadata, mimeType: downloaded[0]!.mimeType, byteLength: downloaded[0]!.bytes.length, assetIds: assets.map((asset) => asset.id) }),
         JSON.stringify({ ...result.providerMetadata, artifactCount: assets.length, assetIds: assets.map((asset) => asset.id) }),
-        persistedUsageQuantity, usageUnit, result.reportedCost?.amount ?? null, result.reportedCost?.currency ?? null, workerId]
+        persistedUsageQuantity, usageUnit, result.reportedCost?.amount ?? null, result.reportedCost?.currency ?? null,
+        providerResponseId, workerId]
     );
-    await recordProfileCost(client, provider, {
-      ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId: job.turn_id,
-      imageJobId: job.id, category: "image", operation: "illustration"
-    }, { usage: result.usage, reportedCost: result.reportedCost, responseId: job.remote_job_id || "" });
+    if (job.campaign_id) {
+      await recordProfileCost(client, provider, {
+        ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId: job.turn_id,
+        imageJobId: job.id, category: "image", operation: "illustration"
+      }, { usage: result.usage, reportedCost: result.reportedCost, responseId: providerResponseId });
+    }
   });
 }
 

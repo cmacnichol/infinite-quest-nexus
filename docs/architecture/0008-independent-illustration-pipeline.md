@@ -14,6 +14,10 @@ After a story turn and its Chronicle memory pass validation, the same commit may
 
 OpenRouter profiles use its dedicated `/api/v1/images` generation API and `/api/v1/images/models` inventory. Other compatible profiles use `/v1/images/generations` and the standard model inventory. Nexus requires base64 raster output (`png`, `jpeg`, or `webp`), writes it to content-addressed shared asset storage, and attaches the asset to the turn. Temporary provider URLs and SVG are rejected rather than fetched.
 
+The durable image queue also supports owner-scoped world-cover jobs. They use the default image provider and its default model, attach the completed asset to the world, and do not require or create a campaign. World-cover failures never block world editing or publication. Because they are not campaign operations, their charges are retained on the image job but are not attributed to a campaign ledger.
+
+OpenRouter image discovery applies a second local output-modality check even though the dedicated inventory is image-only. When OpenRouter advertises endpoint pricing, Nexus labels it as image pricing by billable unit (for example, per image or megapixel); text model token prices remain categorized as text pricing.
+
 Image jobs are claimed with PostgreSQL row locks and expiring leases. Transient errors retry with bounded backoff up to the campaign setting, then become explicitly recoverable. A manual retry resets only the image job. Manual regeneration creates a new job and replaces the turn's current illustration only after the new asset succeeds.
 
 ## Integrity boundary

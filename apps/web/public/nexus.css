@@ -78,6 +78,8 @@ textarea { resize: vertical; }
 .world-editor-heading h3 { margin: 0 0 5px; color: var(--gold); }
 .world-editor-heading label, .world-fields label, .campaign-controls label { display: grid; gap: 7px; color: var(--muted); font-size: .82rem; font-weight: 700; }
 .world-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+.world-cover-editor { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: #10152280; }
+.world-cover-preview { width: min(240px, 100%); aspect-ratio: 2 / 3; object-fit: cover; border-radius: 10px; border: 1px solid var(--line); }
 .quick-create-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0 0 12px; }
 .quick-create-fields label { display: grid; gap: 7px; color: var(--muted); font-size: .82rem; font-weight: 700; }
 .character-roster-field { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.02); }

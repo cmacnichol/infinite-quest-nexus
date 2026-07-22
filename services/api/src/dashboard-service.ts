@@ -17,6 +17,7 @@ type DashboardProviderCostRow = {
   provider_profile_id: string | null;
   provider_name: string | null;
   provider_type: string;
+  category: "story" | "image" | "memory";
   currency: string;
   amount: string;
   event_count: number;
@@ -54,15 +55,15 @@ export async function getDashboardStats(pool: DatabasePool) {
     ),
     pool.query<DashboardProviderCostRow>(
       `SELECT costs.provider_profile_id, profiles.name AS provider_name,
-              costs.provider_type, costs.currency, sum(costs.amount)::text AS amount,
+              costs.provider_type, costs.category, costs.currency, sum(costs.amount)::text AS amount,
               count(*)::int AS event_count, max(costs.occurred_at) AS last_reported_at
          FROM provider_cost_events costs
          LEFT JOIN provider_profiles profiles
            ON profiles.id = costs.provider_profile_id
           AND profiles.owner_user_id = costs.owner_user_id
         WHERE costs.owner_user_id = $1
-        GROUP BY costs.provider_profile_id, profiles.name, costs.provider_type, costs.currency
-        ORDER BY profiles.name NULLS LAST, costs.provider_type, costs.currency`,
+        GROUP BY costs.provider_profile_id, profiles.name, costs.provider_type, costs.category, costs.currency
+        ORDER BY costs.category, profiles.name NULLS LAST, costs.provider_type, costs.currency`,
       [ownerUserId]
     )
   ]);
@@ -81,6 +82,7 @@ export async function getDashboardStats(pool: DatabasePool) {
     providerProfileId: row.provider_profile_id,
     providerName: row.provider_name,
     providerType: row.provider_type,
+    category: row.category,
     currency: row.currency,
     amount: row.amount,
     eventCount: row.event_count,

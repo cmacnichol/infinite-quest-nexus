@@ -51,6 +51,10 @@ export type ModelInventoryItem = {
   loaded: boolean;
   instanceId: string;
   contextLength: number;
+  pricing?: {
+    category: "text" | "image";
+    entries: Array<{ billable: string; unit: string; costUsd: number; provider?: string }>;
+  };
 };
 
 export type EmbeddingResult = {
@@ -747,6 +751,32 @@ function inventoryItems(models: any[]): ModelInventoryItem[] {
   }).filter((model: ModelInventoryItem) => model.id);
 }
 
+function pricingEntries(value: unknown, provider?: string): Array<{ billable: string; unit: string; costUsd: number; provider?: string }> {
+  const rows = Array.isArray(value) ? value : [];
+  return rows.flatMap((row: any) => {
+    const costUsd = Number(row?.cost_usd ?? row?.costUsd);
+    if (!Number.isFinite(costUsd) || costUsd < 0) return [];
+    return [{
+      billable: String(row?.billable || "usage"),
+      unit: String(row?.unit || "unit"),
+      costUsd,
+      ...(provider ? { provider } : {})
+    }];
+  });
+}
+
+function textPricing(model: any): ModelInventoryItem["pricing"] | undefined {
+  const pricing = model?.pricing && typeof model.pricing === "object" ? model.pricing : {};
+  const entries = [
+    ["input_token", "token", pricing.prompt],
+    ["output_token", "token", pricing.completion]
+  ].flatMap(([billable, unit, raw]) => {
+    const costUsd = Number(raw);
+    return Number.isFinite(costUsd) && costUsd >= 0 ? [{ billable: String(billable), unit: String(unit), costUsd }] : [];
+  });
+  return entries.length ? { category: "text", entries } : undefined;
+}
+
 const IMAGE_GENERATION_PATTERN = /(?:^|[^a-z])(?:image(?:[-_ ]generation)?|text[-_ ]to[-_ ]image|diffusion|stable[-_ ]diffusion|sdxl|flux|dall[-_ ]?e|gpt[-_ ]image|imagen|ideogram|seedream|qwen[-_ ]image|recraft|hidream)(?:$|[^a-z])/i;
 const NON_IMAGE_OUTPUT_PATTERN = /(?:^|[^a-z])(?:text|chat|completion|llm|language|embedding|rerank|audio|speech)(?:$|[^a-z])/i;
 
@@ -812,7 +842,14 @@ export async function discoverModels(profile: TextProviderProfile, fetcher: Fetc
     ? `${lmStudioRoot(profile.baseUrl)}/api/v1/models`
     : `${openAiRoot(profile.baseUrl)}/models`;
   const data = await checkedJson(await providerFetch(profile, "model discovery", url, { headers: headers(profile) }, fetcher), profile, "model discovery", url);
-  return inventoryItems(inventoryRows(data));
+  const rows = inventoryRows(data);
+  const items = inventoryItems(rows);
+  if (profile.providerType !== "openrouter") return items;
+  const byId = new Map(rows.map((row: any) => [String(row.id || row.key || ""), row]));
+  return items.map((item) => {
+    const pricing = textPricing(byId.get(item.id));
+    return { ...item, ...(pricing ? { pricing } : {}) };
+  });
 }
 
 export async function discoverEmbeddingModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
@@ -849,11 +886,29 @@ export async function discoverImageModels(profile: TextProviderProfile, fetcher:
   }
   const url = `${rootUrl(profile.baseUrl)}/images/models`;
   const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile) }, fetcher), profile, "image model discovery", url);
-  return inventoryRows(data).map((model: any) => ({
-    id: String(model.id || model.key || ""),
-    displayName: String(model.name || model.display_name || model.id || model.key || ""),
-    loaded: true,
-    instanceId: String(model.id || model.key || ""),
-    contextLength: 0
-  })).filter((model: ModelInventoryItem) => model.id);
+  const rows = imageInventoryRows(inventoryRows(data)).filter((model: any) => explicitImageCapability(model) !== false);
+  return Promise.all(rows.map(async (model: any): Promise<ModelInventoryItem> => {
+    const id = String(model.id || model.key || "");
+    let entries = pricingEntries(model.pricing);
+    const endpointPath = String(model.endpoints || "");
+    if (!entries.length && endpointPath) {
+      try {
+        const endpointUrl = new URL(endpointPath, `${rootUrl(profile.baseUrl)}/`).toString();
+        const endpointData = await checkedJson(await providerFetch(profile, "image model pricing discovery", endpointUrl, { headers: headers(profile) }, fetcher), profile, "image model pricing discovery", endpointUrl);
+        entries = (Array.isArray(endpointData.endpoints) ? endpointData.endpoints : []).flatMap((endpoint: any) =>
+          pricingEntries(endpoint.pricing, String(endpoint.provider_name || endpoint.provider_slug || ""))
+        );
+      } catch {
+        // Model discovery remains useful when optional endpoint-level pricing is unavailable.
+      }
+    }
+    return {
+      id,
+      displayName: String(model.name || model.display_name || model.id || model.key || ""),
+      loaded: true,
+      instanceId: id,
+      contextLength: 0,
+      ...(entries.length ? { pricing: { category: "image" as const, entries } } : {})
+    };
+  })).then((models) => models.filter((model) => model.id));
 }
