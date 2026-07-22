@@ -17,7 +17,13 @@ FROM build AS production-dependencies
 RUN pnpm prune --prod
 
 FROM node:24-bookworm-slim AS runtime
+ARG NEXUS_VERSION=0.1.0
+ARG NEXUS_BUILD_COMMIT
+ARG NEXUS_BUILD_DATE
 ENV NODE_ENV=production \
+    NEXUS_VERSION=${NEXUS_VERSION} \
+    NEXUS_BUILD_COMMIT=${NEXUS_BUILD_COMMIT} \
+    NEXUS_BUILD_DATE=${NEXUS_BUILD_DATE} \
     APP_HOST=0.0.0.0 \
     APP_PORT=8080 \
     WEB_ROOT=/app/apps/web/public \

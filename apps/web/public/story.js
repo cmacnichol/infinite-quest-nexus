@@ -1894,6 +1894,12 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnOpenEditState) btnOpenEditState.addEventListener("click", () => { toggleMenu(); openEditState(); });
   const btnOpenActivityLog = $("btnOpenActivityLog");
   if (btnOpenActivityLog) btnOpenActivityLog.addEventListener("click", () => { toggleMenu(); openActivityLog(); });
+  const btnAboutNexus = $("btnAboutNexus");
+  if (btnAboutNexus) btnAboutNexus.addEventListener("click", () => {
+    toggleMenu();
+    const dialog = $("aboutNexusDialog");
+    if (dialog?.showModal) dialog.showModal();
+  });
 
   const btnOpenUserProfile = $("btnOpenUserProfile");
   if (btnOpenUserProfile) btnOpenUserProfile.addEventListener("click", openUserProfile);
@@ -2110,6 +2116,30 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // Start
+  fetch("/api/v1/meta")
+    .then(response => response.ok ? response.json() : null)
+    .then(metadata => {
+      const application = metadata?.application;
+      if (!application?.version) return;
+      const versionLabel = `Nexus v${application.version}`;
+      const storyVersion = $("storyNexusVersion");
+      if (storyVersion) {
+        storyVersion.textContent = versionLabel;
+        storyVersion.classList.remove("hidden");
+      }
+      const aboutVersion = $("aboutNexusVersion");
+      if (aboutVersion) aboutVersion.textContent = `v${application.version}`;
+      if (application.commit) {
+        $("aboutNexusCommit").textContent = application.commit;
+        $("aboutNexusCommitRow").classList.remove("hidden");
+      }
+      if (application.builtAt) {
+        const builtAt = new Date(application.builtAt);
+        $("aboutNexusBuiltAt").textContent = Number.isNaN(builtAt.valueOf()) ? application.builtAt : builtAt.toLocaleString();
+        $("aboutNexusBuiltAtRow").classList.remove("hidden");
+      }
+    })
+    .catch(() => {});
   init();
 });
 

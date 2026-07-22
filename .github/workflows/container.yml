@@ -54,6 +54,17 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
 
+      - name: Resolve Nexus build information
+        id: build-info
+        shell: bash
+        run: |
+          version="${{ github.event.release.tag_name }}"
+          if [[ -z "$version" ]]; then
+            version="$(node -p "require('./package.json').version")"
+          fi
+          echo "version=${version#v}" >> "$GITHUB_OUTPUT"
+          echo "built-at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
       - name: Build and push image
         id: push
         uses: docker/build-push-action@v6
@@ -63,6 +74,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NEXUS_VERSION=${{ steps.build-info.outputs.version }}
+            NEXUS_BUILD_COMMIT=${{ github.sha }}
+            NEXUS_BUILD_DATE=${{ steps.build-info.outputs.built-at }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

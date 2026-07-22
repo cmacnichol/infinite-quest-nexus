@@ -4,6 +4,9 @@ body { background: radial-gradient(circle at top, #24233c 0, var(--bg) 42rem); }
 .site-header, main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
 .site-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; padding: 48px 0 28px; }
 .header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.product-identity { display: flex; align-items: center; gap: 9px; margin-bottom: 5px; }
+.product-identity .eyebrow { margin-bottom: 0; }
+.version-badge { display: inline-flex; align-items: center; min-height: 22px; padding: 2px 8px; border: 1px solid color-mix(in srgb, var(--purple) 38%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--purple) 9%, transparent); color: var(--muted); font-size: .72rem; font-weight: 750; letter-spacing: .03em; text-transform: none; }
 .anchor-section { scroll-margin-top: 18px; }
 h1, h2, p { margin-top: 0; }
 h1 { margin-bottom: 8px; font-family: Georgia, serif; color: var(--gold); }

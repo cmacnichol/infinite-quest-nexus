@@ -15,7 +15,7 @@ export const DEFAULT_STORY_LENGTH_PROFILE: StoryLengthProfile = "standard";
 export const STORY_LENGTH_WORD_RANGES: Record<StoryLengthProfile, StoryLengthWordRange> = {
   brief: { profile: "brief", minWords: 250, maxWords: 450 },
   standard: { profile: "standard", minWords: 450, maxWords: 900 },
-  long: { profile: "long", minWords: 800, maxWords: 1400 },
+  long: { profile: "long", minWords: 800, maxWords: 1200 },
   extended: { profile: "extended", minWords: 1200, maxWords: 2000 }
 };
 

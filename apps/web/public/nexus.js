@@ -35,6 +35,22 @@ const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
 const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
 const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
 
+async function loadApplicationMetadata() {
+  try {
+    const response = await fetch("/api/v1/meta");
+    if (!response.ok) return;
+    const metadata = await response.json();
+    const version = metadata?.application?.version;
+    if (!version || !elements.nexusVersion) return;
+    elements.nexusVersion.textContent = `v${version}`;
+    elements.nexusVersion.classList.remove("hidden");
+  } catch {
+    // Build metadata is informational and must never block Nexus management.
+  }
+}
+
+void loadApplicationMetadata();
+
 function clampedMemoryContextBudget(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS;

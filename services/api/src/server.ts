@@ -93,6 +93,7 @@ import { generatePlayableCharacter } from "./world-generator-service.js";
 import { getCampaignCostSummary, turnReportedCosts } from "./cost-service.js";
 import { classifyTurnInput } from "./turn-intent-service.js";
 import { previewCampaignWorldTransfer, transferCampaignWorld } from "./campaign-transfer-service.js";
+import { applicationMetadata } from "./app-metadata.js";
 
 type BuildServerOptions = {
   config: RuntimeConfig;
@@ -219,6 +220,8 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       return reply.code(503).send({ status: "not_ready", reason: "database unavailable" });
     }
   });
+
+  app.get("/api/v1/meta", async () => ({ application: applicationMetadata() }));
 
   app.get("/api/v1/session", async () => {
     const user = await getSessionUserProfile(pool);

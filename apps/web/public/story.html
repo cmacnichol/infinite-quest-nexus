@@ -13,6 +13,7 @@
         <div class="sigil" aria-hidden="true">📖</div>
         <div>
           <h1>Infinite Quest</h1>
+          <p id="storyNexusVersion" class="story-product-version hidden"></p>
         </div>
       </div>
       <div class="menu-wrap">
@@ -29,6 +30,7 @@
           <button id="btnExportHtml" type="button" role="menuitem">Export to HTML</button>
           <button id="btnOpenEditState" type="button" role="menuitem">Edit State</button>
           <button id="btnOpenActivityLog" type="button" role="menuitem">Activity Log</button>
+          <button id="btnAboutNexus" type="button" role="menuitem">About Infinite Quest Nexus</button>
         </div>
         <button id="btnOpenUserProfile" class="profile-icon-btn" type="button" aria-label="User Profile" title="User Profile">👤</button>
       </div>
@@ -114,6 +116,24 @@
     <span class="spinner" aria-hidden="true"></span>
     <span id="llmWaitIndicatorText" class="llm-wait-indicator-text">Waiting for response.</span>
   </div>
+
+  <dialog id="aboutNexusDialog" class="world-gen-dialog app-dialog about-nexus-dialog" aria-labelledby="aboutNexusTitle">
+    <form method="dialog" class="world-gen-card">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Application information</p>
+          <h3 id="aboutNexusTitle">Infinite Quest Nexus</h3>
+        </div>
+        <button id="btnCloseAboutNexus" type="submit" aria-label="Close application information">✕</button>
+      </div>
+      <p>Infinite Quest is the player-facing story experience powered by Infinite Quest Nexus.</p>
+      <dl class="build-metadata">
+        <div><dt>Version</dt><dd id="aboutNexusVersion">Unavailable</dd></div>
+        <div id="aboutNexusCommitRow" class="hidden"><dt>Commit</dt><dd id="aboutNexusCommit"></dd></div>
+        <div id="aboutNexusBuiltAtRow" class="hidden"><dt>Built</dt><dd id="aboutNexusBuiltAt"></dd></div>
+      </dl>
+    </form>
+  </dialog>
 
   <dialog id="messagePopupDialog" class="world-gen-dialog message-popup-dialog">
     <form method="dialog" class="world-gen-card">

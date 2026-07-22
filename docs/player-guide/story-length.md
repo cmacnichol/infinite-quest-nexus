@@ -6,7 +6,7 @@ Each campaign stores a **Default story response length** independently from the 
 | --- | --- |
 | Brief | 250–450 words |
 | Standard | 450–900 words |
-| Long | 800–1,400 words |
+| Long | 800–1,200 words |
 | Extended | 1,200–2,000 words |
 
 Change the preference in the selected campaign's Nexus management panel and select **Save campaign**.
