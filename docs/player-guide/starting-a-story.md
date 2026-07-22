@@ -22,6 +22,6 @@ For a campaign with no accepted turns, Infinite Quest displays **Background Stor
 
 ## Resume an existing campaign
 
-Loading an existing campaign opens at the latest accepted scene. Use **Turn History & Navigation** to review earlier scenes without changing the ledger.
+Loading an existing campaign opens at the latest accepted scene. Use **Turn History & State** to select and review earlier scenes without changing the ledger.
 
 If a durable generation was already pending, the player reconnects and resumes its progress after loading or refreshing.

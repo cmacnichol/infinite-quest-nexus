@@ -49,6 +49,8 @@ const state = {
   turnInputMode: "auto",
   nextTurnInputModeSource: null,
   pendingIntentDecision: null,
+  historySelectedIndex: null,
+  historyInspectionRequestId: 0,
   user: {
     id: null,
     systemKey: null,
@@ -1556,24 +1558,32 @@ async function saveUserProfile() {
 async function openTurnHistoryModal() {
   const dlg = $("turnHistoryDialog");
   if (dlg && dlg.showModal) dlg.showModal();
-  populateHistoryContainer($("turnHistoryModalList"), "turnHistoryDialog");
-  const turnNumber = state.viewIndex === -1 ? state.turns.length : state.viewIndex + 1;
-  await inspectTurnState(turnNumber);
+  populateHistoryContainer($("turnHistoryModalList"));
 }
 
-function populateHistoryContainer(container, dialogId) {
+function populateHistoryContainer(container) {
   if (!container) return;
   container.innerHTML = "";
   if (state.turns.length === 0) {
+    state.historySelectedIndex = null;
     container.innerHTML = `<p class="dim mini">No turns recorded yet.</p>`;
+    const panel = $("turnHistoryStatePanel");
+    if (panel) {
+      panel.classList.add("hidden");
+      panel.innerHTML = "";
+    }
+    updateHistorySelectionActions();
     return;
   }
   const currentIdx = state.viewIndex === -1 ? state.turns.length - 1 : state.viewIndex;
   state.turns.forEach((t, i) => {
     const card = document.createElement("div");
     card.className = "history-card";
+    card.dataset.turnIndex = String(i);
+    card.setAttribute("role", "button");
+    card.setAttribute("tabindex", "0");
+    card.setAttribute("aria-pressed", "false");
     const preview = (t.narration || "").slice(0, 140) + ((t.narration || "").length > 140 ? "…" : "");
-    const isPastTurn = i < state.turns.length - 1;
     const inputMode = t.inputMode === "scene" ? "scene" : "action";
     const inputModeLabel = inputMode === "scene" ? "Scene direction" : "Action";
     card.innerHTML = `
@@ -1582,43 +1592,55 @@ function populateHistoryContainer(container, dialogId) {
         <span class="turn-input-mode-pill ${inputMode}" title="Story Engine interpreted this prompt as ${inputModeLabel}" aria-label="Prompt interpretation: ${inputModeLabel}">${inputModeLabel}</span>
       </div>
       <p>${escapeHtml(preview)}</p>
-      <div class="row wrap history-card-actions" style="margin-top: 8px; gap: 8px; justify-content: flex-end;">
-        <button type="button" class="history-state-btn mini">Inspect State</button>
-        <button type="button" class="history-jump-btn mini">Jump to Scene</button>
-        ${isPastTurn ? `<button type="button" class="history-branch-btn mini accent">Restart / Branch from Here…</button>` : ""}
-      </div>
     `;
-    const stateBtn = card.querySelector(".history-state-btn");
-    if (stateBtn) stateBtn.addEventListener("click", () => inspectTurnState(i + 1));
-    const jumpBtn = card.querySelector(".history-jump-btn");
-    if (jumpBtn) {
-      jumpBtn.addEventListener("click", () => {
-        navigateTo(i);
-        const dlg = $(dialogId);
-        if (dlg && dlg.close) dlg.close();
-      });
-    }
-    if (isPastTurn) {
-      const branchBtn = card.querySelector(".history-branch-btn");
-      if (branchBtn) {
-        branchBtn.addEventListener("click", () => {
-          const dlg = $(dialogId);
-          if (dlg && dlg.close) dlg.close();
-          promptBranchOrReset(i);
-        });
+    card.addEventListener("click", () => selectHistoryTurn(i));
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectHistoryTurn(i);
       }
-    }
+    });
     container.appendChild(card);
   });
+  selectHistoryTurn(currentIdx);
+}
+
+function selectHistoryTurn(turnIndex) {
+  if (!Number.isInteger(turnIndex) || turnIndex < 0 || turnIndex >= state.turns.length) return;
+  state.historySelectedIndex = turnIndex;
+  document.querySelectorAll("#turnHistoryModalList .history-card").forEach(card => {
+    const selected = Number(card.dataset.turnIndex) === turnIndex;
+    card.classList.toggle("selected", selected);
+    card.setAttribute("aria-pressed", String(selected));
+  });
+  updateHistorySelectionActions();
+  inspectTurnState(turnIndex + 1);
+}
+
+function updateHistorySelectionActions() {
+  const hasSelection = Number.isInteger(state.historySelectedIndex)
+    && state.historySelectedIndex >= 0
+    && state.historySelectedIndex < state.turns.length;
+  const inspectBtn = $("btnTurnHistoryInspect");
+  const jumpBtn = $("btnTurnHistoryJump");
+  const branchBtn = $("btnTurnHistoryBranch");
+  if (inspectBtn) inspectBtn.disabled = !hasSelection;
+  if (jumpBtn) jumpBtn.disabled = !hasSelection;
+  if (branchBtn) {
+    branchBtn.disabled = !hasSelection;
+    branchBtn.classList.toggle("hidden", !hasSelection || state.historySelectedIndex >= state.turns.length - 1);
+  }
 }
 
 async function inspectTurnState(turnNumber) {
   const panel = $("turnHistoryStatePanel");
   if (!panel || !state.campaignId) return;
+  const requestId = ++state.historyInspectionRequestId;
   panel.classList.remove("hidden");
   panel.innerHTML = `<p class="mini">Loading state after turn ${turnNumber}…</p>`;
   try {
     const runtime = await api(`/campaigns/${state.campaignId}/state?turnNumber=${turnNumber}`);
+    if (requestId !== state.historyInspectionRequestId) return;
     const list = (values, empty) => values && values.length
       ? `<ul>${values.map(value => `<li>${escapeHtml(String(value))}</li>`).join("")}</ul>`
       : `<p class="mini dim">${escapeHtml(empty)}</p>`;
@@ -1632,6 +1654,7 @@ async function inspectTurnState(turnNumber) {
       <details><summary>Canonical facts</summary><div>${list(runtime.canonicalFacts, "No canonical facts recorded.")}</div></details>
     `;
   } catch (err) {
+    if (requestId !== state.historyInspectionRequestId) return;
     panel.innerHTML = `<p class="mini">State could not be loaded: ${escapeHtml(err.message)}</p>`;
   }
 }
@@ -1991,6 +2014,25 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnCloseTurnHistory) btnCloseTurnHistory.addEventListener("click", () => { const d = $("turnHistoryDialog"); if (d && d.close) d.close(); });
   const btnTurnHistoryDone = $("btnTurnHistoryDone");
   if (btnTurnHistoryDone) btnTurnHistoryDone.addEventListener("click", () => { const d = $("turnHistoryDialog"); if (d && d.close) d.close(); });
+  const btnTurnHistoryInspect = $("btnTurnHistoryInspect");
+  if (btnTurnHistoryInspect) btnTurnHistoryInspect.addEventListener("click", () => {
+    if (Number.isInteger(state.historySelectedIndex)) inspectTurnState(state.historySelectedIndex + 1);
+  });
+  const btnTurnHistoryJump = $("btnTurnHistoryJump");
+  if (btnTurnHistoryJump) btnTurnHistoryJump.addEventListener("click", () => {
+    if (!Number.isInteger(state.historySelectedIndex)) return;
+    navigateTo(state.historySelectedIndex);
+    const d = $("turnHistoryDialog");
+    if (d && d.close) d.close();
+  });
+  const btnTurnHistoryBranch = $("btnTurnHistoryBranch");
+  if (btnTurnHistoryBranch) btnTurnHistoryBranch.addEventListener("click", () => {
+    if (!Number.isInteger(state.historySelectedIndex) || state.historySelectedIndex >= state.turns.length - 1) return;
+    const turnIndex = state.historySelectedIndex;
+    const d = $("turnHistoryDialog");
+    if (d && d.close) d.close();
+    promptBranchOrReset(turnIndex);
+  });
   const btnTurnHistoryJumpLatest = $("btnTurnHistoryJumpLatest");
   if (btnTurnHistoryJumpLatest) btnTurnHistoryJumpLatest.addEventListener("click", () => {
     navigateTo(-1);

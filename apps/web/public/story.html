@@ -351,9 +351,16 @@
         <div id="turnHistoryModalList" class="stack"></div>
         <div id="turnHistoryStatePanel" class="track-card hidden" style="margin-top:12px;"></div>
       </div>
-      <div class="row wrap dialog-actions" style="justify-content: flex-end;">
-        <button id="btnTurnHistoryJumpLatest" class="accent" type="button">Jump to Latest Turn</button>
-        <button id="btnTurnHistoryDone" class="primary" type="button">Done</button>
+      <div class="row wrap dialog-actions history-dialog-actions">
+        <div class="row wrap history-selection-actions">
+          <button id="btnTurnHistoryInspect" type="button">Inspect State</button>
+          <button id="btnTurnHistoryJump" type="button">Jump to Scene</button>
+          <button id="btnTurnHistoryBranch" class="accent hidden" type="button">Restart / Branch from Here…</button>
+        </div>
+        <div class="row wrap history-dialog-close-actions">
+          <button id="btnTurnHistoryJumpLatest" class="accent" type="button">Jump to Latest Turn</button>
+          <button id="btnTurnHistoryDone" class="primary" type="button">Done</button>
+        </div>
       </div>
     </div>
   </dialog>

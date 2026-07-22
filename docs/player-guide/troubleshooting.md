@@ -30,7 +30,7 @@ This is expected when illustrations are disabled or the independent image job fa
 
 ## I am viewing an older scene and cannot act
 
-Return to **Viewing latest** to continue the current campaign. To continue from an older boundary, open **Turn History & Navigation** and use **Restart / Branch from Here…**.
+Return to **Viewing latest** to continue the current campaign. To continue from an older boundary, open **Turn History & State**, select the earlier turn, and use **Restart / Branch from Here…** at the bottom of the dialog.
 
 ## The model changed and appears to have lost continuity
 
