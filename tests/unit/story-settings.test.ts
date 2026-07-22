@@ -12,6 +12,7 @@ describe("campaign story-length settings", () => {
     expect(storyLengthProfileFromUnknown(" Extended ")).toBe("extended");
     expect(storyLengthProfileFromUnknown("unsupported")).toBe("standard");
     expect(storyLengthWordRange("brief")).toMatchObject({ minWords: 250, maxWords: 450 });
+    expect(storyLengthWordRange("long")).toMatchObject({ minWords: 800, maxWords: 1200 });
     expect(storyLengthWordRange("extended")).toMatchObject({ minWords: 1200, maxWords: 2000 });
   });
 
