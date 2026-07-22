@@ -89,10 +89,10 @@ This page summarizes behavior implemented in the current repository. It is not a
 - Swarm stack with independently scalable API and worker services
 - External PostgreSQL and Swarm-secret configuration
 - Shared generated-asset path and conservative rolling update policies
+- VitePress documentation validation on pull requests and automatic GitHub Pages deployment from `main`
 
 ## Deliberate current limitations
 
 - Interactive login and OIDC are deferred; deployments must remain on the intended trusted network.
-- GitHub Pages documentation deployment is introduced separately from the documentation build.
 - Image and embedding providers are optional and never required for accepted text generation.
 - The root legacy client remains for historical reference and is not kept in feature parity.

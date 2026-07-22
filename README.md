@@ -64,7 +64,7 @@ docker compose down
 
 ## Documentation
 
-The documentation source is under [`docs/`](docs/index.md) and is built with VitePress. It includes:
+The [published documentation](https://cmacnichol.github.io/infinite-quest-nexus/) is built with VitePress from the source under [`docs/`](docs/index.md). It includes:
 
 - Getting Started and player guides
 - World Library, Campaigns, Chronicle, and provider workflows
@@ -78,6 +78,8 @@ Run the documentation site locally:
 pnpm install --frozen-lockfile
 pnpm --filter @infinite-quest/docs dev
 ```
+
+Maintainers can follow the [GitHub Pages publishing guide](docs/contributing/github-pages.md) to enable, verify, or troubleshoot documentation deployment.
 
 ## Development
 

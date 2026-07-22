@@ -277,6 +277,7 @@ export default withMermaid({
         {
           text: "Documentation contributors",
           items: [
+            { text: "Publish with GitHub Pages", link: "/contributing/github-pages" },
             { text: "Style guide", link: "/contributing/documentation-style-guide" },
             { text: "Review checklist", link: "/contributing/documentation-review-checklist" },
             { text: "Visual assets", link: "/contributing/visual-assets-plan" }
