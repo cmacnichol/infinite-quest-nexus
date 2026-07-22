@@ -15,7 +15,6 @@ The application supports the following runtime settings, but a deployment manife
 | `WORKER_POLL_INTERVAL_MS` | `2000` | Durable queue polling interval |
 | `WORKER_LEASE_SECONDS` | `60` | Job lease duration |
 | `WEB_ROOT` | `apps/web/public` | Active web assets |
-| `LEGACY_INDEX_PATH` | `index.html` | Historical root client |
 | `ASSET_STORAGE_ROOT` | `local-data/assets` | Filesystem asset root |
 | `CREDENTIAL_ENCRYPTION_KEY` / `_FILE` | Empty | Provider-key encryption secret |
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated browser origins |

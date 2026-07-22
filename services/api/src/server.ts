@@ -7,6 +7,7 @@ import { z } from "zod";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
+import { createLoggerOptions } from "../../../packages/logger/src/index.js";
 import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema, storyImportRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
 import {
@@ -131,7 +132,7 @@ function exposeError(error: unknown, code: number): boolean {
 
 export async function buildServer({ config, pool }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: { level: process.env.LOG_LEVEL?.trim() || "info" },
+    logger: createLoggerOptions(),
     bodyLimit: 64 * 1024 * 1024,
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
@@ -171,12 +172,6 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     decorateReply: true
   });
 
-  let legacyIndexCache: string | null = null;
-  const legacyIndex = async () => {
-    legacyIndexCache ??= await readFile(config.legacyIndexPath, "utf8");
-    return legacyIndexCache;
-  };
-
   app.setErrorHandler((error, request, reply) => {
     const code = statusCode(error);
     const details = errorDetails(error);
@@ -193,8 +188,8 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     });
   });
 
-  app.get("/", async (_request, reply) => reply.type("text/html; charset=utf-8").send(await legacyIndex()));
-  app.get("/index.html", async (_request, reply) => reply.type("text/html; charset=utf-8").send(await legacyIndex()));
+  app.get("/", async (_request, reply) => reply.redirect("/nexus/", 308));
+  app.get("/index.html", async (_request, reply) => reply.redirect("/nexus/", 308));
 
   // Story Player — clean URL for campaign gameplay
   const storyHtml = async () => {

@@ -27,12 +27,6 @@ const POLL_INTERVAL_MS = 1000;
 const MAX_POLLS = 900;
 const IMAGE_POLL_MS = 5000;
 const TOAST_DURATION = 3500;
-const STORY_LENGTH_PROFILES = {
-  brief:    { minWords: 250,  maxWords: 450 },
-  standard: { minWords: 450,  maxWords: 900 },
-  long:     { minWords: 800,  maxWords: 1400 },
-  extended: { minWords: 1200, maxWords: 2000 }
-};
 
 // ── State ──────────────────────────────────────────────────────
 const state = {
@@ -691,8 +685,8 @@ function clearStreamingPreview() {
 }
 
 function showGenerationRecovery(jobId, message) {
-  const panel = $("lmStudioRecoveryPanel");
-  const messageEl = $("lmStudioRecoveryMessage");
+  const panel = $("generationRecoveryPanel");
+  const messageEl = $("generationRecoveryMessage");
   if (panel) {
     panel.dataset.jobId = jobId;
     panel.classList.remove("hidden");
@@ -701,7 +695,7 @@ function showGenerationRecovery(jobId, message) {
 }
 
 function hideGenerationRecovery() {
-  const panel = $("lmStudioRecoveryPanel");
+  const panel = $("generationRecoveryPanel");
   if (panel) {
     panel.dataset.jobId = "";
     panel.classList.add("hidden");
@@ -709,7 +703,7 @@ function hideGenerationRecovery() {
 }
 
 async function monitorRecoveryJob(retryFirst) {
-  const panel = $("lmStudioRecoveryPanel");
+  const panel = $("generationRecoveryPanel");
   const jobId = panel?.dataset.jobId || state.pendingGeneration?.id;
   if (!jobId || state.busy) return;
   hideGenerationRecovery();
@@ -725,7 +719,7 @@ async function monitorRecoveryJob(retryFirst) {
 }
 
 async function discardRecoveryJob() {
-  const panel = $("lmStudioRecoveryPanel");
+  const panel = $("generationRecoveryPanel");
   const jobId = panel?.dataset.jobId || state.pendingGeneration?.id;
   if (!jobId || state.busy) return;
   showBusy("Discarding generation job…");
@@ -1520,102 +1514,6 @@ function openWorldSetup() {
   if (dlg.showModal) dlg.showModal();
 }
 
-// ── Character Selection ───────────────────────────────────────
-async function openCharacterSelect() {
-  const dlg = $("characterSelectDialog");
-  if (!dlg) return;
-  const list = $("characterSelectList");
-  if (list) list.innerHTML = `<p class="dim">Click "Generate Options" to get character suggestions.</p>`;
-  if (dlg.showModal) dlg.showModal();
-}
-
-async function generateCharacterCandidates() {
-  if (!state.campaign?.worldVersionId) { toast("No world version available."); return; }
-  const list = $("characterSelectList");
-  if (!list) return;
-  list.innerHTML = `<div class="loading-card"><span class="spinner"></span> Generating character ideas…</div>`;
-  try {
-    const data = await api(`/world-versions/${state.campaign.worldVersionId}/playable-characters`);
-    const characters = data.characters || [];
-    if (characters.length === 0) {
-      list.innerHTML = `<p class="dim">No character suggestions available.</p>`;
-      return;
-    }
-    list.innerHTML = characters.map(c => `<button class="character-select-card choice" type="button" data-character='${escapeHtml(JSON.stringify(c))}'>
-      <strong>${escapeHtml(c.name || "Unnamed")}</strong>
-      <p>${escapeHtml(c.description || c.backstory || "")}</p>
-    </button>`).join("");
-  } catch (err) {
-    list.innerHTML = `<p class="dim">Failed to generate characters: ${escapeHtml(err.message)}</p>`;
-  }
-}
-
-// ── World Generation ──────────────────────────────────────────
-function openWorldGen() {
-  const dlg = $("worldGenDialog");
-  if (!dlg) return;
-  const prompt = $("worldGenPrompt");
-  if (prompt) prompt.value = "";
-  const result = $("worldGenResult");
-  if (result) result.innerHTML = "";
-  if (dlg.showModal) dlg.showModal();
-}
-
-async function generateWorld() {
-  const prompt = $("worldGenPrompt");
-  if (!prompt || !prompt.value.trim()) { toast("Enter a world generation prompt."); return; }
-  const result = $("worldGenResult");
-  if (result) result.innerHTML = `<div class="loading-card"><span class="spinner"></span> Generating world…</div>`;
-  try {
-    showBusy("Generating world setup…");
-    const data = await api("/provider-text/generate", {
-      method: "POST",
-      body: JSON.stringify({
-        messages: [
-          { role: "system", content: "You are a creative writing assistant. Generate a complete world setup for an interactive story based on the user's prompt. Return a JSON object with fields: title, genre, tone, character, premise, backgroundStory." },
-          { role: "user", content: prompt.value.trim() }
-        ]
-      })
-    });
-    const text = data.choices?.[0]?.message?.content || data.text || "";
-    // Attempt JSON parse
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const world = JSON.parse(jsonMatch[0]);
-      if (result) result.innerHTML = `<div class="world-gen-box stack">
-        <p><strong>Title:</strong> ${escapeHtml(world.title || "")}</p>
-        <p><strong>Genre:</strong> ${escapeHtml(world.genre || "")}</p>
-        <p><strong>Tone:</strong> ${escapeHtml(world.tone || "")}</p>
-        <p><strong>Character:</strong> ${escapeHtml(world.character || "")}</p>
-        <p><strong>Premise:</strong> ${escapeHtml(world.premise || "")}</p>
-        <button class="primary" type="button" id="btnApplyWorldGen">Apply to World Setup</button>
-      </div>`;
-      const applyBtn = $("btnApplyWorldGen");
-      if (applyBtn) {
-        applyBtn.addEventListener("click", () => {
-          if ($("worldTitle")) $("worldTitle").value = world.title || "";
-          if ($("genre")) $("genre").value = world.genre || "";
-          if ($("tone")) $("tone").value = world.tone || "";
-          if ($("character")) $("character").value = world.character || "";
-          if ($("premise")) $("premise").value = world.premise || "";
-          if ($("backgroundStory")) $("backgroundStory").value = world.backgroundStory || "";
-          const dlg = $("worldGenDialog");
-          if (dlg && dlg.close) dlg.close();
-          toast("World setup applied. Remember to save.");
-        });
-      }
-    } else {
-      if (result) result.innerHTML = `<div class="world-gen-box"><p class="mini">${escapeHtml(text)}</p></div>`;
-    }
-    recordActivity("success", "World generated", `Title: ${text.slice(0, 100)}`);
-  } catch (err) {
-    if (result) result.innerHTML = `<p class="dim">Generation failed: ${escapeHtml(err.message)}</p>`;
-    recordActivity("error", "World generation failed", err.message);
-  } finally {
-    hideBusy();
-  }
-}
-
 // ── Export Functions ──────────────────────────────────────────
 async function exportJson() {
   if (!state.campaignId) return;
@@ -1693,7 +1591,7 @@ async function init() {
       state.user = sessionRes.user;
     }
   } catch (err) {
-    console.warn("Could not load session user profile:", err);
+    recordActivity("error", "Session profile unavailable", err.message);
   }
   const match = window.location.pathname.match(/\/story\/([^/]+)/);
   if (match) {
@@ -1840,37 +1738,6 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnCloseWorldSetup) btnCloseWorldSetup.addEventListener("click", () => { const d = $("worldSetupDialog"); if (d && d.close) d.close(); });
   const btnDoneWorldSetup = $("btnDoneWorldSetup");
   if (btnDoneWorldSetup) btnDoneWorldSetup.addEventListener("click", () => { const d = $("worldSetupDialog"); if (d && d.close) d.close(); });
-  const btnOpenWorldGen = $("btnOpenWorldGen");
-  if (btnOpenWorldGen) btnOpenWorldGen.addEventListener("click", openWorldGen);
-  const btnGenerateCharacterSelect = $("btnGenerateCharacterSelect");
-  if (btnGenerateCharacterSelect) btnGenerateCharacterSelect.addEventListener("click", openCharacterSelect);
-
-  // World Gen dialog
-  const btnWorldGenSubmit = $("btnWorldGenSubmit") || $("btnWorldGenRun");
-  if (btnWorldGenSubmit) btnWorldGenSubmit.addEventListener("click", generateWorld);
-  const btnWorldGenCancel = $("btnWorldGenCancel");
-  if (btnWorldGenCancel) btnWorldGenCancel.addEventListener("click", () => { const d = $("worldGenDialog"); if (d && d.close) d.close(); });
-
-  // Character Select
-  const btnGenerateCharacterSelectModal = $("btnGenerateCharacterSelectModal");
-  if (btnGenerateCharacterSelectModal) btnGenerateCharacterSelectModal.addEventListener("click", generateCharacterCandidates);
-  const btnCloseCharacterSelect = $("btnCloseCharacterSelect");
-  if (btnCloseCharacterSelect) btnCloseCharacterSelect.addEventListener("click", () => { const d = $("characterSelectDialog"); if (d && d.close) d.close(); });
-  const btnCharacterSelectCancel = $("btnCharacterSelectCancel");
-  if (btnCharacterSelectCancel) btnCharacterSelectCancel.addEventListener("click", () => { const d = $("characterSelectDialog"); if (d && d.close) d.close(); });
-  const characterList = $("characterSelectList");
-  if (characterList) characterList.addEventListener("click", (e) => {
-    const card = e.target.closest("[data-character]");
-    if (!card) return;
-    try {
-      const character = JSON.parse(card.dataset.character);
-      if ($("character")) $("character").value = character.name + "\n" + (character.description || character.backstory || "");
-      const dlg = $("characterSelectDialog");
-      if (dlg && dlg.close) dlg.close();
-      toast(`Character "${character.name}" selected.`);
-    } catch (_) { /* ignore */ }
-  });
-
   // Image prompt dialog
   const btnRegenerateImageConfirm = $("btnRegenerateImageConfirm");
   if (btnRegenerateImageConfirm) btnRegenerateImageConfirm.addEventListener("click", () => {
@@ -1979,12 +1846,12 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnMessagePopupClose) btnMessagePopupClose.addEventListener("click", () => { const d = $("messagePopupDialog"); if (d && d.close) d.close(); });
   const btnSkipGettingStartedToStory = $("btnSkipGettingStartedToStory");
   if (btnSkipGettingStartedToStory) btnSkipGettingStartedToStory.addEventListener("click", () => { const d = $("gettingStartedDialog"); if (d && d.close) d.close(); });
-  const btnDiscardLmStudioRecovery = $("btnDiscardLmStudioRecovery");
-  if (btnDiscardLmStudioRecovery) btnDiscardLmStudioRecovery.addEventListener("click", discardRecoveryJob);
-  const btnContinueLmStudioGeneration = $("btnContinueLmStudioGeneration");
-  if (btnContinueLmStudioGeneration) btnContinueLmStudioGeneration.addEventListener("click", () => monitorRecoveryJob(false));
-  const btnRetryLmStudioShorter = $("btnRetryLmStudioShorter");
-  if (btnRetryLmStudioShorter) btnRetryLmStudioShorter.addEventListener("click", () => monitorRecoveryJob(true));
+  const btnDiscardGenerationRecovery = $("btnDiscardGenerationRecovery");
+  if (btnDiscardGenerationRecovery) btnDiscardGenerationRecovery.addEventListener("click", discardRecoveryJob);
+  const btnContinueGeneration = $("btnContinueGeneration");
+  if (btnContinueGeneration) btnContinueGeneration.addEventListener("click", () => monitorRecoveryJob(false));
+  const btnRetryGeneration = $("btnRetryGeneration");
+  if (btnRetryGeneration) btnRetryGeneration.addEventListener("click", () => monitorRecoveryJob(true));
 
   // Edit Response dialog
   const btnEditResponse = $("btnEditResponse");

@@ -9,8 +9,9 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "check": "tsc -p tsconfig.json --noEmit && node --check apps/web/public/nexus.js && node --check apps/web/public/story.js",
+    "check": "pnpm check:repository && tsc -p tsconfig.json --noEmit && node --check apps/web/public/nexus.js && node --check apps/web/public/story.js",
     "check:data": "node scripts/check-repository-data.mjs",
+    "check:repository": "node scripts/check-repository-boundaries.mjs && pnpm check:data",
     "dev": "tsx watch services/runtime/src/main.ts",
     "start": "node dist/services/runtime/src/main.js",
     "migrate": "tsx packages/database/src/migrate-cli.ts",

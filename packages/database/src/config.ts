@@ -13,7 +13,6 @@ export type RuntimeConfig = {
   workerPollIntervalMs: number;
   workerLeaseSeconds: number;
   webRoot: string;
-  legacyIndexPath: string;
   assetStorageDriver: "filesystem";
   assetStorageRoot: string;
   credentialEncryptionKey: string;
@@ -62,7 +61,6 @@ export function loadRuntimeConfig(): RuntimeConfig {
     workerPollIntervalMs: integerSetting("WORKER_POLL_INTERVAL_MS", 2000, 250, 60000),
     workerLeaseSeconds: integerSetting("WORKER_LEASE_SECONDS", 60, 15, 3600),
     webRoot: resolve(process.env.WEB_ROOT?.trim() || "apps/web/public"),
-    legacyIndexPath: resolve(process.env.LEGACY_INDEX_PATH?.trim() || "index.html"),
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve(process.env.ASSET_STORAGE_ROOT?.trim() || "local-data/assets"),
     credentialEncryptionKey: secretSetting("CREDENTIAL_ENCRYPTION_KEY"),

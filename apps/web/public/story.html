@@ -73,12 +73,12 @@
             <p>Generating...</p>
           </div>
 
-          <div id="lmStudioRecoveryPanel" class="generation-recovery hidden" role="status" aria-live="polite">
-            <p id="lmStudioRecoveryMessage">LM Studio stopped before completing the next turn.</p>
+          <div id="generationRecoveryPanel" class="generation-recovery hidden" role="status" aria-live="polite">
+            <p id="generationRecoveryMessage">Story generation stopped before completing the next turn.</p>
             <div class="row wrap">
-              <button id="btnContinueLmStudioGeneration" class="primary" type="button">Resume monitoring</button>
-              <button id="btnRetryLmStudioShorter" class="accent" type="button">Retry generation job</button>
-              <button id="btnDiscardLmStudioRecovery" class="ghost" type="button">Discard generation job</button>
+              <button id="btnContinueGeneration" class="primary" type="button">Resume monitoring</button>
+              <button id="btnRetryGeneration" class="accent" type="button">Retry generation job</button>
+              <button id="btnDiscardGenerationRecovery" class="ghost" type="button">Discard generation job</button>
             </div>
           </div>
         </div>
@@ -307,39 +307,6 @@
       </div>
       <div class="row wrap dialog-actions">
         <button id="btnActivityLogDone" class="primary" type="button">Done</button>
-      </div>
-    </div>
-  </dialog>
-
-  <dialog id="worldGenDialog" class="world-gen-dialog">
-    <form method="dialog" class="world-gen-card">
-      <div>
-        <h3>Generate world setup</h3>
-        <p class="mini">Describe the adventure you want. A few words is enough; more detail gives the LLM more to preserve.</p>
-      </div>
-      <label>World prompt
-        <textarea id="worldGenPrompt" placeholder="Examples: cozy magical academy mystery with a shy alchemist; post-apocalyptic train journey; haunted Mars colony noir..." style="min-height:160px;"></textarea>
-      </label>
-      <div class="row wrap" style="justify-content:flex-end;">
-        <button id="btnWorldGenCancel" type="submit">Cancel</button>
-        <button id="btnWorldGenRun" class="primary" type="button">✨ Generate and fill setup</button>
-      </div>
-    </form>
-  </dialog>
-
-  <dialog id="characterSelectDialog" class="world-gen-dialog app-dialog wide-dialog">
-    <div class="world-gen-card">
-      <div class="dialog-header">
-        <div>
-          <h3>Choose a player character</h3>
-          <p class="mini">Pick one of the generated character options to use in the current world setup.</p>
-        </div>
-        <button id="btnCloseCharacterSelect" class="small ghost" type="button" aria-label="Close character select">✕</button>
-      </div>
-      <div id="characterSelectList" class="character-select-grid"></div>
-      <div class="row wrap dialog-actions">
-        <button id="btnGenerateCharacterSelectModal" class="primary" type="button">Generate Options</button>
-        <button id="btnCharacterSelectCancel" type="button">Cancel</button>
       </div>
     </div>
   </dialog>

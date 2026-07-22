@@ -51,6 +51,8 @@ Open:
 - Infinite Quest player: `http://localhost:8080/story`
 - Readiness check: `http://localhost:8080/health/ready`
 
+Requests to `/` or `/index.html` redirect permanently to the active Nexus application at `/nexus/`.
+
 The first startup creates the database schema and credential-free initial owner. Configure a text provider in **Providers**, create or import a world, publish a version, create a campaign, and select **Load story**.
 
 Stop the containers while preserving the database and generated assets:
@@ -108,7 +110,7 @@ deploy/swarm/         replicated deployment manifest
 docs/                 guides, concepts, operations, and ADRs
 ```
 
-The root `index.html` is retained only as historical reference and is not kept in parity with the active application.
+The root `index.html` is retained only as an unshipped historical reference. It is not copied into the application image, served by the API, or kept in parity with the active application.
 
 ## Security
 

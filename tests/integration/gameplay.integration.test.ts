@@ -27,7 +27,6 @@ function makeConfig(databaseUrl: string): RuntimeConfig {
     workerPollIntervalMs: 1000,
     workerLeaseSeconds: 60,
     webRoot: resolve("apps/web/public"),
-    legacyIndexPath: resolve("index.html"),
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve("local-data/assets"),
     credentialEncryptionKey: credentialSecret,

@@ -22,10 +22,10 @@ describe("campaign story-length settings", () => {
     expect(migration).toContain("'brief', 'standard', 'long', 'extended'");
   });
 
-  it("applies the legacy-client readability fallback to every text model", () => {
-    const legacyClient = readFileSync("index.html", "utf8");
-    expect(legacyClient).toContain("function paragraphizeStoryText");
-    expect(legacyClient).toContain("return paragraphizeStoryText(text);");
-    expect(legacyClient).not.toContain("return isFreeTextModelMode() ? paragraphize");
+  it("renders narration through the active Story Player sanitizer", () => {
+    const storyPlayer = readFileSync("apps/web/public/story.js", "utf8");
+    expect(storyPlayer).toContain("const sanitizeNarration = (text) => {");
+    expect(storyPlayer).toContain('`<div class="narration">${sanitizeNarration(turn.narration)}</div>`');
+    expect(storyPlayer).toContain("sanitizeNarration(narrationText)");
   });
 });
