@@ -35,6 +35,7 @@ type SourceRow = {
   status: string;
   active_turn_number: number;
   story_length_profile: string;
+  turn_control_style: string;
   selected_character_id: string | null;
   character_snapshot: Record<string, unknown> | null;
   legacy_settings: Record<string, unknown>;
@@ -71,7 +72,7 @@ type TargetRow = {
 
 async function loadSource(client: DatabaseClient | DatabasePool, ownerUserId: string, campaignId: string, lock = false): Promise<SourceRow> {
   const result = await client.query<SourceRow>(
-    `SELECT c.id, c.title, c.status, c.active_turn_number, c.story_length_profile,
+    `SELECT c.id, c.title, c.status, c.active_turn_number, c.story_length_profile, c.turn_control_style,
             c.selected_character_id, c.character_snapshot, c.legacy_settings,
             c.text_provider_profile_id, c.image_provider_profile_id, c.world_version_id,
             w.id AS world_id, w.title AS world_title, wv.version_number AS world_version_number,
@@ -228,10 +229,10 @@ async function insertCampaignClone(
 ): Promise<{ campaignId: string; memoryCount: number; embeddingJobId: string | null }> {
   const campaignResult = await client.query<{ id: string }>(
     `INSERT INTO campaigns (
-       owner_user_id, world_version_id, title, status, active_turn_number, story_length_profile,
+       owner_user_id, world_version_id, title, status, active_turn_number, story_length_profile, turn_control_style,
        selected_character_id, character_snapshot, legacy_settings, text_provider_profile_id, image_provider_profile_id
-     ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-    [ownerUserId, target.id, title, source.active_turn_number, source.story_length_profile,
+     ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+    [ownerUserId, target.id, title, source.active_turn_number, source.story_length_profile, source.turn_control_style,
       source.selected_character_id, json(source.character_snapshot), json(transferableLegacySettings(source.legacy_settings)),
       source.text_provider_profile_id, source.image_provider_profile_id]
   );
@@ -268,11 +269,12 @@ async function insertCampaignClone(
   for (const turn of sourceTurns.rows) {
     const inserted = await client.query<{ id: string }>(
       `INSERT INTO turns (
-         campaign_id, owner_user_id, turn_number, source_turn_id, action, narration, choices,
+         campaign_id, owner_user_id, turn_number, source_turn_id, action, input_mode, input_mode_source, narration, choices,
          custom_action_suggestion, image_prompt, image_url, mechanics_private, state_snapshot_private,
          model_metadata, import_metadata, accepted_at, created_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
-      [campaignId, ownerUserId, turn.turn_number, turn.source_turn_id, turn.action, turn.narration,
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`,
+      [campaignId, ownerUserId, turn.turn_number, turn.source_turn_id, turn.action,
+        turn.input_mode || "action", turn.input_mode_source || "explicit", turn.narration,
         json(turn.choices), turn.custom_action_suggestion, turn.image_prompt, turn.image_url,
         json(turn.mechanics_private), json(turn.state_snapshot_private), json(turn.model_metadata),
         json(turn.import_metadata), turn.accepted_at, turn.created_at]

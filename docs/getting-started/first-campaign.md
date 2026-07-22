@@ -9,7 +9,8 @@ A campaign is a persistent story instance created from one exact published world
 3. Select **Create campaign**.
 4. Enter a **New campaign title**.
 5. Choose the **Campaign player character**.
-6. Select **Create campaign**.
+6. Choose a **Turn control style**. **Flexible — Auto** is a useful first-campaign default; **Player actions only** keeps every turn mechanics-mediated.
+7. Select **Create campaign**.
 
 Nexus copies the selected character into the campaign. Later changes to the world roster or a newly published version do not silently change that campaign snapshot.
 
@@ -22,6 +23,7 @@ Select the new campaign in **Campaigns**. Its management panel provides:
 - **World version**
 - **Text provider profile**
 - **Default story response length**
+- **Turn control style**
 
 Confirm that the text provider is enabled and has a model. The story response length is a campaign preference; the provider's maximum output remains a separate safety ceiling.
 

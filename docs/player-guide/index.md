@@ -6,6 +6,7 @@ Infinite Quest is the player-facing story experience backed by an authoritative 
 
 - [Player interface](./interface.md)
 - [Start or resume a story](./starting-a-story.md)
+- [Turn input modes](./turn-input-modes.md)
 - [Actions and choices](./actions-and-choices.md)
 - [Characters and statistics](./characters-and-stats.md)
 - [Story response length](./story-length.md)

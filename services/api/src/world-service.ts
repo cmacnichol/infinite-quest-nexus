@@ -202,6 +202,7 @@ export async function getWorld(pool: DatabasePool, worldId: string) {
             c.world_version_id AS "worldVersionId", wv.version_number AS "worldVersionNumber",
             c.selected_character_id AS "selectedCharacterId",
             c.character_snapshot->>'name' AS "selectedCharacterName",
+            c.turn_control_style AS "turnControlStyle",
             c.updated_at AS "updatedAt"
        FROM campaigns c
        JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
@@ -508,6 +509,7 @@ export async function listCampaigns(pool: DatabasePool) {
     `SELECT c.id, c.title, c.status, c.active_turn_number AS "activeTurnNumber",
             c.created_at AS "createdAt", c.updated_at AS "updatedAt",
             c.story_length_profile AS "storyLengthProfile",
+            c.turn_control_style AS "turnControlStyle",
             c.selected_character_id AS "selectedCharacterId",
             c.character_snapshot->>'name' AS "selectedCharacterName",
             w.id AS "worldId", w.title AS "worldTitle", c.world_version_id AS "worldVersionId",
@@ -546,11 +548,11 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
     const snapshot = characterSnapshot(seed.character);
     const campaign = await client.query<{ id: string }>(
       `INSERT INTO campaigns (
-         owner_user_id, world_version_id, title, story_length_profile,
+         owner_user_id, world_version_id, title, story_length_profile, turn_control_style,
          selected_character_id, character_snapshot, legacy_settings
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
       [ownerUserId, request.worldVersionId, request.title, request.storyLengthProfile,
-        seed.character.id, json(snapshot), json({ useRpgStats: seed.rpgStats.length > 0 })]
+        request.turnControlStyle, seed.character.id, json(snapshot), json({ useRpgStats: seed.rpgStats.length > 0 })]
     );
     const campaignId = campaign.rows[0]?.id;
     if (!campaignId) throw new Error("Could not create campaign.");
@@ -572,7 +574,7 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
       ]
     );
     await autoEnableCampaignEmbeddingIfAvailable(client, ownerUserId, campaignId);
-    return { id: campaignId, title: request.title, status: "active", activeTurnNumber: 0, storyLengthProfile: request.storyLengthProfile, worldId: source.world_id, worldVersionId: request.worldVersionId, worldVersionNumber: source.version_number, selectedCharacterId: seed.character.id, selectedCharacterName: seed.character.name, textProviderProfileId: null, imageProviderProfileId: null };
+    return { id: campaignId, title: request.title, status: "active", activeTurnNumber: 0, storyLengthProfile: request.storyLengthProfile, turnControlStyle: request.turnControlStyle, worldId: source.world_id, worldVersionId: request.worldVersionId, worldVersionNumber: source.version_number, selectedCharacterId: seed.character.id, selectedCharacterName: seed.character.name, textProviderProfileId: null, imageProviderProfileId: null };
   });
 }
 
@@ -609,15 +611,16 @@ export async function updateCampaign(pool: DatabasePool, campaignId: string, req
          text_provider_profile_id = CASE WHEN $5 THEN $6 ELSE text_provider_profile_id END,
          image_provider_profile_id = CASE WHEN $7 THEN $8 ELSE image_provider_profile_id END,
          story_length_profile = COALESCE($9, story_length_profile),
+         turn_control_style = COALESCE($10, turn_control_style),
          updated_at = now()
         WHERE id = $1 AND owner_user_id = $2
         RETURNING id, title, status, active_turn_number AS "activeTurnNumber",
           text_provider_profile_id AS "textProviderProfileId", image_provider_profile_id AS "imageProviderProfileId",
-          story_length_profile AS "storyLengthProfile", updated_at AS "updatedAt"`,
+          story_length_profile AS "storyLengthProfile", turn_control_style AS "turnControlStyle", updated_at AS "updatedAt"`,
       [campaignId, ownerUserId, request.title ?? null, request.status ?? null,
         request.textProviderProfileId !== undefined, request.textProviderProfileId ?? null,
         request.imageProviderProfileId !== undefined, request.imageProviderProfileId ?? null,
-        request.storyLengthProfile ?? null]
+        request.storyLengthProfile ?? null, request.turnControlStyle ?? null]
     );
     if (!result.rows[0]) throw httpError(404, "Campaign not found.");
     if (request.imageProviderProfileId !== undefined) {
@@ -905,7 +908,7 @@ export async function migrateCampaignWorld(pool: DatabasePool, campaignId: strin
 export async function exportCampaign(pool: DatabasePool, campaignId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const campaign = await pool.query<any>(
-    `SELECT c.title, c.status, c.active_turn_number, c.story_length_profile, c.legacy_settings,
+    `SELECT c.title, c.status, c.active_turn_number, c.story_length_profile, c.turn_control_style, c.legacy_settings,
             c.selected_character_id, c.character_snapshot, w.title AS world_title,
             wv.id AS world_version_id, wv.version_number, wv.content, cs.*
        FROM campaigns c
@@ -918,7 +921,7 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
   const row = campaign.rows[0];
   if (!row) throw httpError(404, "Campaign not found.");
   const turns = await pool.query<any>(
-    `SELECT id, turn_number, action, narration, choices, custom_action_suggestion,
+    `SELECT id, turn_number, action, input_mode, input_mode_source, narration, choices, custom_action_suggestion,
             image_prompt, image_url, mechanics_private, state_snapshot_private,
             model_metadata, accepted_at
        FROM turns WHERE campaign_id = $1 AND owner_user_id = $2 ORDER BY turn_number`,
@@ -939,7 +942,7 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
   const { character: _storedCharacter, ...worldWithoutStoredCharacter } = sourceWorld;
   return {
     format: "infinite-quest-campaign",
-    formatVersion: 2,
+    formatVersion: 3,
     exportedAt: new Date().toISOString(),
     campaign: {
       title: row.title,
@@ -951,11 +954,13 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
       stateRevision: Number(row.revision || 0)
     },
     world: { ...worldWithoutStoredCharacter, ...(selectedCharacterText !== null ? { character: selectedCharacterText } : {}) },
-    settings: { ...portableCampaignSettings(row.legacy_settings), storyLength: row.story_length_profile },
+    settings: { ...portableCampaignSettings(row.legacy_settings), storyLength: row.story_length_profile, turnControlStyle: row.turn_control_style },
     turns: turns.rows.map((turn: any) => ({
       id: turn.id,
       turnNumber: turn.turn_number,
       action: turn.action,
+      inputMode: turn.input_mode || "action",
+      inputModeSource: turn.input_mode_source || "explicit",
       narration: turn.narration,
       choices: turn.choices,
       customActionSuggestion: turn.custom_action_suggestion,

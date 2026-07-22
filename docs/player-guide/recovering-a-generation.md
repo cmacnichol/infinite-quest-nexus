@@ -12,6 +12,8 @@ When a provider stops at an output limit or returns incomplete structured output
 
 The player performs one supported automatic retry for a recoverable generation. Continue to watch the current job rather than submitting the action again.
 
+The pending turn retains its resolved Action or Scene direction mode. Recovery and retry do not classify Auto again, even if provider defaults change. A staged replacement may change the mode only when the campaign's control style permits it.
+
 ## Terminal failure
 
 If the job reaches a failed state:

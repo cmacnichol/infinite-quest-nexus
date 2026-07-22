@@ -31,6 +31,8 @@ const legacyTurnSchema = z.object({
   id: z.string().optional(),
   turnNumber: z.number().int().positive().optional(),
   action: flexibleOptionalString,
+  inputMode: z.enum(["action", "scene"]).optional(),
+  inputModeSource: z.enum(["explicit", "auto", "generated_choice", "opening_action", "fallback"]).optional(),
   narration: flexibleOptionalString,
   story: flexibleOptionalString,
   text: flexibleOptionalString,
@@ -61,7 +63,7 @@ const portableCampaignMetadataSchema = z.object({
 
 export const legacyStorySchema = z.object({
   format: z.literal("infinite-quest-campaign").optional(),
-  formatVersion: z.union([z.literal(1), z.literal(2)]).optional(),
+  formatVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
   campaign: portableCampaignMetadataSchema.optional(),
   world: legacyWorldSchema,
   turns: z.array(legacyTurnSchema),

@@ -4,6 +4,18 @@
 
 Return to Nexus **Providers** and confirm that an enabled **Story text** profile has a selected model. A new zero-turn campaign submits its opening action automatically when loaded, so configure the provider first.
 
+## Auto chose the wrong input mode
+
+Use the visible **Action** or **Scene direction** selector before submitting when the distinction matters. If Auto reports mixed or ambiguous input, review the text and choose the intended mode in the confirmation. Generated choices and opening actions intentionally use Action.
+
+## Auto classification is slow or unavailable
+
+Auto first uses the explicitly default **Turn intent classification** provider, if configured, and otherwise the campaign Story text provider. Ask the administrator to check that provider's health or select a smaller classifier model. If classification cannot complete, Nexus uses the campaign fallback; it does not discard the text or use the Intent provider for narration.
+
+## Detailed events were skipped
+
+Confirm that the turn was submitted as **Scene direction**. Action mode treats prose as intent that may be resolved rather than as guaranteed facts. Scene direction requires the narration to cover the described beats before moving to their aftermath.
+
 ## A choice submits before I can edit it
 
 Open the user profile, clear **Auto-submit story turns when selecting a choice**, and select **Save Profile**.

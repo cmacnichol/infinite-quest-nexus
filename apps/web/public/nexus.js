@@ -27,6 +27,7 @@ let discoveredProfileModels = [];
 let discoveredEmbeddingModels = [];
 let providerModelPickerTarget = "provider";
 let embeddingJobPollSequence = 0;
+let sessionUser = null;
 let transferPreviewSequence = 0;
 let transferPreview = null;
 let transferIdempotencyKey = "";
@@ -74,7 +75,7 @@ function applyManagementView() {
   document.body.dataset.managementView = providerView ? "providers" : "worlds";
   elements.managementTitle.textContent = providerView ? "Provider Management" : "World Management";
   elements.managementDescription.textContent = providerView
-    ? "Add and manage provider profiles independently for text, image generation, and Chronicle embeddings."
+    ? "Add and manage provider profiles independently for story text, turn intent, image generation, and Chronicle embeddings."
     : "Author reusable versioned worlds, configure campaigns, and inspect the fiction-only memory selected for generation.";
   document.title = `${elements.managementTitle.textContent} · Infinite Quest Nexus`;
 
@@ -173,6 +174,7 @@ function setWorldEditorDisabled(disabled) {
     elements.forkWorldTitle,
     elements.newCampaignTitle,
     elements.newCampaignCharacter,
+    elements.newCampaignTurnControlStyle,
     elements.saveWorldDraft,
     elements.publishWorld,
     elements.forkWorldModalBtn,
@@ -990,7 +992,12 @@ async function createCampaignFromWorld() {
   try {
     const campaign = await api("/api/v1/campaigns", {
       method: "POST",
-      body: JSON.stringify({ title, worldVersionId: selectedWorldVersionId(), ...(selectedCharacterId ? { selectedCharacterId } : {}) })
+      body: JSON.stringify({
+        title,
+        worldVersionId: selectedWorldVersionId(),
+        turnControlStyle: elements.newCampaignTurnControlStyle.value,
+        ...(selectedCharacterId ? { selectedCharacterId } : {})
+      })
     });
     elements.newCampaignTitle.value = "";
     await loadCampaigns(campaign.id);
@@ -1008,7 +1015,7 @@ async function loadCampaigns(preselectId = "") {
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
     selectedCampaign = null;
     updateStoryViewLink();
-    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationEnabled, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.saveIllustrationConfig, elements.discoverIllustrationModels].forEach((element) => { element.disabled = true; });
+    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationEnabled, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.saveIllustrationConfig, elements.discoverIllustrationModels].forEach((element) => { element.disabled = true; });
     elements.illustrationEnabled.checked = false;
     renderIllustrationSettingsVisibility();
     elements.campaignCostSection.classList.add("hidden");
@@ -1044,9 +1051,10 @@ async function selectCampaign(campaign) {
   elements.saveIllustrationConfig.disabled = false;
   elements.campaignTitle.value = campaign.title;
   elements.campaignStatus.value = campaign.status;
-  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationEnabled, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts].forEach((element) => { element.disabled = false; });
+  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationEnabled, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts].forEach((element) => { element.disabled = false; });
   elements.campaignTextProvider.value = campaign.textProviderProfileId || "";
   elements.campaignImageProvider.value = campaign.imageProviderProfileId || "";
+  elements.campaignTurnControlStyle.value = campaign.turnControlStyle || "flexible_auto";
   elements.campaignStoryLengthProfile.value = campaign.storyLengthProfile || "standard";
   applyStoryProviderContextBudget();
   populateEmbeddingProviderSelect();
@@ -1081,11 +1089,12 @@ async function saveSelectedCampaign(event) {
         title: elements.campaignTitle.value,
         status: elements.campaignStatus.value,
         textProviderProfileId: elements.campaignTextProvider.value || null,
+        turnControlStyle: elements.campaignTurnControlStyle.value,
         storyLengthProfile: elements.campaignStoryLengthProfile.value
       })
     });
     await loadCampaigns(selectedCampaign.id);
-    campaignMessage("Campaign metadata and default story length saved. Accepted turns and Chronicle memory were unchanged.", "success");
+    campaignMessage("Campaign metadata, turn input style, and default story length saved. Accepted turns and Chronicle memory were unchanged.", "success");
   } catch (error) {
     campaignMessage(error.message || String(error), "error");
   } finally {
@@ -1467,7 +1476,8 @@ function enabledProviders(role) {
 
 function defaultProvider(role) {
   const available = enabledProviders(role);
-  return available.find((provider) => provider.isDefault) || (available.length === 1 ? available[0] : null);
+  const explicit = available.find((provider) => provider.isDefault);
+  return explicit || (role !== "intent" && available.length === 1 ? available[0] : null);
 }
 
 function effectiveCampaignProvider(role) {
@@ -1543,7 +1553,10 @@ function renderProviderProfiles() {
     remove.className = "button danger";
     remove.textContent = "Delete";
     remove.addEventListener("click", async () => {
-      if (!window.confirm(`Delete provider profile “${provider.name}”? Campaign assignments and provider-linked jobs, chains, and derived embeddings will be removed.`)) return;
+      const impact = provider.providerRole === "intent"
+        ? "Future Auto decisions will fall back to each campaign's Story text provider. Existing turns are unchanged."
+        : "Campaign assignments and provider-linked jobs, chains, or derived data may be removed.";
+      if (!window.confirm(`Delete provider profile “${provider.name}”? ${impact}`)) return;
       remove.disabled = true;
       try {
         await api(`/api/v1/providers/${provider.id}`, { method: "DELETE" });
@@ -1556,17 +1569,24 @@ function renderProviderProfiles() {
       }
     });
     actions.append(remove);
-    if (provider.isDefault || enabledProviders(provider.providerRole).length === 1) {
+    const implicitlyDefault = provider.providerRole !== "intent" && enabledProviders(provider.providerRole).length === 1;
+    if (provider.isDefault || implicitlyDefault) {
       const badge = document.createElement("span");
       badge.className = "default-badge";
-      badge.textContent = provider.isDefault ? "Default" : "Default (only profile)";
+      badge.textContent = provider.isDefault ? "System default" : "Default (only profile)";
       details.append(badge);
       row.append(details, actions);
     } else {
+      if (provider.providerRole === "intent") {
+        const inactive = document.createElement("span");
+        inactive.className = "default-badge";
+        inactive.textContent = "Inactive · Story text fallback";
+        details.append(inactive);
+      }
       const makeDefault = document.createElement("button");
       makeDefault.type = "button";
       makeDefault.className = "button secondary";
-      makeDefault.textContent = "Make default";
+      makeDefault.textContent = provider.providerRole === "intent" ? "Make system default" : "Make default";
       makeDefault.addEventListener("click", async () => {
         makeDefault.disabled = true;
         await api(`/api/v1/providers/${provider.id}/default`, { method: "PUT", body: "{}" });
@@ -1603,6 +1623,25 @@ function resetProviderForm() {
   elements.providerContextTokens.readOnly = false;
   elements.providerContextSource.textContent = "Editable until model discovery supplies a context length.";
   elements.providerContextSource.className = "field-note";
+  syncProviderRoleSettings();
+}
+
+function syncProviderRoleSettings(options = {}) {
+  const intent = elements.providerRole.value === "intent";
+  elements.providerRoleNote.textContent = intent
+    ? "Classifies Auto as Action or Scene direction only. It never generates story narration. Until explicitly made system default, Auto uses the campaign Story text provider."
+    : elements.providerRole.value === "image"
+      ? "Illustration providers are independent from story text and use separate credentials."
+      : elements.providerRole.value === "embedding"
+        ? "Embedding providers index Chronicle memory and do not generate narration."
+        : "Story text providers generate narration and are the fallback for Auto classification.";
+  elements.providerStreaming.disabled = intent;
+  if (intent) elements.providerStreaming.checked = false;
+  if (intent && options.applySuggestedDefaults) {
+    elements.providerContextTokens.value = "8192";
+    elements.providerOutputTokens.value = "256";
+    elements.providerTemperature.value = "0";
+  }
 }
 
 function beginProviderEdit(provider) {
@@ -1629,6 +1668,7 @@ function beginProviderEdit(provider) {
   elements.providerName.focus();
   if (elements.providerDialog) elements.providerDialog.showModal();
   providerMessage(`Editing ${provider.name}. Leave the API key blank to keep the stored credential.`);
+  syncProviderRoleSettings();
 }
 
 async function loadProviders(preselectId = "") {
@@ -1824,12 +1864,14 @@ function renderProviderModelPicker() {
 async function openProviderModelPicker(forceRefresh = false) {
   providerModelPickerTarget = "provider";
   const role = elements.providerRole.value;
-  elements.providerModelDialogTitle.textContent = role === "image" ? "Choose image model" : role === "embedding" ? "Choose embedding model" : "Choose default model";
+  elements.providerModelDialogTitle.textContent = role === "image" ? "Choose image model" : role === "embedding" ? "Choose embedding model" : role === "intent" ? "Choose intent classifier model" : "Choose default model";
   elements.providerModelDialogDescription.textContent = role === "image"
     ? "Only image-capable models are shown when the provider advertises modality data. Active models appear first."
     : role === "embedding"
       ? "Only embedding models are shown when the provider offers a dedicated inventory. Active models appear first."
-      : "Active models appear first. You may also select an available model that is not currently loaded.";
+      : role === "intent"
+        ? "Choose a small, instruction-following text model. Classification requests use deterministic settings and at most 256 output tokens."
+        : "Active models appear first. You may also select an available model that is not currently loaded.";
   elements.providerModelFilter.value = "";
   elements.providerCustomModel.value = elements.providerDefaultModel.value;
   elements.providerModelPickerStatus.textContent = discoveredProfileModels.length
@@ -1951,6 +1993,11 @@ elements.providerType.addEventListener("change", () => {
   };
   const suggested = defaults[elements.providerType.value];
   if (suggested) elements.providerBaseUrl.value = suggested;
+});
+
+elements.providerRole.addEventListener("change", () => {
+  discoveredProfileModels = [];
+  syncProviderRoleSettings({ applySuggestedDefaults: !editingProviderId });
 });
 
 elements.embeddingProvider.addEventListener("change", () => {
@@ -2907,7 +2954,17 @@ elements.illustrationEnabled.addEventListener("change", () => {
   renderIllustrationSettingsVisibility();
 });
 elements.discoverIllustrationModels.addEventListener("click", discoverIllustrationModels);
+async function loadSessionPreferences() {
+  const response = await api("/api/v1/session");
+  sessionUser = response.user || null;
+  const style = sessionUser?.settings?.defaultTurnControlStyle;
+  if (["action_only", "flexible_auto", "flexible_action", "flexible_scene"].includes(style)) {
+    elements.newCampaignTurnControlStyle.value = style;
+  }
+}
+
 detectBrowserStory();
+loadSessionPreferences().catch(() => undefined);
 loadProviders().catch((error) => providerMessage(error.message || String(error), "error"));
 loadWorlds().catch((error) => worldMessage(error.message || String(error), "error"));
 loadCampaigns().catch((error) => setStatus(error.message || String(error), "error"));

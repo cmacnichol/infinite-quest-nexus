@@ -2,14 +2,15 @@ import { z } from "zod";
 
 export const userSettingsSchema = z.object({
   autoSubmitTurnChoices: z.boolean().default(true),
-  continuousReading: z.boolean().default(false)
+  continuousReading: z.boolean().default(false),
+  defaultTurnControlStyle: z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]).default("flexible_auto")
 }).passthrough();
 
 export const userProfileSchema = z.object({
   id: z.uuid(),
   systemKey: z.string().nullable().default(null),
   displayName: z.string(),
-  settings: userSettingsSchema.default({ autoSubmitTurnChoices: true, continuousReading: false })
+  settings: userSettingsSchema.default({ autoSubmitTurnChoices: true, continuousReading: false, defaultTurnControlStyle: "flexible_auto" })
 });
 
 export const userProfileUpdateSchema = z.object({

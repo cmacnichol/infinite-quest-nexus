@@ -46,13 +46,17 @@ const state = {
   toastTimer: null,
   streamingAutoFollow: true,
   streamingExpectedScrollY: null,
+  turnInputMode: "auto",
+  nextTurnInputModeSource: null,
+  pendingIntentDecision: null,
   user: {
     id: null,
     systemKey: null,
     displayName: "Initial Owner",
     settings: {
       autoSubmitTurnChoices: true,
-      continuousReading: false
+      continuousReading: false,
+      defaultTurnControlStyle: "flexible_auto"
     }
   }
 };
@@ -111,6 +115,9 @@ function syncInputState() {
   const generationLocked = state.busy || Boolean(state.pendingGeneration);
   if (btnAction) btnAction.disabled = generationLocked;
   if (freeAction) freeAction.disabled = generationLocked;
+  document.querySelectorAll("[data-turn-input-mode]").forEach((button) => {
+    button.disabled = generationLocked || campaignTurnControlStyle() === "action_only";
+  });
   document.querySelectorAll("#choiceArea .choice").forEach(b => { b.disabled = generationLocked; });
 
   const btnPrev = $("btnPrev");
@@ -189,6 +196,7 @@ async function loadCampaign(campaignId, options = {}) {
     state.world = syncData.world || state.campaign.world || null;
     state.playerConfig = syncData.playerConfig || state.campaign.playerConfig || null;
     state.pendingGeneration = syncData.pendingGeneration || null;
+    syncTurnInputModeFromCampaign();
 
     const turnData = await api(`/campaigns/${campaignId}/turns`);
     state.turns = turnData.turns || [];
@@ -257,7 +265,11 @@ async function showBackgroundStoryBeforeStart() {
 async function startAdventure(options = {}) {
   if (state.busy) return;
   await showBackgroundStoryBeforeStart();
-  await runGeneration(firstActionForNewAdventure());
+  await runGeneration(firstActionForNewAdventure(), {
+    requestedInputMode: "action",
+    resolvedInputMode: "action",
+    inputModeSource: "opening_action"
+  });
 }
 
 
@@ -428,6 +440,87 @@ function scrollToView() {
 }
 
 // ── Player Input ──────────────────────────────────────────────
+function campaignTurnControlStyle() {
+  return state.campaign?.turnControlStyle || "flexible_auto";
+}
+
+function defaultTurnInputMode() {
+  const style = campaignTurnControlStyle();
+  if (style === "flexible_auto") return "auto";
+  if (style === "flexible_scene") return "scene";
+  return "action";
+}
+
+function preferredAutoFallback() {
+  return ["flexible_auto", "flexible_scene"].includes(campaignTurnControlStyle()) ? "scene" : "action";
+}
+
+function turnInputCopy(mode) {
+  if (mode === "scene") {
+    return {
+      label: "Describe the scene events and details that must happen",
+      help: "Scene direction treats concrete events and details as required facts to dramatize before the story advances.",
+      button: "➜ Direct scene",
+      placeholder: "Describe the events, dialogue, atmosphere, and details that must appear in the next scene..."
+    };
+  }
+  if (mode === "action") {
+    return {
+      label: "Describe what your character tries to do",
+      help: "Action expresses an attempt or intention. The Story Engine decides uncertain outcomes and writes what follows.",
+      button: "➜ Take action",
+      placeholder: "Describe an action, decision, or dialogue for your character..."
+    };
+  }
+  return {
+    label: "Describe what you want to do or what happens next",
+    help: "Auto decides whether your prompt is an attempted action or scene direction immediately before submission.",
+    button: "➜ Continue story",
+    placeholder: "Describe an action, dialogue, or the scene events and details that should happen..."
+  };
+}
+
+function updateTurnInputCharacterCount() {
+  const freeAction = $("freeAction");
+  const counter = $("turnInputCount");
+  if (freeAction && counter) counter.textContent = `${freeAction.value.length.toLocaleString()} / 12,000`;
+}
+
+function clearTurnIntentDecision() {
+  state.pendingIntentDecision = null;
+  const panel = $("turnIntentDecision");
+  if (panel) panel.classList.add("hidden");
+}
+
+function setTurnInputMode(mode, options = {}) {
+  const locked = campaignTurnControlStyle() === "action_only";
+  state.turnInputMode = locked ? "action" : (["auto", "action", "scene"].includes(mode) ? mode : defaultTurnInputMode());
+  document.querySelectorAll("[data-turn-input-mode]").forEach((button) => {
+    const selected = button.dataset.turnInputMode === state.turnInputMode;
+    button.setAttribute("aria-checked", String(selected));
+    button.disabled = locked || state.busy || Boolean(state.pendingGeneration);
+  });
+  const selector = $("turnInputModeSelector");
+  const lock = $("turnInputModeLock");
+  if (selector) selector.classList.toggle("hidden", locked);
+  if (lock) lock.classList.toggle("hidden", !locked);
+  const copy = turnInputCopy(state.turnInputMode);
+  const label = $("turnInputLabel");
+  const help = $("turnInputHelp");
+  const button = $("btnTakeAction");
+  const freeAction = $("freeAction");
+  if (label) label.textContent = copy.label;
+  if (help) help.textContent = copy.help;
+  if (button) button.textContent = copy.button;
+  if (freeAction && (options.refreshPlaceholder || !freeAction.placeholder)) freeAction.placeholder = copy.placeholder;
+  clearTurnIntentDecision();
+}
+
+function syncTurnInputModeFromCampaign() {
+  setTurnInputMode(defaultTurnInputMode(), { refreshPlaceholder: true });
+  updateTurnInputCharacterCount();
+}
+
 function renderChoices(choices, customSuggestion) {
   const container = $("choiceArea");
   if (!container) return;
@@ -441,12 +534,16 @@ function renderChoices(choices, customSuggestion) {
       btn.addEventListener("click", () => {
         const autoSubmit = state.user?.settings?.autoSubmitTurnChoices !== false;
         if (autoSubmit) {
+          setTurnInputMode("action", { refreshPlaceholder: true });
+          state.nextTurnInputModeSource = "generated_choice";
           submitAction(text);
         } else {
           const freeAction = $("freeAction");
           if (freeAction) {
+            setTurnInputMode("action", { refreshPlaceholder: true });
             freeAction.value = text;
             freeAction.focus();
+            updateTurnInputCharacterCount();
           }
           toast("Loaded choice into action box for editing.", 2400);
         }
@@ -456,20 +553,78 @@ function renderChoices(choices, customSuggestion) {
   }
   const freeAction = $("freeAction");
   if (freeAction && customSuggestion) {
-    freeAction.placeholder = customSuggestion;
+    freeAction.placeholder = state.turnInputMode === "action" ? customSuggestion : turnInputCopy(state.turnInputMode).placeholder;
   }
 }
 
-async function submitAction(actionText) {
+function showAmbiguousTurnIntent(action, classification) {
+  state.pendingIntentDecision = { action, classification };
+  const panel = $("turnIntentDecision");
+  const message = $("turnIntentDecisionMessage");
+  if (message) {
+    const label = classification.classification === "mixed" ? "both an action and required scene events" : "an uncertain intent";
+    message.textContent = `Auto found ${label}. Choose how the Story Engine should interpret this turn.`;
+  }
+  if (panel) panel.classList.remove("hidden");
+}
+
+async function classifyTurnInput(action) {
+  try {
+    return await api(`/campaigns/${state.campaignId}/turn-input/classify`, {
+      method: "POST",
+      body: JSON.stringify({ text: action, preferredFallback: preferredAutoFallback() })
+    });
+  } catch (error) {
+    const resolvedMode = preferredAutoFallback();
+    toast(`Auto classification was unavailable; using ${resolvedMode === "scene" ? "Scene direction" : "Action"}.`, 4200);
+    recordActivity("error", "Turn intent classification unavailable", error.message);
+    return { classification: "uncertain", confidenceBand: "probable", resolvedMode, providerSource: "fallback" };
+  }
+}
+
+async function submitResolvedTurn(action, details) {
+  const freeAction = $("freeAction");
+  if (freeAction) freeAction.value = "";
+  updateTurnInputCharacterCount();
+  clearTurnIntentDecision();
+  await runGeneration(action, details);
+}
+
+async function submitAction(actionText, options = {}) {
   if (state.busy) return;
   let action = (actionText || "").trim();
   if (!action && state.turns.length === 0) {
     action = firstActionForNewAdventure();
   }
   if (!action) { toast("Enter an action first."); return; }
-  const freeAction = $("freeAction");
-  if (freeAction) freeAction.value = "";
-  await runGeneration(action);
+  const requestedInputMode = options.requestedInputMode || state.turnInputMode;
+  const inputModeSource = options.inputModeSource || state.nextTurnInputModeSource || (requestedInputMode === "auto" ? "auto" : "explicit");
+  state.nextTurnInputModeSource = null;
+  if (requestedInputMode !== "auto") {
+    await submitResolvedTurn(action, { requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource });
+    return;
+  }
+  showBusy("Determining how to interpret this turn…");
+  let classification;
+  try {
+    classification = await classifyTurnInput(action);
+  } finally {
+    hideBusy();
+  }
+  if ($("freeAction") && $("freeAction").value.trim() !== action) {
+    toast("The prompt changed while Auto was deciding. Review it and submit again.");
+    return;
+  }
+  if (classification.confidenceBand === "ambiguous" || classification.classification === "mixed") {
+    showAmbiguousTurnIntent(action, classification);
+    return;
+  }
+  await submitResolvedTurn(action, {
+    requestedInputMode: classification.classificationId ? "auto" : classification.resolvedMode,
+    resolvedInputMode: classification.resolvedMode,
+    inputModeSource: classification.classificationId ? "auto" : "fallback",
+    classificationId: classification.classificationId
+  });
 }
 
 // ── Generation Pipeline ───────────────────────────────────────
@@ -517,6 +672,10 @@ async function enqueueGenerationSubmission(submission) {
     : `/campaigns/${state.campaignId}/generations`;
   const payload = {
     action: submission.action,
+    requestedInputMode: submission.requestedInputMode,
+    resolvedInputMode: submission.resolvedInputMode,
+    inputModeSource: submission.inputModeSource,
+    ...(submission.classificationId ? { classificationId: submission.classificationId } : {}),
     idempotencyKey: submission.idempotencyKey,
     context: submission.context,
     ...(submission.operationKind === "replace_latest"
@@ -570,6 +729,10 @@ async function runGeneration(action, options = {}) {
       : state.turns.length + 1;
     const submission = {
       action,
+      requestedInputMode: options.requestedInputMode || "action",
+      resolvedInputMode: options.resolvedInputMode || "action",
+      inputModeSource: options.inputModeSource || "explicit",
+      ...(options.classificationId ? { classificationId: options.classificationId } : {}),
       operationKind,
       expectedTurnNumber,
       idempotencyKey: options.idempotencyKey || crypto.randomUUID(),
@@ -971,7 +1134,11 @@ async function resumePendingGeneration() {
         operationKind: stored.operationKind,
         expectedCurrentTurnNumber: stored.expectedTurnNumber,
         idempotencyKey: stored.idempotencyKey,
-        createdAt: stored.createdAt
+        createdAt: stored.createdAt,
+        requestedInputMode: stored.requestedInputMode,
+        resolvedInputMode: stored.resolvedInputMode,
+        inputModeSource: stored.inputModeSource,
+        classificationId: stored.classificationId
       });
       return true;
     }
@@ -1096,10 +1263,15 @@ async function executeRetryWithPrompt(submittedPromptText) {
   }
 
   const currentTurnNumber = state.turns.length;
+  const originalTurn = state.turns[currentTurnNumber - 1] || {};
+  const resolvedInputMode = originalTurn.resolvedInputMode || originalTurn.inputMode || "action";
   closeRetryPromptDialog();
   await runGeneration(action, {
     operationKind: "replace_latest",
-    expectedCurrentTurnNumber: currentTurnNumber
+    expectedCurrentTurnNumber: currentTurnNumber,
+    requestedInputMode: originalTurn.requestedInputMode || resolvedInputMode,
+    resolvedInputMode,
+    inputModeSource: originalTurn.inputModeSource || "explicit"
   });
 }
 
@@ -1324,9 +1496,11 @@ function openUserProfile() {
   const nameInput = $("userProfileDisplayName");
   const cbSubmit = $("userProfileAutoSubmitChoices");
   const cbContinuous = $("userProfileContinuousReading");
+  const defaultTurnStyle = $("userProfileDefaultTurnControlStyle");
   if (nameInput) nameInput.value = state.user?.displayName || "Initial Owner";
   if (cbSubmit) cbSubmit.checked = state.user?.settings?.autoSubmitTurnChoices !== false;
   if (cbContinuous) cbContinuous.checked = Boolean(state.user?.settings?.continuousReading);
+  if (defaultTurnStyle) defaultTurnStyle.value = state.user?.settings?.defaultTurnControlStyle || "flexible_auto";
   if (dlg.showModal) dlg.showModal();
 }
 
@@ -1334,9 +1508,11 @@ async function saveUserProfile() {
   const nameInput = $("userProfileDisplayName");
   const cbSubmit = $("userProfileAutoSubmitChoices");
   const cbContinuous = $("userProfileContinuousReading");
+  const defaultTurnStyle = $("userProfileDefaultTurnControlStyle");
   const displayName = nameInput ? nameInput.value.trim() : "";
   const autoSubmitTurnChoices = cbSubmit ? cbSubmit.checked : true;
   const continuousReading = cbContinuous ? cbContinuous.checked : false;
+  const defaultTurnControlStyle = defaultTurnStyle ? defaultTurnStyle.value : "flexible_auto";
 
   if (!displayName) {
     toast("Display name is required.", 2600);
@@ -1350,7 +1526,8 @@ async function saveUserProfile() {
         displayName,
         settings: {
           autoSubmitTurnChoices,
-          continuousReading
+          continuousReading,
+          defaultTurnControlStyle
         }
       })
     });
@@ -1362,6 +1539,7 @@ async function saveUserProfile() {
         if (!state.user.settings) state.user.settings = {};
         state.user.settings.autoSubmitTurnChoices = autoSubmitTurnChoices;
         state.user.settings.continuousReading = continuousReading;
+        state.user.settings.defaultTurnControlStyle = defaultTurnControlStyle;
       }
     }
     renderAllScenes();
@@ -1632,8 +1810,35 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   const freeAction = $("freeAction");
-  if (freeAction) freeAction.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitAction(freeAction.value); }
+  if (freeAction) {
+    freeAction.addEventListener("input", () => {
+      updateTurnInputCharacterCount();
+      clearTurnIntentDecision();
+    });
+    freeAction.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitAction(freeAction.value); }
+    });
+  }
+  document.querySelectorAll("[data-turn-input-mode]").forEach((button) => {
+    button.addEventListener("click", () => setTurnInputMode(button.dataset.turnInputMode, { refreshPlaceholder: true }));
+  });
+  const submitAmbiguousTurn = (resolvedInputMode) => {
+    const pending = state.pendingIntentDecision;
+    if (!pending) return;
+    submitResolvedTurn(pending.action, {
+      requestedInputMode: resolvedInputMode,
+      resolvedInputMode,
+      inputModeSource: "explicit"
+    });
+  };
+  const btnSubmitAsAction = $("btnSubmitAsAction");
+  if (btnSubmitAsAction) btnSubmitAsAction.addEventListener("click", () => submitAmbiguousTurn("action"));
+  const btnSubmitAsScene = $("btnSubmitAsScene");
+  if (btnSubmitAsScene) btnSubmitAsScene.addEventListener("click", () => submitAmbiguousTurn("scene"));
+  const btnReturnToTurnEditor = $("btnReturnToTurnEditor");
+  if (btnReturnToTurnEditor) btnReturnToTurnEditor.addEventListener("click", () => {
+    clearTurnIntentDecision();
+    if (freeAction) freeAction.focus();
   });
 
   // History navigation

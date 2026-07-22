@@ -16,16 +16,18 @@ Where supported, narration appears with **Streaming Live** while the durable job
 
 Only validated output is accepted. A failed or rejected generation cannot update campaign state or Chronicle memory.
 
-## Take an action
+## Submit the next turn
 
 After the scene completes:
 
 - Select a generated choice, or
-- Enter an original action under **Or type any action you want below**, then select **➜ Take action**.
+- Choose **Auto**, **Action**, or **Scene direction** when the campaign is flexible, then enter original text and submit it.
 
-Pressing Enter submits the typed action. Use Shift+Enter for a new line.
+Pressing Enter submits the typed turn. Use Shift+Enter for a new line.
 
 Choice selection submits immediately by default. To make a choice populate the action editor instead, open the user profile and clear **Auto-submit story turns when selecting a choice**.
+
+Use Action for what the character attempts. Use Scene direction when described events are required facts the narration must dramatize. Auto decides between them immediately before submission and asks for confirmation when the text is ambiguous. See [Turn input modes](../player-guide/turn-input-modes.md).
 
 ## Confirm acceptance
 

@@ -8,6 +8,13 @@ const managementScript = readFileSync("apps/web/public/nexus.js", "utf8");
 const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
 
 describe("Nexus management UI contracts", () => {
+  it("offers an explicit turn-intent provider role without implicit activation", () => {
+    expect(managementHtml).toContain('<option value="intent">Turn intent classification</option>');
+    expect(managementScript).toContain("Inactive · Story text fallback");
+    expect(managementScript).toContain("Make system default");
+    expect(managementScript).toContain("It never generates story narration");
+  });
+
   it("leaves fiction-boundary validation exclusively to the Nexus Story Engine", () => {
     expect(storyScript).not.toContain("STORY_RPG_MECHANIC_PATTERNS");
     expect(storyScript).not.toContain("storyRpgMechanicLeakFields");
@@ -164,9 +171,17 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="campaignTextProvider"');
     expect(managementHtml).toContain('id="campaignImageProvider"');
     expect(managementHtml).toContain('id="campaignStoryLengthProfile"');
+    expect(managementHtml).toContain('id="campaignTurnControlStyle"');
+    expect(managementHtml).toContain('id="newCampaignTurnControlStyle"');
+    expect(managementHtml).toContain('value="action_only">Player actions only');
+    expect(managementHtml).toContain('value="flexible_auto" selected>Flexible — Auto');
+    expect(managementHtml).toContain('value="flexible_action">Flexible — Action first');
+    expect(managementHtml).toContain('value="flexible_scene">Flexible — Scene direction first');
     expect(managementHtml).toContain('value="brief">Brief — 250–450 words');
     expect(managementHtml).toContain('value="extended">Extended — 1,200–2,000 words');
     expect(managementScript).toContain('storyLengthProfile: elements.campaignStoryLengthProfile.value');
+    expect(managementScript).toContain('turnControlStyle: elements.newCampaignTurnControlStyle.value');
+    expect(managementScript).toContain('turnControlStyle: elements.campaignTurnControlStyle.value');
     expect(managementScript).toContain('document.body.dataset.managementView = providerView ? "providers" : "worlds"');
     expect(managementCss).toContain('body[data-management-view="providers"] .world-management');
     expect(managementCss).toContain('body[data-management-view="worlds"] .provider-management');
