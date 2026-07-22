@@ -24,7 +24,7 @@ Each profile owns:
 - Capability settings and request timeout
 - Health and safe diagnostics
 
-One vendor may serve multiple roles, but sharing a hostname does not authorize Nexus to copy credentials or infer model compatibility. Turn Intent is optional and system-wide: an explicitly default profile classifies Auto input, otherwise the campaign Story text profile does so. Intent never generates story text.
+One vendor may serve multiple roles, but sharing a hostname does not authorize Nexus to copy credentials or infer model compatibility. Sogni profiles use the dedicated illustration adapter and keep their bearer credential separate even if the same vendor also exposes text APIs. Turn Intent is optional and system-wide: an explicitly default profile classifies Auto input, otherwise the campaign Story text profile does so. Intent never generates story text.
 
 Transport diagnostics are bounded and sanitized. They can identify phase, endpoint origin, model, timeout, status class, correlation, and latency without recording prompt bodies or credentials.
 

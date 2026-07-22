@@ -37,6 +37,21 @@ let transferIdempotencyKey = "";
 const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
 const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
 const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
+const SOGNI_DEFAULT_CONFIGURATION = Object.freeze({
+  defaultWidth: 1280,
+  defaultHeight: 720,
+  defaultAspectRatio: "16:9",
+  defaultImageCount: 1,
+  defaultOutputFormat: "png",
+  defaultQuality: "auto",
+  sensitiveContentFilter: "provider-default",
+  workflowSafeContentFilterSupported: false,
+  pollIntervalMs: 2000,
+  maximumPollIntervalMs: 10000,
+  generationTimeoutMs: 180000,
+  maximumAttempts: 3,
+  modelDiscoveryEnabled: true
+});
 
 async function loadApplicationMetadata() {
   try {
@@ -1941,6 +1956,7 @@ function resetProviderForm() {
   elements.providerOutputTokens.value = "4096";
   elements.providerTemperature.value = "0.8";
   elements.providerRequestTimeoutMinutes.value = "5";
+  applySogniConfiguration(SOGNI_DEFAULT_CONFIGURATION);
   elements.providerAdvancedSettings.open = false;
   elements.providerStreaming.checked = false;
   elements.providerEnabled.checked = true;
@@ -1957,6 +1973,8 @@ function resetProviderForm() {
 }
 
 function syncProviderRoleSettings(options = {}) {
+  const sogni = elements.providerType.value === "sogni";
+  if (sogni) elements.providerRole.value = "image";
   const intent = elements.providerRole.value === "intent";
   elements.providerRoleNote.textContent = intent
     ? "Classifies Auto as Action or Scene direction only. It never generates story narration. Until explicitly made system default, Auto uses the campaign Story text provider."
@@ -1965,13 +1983,55 @@ function syncProviderRoleSettings(options = {}) {
       : elements.providerRole.value === "embedding"
         ? "Embedding providers index Chronicle memory and do not generate narration."
         : "Story text providers generate narration and are the fallback for Auto classification.";
-  elements.providerStreaming.disabled = intent;
-  if (intent) elements.providerStreaming.checked = false;
+  elements.providerStreaming.disabled = intent || sogni;
+  if (intent || sogni) elements.providerStreaming.checked = false;
+  elements.providerRole.disabled = Boolean(editingProviderId) || sogni;
+  elements.providerSogniSettings.classList.toggle("hidden", !sogni);
+  elements.providerSogniSettings.setAttribute("aria-hidden", String(!sogni));
+  for (const control of elements.providerSogniSettings.querySelectorAll("input, select")) control.disabled = !sogni;
   if (intent && options.applySuggestedDefaults) {
     elements.providerContextTokens.value = "8192";
     elements.providerOutputTokens.value = "256";
     elements.providerTemperature.value = "0";
   }
+}
+
+function applySogniConfiguration(configuration = {}) {
+  const config = { ...SOGNI_DEFAULT_CONFIGURATION, ...configuration };
+  elements.providerSogniWidth.value = String(config.defaultWidth);
+  elements.providerSogniHeight.value = String(config.defaultHeight);
+  elements.providerSogniAspectRatio.value = config.defaultAspectRatio;
+  elements.providerSogniImageCount.value = String(config.defaultImageCount);
+  elements.providerSogniOutputFormat.value = config.defaultOutputFormat;
+  elements.providerSogniQuality.value = config.defaultQuality;
+  elements.providerSogniSensitiveContentFilter.value = config.sensitiveContentFilter;
+  elements.providerSogniSupportsSafeContentFilter.checked = config.workflowSafeContentFilterSupported === true;
+  elements.providerSogniPollIntervalSeconds.value = String(Number(config.pollIntervalMs) / 1000);
+  elements.providerSogniMaximumPollIntervalSeconds.value = String(Number(config.maximumPollIntervalMs) / 1000);
+  elements.providerSogniGenerationTimeoutSeconds.value = String(Number(config.generationTimeoutMs) / 1000);
+  elements.providerSogniMaximumAttempts.value = String(config.maximumAttempts);
+  elements.providerSogniModelDiscoveryEnabled.checked = config.modelDiscoveryEnabled !== false;
+}
+
+function providerConfigurationFromForm(existingConfig = {}) {
+  const configuration = { ...existingConfig, streaming: elements.providerStreaming.checked };
+  if (elements.providerType.value !== "sogni") return configuration;
+  return {
+    ...configuration,
+    defaultWidth: Number(elements.providerSogniWidth.value),
+    defaultHeight: Number(elements.providerSogniHeight.value),
+    defaultAspectRatio: elements.providerSogniAspectRatio.value.trim(),
+    defaultImageCount: Number(elements.providerSogniImageCount.value),
+    defaultOutputFormat: elements.providerSogniOutputFormat.value,
+    defaultQuality: elements.providerSogniQuality.value,
+    sensitiveContentFilter: elements.providerSogniSensitiveContentFilter.value,
+    workflowSafeContentFilterSupported: elements.providerSogniSupportsSafeContentFilter.checked,
+    pollIntervalMs: Math.round(Number(elements.providerSogniPollIntervalSeconds.value) * 1000),
+    maximumPollIntervalMs: Math.round(Number(elements.providerSogniMaximumPollIntervalSeconds.value) * 1000),
+    generationTimeoutMs: Math.round(Number(elements.providerSogniGenerationTimeoutSeconds.value) * 1000),
+    maximumAttempts: Number(elements.providerSogniMaximumAttempts.value),
+    modelDiscoveryEnabled: elements.providerSogniModelDiscoveryEnabled.checked
+  };
 }
 
 function beginProviderEdit(provider) {
@@ -1986,6 +2046,7 @@ function beginProviderEdit(provider) {
   elements.providerOutputTokens.value = String(provider.maxOutputTokens);
   elements.providerTemperature.value = String(provider.temperature);
   elements.providerRequestTimeoutMinutes.value = String(Number(provider.requestTimeoutMs || 300000) / 60000);
+  applySogniConfiguration(provider.configuration);
   elements.providerStreaming.checked = Boolean(provider.configuration?.streaming || provider.configuration?.streamingSupport);
   elements.providerEnabled.checked = provider.enabled;
   elements.providerIsDefault.checked = provider.isDefault;
@@ -2047,7 +2108,7 @@ async function saveProvider(event) {
         temperature: elements.providerTemperature.value,
         requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
         enabled: elements.providerEnabled.checked,
-        configuration: { ...existingConfig, streaming: elements.providerStreaming.checked }
+        configuration: providerConfigurationFromForm(existingConfig)
       })
     });
     const wasEditing = Boolean(editingProviderId);
@@ -2098,7 +2159,7 @@ async function refreshProviderModelsFromForm() {
           requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
           enabled: elements.providerEnabled.checked,
           isDefault: elements.providerIsDefault.checked,
-          configuration: { ...existingConfig, streaming: elements.providerStreaming.checked }
+          configuration: providerConfigurationFromForm(existingConfig)
         })
     });
     discoveredProfileModels = result.models || [];
@@ -2319,10 +2380,16 @@ elements.modelSelect.addEventListener("change", () => {
 elements.providerType.addEventListener("change", () => {
   const defaults = {
     lmstudio: "http://host.docker.internal:1234",
-    openrouter: "https://openrouter.ai/api/v1"
+    openrouter: "https://openrouter.ai/api/v1",
+    sogni: "https://api.sogni.ai"
   };
   const suggested = defaults[elements.providerType.value];
   if (suggested) elements.providerBaseUrl.value = suggested;
+  if (elements.providerType.value === "sogni") {
+    if (elements.providerName.value === "Local LM Studio") elements.providerName.value = "Sogni AI";
+    elements.providerRequestTimeoutMinutes.value = "0.5";
+  }
+  syncProviderRoleSettings({ applySuggestedDefaults: !editingProviderId });
 });
 
 elements.providerRole.addEventListener("change", () => {
@@ -2510,6 +2577,14 @@ async function saveEmbeddingConfig(event) {
 elements.campaignImageProvider.addEventListener("change", () => {
   const provider = effectiveCampaignProvider("image");
   if (provider?.defaultModel && !elements.illustrationModel.value) elements.illustrationModel.value = provider.defaultModel;
+  if (provider?.providerType === "sogni") {
+    const config = { ...SOGNI_DEFAULT_CONFIGURATION, ...provider.configuration };
+    elements.illustrationSize.value = `${config.defaultWidth}x${config.defaultHeight}`;
+    elements.illustrationAspectRatio.value = config.defaultAspectRatio;
+    elements.illustrationQuality.value = config.defaultQuality;
+    elements.illustrationOutputFormat.value = config.defaultOutputFormat;
+    elements.illustrationMaxAttempts.value = String(config.maximumAttempts);
+  }
   elements.campaignImageProviderSummary.textContent = provider
     ? `Using ${provider.name} for this campaign.`
     : "Select an image provider before saving enabled illustrations.";

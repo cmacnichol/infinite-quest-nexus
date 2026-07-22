@@ -1,6 +1,6 @@
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
-import type { ProviderProfileInput, ProviderProfileUpdate, ProviderTextRequest } from "../../../packages/contracts/src/generation.js";
+import { sogniIllustrationProviderConfigSchema, type ProviderProfileInput, type ProviderProfileUpdate, type ProviderTextRequest } from "../../../packages/contracts/src/generation.js";
 import { callTextProvider, decryptCredential, encryptCredential, discoverEmbeddingModels, discoverImageModels, discoverModels, logProviderTransportError, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
 
 type ProviderRow = {
@@ -139,6 +139,10 @@ export async function updateProvider(pool: DatabasePool, providerProfileId: stri
     const current = await client.query<ProviderRow>(`SELECT ${selectColumns} FROM provider_profiles WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [providerProfileId, ownerUserId]);
     const row = current.rows[0];
     if (!row) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+    if (row.provider_type === "sogni" && input.configuration !== undefined) {
+      const parsed = sogniIllustrationProviderConfigSchema.safeParse(input.configuration);
+      if (!parsed.success) throw Object.assign(new Error(parsed.error.issues[0]?.message || "Invalid Sogni provider configuration."), { statusCode: 400 });
+    }
     if (input.isDefault) {
       await client.query("UPDATE provider_profiles SET is_default = false, updated_at = now() WHERE owner_user_id = $1 AND provider_role = $2 AND is_default = true", [ownerUserId, row.provider_role]);
     }

@@ -11,8 +11,9 @@ sequenceDiagram
   W->>DB: Commit accepted turn and fiction-only image prompt
   DB-->>I: Claim optional image child job
   I->>P: Send sanitized prompt with image-role credentials
-  alt Valid raster response
-    P-->>I: Base64 PNG, JPEG, or WebP
+  alt Valid raster response or completed asynchronous job
+    P-->>I: Base64 raster or temporary artifact reference
+    I->>I: Download and validate PNG, JPEG, or WebP
     I->>DB: Store asset reference and success
   else Failure or incompatible output
     P-->>I: Error or rejected output
@@ -25,6 +26,6 @@ The image role has its own endpoint, key, model inventory, defaults, health, att
 
 Only validated fiction and a fiction-only prompt cross the boundary. Rolls, private reasoning, hidden trackers, raw responses, rejected narration, and provider credentials do not.
 
-Generated files are content-addressed and independently retryable. Nexus accepts base64 PNG, JPEG, or WebP and rejects untrusted URL or SVG output for this pipeline.
+Generated files are content-addressed and independently retryable. Sogni remote job IDs, generation revisions, deadlines, and polling state are durable so another worker can resume safely without intentionally duplicating an accepted remote workflow. Provider artifacts are downloaded under bounded network and size controls, then validated by raster signature as PNG, JPEG, or WebP; SVG and payloads masquerading as images are rejected.
 
 Related decision: [ADR 0008](../architecture/0008-independent-illustration-pipeline.md).

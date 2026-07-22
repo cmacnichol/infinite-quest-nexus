@@ -83,7 +83,7 @@ This page summarizes behavior implemented in the current repository. It is not a
 - LM Studio native text generation and loaded-model discovery
 - OpenRouter, Manifest, and generic OpenAI-compatible text adapters
 - LM Studio and compatible embedding requests
-- OpenRouter image generation and generic compatible image endpoints
+- OpenRouter image generation, durable asynchronous Sogni illustration jobs, and generic compatible image endpoints
 - Independent endpoints, credentials, models, health, timeouts, and defaults for every role
 - Safe transport diagnostics that exclude credentials and prompt bodies
 - Explicit-only system default for Intent, with Story text and campaign-mode fallbacks
@@ -92,9 +92,10 @@ This page summarizes behavior implemented in the current repository. It is not a
 
 - Optional image child jobs after a story turn is accepted
 - Independent campaign image provider, model, format, size, aspect, quality, and retry settings
+- Sogni profile defaults for one or two images, sensitive-content filtering, polling intervals, generation deadline, and submission attempts
 - Replica-safe retries that never rerun or reject story narration
 - Fiction-only image prompts that exclude mechanics, scratchpads, and private reasoning
-- Base64 PNG, JPEG, and WebP validation
+- Base64 and restricted-download PNG, JPEG, and WebP signature validation, with temporary provider URLs excluded from durable metadata
 - Stored-asset display, prompt editing, and regeneration
 - Successful story completion when images are disabled or generation fails
 

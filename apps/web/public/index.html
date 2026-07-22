@@ -555,6 +555,7 @@
             <select id="providerType">
               <option value="lmstudio">LM Studio native</option>
               <option value="openrouter">OpenRouter</option>
+              <option value="sogni">Sogni AI</option>
               <option value="manifest">Manifest</option>
               <option value="openai_compatible">OpenAI-compatible</option>
             </select>
@@ -587,13 +588,41 @@
           <label title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
         </div>
       </fieldset>
+      <fieldset id="providerSogniSettings" class="hidden" aria-hidden="true">
+        <legend>Sogni illustration defaults</legend>
+        <p class="fieldset-note">These non-secret defaults are stored with this profile. Model discovery may not list every image model, so the model picker also accepts a manual model ID.</p>
+        <div class="fieldset-content">
+          <label>Images per job
+            <select id="providerSogniImageCount"><option value="1">1 image</option><option value="2">2 images</option></select>
+          </label>
+          <label>Default width<input id="providerSogniWidth" type="number" min="256" max="8192" step="8" value="1280"></label>
+          <label>Default height<input id="providerSogniHeight" type="number" min="256" max="8192" step="8" value="720"></label>
+          <label>Aspect ratio<input id="providerSogniAspectRatio" maxlength="10" value="16:9" pattern="[0-9]{1,3}:[0-9]{1,3}"></label>
+          <label>Output format
+            <select id="providerSogniOutputFormat"><option value="png">PNG</option><option value="jpeg">JPEG</option></select>
+          </label>
+          <label>Quality
+            <select id="providerSogniQuality"><option value="auto">Automatic</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
+          </label>
+          <label>Sensitive-content filter
+            <select id="providerSogniSensitiveContentFilter"><option value="provider-default">Provider default (safest)</option><option value="enabled">Request enabled</option><option value="disabled">Request disabled, if account permits</option></select>
+          </label>
+          <label class="toggle-field"><input id="providerSogniSupportsSafeContentFilter" type="checkbox"> Selected workflow documents filter overrides</label>
+          <label>Initial poll interval (seconds)<input id="providerSogniPollIntervalSeconds" type="number" min="1" max="30" step="1" value="2"></label>
+          <label>Maximum poll interval (seconds)<input id="providerSogniMaximumPollIntervalSeconds" type="number" min="1" max="30" step="1" value="10"></label>
+          <label>Generation timeout (seconds)<input id="providerSogniGenerationTimeoutSeconds" type="number" min="30" max="600" step="5" value="180"></label>
+          <label>Submission attempts<input id="providerSogniMaximumAttempts" type="number" min="1" max="5" step="1" value="3"></label>
+          <label class="toggle-field"><input id="providerSogniModelDiscoveryEnabled" type="checkbox" checked> Attempt model discovery</label>
+        </div>
+        <p class="fieldset-note">Provider-default is safest. Declare override support only after verifying the selected workflow's current documentation; Sogni account eligibility and provider policy still apply.</p>
+      </fieldset>
       <details id="providerAdvancedSettings" class="provider-advanced-settings">
         <summary>Advanced request settings</summary>
         <div class="provider-advanced-fields">
           <label title="Maximum wall-clock time Nexus waits for one provider HTTP request, including response headers and body. Increase this for slower local generation.">
             Request timeout (minutes)
-            <input id="providerRequestTimeoutMinutes" type="number" min="1" max="60" step="0.5" value="5" required>
-            <span class="field-note">Defaults to 5 minutes. When reached, Nexus closes the request and records an explicit timeout diagnostic.</span>
+            <input id="providerRequestTimeoutMinutes" type="number" min="0.1" max="60" step="0.1" value="5" required>
+            <span class="field-note">Defaults to 5 minutes, or 30 seconds for a new Sogni profile. When reached, Nexus closes the request and records an explicit timeout diagnostic.</span>
           </label>
         </div>
       </details>

@@ -21,7 +21,7 @@ Story generation should continue with lexical fallback. Confirm the embedding pr
 
 ## Images fail
 
-Accepted story turns remain valid. Confirm independent image credentials, model, compatible base64 format, shared storage permissions, and retry policy.
+Accepted story turns remain valid. Confirm independent image credentials, model, output format, shared storage permissions, and retry policy. For Sogni, also check account balance or entitlement, active-workflow and rate limits, persisted remote-job state, request timeout, generation deadline, artifact-host restrictions, and whether the chosen workflow honors the requested sensitive-content filter mode. If discovery is empty, try the exact image model ID manually.
 
 ## Saved provider key cannot be decrypted
 
