@@ -39,6 +39,10 @@ import {
 import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
 import { formatNarrationParagraphs } from "../../../packages/story-engine/src/narration-formatting.js";
 import { userProfileUpdateSchema } from "../../../packages/contracts/src/users.js";
+import {
+  campaignTransferCommitRequestSchema,
+  campaignTransferPreviewRequestSchema
+} from "../../../packages/contracts/src/campaign-transfer.js";
 import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js";
 import { getImportProgress, importInfiniteWorlds, previewInfiniteWorldsImport } from "./infinite-worlds-import-service.js";
 import { getSessionUserProfile, updateSessionUserProfile } from "./user-service.js";
@@ -85,6 +89,7 @@ import {
 } from "./world-service.js";
 import { generatePlayableCharacter } from "./world-generator-service.js";
 import { getCampaignCostSummary, turnReportedCosts } from "./cost-service.js";
+import { previewCampaignWorldTransfer, transferCampaignWorld } from "./campaign-transfer-service.js";
 
 type BuildServerOptions = {
   config: RuntimeConfig;
@@ -389,6 +394,23 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/migrate-world", async (request) => (
     migrateCampaignWorld(pool, uuidSchema.parse(request.params.campaignId), campaignWorldMigrationSchema.parse(request.body))
   ));
+
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/transfer-world/preview", async (request) => (
+    previewCampaignWorldTransfer(
+      pool,
+      uuidSchema.parse(request.params.campaignId),
+      campaignTransferPreviewRequestSchema.parse(request.body)
+    )
+  ));
+
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/transfer-world", async (request, reply) => {
+    const result = await transferCampaignWorld(
+      pool,
+      uuidSchema.parse(request.params.campaignId),
+      campaignTransferCommitRequestSchema.parse(request.body)
+    );
+    return reply.code(result.reused ? 200 : 201).send(result);
+  });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/export", async (request, reply) => (
     reply

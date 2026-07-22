@@ -458,6 +458,66 @@ integration("durable Story Engine integration", () => {
     expect(branchTurns.rows.map((row) => row.turn_number)).toEqual([1, 2]);
   });
 
+  it("copies artwork references to mapped branch turns and preserves the blob after deleting the parent", async () => {
+    const imported = await campaign();
+    const source = await pool.query<{ owner_user_id: string; turn_id: string }>(
+      `SELECT c.owner_user_id, t.id AS turn_id
+         FROM campaigns c
+         JOIN turns t ON t.campaign_id = c.id AND t.owner_user_id = c.owner_user_id
+        WHERE c.id = $1 AND t.turn_number = 2`,
+      [imported.campaignId]
+    );
+    const sourceRow = source.rows[0];
+    if (!sourceRow) throw new Error("Synthetic source turn was not found.");
+    const asset = await pool.query<{ id: string }>(
+      `INSERT INTO assets (
+         owner_user_id, campaign_id, turn_id, content_hash, storage_driver,
+         storage_path, mime_type, byte_length
+       ) VALUES ($1,$2,$3,$4,'filesystem',$5,'image/png',4) RETURNING id`,
+      [sourceRow.owner_user_id, imported.campaignId, sourceRow.turn_id,
+        `branch-artwork-${crypto.randomUUID()}`, `branch-artwork/${crypto.randomUUID()}.png`]
+    );
+    const assetId = asset.rows[0]?.id;
+    if (!assetId) throw new Error("Synthetic asset was not created.");
+    await pool.query(
+      `INSERT INTO asset_references (owner_user_id, asset_id, campaign_id, turn_id, asset_role)
+       VALUES ($1,$2,$3,$4,'turn_illustration')`,
+      [sourceRow.owner_user_id, assetId, imported.campaignId, sourceRow.turn_id]
+    );
+
+    const branched = await branchCampaign(pool, imported.campaignId, { targetTurnNumber: 2 });
+    const branchReference = await pool.query<{ turn_number: number }>(
+      `SELECT t.turn_number
+         FROM asset_references ar
+         JOIN turns t ON t.id = ar.turn_id AND t.campaign_id = ar.campaign_id
+        WHERE ar.asset_id = $1 AND ar.campaign_id = $2`,
+      [assetId, branched.id]
+    );
+    expect(branchReference.rows).toEqual([{ turn_number: 2 }]);
+
+    await pool.query("DELETE FROM campaigns WHERE id = $1", [imported.campaignId]);
+
+    const surviving = await pool.query<{
+      campaign_id: string | null;
+      turn_id: string | null;
+      reference_campaign_id: string;
+      turn_number: number;
+    }>(
+      `SELECT a.campaign_id, a.turn_id, ar.campaign_id AS reference_campaign_id, t.turn_number
+         FROM assets a
+         JOIN asset_references ar ON ar.asset_id = a.id
+         JOIN turns t ON t.id = ar.turn_id AND t.campaign_id = ar.campaign_id
+        WHERE a.id = $1`,
+      [assetId]
+    );
+    expect(surviving.rows).toEqual([{
+      campaign_id: null,
+      turn_id: null,
+      reference_campaign_id: branched.id,
+      turn_number: 2
+    }]);
+  });
+
   it("rejects rewinds with HTTP 409 when expectedCurrentTurnNumber does not match active_turn_number", async () => {
     const imported = await campaign();
     await expect(

@@ -49,7 +49,20 @@ const legacyTurnSchema = z.object({
   createdAt: z.string().optional()
 }).passthrough();
 
+const portableCampaignMetadataSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  sourceCampaignId: z.uuid().optional(),
+  sourceWorldVersionId: z.uuid().optional(),
+  sourceWorldVersionNumber: z.number().int().positive().optional(),
+  selectedCharacterId: z.string().trim().min(1).max(200).nullable().optional(),
+  characterSnapshot: z.record(z.string(), z.unknown()).nullable().optional(),
+  stateRevision: z.number().int().nonnegative().default(0)
+}).passthrough();
+
 export const legacyStorySchema = z.object({
+  format: z.literal("infinite-quest-campaign").optional(),
+  formatVersion: z.union([z.literal(1), z.literal(2)]).optional(),
+  campaign: portableCampaignMetadataSchema.optional(),
   world: legacyWorldSchema,
   turns: z.array(legacyTurnSchema),
   settings: z.record(z.string(), z.unknown()).optional(),
@@ -70,7 +83,8 @@ export const storyImportRequestSchema = z.object({
   sourceName: z.string().max(512).default("legacy-story.story"),
   story: legacyStorySchema,
   targetWorldVersionId: z.uuid().optional(),
-  selectedCharacterId: z.string().trim().min(1).max(200).optional()
+  selectedCharacterId: z.string().trim().min(1).max(200).optional(),
+  characterStrategy: z.enum(["preserve_source", "map_to_target"]).optional()
 });
 
 export const storyImportPreviewRequestSchema = storyImportRequestSchema;

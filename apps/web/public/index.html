@@ -146,6 +146,7 @@
           </label>
           <button id="saveCampaign" class="button secondary" type="submit" disabled>Save campaign</button>
           <button id="migrateCampaign" class="button secondary" type="button" disabled>Migrate version</button>
+          <button id="transferCampaign" class="button secondary" type="button" disabled>Transfer to another world…</button>
           <button id="loadCampaign" class="button primary" type="button" disabled>Load story</button>
           <button id="exportCampaign" class="button secondary" type="button" disabled>Export campaign</button>
           <button id="deleteCampaign" class="button danger" type="button" disabled>Delete campaign</button>
@@ -296,6 +297,21 @@
         <label class="toggle-field"><input id="infiniteWorldsEnrichFinal" type="checkbox"> Generate missing final-turn choices with the selected text provider</label>
         <label class="toggle-field"><input id="infiniteWorldsFinalImage" type="checkbox"> Queue an illustration for the latest imported turn</label>
         <p class="muted">World imports retain every playable character. CYOA export imports convert the story description and top-level choices into a new world with 3-4 playable characters using the selected text provider below. Story TXT attaches to the selected published world version and may require choosing the character used by that story. World TXT conversion uses the selected text provider below.</p>
+      </div>
+      <div id="campaignImportOptions" class="import-options hidden">
+        <label>Campaign destination
+          <select id="campaignImportDestination">
+            <option value="embedded">Create or reuse the world embedded in this backup</option>
+            <option value="existing">Attach a new campaign to an existing world version</option>
+          </select>
+        </label>
+        <label id="campaignImportWorldField" class="hidden">Target world
+          <select id="campaignImportWorld"></select>
+        </label>
+        <label id="campaignImportVersionField" class="hidden">Target published version
+          <select id="campaignImportVersion"></select>
+        </label>
+        <p class="muted">Attaching to another world preserves the exported campaign character, accepted history, and accumulated state. Target-world defaults are not merged automatically.</p>
       </div>
       <div class="import-actions">
         <button id="openClipboardImport" class="button secondary" type="button">Paste copied content</button>
@@ -522,6 +538,46 @@
       <div class="button-row confirm-actions">
         <button id="cancelCreateCampaign" class="button secondary" type="button">Cancel</button>
         <button id="confirmCreateCampaign" class="button primary" type="submit">Create campaign</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="transferCampaignDialog" class="confirm-dialog transfer-campaign-dialog" aria-labelledby="transferCampaignTitleLabel" aria-describedby="transferCampaignDescription">
+    <form id="transferCampaignForm">
+      <div>
+        <p class="eyebrow">Campaigns</p>
+        <h2 id="transferCampaignTitleLabel">Transfer to another world</h2>
+        <p id="transferCampaignDescription" class="muted">Create an independent campaign copy that continues against a different immutable world version.</p>
+      </div>
+      <div id="transferCampaignSource" class="transfer-source" aria-live="polite"></div>
+      <label>Target world
+        <select id="transferTargetWorld" required><option value="">Select another world</option></select>
+      </label>
+      <label>Target published version
+        <select id="transferTargetVersion" required disabled><option value="">Select a target world first</option></select>
+      </label>
+      <label>New campaign title
+        <input id="transferCampaignTitle" maxlength="200" required>
+      </label>
+      <div class="transfer-policy-summary" aria-label="Transfer policies">
+        <strong>Continuity policy</strong>
+        <ul>
+          <li>Preserve the source character snapshot and accumulated campaign state.</li>
+          <li>Preserve accepted turns and rebuild Chronicle indexes for the target world.</li>
+          <li>Use the target world's canon for future generation; do not merge its defaults silently.</li>
+          <li>Leave the source campaign unchanged.</li>
+        </ul>
+      </div>
+      <section class="transfer-preview" aria-labelledby="transferPreviewTitle">
+        <h3 id="transferPreviewTitle">Compatibility preview</h3>
+        <div id="transferPreviewSummary" class="status" role="status" aria-live="polite">Choose a target world and version to check compatibility.</div>
+        <ul id="transferFindings" class="transfer-findings"></ul>
+      </section>
+      <label id="transferWarningAcknowledgementField" class="toggle-field hidden"><input id="transferWarningAcknowledgement" type="checkbox"> I reviewed the compatibility warnings and want to create the copy.</label>
+      <p class="field-note">After the transfer succeeds, review the new campaign before separately archiving the original.</p>
+      <div class="button-row confirm-actions">
+        <button id="cancelTransferCampaign" class="button secondary" type="button">Cancel</button>
+        <button id="confirmTransferCampaign" class="button primary" type="submit" disabled>Create transferred campaign</button>
       </div>
     </form>
   </dialog>

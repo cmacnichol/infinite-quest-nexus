@@ -147,6 +147,21 @@ textarea { resize: vertical; }
 .confirm-dialog h2, .confirm-dialog p { margin: 0; }
 .confirm-dialog label { display: grid; gap: 8px; color: var(--muted); font-weight: 700; }
 .confirm-dialog strong { color: var(--gold); overflow-wrap: anywhere; }
+.transfer-campaign-dialog { width: min(720px, calc(100% - 28px)); max-height: calc(100vh - 28px); overflow: auto; }
+.transfer-source, .transfer-policy-summary { border: 1px solid var(--line); border-radius: 12px; padding: 13px 15px; background: #101522; color: var(--muted); line-height: 1.45; }
+.transfer-source strong, .transfer-source span { display: block; }
+.transfer-source span { margin-top: 4px; font-size: .8rem; }
+.transfer-policy-summary ul, .transfer-findings { margin: 8px 0 0; padding-left: 20px; }
+.transfer-policy-summary li, .transfer-findings li { margin-top: 5px; }
+.transfer-preview { display: grid; gap: 9px; }
+.transfer-preview h3 { margin: 0; color: var(--purple); font-size: .92rem; }
+.transfer-findings { display: grid; gap: 7px; margin-top: 0; }
+.transfer-finding { border-left: 3px solid var(--line); padding: 5px 9px; color: var(--muted); line-height: 1.4; }
+.transfer-finding[data-severity="blocking"] { border-color: var(--danger); color: var(--danger); }
+.transfer-finding[data-severity="warning"] { border-color: var(--gold); color: var(--gold); }
+.transfer-finding[data-severity="info"] { border-color: var(--purple); }
+.transfer-campaign-dialog .toggle-field { display: flex; align-items: flex-start; gap: 9px; color: var(--text); font-size: .86rem; }
+.transfer-campaign-dialog .toggle-field input { width: auto; margin-top: 3px; }
 .delete-dialog-details { margin: 0; padding-left: 20px; color: var(--muted); display: grid; gap: 6px; line-height: 1.4; }
 .delete-dialog-details.hidden { display: none; }
 .paste-dialog { width: min(760px, calc(100% - 28px)); }

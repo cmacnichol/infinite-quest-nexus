@@ -7,6 +7,7 @@ import { estimateTokens, removeProviderSecrets, sha256, stableStringify } from "
 import { campaignCharacterSeed, characterSnapshot } from "../../../packages/domain/src/world-characters.js";
 import {
   canonicalizeWorldContent,
+  playableCharacterSchema,
   worldContentSchema,
   WORLD_CONTENT_SCHEMA_VERSION,
   type WorldContent
@@ -43,6 +44,10 @@ function choices(turn: LegacyTurn): string[] {
 
 function worldTitle(story: LegacyStory): string {
   return story.world.title?.trim() || "Imported adventure";
+}
+
+function campaignTitle(story: LegacyStory): string {
+  return story.campaign?.title?.trim() || worldTitle(story);
 }
 
 export function legacyWorldContent(story: LegacyStory, requestedSelectedCharacterId?: string): WorldContent {
@@ -98,16 +103,45 @@ function importSourceHash(request: StoryImportRequest): string {
   return sha256(stableStringify({
     story: sanitizedStoryForHash(request.story),
     targetWorldVersionId: request.targetWorldVersionId ?? null,
-    selectedCharacterId: requestedCharacterId(request) ?? null
+    selectedCharacterId: requestedCharacterId(request) ?? null,
+    characterStrategy: request.characterStrategy ?? null
   }));
 }
 
 function requestedCharacterId(request: StoryImportRequest): string | undefined {
   if (request.selectedCharacterId) return request.selectedCharacterId;
+  if (request.story.campaign?.selectedCharacterId) return request.story.campaign.selectedCharacterId;
   const provenance = request.story.storyImportProvenance;
   if (!provenance || typeof provenance !== "object" || Array.isArray(provenance)) return undefined;
   const value = (provenance as Record<string, unknown>).selectedCharacterId;
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function isPortableCampaign(request: StoryImportRequest): boolean {
+  return request.story.format === "infinite-quest-campaign";
+}
+
+function importedCharacterSeed(
+  pinnedContent: WorldContent,
+  request: StoryImportRequest,
+  attachingToExistingWorld: boolean
+) {
+  const strategy = request.characterStrategy
+    ?? (attachingToExistingWorld && isPortableCampaign(request) ? "preserve_source" : "map_to_target");
+  if (!attachingToExistingWorld || strategy === "map_to_target") {
+    return campaignCharacterSeed(pinnedContent, requestedCharacterId(request));
+  }
+
+  const storedSnapshot = request.story.campaign?.characterSnapshot;
+  const character = storedSnapshot
+    ? playableCharacterSchema.parse(storedSnapshot)
+    : legacyWorldContent(request.story, requestedCharacterId(request)).playableCharacters[0];
+  if (!character) throw Object.assign(new Error("The portable campaign does not contain a character snapshot to preserve."), { statusCode: 400 });
+  return {
+    character,
+    rpgStats: Array.isArray(character.rpgStats) ? character.rpgStats : [],
+    defaultTriggers: Array.isArray(character.defaultTriggers) ? character.defaultTriggers : []
+  };
 }
 
 function duplicateResult(row: ImportRow): StoryImportResult {
@@ -168,7 +202,7 @@ async function reconnectMatchingCampaign(
         AND ($5::text IS NULL OR c.selected_character_id = $5)
       ORDER BY (c.id = $6::uuid) DESC, c.updated_at DESC
       FOR SHARE OF c`,
-    [ownerUserId, worldTitle(request.story), request.story.turns.length, requiredWorldVersionId ?? null,
+    [ownerUserId, campaignTitle(request.story), request.story.turns.length, requiredWorldVersionId ?? null,
       requestedCharacterId(request) ?? null, priorImport?.campaign_id ?? null]
   );
   const requestedTurns = request.story.turns.map(turnIdentity);
@@ -359,7 +393,7 @@ export async function importLegacyStory(
       [worldVersionId, ownerUserId]
     );
     const pinnedContent = worldContentSchema.parse(pinnedContentResult.rows[0]?.content);
-    const characterSeed = campaignCharacterSeed(pinnedContent, requestedCharacterId(request));
+    const characterSeed = importedCharacterSeed(pinnedContent, request, Boolean(existingTarget));
     const selectedCharacterSnapshot = characterSnapshot(characterSeed.character);
 
     const sanitizedSettings = removeProviderSecrets(request.story.settings);
@@ -374,7 +408,7 @@ export async function importLegacyStory(
          owner_user_id, world_version_id, title, active_turn_number, story_length_profile,
          legacy_settings, selected_character_id, character_snapshot
        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-      [ownerUserId, worldVersionId, worldTitle(request.story), request.story.turns.length, storyLengthProfile,
+      [ownerUserId, worldVersionId, campaignTitle(request.story), request.story.turns.length, storyLengthProfile,
         json(sanitizedSettings), characterSeed.character.id, json(selectedCharacterSnapshot)]
     );
     const campaignId = campaignInsert.rows[0]?.id;
@@ -405,6 +439,8 @@ export async function importLegacyStory(
           sourceName: request.sourceName,
           sourceHash,
           selectedCharacterId: characterSeed.character.id,
+          characterStrategy: request.characterStrategy
+            ?? (existingTarget && isPortableCampaign(request) ? "preserve_source" : "map_to_target"),
           world: request.story.worldImportProvenance ?? null,
           story: request.story.storyImportProvenance ?? null
         }),
@@ -540,12 +576,15 @@ export async function importLegacyStory(
 export async function previewLegacyStoryImport(pool: DatabasePool, request: StoryImportRequest) {
   const sourceHash = importSourceHash(request);
   const ownerUserId = await initialOwnerId(pool);
+  let targetContent: WorldContent | null = null;
   if (request.targetWorldVersionId) {
-    const target = await pool.query(
-      "SELECT 1 FROM world_versions WHERE id = $1 AND owner_user_id = $2",
+    const target = await pool.query<{ content: WorldContent }>(
+      "SELECT content FROM world_versions WHERE id = $1 AND owner_user_id = $2",
       [request.targetWorldVersionId, ownerUserId]
     );
     if (!target.rowCount) throw Object.assign(new Error("The selected target world version was not found."), { statusCode: 404 });
+    targetContent = worldContentSchema.parse(target.rows[0]?.content);
+    importedCharacterSeed(targetContent, request, true);
   }
   const prior = await pool.query<{ campaign_id: string | null }>(
     "SELECT campaign_id FROM imports WHERE owner_user_id = $1 AND source_hash = $2 AND status = 'completed'",
@@ -562,11 +601,17 @@ export async function previewLegacyStoryImport(pool: DatabasePool, request: Stor
   const credentialsRemoved = stableStringify(sanitizedSettings) !== stableStringify(request.story.settings ?? {});
   const warnings = [
     ...(credentialsRemoved ? ["Provider credentials and endpoint secrets will not be imported."] : []),
-    ...(missingNarration.length ? [`${missingNarration.length} turn(s) have no narration and must be corrected before import.`] : [])
+    ...(missingNarration.length ? [`${missingNarration.length} turn(s) have no narration and must be corrected before import.`] : []),
+    ...(targetContent && isPortableCampaign(request) && (request.characterStrategy ?? "preserve_source") === "preserve_source"
+      ? ["The exported campaign character and accumulated state will be preserved; target-world defaults will not be merged automatically."]
+      : []),
+    ...(targetContent && isPortableCampaign(request) && request.story.formatVersion !== 2
+      ? ["This older campaign backup does not contain a complete character snapshot; Nexus will preserve the compatible character text and campaign state available in the file."]
+      : [])
   ];
   return {
     kind: "campaign" as const,
-    title: worldTitle(request.story),
+    title: campaignTitle(request.story),
     duplicate: Boolean(prior.rows[0]?.campaign_id),
     existingCampaignId: prior.rows[0]?.campaign_id ?? null,
     valid: missingNarration.length === 0,

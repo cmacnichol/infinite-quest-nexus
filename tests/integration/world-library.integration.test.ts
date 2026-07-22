@@ -607,7 +607,17 @@ integration("World Library and campaign version integration", () => {
     );
     const exported = await exportCampaign(pool, campaign.id);
     const serialized = JSON.stringify(exported);
-    expect(exported).toMatchObject({ format: "infinite-quest-campaign", formatVersion: 1 });
+    expect(exported).toMatchObject({
+      format: "infinite-quest-campaign",
+      formatVersion: 2,
+      campaign: {
+        sourceCampaignId: campaign.id,
+        sourceWorldVersionId: world.version.worldVersionId,
+        selectedCharacterId: expect.any(String),
+        characterSnapshot: expect.any(Object),
+        stateRevision: expect.any(Number)
+      }
+    });
     expect(serialized).not.toContain("test-credential-placeholder");
     expect(serialized).not.toContain("provider.invalid");
     expect(serialized).not.toContain("private-response-id");

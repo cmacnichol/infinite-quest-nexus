@@ -27,6 +27,9 @@ let discoveredProfileModels = [];
 let discoveredEmbeddingModels = [];
 let providerModelPickerTarget = "provider";
 let embeddingJobPollSequence = 0;
+let transferPreviewSequence = 0;
+let transferPreview = null;
+let transferIdempotencyKey = "";
 const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
 const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
 const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
@@ -717,6 +720,7 @@ function namedDependencyCounts(values = {}) {
     campaigns: "campaign",
     historicalCampaignLinks: "historical campaign link",
     campaignMigrations: "campaign migration record",
+    campaignTransfers: "campaign transfer record",
     chronicleMemories: "Chronicle memory",
     memories: "Chronicle memory",
     modelChains: "model chain",
@@ -1004,7 +1008,7 @@ async function loadCampaigns(preselectId = "") {
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
     selectedCampaign = null;
     updateStoryViewLink();
-    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationEnabled, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.saveIllustrationConfig, elements.discoverIllustrationModels].forEach((element) => { element.disabled = true; });
+    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationEnabled, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.saveIllustrationConfig, elements.discoverIllustrationModels].forEach((element) => { element.disabled = true; });
     elements.illustrationEnabled.checked = false;
     renderIllustrationSettingsVisibility();
     elements.campaignCostSection.classList.add("hidden");
@@ -1040,7 +1044,7 @@ async function selectCampaign(campaign) {
   elements.saveIllustrationConfig.disabled = false;
   elements.campaignTitle.value = campaign.title;
   elements.campaignStatus.value = campaign.status;
-  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationEnabled, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts].forEach((element) => { element.disabled = false; });
+  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationEnabled, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts].forEach((element) => { element.disabled = false; });
   elements.campaignTextProvider.value = campaign.textProviderProfileId || "";
   elements.campaignImageProvider.value = campaign.imageProviderProfileId || "";
   elements.campaignStoryLengthProfile.value = campaign.storyLengthProfile || "standard";
@@ -1109,6 +1113,151 @@ async function migrateSelectedCampaign() {
     campaignMessage(`Campaign migrated to world version ${target.versionNumber}. The next generation will bootstrap a fresh model chain from database state.`, "success");
   } catch (error) {
     campaignMessage(error.message || String(error), "error");
+  }
+}
+
+function transferRequest() {
+  return {
+    targetWorldVersionId: elements.transferTargetVersion.value,
+    title: elements.transferCampaignTitle.value.trim(),
+    characterStrategy: "preserve_source",
+    stateStrategy: "preserve",
+    targetDefaultsPolicy: "retain_source"
+  };
+}
+
+function resetTransferPreview(message = "Choose a target world and version to check compatibility.") {
+  transferPreview = null;
+  elements.transferPreviewSummary.textContent = message;
+  elements.transferPreviewSummary.className = "status";
+  elements.transferFindings.replaceChildren();
+  elements.transferWarningAcknowledgement.checked = false;
+  elements.transferWarningAcknowledgementField.classList.add("hidden");
+  elements.confirmTransferCampaign.disabled = true;
+}
+
+function renderTransferPreview(preview) {
+  const findings = Array.isArray(preview.findings) ? preview.findings : [];
+  const blocking = findings.filter((finding) => finding.severity === "blocking");
+  const warnings = findings.filter((finding) => finding.severity === "warning");
+  const counts = preview.counts || {};
+  const countParts = [
+    Number.isFinite(Number(counts.turns ?? preview.turnCount)) ? `${number(counts.turns ?? preview.turnCount)} accepted turns` : "",
+    Number.isFinite(Number(counts.assets ?? preview.assetCount)) ? `${number(counts.assets ?? preview.assetCount)} asset references` : "",
+    Number.isFinite(Number(counts.summaries ?? preview.summaryCount)) ? `${number(counts.summaries ?? preview.summaryCount)} summaries` : ""
+  ].filter(Boolean);
+  elements.transferPreviewSummary.textContent = blocking.length
+    ? `Transfer blocked by ${number(blocking.length)} compatibility issue${blocking.length === 1 ? "" : "s"}.`
+    : `Ready to create an independent copy${countParts.length ? ` with ${countParts.join(", ")}` : ""}.`;
+  elements.transferPreviewSummary.className = `status ${blocking.length ? "error" : "success"}`;
+  elements.transferFindings.replaceChildren(...findings.map((finding) => {
+    const item = document.createElement("li");
+    item.className = "transfer-finding";
+    item.dataset.severity = finding.severity || "info";
+    item.textContent = finding.message || finding.code || "Compatibility finding";
+    return item;
+  }));
+  elements.transferWarningAcknowledgementField.classList.toggle("hidden", !warnings.length || !!blocking.length);
+  elements.transferWarningAcknowledgement.checked = false;
+  elements.confirmTransferCampaign.disabled = !!blocking.length || !!warnings.length || preview.allowed === false;
+}
+
+async function previewCampaignTransfer() {
+  const sequence = ++transferPreviewSequence;
+  if (!selectedCampaign || !elements.transferTargetVersion.value || !elements.transferCampaignTitle.value.trim()) {
+    resetTransferPreview();
+    return;
+  }
+  resetTransferPreview("Checking target-world compatibility…");
+  try {
+    const preview = await api(`/api/v1/campaigns/${selectedCampaign.id}/transfer-world/preview`, {
+      method: "POST",
+      body: JSON.stringify(transferRequest())
+    });
+    if (sequence !== transferPreviewSequence || !elements.transferCampaignDialog.open) return;
+    transferPreview = preview;
+    renderTransferPreview(preview);
+  } catch (error) {
+    if (sequence !== transferPreviewSequence) return;
+    elements.transferPreviewSummary.textContent = error.message || String(error);
+    elements.transferPreviewSummary.className = "status error";
+  }
+}
+
+async function loadTransferTargetVersions() {
+  const worldId = elements.transferTargetWorld.value;
+  resetTransferPreview(worldId ? "Loading published versions…" : undefined);
+  elements.transferTargetVersion.replaceChildren(new Option(worldId ? "Loading published versions…" : "Select a target world first", ""));
+  elements.transferTargetVersion.disabled = true;
+  if (!worldId) return;
+  try {
+    const world = await api(`/api/v1/worlds/${worldId}`);
+    elements.transferTargetVersion.replaceChildren(new Option("Select a published version", ""));
+    for (const version of [...(world.versions || [])].reverse()) {
+      elements.transferTargetVersion.append(new Option(`Version ${version.versionNumber}${version.releaseNotes ? ` · ${version.releaseNotes}` : ""}`, version.id));
+    }
+    elements.transferTargetVersion.disabled = !(world.versions || []).length;
+    resetTransferPreview((world.versions || []).length ? undefined : "This world has no published version available for transfer.");
+  } catch (error) {
+    resetTransferPreview(error.message || String(error));
+    elements.transferPreviewSummary.className = "status error";
+  }
+}
+
+async function openCampaignTransfer() {
+  if (!selectedCampaign) return;
+  transferIdempotencyKey = crypto.randomUUID();
+  elements.transferCampaignSource.replaceChildren();
+  const sourceTitle = document.createElement("strong");
+  sourceTitle.textContent = selectedCampaign.title;
+  const sourceDetail = document.createElement("span");
+  sourceDetail.textContent = `${selectedCampaign.worldTitle} · version ${selectedCampaign.worldVersionNumber} · ${number(selectedCampaign.activeTurnNumber)} accepted turns`;
+  elements.transferCampaignSource.append(sourceTitle, sourceDetail);
+  elements.transferCampaignTitle.value = `${selectedCampaign.title} — transferred`;
+  elements.transferTargetWorld.replaceChildren(new Option("Select another world", ""));
+  for (const world of worlds.filter((world) => world.id !== selectedCampaign.worldId && world.status !== "archived" && world.latestVersionNumber)) {
+    elements.transferTargetWorld.append(new Option(`${world.title} · version ${world.latestVersionNumber}`, world.id));
+  }
+  elements.transferTargetVersion.replaceChildren(new Option("Select a target world first", ""));
+  elements.transferTargetVersion.disabled = true;
+  resetTransferPreview(worlds.some((world) => world.id !== selectedCampaign.worldId && world.status !== "archived" && world.latestVersionNumber)
+    ? undefined
+    : "No other active world has a published version available.");
+  elements.transferCampaignDialog.showModal();
+}
+
+async function commitCampaignTransfer(event) {
+  event.preventDefault();
+  if (!selectedCampaign || !transferPreview) return;
+  const sourceCampaignId = selectedCampaign.id;
+  elements.confirmTransferCampaign.disabled = true;
+  elements.cancelTransferCampaign.disabled = true;
+  elements.transferPreviewSummary.textContent = "Creating the transferred campaign and rebuilding Chronicle…";
+  elements.transferPreviewSummary.className = "status";
+  try {
+    const result = await api(`/api/v1/campaigns/${sourceCampaignId}/transfer-world`, {
+      method: "POST",
+      body: JSON.stringify({
+        ...transferRequest(),
+        idempotencyKey: transferIdempotencyKey,
+        expectedActiveTurnNumber: transferPreview.expectedActiveTurnNumber,
+        expectedStateRevision: transferPreview.expectedStateRevision,
+        sourceFingerprint: transferPreview.sourceFingerprint,
+        note: "Explicit cross-world transfer from Campaign Management."
+      })
+    });
+    elements.transferCampaignDialog.close();
+    await Promise.all([loadWorlds(), loadCampaigns(result.targetCampaignId)]);
+    campaignMessage("Transferred campaign created and selected. Review it before separately archiving the original campaign; the original remains unchanged.", "success");
+  } catch (error) {
+    elements.transferPreviewSummary.textContent = error.statusCode === 409
+      ? `${error.message || "The source campaign changed."} Preview compatibility again before retrying.`
+      : error.message || String(error);
+    elements.transferPreviewSummary.className = "status error";
+    transferPreview = null;
+  } finally {
+    elements.cancelTransferCampaign.disabled = false;
+    elements.confirmTransferCampaign.disabled = !transferPreview;
   }
 }
 
@@ -2110,16 +2259,17 @@ async function loadLatestImageJob(monitor = false) {
   if (monitor && ["queued", "generating"].includes(job.status)) void monitorImageJob(job.id);
 }
 
-async function importStoryObject(story, sourceName) {
+async function importStoryObject(story, sourceName, requestOverrides = {}) {
+  const request = { sourceName, story, ...requestOverrides };
   const preview = await api("/api/v1/imports/legacy-story/preview", {
     method: "POST",
-    body: JSON.stringify({ sourceName, story })
+    body: JSON.stringify(request)
   });
   if (!preview.valid) throw new Error(preview.warnings.join(" ") || "The campaign export is not valid for import.");
   setStatus(`Importing ${story.turns?.length || 0} turns into PostgreSQL and building Chronicle memory…`);
   const result = await api("/api/v1/imports/legacy-story", {
     method: "POST",
-    body: JSON.stringify({ sourceName, story })
+    body: JSON.stringify(request)
   });
   const duplicate = result.duplicate ? "The story was already imported; the existing campaign was selected." : "Import completed.";
   setStatus(`${duplicate} ${result.stats.turnCount} turns and ${result.stats.memoryCount} memories are available. Complete history is approximately ${number(result.stats.estimatedHistoryTokens)} tokens. Use “Load story” in Campaigns to open the database-backed story.`, "success");
@@ -2151,6 +2301,84 @@ function infiniteWorldsRequest(sourceName, sourceText, sourceKind = elements.inf
 function showInfiniteWorldsOptions(show) {
   elements.infiniteWorldsOptions.classList.toggle("hidden", !show);
   if (!show) elements.infiniteWorldsCharacterField.classList.add("hidden");
+}
+
+function showCampaignImportOptions(show) {
+  elements.campaignImportOptions.classList.toggle("hidden", !show);
+  if (!show) return;
+  const previousWorldId = elements.campaignImportWorld.value;
+  const eligible = worlds.filter((world) => world.status !== "archived" && world.latestVersionId);
+  elements.campaignImportWorld.replaceChildren(
+    new Option(eligible.length ? "Choose a target world" : "No published worlds available", ""),
+    ...eligible.map((world) => new Option(`${world.title} · latest version ${world.latestVersionNumber}`, world.id))
+  );
+  if (eligible.some((world) => world.id === previousWorldId)) elements.campaignImportWorld.value = previousWorldId;
+  updateCampaignImportDestinationVisibility();
+}
+
+function updateCampaignImportDestinationVisibility() {
+  const existing = elements.campaignImportDestination.value === "existing";
+  elements.campaignImportWorldField.classList.toggle("hidden", !existing);
+  elements.campaignImportVersionField.classList.toggle("hidden", !existing);
+}
+
+function campaignImportRequest(sourceName, story) {
+  const targetWorldVersionId = elements.campaignImportDestination.value === "existing"
+    ? elements.campaignImportVersion.value : "";
+  return {
+    sourceName,
+    story,
+    ...(targetWorldVersionId ? { targetWorldVersionId, characterStrategy: "preserve_source" } : {})
+  };
+}
+
+async function previewPortableCampaign(sourceName, story) {
+  if (elements.campaignImportOptions.classList.contains("hidden")) {
+    elements.campaignImportDestination.value = "embedded";
+    elements.campaignImportWorld.value = "";
+    elements.campaignImportVersion.replaceChildren(new Option("Choose a target world first", ""));
+  }
+  showCampaignImportOptions(true);
+  const request = campaignImportRequest(sourceName, story);
+  if (elements.campaignImportDestination.value === "existing" && !request.targetWorldVersionId) {
+    selectedImport = null;
+    elements.importStory.disabled = true;
+    elements.importPreview.textContent = "Choose a published target world version before importing this campaign backup.";
+    setStatus("Select the exact destination version, then review the campaign preview.");
+    return;
+  }
+  const preview = await api("/api/v1/imports/legacy-story/preview", { method: "POST", body: JSON.stringify(request) });
+  selectedImport = { kind: "campaign", request };
+  const destination = request.targetWorldVersionId ? " · attaching to selected world version" : " · using embedded world";
+  elements.importPreview.textContent = `${preview.duplicate ? "Duplicate" : "New"} campaign${destination} · ${preview.counts.turns} turns · approximately ${number(preview.counts.estimatedHistoryTokens)} history tokens${preview.warnings.length ? ` · ${preview.warnings.join(" ")}` : ""}`;
+  elements.importStory.disabled = !preview.valid;
+  setStatus(preview.valid ? (preview.duplicate ? "This campaign was already imported for this destination. Importing will select the existing record." : "Campaign and destination validated and ready to import.") : "Correct the validation warnings before importing.", preview.valid ? (preview.duplicate ? "" : "success") : "error");
+}
+
+async function refreshPortableCampaignPreview() {
+  if (!selectedImportSource) return;
+  let story;
+  try { story = parseImportJson(selectedImportSource.sourceText); } catch { return; }
+  if (!story?.world || !Array.isArray(story.turns)) return;
+  await previewPortableCampaign(selectedImportSource.sourceName, story);
+}
+
+async function loadCampaignImportVersions() {
+  elements.campaignImportVersion.replaceChildren(new Option("Loading published versions…", ""));
+  const worldId = elements.campaignImportWorld.value;
+  if (!worldId) {
+    elements.campaignImportVersion.replaceChildren(new Option("Choose a target world first", ""));
+    await refreshPortableCampaignPreview();
+    return;
+  }
+  const world = await api(`/api/v1/worlds/${worldId}`);
+  const versions = [...(world.versions || [])].sort((a, b) => b.versionNumber - a.versionNumber);
+  elements.campaignImportVersion.replaceChildren(
+    new Option(versions.length ? "Choose a published version" : "No published versions", ""),
+    ...versions.map((version) => new Option(`Version ${version.versionNumber}${version.releaseNotes ? ` · ${version.releaseNotes}` : ""}`, version.id))
+  );
+  if (versions.length === 1) elements.campaignImportVersion.value = versions[0].id;
+  await refreshPortableCampaignPreview();
 }
 
 async function previewInfiniteWorldsSource(sourceName, sourceText, sourceKind) {
@@ -2205,6 +2433,7 @@ async function previewImportSource(sourceName, sourceText, sourceKind = "auto", 
   selectedImport = null;
   elements.importStory.disabled = true;
   elements.importProgressContainer.classList.add("hidden");
+  showCampaignImportOptions(false);
   elements.importPreview.textContent = "Validating content without writing to the database…";
   let parsed = null;
   try { parsed = parseImportJson(sourceText); } catch { /* TXT imports are validated by the server */ }
@@ -2212,11 +2441,13 @@ async function previewImportSource(sourceName, sourceText, sourceKind = "auto", 
   const looksLikeInfiniteWorldsJson = parsed && (Array.isArray(parsed.possibleCharacters) || (Array.isArray(parsed.triggerEvents) && ("background" in parsed || "instructions" in parsed)));
   const looksLikeCyoaJson = parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.chapters && parsed.info && typeof parsed.chapters === "object";
   if (forcedInfiniteWorlds || looksLikeInfiniteWorldsJson || looksLikeCyoaJson || sourceName.toLowerCase().endsWith(".txt")) {
+    showCampaignImportOptions(false);
     await previewInfiniteWorldsSource(sourceName, sourceText, looksLikeCyoaJson && sourceKind === "auto" ? "cyoa_json" : sourceKind);
     return;
   }
   showInfiniteWorldsOptions(false);
   if (parsed?.format === "infinite-quest-world") {
+    showCampaignImportOptions(false);
     const request = { sourceName, worldExport: parsed };
     const preview = await api("/api/v1/imports/world/preview", { method: "POST", body: JSON.stringify(request) });
     selectedImport = { kind: "world", request };
@@ -2226,12 +2457,7 @@ async function previewImportSource(sourceName, sourceText, sourceKind = "auto", 
     return;
   }
   if (parsed?.world && Array.isArray(parsed.turns)) {
-    const request = { sourceName, story: parsed };
-    const preview = await api("/api/v1/imports/legacy-story/preview", { method: "POST", body: JSON.stringify(request) });
-    selectedImport = { kind: "campaign", request };
-    elements.importPreview.textContent = `${preview.duplicate ? "Duplicate" : "New"} campaign · ${preview.counts.turns} turns · approximately ${number(preview.counts.estimatedHistoryTokens)} history tokens${preview.warnings.length ? ` · ${preview.warnings.join(" ")}` : ""}`;
-    elements.importStory.disabled = !preview.valid;
-    setStatus(preview.valid ? (preview.duplicate ? "This campaign was already imported. Importing will select the existing record." : "Campaign validated and ready to import.") : "Correct the validation warnings before importing.", preview.valid ? (preview.duplicate ? "" : "success") : "error");
+    await previewPortableCampaign(sourceName, parsed);
     return;
   }
   throw new Error("The content is neither an Infinite Quest world/campaign export nor a recognized Infinite Worlds export.");
@@ -2383,7 +2609,7 @@ async function importStory() {
       await loadWorlds(result.worldId);
       setStatus(result.duplicate ? "The world was already imported; the existing World Library record was selected." : "World imported with an immutable version and editable draft.", "success");
     } else {
-      await importStoryObject(selectedImport.request.story, selectedImport.request.sourceName);
+      await importStoryObject(selectedImport.request.story, selectedImport.request.sourceName, selectedImport.request);
     }
   } catch (error) {
     if (progressTimer) clearInterval(progressTimer);
@@ -2523,6 +2749,16 @@ elements.deleteDialog.addEventListener("close", () => {
   if (resolve) resolve(confirmed);
 });
 elements.importStory.addEventListener("click", importStory);
+elements.campaignImportDestination.addEventListener("change", async () => {
+  updateCampaignImportDestinationVisibility();
+  if (elements.campaignImportDestination.value === "existing") {
+    await loadCampaignImportVersions();
+  } else {
+    await refreshPortableCampaignPreview();
+  }
+});
+elements.campaignImportWorld.addEventListener("change", loadCampaignImportVersions);
+elements.campaignImportVersion.addEventListener("change", refreshPortableCampaignPreview);
 elements.importBrowserState.addEventListener("click", importBrowserState);
 elements.newWorld.addEventListener("click", newWorld);
 elements.refreshWorlds.addEventListener("click", () => loadWorlds().catch((error) => worldMessage(error.message || String(error), "error")));
@@ -2584,6 +2820,20 @@ elements.deleteWorld.addEventListener("click", deleteSelectedWorld);
 elements.refreshCampaigns.addEventListener("click", () => loadCampaigns().catch((error) => setStatus(error.message, "error")));
 elements.campaignForm.addEventListener("submit", saveSelectedCampaign);
 elements.migrateCampaign.addEventListener("click", migrateSelectedCampaign);
+elements.transferCampaign.addEventListener("click", openCampaignTransfer);
+elements.cancelTransferCampaign.addEventListener("click", () => elements.transferCampaignDialog.close());
+elements.transferTargetWorld.addEventListener("change", loadTransferTargetVersions);
+elements.transferTargetVersion.addEventListener("change", previewCampaignTransfer);
+elements.transferCampaignTitle.addEventListener("change", previewCampaignTransfer);
+elements.transferWarningAcknowledgement.addEventListener("change", () => {
+  elements.confirmTransferCampaign.disabled = !transferPreview || !elements.transferWarningAcknowledgement.checked;
+});
+elements.transferCampaignForm.addEventListener("submit", commitCampaignTransfer);
+elements.transferCampaignDialog.addEventListener("close", () => {
+  transferPreviewSequence += 1;
+  transferPreview = null;
+  transferIdempotencyKey = "";
+});
 elements.exportCampaign.addEventListener("click", exportSelectedCampaign);
 elements.loadCampaign.addEventListener("click", loadSelectedCampaign);
 elements.deleteCampaign.addEventListener("click", deleteSelectedCampaign);

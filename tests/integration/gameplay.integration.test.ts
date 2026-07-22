@@ -379,7 +379,12 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     const exported = jsonExport.json();
     expect(exported).toMatchObject({
       format: "infinite-quest-campaign",
-      formatVersion: 1,
+      formatVersion: 2,
+      campaign: {
+        sourceCampaignId: campaignId,
+        sourceWorldVersionId: expect.any(String),
+        characterSnapshot: expect.any(Object)
+      },
       world: { title: worldTitle },
       settings: { storyLength: "long" }
     });
