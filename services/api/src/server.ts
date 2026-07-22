@@ -21,7 +21,8 @@ import {
   playerCampaignConfigSchema,
   providerProfileInputSchema,
   providerProfileUpdateSchema,
-  providerTextRequestSchema
+  providerTextRequestSchema,
+  turnInputClassificationRequestSchema
 } from "../../../packages/contracts/src/generation.js";
 import {
   campaignCreateSchema,
@@ -90,6 +91,7 @@ import {
 } from "./world-service.js";
 import { generatePlayableCharacter } from "./world-generator-service.js";
 import { getCampaignCostSummary, turnReportedCosts } from "./cost-service.js";
+import { classifyTurnInput } from "./turn-intent-service.js";
 import { previewCampaignWorldTransfer, transferCampaignWorld } from "./campaign-transfer-service.js";
 
 type BuildServerOptions = {
@@ -417,7 +419,8 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     const ownerUserId = await initialOwnerId(pool);
     const campaignId = uuidSchema.parse(request.params.campaignId);
     const result = await pool.query(
-      `SELECT id, turn_number AS "turnNumber", action, narration, choices,
+      `SELECT id, turn_number AS "turnNumber", action, input_mode AS "inputMode",
+              input_mode_source AS "inputModeSource", narration, choices,
               custom_action_suggestion AS "customActionSuggestion", image_prompt AS "imagePrompt",
               image_url AS "imageUrl", accepted_at AS "acceptedAt"
          FROM turns
@@ -460,6 +463,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     const result = await pool.query(
       `SELECT c.id, c.title, c.active_turn_number AS "activeTurnNumber", c.world_version_id AS "worldVersionId",
               c.story_length_profile AS "storyLengthProfile", c.updated_at AS "updatedAt",
+              c.turn_control_style AS "turnControlStyle",
               c.selected_character_id AS "selectedCharacterId", c.character_snapshot AS "characterSnapshot",
               c.legacy_settings AS "legacySettings", c.status,
               w.id AS "worldId", w.title AS "worldTitle", wv.version_number AS "worldVersionNumber",
@@ -467,6 +471,8 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
               cs.rpg_stats AS "rpgStats", cs.event_triggers AS "eventTriggers", cs.trackers AS "trackers",
               pending.id AS "pendingGenerationId", pending.status AS "pendingGenerationStatus",
               pending.action AS "pendingGenerationAction", pending.operation_kind AS "pendingGenerationOperationKind",
+              pending.requested_input_mode AS "pendingRequestedInputMode",
+              pending.resolved_input_mode AS "pendingResolvedInputMode", pending.input_mode_source AS "pendingInputModeSource",
               pending.expected_turn_number AS "pendingGenerationExpectedTurnNumber",
               pending.created_at AS "pendingGenerationCreatedAt", pending.updated_at AS "pendingGenerationUpdatedAt"
          FROM campaigns c
@@ -474,7 +480,8 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
          JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
          LEFT JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
          LEFT JOIN LATERAL (
-           SELECT id, status, action, operation_kind, expected_turn_number, created_at, updated_at
+           SELECT id, status, action, operation_kind, requested_input_mode, resolved_input_mode, input_mode_source,
+                  expected_turn_number, created_at, updated_at
              FROM generation_jobs
             WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
               AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
@@ -555,6 +562,15 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
         uuidSchema.parse(request.params.campaignId),
         campaignBranchSchema.parse(request.body)
       )
+    )
+  ));
+
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/turn-input/classify", async (request) => (
+    classifyTurnInput(
+      pool,
+      uuidSchema.parse(request.params.campaignId),
+      turnInputClassificationRequestSchema.parse(request.body),
+      config.credentialEncryptionKey
     )
   ));
 

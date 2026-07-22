@@ -82,6 +82,7 @@ export default withMermaid({
             { text: "Overview", link: "/player-guide/" },
             { text: "Player interface", link: "/player-guide/interface" },
             { text: "Start or resume", link: "/player-guide/starting-a-story" },
+            { text: "Turn input modes", link: "/player-guide/turn-input-modes" },
             { text: "Actions and choices", link: "/player-guide/actions-and-choices" },
             { text: "Characters and statistics", link: "/player-guide/characters-and-stats" },
             { text: "Story response length", link: "/player-guide/story-length" },
@@ -145,6 +146,7 @@ export default withMermaid({
           collapsed: true,
           items: [
             { text: "Story text", link: "/nexus-guide/providers/text" },
+            { text: "Turn intent", link: "/nexus-guide/providers/turn-intent" },
             { text: "Embeddings", link: "/nexus-guide/providers/embeddings" },
             { text: "Images", link: "/nexus-guide/providers/images" },
             { text: "Model discovery", link: "/nexus-guide/providers/model-discovery" },
@@ -257,7 +259,8 @@ export default withMermaid({
             { text: "Character rosters", link: "/architecture/0013-playable-character-rosters" },
             { text: "Roster-only guidance", link: "/architecture/0014-roster-only-world-character-guidance" },
             { text: "World-version deletion", link: "/architecture/0015-deletable-unused-world-versions" },
-            { text: "Reviewed character authoring", link: "/architecture/0016-reviewed-character-authoring" }
+            { text: "Reviewed character authoring", link: "/architecture/0016-reviewed-character-authoring" },
+            { text: "Turn input intent", link: "/architecture/0021-turn-input-intent-classification" }
           ]
         }
       ],

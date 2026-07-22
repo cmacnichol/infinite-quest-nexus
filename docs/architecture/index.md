@@ -20,6 +20,7 @@ Architecture decision records (ADRs) preserve consequential design decisions and
 - [ADR 0017: Staged latest-turn replacement](./0017-staged-latest-turn-replacement.md)
 - [ADR 0018: Canonical facts use structured, rebuildable projections](./0018-structured-canonical-fact-projections.md)
 - [ADR 0020: Retire the legacy player from the runtime](./0020-retire-legacy-player-runtime.md)
+- [ADR 0021: Typed turn input and optional intent classification](./0021-turn-input-intent-classification.md)
 
 ## World Library and characters
 

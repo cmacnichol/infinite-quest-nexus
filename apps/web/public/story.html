@@ -57,9 +57,30 @@
 
         <div class="input-action">
           <div class="choices" id="choiceArea"></div>
-          <label>Or type any action you want below
-            <textarea id="freeAction" placeholder="A different story-aware suggestion will appear here after each turn..."></textarea>
+          <fieldset id="turnInputModeField" class="turn-input-mode-field">
+            <legend>How should the Story Engine interpret your prompt?</legend>
+            <div id="turnInputModeSelector" class="turn-input-mode-selector" role="radiogroup" aria-label="Turn input mode">
+              <button id="turnInputModeAuto" type="button" role="radio" aria-checked="true" data-turn-input-mode="auto">Auto</button>
+              <button id="turnInputModeAction" type="button" role="radio" aria-checked="false" data-turn-input-mode="action">Action</button>
+              <button id="turnInputModeScene" type="button" role="radio" aria-checked="false" data-turn-input-mode="scene">Scene direction</button>
+            </div>
+            <span id="turnInputModeLock" class="turn-input-mode-lock hidden">Action only for this campaign</span>
+          </fieldset>
+          <label><span id="turnInputLabel">Describe what you want to do or what happens next</span>
+            <textarea id="freeAction" maxlength="12000" aria-describedby="turnInputHelp turnInputCount" placeholder="Describe an action, dialogue, or the scene events and details that should happen..."></textarea>
           </label>
+          <div class="turn-input-guidance">
+            <span id="turnInputHelp">Auto decides whether your prompt is an attempted action or scene direction immediately before submission.</span>
+            <span id="turnInputCount">0 / 12,000</span>
+          </div>
+          <div id="turnIntentDecision" class="turn-intent-decision hidden" role="status" aria-live="polite">
+            <p id="turnIntentDecisionMessage"></p>
+            <div class="row wrap">
+              <button id="btnSubmitAsAction" type="button" class="primary">Submit as Action</button>
+              <button id="btnSubmitAsScene" type="button" class="accent">Submit as Scene</button>
+              <button id="btnReturnToTurnEditor" type="button">Return to editor</button>
+            </div>
+          </div>
           <div class="row wrap">
             <button id="btnTakeAction" class="primary">➜ Take action</button>
             <button id="btnPrev">← Previous turn</button>
@@ -395,6 +416,15 @@
           <label class="settings-option-row" title="When True, it enables the current behavior where the story continues endlessly on a single page. When false, the story only displays the new turn content once it has been generated and confirmed.">
             <span class="settings-option-label">Continuous Reading</span>
             <input type="checkbox" id="userProfileContinuousReading">
+          </label>
+          <label class="settings-field" title="Seeds the turn input style for newly created campaigns. Existing campaigns keep their own setting.">
+            <span class="settings-option-label">Default turn input style for new campaigns</span>
+            <select id="userProfileDefaultTurnControlStyle">
+              <option value="action_only">Player actions only</option>
+              <option value="flexible_auto">Flexible — Auto</option>
+              <option value="flexible_action">Flexible — Action first</option>
+              <option value="flexible_scene">Flexible — Scene direction first</option>
+            </select>
           </label>
         </div>
       </div>

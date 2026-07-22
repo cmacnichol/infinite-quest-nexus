@@ -28,6 +28,7 @@ import {
   buildEventTriggerPrompt,
   buildRpgAssessmentPrompt,
   buildStoryUserPrompt,
+  buildSceneCoveragePrompt,
   callTextProvider,
   containsMechanicsLanguage,
   EVENT_EXTENSION_SYSTEM_PROMPT,
@@ -41,12 +42,15 @@ import {
   parseEventExtension,
   parseRpgAssessment,
   parseStoryOutput,
+  parseSceneCoverageOutput,
   extractPartialNarration,
   performPrivateRoll,
   recoveryInstruction,
   RPG_ASSESSMENT_SYSTEM_PROMPT,
   STORY_PROMPT_PROTOCOL_VERSION,
   STORY_SYSTEM_PROMPT,
+  SCENE_COVERAGE_SYSTEM_PROMPT,
+  sceneCoverageRewriteInstruction,
   providerTransportErrorDetails,
   type ActivatedEvent,
   type PrivateRollResolution
@@ -102,6 +106,9 @@ type ClaimedJob = {
   base_state_private: Record<string, unknown>;
   base_scratchpad_safe_for_prompt: boolean;
   action: string;
+  requested_input_mode: "auto" | "action" | "scene";
+  resolved_input_mode: "action" | "scene";
+  input_mode_source: "explicit" | "auto" | "generated_choice" | "opening_action" | "fallback";
   requested_model: string;
   context_options: MemoryContextQuery & {
     modelContextWindowTokens?: number;
@@ -114,8 +121,52 @@ type ClaimedJob = {
   orchestration_private: OrchestrationPrivate;
 };
 
+function safeTurnInput(value: string): string {
+  const safety = stripMechanicsLeakage(value);
+  if (!safety.text || safety.changed || containsMechanicsLanguage(value)) {
+    throw Object.assign(new Error("The turn input contains game-mechanics or engine language that cannot be sent to story generation. Edit the input and retry; no part of it was silently removed."), {
+      statusCode: 400,
+      code: "unsafe_turn_input"
+    });
+  }
+  return value.trim();
+}
+
+async function validateTurnInputMode(
+  client: DatabaseClient,
+  ownerUserId: string,
+  campaignId: string,
+  request: GenerationRequest,
+  turnControlStyle: string
+) {
+  if (turnControlStyle === "action_only" && request.resolvedInputMode !== "action") {
+    throw Object.assign(new Error("This campaign accepts player actions only."), { statusCode: 400 });
+  }
+  if (request.requestedInputMode !== "auto") {
+    if (request.classificationId) throw Object.assign(new Error("Classification IDs are valid only for Auto input."), { statusCode: 400 });
+    if (request.requestedInputMode !== request.resolvedInputMode) {
+      throw Object.assign(new Error("Explicit turn input mode does not match the resolved mode."), { statusCode: 400 });
+    }
+    return null;
+  }
+  if (!request.classificationId) throw Object.assign(new Error("Auto input requires a current classification."), { statusCode: 400 });
+  const result = await client.query<{ id: string; resolved_mode: "action" | "scene" }>(
+    `SELECT id, resolved_mode FROM turn_input_classifications
+      WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3 AND input_hash = $4
+        AND consumed_at IS NULL AND expires_at > now() FOR UPDATE`,
+    [request.classificationId, ownerUserId, campaignId, sha256(request.action)]
+  );
+  const classification = result.rows[0];
+  if (!classification) throw Object.assign(new Error("The Auto classification is missing, expired, consumed, or does not match this input."), { statusCode: 409 });
+  if (classification.resolved_mode !== request.resolvedInputMode) {
+    throw Object.assign(new Error("The submitted turn mode does not match the Auto classification."), { statusCode: 409 });
+  }
+  await client.query("UPDATE turn_input_classifications SET consumed_at = now() WHERE id = $1", [classification.id]);
+  return classification.id;
+}
+
 type StoryCostOperation = "rpg_assessment" | "event_trigger_before" | "story_generation"
-  | "story_recovery" | "event_trigger_after" | "event_extension";
+  | "story_recovery" | "event_trigger_after" | "event_extension" | "scene_coverage_validation" | "scene_coverage_rewrite";
 
 async function callCampaignTextProvider(
   pool: DatabasePool,
@@ -180,6 +231,7 @@ type OrchestrationInputs = {
 };
 
 export async function enqueueGeneration(pool: DatabasePool, campaignId: string, request: GenerationRequest) {
+  safeTurnInput(request.action);
   const ownerUserId = await initialOwnerId(pool);
   return withTransaction(pool, async (client) => {
     const requestFingerprint = sha256(stableStringify(request));
@@ -192,9 +244,10 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
       }
       return { ...existing.rows[0], duplicate: true };
     }
-    const campaign = await client.query<{ active_turn_number: number; text_provider_profile_id: string | null; story_length_profile: string }>(`SELECT active_turn_number, text_provider_profile_id, story_length_profile FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [campaignId, ownerUserId]);
+    const campaign = await client.query<{ active_turn_number: number; text_provider_profile_id: string | null; story_length_profile: string; turn_control_style: string }>(`SELECT active_turn_number, text_provider_profile_id, story_length_profile, turn_control_style FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [campaignId, ownerUserId]);
     const row = campaign.rows[0];
     if (!row) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    const classificationId = await validateTurnInputMode(client, ownerUserId, campaignId, request, row.turn_control_style);
     const providerProfileId = await resolveEffectiveProviderId(client, ownerUserId, "text", request.providerProfileId || row.text_provider_profile_id);
     if (!providerProfileId) throw Object.assign(new Error("Select a text provider for this campaign or mark a default text provider."), { statusCode: 409 });
     const storyLengthProfile = storyLengthProfileFromUnknown(row.story_length_profile);
@@ -209,11 +262,13 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
       const result = await client.query(
         `INSERT INTO generation_jobs (
            owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
-           action, requested_model, context_options, prompt_protocol_version, recovery_metadata
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           action, requested_input_mode, resolved_input_mode, input_mode_source, turn_input_classification_id,
+           requested_model, context_options, prompt_protocol_version, recovery_metadata
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
          RETURNING id, status, expected_turn_number AS "expectedTurnNumber", created_at AS "createdAt"`,
         [ownerUserId, campaignId, providerProfileId, request.idempotencyKey, row.active_turn_number + 1,
-          request.action, request.model || "", json(contextSnapshot), STORY_PROMPT_PROTOCOL_VERSION, json({ requestFingerprint })]
+          request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
+          request.model || "", json(contextSnapshot), STORY_PROMPT_PROTOCOL_VERSION, json({ requestFingerprint })]
       );
       return { ...result.rows[0], duplicate: false };
     } catch (error) {
@@ -235,6 +290,7 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
 }
 
 export async function enqueueLatestReplacement(pool: DatabasePool, campaignId: string, request: GenerationRetryLatestRequest) {
+  safeTurnInput(request.action);
   const ownerUserId = await initialOwnerId(pool);
   return withTransaction(pool, async (client) => {
     const existing = await client.query<{
@@ -268,13 +324,15 @@ export async function enqueueLatestReplacement(pool: DatabasePool, campaignId: s
       active_turn_number: number;
       text_provider_profile_id: string | null;
       story_length_profile: string;
+      turn_control_style: string;
     }>(
-      `SELECT active_turn_number, text_provider_profile_id, story_length_profile
+      `SELECT active_turn_number, text_provider_profile_id, story_length_profile, turn_control_style
          FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
     const campaign = campaignResult.rows[0];
     if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    const classificationId = await validateTurnInputMode(client, ownerUserId, campaignId, request, campaign.turn_control_style);
     if (campaign.active_turn_number !== request.expectedCurrentTurnNumber) {
       throw Object.assign(
         new Error(`Campaign is at turn ${campaign.active_turn_number}, not ${request.expectedCurrentTurnNumber}.`),
@@ -357,13 +415,15 @@ export async function enqueueLatestReplacement(pool: DatabasePool, campaignId: s
       const inserted = await client.query(
         `INSERT INTO generation_jobs (
            owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
-           action, requested_model, context_options, prompt_protocol_version, recovery_metadata,
+           action, requested_input_mode, resolved_input_mode, input_mode_source, turn_input_classification_id,
+           requested_model, context_options, prompt_protocol_version, recovery_metadata,
            operation_kind, replacement_turn_id, base_turn_number, base_state_private, base_scratchpad_safe_for_prompt, status
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'replace_latest',$11,$12,$13,$14,'replacement_queued')
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'replace_latest',$15,$16,$17,$18,'replacement_queued')
          RETURNING id, status, expected_turn_number AS "expectedTurnNumber",
                    operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", created_at AS "createdAt"`,
         [ownerUserId, campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number,
-          request.action, request.model || "", json(contextSnapshot), STORY_PROMPT_PROTOCOL_VERSION,
+          request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
+          request.model || "", json(contextSnapshot), STORY_PROMPT_PROTOCOL_VERSION,
           json({ requestFingerprint: sha256(stableStringify(request)) }), replacementTurnId, baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt]
       );
       return { ...inserted.rows[0], duplicate: false };
@@ -390,6 +450,8 @@ export async function getGenerationJob(pool: DatabasePool, jobId: string) {
   const result = await pool.query(
     `SELECT id, campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
             expected_turn_number AS "expectedTurnNumber", action, status, attempts,
+            requested_input_mode AS "requestedInputMode", resolved_input_mode AS "resolvedInputMode",
+            input_mode_source AS "inputModeSource",
             operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId",
             base_turn_number AS "baseTurnNumber",
             requested_model AS "requestedModel", provider_response_id AS "providerResponseId",
@@ -410,7 +472,8 @@ export async function getGenerationResult(pool: DatabasePool, jobId: string) {
   const result = await pool.query(
     `SELECT j.id, j.status, j.campaign_id AS "campaignId", j.expected_turn_number AS "expectedTurnNumber",
             j.result_turn_id AS "resultTurnId", j.error_code AS "errorCode", j.error_message AS "errorMessage",
-            t.turn_number AS "turnNumber", t.action, t.narration, t.choices,
+            t.turn_number AS "turnNumber", t.action, t.input_mode AS "inputMode",
+            t.input_mode_source AS "inputModeSource", t.narration, t.choices,
             t.custom_action_suggestion AS "customActionSuggestion", t.image_prompt AS "imagePrompt",
             t.model_metadata AS "modelMetadata", t.mechanics_private AS mechanics,
             t.accepted_at AS "acceptedAt",
@@ -693,13 +756,14 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
       world_version_id: string;
       title: string;
       story_length_profile: string;
+      turn_control_style: string;
       selected_character_id: string | null;
       character_snapshot: Record<string, unknown> | null;
       legacy_settings: Record<string, unknown>;
       text_provider_profile_id: string | null;
       image_provider_profile_id: string | null;
     }>(
-      `SELECT active_turn_number, world_version_id, title, story_length_profile,
+      `SELECT active_turn_number, world_version_id, title, story_length_profile, turn_control_style,
               selected_character_id, character_snapshot, legacy_settings,
               text_provider_profile_id, image_provider_profile_id
          FROM campaigns
@@ -763,12 +827,12 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
     const newCampaignRes = await client.query<{ id: string }>(
       `INSERT INTO campaigns (
          owner_user_id, world_version_id, title, status, active_turn_number,
-         story_length_profile, selected_character_id, character_snapshot, legacy_settings,
+         story_length_profile, turn_control_style, selected_character_id, character_snapshot, legacy_settings,
          text_provider_profile_id, image_provider_profile_id
-       ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+       ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
       [
         ownerUserId, campaign.world_version_id, branchTitle, request.targetTurnNumber,
-        campaign.story_length_profile, campaign.selected_character_id, json(campaign.character_snapshot), json(campaign.legacy_settings),
+        campaign.story_length_profile, campaign.turn_control_style, campaign.selected_character_id, json(campaign.character_snapshot), json(campaign.legacy_settings),
         campaign.text_provider_profile_id, campaign.image_provider_profile_id
       ]
     );
@@ -836,10 +900,10 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
     if (request.targetTurnNumber > 0) {
       await client.query(
         `INSERT INTO turns (
-           campaign_id, owner_user_id, turn_number, source_turn_id, action, narration,
+           campaign_id, owner_user_id, turn_number, source_turn_id, action, input_mode, input_mode_source, narration,
            choices, custom_action_suggestion, image_prompt, image_url, mechanics_private,
            state_snapshot_private, model_metadata, import_metadata, accepted_at, created_at
-         ) SELECT $1, owner_user_id, turn_number, source_turn_id, action, narration,
+         ) SELECT $1, owner_user_id, turn_number, source_turn_id, action, input_mode, input_mode_source, narration,
                   choices, custom_action_suggestion, image_prompt, image_url, mechanics_private,
                   state_snapshot_private, model_metadata, import_metadata, accepted_at, created_at
              FROM turns WHERE campaign_id = $2 AND owner_user_id = $3 AND turn_number <= $4
@@ -903,6 +967,7 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
       status: "active",
       activeTurnNumber: request.targetTurnNumber,
       storyLengthProfile: campaign.story_length_profile,
+      turnControlStyle: campaign.turn_control_style,
       worldVersionId: campaign.world_version_id,
       selectedCharacterId: campaign.selected_character_id,
       textProviderProfileId: campaign.text_provider_profile_id,
@@ -925,6 +990,7 @@ async function claimGeneration(pool: DatabasePool, workerId: string, leaseSecond
        RETURNING j.id, j.owner_user_id, j.campaign_id, j.provider_profile_id, j.expected_turn_number,
                  j.action, j.operation_kind, j.replacement_turn_id, j.base_turn_number, j.base_state_private,
                  j.base_scratchpad_safe_for_prompt,
+                 j.requested_input_mode, j.resolved_input_mode, j.input_mode_source,
                  j.requested_model, j.context_options, j.prompt_protocol_version, j.attempts,
                  j.orchestration_private`,
       [workerId, leaseSeconds]
@@ -1126,10 +1192,11 @@ async function commitStory(
     );
   }
   const turnResult = await client.query<{ id: string }>(
-    `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration, choices,
+    `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, input_mode, input_mode_source, narration, choices,
        custom_action_suggestion, image_prompt, mechanics_private, state_snapshot_private, model_metadata)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
-    [job.owner_user_id, job.campaign_id, job.expected_turn_number, job.action, story.narration, json(story.choices),
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+    [job.owner_user_id, job.campaign_id, job.expected_turn_number, job.action, job.resolved_input_mode, job.input_mode_source,
+      story.narration, json(story.choices),
       story.custom_action_suggestion, story.image_prompt, json(mechanicsPrivate),
       json({ scratchpad: story.scratchpad, trackers, eventTriggers, pendingEventTriggers, rpgStats: inputs.rpgStats,
         continuitySummary: story.continuity_summary, canonicalFacts: story.canonical_facts,
@@ -1204,17 +1271,14 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
   }, Math.max(5000, Math.floor(leaseSeconds * 1000 / 3)));
   try {
     const provider = await loadTextProvider(pool, job.owner_user_id, job.provider_profile_id, credentialSecret, job.requested_model);
-    const strippedAction = stripMechanicsLeakage(job.action).text;
-    const safeAction = strippedAction && !containsMechanicsLanguage(strippedAction)
-      ? strippedAction
-      : "Continue from the current scene through natural fictional events.";
+    const safeAction = safeTurnInput(job.action);
     const storyLength = snapshottedStoryLength(job.context_options);
     const requestedContextWindow = Number(job.context_options.modelContextWindowTokens || provider.contextWindowTokens);
     const effectiveContextWindow = Math.min(provider.contextWindowTokens, requestedContextWindow);
     const inputTokenLimit = effectiveContextWindow - provider.maxOutputTokens;
     const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
     const fixedPromptEnvelope = budgetTokenEstimate(STORY_SYSTEM_PROMPT)
-      + budgetTokenEstimate(buildStoryUserPrompt(emptyPromptContext, safeAction, false, [], storyLength))
+      + budgetTokenEstimate(buildStoryUserPrompt(emptyPromptContext, safeAction, false, [], storyLength, job.resolved_input_mode))
       + 1024;
     if (inputTokenLimit - fixedPromptEnvelope < 512) {
       throw Object.assign(new Error(`The provider context window (${effectiveContextWindow}) cannot fit the configured output reserve (${provider.maxOutputTokens}) and story prompt envelope.`), { code: "context_budget_invalid" });
@@ -1241,7 +1305,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
     const inputs = await loadOrchestrationInputs(pool, job);
     let orchestration = job.orchestration_private || {};
     if (orchestration.roll === undefined) {
-      if (inputs.useRpgStats && job.expected_turn_number > 1 && inputs.rpgStats.length) {
+      if (job.resolved_input_mode === "action" && inputs.useRpgStats && job.expected_turn_number > 1 && inputs.rpgStats.length) {
         let assessment;
         let assessmentError = "";
         try {
@@ -1284,7 +1348,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
       ...fictionGuidanceForEvents(orchestration.beforeEvents || [])
     ].filter((entry) => entry && !containsMechanicsLanguage(entry));
     await pool.query(`UPDATE generation_jobs SET status = 'generating', updated_at = now() WHERE id = $1 AND lease_owner = $2`, [job.id, workerId]);
-    let storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength);
+    let storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength, job.resolved_input_mode);
     const removalPriority = ["chronological", "relevant", "summary_checkpoint", "recent", "open_threads"];
     while (budgetTokenEstimate(STORY_SYSTEM_PROMPT) + budgetTokenEstimate(storyInput) > inputTokenLimit && promptContext.chronicle.length) {
       let removalIndex = -1;
@@ -1293,7 +1357,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
         if (removalIndex >= 0) break;
       }
       promptContext.chronicle.splice(removalIndex >= 0 ? removalIndex : 0, 1);
-      storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength);
+      storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength, job.resolved_input_mode);
     }
     const estimatedPromptTokens = budgetTokenEstimate(STORY_SYSTEM_PROMPT) + budgetTokenEstimate(storyInput);
     if (estimatedPromptTokens > inputTokenLimit) {
@@ -1305,6 +1369,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
       protocol: job.prompt_protocol_version,
       expectedTurnNumber: job.expected_turn_number,
       action: safeAction,
+      inputMode: job.resolved_input_mode,
       storyLength,
       context: promptContext
     }));
@@ -1396,6 +1461,53 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
     }
     if (!parsed.ok) throw new Error("Story validation invariant failed.");
     if (mechanicsLeakFields(parsed.story).length) throw new Error("Mechanics validation invariant failed.");
+    if (job.resolved_input_mode === "scene") {
+      let coverage;
+      try {
+        const coverageResponse = await callCampaignTextProvider(pool, provider, job, "scene_coverage_validation", {
+          systemPrompt: SCENE_COVERAGE_SYSTEM_PROMPT,
+          input: buildSceneCoveragePrompt(safeAction, parsed.story.narration)
+        });
+        coverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
+      } catch {
+        coverage = null;
+      }
+      if (!coverage?.covered) {
+        const rejectedResponse = result.content;
+        result = await callCampaignTextProvider(pool, provider, job, "scene_coverage_rewrite", {
+          ...baseRequest,
+          recoveryInput: sceneCoverageRewriteInstruction(coverage?.missing_required_beats || ["Coverage could not be verified."], coverage?.contradictions || []),
+          rejectedResponse
+        });
+        parsed = parseStoryOutput(result.content, storyMemoryDefaults);
+        let repairedCoverage = null;
+        if (parsed.ok && !result.outputLimited) {
+          try {
+            const coverageResponse = await callCampaignTextProvider(pool, provider, job, "scene_coverage_validation", {
+              systemPrompt: SCENE_COVERAGE_SYSTEM_PROMPT,
+              input: buildSceneCoveragePrompt(safeAction, parsed.story.narration)
+            });
+            repairedCoverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
+          } catch {
+            repairedCoverage = null;
+          }
+        }
+        if (!parsed.ok || result.outputLimited || !repairedCoverage?.covered) {
+          const details = repairedCoverage
+            ? [...repairedCoverage.missing_required_beats, ...repairedCoverage.contradictions]
+            : ["The required scene beats could not be verified after one rewrite."];
+          await pool.query(
+            `UPDATE generation_jobs SET status = 'recoverable', provider_response_id = $3, provider_finish_reason = $4,
+               partial_output = $5, error_code = 'scene_coverage', error_message = $6,
+               recovery_metadata = recovery_metadata || $7::jsonb, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $8`,
+            [job.id, job.owner_user_id, result.responseId || null, result.finishReason || null, result.content || null,
+              details.join(" ").slice(0, 4000), json({ retryable: true, sceneCoverageRewriteAttempted: true }), workerId]
+          );
+          return true;
+        }
+      }
+    }
     await pool.query(`UPDATE generation_jobs SET status = 'validating', updated_at = now() WHERE id = $1 AND lease_owner = $2`, [job.id, workerId]);
     if (orchestration.afterEvents === undefined) {
       let activated: ActivatedEvent[] = [];

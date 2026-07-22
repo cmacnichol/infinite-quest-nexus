@@ -188,7 +188,7 @@ export async function updateProvider(pool: DatabasePool, providerProfileId: stri
   });
 }
 
-export async function resolveEffectiveProviderId(pool: DatabasePool | DatabaseClient, ownerUserId: string, role: "text" | "image" | "embedding", selectedId?: string | null) {
+export async function resolveEffectiveProviderId(pool: DatabasePool | DatabaseClient, ownerUserId: string, role: "text" | "image" | "embedding" | "intent", selectedId?: string | null) {
   if (selectedId) {
     const selected = await pool.query<{ id: string }>("SELECT id FROM provider_profiles WHERE id = $1 AND owner_user_id = $2 AND provider_role = $3 AND enabled = true", [selectedId, ownerUserId, role]);
     if (!selected.rows[0]) throw Object.assign(new Error(`Enabled ${role} provider profile not found.`), { statusCode: 400 });
@@ -200,6 +200,16 @@ export async function resolveEffectiveProviderId(pool: DatabasePool | DatabaseCl
   );
   if (result.rows.length === 1 || result.rows[0]?.is_default) return result.rows[0]?.id || null;
   return null;
+}
+
+export async function resolveDefaultIntentProviderId(pool: DatabasePool | DatabaseClient, ownerUserId: string) {
+  const result = await pool.query<{ id: string }>(
+    `SELECT id FROM provider_profiles
+      WHERE owner_user_id = $1 AND provider_role = 'intent' AND enabled = true AND is_default = true
+      LIMIT 1`,
+    [ownerUserId]
+  );
+  return result.rows[0]?.id || null;
 }
 
 export async function generateProviderText(pool: DatabasePool, request: ProviderTextRequest, credentialSecret: string) {
@@ -246,6 +256,10 @@ export async function loadTextProvider(pool: DatabasePool, ownerUserId: string, 
   };
 }
 
+export async function loadIntentProvider(pool: DatabasePool, ownerUserId: string, providerProfileId: string, credentialSecret: string, model = ""): Promise<TextProviderProfile & { id: string; name: string }> {
+  return loadProviderByRole(pool, ownerUserId, providerProfileId, credentialSecret, "intent", model);
+}
+
 export async function loadEmbeddingProvider(pool: DatabasePool, ownerUserId: string, providerProfileId: string, credentialSecret: string, model = ""): Promise<TextProviderProfile & { id: string; name: string }> {
   const result = await pool.query<ProviderRow>(
     `SELECT ${selectColumns} FROM provider_profiles
@@ -283,7 +297,7 @@ async function loadProviderByRole(
   ownerUserId: string,
   providerProfileId: string,
   credentialSecret: string,
-  role: "text" | "embedding" | "image",
+  role: "text" | "embedding" | "image" | "intent",
   model = ""
 ): Promise<TextProviderProfile & { id: string; name: string }> {
   const result = await pool.query<ProviderRow>(
@@ -353,17 +367,23 @@ export async function discoverUnsavedProviderModels(input: Omit<ProviderProfileI
 export async function deleteProvider(pool: DatabasePool, providerProfileId: string) {
   return withTransaction(pool, async (client) => {
     const ownerUserId = await initialOwnerId(client);
-    const current = await client.query<{ id: string; name: string }>("SELECT id, name FROM provider_profiles WHERE id = $1 AND owner_user_id = $2 FOR UPDATE", [providerProfileId, ownerUserId]);
+    const current = await client.query<{ id: string; name: string; provider_role: ProviderRow["provider_role"] }>("SELECT id, name, provider_role FROM provider_profiles WHERE id = $1 AND owner_user_id = $2 FOR UPDATE", [providerProfileId, ownerUserId]);
     const provider = current.rows[0];
     if (!provider) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
-    await client.query("UPDATE campaigns SET text_provider_profile_id = NULL WHERE owner_user_id = $1 AND text_provider_profile_id = $2", [ownerUserId, providerProfileId]);
-    await client.query("UPDATE campaigns SET image_provider_profile_id = NULL WHERE owner_user_id = $1 AND image_provider_profile_id = $2", [ownerUserId, providerProfileId]);
-    await client.query("UPDATE campaign_memory_configs SET embedding_enabled = false, embedding_provider_profile_id = NULL WHERE owner_user_id = $1 AND embedding_provider_profile_id = $2", [ownerUserId, providerProfileId]);
-    await client.query("UPDATE chronicle_memories SET embedding = NULL, embedding_provider_profile_id = NULL, embedding_model = NULL, embedding_dimensions = NULL, embedding_content_hash = NULL, embedding_updated_at = NULL, embedding_provider_fingerprint = NULL WHERE owner_user_id = $1 AND embedding_provider_profile_id = $2", [ownerUserId, providerProfileId]);
-    await client.query("UPDATE campaign_illustration_configs SET enabled = false, provider_profile_id = NULL WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
-    await client.query("DELETE FROM image_jobs WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
-    await client.query("DELETE FROM model_chains WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
-    await client.query("DELETE FROM generation_jobs WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
+    if (provider.provider_role === "text") {
+      await client.query("UPDATE campaigns SET text_provider_profile_id = NULL WHERE owner_user_id = $1 AND text_provider_profile_id = $2", [ownerUserId, providerProfileId]);
+      await client.query("UPDATE campaign_memory_configs SET embedding_enabled = false, embedding_provider_profile_id = NULL WHERE owner_user_id = $1 AND embedding_provider_profile_id = $2", [ownerUserId, providerProfileId]);
+      await client.query("UPDATE chronicle_memories SET embedding = NULL, embedding_provider_profile_id = NULL, embedding_model = NULL, embedding_dimensions = NULL, embedding_content_hash = NULL, embedding_updated_at = NULL, embedding_provider_fingerprint = NULL WHERE owner_user_id = $1 AND embedding_provider_profile_id = $2", [ownerUserId, providerProfileId]);
+      await client.query("DELETE FROM model_chains WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
+      await client.query("DELETE FROM generation_jobs WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
+    } else if (provider.provider_role === "image") {
+      await client.query("UPDATE campaigns SET image_provider_profile_id = NULL WHERE owner_user_id = $1 AND image_provider_profile_id = $2", [ownerUserId, providerProfileId]);
+      await client.query("UPDATE campaign_illustration_configs SET enabled = false, provider_profile_id = NULL WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
+      await client.query("DELETE FROM image_jobs WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
+    } else if (provider.provider_role === "embedding") {
+      await client.query("UPDATE campaign_memory_configs SET embedding_enabled = false, embedding_provider_profile_id = NULL WHERE owner_user_id = $1 AND embedding_provider_profile_id = $2", [ownerUserId, providerProfileId]);
+      await client.query("UPDATE chronicle_memories SET embedding = NULL, embedding_provider_profile_id = NULL, embedding_model = NULL, embedding_dimensions = NULL, embedding_content_hash = NULL, embedding_updated_at = NULL, embedding_provider_fingerprint = NULL WHERE owner_user_id = $1 AND embedding_provider_profile_id = $2", [ownerUserId, providerProfileId]);
+    }
     await client.query("DELETE FROM provider_profiles WHERE id = $1 AND owner_user_id = $2", [providerProfileId, ownerUserId]);
     return { deleted: true, ...provider };
   });

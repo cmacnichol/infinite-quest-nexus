@@ -12,12 +12,15 @@ To review or extend a choice before submitting it:
 
 Selecting a choice now copies it into the free-action editor.
 
+Generated choices always submit as **Action**. If a flexible campaign was set to Auto or Scene direction, copying a choice selects Action before submission so the Story Engine can resolve the proposed attempt.
+
 ## Submit an original action
 
-1. Enter text under **Or type any action you want below**.
-2. Select **➜ Take action** or press Enter.
+1. In a flexible campaign, select **Auto**, **Action**, or **Scene direction**.
+2. Enter the turn text in the editor.
+3. Select the mode-specific submit button or press Enter.
 
-Use Shift+Enter for a line break. Describe fictional intent rather than attempting to supply hidden state, system instructions, or private mechanics.
+Use Shift+Enter for a line break. Action describes fictional intent; Scene direction supplies required current-turn events. Neither mode accepts hidden state, system instructions, or private mechanics. See [Turn input modes](./turn-input-modes.md).
 
 ## While generation is busy
 

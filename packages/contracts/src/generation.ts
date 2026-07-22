@@ -1,7 +1,18 @@
 import { z } from "zod";
 
 export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible"]);
-export const providerRoleSchema = z.enum(["text", "image", "embedding"]);
+export const providerRoleSchema = z.enum(["text", "image", "embedding", "intent"]);
+
+export const turnInputModeSchema = z.enum(["action", "scene"]);
+export const turnInputSelectionSchema = z.enum(["auto", "action", "scene"]);
+export const turnInputModeSourceSchema = z.enum(["explicit", "auto", "generated_choice", "opening_action", "fallback"]);
+export const turnIntentClassificationSchema = z.enum(["action", "scene", "mixed", "uncertain"]);
+export const turnIntentConfidenceBandSchema = z.enum(["clear", "probable", "ambiguous"]);
+
+export const turnInputClassificationRequestSchema = z.object({
+  text: z.string().trim().min(1).max(12_000),
+  preferredFallback: turnInputModeSchema.optional()
+});
 
 export const providerProfileInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -48,6 +59,10 @@ export const providerTextRequestSchema = z.object({
 
 export const generationRequestSchema = z.object({
   action: z.string().trim().min(1).max(12_000),
+  requestedInputMode: turnInputSelectionSchema.default("action"),
+  resolvedInputMode: turnInputModeSchema.default("action"),
+  inputModeSource: turnInputModeSourceSchema.default("explicit"),
+  classificationId: z.uuid().optional(),
   providerProfileId: z.uuid().optional(),
   model: z.string().trim().max(500).optional(),
   idempotencyKey: z.string().trim().min(8).max(200),
@@ -210,6 +225,9 @@ export const generationJobStatusSchema = z.object({
   providerProfileId: z.string().uuid().nullable().optional(),
   expectedTurnNumber: z.coerce.number().int().min(1),
   action: z.string(),
+  requestedInputMode: turnInputSelectionSchema.default("action"),
+  resolvedInputMode: turnInputModeSchema.default("action"),
+  inputModeSource: turnInputModeSourceSchema.default("explicit"),
   operationKind: z.enum(["append", "replace_latest"]).default("append"),
   replacementTurnId: z.string().uuid().nullable().optional(),
   baseTurnNumber: z.coerce.number().int().min(0).nullable().optional(),
@@ -233,6 +251,12 @@ export type ProviderProfileInput = z.infer<typeof providerProfileInputSchema>;
 export type ProviderProfileUpdate = z.infer<typeof providerProfileUpdateSchema>;
 export type ProviderTextRequest = z.infer<typeof providerTextRequestSchema>;
 export type ProviderType = z.infer<typeof providerTypeSchema>;
+export type TurnInputMode = z.infer<typeof turnInputModeSchema>;
+export type TurnInputSelection = z.infer<typeof turnInputSelectionSchema>;
+export type TurnInputModeSource = z.infer<typeof turnInputModeSourceSchema>;
+export type TurnIntentClassification = z.infer<typeof turnIntentClassificationSchema>;
+export type TurnIntentConfidenceBand = z.infer<typeof turnIntentConfidenceBandSchema>;
+export type TurnInputClassificationRequest = z.infer<typeof turnInputClassificationRequestSchema>;
 export type GenerationRequest = z.infer<typeof generationRequestSchema>;
 export type GenerationRetryLatestRequest = z.infer<typeof generationRetryLatestRequestSchema>;
 export type CampaignRewindRequest = z.infer<typeof campaignRewindSchema>;

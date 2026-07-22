@@ -169,6 +169,16 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .choice::before { content: "➜"; color: var(--accent); font-weight: 900; }
 
 .input-action { display: grid; gap: 10px; border-top: 1px solid var(--border); padding: 17px 20px 20px; background: rgba(0,0,0,.12); }
+.turn-input-mode-field { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0; padding: 0; border: 0; }
+.turn-input-mode-field legend { width: 100%; margin-bottom: 2px; color: var(--dim); font-size: .82rem; font-weight: 700; }
+.turn-input-mode-selector { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px; border: 1px solid rgba(255,255,255,.14); border-radius: 14px; background: rgba(0,0,0,.18); }
+.turn-input-mode-selector button { min-height: 34px; padding: 7px 11px; border-color: transparent; border-radius: 10px; background: transparent; }
+.turn-input-mode-selector button[aria-checked="true"] { border-color: rgba(201,156,255,.55); background: rgba(201,156,255,.16); color: #fff; }
+.turn-input-mode-lock { padding: 7px 10px; border: 1px solid rgba(241,194,50,.35); border-radius: 999px; color: var(--gold2); font-size: .82rem; font-weight: 800; }
+.turn-input-guidance { display: flex; justify-content: space-between; gap: 12px; color: var(--dim); font-size: .8rem; line-height: 1.4; }
+.turn-input-guidance span:last-child { flex: 0 0 auto; }
+.turn-intent-decision { display: grid; gap: 9px; padding: 12px 14px; border: 1px solid rgba(201,156,255,.42); border-radius: 14px; background: rgba(201,156,255,.09); }
+.turn-intent-decision p { margin: 0; line-height: 1.45; }
 .generation-recovery { display: grid; gap: 9px; padding: 12px 14px; border: 1px solid rgba(241,194,50,.4); border-radius: 14px; background: rgba(241,194,50,.08); color: #fff4c5; }
 .generation-recovery p { margin: 0; line-height: 1.45; }
 

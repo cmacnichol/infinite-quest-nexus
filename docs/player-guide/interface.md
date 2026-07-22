@@ -28,8 +28,12 @@ Private mechanics, trigger reasons, scratchpads, parser diagnostics, and model r
 - **← Previous turn** and **Next turn →** browse accepted scenes.
 - **Undo latest** rewinds the current campaign from its latest accepted boundary after confirmation.
 - **Retry latest generation** is available for the applicable latest-generation recovery path.
-- **Or type any action you want below** accepts original actions.
-- **➜ Take action** submits the action to the Story Engine.
+- The turn editor accepts original actions or scene direction.
+- Flexible campaigns show **Auto**, **Action**, and **Scene direction** above the editor. Actions-only campaigns show a locked Action badge.
+- The label, example text, helper message, and submit button change with the selected mode.
+- A character counter shows the remaining turn-input limit.
+
+When Auto resolves clearly, the player briefly shows **Auto → Action** or **Auto → Scene direction**. Mixed or ambiguous input opens a confirmation with explicit Action and Scene choices rather than guessing silently.
 
 You cannot submit a new canonical turn while browsing an older scene. Return to the latest turn or use the explicit restart/branch workflow.
 

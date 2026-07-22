@@ -65,13 +65,42 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   });
 
   it("supports choice selection and free action submission with input validation and busy indicator", () => {
-    expect(storyScript).toContain('async function submitAction(actionText)');
+    expect(storyScript).toContain('async function submitAction(actionText, options = {})');
     expect(storyScript).toContain('if (state.busy) return;');
     expect(storyScript).toContain('if (!action) { toast("Enter an action first."); return; }');
     expect(storyScript).toContain('function renderChoices(choices, customSuggestion)');
     expect(storyScript).toContain('submitAction(text)');
     expect(storyScript).toContain('freeAction.addEventListener("keydown", (e) => {');
     expect(storyScript).toContain('if (e.key === "Enter" && !e.shiftKey)');
+  });
+
+  it("supports campaign-controlled Action, Scene direction, and Auto turn input", () => {
+    expect(storyHtml).toContain('id="turnInputModeSelector"');
+    expect(storyHtml).toContain('data-turn-input-mode="auto"');
+    expect(storyHtml).toContain('data-turn-input-mode="action"');
+    expect(storyHtml).toContain('data-turn-input-mode="scene"');
+    expect(storyHtml).toContain('id="turnInputModeLock"');
+    expect(storyHtml).toContain('maxlength="12000"');
+    expect(storyScript).toContain('function campaignTurnControlStyle()');
+    expect(storyScript).toContain('state.campaign?.turnControlStyle || "flexible_auto"');
+    expect(storyScript).toContain('campaignTurnControlStyle() === "action_only"');
+    expect(storyScript).toContain('function setTurnInputMode(mode, options = {})');
+    expect(storyScript).toContain('setTurnInputMode("action", { refreshPlaceholder: true });');
+    expect(storyScript).toContain('state.nextTurnInputModeSource = "generated_choice"');
+    expect(storyScript).toContain('inputModeSource: "opening_action"');
+  });
+
+  it("classifies Auto immediately before submission and confirms ambiguous intent inline", () => {
+    expect(storyHtml).toContain('id="turnIntentDecision"');
+    expect(storyHtml).toContain('id="btnSubmitAsAction"');
+    expect(storyHtml).toContain('id="btnSubmitAsScene"');
+    expect(storyHtml).toContain('id="btnReturnToTurnEditor"');
+    expect(storyScript).toContain('/campaigns/${state.campaignId}/turn-input/classify');
+    expect(storyScript).toContain('body: JSON.stringify({ text: action, preferredFallback: preferredAutoFallback() })');
+    expect(storyScript).toContain('classification.confidenceBand === "ambiguous" || classification.classification === "mixed"');
+    expect(storyScript).toContain('requestedInputMode: submission.requestedInputMode');
+    expect(storyScript).toContain('resolvedInputMode: submission.resolvedInputMode');
+    expect(storyScript).toContain('classificationId: submission.classificationId');
   });
 
   it("orchestrates turn generation via Nexus API polling with progress updates, crash recovery, and retry", () => {
@@ -136,7 +165,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('function openRetryPromptDialog(originalPrompt)');
     expect(storyScript).toContain('async function executeRetryWithPrompt(submittedPromptText)');
     expect(storyScript).toContain('expectedCurrentTurnNumber: currentTurnNumber');
-    expect(storyScript).toContain('await runGeneration(action);');
+    expect(storyScript).toContain('await runGeneration(action, {');
     expect(storyScript).not.toContain('confirm("Retry the last turn? The current outcome will be replaced.")');
     expect(storyScript).toContain('branchDlg.addEventListener("close"');
     expect(storyScript).toContain('body: JSON.stringify({ targetTurnNumber: branchDlg._turnIndex + 1 })');

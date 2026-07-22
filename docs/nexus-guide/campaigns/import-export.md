@@ -4,7 +4,7 @@
 
 Select a campaign and choose **Export campaign**. The portable file contains campaign story data and provenance but excludes provider profiles and credentials.
 
-Format version 2 also carries the complete campaign character snapshot and state revision needed for a high-fidelity attachment to another world. Older version 1 files remain importable with a compatibility warning when they do not contain the full snapshot.
+Format version 3 carries the campaign turn-control style and accepted turns' resolved input modes in addition to the complete character snapshot and state revision. Provider profiles, Intent assignments, classifier records, confidence values, and credentials are excluded. Older formats remain importable; missing turn-mode data defaults to Action.
 
 The player menu also provides `.story`, Markdown, and HTML exports. Those formats serve portability or reading; they do not replace a coordinated PostgreSQL, asset, and encryption-key backup.
 

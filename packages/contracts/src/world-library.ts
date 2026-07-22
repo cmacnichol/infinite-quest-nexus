@@ -121,7 +121,8 @@ export const campaignCreateSchema = z.object({
   worldVersionId: z.uuid(),
   title,
   selectedCharacterId: characterId.optional(),
-  storyLengthProfile: storyLengthProfileSchema.default(DEFAULT_STORY_LENGTH_PROFILE)
+  storyLengthProfile: storyLengthProfileSchema.default(DEFAULT_STORY_LENGTH_PROFILE),
+  turnControlStyle: z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]).default("flexible_auto")
 });
 
 export const campaignUpdateSchema = z.object({
@@ -129,7 +130,8 @@ export const campaignUpdateSchema = z.object({
   status: z.enum(["active", "archived"]).optional(),
   textProviderProfileId: z.uuid().nullable().optional(),
   imageProviderProfileId: z.uuid().nullable().optional(),
-  storyLengthProfile: storyLengthProfileSchema.optional()
+  storyLengthProfile: storyLengthProfileSchema.optional(),
+  turnControlStyle: z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]).optional()
 }).refine((value) => Object.values(value).some((item) => item !== undefined), "At least one field is required.");
 
 export const campaignWorldMigrationSchema = z.object({

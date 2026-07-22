@@ -27,7 +27,7 @@
         <div>
           <p class="eyebrow">Story Engine</p>
           <h2 id="provider-title">Provider profiles</h2>
-          <p>Add independent profiles for story text, Chronicle embeddings, and image generation. API keys are encrypted before storage and are never returned to this browser.</p>
+          <p>Add independent profiles for story text, Auto turn-intent classification, Chronicle embeddings, and image generation. API keys are encrypted before storage and are never returned to this browser.</p>
         </div>
         <div class="button-row">
           <button id="newProviderButton" class="button primary" type="button">New provider profile</button>
@@ -135,6 +135,15 @@
           <label>Status<select id="campaignStatus" disabled><option value="active">Active</option><option value="archived">Archived</option></select></label>
           <label>World version<select id="campaignWorldVersion" disabled><option value="">Select a campaign</option></select></label>
           <label>Text provider profile<select id="campaignTextProvider" disabled><option value="">Use default text provider</option></select></label>
+          <label title="Controls whether players enter attempted actions, required scene events, or let Auto classify each freeform prompt.">
+            Turn input style
+            <select id="campaignTurnControlStyle" disabled>
+              <option value="action_only">Player actions only</option>
+              <option value="flexible_auto">Flexible — Auto</option>
+              <option value="flexible_action">Flexible — Action first</option>
+              <option value="flexible_scene">Flexible — Scene direction first</option>
+            </select>
+          </label>
           <label title="Sets the requested narration size for each new story turn. The provider maximum output remains a separate safety ceiling.">
             Default story response length
             <select id="campaignStoryLengthProfile" disabled>
@@ -420,12 +429,14 @@
               <option value="openai_compatible">OpenAI-compatible</option>
             </select>
           </label>
-          <label title="Limits this profile to story text, Chronicle embeddings, or illustration generation so credentials and endpoints remain independent.">Role
+          <label title="Limits this profile to one provider purpose so credentials and endpoints remain independent.">Role
             <select id="providerRole">
               <option value="text">Story text</option>
+              <option value="intent">Turn intent classification</option>
               <option value="embedding">Chronicle embeddings</option>
               <option value="image">Illustrations</option>
             </select>
+            <span id="providerRoleNote" class="field-note">Story text providers generate narration and other text workflows.</span>
           </label>
           <label title="The endpoint root Nexus calls from the server. Do not include a model-specific path.">Base URL<input id="providerBaseUrl" required type="url" value="http://host.docker.internal:1234"></label>
           <label title="Bearer credential sent only to this provider. Leave blank for unauthenticated local endpoints or while editing to retain the stored key.">API key (optional for local endpoints)<input id="providerApiKey" type="password" autocomplete="off"></label>
@@ -461,7 +472,7 @@
         <div class="fieldset-content">
           <label class="toggle-field" title="Enables real-time token streaming for compatible models during story turn generation, allowing live narration text updates on the frontend."><input id="providerStreaming" type="checkbox"> Streaming</label>
           <label class="toggle-field" title="Disabled profiles remain stored but cannot be selected for new provider work."><input id="providerEnabled" type="checkbox" checked> Profile enabled</label>
-          <label class="toggle-field" title="Used when a campaign leaves this provider role unassigned. A role with only one enabled profile treats it as the default automatically."><input id="providerIsDefault" type="checkbox"> Make this the default profile for its role</label>
+          <label class="toggle-field" title="Used when this provider role has no campaign-specific assignment. Intent profiles must be explicitly made default before Auto uses them."><input id="providerIsDefault" type="checkbox"> Make this the system default profile for its role</label>
         </div>
       </fieldset>
       <div class="button-row confirm-actions">
@@ -534,6 +545,15 @@
       <label>Campaign player character
         <select id="newCampaignCharacter"><option value="">Select a published world version</option></select>
         <span id="newCampaignCharacterNote" class="field-note">The selected character is snapshotted into the new campaign.</span>
+      </label>
+      <label>Turn input style
+        <select id="newCampaignTurnControlStyle">
+          <option value="action_only">Player actions only</option>
+          <option value="flexible_auto" selected>Flexible — Auto</option>
+          <option value="flexible_action">Flexible — Action first</option>
+          <option value="flexible_scene">Flexible — Scene direction first</option>
+        </select>
+        <span class="field-note">Action resolves an attempt. Scene direction treats described events and details as required story facts. Flexible campaigns can switch per turn.</span>
       </label>
       <div class="button-row confirm-actions">
         <button id="cancelCreateCampaign" class="button secondary" type="button">Cancel</button>

@@ -403,13 +403,17 @@ export async function importLegacyStory(
     delete sanitizedSettings.nexusCampaignWorldVersionId;
     delete sanitizedSettings.nexusBranchWorldVersionId;
     const storyLengthProfile = storyLengthProfileFromUnknown(request.story.settings?.storyLength ?? request.story.settings?.story_length);
+    const importedTurnControlStyle = request.story.settings?.turnControlStyle;
+    const turnControlStyle = importedTurnControlStyle === "action_only" || importedTurnControlStyle === "flexible_auto"
+      || importedTurnControlStyle === "flexible_action" || importedTurnControlStyle === "flexible_scene"
+      ? importedTurnControlStyle : "flexible_action";
     const campaignInsert = await client.query<{ id: string }>(
       `INSERT INTO campaigns (
-         owner_user_id, world_version_id, title, active_turn_number, story_length_profile,
+         owner_user_id, world_version_id, title, active_turn_number, story_length_profile, turn_control_style,
          legacy_settings, selected_character_id, character_snapshot
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
       [ownerUserId, worldVersionId, campaignTitle(request.story), request.story.turns.length, storyLengthProfile,
-        json(sanitizedSettings), characterSeed.character.id, json(selectedCharacterSnapshot)]
+        turnControlStyle, json(sanitizedSettings), characterSeed.character.id, json(selectedCharacterSnapshot)]
     );
     const campaignId = campaignInsert.rows[0]?.id;
     if (!campaignId) throw new Error("Could not create the imported campaign.");
@@ -466,10 +470,10 @@ export async function importLegacyStory(
         : { scratchpad: turn.scratchpadSnapshot ?? "", trackers: turn.trackersSnapshot ?? [] };
       const turnInsert = await client.query<{ id: string }>(
         `INSERT INTO turns (
-           owner_user_id, campaign_id, turn_number, source_turn_id, action, narration, choices,
+           owner_user_id, campaign_id, turn_number, source_turn_id, action, input_mode, input_mode_source, narration, choices,
            custom_action_suggestion, image_prompt, image_url, mechanics_private,
            state_snapshot_private, model_metadata, import_metadata, accepted_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
          RETURNING id`,
         [
           ownerUserId,
@@ -477,6 +481,8 @@ export async function importLegacyStory(
           ordinal,
           turn.id ?? null,
           action,
+          turn.inputMode ?? "action",
+          turn.inputModeSource ?? "explicit",
           narration,
           json(choices(turn)),
           turn.customActionSuggestion ?? turn.custom_action_suggestion ?? "",
@@ -605,7 +611,7 @@ export async function previewLegacyStoryImport(pool: DatabasePool, request: Stor
     ...(targetContent && isPortableCampaign(request) && (request.characterStrategy ?? "preserve_source") === "preserve_source"
       ? ["The exported campaign character and accumulated state will be preserved; target-world defaults will not be merged automatically."]
       : []),
-    ...(targetContent && isPortableCampaign(request) && request.story.formatVersion !== 2
+    ...(targetContent && isPortableCampaign(request) && (request.story.formatVersion ?? 1) < 2
       ? ["This older campaign backup does not contain a complete character snapshot; Nexus will preserve the compatible character text and campaign state available in the file."]
       : [])
   ];

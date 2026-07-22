@@ -4,4 +4,6 @@ export * from "./mechanics.js";
 export * from "./narration-formatting.js";
 export * from "./output.js";
 export * from "./prompt.js";
+export * from "./turn-intent.js";
+export * from "./scene-coverage.js";
 export * from "./providers.js";

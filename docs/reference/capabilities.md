@@ -29,6 +29,8 @@ This page summarizes behavior implemented in the current repository. It is not a
 - Selected playable-character snapshots isolated from later world edits
 - Campaign switching and latest-turn resume in the player experience
 - Independent default story response length
+- Campaign turn-control styles for actions-only or flexible Auto, Action, and Scene direction input
+- Durable per-turn input mode retained across retry, branch, and portable export
 - Explicit campaign migration to a newer version of the same world
 - Append-only accepted-turn history across migration
 - Archive, guarded deletion, rewind, and branch workflows
@@ -57,19 +59,22 @@ This page summarizes behavior implemented in the current repository. It is not a
 - Output-limit recovery and recoverable job states
 - Atomic accepted-turn, campaign-state, and Chronicle commits
 - Pending-job resume after a browser refresh
+- Typed Action and Scene direction prompt contracts, with required-beat coverage for directed scenes
+- Auto input classification with explicit confirmation for mixed or ambiguous entries
 - Streaming narration progress where the provider supports it
 - Rejected or incomplete generations cannot mutate accepted campaign state
 
 ## Providers
 
 - User-owned encrypted provider profiles
-- Separate roles for story text, Chronicle embeddings, and illustrations
+- Separate roles for story text, optional turn intent classification, Chronicle embeddings, and illustrations
 - LM Studio native text generation and loaded-model discovery
 - OpenRouter, Manifest, and generic OpenAI-compatible text adapters
 - LM Studio and compatible embedding requests
 - OpenRouter image generation and generic compatible image endpoints
 - Independent endpoints, credentials, models, health, timeouts, and defaults for every role
 - Safe transport diagnostics that exclude credentials and prompt bodies
+- Explicit-only system default for Intent, with Story text and campaign-mode fallbacks
 
 ## Illustrations
 

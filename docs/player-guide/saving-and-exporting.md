@@ -17,4 +17,6 @@ Generated HTML and Markdown must be treated as untrusted content when opened or 
 
 The selected campaign management panel also provides **Export campaign**. Portable exports omit saved provider profiles and credentials. Provenance does not grant ownership or authorization on another installation; imported content belongs to the receiving installation's server-resolved user.
 
+Current portable exports retain the campaign turn-control style and each accepted turn's resolved Action or Scene direction mode. They do not include Intent provider assignments, classifier audit records, model names, confidence values, or provider credentials. Older imports without mode metadata use Action.
+
 Exports complement database and asset backups but do not replace a complete operator backup.

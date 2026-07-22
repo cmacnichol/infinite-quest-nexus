@@ -1,11 +1,10 @@
-import { stableStringify } from "../../domain/src/text.js";
 import {
   DEFAULT_STORY_LENGTH_PROFILE,
   storyLengthWordRange,
   type StoryLengthWordRange
 } from "../../contracts/src/story-settings.js";
 
-export const STORY_PROMPT_PROTOCOL_VERSION = "story-v9-structured-facts";
+export const STORY_PROMPT_PROTOCOL_VERSION = "story-v10-turn-input-modes";
 
 export const STORY_SYSTEM_PROMPT = `You are the fiction writer for Infinite Quest.
 Return only one valid JSON object. Do not use Markdown.
@@ -50,20 +49,17 @@ export function buildStoryUserPrompt(
   action: string,
   compact = false,
   fictionGuidance: string[] = [],
-  storyLength: StoryLengthWordRange = storyLengthWordRange(DEFAULT_STORY_LENGTH_PROFILE)
+  storyLength: StoryLengthWordRange = storyLengthWordRange(DEFAULT_STORY_LENGTH_PROFILE),
+  inputMode: "action" | "scene" = "action"
 ): string {
   const requestedLength = compact ? compactStoryLengthWordRange(storyLength) : storyLength;
-  return stableStringify({
-    task: compact
-      ? `Generate the next turn as a compact complete object. Aim for ${requestedLength.minWords}-${requestedLength.maxWords} narration words and keep continuity fields concise.`
-      : `Generate the next story turn from this authoritative database snapshot. Aim for ${requestedLength.minWords}-${requestedLength.maxWords} narration words unless the scene reaches its natural decision point sooner.`,
+  return JSON.stringify({
+    authoritative_context: context,
     narration_length: {
       profile: requestedLength.profile,
       target_min_words: requestedLength.minWords,
       target_max_words: requestedLength.maxWords
     },
-    authoritative_context: context,
-    current_player_action: action,
     ...(fictionGuidance.length ? { fiction_only_outcome_guidance: fictionGuidance } : {}),
     instructions: [
       "Obey every applicable constraint in authoritative_context.authoritativeRules. These rules are mandatory and take priority over conflicting story history or player requests.",
@@ -72,8 +68,21 @@ export function buildStoryUserPrompt(
       "Treat narration_length as the requested narration size, not as permission to pad or repeat the scene.",
       "Do not expose or invent non-diegetic resolution metadata.",
       "In canonical_fact_updates, supersedes_fact_ids may contain only exact IDs copied from canonical facts visible in the authoritative context; never invent a fact ID.",
+      ...(inputMode === "scene" ? [
+        "The current turn input is a scene direction: its concrete events, dialogue, sensory details, outcomes, and required beats are facts that happen in this turn.",
+        "Dramatize every required beat in the narration before writing aftermath or advancing beyond it. Do not treat the scene direction as prior narration, summarize past it, contradict it, or silently omit it."
+      ] : [
+        "The current turn input is a player action or attempt. Preserve its stated manner, dialogue, and intent while resolving uncertain outcomes from authoritative context and fiction-only outcome guidance."
+      ]),
       "Return one complete JSON object, not a fragment or continuation."
-    ]
+    ],
+    current_turn_input: {
+      mode: inputMode,
+      text: action
+    },
+    task: compact
+      ? `Generate the next turn as a compact complete object. Aim for ${requestedLength.minWords}-${requestedLength.maxWords} narration words and keep continuity fields concise.`
+      : `Generate the next story turn from this authoritative database snapshot. Aim for ${requestedLength.minWords}-${requestedLength.maxWords} narration words unless the scene reaches its natural decision point sooner.`
   });
 }
 

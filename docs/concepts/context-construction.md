@@ -12,6 +12,8 @@ flowchart LR
 
 The budget reserves space for provider output and protocol overhead before selecting memories. High-priority authoritative context is retained while lower-priority derived material is compressed or omitted.
 
+The current turn is typed before prompt construction. Only the active Action or Scene direction contract is included near the submitted text: Action asks the model to resolve and narrate intent, while Scene direction requires the stated current-turn beats before aftermath. Auto never appears in the story prompt because it resolves before the generation job is created.
+
 Compression modes range from complete selected memories to summary-plus-recent context. Automatic mode chooses the least compressed form that fits.
 
 Retrieval can combine semantic similarity, entity and keyword matches, recency, chronology, and open-thread relevance. Selected memory identifiers and hashes are recorded for diagnostics without logging private prompts.

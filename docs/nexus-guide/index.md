@@ -9,6 +9,7 @@ Infinite Quest Nexus provides the management workflows for reusable worlds, pers
 - [Campaigns](./campaigns/create.md)
 - [Chronicle](./chronicle/inspect.md)
 - [Providers](./providers/text.md)
+- [Turn intent classification](./providers/turn-intent.md)
 
 ## Safety model
 
