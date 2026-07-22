@@ -847,13 +847,6 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
             ORDER BY turn_number ASC`,
         [newCampaignId, campaignId, ownerUserId, request.targetTurnNumber]
       );
-      await client.query(
-        `INSERT INTO summary_checkpoints (
-           owner_user_id, campaign_id, through_turn, summary_kind, content, token_estimate, created_at
-         ) SELECT owner_user_id, $1, through_turn, summary_kind, content, token_estimate, created_at
-             FROM summary_checkpoints WHERE campaign_id = $2 AND owner_user_id = $3 AND through_turn <= $4`,
-        [newCampaignId, campaignId, ownerUserId, request.targetTurnNumber]
-      );
     }
 
     await rebuildCampaignMemories(client, ownerUserId, newCampaignId);

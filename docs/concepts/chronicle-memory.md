@@ -14,10 +14,16 @@ Chronicle combines:
 
 The accepted-turn ledger remains the recovery source of truth. Structured fact projections, summaries, and vectors can be rebuilt without rewriting accepted narration. New fact corrections reference an exact visible fact ID; normalized text matching is retained only for legacy snapshots.
 
+Periodic campaign-summary checkpoints accelerate historical context construction and Chronicle rebuilds, but they remain derived data. For a requested turn cutoff, Chronicle examines checkpoints newest first, considers only checkpoints at or before the cutoff, and uses the first one that validates against the accepted turn ledger. If none validates, it falls back to the accepted snapshot's living summary or replays accepted turns without a checkpoint seed.
+
+Current version 2 checkpoints store `schemaVersion`, `throughTurn`, `sourceSnapshotHash`, `continuitySummary`, `openThreads`, and `factProjection`. The deterministic hash covers the accepted turn number plus sanitized `continuitySummary`, `canonicalFacts`, `supersededFacts`, `canonicalFactUpdates`, and `openThreads`. Mechanics, trackers, private scratchpads, provider metadata, diagnostics, raw responses, and rejected output are excluded. Legacy version 1 checkpoints have only a `summary`, no integrity hash, and are accepted only when that sanitized summary exactly matches the accepted through-turn snapshot's continuity summary.
+
+Rewinds and turn replacements invalidate checkpoints after the retained turn and rebuild derived memory. A branch does not copy checkpoints; the new campaign recreates them against its copied accepted ledger. In every case, a checkpoint is a rebuild seed, never authority over accepted turns or campaign state.
+
 Semantic retrieval is optional. When its independent embedding provider is disabled or unavailable, Chronicle falls back to lexical/entity, relevance, recency, and chronology signals. That degradation must not block story generation.
 
 Entity matches use derived `entity_ids` resolved from the campaign's pinned world-version catalog and immutable selected-character snapshot. Known unambiguous aliases are matched before the capitalization-based fallback heuristic; ambiguous aliases remain unresolved rather than being guessed. The identifiers are scoped to the owner and campaign, are rebuildable metadata, and never appear in narrative prompts.
 
 Mechanics, rolls, private scratchpads, diagnostics, rejected output, credentials, and raw provider responses never become Chronicle memories.
 
-Related decisions: [ADR 0001](../architecture/0001-postgresql-chronicle.md), [ADR 0006](../architecture/0006-campaign-scoped-semantic-chronicle.md), [ADR 0010](../architecture/0010-dynamic-chronicle-context.md), [ADR 0018](../architecture/0018-structured-canonical-fact-projections.md), and [ADR 0019](../architecture/0019-scoped-chronicle-entity-identity.md).
+Related decisions: [ADR 0001](../architecture/0001-postgresql-chronicle.md), [ADR 0006](../architecture/0006-campaign-scoped-semantic-chronicle.md), [ADR 0010](../architecture/0010-dynamic-chronicle-context.md), [ADR 0018](../architecture/0018-structured-canonical-fact-projections.md), [ADR 0019](../architecture/0019-scoped-chronicle-entity-identity.md), and [ADR 0020](../architecture/0020-validated-summary-checkpoints.md).

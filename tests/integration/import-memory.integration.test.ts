@@ -403,6 +403,112 @@ integration("legacy import and Chronicle integration", () => {
     expect(rebuilt.rows[0]?.entity_ids).toEqual(indexed.rows[0]?.entity_ids);
   });
 
+  it("uses only validated checkpoints at or before a historical cutoff and seeds deterministic rebuilds", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Checkpoint recovery ${crypto.randomUUID()}`;
+    const imported = await importLegacyStory(
+      pool,
+      storyImportRequestSchema.parse({ sourceName: "checkpoint-recovery.story", story: fixture })
+    );
+    const ownerUserId = await initialOwnerId(pool);
+    const firstTurn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id = $1 AND turn_number = 1",
+      [imported.campaignId]
+    );
+    const checkpointFact = "The obsidian archive remains sealed.";
+    const checkpointFactId = createCanonicalFactId({
+      campaignId: imported.campaignId,
+      sourceTurnId: firstTurn.rows[0]!.id,
+      factIndex: 0,
+      content: checkpointFact
+    });
+    await pool.query(
+      `UPDATE turns SET state_snapshot_private = state_snapshot_private || $2::jsonb
+        WHERE campaign_id = $1 AND turn_number = 1`,
+      [imported.campaignId, JSON.stringify({
+        canonicalFacts: [checkpointFact],
+        canonicalFactUpdates: [{ content: checkpointFact, supersedesFactIds: [] }]
+      })]
+    );
+    for (let turnNumber = 3; turnNumber <= 16; turnNumber += 1) {
+      await pool.query(
+        `INSERT INTO turns (
+           owner_user_id, campaign_id, turn_number, action, narration, state_snapshot_private
+         ) VALUES ($1,$2,$3,$4,$5,$6)`,
+        [ownerUserId, imported.campaignId, turnNumber, `Continue scene ${turnNumber}.`,
+          `Scene marker ${turnNumber} enters the accepted ledger.`, JSON.stringify({
+            continuitySummary: `Continuity through ${turnNumber}`,
+            canonicalFacts: [],
+            supersededFacts: [],
+            canonicalFactUpdates: [],
+            openThreads: [`Resolve scene marker ${turnNumber}`]
+          })]
+      );
+    }
+    await pool.query("UPDATE campaigns SET active_turn_number = 16 WHERE id = $1", [imported.campaignId]);
+
+    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, imported.campaignId));
+    const checkpoints = await pool.query<{ through_turn: number; content: Record<string, unknown> }>(
+      `SELECT through_turn, content FROM summary_checkpoints
+        WHERE campaign_id = $1 AND summary_kind = 'campaign_continuity' ORDER BY through_turn`,
+      [imported.campaignId]
+    );
+    expect(checkpoints.rows.map((row) => [row.through_turn, row.content.schemaVersion])).toEqual([[8, 2], [16, 2]]);
+
+    const historical = await buildContextPreview(
+      pool,
+      imported.campaignId,
+      { budgetTokens: 4096, compression: "summary", query: "continuity", recentTurns: 2 },
+      "",
+      {},
+      { throughTurnNumber: 13 }
+    );
+    expect(JSON.stringify(historical.scopes.chronicle)).toContain("Continuity through 8");
+    expect(JSON.stringify(historical.scopes.chronicle)).not.toContain("Continuity through 16");
+
+    await pool.query(
+      `UPDATE summary_checkpoints SET content = content || '{"sourceSnapshotHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'::jsonb
+        WHERE campaign_id = $1 AND through_turn = 8`,
+      [imported.campaignId]
+    );
+    const corrupt = await buildContextPreview(
+      pool,
+      imported.campaignId,
+      { budgetTokens: 4096, compression: "summary", query: "continuity", recentTurns: 2 },
+      "",
+      {},
+      { throughTurnNumber: 13 }
+    );
+    expect(JSON.stringify(corrupt.scopes.chronicle)).not.toContain("Continuity through 8");
+
+    await pool.query(
+      "UPDATE summary_checkpoints SET content = $2::jsonb WHERE campaign_id = $1 AND through_turn = 8",
+      [imported.campaignId, JSON.stringify({ summary: "Continuity through 8" })]
+    );
+    const legacy = await buildContextPreview(
+      pool,
+      imported.campaignId,
+      { budgetTokens: 4096, compression: "summary", query: "continuity", recentTurns: 2 },
+      "",
+      {},
+      { throughTurnNumber: 13 }
+    );
+    expect(JSON.stringify(legacy.scopes.chronicle)).toContain("Continuity through 8");
+
+    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, imported.campaignId));
+    const rebuilt = await pool.query<{ id: string }>(
+      "SELECT id FROM campaign_canonical_facts WHERE campaign_id = $1",
+      [imported.campaignId]
+    );
+    expect(rebuilt.rows.map((fact) => fact.id)).toContain(checkpointFactId);
+    const retained = await pool.query<{ through_turn: number }>(
+      `SELECT through_turn FROM summary_checkpoints
+        WHERE campaign_id = $1 AND summary_kind = 'campaign_continuity' ORDER BY through_turn`,
+      [imported.campaignId]
+    );
+    expect(retained.rows.map((row) => row.through_turn)).toEqual([8, 16]);
+  });
+
   it("moves imported data-URL illustrations into filesystem asset storage", async () => {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `Asset import fixture ${crypto.randomUUID()}`;
