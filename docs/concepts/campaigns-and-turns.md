@@ -14,4 +14,6 @@ Rewind and branch are explicit ledger-boundary operations. A branch creates a se
 
 Campaign migrations retain accepted turns and invalidate incompatible provider continuation state. The next request bootstraps from PostgreSQL rather than relying on a model conversation chain.
 
-Related decisions: [ADR 0003](../architecture/0003-worker-owned-story-engine.md), [ADR 0007](../architecture/0007-world-library-versioning.md), and [ADR 0013](../architecture/0013-playable-character-rosters.md).
+Same-world version migration updates an existing campaign in place. A cross-world transfer instead creates an independent campaign copy, preserves the source, rebuilds derived Chronicle data under the target world version, and uses target-world canon only for future generation.
+
+Related decisions: [ADR 0003](../architecture/0003-worker-owned-story-engine.md), [ADR 0007](../architecture/0007-world-library-versioning.md), [ADR 0013](../architecture/0013-playable-character-rosters.md), and [ADR 0019](../architecture/0019-cross-world-campaign-transfer.md).

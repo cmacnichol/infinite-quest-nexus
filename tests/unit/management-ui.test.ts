@@ -53,6 +53,17 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('/api/v1/imports/infinite-worlds');
   });
 
+  it("can attach a portable campaign backup to an explicit world version", () => {
+    expect(managementHtml).toContain('id="campaignImportOptions"');
+    expect(managementHtml).toContain('id="campaignImportDestination"');
+    expect(managementHtml).toContain('id="campaignImportWorld"');
+    expect(managementHtml).toContain('id="campaignImportVersion"');
+    expect(managementScript).toContain("async function previewPortableCampaign(sourceName, story)");
+    expect(managementScript).toContain('characterStrategy: "preserve_source"');
+    expect(managementScript).toContain("targetWorldVersionId");
+    expect(managementHtml).toContain("Target-world defaults are not merged automatically");
+  });
+
   it("uses structured playable-character rosters for manual, imported, and generated worlds", () => {
     expect(managementHtml).toContain('id="playableCharacterRoster"');
     expect(managementHtml).toContain('id="addPlayableCharacter"');
@@ -219,6 +230,29 @@ describe("Nexus management UI contracts", () => {
     expect(playerHtml).toContain("const startedResumedCampaign = await maybeAutoStartResumedCampaign();");
     expect(managementScript).toContain("function parseImportJson(sourceText)");
     expect(managementScript).not.toContain("window.prompt");
+  });
+
+  it("offers an accessible copy-first cross-world campaign transfer", () => {
+    expect(managementHtml).toContain('id="transferCampaign"');
+    expect(managementHtml).toContain('id="transferCampaignDialog"');
+    expect(managementHtml).toContain('aria-labelledby="transferCampaignTitleLabel"');
+    expect(managementHtml).toContain('id="transferTargetWorld"');
+    expect(managementHtml).toContain('id="transferTargetVersion"');
+    expect(managementHtml).toContain("Leave the source campaign unchanged.");
+    expect(managementHtml).toContain('id="transferWarningAcknowledgement"');
+    expect(managementScript).toContain("async function previewCampaignTransfer()");
+    expect(managementScript).toContain('/transfer-world/preview`');
+    expect(managementScript).toContain('/transfer-world`');
+    expect(managementScript).toContain('characterStrategy: "preserve_source"');
+    expect(managementScript).toContain('stateStrategy: "preserve"');
+    expect(managementScript).toContain('targetDefaultsPolicy: "retain_source"');
+    expect(managementScript).toContain("expectedActiveTurnNumber: transferPreview.expectedActiveTurnNumber");
+    expect(managementScript).toContain("expectedStateRevision: transferPreview.expectedStateRevision");
+    expect(managementScript).toContain("sourceFingerprint: transferPreview.sourceFingerprint");
+    expect(managementScript).toContain("idempotencyKey: transferIdempotencyKey");
+    expect(managementScript).toContain("await Promise.all([loadWorlds(), loadCampaigns(result.targetCampaignId)])");
+    expect(managementScript).toContain("the original remains unchanged");
+    expect(managementCss).toContain(".transfer-finding[data-severity=\"blocking\"]");
   });
 
   it("deletes only an explicitly selected unused World version with a typed confirmation", () => {

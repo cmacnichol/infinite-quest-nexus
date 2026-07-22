@@ -27,6 +27,7 @@ Architecture decision records (ADRs) preserve consequential design decisions and
 - [ADR 0014: Roster-only world character guidance](./0014-roster-only-world-character-guidance.md)
 - [ADR 0015: Deletable unused world versions](./0015-deletable-unused-world-versions.md)
 - [ADR 0016: Reviewed character authoring](./0016-reviewed-character-authoring.md)
+- [ADR 0019: Cross-world campaign transfer creates an independent copy](./0019-cross-world-campaign-transfer.md)
 
 ADR 0014 supersedes only the backward-compatibility portions of ADR 0013 that allowed legacy top-level character guidance to remain authoritative. It does not supersede structured rosters or campaign character snapshots.
 

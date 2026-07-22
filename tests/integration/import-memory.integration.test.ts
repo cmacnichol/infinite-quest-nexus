@@ -65,6 +65,57 @@ integration("legacy import and Chronicle integration", () => {
     expect(draft.rows[0]).toMatchObject({ revision: 1 });
   });
 
+  it("attaches a portable campaign to another world while preserving its character snapshot", async () => {
+    const ownerUserId = await initialOwnerId(pool);
+    const portable = JSON.parse(JSON.stringify(await exportCampaign(pool, campaignId)));
+    portable.campaign.title = `Portable transferred campaign ${crypto.randomUUID()}`;
+    const sourceCharacter = portable.campaign.characterSnapshot;
+    const world = await pool.query<{ id: string }>(
+      "INSERT INTO worlds (owner_user_id, title, status) VALUES ($1,$2,'active') RETURNING id",
+      [ownerUserId, `Portable target ${crypto.randomUUID()}`]
+    );
+    const targetContent = {
+      schemaVersion: 4,
+      world: {
+        title: "Portable target",
+        genre: "test",
+        tone: "neutral",
+        premise: "A distinct target world.",
+        backgroundStory: "Target-only background.",
+        firstAction: "Arrive.",
+        rules: "Target-only rules."
+      },
+      playableCharacters: [{
+        id: "unrelated-target-character",
+        name: "Unrelated Target Character",
+        characterText: "This roster identity must not replace the exported protagonist.",
+        rpgStats: [],
+        defaultTriggers: [],
+        source: {}
+      }],
+      entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {}
+    };
+    const version = await pool.query<{ id: string }>(
+      `INSERT INTO world_versions (world_id, owner_user_id, version_number, content, source_hash)
+       VALUES ($1,$2,1,$3,$4) RETURNING id`,
+      [world.rows[0]!.id, ownerUserId, JSON.stringify(targetContent), `portable-target-${crypto.randomUUID()}`]
+    );
+    const result = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: `portable-transfer-${crypto.randomUUID()}.story`,
+      story: portable,
+      targetWorldVersionId: version.rows[0]!.id,
+      characterStrategy: "preserve_source"
+    }));
+    const imported = await pool.query<{ world_version_id: string; character_snapshot: unknown }>(
+      "SELECT world_version_id, character_snapshot FROM campaigns WHERE id = $1 AND owner_user_id = $2",
+      [result.campaignId, ownerUserId]
+    );
+    expect(imported.rows[0]).toMatchObject({
+      world_version_id: version.rows[0]!.id,
+      character_snapshot: sourceCharacter
+    });
+  });
+
   it("reconnects an exact ledger when its saved world-version id is stale", async () => {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     const before = await pool.query<{ worlds: string; campaigns: string; world_id: string }>(

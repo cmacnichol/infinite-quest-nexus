@@ -164,6 +164,7 @@ export async function getWorld(pool: DatabasePool, worldId: string) {
             published_at AS "publishedAt", created_at AS "createdAt",
             dependencies.current_campaigns AS "currentCampaigns",
             dependencies.campaign_migrations AS "campaignMigrations",
+            dependencies.campaign_transfers AS "campaignTransfers",
             dependencies.chronicle_memories AS "chronicleMemories",
             dependencies.model_chains AS "modelChains",
             detachments.drafts, detachments.forks, detachments.imports
@@ -175,6 +176,9 @@ export async function getWorld(pool: DatabasePool, worldId: string) {
            (SELECT count(*)::int FROM campaign_world_migrations cwm
              WHERE cwm.owner_user_id = wv.owner_user_id
                AND (cwm.from_world_version_id = wv.id OR cwm.to_world_version_id = wv.id)) AS campaign_migrations,
+           (SELECT count(*)::int FROM campaign_world_transfers cwt
+             WHERE cwt.owner_user_id = wv.owner_user_id
+               AND (cwt.from_world_version_id = wv.id OR cwt.to_world_version_id = wv.id)) AS campaign_transfers,
            (SELECT count(*)::int FROM chronicle_memories cm
              WHERE cm.owner_user_id = wv.owner_user_id AND cm.world_version_id = wv.id) AS chronicle_memories,
            (SELECT count(*)::int FROM model_chains mc
@@ -211,6 +215,7 @@ export async function getWorld(pool: DatabasePool, worldId: string) {
       const {
         currentCampaigns,
         campaignMigrations,
+        campaignTransfers,
         chronicleMemories,
         modelChains,
         drafts,
@@ -221,6 +226,7 @@ export async function getWorld(pool: DatabasePool, worldId: string) {
       const deletionBlockers = {
         currentCampaigns: Number(currentCampaigns || 0),
         campaignMigrations: Number(campaignMigrations || 0),
+        campaignTransfers: Number(campaignTransfers || 0),
         chronicleMemories: Number(chronicleMemories || 0),
         modelChains: Number(modelChains || 0)
       };
@@ -681,6 +687,18 @@ export async function deleteWorld(pool: DatabasePool, worldId: string, request: 
     if (campaignCount) {
       throw httpError(409, `Delete the ${campaignCount} campaign${campaignCount === 1 ? "" : "s"} using this world before deleting the world.`);
     }
+    const transferHistory = await client.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM campaign_world_transfers cwt
+        WHERE cwt.owner_user_id = $2 AND (
+          cwt.from_world_version_id IN (SELECT id FROM world_versions WHERE world_id = $1 AND owner_user_id = $2)
+          OR cwt.to_world_version_id IN (SELECT id FROM world_versions WHERE world_id = $1 AND owner_user_id = $2)
+        )`,
+      [worldId, ownerUserId]
+    );
+    const transferCount = Number(transferHistory.rows[0]?.count || 0);
+    if (transferCount) {
+      throw httpError(409, `This world is retained by ${transferCount} campaign transfer audit record${transferCount === 1 ? "" : "s"}.`);
+    }
 
     await client.query(
       `DELETE FROM imports
@@ -744,6 +762,7 @@ export async function deleteWorldVersion(
     const dependencies = await client.query<{
       current_campaigns: number;
       campaign_migrations: number;
+      campaign_transfers: number;
       chronicle_memories: number;
       model_chains: number;
     }>(
@@ -753,6 +772,9 @@ export async function deleteWorldVersion(
          (SELECT count(*)::int FROM campaign_world_migrations
            WHERE owner_user_id = $2
              AND (from_world_version_id = $1 OR to_world_version_id = $1)) AS campaign_migrations,
+         (SELECT count(*)::int FROM campaign_world_transfers
+           WHERE owner_user_id = $2
+             AND (from_world_version_id = $1 OR to_world_version_id = $1)) AS campaign_transfers,
          (SELECT count(*)::int FROM chronicle_memories
            WHERE owner_user_id = $2 AND world_version_id = $1) AS chronicle_memories,
          (SELECT count(*)::int FROM model_chains
@@ -763,6 +785,7 @@ export async function deleteWorldVersion(
     const blockers = {
       currentCampaigns: Number(counts?.current_campaigns || 0),
       campaignMigrations: Number(counts?.campaign_migrations || 0),
+      campaignTransfers: Number(counts?.campaign_transfers || 0),
       chronicleMemories: Number(counts?.chronicle_memories || 0),
       modelChains: Number(counts?.model_chains || 0)
     };
@@ -916,8 +939,17 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
   const { character: _storedCharacter, ...worldWithoutStoredCharacter } = sourceWorld;
   return {
     format: "infinite-quest-campaign",
-    formatVersion: 1,
+    formatVersion: 2,
     exportedAt: new Date().toISOString(),
+    campaign: {
+      title: row.title,
+      sourceCampaignId: campaignId,
+      sourceWorldVersionId: row.world_version_id,
+      sourceWorldVersionNumber: row.version_number,
+      selectedCharacterId: row.selected_character_id ?? null,
+      characterSnapshot: row.character_snapshot ?? null,
+      stateRevision: Number(row.revision || 0)
+    },
     world: { ...worldWithoutStoredCharacter, ...(selectedCharacterText !== null ? { character: selectedCharacterText } : {}) },
     settings: { ...portableCampaignSettings(row.legacy_settings), storyLength: row.story_length_profile },
     turns: turns.rows.map((turn: any) => ({

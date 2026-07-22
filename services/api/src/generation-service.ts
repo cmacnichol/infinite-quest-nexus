@@ -853,7 +853,40 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
              FROM summary_checkpoints WHERE campaign_id = $2 AND owner_user_id = $3 AND through_turn <= $4`,
         [newCampaignId, campaignId, ownerUserId, request.targetTurnNumber]
       );
+
+      await client.query(
+        `INSERT INTO asset_references (
+           owner_user_id, asset_id, campaign_id, turn_id, asset_role, created_at
+         )
+         SELECT source_ref.owner_user_id, source_ref.asset_id, $1, target_turn.id,
+                source_ref.asset_role, source_ref.created_at
+           FROM asset_references source_ref
+           JOIN turns source_turn
+             ON source_turn.id = source_ref.turn_id
+            AND source_turn.campaign_id = source_ref.campaign_id
+            AND source_turn.owner_user_id = source_ref.owner_user_id
+           JOIN turns target_turn
+             ON target_turn.campaign_id = $1
+            AND target_turn.owner_user_id = source_ref.owner_user_id
+            AND target_turn.turn_number = source_turn.turn_number
+          WHERE source_ref.campaign_id = $2
+            AND source_ref.owner_user_id = $3
+            AND source_turn.turn_number <= $4
+         ON CONFLICT DO NOTHING`,
+        [newCampaignId, campaignId, ownerUserId, request.targetTurnNumber]
+      );
     }
+
+    await client.query(
+      `INSERT INTO asset_references (
+         owner_user_id, asset_id, campaign_id, turn_id, asset_role, created_at
+       )
+       SELECT owner_user_id, asset_id, $1, NULL, asset_role, created_at
+         FROM asset_references
+        WHERE campaign_id = $2 AND owner_user_id = $3 AND turn_id IS NULL
+       ON CONFLICT DO NOTHING`,
+      [newCampaignId, campaignId, ownerUserId]
+    );
 
     await rebuildCampaignMemories(client, ownerUserId, newCampaignId);
     await enqueueEmbeddingReindex(client, newCampaignId);

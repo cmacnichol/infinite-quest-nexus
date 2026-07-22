@@ -2,6 +2,8 @@
 
 Campaigns remain pinned until an explicit same-world upgrade.
 
+This operation updates the existing campaign. To create an independent continuation in a different world, use [Transfer a campaign to another world](./transfer-world.md).
+
 1. Publish a newer version of the campaign's world.
 2. Select the campaign.
 3. Choose the newer **World version**.
