@@ -116,6 +116,15 @@ export const illustrationRequestSchema = z.object({
   replace: z.boolean().default(false)
 });
 
+export const worldCoverRequestSchema = z.object({
+  prompt: z.string().trim().max(20_000).default(""),
+  size: z.string().trim().regex(/^\d{2,5}x\d{2,5}$/).default("1024x1536"),
+  aspectRatio: z.string().trim().min(1).max(20).default("2:3"),
+  quality: z.enum(["auto", "low", "medium", "high"]).default("auto"),
+  outputFormat: z.enum(["png", "jpeg", "webp"]).default("png"),
+  replace: z.boolean().default(false)
+}).strict();
+
 export const sensitiveContentFilterSchema = z.enum(["provider-default", "enabled", "disabled"]);
 
 export const sogniIllustrationProviderConfigSchema = z.object({
@@ -328,6 +337,7 @@ export type CampaignRewindRequest = z.infer<typeof campaignRewindSchema>;
 export type CampaignBranchRequest = z.infer<typeof campaignBranchSchema>;
 export type IllustrationConfig = z.infer<typeof illustrationConfigSchema>;
 export type IllustrationRequest = z.infer<typeof illustrationRequestSchema>;
+export type WorldCoverRequest = z.infer<typeof worldCoverRequestSchema>;
 export type SensitiveContentFilter = z.infer<typeof sensitiveContentFilterSchema>;
 export type SogniIllustrationProviderConfig = z.infer<typeof sogniIllustrationProviderConfigSchema>;
 export type IllustrationGenerationRequest = z.infer<typeof illustrationGenerationRequestSchema>;

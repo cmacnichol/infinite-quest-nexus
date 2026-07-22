@@ -18,6 +18,7 @@ import {
   generationRetryLatestRequestSchema,
   illustrationConfigSchema,
   illustrationRequestSchema,
+  worldCoverRequestSchema,
   playerCampaignConfigSchema,
   providerProfileInputSchema,
   providerProfileUpdateSchema,
@@ -62,6 +63,7 @@ import { branchCampaign, discardGeneration, enqueueGeneration, enqueueLatestRepl
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "./campaign-state-service.js";
 import {
   enqueueIllustration,
+  enqueueWorldCover,
   getIllustrationConfig,
   getImageJob,
   listCampaignImageJobs,
@@ -653,6 +655,11 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-config", async (request) => (
     getIllustrationConfig(pool, uuidSchema.parse(request.params.campaignId))
   ));
+
+  app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/cover", async (request, reply) => {
+    const job = await enqueueWorldCover(pool, uuidSchema.parse(request.params.worldId), worldCoverRequestSchema.parse(request.body));
+    return reply.code(job.duplicate ? 200 : 202).send(job);
+  });
 
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-config", async (request) => (
     setIllustrationConfig(

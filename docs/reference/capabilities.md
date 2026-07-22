@@ -21,7 +21,7 @@ This page summarizes behavior implemented in the current repository. It is not a
 - Advanced-creation handoff to Campaign Management
 - Immediate Story launch and opening-turn submission after basic campaign creation
 - Campaign-card resume at the latest accepted scene
-- Prepared world and campaign artwork slots; user-supplied card-picture wiring remains deferred
+- Generated world covers displayed in world cards; campaign-card artwork remains deferred
 
 ## World Library
 
@@ -48,6 +48,7 @@ This page summarizes behavior implemented in the current repository. It is not a
 - Archive, guarded deletion, rewind, and branch workflows
 - Credential-free portable campaign export
 - Provider-reported campaign cost ledger when a provider supplies cost data
+- Separate text-generation, image-generation, and Chronicle-memory campaign cost categories
 
 ## Chronicle
 
@@ -92,6 +93,7 @@ This page summarizes behavior implemented in the current repository. It is not a
 
 - Optional image child jobs after a story turn is accepted
 - Independent campaign image provider, model, format, size, aspect, quality, and retry settings
+- Durable world-cover generation through the default image provider from new-world and edit-world workflows
 - Sogni profile defaults for one or two images, sensitive-content filtering, polling intervals, generation deadline, and submission attempts
 - Replica-safe retries that never rerun or reject story narration
 - Fiction-only image prompts that exclude mechanics, scratchpads, and private reasoning

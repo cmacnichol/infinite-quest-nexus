@@ -172,6 +172,28 @@ function money(value, currency) {
   }).format(amount);
 }
 
+function modelPricingLabel(model) {
+  const pricing = model?.pricing;
+  if (!pricing || !Array.isArray(pricing.entries) || !pricing.entries.length) return "";
+  if (pricing.category === "image") {
+    const byUnit = new Map();
+    for (const entry of pricing.entries) {
+      const key = `${entry.unit || "unit"}:${entry.provider || ""}`;
+      const current = byUnit.get(key);
+      if (!current || Number(entry.costUsd) < Number(current.costUsd)) byUnit.set(key, entry);
+    }
+    return [...byUnit.values()].slice(0, 3).map((entry) => {
+      const provider = entry.provider ? ` via ${entry.provider}` : "";
+      return `${money(entry.costUsd, "USD")} / ${entry.unit}${provider}`;
+    }).join(" · ");
+  }
+  return pricing.entries.map((entry) => {
+    const perMillion = Number(entry.costUsd) * 1_000_000;
+    const direction = entry.billable === "input_token" ? "input" : entry.billable === "output_token" ? "output" : entry.billable;
+    return `${money(perMillion, "USD")} / 1M ${direction}`;
+  }).join(" · ");
+}
+
 function artworkUrl(record) {
   const candidate = String(record?.imageUrl || record?.artworkUrl || record?.coverImageUrl || "").trim();
   if (!candidate) return "";
@@ -347,7 +369,8 @@ function dashboardReportedCost(costs) {
     : `${currencies.length} currencies`;
   const providers = costs.totals.map((cost) => {
     const label = cost.providerName || cost.providerType || "Provider";
-    return `${label}: ${money(cost.amount, cost.currency) || `${cost.amount} ${cost.currency}`}`;
+    const category = cost.category === "image" ? "Image" : cost.category === "story" ? "Text" : cost.category === "memory" ? "Memory" : "Provider";
+    return `${category} · ${label}: ${money(cost.amount, cost.currency) || `${cost.amount} ${cost.currency}`}`;
   });
   return { total, providers: [...new Set(providers)].join(" · ") || "Reported by configured providers" };
 }
@@ -510,6 +533,8 @@ function setWorldEditorDisabled(disabled) {
     elements.worldFirstAction,
     elements.worldRules,
     elements.worldReleaseNotes,
+    elements.worldCoverPrompt,
+    elements.generateWorldCover,
     elements.addPlayableCharacter,
     elements.forkWorldTitle,
     elements.newCampaignTitle,
@@ -825,6 +850,12 @@ async function selectWorld(worldId) {
   elements.worldFirstAction.value = overview.firstAction || "";
   elements.worldRules.value = overview.rules || "";
   elements.worldReleaseNotes.value = "";
+  const coverUrl = artworkUrl(selectedWorld);
+  elements.worldCoverPreview.src = coverUrl;
+  elements.worldCoverPreview.classList.toggle("hidden", !coverUrl);
+  elements.worldCoverStatus.textContent = coverUrl
+    ? "This cover is stored in Nexus shared asset storage. Generate again to replace it."
+    : "No cover has been generated for this world.";
   elements.worldVersionSelect.replaceChildren(new Option(selectedWorld.versions.length ? "Latest published version" : "No published versions", ""));
   for (const version of selectedWorld.versions) {
     elements.worldVersionSelect.append(new Option(`Version ${version.versionNumber}${version.releaseNotes ? ` · ${version.releaseNotes}` : ""}`, version.id));
@@ -856,12 +887,74 @@ async function newWorld() {
   }
   worldMessage("Creating world draft…");
   try {
+    const generateCover = elements.newWorldGenerateCover.checked;
     const world = await api("/api/v1/worlds", { method: "POST", body: JSON.stringify({ title }) });
     elements.newWorldTitle.value = "";
     await loadWorlds(world.id);
-    worldMessage("World draft created. It must be published before a campaign can use it.", "success");
+    if (generateCover) {
+      worldMessage("World draft created. Queuing its cover with the default image provider…", "success");
+      await generateWorldCoverImage();
+    } else {
+      worldMessage("World draft created. It must be published before a campaign can use it.", "success");
+    }
   } catch (error) {
     worldMessage(error.message || String(error), "error");
+  }
+}
+
+function imageJobDelay(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function monitorWorldCoverJob(jobId, worldId) {
+  for (let poll = 0; poll < 1200; poll += 1) {
+    if (selectedWorld?.id !== worldId) return null;
+    const job = await api(`/api/v1/image-jobs/${jobId}`);
+    if (job.status === "completed") {
+      elements.worldCoverStatus.className = "status success";
+      elements.worldCoverStatus.textContent = "World cover generated and stored in Nexus shared asset storage.";
+      selectedWorld.imageUrl = job.assetUrl;
+      elements.worldCoverPreview.src = job.assetUrl;
+      elements.worldCoverPreview.classList.remove("hidden");
+      const cached = worlds.find((world) => world.id === worldId);
+      if (cached) cached.imageUrl = job.assetUrl;
+      renderDashboardWorlds();
+      return job;
+    }
+    if (["failed", "recoverable", "cancelled", "expired"].includes(job.status)) {
+      throw new Error(job.errorMessage || "World cover generation did not complete.");
+    }
+    const progress = job.providerProgress === null || job.providerProgress === undefined ? "" : ` · ${number(job.providerProgress)}%`;
+    elements.worldCoverStatus.textContent = `World cover ${job.status.replaceAll("_", " ")}${progress}. You can continue editing while it runs.`;
+    await imageJobDelay(1000);
+  }
+  throw new Error("World cover generation is still running. Refresh the world to check it again.");
+}
+
+async function generateWorldCoverImage() {
+  if (!selectedWorld) return;
+  const worldId = selectedWorld.id;
+  elements.generateWorldCover.disabled = true;
+  elements.worldCoverStatus.className = "status";
+  elements.worldCoverStatus.textContent = "Queuing a world cover with the default image provider…";
+  try {
+    const job = await api(`/api/v1/worlds/${worldId}/cover`, {
+      method: "POST",
+      body: JSON.stringify({
+        prompt: elements.worldCoverPrompt.value.trim(),
+        size: "1024x1536",
+        aspectRatio: "2:3",
+        quality: "auto",
+        outputFormat: "png",
+        replace: Boolean(selectedWorld.imageUrl)
+      })
+    });
+    await monitorWorldCoverJob(job.id, worldId);
+  } catch (error) {
+    elements.worldCoverStatus.className = "status error";
+    elements.worldCoverStatus.textContent = error.message || String(error);
+  } finally {
+    if (selectedWorld?.id === worldId) elements.generateWorldCover.disabled = selectedWorld.status === "archived";
   }
 }
 
@@ -1720,8 +1813,8 @@ async function refreshCampaignCostSummary() {
   for (const total of summary.totals) {
     const suffix = summary.totals.length > 1 ? ` (${total.currency})` : "";
     appendCostMetric(money(total.amount, total.currency), `campaign total${suffix}`);
-    appendCostMetric(money(total.byCategory?.story || 0, total.currency), `story${suffix}`);
-    appendCostMetric(money(total.byCategory?.image || 0, total.currency), `images${suffix}`);
+    appendCostMetric(money(total.byCategory?.story || 0, total.currency), `text generation${suffix}`);
+    appendCostMetric(money(total.byCategory?.image || 0, total.currency), `image generation${suffix}`);
     appendCostMetric(money(total.byCategory?.memory || 0, total.currency), `semantic memory${suffix}`);
     appendCostMetric(money(total.historicalAndUnattributedOperations || total.otherCampaignOperations || 0, total.currency), `historical & unattributed operations${suffix}`);
   }
@@ -2235,7 +2328,11 @@ function renderProviderModelPicker() {
     name.textContent = model.displayName;
     const meta = document.createElement("span");
     meta.className = "model-meta";
-    meta.textContent = `${value}${model.contextLength ? ` · ${number(model.contextLength)} context` : " · context not advertised"}`;
+    const pricing = modelPricingLabel(model);
+    const capability = model.pricing?.category === "image"
+      ? "image generation"
+      : model.contextLength ? `${number(model.contextLength)} context` : "context not advertised";
+    meta.textContent = `${value} · ${capability}${pricing ? ` · ${pricing}` : ""}`;
     details.append(name, meta);
     const state = document.createElement("span");
     state.className = `provider-model-state${model.loaded ? " active" : ""}`;
@@ -2600,7 +2697,10 @@ async function discoverIllustrationModels() {
   try {
     const { models } = await api(`/api/v1/providers/${provider.id}/models`);
     elements.illustrationModels.replaceChildren();
-    for (const model of models) elements.illustrationModels.append(new Option(model.displayName, model.id));
+    for (const model of models) {
+      const pricing = modelPricingLabel(model);
+      elements.illustrationModels.append(new Option(`${model.displayName}${pricing ? ` · ${pricing}` : ""}`, model.id));
+    }
     if (models[0]) elements.illustrationModel.value = models[0].id;
     elements.illustrationStatus.textContent = `${models.length} image model entr${models.length === 1 ? "y" : "ies"} found. Confirm the model and save this campaign's illustration settings.`;
   } catch (error) {
@@ -3263,6 +3363,7 @@ elements.campaignImportWorld.addEventListener("change", loadCampaignImportVersio
 elements.campaignImportVersion.addEventListener("change", refreshPortableCampaignPreview);
 elements.importBrowserState.addEventListener("click", importBrowserState);
 elements.newWorld.addEventListener("click", newWorld);
+elements.generateWorldCover.addEventListener("click", generateWorldCoverImage);
 elements.refreshWorlds.addEventListener("click", () => loadWorlds().catch((error) => worldMessage(error.message || String(error), "error")));
 elements.worldForm.addEventListener("submit", saveWorldDraft);
 elements.addPlayableCharacter.addEventListener("click", () => openCharacterDialog());

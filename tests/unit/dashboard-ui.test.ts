@@ -51,7 +51,8 @@ describe("Nexus central dashboard", () => {
     }
     expect(dashboardScript).toContain('api("/api/v1/dashboard/stats")');
     expect(dashboardScript).toContain("dashboardReportedCost(stats.providerCosts)");
-    expect(dashboardScript).toContain('`${label}: ${money(cost.amount, cost.currency)');
+    expect(dashboardScript).toContain('`${category} · ${label}: ${money(cost.amount, cost.currency)');
+    expect(dashboardScript).toContain('cost.category === "image" ? "Image"');
     expect(dashboardScript).toContain('return { total: "Not reported", providers: "Local and unsupported fees are not estimated" };');
   });
 

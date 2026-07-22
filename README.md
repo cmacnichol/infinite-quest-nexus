@@ -18,6 +18,7 @@ The repository contains a production-shaped pre-authentication deployment for a 
 - Durable, validated Story Engine jobs and recovery
 - Campaign-scoped Chronicle memory and optional embeddings
 - Independent text, embedding, and illustration provider profiles
+- OpenRouter image-model discovery with image-unit pricing, campaign text-versus-image cost totals, and durable world-cover generation
 - A two-container local Compose deployment
 - Separate API and worker roles for Docker Swarm
 
@@ -57,7 +58,7 @@ Requests to `/` or `/index.html` redirect permanently to the active Nexus applic
 
 The slim universal navigation bar links the dashboard, active Story, Setup, and About areas across the application. Setup includes the shared Import workspace; a Story-only Export menu provides Markdown and print-to-PDF output with available illustrations. Published container images expose their release version, source commit, and build timestamp under **About**. World versions, database migrations, export formats, and prompt protocols retain their own independent version numbers.
 
-The first startup creates the database schema and credential-free initial owner. Configure a text provider under **Setup**, create or import a world in **World Management**, and publish a version. The dashboard then supports quick campaign creation from a world card and immediately opens the new story; existing campaign cards resume play.
+The first startup creates the database schema and credential-free initial owner. Configure a text provider under **Setup**, create or import a world in **World Management**, and publish a version. Configure a separate default image provider when you want optional turn illustrations or generated world covers. The dashboard then supports quick campaign creation from a world card and immediately opens the new story; existing campaign cards resume play.
 
 Stop the containers while preserving the database and generated assets:
 

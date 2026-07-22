@@ -9,13 +9,13 @@ The stats area provides an at-a-glance view of the library and recent play, incl
 - Available worlds
 - Open campaigns
 - Total accepted turns generated
-- Provider-reported API fees, grouped by provider when cost data is available
+- Provider-reported API fees, grouped by text, image, or memory work and provider when cost data is available
 
 Additional activity indicators may appear alongside these core totals. Provider fees include only costs reported by providers; Nexus does not estimate missing prices or usage.
 
 ## Browse available worlds
 
-Use the world search to narrow the horizontal carousel by title or description. Each world card summarizes the world and reserves a place for world artwork. World and campaign picture upload and selection are prepared for a later update, so a card may show a themed placeholder instead of a user-supplied image.
+Use the world search to narrow the horizontal carousel by title or description. Each world card summarizes the world and displays a generated world cover when one is available; otherwise it shows a themed placeholder. World-cover generation is managed from **Setup → World Management** and uses the default image provider.
 
 Select a card to open **World Details**. The details view presents the world's published information and offers two paths:
 

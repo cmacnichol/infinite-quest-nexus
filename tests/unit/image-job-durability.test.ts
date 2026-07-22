@@ -31,4 +31,17 @@ describe("durable asynchronous image jobs", () => {
     ]) expect(migration).toContain(column);
     expect(migration).toContain("image_jobs_remote_provider_job_idx");
   });
+
+  it("extends the durable queue with an owner-scoped world-cover target", async () => {
+    const migration = await readFile(resolve("database/migrations/0030_world_cover_image_jobs.sql"), "utf8");
+    const source = await readFile(resolve("services/api/src/image-service.ts"), "utf8");
+
+    expect(migration).toContain("target_type IN ('turn_illustration', 'world_cover')");
+    expect(migration).toContain("image_jobs_one_active_world_cover_idx");
+    expect(migration).toContain("worlds_cover_asset_owner_fk");
+    expect(source).toContain("export async function enqueueWorldCover");
+    expect(source).toContain('targetType: "world_cover"');
+    expect(source).toContain("persistWorldCover");
+    expect(source).toContain("if (job.campaign_id)");
+  });
 });

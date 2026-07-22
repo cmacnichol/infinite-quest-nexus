@@ -14,7 +14,7 @@ Story turn cost includes all reported calls attributed to the accepted generatio
 
 Authoritative server-side rewinds (`POST /campaigns/:id/rewind`) power all client undo (`undoLatest`) and retry (`retryLatest`) operations. Rewinding a campaign clears deleted turn references through `ON DELETE SET NULL` (`turn_id IS NULL`) but retains the historical campaign charge under the original campaign ID without creating duplicate replacement campaigns or branching. To protect against race conditions, clients pass `expectedCurrentTurnNumber`; mismatches return HTTP 409 without mutating local state. Rewinds targeting turn zero (`targetTurnNumber: 0`) restore the `initial_state_snapshot` recorded at campaign creation or import (`campaign_state.initial_state_snapshot`), allowing fresh turn 1 generation while maintaining historical cost ledger entries. Creating a separate campaign via explicit branching (`choice === "copy"`) does not copy cost events because copied story content does not represent newly incurred spend.
 
-API amounts are decimal strings. The campaign cost summary (`getCampaignCostSummary()`) surfaces discreet turn amounts, total campaign spend, and groups surviving non-turn or rewound charges under `historicalAndUnattributedOperations`. Current UI displays turn amounts, historical/unattributed operations, and campaign totals; a dedicated cost reporting page is intentionally deferred and must use the same ledger rather than introducing new counters.
+API amounts are decimal strings. The campaign cost summary (`getCampaignCostSummary()`) surfaces discrete turn amounts, total campaign spend, and separate `story`, `image`, and `memory` category totals. Campaign list data also includes per-currency text-generation, image-generation, memory, and total amounts. Surviving non-turn or rewound charges remain grouped under `historicalAndUnattributedOperations`. Current UI displays category amounts, historical/unattributed operations, and campaign totals; a dedicated cost reporting page is intentionally deferred and must use the same ledger rather than introducing new counters.
 
 ## Consequences
 
@@ -23,3 +23,4 @@ API amounts are decimal strings. The campaign cost summary (`getCampaignCostSumm
 - Historical text charges cannot be reliably backfilled because earlier adapters discarded cost fields.
 - Provider response IDs and local call IDs make worker persistence idempotent without collapsing distinct billed retries.
 - Cost telemetry stays independent from authoritative story state and never prevents unsupported local providers from generating stories.
+- World-cover image jobs have no campaign scope, so their provider-reported charge is retained with the job but intentionally excluded from campaign cost events and campaign totals.

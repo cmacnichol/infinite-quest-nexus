@@ -117,6 +117,7 @@
         </div>
         <div class="button-row">
           <label class="compact-field">New world title<input id="newWorldTitle" maxlength="200" placeholder="Name a new world"></label>
+          <label class="toggle-field compact-field"><input id="newWorldGenerateCover" type="checkbox"> Generate cover</label>
           <button id="newWorld" class="button primary" type="button">New world</button>
           <button id="refreshWorlds" class="icon-button" type="button" aria-label="Refresh worlds">↻</button>
         </div>
@@ -143,6 +144,20 @@
             <label>Genre<input id="worldGenre" maxlength="2000" disabled></label>
             <label>Tone<input id="worldTone" maxlength="2000" disabled></label>
             <label class="wide-field">Release notes<input id="worldReleaseNotes" maxlength="10000" disabled placeholder="Describe this published version without changing canon"></label>
+            <section class="wide-field world-cover-editor" aria-labelledby="worldCoverTitle">
+              <div class="campaign-settings-heading">
+                <div>
+                  <strong id="worldCoverTitle">World cover</strong>
+                  <span class="field-note">Generated asynchronously with the default image provider. Cover failures do not affect world drafts or publication.</span>
+                </div>
+              </div>
+              <img id="worldCoverPreview" class="world-cover-preview hidden" alt="Selected world cover">
+              <label>Cover prompt (optional)<textarea id="worldCoverPrompt" rows="3" maxlength="20000" disabled placeholder="Leave blank to build a fiction-only prompt from this world's title, genre, tone, and premise."></textarea></label>
+              <div class="button-row">
+                <button id="generateWorldCover" class="button secondary" type="button" disabled>Generate cover</button>
+              </div>
+              <div id="worldCoverStatus" class="status">Select or create a world to generate cover artwork.</div>
+            </section>
           </div>
           <div class="world-fields tab-content" id="tab-lore" data-tab-group="world-editor">
             <label class="wide-field">Premise<textarea id="worldPremise" rows="3" maxlength="200000" disabled></textarea></label>

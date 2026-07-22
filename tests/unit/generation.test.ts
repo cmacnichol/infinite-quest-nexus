@@ -7,7 +7,8 @@ import {
   illustrationConfigSchema,
   illustrationGenerationRequestSchema,
   sogniIllustrationProviderConfigSchema,
-  storyTurnOutputSchema
+  storyTurnOutputSchema,
+  worldCoverRequestSchema
 } from "../../packages/contracts/src/generation.js";
 
 describe("generation contracts", () => {
@@ -175,6 +176,20 @@ describe("generation contracts", () => {
       expect(illustrationGenerationRequestSchema.parse({ ...base, imageCount: 2, width: 1280, height: 720 })).toMatchObject({ imageCount: 2 });
       expect(illustrationGenerationRequestSchema.safeParse({ ...base, imageCount: 3 }).success).toBe(false);
       expect(illustrationGenerationRequestSchema.safeParse({ ...base, width: 1280 }).success).toBe(false);
+    });
+  });
+
+  describe("worldCoverRequestSchema", () => {
+    it("uses vertical cover defaults and rejects unknown request fields", () => {
+      expect(worldCoverRequestSchema.parse({})).toMatchObject({
+        prompt: "",
+        size: "1024x1536",
+        aspectRatio: "2:3",
+        quality: "auto",
+        outputFormat: "png",
+        replace: false
+      });
+      expect(worldCoverRequestSchema.safeParse({ secretProviderKey: "never" }).success).toBe(false);
     });
   });
 

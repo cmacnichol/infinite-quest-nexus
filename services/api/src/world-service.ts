@@ -112,6 +112,7 @@ export async function listWorlds(pool: DatabasePool) {
   const ownerUserId = await initialOwnerId(pool);
   const result = await pool.query(
     `SELECT w.id, w.title, w.status,
+            CASE WHEN w.cover_asset_id IS NOT NULL THEN '/api/v1/assets/' || w.cover_asset_id::text ELSE '' END AS "imageUrl",
             w.forked_from_world_id AS "forkedFromWorldId",
             w.forked_from_world_version_id AS "forkedFromWorldVersionId",
             w.created_at AS "createdAt", w.updated_at AS "updatedAt",
@@ -144,6 +145,7 @@ export async function getWorld(pool: DatabasePool, worldId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const worldResult = await pool.query(
     `SELECT w.id, w.title, w.status,
+            CASE WHEN w.cover_asset_id IS NOT NULL THEN '/api/v1/assets/' || w.cover_asset_id::text ELSE '' END AS "imageUrl",
             w.forked_from_world_id AS "forkedFromWorldId",
             w.forked_from_world_version_id AS "forkedFromWorldVersionId",
             w.created_at AS "createdAt", w.updated_at AS "updatedAt",
@@ -268,7 +270,9 @@ export async function createWorld(pool: DatabasePool, request: WorldCreateReques
 
 async function getWorldFromClient(client: DatabaseClient, ownerUserId: string, worldId: string) {
   const result = await client.query(
-    `SELECT w.id, w.title, w.status, wd.revision AS "draftRevision",
+    `SELECT w.id, w.title, w.status,
+            CASE WHEN w.cover_asset_id IS NOT NULL THEN '/api/v1/assets/' || w.cover_asset_id::text ELSE '' END AS "imageUrl",
+            wd.revision AS "draftRevision",
             wd.content AS "draftContent", wd.based_on_world_version_id AS "draftBasedOnWorldVersionId",
             w.created_at AS "createdAt", w.updated_at AS "updatedAt"
        FROM worlds w
@@ -516,7 +520,8 @@ export async function listCampaigns(pool: DatabasePool) {
             c.text_provider_profile_id AS "textProviderProfileId",
             c.image_provider_profile_id AS "imageProviderProfileId",
             wv.version_number AS "worldVersionNumber", latest.version_number AS "latestWorldVersionNumber",
-            (latest.version_number > wv.version_number) AS "worldUpdateAvailable"
+            (latest.version_number > wv.version_number) AS "worldUpdateAvailable",
+            COALESCE(costs.information, '[]'::jsonb) AS "costInformation"
        FROM campaigns c
        JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
        JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
@@ -525,6 +530,24 @@ export async function listCampaigns(pool: DatabasePool) {
           WHERE world_id = w.id AND owner_user_id = c.owner_user_id
           ORDER BY version_number DESC LIMIT 1
        ) latest ON true
+       LEFT JOIN LATERAL (
+         SELECT jsonb_agg(jsonb_build_object(
+           'currency', totals.currency,
+           'amount', totals.amount,
+           'textGenerationAmount', totals.text_generation_amount,
+           'imageGenerationAmount', totals.image_generation_amount,
+           'memoryAmount', totals.memory_amount
+         ) ORDER BY totals.currency) AS information
+           FROM (
+             SELECT currency, sum(amount)::text AS amount,
+                    coalesce(sum(amount) FILTER (WHERE category = 'story'), 0)::text AS text_generation_amount,
+                    coalesce(sum(amount) FILTER (WHERE category = 'image'), 0)::text AS image_generation_amount,
+                    coalesce(sum(amount) FILTER (WHERE category = 'memory'), 0)::text AS memory_amount
+               FROM provider_cost_events
+              WHERE owner_user_id = c.owner_user_id AND campaign_id = c.id
+              GROUP BY currency
+           ) totals
+       ) costs ON true
       WHERE c.owner_user_id = $1
       ORDER BY (c.status = 'archived'), c.updated_at DESC`,
     [ownerUserId]
@@ -653,7 +676,8 @@ export async function deleteCampaign(pool: DatabasePool, campaignId: string, req
           AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
        UNION ALL
        SELECT 'illustration' AS kind FROM image_jobs
-        WHERE campaign_id = $1 AND owner_user_id = $2 AND status IN ('queued','generating')
+        WHERE campaign_id = $1 AND owner_user_id = $2
+          AND status IN ('queued','generating','provider_pending','downloading')
        UNION ALL
        SELECT 'memory' AS kind FROM chronicle_jobs
         WHERE campaign_id = $1 AND owner_user_id = $2 AND status IN ('queued','running')
@@ -702,6 +726,14 @@ export async function deleteWorld(pool: DatabasePool, worldId: string, request: 
     if (transferCount) {
       throw httpError(409, `This world is retained by ${transferCount} campaign transfer audit record${transferCount === 1 ? "" : "s"}.`);
     }
+    const activeCover = await client.query(
+      `SELECT id FROM image_jobs
+        WHERE world_id = $1 AND owner_user_id = $2
+          AND status IN ('queued','generating','provider_pending','downloading')
+        LIMIT 1`,
+      [worldId, ownerUserId]
+    );
+    if (activeCover.rowCount) throw httpError(409, "Wait for active world-cover generation before deleting this world.");
 
     await client.query(
       `DELETE FROM imports

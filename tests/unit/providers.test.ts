@@ -294,15 +294,33 @@ describe("text provider adapters", () => {
   it("uses OpenRouter's dedicated image-model inventory", async () => {
     const imageProfile = { ...profile, providerType: "openrouter" as const, baseUrl: "https://openrouter.ai/api/v1" };
     const fetcher = vi.fn(async (url: string | URL | Request) => {
-      expect(String(url)).toBe("https://openrouter.ai/api/v1/images/models");
-      return new Response(JSON.stringify({ data: [{ id: "synthetic/image-model", name: "Synthetic Image Model" }] }), { status: 200 });
+      if (String(url) === "https://openrouter.ai/api/v1/images/models") {
+        return new Response(JSON.stringify({ data: [
+          {
+            id: "synthetic/image-model",
+            name: "Synthetic Image Model",
+            architecture: { output_modalities: ["image"] },
+            endpoints: "/api/v1/images/models/synthetic/image-model/endpoints"
+          },
+          { id: "synthetic/text-model", name: "Synthetic Text Model", architecture: { output_modalities: ["text"] } }
+        ] }), { status: 200 });
+      }
+      expect(String(url)).toBe("https://openrouter.ai/api/v1/images/models/synthetic/image-model/endpoints");
+      return new Response(JSON.stringify({ endpoints: [{
+        provider_name: "Synthetic Images",
+        pricing: [{ billable: "output_image", unit: "image", cost_usd: 0.04 }]
+      }] }), { status: 200 });
     });
     expect(await discoverImageModels(imageProfile, fetcher as typeof fetch)).toEqual([{
       id: "synthetic/image-model",
       displayName: "Synthetic Image Model",
       loaded: true,
       instanceId: "synthetic/image-model",
-      contextLength: 0
+      contextLength: 0,
+      pricing: {
+        category: "image",
+        entries: [{ billable: "output_image", unit: "image", costUsd: 0.04, provider: "Synthetic Images" }]
+      }
     }]);
   });
 

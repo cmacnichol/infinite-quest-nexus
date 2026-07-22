@@ -341,7 +341,20 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("async function refreshCampaignCostSummary()");
     expect(managementScript).toContain("/cost-summary");
     expect(managementScript).toContain("No provider-reported cost data");
+    expect(managementScript).toContain("text generation");
+    expect(managementScript).toContain("image generation");
+    expect(managementScript).toContain("function modelPricingLabel(model)");
     expect(managementHtml).not.toMatch(/cost tracking page/i);
+  });
+
+  it("generates durable world covers from both new-world and edit-world workflows", () => {
+    expect(managementHtml).toContain('id="newWorldGenerateCover"');
+    expect(managementHtml).toContain('id="worldCoverPreview"');
+    expect(managementHtml).toContain('id="worldCoverPrompt"');
+    expect(managementHtml).toContain('id="generateWorldCover"');
+    expect(managementScript).toContain("async function generateWorldCoverImage()");
+    expect(managementScript).toContain("async function monitorWorldCoverJob(jobId, worldId)");
+    expect(managementScript).toContain("/cover`");
   });
 
   it("places infrequent imports after the campaign workspace", () => {
