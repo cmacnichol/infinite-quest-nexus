@@ -1,6 +1,12 @@
 import type { ProviderType } from "../../contracts/src/generation.js";
 import { logger } from "../../logger/src/index.js";
 import { Agent } from "undici";
+import {
+  cancelSogniGeneration,
+  pollSogniGeneration,
+  submitSogniGeneration,
+  type NormalizedProviderError as SogniNormalizedProviderError
+} from "./providers/illustration/sogni/index.js";
 
 export type TextProviderProfile = {
   providerType: ProviderType;
@@ -61,6 +67,16 @@ export type ImageProviderRequest = {
   aspectRatio: string;
   quality: "auto" | "low" | "medium" | "high";
   outputFormat: "png" | "jpeg" | "webp";
+  idempotencyKey?: string;
+  imageCount?: 1 | 2;
+  negativePrompt?: string;
+  width?: number;
+  height?: number;
+  seed?: number;
+  steps?: number;
+  guidance?: number;
+  scheduler?: string;
+  sensitiveContentFilter?: "provider-default" | "enabled" | "disabled";
 };
 
 export type ImageProviderResult = {
@@ -71,6 +87,38 @@ export type ImageProviderResult = {
   reportedCost: ReportedProviderCost | null;
   rawMetadata: Record<string, unknown>;
 };
+
+export type NormalizedProviderError = SogniNormalizedProviderError;
+
+export type ImageProviderArtifact =
+  | { source: "base64"; base64: string; mimeType: ImageProviderResult["mimeType"] }
+  | { source: "url"; url: string; mimeType?: ImageProviderResult["mimeType"] };
+
+export type ImageProviderSubmissionResult =
+  | {
+      mode: "completed";
+      artifacts: ImageProviderArtifact[];
+      usage: Record<string, unknown>;
+      reportedCost: ReportedProviderCost | null;
+      providerMetadata: Record<string, unknown>;
+    }
+  | {
+      mode: "pending";
+      remoteJobId: string;
+      pollAfterMs?: number;
+      providerMetadata: Record<string, unknown>;
+    };
+
+export type ImageProviderPollResult =
+  | { status: "pending"; progress?: number; pollAfterMs?: number; providerMetadata: Record<string, unknown> }
+  | {
+      status: "completed";
+      artifacts: ImageProviderArtifact[];
+      usage: Record<string, unknown>;
+      reportedCost: ReportedProviderCost | null;
+      providerMetadata: Record<string, unknown>;
+    }
+  | { status: "failed"; error: NormalizedProviderError; providerMetadata: Record<string, unknown> };
 
 type Fetch = typeof fetch;
 
@@ -160,7 +208,8 @@ function transportFailure(
   const timeoutMs = requestTimeoutMs(profile);
   const providerName = profile.providerType === "lmstudio" ? "LM Studio"
     : profile.providerType === "openrouter" ? "OpenRouter"
-      : profile.providerType === "openai_compatible" ? "OpenAI-compatible provider" : "Manifest provider";
+      : profile.providerType === "openai_compatible" ? "OpenAI-compatible provider"
+        : profile.providerType === "sogni" ? "Sogni" : "Manifest provider";
   const transportCode = codes[0] || (timedOut ? "REQUEST_TIMEOUT" : "TRANSPORT_FAILURE");
   const causeName = names.find(Boolean) || "Error";
   const causeMessage = messages.findLast(Boolean) || messages.find(Boolean) || String(cause || "Transport failure");
@@ -580,6 +629,100 @@ export async function callImageProvider(
   };
 }
 
+type AsyncImageProviderAdapter = {
+  submit(profile: TextProviderProfile, request: ImageProviderRequest, fetcher: Fetch): Promise<ImageProviderSubmissionResult>;
+  poll?(profile: TextProviderProfile, remoteJobId: string, fetcher: Fetch): Promise<ImageProviderPollResult>;
+  cancel?(profile: TextProviderProfile, remoteJobId: string, fetcher: Fetch): Promise<void>;
+};
+
+const compatibleImageProviderAdapter: AsyncImageProviderAdapter = {
+  async submit(profile, request, fetcher) {
+    const result = await callImageProvider(profile, request, fetcher);
+    return {
+      mode: "completed",
+      artifacts: [{ source: "base64", base64: result.base64, mimeType: result.mimeType }],
+      usage: result.usage,
+      reportedCost: result.reportedCost,
+      providerMetadata: { responseId: result.responseId, ...result.rawMetadata }
+    };
+  }
+};
+
+const sogniImageProviderAdapter: AsyncImageProviderAdapter = {
+  async submit(profile, request, fetcher) {
+    const dimensions = /^(\d{2,5})x(\d{2,5})$/.exec(request.size);
+    const imageCount = request.imageCount ?? 1;
+    if (imageCount !== 1 && imageCount !== 2) throw new Error("Image count must be one or two.");
+    const submitted = await submitSogniGeneration(profile, {
+      prompt: request.prompt,
+      idempotencyKey: String(request.idempotencyKey || ""),
+      imageCount,
+      outputFormat: request.outputFormat,
+      sensitiveContentFilter: request.sensitiveContentFilter ?? "provider-default",
+      ...(request.negativePrompt !== undefined ? { negativePrompt: request.negativePrompt } : {}),
+      ...((request.width !== undefined || dimensions) ? { width: request.width ?? Number(dimensions?.[1]) } : {}),
+      ...((request.height !== undefined || dimensions) ? { height: request.height ?? Number(dimensions?.[2]) } : {}),
+      ...(request.aspectRatio !== undefined ? { aspectRatio: request.aspectRatio } : {}),
+      ...(request.seed !== undefined ? { seed: request.seed } : {}),
+      ...(request.steps !== undefined ? { steps: request.steps } : {}),
+      ...(request.guidance !== undefined ? { guidance: request.guidance } : {}),
+      ...(request.scheduler !== undefined ? { scheduler: request.scheduler } : {})
+    }, fetcher);
+    return { mode: "pending", ...submitted };
+  },
+  async poll(profile, remoteJobId, fetcher) {
+    const result = await pollSogniGeneration(profile, remoteJobId, fetcher);
+    if (result.status === "completed") return {
+      ...result,
+      reportedCost: reportedProviderCost(result.usage)
+    };
+    return result;
+  },
+  cancel: cancelSogniGeneration
+};
+
+export const imageProviderRegistry: Readonly<Partial<Record<ProviderType, AsyncImageProviderAdapter>>> = Object.freeze({
+  lmstudio: compatibleImageProviderAdapter,
+  openrouter: compatibleImageProviderAdapter,
+  openai_compatible: compatibleImageProviderAdapter,
+  manifest: compatibleImageProviderAdapter,
+  sogni: sogniImageProviderAdapter
+});
+
+function imageProviderAdapter(profile: TextProviderProfile): AsyncImageProviderAdapter {
+  const adapter = imageProviderRegistry[profile.providerType];
+  if (!adapter) throw new Error(`No image provider adapter is registered for '${profile.providerType}'.`);
+  return adapter;
+}
+
+export async function submitImageProvider(
+  profile: TextProviderProfile,
+  request: ImageProviderRequest,
+  fetcher: Fetch = fetch
+): Promise<ImageProviderSubmissionResult> {
+  return imageProviderAdapter(profile).submit(profile, request, fetcher);
+}
+
+export async function pollImageProvider(
+  profile: TextProviderProfile,
+  request: { remoteJobId: string },
+  fetcher: Fetch = fetch
+): Promise<ImageProviderPollResult> {
+  const adapter = imageProviderAdapter(profile);
+  if (!adapter.poll) throw new Error(`Image provider '${profile.providerType}' does not use asynchronous polling.`);
+  return adapter.poll(profile, request.remoteJobId, fetcher);
+}
+
+export async function cancelImageProvider(
+  profile: TextProviderProfile,
+  request: { remoteJobId: string },
+  fetcher: Fetch = fetch
+): Promise<void> {
+  const adapter = imageProviderAdapter(profile);
+  if (!adapter.cancel) throw new Error(`Image provider '${profile.providerType}' does not support cancellation.`);
+  await adapter.cancel(profile, request.remoteJobId, fetcher);
+}
+
 function inventoryRows(data: Record<string, any>): any[] {
   return Array.isArray(data.models) ? data.models : Array.isArray(data.data) ? data.data : [];
 }
@@ -686,6 +829,17 @@ export async function discoverEmbeddingModels(profile: TextProviderProfile, fetc
 }
 
 export async function discoverImageModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
+  if (profile.providerType === "sogni") {
+    if (profile.configuration?.modelDiscoveryEnabled === false) return [];
+    const url = `${openAiRoot(profile.baseUrl)}/models`;
+    const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile) }, fetcher), profile, "image model discovery", url);
+    const rows = inventoryRows(data).filter((model: any) => {
+      const capability = explicitImageCapability(model);
+      const identity = String(model?.id || model?.key || model?.name || model?.display_name || "");
+      return capability === true || (capability === null && IMAGE_GENERATION_PATTERN.test(identity));
+    });
+    return inventoryItems(rows);
+  }
   if (profile.providerType !== "openrouter") {
     const url = profile.providerType === "lmstudio"
       ? `${lmStudioRoot(profile.baseUrl)}/api/v1/models`

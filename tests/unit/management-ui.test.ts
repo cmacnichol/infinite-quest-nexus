@@ -15,6 +15,21 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("It never generates story narration");
   });
 
+  it("configures Sogni as an independent illustration provider without exposing stored secrets", () => {
+    expect(managementHtml).toContain('<option value="sogni">Sogni AI</option>');
+    expect(managementHtml).toContain('id="providerSogniSettings" class="hidden" aria-hidden="true"');
+    expect(managementHtml).toContain('Provider default (safest)');
+    expect(managementHtml).toContain('id="providerSogniImageCount"');
+    expect(managementHtml).toContain('<option value="2">2 images</option>');
+    expect(managementHtml).toContain('id="providerSogniModelDiscoveryEnabled"');
+    expect(managementHtml).toContain('id="providerSogniSupportsSafeContentFilter"');
+    expect(managementScript).toContain('sogni: "https://api.sogni.ai"');
+    expect(managementScript).toContain('maximumPollIntervalMs: Math.round(Number(elements.providerSogniMaximumPollIntervalSeconds.value) * 1000)');
+    expect(managementScript).toContain('generationTimeoutMs: Math.round(Number(elements.providerSogniGenerationTimeoutSeconds.value) * 1000)');
+    expect(managementScript).toContain('elements.providerApiKey.value = "";');
+    expect(managementScript).not.toContain('elements.providerApiKey.value = provider.');
+  });
+
   it("leaves fiction-boundary validation exclusively to the Nexus Story Engine", () => {
     expect(storyScript).not.toContain("STORY_RPG_MECHANIC_PATTERNS");
     expect(storyScript).not.toContain("storyRpgMechanicLeakFields");

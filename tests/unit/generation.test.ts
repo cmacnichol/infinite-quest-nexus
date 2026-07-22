@@ -5,6 +5,8 @@ import {
   providerTextRequestSchema,
   generationRequestSchema,
   illustrationConfigSchema,
+  illustrationGenerationRequestSchema,
+  sogniIllustrationProviderConfigSchema,
   storyTurnOutputSchema
 } from "../../packages/contracts/src/generation.js";
 
@@ -54,6 +56,18 @@ describe("generation contracts", () => {
       };
 
       const result = providerProfileInputSchema.safeParse(input);
+      expect(result.success).toBe(true);
+    });
+
+    it("accepts the 30-second Sogni request-timeout default", () => {
+      const result = providerProfileInputSchema.safeParse({
+        name: "Sogni AI",
+        providerType: "sogni",
+        providerRole: "image",
+        baseUrl: "https://api.sogni.ai",
+        requestTimeoutMs: 30_000
+      });
+
       expect(result.success).toBe(true);
     });
 
@@ -136,6 +150,31 @@ describe("generation contracts", () => {
 
       const result = illustrationConfigSchema.safeParse(input);
       expect(result.success).toBe(true);
+    });
+  });
+
+  describe("Sogni illustration contracts", () => {
+    it("accepts bounded async provider settings and defaults filtering safely", () => {
+      expect(sogniIllustrationProviderConfigSchema.parse({})).toMatchObject({
+        pollIntervalMs: 2_000,
+        maximumPollIntervalMs: 10_000,
+        generationTimeoutMs: 180_000,
+        defaultImageCount: 1,
+        sensitiveContentFilter: "provider-default"
+      });
+      expect(sogniIllustrationProviderConfigSchema.safeParse({ pollIntervalMs: 10_000, maximumPollIntervalMs: 2_000 }).success).toBe(false);
+    });
+
+    it("limits Sogni generation requests to two images and paired dimensions", () => {
+      const base = {
+        jobId: "illustration-job-1",
+        idempotencyKey: "illustration-job-1:revision-1",
+        prompt: "A fictional moonlit citadel.",
+        modelId: "flux2"
+      };
+      expect(illustrationGenerationRequestSchema.parse({ ...base, imageCount: 2, width: 1280, height: 720 })).toMatchObject({ imageCount: 2 });
+      expect(illustrationGenerationRequestSchema.safeParse({ ...base, imageCount: 3 }).success).toBe(false);
+      expect(illustrationGenerationRequestSchema.safeParse({ ...base, width: 1280 }).success).toBe(false);
     });
   });
 

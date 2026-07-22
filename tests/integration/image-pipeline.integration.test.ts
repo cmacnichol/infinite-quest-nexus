@@ -8,7 +8,7 @@ import { storyImportRequestSchema } from "../../packages/contracts/src/imports.j
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { enqueueGeneration, getGenerationJob, runGenerationJob } from "../../services/api/src/generation-service.js";
-import { getImageJob, listCampaignImageJobs, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
+import { enqueueIllustration, getImageJob, listCampaignImageJobs, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
@@ -42,6 +42,7 @@ integration("independent illustration pipeline", () => {
   let assetRoot = "";
   let failImages = false;
   const imageRequests: Array<Record<string, unknown>> = [];
+  const sogniRequests: Array<{ body: Record<string, unknown>; idempotencyKey: string }> = [];
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
@@ -53,6 +54,27 @@ integration("independent illustration pipeline", () => {
       request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
         const parsed = JSON.parse(body || "{}");
+        if (request.method === "POST" && request.url === "/v1/creative-agent/workflows") {
+          sogniRequests.push({ body: parsed, idempotencyKey: String(request.headers["idempotency-key"] || "") });
+          response.writeHead(201, { "content-type": "application/json" });
+          response.end(JSON.stringify({ status: "success", data: { workflow: { workflowId: "wf_integration-1", status: "queued" } } }));
+          return;
+        }
+        if (request.method === "GET" && request.url === "/v1/creative-agent/workflows/wf_integration-1") {
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({ status: "success", data: { workflow: {
+            workflowId: "wf_integration-1",
+            status: "completed",
+            steps: [{ status: "completed", artifacts: [{ url: `${baseUrl}/sogni-artifact.png`, mimeType: "image/png" }] }],
+            usage: { images: 1 }
+          } } }));
+          return;
+        }
+        if (request.method === "GET" && request.url === "/sogni-artifact.png") {
+          response.writeHead(200, { "content-type": "image/png", "content-length": Buffer.byteLength(tinyPng, "base64") });
+          response.end(Buffer.from(tinyPng, "base64"));
+          return;
+        }
         if (request.url?.endsWith("/images/generations")) {
           imageRequests.push(parsed);
           if (failImages) {
@@ -173,5 +195,52 @@ integration("independent illustration pipeline", () => {
     expect(await getGenerationJob(pool, storyJob.id)).toMatchObject({ status: "completed" });
     const acceptedAfter = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM turns WHERE campaign_id = $1", [imported.campaignId]);
     expect(acceptedAfter.rows[0]?.count).toBe(acceptedBefore.rows[0]?.count);
+  });
+
+  it("persists a Sogni workflow ID, resumes polling, and stores the downloaded artifact", async () => {
+    const sogniProviderId = (await createProvider(pool, {
+      name: `Synthetic Sogni ${crypto.randomUUID()}`,
+      providerType: "sogni",
+      providerRole: "image",
+      baseUrl,
+      defaultModel: "flux2",
+      contextWindowTokens: 32768,
+      maxOutputTokens: 4096,
+      temperature: 0,
+      requestTimeoutMs: 30_000,
+      apiKey: "synthetic-sogni-token",
+      enabled: true,
+      configuration: {
+        pollIntervalMs: 1_000,
+        maximumPollIntervalMs: 1_000,
+        generationTimeoutMs: 30_000,
+        defaultImageCount: 1,
+        sensitiveContentFilter: "provider-default",
+        allowPrivateArtifactHosts: true
+      }
+    }, credentialSecret)).id;
+    const imported = await campaign();
+    const turn = await pool.query<{ id: string }>("SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId]);
+    const turnId = turn.rows[0]!.id;
+    const queued = await enqueueIllustration(pool, turnId, {
+      providerProfileId: sogniProviderId,
+      model: "flux2",
+      prompt: "A quiet violet sky above a luminous stone arch in an empty valley.",
+      replace: true
+    });
+
+    await runImageJob(pool, "sogni-submit-worker", 30, credentialSecret, { root: assetRoot });
+    expect(await getImageJob(pool, queued.id)).toMatchObject({ status: "provider_pending", remoteJobId: "wf_integration-1" });
+    await pool.query("UPDATE image_jobs SET next_poll_at = now() WHERE id = $1", [queued.id]);
+    await runImageJob(pool, "sogni-poll-worker", 30, credentialSecret, { root: assetRoot });
+
+    expect(await getImageJob(pool, queued.id)).toMatchObject({
+      status: "completed",
+      providerProgress: 100,
+      assetUrl: expect.stringMatching(/^\/api\/v1\/assets\//)
+    });
+    expect(sogniRequests).toHaveLength(1);
+    expect(sogniRequests[0]?.idempotencyKey).toBe(`${queued.id}:0`);
+    expect(JSON.stringify(sogniRequests[0]?.body)).not.toContain("synthetic-sogni-token");
   });
 });

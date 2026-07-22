@@ -1,6 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { providerProfileInputSchema } from "../../packages/contracts/src/generation.js";
-import { callEmbeddingProvider, callImageProvider, callTextProvider, discoverEmbeddingModels, discoverImageModels, discoverModels, providerTransportErrorDetails, reportedProviderCost, type TextProviderProfile } from "../../packages/story-engine/src/providers.js";
+import {
+  callEmbeddingProvider,
+  callImageProvider,
+  callTextProvider,
+  cancelImageProvider,
+  discoverEmbeddingModels,
+  discoverImageModels,
+  discoverModels,
+  pollImageProvider,
+  providerTransportErrorDetails,
+  reportedProviderCost,
+  submitImageProvider,
+  type TextProviderProfile
+} from "../../packages/story-engine/src/providers.js";
 import { logger } from "../../packages/logger/src/index.js";
 
 const profile: TextProviderProfile = {
@@ -406,5 +419,124 @@ describe("text provider adapters", () => {
     }, fetcher as typeof fetch);
     expect(streamChunks).toEqual(["Hello", "Hello world"]);
     expect(result.content).toBe("Hello world");
+  });
+
+  it("submits a durable Sogni workflow with bearer auth and an idempotency key", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni",
+      baseUrl: "https://api.sogni.ai/v1",
+      model: "flux2",
+      apiKey: "sogni-secret",
+      configuration: { tokenType: "auto", pollIntervalMs: 3_000 }
+    };
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe("https://api.sogni.ai/v1/creative-agent/workflows");
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer sogni-secret");
+      expect(new Headers(init?.headers).get("idempotency-key")).toBe("illustration-job-1:revision-1");
+      const body = JSON.parse(String(init?.body));
+      expect(body).toMatchObject({
+        token_type: "auto",
+        app_source: "infinite-quest-nexus",
+        confirm_cost: true,
+        input: {
+          steps: [
+            { id: "image1", toolName: "generate_image", arguments: { prompt: "A fictional moonlit citadel.", model: "flux2" } },
+            { id: "image2", toolName: "generate_image", arguments: { prompt: "A fictional moonlit citadel.", model: "flux2" } }
+          ]
+        }
+      });
+      return new Response(JSON.stringify({ status: "success", data: { workflow: { workflowId: "wf_test-1", status: "queued" } } }), { status: 201 });
+    });
+    await expect(submitImageProvider(sogniProfile, {
+      prompt: "A fictional moonlit citadel.",
+      size: "1280x720",
+      aspectRatio: "16:9",
+      quality: "high",
+      outputFormat: "png",
+      imageCount: 2,
+      idempotencyKey: "illustration-job-1:revision-1"
+    }, fetcher as typeof fetch)).resolves.toEqual({
+      mode: "pending",
+      remoteJobId: "wf_test-1",
+      pollAfterMs: 3_000,
+      providerMetadata: { status: "queued" }
+    });
+  });
+
+  it("polls and cancels Sogni workflows without forwarding credentials to artifact URLs", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni",
+      baseUrl: "https://api.sogni.ai",
+      model: "flux2",
+      apiKey: "sogni-secret"
+    };
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith("/cancel")) {
+        expect(init?.method).toBe("POST");
+        return new Response(JSON.stringify({ status: "success" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        status: "success",
+        data: {
+          workflow: {
+            workflowId: "wf_test-1",
+            status: "completed",
+            steps: [{ artifacts: [{ url: "https://artifacts.sogni.ai/signed/image.png", mimeType: "image/png" }] }],
+            usage: { cost: 0.25, currency: "USD" }
+          }
+        }
+      }), { status: 200 });
+    });
+    await expect(pollImageProvider(sogniProfile, { remoteJobId: "wf_test-1" }, fetcher as typeof fetch)).resolves.toMatchObject({
+      status: "completed",
+      artifacts: [{ source: "url", url: "https://artifacts.sogni.ai/signed/image.png", mimeType: "image/png" }],
+      reportedCost: { amount: "0.25", currency: "USD" }
+    });
+    await expect(cancelImageProvider(sogniProfile, { remoteJobId: "wf_test-1" }, fetcher as typeof fetch)).resolves.toBeUndefined();
+  });
+
+  it("normalizes Sogni rate limits and honors Retry-After", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni",
+      baseUrl: "https://api.sogni.ai",
+      model: "flux2",
+      apiKey: "sogni-secret"
+    };
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ status: "error", errorCode: 209, message: "Slow down" }), {
+      status: 429,
+      headers: { "retry-after": "4" }
+    }));
+    await expect(submitImageProvider(sogniProfile, {
+      prompt: "A fictional vista.",
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "auto",
+      outputFormat: "png",
+      idempotencyKey: "illustration-job-2:revision-1"
+    }, fetcher as typeof fetch)).rejects.toMatchObject({
+      normalized: { code: "rate_limited:209", retryable: true, statusCode: 429, retryAfterMs: 4_000 }
+    });
+  });
+
+  it("discovers only Sogni models with image capability signals", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni",
+      baseUrl: "https://api.sogni.ai",
+      model: "flux2",
+      apiKey: "sogni-secret"
+    };
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ data: [
+      { id: "qwen-chat", capabilities: { output_modalities: ["text"] } },
+      { id: "flux2", capabilities: { output_modalities: ["image"] } },
+      { id: "vendor/custom-image-renderer" }
+    ] }), { status: 200 }));
+    expect(await discoverImageModels(sogniProfile, fetcher as typeof fetch)).toEqual([
+      { id: "flux2", displayName: "flux2", loaded: false, instanceId: "flux2", contextLength: 0 },
+      { id: "vendor/custom-image-renderer", displayName: "vendor/custom-image-renderer", loaded: false, instanceId: "vendor/custom-image-renderer", contextLength: 0 }
+    ]);
   });
 });

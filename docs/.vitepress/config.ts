@@ -150,6 +150,7 @@ export default withMermaid({
             { text: "Turn intent", link: "/nexus-guide/providers/turn-intent" },
             { text: "Embeddings", link: "/nexus-guide/providers/embeddings" },
             { text: "Images", link: "/nexus-guide/providers/images" },
+            { text: "Sogni", link: "/nexus-guide/providers/sogni" },
             { text: "Model discovery", link: "/nexus-guide/providers/model-discovery" },
             { text: "Health and errors", link: "/nexus-guide/providers/health-and-errors" }
           ]

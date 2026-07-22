@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible"]);
+export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible", "sogni"]);
 export const providerRoleSchema = z.enum(["text", "image", "embedding", "intent"]);
 
 export const turnInputModeSchema = z.enum(["action", "scene"]);
@@ -23,7 +23,7 @@ export const providerProfileInputSchema = z.object({
   contextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).default(32768),
   maxOutputTokens: z.coerce.number().int().min(128).max(262144).default(4096),
   temperature: z.coerce.number().min(0).max(2).default(0.8),
-  requestTimeoutMs: z.coerce.number().int().min(60_000).max(3_600_000).default(300_000),
+  requestTimeoutMs: z.coerce.number().int().min(5_000).max(3_600_000).default(300_000),
   apiKey: z.string().trim().max(16_384).optional(),
   enabled: z.boolean().default(true),
   isDefault: z.boolean().default(false),
@@ -31,6 +31,12 @@ export const providerProfileInputSchema = z.object({
 }).superRefine((value, context) => {
   if (value.providerRole === "text" && value.maxOutputTokens + 512 >= value.contextWindowTokens) {
     context.addIssue({ code: "custom", path: ["maxOutputTokens"], message: "Text output reserve must leave at least 512 tokens for input context." });
+  }
+  if (value.providerType === "sogni") {
+    const result = sogniIllustrationProviderConfigSchema.safeParse(value.configuration);
+    if (!result.success) {
+      for (const issue of result.error.issues) context.addIssue({ ...issue, path: ["configuration", ...issue.path] });
+    }
   }
 });
 
@@ -41,7 +47,7 @@ export const providerProfileUpdateSchema = z.object({
   contextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).optional(),
   maxOutputTokens: z.coerce.number().int().min(128).max(262144).optional(),
   temperature: z.coerce.number().min(0).max(2).optional(),
-  requestTimeoutMs: z.coerce.number().int().min(60_000).max(3_600_000).optional(),
+  requestTimeoutMs: z.coerce.number().int().min(5_000).max(3_600_000).optional(),
   apiKey: z.string().trim().max(16_384).optional(),
   enabled: z.boolean().optional(),
   isDefault: z.boolean().optional(),
@@ -108,6 +114,65 @@ export const illustrationRequestSchema = z.object({
   model: z.string().trim().max(500).optional(),
   prompt: z.string().trim().min(1).max(20_000).optional(),
   replace: z.boolean().default(false)
+});
+
+export const sensitiveContentFilterSchema = z.enum(["provider-default", "enabled", "disabled"]);
+
+export const sogniIllustrationProviderConfigSchema = z.object({
+  modelDiscoveryEnabled: z.boolean().default(true),
+  network: z.enum(["fast", "relaxed"]).default("fast"),
+  tokenType: z.enum(["auto", "sogni", "spark"]).default("auto"),
+  defaultWidth: z.coerce.number().int().min(256).max(8_192).default(1_280),
+  defaultHeight: z.coerce.number().int().min(256).max(8_192).default(720),
+  defaultAspectRatio: z.string().trim().regex(/^\d{1,3}:\d{1,3}$/).default("16:9"),
+  defaultOutputFormat: z.enum(["png", "jpeg"]).default("png"),
+  defaultQuality: z.enum(["auto", "low", "medium", "high"]).default("auto"),
+  pollIntervalMs: z.coerce.number().int().min(1_000).max(30_000).default(2_000),
+  maximumPollIntervalMs: z.coerce.number().int().min(1_000).max(30_000).default(10_000),
+  generationTimeoutMs: z.coerce.number().int().min(30_000).max(600_000).default(180_000),
+  maximumAttempts: z.coerce.number().int().min(1).max(5).default(3),
+  defaultImageCount: z.coerce.number().int().min(1).max(2).default(1),
+  sensitiveContentFilter: sensitiveContentFilterSchema.default("provider-default"),
+  workflowSafeContentFilterSupported: z.boolean().default(false),
+  allowPrivateArtifactHosts: z.boolean().default(false)
+}).superRefine((value, context) => {
+  if (value.maximumPollIntervalMs < value.pollIntervalMs) {
+    context.addIssue({
+      code: "custom",
+      path: ["maximumPollIntervalMs"],
+      message: "Maximum poll interval must be greater than or equal to the initial poll interval."
+    });
+  }
+  if (value.defaultWidth * value.defaultHeight > 40_000_000) {
+    context.addIssue({ code: "custom", path: ["defaultWidth"], message: "Default image dimensions exceed the 40 megapixel limit." });
+  }
+});
+
+export const illustrationGenerationRequestSchema = z.object({
+  jobId: z.string().trim().min(1).max(200),
+  campaignId: z.uuid().optional(),
+  acceptedTurnId: z.uuid().optional(),
+  idempotencyKey: z.string().trim().min(8).max(192),
+  prompt: z.string().trim().min(1).max(20_000),
+  negativePrompt: z.string().trim().max(20_000).optional(),
+  modelId: z.string().trim().min(1).max(500),
+  imageCount: z.coerce.number().int().min(1).max(2).default(1),
+  width: z.coerce.number().int().min(256).max(8_192).optional(),
+  height: z.coerce.number().int().min(256).max(8_192).optional(),
+  aspectRatio: z.string().trim().regex(/^\d{1,3}:\d{1,3}$/).optional(),
+  outputFormat: z.enum(["png", "jpeg", "webp"]).default("png"),
+  seed: z.coerce.number().int().min(0).max(4_294_967_295).optional(),
+  steps: z.coerce.number().int().min(1).max(500).optional(),
+  guidance: z.coerce.number().min(0).max(100).optional(),
+  scheduler: z.string().trim().min(1).max(100).optional(),
+  sensitiveContentFilter: sensitiveContentFilterSchema.default("provider-default")
+}).superRefine((value, context) => {
+  if ((value.width === undefined) !== (value.height === undefined)) {
+    context.addIssue({ code: "custom", path: ["width"], message: "Width and height must be configured together." });
+  }
+  if (value.width && value.height && value.width * value.height > 40_000_000) {
+    context.addIssue({ code: "custom", path: ["width"], message: "Requested image dimensions exceed the 40 megapixel limit." });
+  }
 });
 
 export const playerRpgStatSchema = z.object({
@@ -263,6 +328,9 @@ export type CampaignRewindRequest = z.infer<typeof campaignRewindSchema>;
 export type CampaignBranchRequest = z.infer<typeof campaignBranchSchema>;
 export type IllustrationConfig = z.infer<typeof illustrationConfigSchema>;
 export type IllustrationRequest = z.infer<typeof illustrationRequestSchema>;
+export type SensitiveContentFilter = z.infer<typeof sensitiveContentFilterSchema>;
+export type SogniIllustrationProviderConfig = z.infer<typeof sogniIllustrationProviderConfigSchema>;
+export type IllustrationGenerationRequest = z.infer<typeof illustrationGenerationRequestSchema>;
 export type StoryTurnOutput = z.infer<typeof storyTurnOutputSchema>;
 export type PlayerCampaignConfig = z.infer<typeof playerCampaignConfigSchema>;
 export type CampaignRuntimeStateUpdate = z.infer<typeof campaignRuntimeStateUpdateSchema>;
