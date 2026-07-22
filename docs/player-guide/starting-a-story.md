@@ -3,12 +3,18 @@
 ## Start from Nexus
 
 1. Open Nexus at `/nexus/`.
-2. Select **Campaigns**.
-3. Select the campaign.
-4. Confirm its **Text provider profile** and **Default story response length**.
-5. Select **Load story**.
+2. Search or browse the campaign carousel.
+3. Select the campaign card.
 
-Always start a managed campaign through **Load story**. It opens the campaign route with the accepted ledger and connection information prepared by the server.
+The dashboard opens the campaign route with the accepted ledger and connection information prepared by the server. Use **Story** in the universal navigation to return to the active campaign from any other page.
+
+For advanced review before loading, open **Setup → Campaign Management**, select the campaign, confirm its **Text provider profile** and **Default story response length**, then use its story-opening action.
+
+## Start a new campaign
+
+Select an available world card, review **World Details**, and choose **Create campaign**. Enter a campaign name and choose a playable character. Other settings use the current system defaults; **Advanced creation** opens **Setup → Campaign Management** when you need more control.
+
+Successful basic creation opens the new Story immediately and starts its first turn.
 
 ## New campaign behavior
 

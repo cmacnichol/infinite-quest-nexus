@@ -16,7 +16,7 @@ Each screenshot requires:
 
 | Filename | Subject | Used by |
 | --- | --- | --- |
-| `nexus-home.png` | Nexus management landing page | Getting Started, Nexus Guide |
+| `nexus-home.png` | Central dashboard with stats and world/campaign carousels | Getting Started, Nexus Guide |
 | `text-provider-profile.png` | Text provider form with safe placeholders | Quick Start, Providers |
 | `model-discovery.png` | Discovered model selection | Quick Start, Providers |
 | `world-library.png` | World list and selected draft | First World, World Library |

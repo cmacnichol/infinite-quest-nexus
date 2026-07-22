@@ -1,5 +1,17 @@
 # Create a campaign
 
+## Basic creation from the dashboard
+
+1. Search or browse the dashboard's available-worlds carousel.
+2. Select a world card to open **World Details**.
+3. Select **Create campaign**.
+4. Enter the campaign name and choose a playable character.
+5. Select **Create campaign**.
+
+The basic form uses system defaults for the remaining campaign settings. Successful creation opens the Story page and starts the world's first turn. Choose **Advanced creation** to continue in **Setup → Campaign Management** instead.
+
+## Advanced creation
+
 1. Select a world and an exact **Published version**.
 2. Open **More actions** and select **Create campaign**.
 3. Enter a **New campaign title**.

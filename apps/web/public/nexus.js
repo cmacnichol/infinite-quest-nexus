@@ -4,7 +4,10 @@ let selectedImportSource = null;
 let selectedImport = null;
 let selectedCampaign = null;
 let worlds = [];
+let campaigns = [];
 let selectedWorld = null;
+let dashboardWorld = null;
+const dashboardWorldDetails = new Map();
 let worldVersionCharacters = [];
 let worldVersionCampaignReady = false;
 let playableCharacterLoadSequence = 0;
@@ -76,29 +79,36 @@ function applyStoryProviderContextBudget() {
 function updateStoryViewLink() {
   if (!elements.storyViewLink) return;
   const lastCampaignId = localStorage.getItem("infiniteQuestLastCampaignId");
+  let storyHref = "/story";
   if (selectedCampaign) {
-    elements.storyViewLink.href = "/story/" + encodeURIComponent(selectedCampaign.id);
+    storyHref = "/story/" + encodeURIComponent(selectedCampaign.id);
   } else if (lastCampaignId) {
-    elements.storyViewLink.href = "/story/" + encodeURIComponent(lastCampaignId);
-  } else {
-    elements.storyViewLink.href = "/story";
+    storyHref = "/story/" + encodeURIComponent(lastCampaignId);
   }
+  elements.storyViewLink.href = storyHref;
+  if (elements.dashboardStoryLink) elements.dashboardStoryLink.href = storyHref;
 }
 
 function applyManagementView() {
-  const hash = window.location.hash || "#world-library";
+  const hash = window.location.hash || "#dashboard";
+  const dashboardView = hash === "#dashboard";
   const providerView = hash === "#providers";
-  document.body.dataset.managementView = providerView ? "providers" : "worlds";
-  elements.managementTitle.textContent = providerView ? "Provider Management" : "World Management";
+  document.body.dataset.managementView = dashboardView ? "dashboard" : providerView ? "providers" : "worlds";
+  elements.managementTitle.textContent = providerView ? "Provider Management" : hash === "#campaigns" ? "Campaign Management" : "World Management";
   elements.managementDescription.textContent = providerView
     ? "Add and manage provider profiles independently for story text, turn intent, image generation, and Chronicle embeddings."
-    : "Author reusable versioned worlds, configure campaigns, and inspect the fiction-only memory selected for generation.";
-  document.title = `${elements.managementTitle.textContent} · Infinite Quest Nexus`;
+    : hash === "#campaigns"
+      ? "Configure campaigns, Chronicle memory, provider selection, illustrations, and world-version migrations."
+      : "Author reusable versioned worlds, configure campaigns, and inspect the fiction-only memory selected for generation.";
+  document.title = dashboardView ? "Infinite Quest Nexus" : `${elements.managementTitle.textContent} · Infinite Quest Nexus`;
 
-  // UI Pass on navigation active states
-  if (elements.navProviders) elements.navProviders.className = hash === "#providers" ? "button primary" : "button secondary";
-  if (elements.navWorlds) elements.navWorlds.className = hash === "#world-library" || hash === "" ? "button primary" : "button secondary";
-  if (elements.navCampaigns) elements.navCampaigns.className = hash === "#campaigns" ? "button primary" : "button secondary";
+  [elements.navDashboard, elements.navProviders, elements.navWorlds, elements.navCampaigns, elements.navImports].forEach((link) => link?.classList.remove("active"));
+  if (dashboardView) elements.navDashboard?.classList.add("active");
+  if (providerView) elements.navProviders?.classList.add("active");
+  if (hash === "#world-library") elements.navWorlds?.classList.add("active");
+  if (hash === "#campaigns") elements.navCampaigns?.classList.add("active");
+  if (hash === "#imports") elements.navImports?.classList.add("active");
+  elements.navSetup?.classList.toggle("active", !dashboardView);
 
   updateStoryViewLink();
 }
@@ -145,6 +155,305 @@ function money(value, currency) {
     minimumFractionDigits: amount < 0.01 ? 4 : 2,
     maximumFractionDigits: amount < 0.01 ? 6 : 2
   }).format(amount);
+}
+
+function artworkUrl(record) {
+  const candidate = String(record?.imageUrl || record?.artworkUrl || record?.coverImageUrl || "").trim();
+  if (!candidate) return "";
+  try {
+    const url = new URL(candidate, window.location.origin);
+    return ["http:", "https:"].includes(url.protocol) || url.origin === window.location.origin ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function applyArtwork(element, record) {
+  const url = artworkUrl(record);
+  if (!url) return;
+  element.style.backgroundImage = `linear-gradient(180deg, transparent, rgba(7,9,15,.78)), url("${url.replaceAll('"', '%22')}")`;
+  element.classList.add("has-image");
+}
+
+function worldPreview(world, detail = dashboardWorldDetails.get(world.id)) {
+  const content = world?.latestPreview || detail?.latestPreview || detail?.draftContent?.world || {};
+  return {
+    genre: String(content.genre || "Uncharted genre"),
+    tone: String(content.tone || "Open-ended"),
+    description: String(content.premise || content.backgroundStory || "A published world ready for a new campaign."),
+    firstAction: String(content.firstAction || "Begin the adventure."),
+    imageUrl: detail?.imageUrl || content.imageUrl || content.artworkUrl || ""
+  };
+}
+
+function createDashboardWorldCard(world) {
+  const preview = worldPreview(world);
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "dashboard-card world-card";
+  card.dataset.worldId = world.id;
+  card.setAttribute("aria-label", `View details for ${world.title}`);
+
+  const art = document.createElement("div");
+  art.className = "card-art";
+  applyArtwork(art, preview);
+  const badge = document.createElement("span");
+  badge.className = "card-badge";
+  badge.textContent = `World · v${world.latestVersionNumber}`;
+  art.append(badge);
+
+  const body = document.createElement("div");
+  body.className = "card-body";
+  const title = document.createElement("h3");
+  title.textContent = world.title;
+  const description = document.createElement("p");
+  description.textContent = preview.description;
+  const meta = document.createElement("div");
+  meta.className = "card-meta";
+  const genre = document.createElement("span");
+  genre.textContent = preview.genre;
+  const campaignsCount = document.createElement("span");
+  campaignsCount.textContent = `${number(world.campaignCount)} campaign${Number(world.campaignCount) === 1 ? "" : "s"}`;
+  meta.append(genre, campaignsCount);
+  const cta = document.createElement("div");
+  cta.className = "card-cta";
+  const ctaLabel = document.createElement("span");
+  ctaLabel.textContent = "Explore world";
+  const ctaArrow = document.createElement("span");
+  ctaArrow.setAttribute("aria-hidden", "true");
+  ctaArrow.textContent = "→";
+  cta.append(ctaLabel, ctaArrow);
+  body.append(title, description, meta, cta);
+  card.append(art, body);
+  card.addEventListener("click", () => openWorldDetails(world.id));
+  return card;
+}
+
+function renderDashboardWorlds() {
+  if (!elements.dashboardWorlds) return;
+  const query = elements.worldSearch.value.trim().toLocaleLowerCase();
+  const available = worlds.filter((world) => world.status !== "archived" && world.latestVersionId).filter((world) => {
+    const preview = worldPreview(world);
+    return [world.title, preview.genre, preview.tone, preview.description].join(" ").toLocaleLowerCase().includes(query);
+  });
+  elements.dashboardWorlds.replaceChildren();
+  if (!available.length) {
+    const empty = document.createElement("p");
+    empty.className = "carousel-empty";
+    empty.textContent = query ? "No worlds match that search." : "No published worlds are available yet. Open World Management to prepare one.";
+    elements.dashboardWorlds.append(empty);
+    return;
+  }
+  available.forEach((world) => elements.dashboardWorlds.append(createDashboardWorldCard(world)));
+}
+
+async function hydrateDashboardWorlds() {
+  const available = worlds.filter((world) => world.status !== "archived" && world.latestVersionId);
+  await Promise.all(available.map(async (world) => {
+    if (dashboardWorldDetails.has(world.id)) return;
+    try {
+      dashboardWorldDetails.set(world.id, await api(`/api/v1/worlds/${world.id}`));
+    } catch {
+      // The summary card remains usable if optional detail hydration fails.
+    }
+  }));
+  renderDashboardWorlds();
+}
+
+function createDashboardCampaignCard(campaign) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "dashboard-card campaign-card";
+  card.dataset.campaignId = campaign.id;
+  card.dataset.status = campaign.status;
+  card.setAttribute("aria-label", `Resume ${campaign.title}`);
+
+  const art = document.createElement("div");
+  art.className = "card-art";
+  applyArtwork(art, campaign);
+  const badge = document.createElement("span");
+  badge.className = "card-badge";
+  badge.textContent = campaign.status === "archived" ? "Archived campaign" : "Campaign in progress";
+  art.append(badge);
+
+  const body = document.createElement("div");
+  body.className = "card-body";
+  const title = document.createElement("h3");
+  title.textContent = campaign.title;
+  const description = document.createElement("p");
+  description.textContent = `${campaign.worldTitle} · World version ${campaign.worldVersionNumber}${campaign.selectedCharacterName ? ` · Playing as ${campaign.selectedCharacterName}` : ""}`;
+  const meta = document.createElement("div");
+  meta.className = "card-meta";
+  const turns = document.createElement("span");
+  turns.textContent = `${number(campaign.activeTurnNumber)} accepted turn${Number(campaign.activeTurnNumber) === 1 ? "" : "s"}`;
+  const updated = document.createElement("span");
+  const updatedAt = new Date(campaign.updatedAt);
+  updated.textContent = Number.isNaN(updatedAt.valueOf()) ? "Ready to resume" : `Updated ${updatedAt.toLocaleDateString()}`;
+  meta.append(turns, updated);
+  const cta = document.createElement("div");
+  cta.className = "card-cta";
+  const ctaLabel = document.createElement("span");
+  ctaLabel.textContent = campaign.status === "archived" ? "Open story" : "Resume story";
+  const ctaArrow = document.createElement("span");
+  ctaArrow.setAttribute("aria-hidden", "true");
+  ctaArrow.textContent = "→";
+  cta.append(ctaLabel, ctaArrow);
+  body.append(title, description, meta, cta);
+  card.append(art, body);
+  card.addEventListener("click", () => {
+    localStorage.setItem("infiniteQuestLastCampaignId", campaign.id);
+    window.location.assign(`/story/${encodeURIComponent(campaign.id)}`);
+  });
+  return card;
+}
+
+function renderDashboardCampaigns() {
+  if (!elements.dashboardCampaigns) return;
+  const query = elements.campaignSearch.value.trim().toLocaleLowerCase();
+  const matches = campaigns.filter((campaign) => [campaign.title, campaign.worldTitle, campaign.selectedCharacterName].join(" ").toLocaleLowerCase().includes(query));
+  elements.dashboardCampaigns.replaceChildren();
+  if (!matches.length) {
+    const empty = document.createElement("p");
+    empty.className = "carousel-empty";
+    empty.textContent = query ? "No campaigns match that search." : "No campaigns yet. Choose an available world to begin one.";
+    elements.dashboardCampaigns.append(empty);
+    return;
+  }
+  matches.forEach((campaign) => elements.dashboardCampaigns.append(createDashboardCampaignCard(campaign)));
+}
+
+function dashboardReportedCost(costs) {
+  if (!costs?.hasReportedCosts || !Array.isArray(costs.totals) || !costs.totals.length) {
+    return { total: "Not reported", providers: "Local and unsupported fees are not estimated" };
+  }
+  const currencies = [...new Set(costs.totals.map((cost) => cost.currency))];
+  const total = currencies.length === 1
+    ? money(costs.totals.reduce((sum, cost) => sum + Number(cost.amount || 0), 0), currencies[0])
+    : `${currencies.length} currencies`;
+  const providers = costs.totals.map((cost) => {
+    const label = cost.providerName || cost.providerType || "Provider";
+    return `${label}: ${money(cost.amount, cost.currency) || `${cost.amount} ${cost.currency}`}`;
+  });
+  return { total, providers: [...new Set(providers)].join(" · ") || "Reported by configured providers" };
+}
+
+async function loadDashboardStats() {
+  if (!elements.dashboardStatsGrid) return;
+  try {
+    const stats = await api("/api/v1/dashboard/stats");
+    const reportedCost = dashboardReportedCost(stats.providerCosts);
+    elements.statWorlds.textContent = number(stats.worlds?.available);
+    elements.statCampaigns.textContent = number(stats.campaigns?.open);
+    elements.statTurns.textContent = number(stats.turns?.accepted);
+    elements.statActiveWorlds.textContent = number(stats.worlds?.published);
+    elements.statCost.textContent = reportedCost.total;
+    elements.statCostProviders.textContent = reportedCost.providers;
+    elements.statCostProviders.title = reportedCost.providers;
+    elements.dashboardStatsStatus.textContent = `${number(stats.worlds?.total)} worlds · ${number(stats.campaigns?.total)} campaigns total`;
+  } catch (error) {
+    elements.statWorlds.textContent = number(worlds.filter((world) => world.status !== "archived" && world.latestVersionId).length);
+    elements.statCampaigns.textContent = number(campaigns.filter((campaign) => campaign.status === "active").length);
+    elements.statTurns.textContent = number(campaigns.reduce((total, campaign) => total + Number(campaign.activeTurnNumber || 0), 0));
+    elements.statActiveWorlds.textContent = number(worlds.filter((world) => world.latestVersionId).length);
+    elements.statCost.textContent = "Unavailable";
+    elements.statCostProviders.textContent = "Refresh to retry provider totals";
+    elements.dashboardStatsStatus.textContent = error.message || "Dashboard statistics are temporarily unavailable.";
+  }
+}
+
+async function openWorldDetails(worldId) {
+  const summary = worlds.find((world) => world.id === worldId);
+  if (!summary) return;
+  let detail = dashboardWorldDetails.get(worldId);
+  if (!detail) {
+    try {
+      detail = await api(`/api/v1/worlds/${worldId}`);
+      dashboardWorldDetails.set(worldId, detail);
+    } catch (error) {
+      elements.dashboardStatsStatus.textContent = error.message || String(error);
+      return;
+    }
+  }
+  dashboardWorld = { ...summary, ...detail, latestVersionId: summary.latestVersionId, latestVersionNumber: summary.latestVersionNumber };
+  const preview = worldPreview(summary, detail);
+  elements.worldDetailsTitle.textContent = summary.title;
+  elements.worldDetailsEyebrow.textContent = `${preview.genre} · Published version ${summary.latestVersionNumber}`;
+  elements.worldDetailsSummary.textContent = preview.description;
+  elements.worldDetailsMeta.replaceChildren();
+  for (const [label, value] of [["Tone", preview.tone], ["Campaigns", number(summary.campaignCount)], ["Opening", preview.firstAction], ["Updated", new Date(summary.updatedAt).toLocaleDateString()]]) {
+    const group = document.createElement("div");
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const description = document.createElement("dd");
+    description.textContent = value;
+    group.append(term, description);
+    elements.worldDetailsMeta.append(group);
+  }
+  elements.worldDetailsMedia.className = "world-details-media";
+  elements.worldDetailsMedia.style.backgroundImage = "";
+  applyArtwork(elements.worldDetailsMedia, preview);
+  elements.beginCampaignFromWorld.disabled = !summary.latestVersionId;
+  elements.editWorldDetails.href = `#world-library`;
+  elements.worldDetailsDialog.showModal();
+}
+
+async function openQuickCampaign() {
+  if (!dashboardWorld?.latestVersionId) return;
+  elements.worldDetailsDialog.close();
+  elements.quickCampaignWorld.textContent = `${dashboardWorld.title} · version ${dashboardWorld.latestVersionNumber}`;
+  elements.quickCampaignName.value = `${dashboardWorld.title} Adventure`;
+  elements.quickCampaignCharacter.replaceChildren(new Option("Loading characters…", ""));
+  elements.confirmQuickCampaign.disabled = true;
+  elements.quickCampaignStatus.className = "status hidden";
+  elements.quickCampaignDialog.showModal();
+  try {
+    const result = await api(`/api/v1/world-versions/${dashboardWorld.latestVersionId}/playable-characters`);
+    const characters = Array.isArray(result.characters) ? result.characters : [];
+    elements.quickCampaignCharacter.replaceChildren();
+    if (!result.readiness?.ready || !characters.length) {
+      elements.quickCampaignCharacter.append(new Option("No playable characters available", ""));
+      elements.quickCampaignCharacterNote.textContent = result.readiness?.issues?.[0]?.message || "Publish this world with a playable character before creating a campaign.";
+      return;
+    }
+    if (characters.length > 1) elements.quickCampaignCharacter.append(new Option("Choose a character", ""));
+    characters.forEach((character) => elements.quickCampaignCharacter.append(new Option(character.name, character.id)));
+    if (characters.length === 1) elements.quickCampaignCharacter.value = characters[0].id;
+    elements.quickCampaignCharacterNote.textContent = characters.length === 1
+      ? `${characters[0].name} will be snapshotted into the campaign.`
+      : `Choose one of ${characters.length} published playable characters.`;
+    elements.confirmQuickCampaign.disabled = false;
+    elements.quickCampaignName.focus();
+  } catch (error) {
+    elements.quickCampaignStatus.textContent = error.message || String(error);
+    elements.quickCampaignStatus.className = "status error";
+  }
+}
+
+async function createQuickCampaign(event) {
+  event.preventDefault();
+  if (!dashboardWorld?.latestVersionId) return;
+  const title = elements.quickCampaignName.value.trim();
+  const selectedCharacterId = elements.quickCampaignCharacter.value;
+  if (!title || !selectedCharacterId) return;
+  elements.confirmQuickCampaign.disabled = true;
+  elements.quickCampaignStatus.textContent = "Creating your campaign and opening the first scene…";
+  elements.quickCampaignStatus.className = "status";
+  try {
+    const campaign = await api("/api/v1/campaigns", {
+      method: "POST",
+      body: JSON.stringify({ title, worldVersionId: dashboardWorld.latestVersionId, selectedCharacterId })
+    });
+    localStorage.setItem("infiniteQuestLastCampaignId", campaign.id);
+    window.location.assign(`/story/${encodeURIComponent(campaign.id)}`);
+  } catch (error) {
+    elements.confirmQuickCampaign.disabled = false;
+    elements.quickCampaignStatus.textContent = error.message || String(error);
+    elements.quickCampaignStatus.className = "status error";
+  }
+}
+
+function scrollCarousel(element, direction) {
+  element.scrollBy({ left: direction * Math.max(280, element.clientWidth * .82), behavior: "smooth" });
 }
 
 function worldMessage(message, type = "") {
@@ -449,6 +758,9 @@ function renderPlayableCharacterRoster(characters = []) {
 
 async function loadWorlds(preselectId = "") {
   ({ worlds } = await api("/api/v1/worlds"));
+  renderDashboardWorlds();
+  void hydrateDashboardWorlds();
+  void loadDashboardStats();
   elements.worldList.replaceChildren();
   if (!worlds.length) {
     const empty = document.createElement("p");
@@ -1025,7 +1337,9 @@ async function createCampaignFromWorld() {
 }
 
 async function loadCampaigns(preselectId = "") {
-  const { campaigns } = await api("/api/v1/campaigns");
+  ({ campaigns } = await api("/api/v1/campaigns"));
+  renderDashboardCampaigns();
+  void loadDashboardStats();
   elements.campaignList.replaceChildren();
   if (!campaigns.length) {
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
@@ -2812,6 +3126,56 @@ elements.deleteDialog.addEventListener("close", () => {
   if (resolve) resolve(confirmed);
 });
 elements.importStory.addEventListener("click", importStory);
+elements.worldSearch?.addEventListener("input", renderDashboardWorlds);
+elements.campaignSearch?.addEventListener("input", renderDashboardCampaigns);
+elements.worldCarouselPrev?.addEventListener("click", () => scrollCarousel(elements.dashboardWorlds, -1));
+elements.worldCarouselNext?.addEventListener("click", () => scrollCarousel(elements.dashboardWorlds, 1));
+elements.campaignCarouselPrev?.addEventListener("click", () => scrollCarousel(elements.dashboardCampaigns, -1));
+elements.campaignCarouselNext?.addEventListener("click", () => scrollCarousel(elements.dashboardCampaigns, 1));
+elements.closeWorldDetails?.addEventListener("click", () => elements.worldDetailsDialog.close());
+elements.editWorldDetails?.addEventListener("click", () => elements.worldDetailsDialog.close());
+elements.beginCampaignFromWorld?.addEventListener("click", openQuickCampaign);
+elements.cancelQuickCampaign?.addEventListener("click", () => elements.quickCampaignDialog.close());
+elements.quickCampaignForm?.addEventListener("submit", createQuickCampaign);
+elements.advancedCampaignCreation?.addEventListener("click", () => elements.quickCampaignDialog.close());
+elements.openNexusAbout?.addEventListener("click", () => elements.nexusAboutDialog.showModal());
+elements.closeNexusAbout?.addEventListener("click", () => elements.nexusAboutDialog.close());
+elements.openNexusUserProfile?.addEventListener("click", openNexusUserProfile);
+elements.closeNexusUserProfile?.addEventListener("click", () => elements.nexusUserProfileDialog.close());
+elements.cancelNexusUserProfile?.addEventListener("click", () => elements.nexusUserProfileDialog.close());
+elements.nexusUserProfileForm?.addEventListener("submit", saveNexusUserProfile);
+function closeNavigationMenus(except = null) {
+  document.querySelectorAll(".nav-menu.open").forEach((menu) => {
+    if (menu !== except) setNavigationMenuState(menu, false);
+  });
+}
+
+function setNavigationMenuState(menu, open) {
+  const trigger = menu.querySelector(".nav-menu-trigger");
+  const panel = menu.querySelector(".nav-menu-panel");
+  menu.classList.toggle("open", open);
+  if (trigger) trigger.setAttribute("aria-expanded", String(open));
+  if (panel) panel.hidden = !open;
+}
+
+document.querySelectorAll(".nav-menu-trigger").forEach((trigger) => {
+  trigger.addEventListener("click", () => {
+    const menu = trigger.closest(".nav-menu");
+    if (!menu) return;
+    const open = !menu.classList.contains("open");
+    closeNavigationMenus(menu);
+    setNavigationMenuState(menu, open);
+  });
+});
+document.addEventListener("pointerdown", (event) => {
+  if (!(event.target instanceof Element) || !event.target.closest(".nav-menu")) closeNavigationMenus();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeNavigationMenus();
+});
+document.querySelectorAll(".nav-menu-panel a, .nav-menu-panel button").forEach((control) => {
+  control.addEventListener("click", () => closeNavigationMenus());
+});
 elements.campaignImportDestination.addEventListener("change", async () => {
   updateCampaignImportDestinationVisibility();
   if (elements.campaignImportDestination.value === "existing") {
@@ -2976,6 +3340,48 @@ async function loadSessionPreferences() {
   const style = sessionUser?.settings?.defaultTurnControlStyle;
   if (["action_only", "flexible_auto", "flexible_action", "flexible_scene"].includes(style)) {
     elements.newCampaignTurnControlStyle.value = style;
+  }
+}
+
+async function openNexusUserProfile() {
+  try {
+    if (!sessionUser) await loadSessionPreferences();
+    elements.nexusUserProfileDisplayName.value = sessionUser?.displayName || "Initial Owner";
+    elements.nexusUserProfileAutoSubmitChoices.checked = sessionUser?.settings?.autoSubmitTurnChoices !== false;
+    elements.nexusUserProfileContinuousReading.checked = Boolean(sessionUser?.settings?.continuousReading);
+    elements.nexusUserProfileDefaultTurnControlStyle.value = sessionUser?.settings?.defaultTurnControlStyle || "flexible_auto";
+    elements.nexusUserProfileStatus.textContent = "";
+    elements.nexusUserProfileStatus.className = "status hidden";
+    elements.nexusUserProfileDialog.showModal();
+  } catch (error) {
+    setStatus(error.message || String(error), "error");
+  }
+}
+
+async function saveNexusUserProfile(event) {
+  event.preventDefault();
+  const displayName = elements.nexusUserProfileDisplayName.value.trim();
+  if (!displayName) return;
+  elements.nexusUserProfileStatus.textContent = "Saving profile…";
+  elements.nexusUserProfileStatus.className = "status";
+  try {
+    const response = await api("/api/v1/users/me/profile", {
+      method: "PATCH",
+      body: JSON.stringify({
+        displayName,
+        settings: {
+          autoSubmitTurnChoices: elements.nexusUserProfileAutoSubmitChoices.checked,
+          continuousReading: elements.nexusUserProfileContinuousReading.checked,
+          defaultTurnControlStyle: elements.nexusUserProfileDefaultTurnControlStyle.value
+        }
+      })
+    });
+    sessionUser = response.user || sessionUser;
+    elements.newCampaignTurnControlStyle.value = sessionUser?.settings?.defaultTurnControlStyle || "flexible_auto";
+    elements.nexusUserProfileDialog.close();
+  } catch (error) {
+    elements.nexusUserProfileStatus.textContent = error.message || String(error);
+    elements.nexusUserProfileStatus.className = "status error";
   }
 }
 

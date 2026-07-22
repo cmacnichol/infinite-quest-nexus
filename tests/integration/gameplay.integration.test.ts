@@ -186,6 +186,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(turnsResponse.statusCode).toBe(200);
     const initialTurns = turnsResponse.json().turns;
     expect(initialTurns.length).toBeGreaterThan(0);
+    expect(initialTurns.every((turn: { inputMode?: string }) => turn.inputMode === "action")).toBe(true);
 
     // 3. Submit action via POST /api/v1/campaigns/:campaignId/generations
     replies.push({ content: validStory("You step into the Ancient Observatory and hear a hum.") });
@@ -226,6 +227,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     const latestTurn = turnsAfter[turnsAfter.length - 1];
     expect(latestTurn.narration).toContain("Ancient Observatory");
     expect(latestTurn.choices).toContain("Examine the telescope.");
+    expect(latestTurn).toMatchObject({ inputMode: "action", inputModeSource: "explicit" });
   });
 
   it("exposes and idempotently resumes a staged latest-turn replacement through sync-status", async () => {

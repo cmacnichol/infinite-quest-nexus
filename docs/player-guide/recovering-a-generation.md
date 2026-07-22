@@ -4,7 +4,7 @@ Story generation is a durable server job. Closing or refreshing the player does 
 
 ## Refresh or reconnect
 
-Reload the campaign or select **Load story** again. The player reconnects to the pending generation and resumes progress.
+Reload the campaign, select it from the dashboard again, or choose **Story** while it is active. The player reconnects to the pending generation and resumes progress.
 
 ## Recoverable provider output
 

@@ -12,6 +12,7 @@ The player-facing experience is **Infinite Quest**. The management platform is *
 
 The repository contains a production-shaped pre-authentication deployment for a trusted network. It includes:
 
+- A central Nexus dashboard for world discovery, quick campaign creation, campaign resume, and activity totals
 - A database-backed World Library and campaign manager
 - The Infinite Quest player experience
 - Durable, validated Story Engine jobs and recovery
@@ -47,16 +48,16 @@ docker compose up --build
 
 Open:
 
-- Nexus World Management: `http://localhost:8080/nexus/`
+- Nexus dashboard: `http://localhost:8080/nexus/`
 - Infinite Quest player: `http://localhost:8080/story`
 - Readiness check: `http://localhost:8080/health/ready`
 - Application metadata: `http://localhost:8080/api/v1/meta`
 
 Requests to `/` or `/index.html` redirect permanently to the active Nexus application at `/nexus/`.
 
-The Nexus header displays the application release version. Published container images also expose their source commit and build timestamp in the player view's **About Infinite Quest Nexus** dialog. World versions, database migrations, export formats, and prompt protocols retain their own independent version numbers.
+The slim universal navigation bar links the dashboard, active Story, Setup, and About areas across the application. Setup includes the shared Import workspace; a Story-only Export menu provides Markdown and print-to-PDF output with available illustrations. Published container images expose their release version, source commit, and build timestamp under **About**. World versions, database migrations, export formats, and prompt protocols retain their own independent version numbers.
 
-The first startup creates the database schema and credential-free initial owner. Configure a text provider in **Providers**, create or import a world, publish a version, create a campaign, and select **Load story**.
+The first startup creates the database schema and credential-free initial owner. Configure a text provider under **Setup**, create or import a world in **World Management**, and publish a version. The dashboard then supports quick campaign creation from a world card and immediately opens the new story; existing campaign cards resume play.
 
 Stop the containers while preserving the database and generated assets:
 

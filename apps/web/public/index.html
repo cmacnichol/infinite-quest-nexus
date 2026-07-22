@@ -7,24 +7,92 @@
   <link rel="stylesheet" href="/nexus/nexus.css">
 </head>
 <body>
-  <header class="site-header">
-    <div>
-      <div class="product-identity">
-        <p class="eyebrow">Infinite Quest Nexus</p>
-        <span id="nexusVersion" class="version-badge hidden" aria-label="Infinite Quest Nexus application version"></span>
+  <header class="universal-nav">
+    <a class="nexus-brand" href="/nexus/" aria-label="Infinite Quest Nexus dashboard">
+      <img src="/nexus/nexus-mark.png" alt="">
+      <span><strong>Infinite Quest</strong><small>Nexus</small></span>
+    </a>
+    <nav class="universal-nav-links" aria-label="Primary navigation">
+      <div class="nav-primary-links">
+        <a id="navDashboard" href="#dashboard">Dashboard</a>
+        <a id="storyViewLink" href="/story">Story</a>
       </div>
-      <h1 id="managementTitle">World Management</h1>
-      <p id="managementDescription">Author reusable versioned worlds, run persistent campaigns, and inspect the fiction-only memory selected for generation.</p>
-    </div>
-    <nav class="header-actions" aria-label="Nexus sections">
-      <a id="navProviders" class="button secondary" href="#providers">Providers</a>
-      <a id="navWorlds" class="button secondary" href="#world-library">Worlds</a>
-      <a id="navCampaigns" class="button secondary" href="#campaigns">Campaigns</a>
-      <a id="storyViewLink" class="button accent" href="/story">Story view ➜</a>
+      <span class="nav-section-divider" aria-hidden="true"></span>
+      <div class="nav-menu">
+        <button id="navSetup" class="nav-menu-trigger" type="button" aria-expanded="false" aria-controls="nexusSetupMenu">Setup</button>
+        <div id="nexusSetupMenu" class="nav-menu-panel" hidden>
+          <a id="navWorlds" href="#world-library"><strong>World Management</strong><span>Author and publish reusable worlds</span></a>
+          <a id="navCampaigns" href="#campaigns"><strong>Campaign Management</strong><span>Advanced campaign, Chronicle, and image settings</span></a>
+          <a id="navProviders" href="#providers"><strong>Provider Setup</strong><span>Text, embedding, intent, and image endpoints</span></a>
+          <a id="navImports" href="#imports"><strong>Import</strong><span>Bring in portable worlds and campaign backups</span></a>
+        </div>
+      </div>
+      <button id="openNexusAbout" class="nav-text-button" type="button">About</button>
     </nav>
+    <div class="nav-meta">
+      <span id="nexusVersion" class="version-badge hidden" aria-label="Infinite Quest Nexus application version"></span>
+      <button id="openNexusUserProfile" class="nav-profile-button" type="button" aria-label="User profile and settings" title="User profile and settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0" /></svg>
+      </button>
+    </div>
   </header>
 
+  <section id="managementHeader" class="management-header">
+    <p class="eyebrow">Infinite Quest Nexus</p>
+    <h1 id="managementTitle">World Management</h1>
+    <p id="managementDescription">Author reusable versioned worlds, run persistent campaigns, and inspect the fiction-only memory selected for generation.</p>
+  </section>
+
   <main>
+    <section id="dashboard" class="dashboard-home" aria-labelledby="dashboardTitle">
+      <div class="dashboard-hero">
+        <div>
+          <p class="eyebrow">Your stories, always in reach</p>
+          <h1 id="dashboardTitle">Where worlds awaken.</h1>
+          <p>Choose a published world and begin a new tale, or step straight back into a campaign already in motion.</p>
+        </div>
+        <a class="button accent dashboard-story-link" href="/story" id="dashboardStoryLink">Continue latest story <span aria-hidden="true">→</span></a>
+      </div>
+
+      <section class="dashboard-stats" aria-labelledby="dashboardStatsTitle">
+        <div class="stats-heading">
+          <div><p class="eyebrow">Nexus at a glance</p><h2 id="dashboardStatsTitle">Your living library</h2></div>
+          <span id="dashboardStatsStatus" class="muted" role="status" aria-live="polite">Gathering your Chronicle…</span>
+        </div>
+        <div id="dashboardStatsGrid" class="stats-grid">
+          <article class="stat-card worlds-stat"><span class="stat-glyph" aria-hidden="true">◇</span><strong id="statWorlds">—</strong><span>Available worlds</span></article>
+          <article class="stat-card campaigns-stat"><span class="stat-glyph" aria-hidden="true">✦</span><strong id="statCampaigns">—</strong><span>Open campaigns</span></article>
+          <article class="stat-card turns-stat"><span class="stat-glyph" aria-hidden="true">↟</span><strong id="statTurns">—</strong><span>Turns generated</span></article>
+          <article class="stat-card cost-stat"><span class="stat-glyph" aria-hidden="true">◈</span><strong id="statCost">—</strong><span>Reported API fees</span><small id="statCostProviders">By provider</small></article>
+          <article class="stat-card activity-stat"><span class="stat-glyph" aria-hidden="true">⌁</span><strong id="statActiveWorlds">—</strong><span>Published worlds</span></article>
+        </div>
+      </section>
+
+      <section class="dashboard-collection" aria-labelledby="browseWorldsTitle">
+        <div class="collection-heading">
+          <div><p class="eyebrow">World Library</p><h2 id="browseWorldsTitle">Browse available worlds</h2><p>Every campaign begins from an immutable published version.</p></div>
+          <a href="#world-library">Manage worlds <span aria-hidden="true">→</span></a>
+        </div>
+        <div class="carousel-toolbar">
+          <label class="carousel-search"><span class="sr-only">Search worlds</span><span aria-hidden="true">⌕</span><input id="worldSearch" type="search" placeholder="Search worlds by name, genre, or premise"></label>
+          <div class="carousel-buttons"><button id="worldCarouselPrev" type="button" aria-label="Previous worlds">←</button><button id="worldCarouselNext" type="button" aria-label="Next worlds">→</button></div>
+        </div>
+        <div id="dashboardWorlds" class="card-carousel" tabindex="0" aria-live="polite"><p class="carousel-empty">Loading your worlds…</p></div>
+      </section>
+
+      <section class="dashboard-collection" aria-labelledby="campaignSelectionTitle">
+        <div class="collection-heading">
+          <div><p class="eyebrow">Campaigns</p><h2 id="campaignSelectionTitle">Resume an adventure</h2><p>Your accepted turns and current state are waiting exactly where you left them.</p></div>
+          <a href="#campaigns">Manage campaigns <span aria-hidden="true">→</span></a>
+        </div>
+        <div class="carousel-toolbar">
+          <label class="carousel-search"><span class="sr-only">Search campaigns</span><span aria-hidden="true">⌕</span><input id="campaignSearch" type="search" placeholder="Search campaigns, worlds, or characters"></label>
+          <div class="carousel-buttons"><button id="campaignCarouselPrev" type="button" aria-label="Previous campaigns">←</button><button id="campaignCarouselNext" type="button" aria-label="Next campaigns">→</button></div>
+        </div>
+        <div id="dashboardCampaigns" class="card-carousel" tabindex="0" aria-live="polite"><p class="carousel-empty">Loading your campaigns…</p></div>
+      </section>
+    </section>
+
     <section id="providers" class="card provider-card anchor-section provider-management" aria-labelledby="provider-title">
       <div class="section-heading">
         <div>
@@ -284,7 +352,7 @@
       </section>
     </section>
 
-    <section class="card import-card world-management" aria-labelledby="import-title">
+    <section id="imports" class="card import-card world-management" aria-labelledby="import-title">
       <div>
         <h2 id="import-title">Import a world or campaign</h2>
         <p>Upload a file or paste its copied contents. Infinite Quest <code>.story</code> exports include the world and story history. Infinite Worlds world JSON contains only world details; import its matching story TXT separately after selecting the imported world.</p>
@@ -347,6 +415,65 @@
       <div id="importStatus" class="status" role="status" aria-live="polite">Choose a story file to begin.</div>
     </section>
   </main>
+
+  <dialog id="worldDetailsDialog" class="confirm-dialog world-details-dialog" aria-labelledby="worldDetailsTitle">
+    <div class="world-details-media" id="worldDetailsMedia" role="img" aria-label="World artwork placeholder"><span>World artwork</span></div>
+    <div class="world-details-content">
+      <div class="dialog-heading-row">
+        <div><p id="worldDetailsEyebrow" class="eyebrow">Published world</p><h2 id="worldDetailsTitle">World details</h2></div>
+        <button id="closeWorldDetails" class="icon-button" type="button" aria-label="Close world details">×</button>
+      </div>
+      <p id="worldDetailsSummary" class="world-details-summary"></p>
+      <dl id="worldDetailsMeta" class="world-details-meta"></dl>
+      <div class="world-details-actions">
+        <a id="editWorldDetails" class="button secondary" href="#world-library">Edit in World Management</a>
+        <button id="beginCampaignFromWorld" class="button accent" type="button">Create a campaign</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="quickCampaignDialog" class="confirm-dialog quick-campaign-dialog" aria-labelledby="quickCampaignTitle">
+    <form id="quickCampaignForm">
+      <p class="eyebrow">Begin a new story</p>
+      <h2 id="quickCampaignTitle">Create campaign</h2>
+      <p id="quickCampaignWorld" class="muted"></p>
+      <label>Campaign name<input id="quickCampaignName" maxlength="200" placeholder="Name this adventure" required></label>
+      <label>Play as<select id="quickCampaignCharacter" required><option value="">Loading characters…</option></select><span id="quickCampaignCharacterNote" class="field-note">Your selected character is snapshotted into this campaign.</span></label>
+      <p id="quickCampaignStatus" class="status hidden" role="status" aria-live="polite"></p>
+      <div class="advanced-campaign-link">Need more control? <a id="advancedCampaignCreation" href="#campaigns">Open Campaign Management</a> for provider, input, Chronicle, and illustration options.</div>
+      <div class="button-row confirm-actions"><button id="cancelQuickCampaign" class="button secondary" type="button">Cancel</button><button id="confirmQuickCampaign" class="button accent" type="submit">Create &amp; start story</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="nexusAboutDialog" class="confirm-dialog nexus-about-dialog" aria-labelledby="nexusAboutTitle">
+    <div class="dialog-heading-row"><div><p class="eyebrow">About</p><h2 id="nexusAboutTitle">Infinite Quest Nexus</h2></div><button id="closeNexusAbout" class="icon-button" type="button" aria-label="Close About">×</button></div>
+    <p>Infinite Quest Nexus is the home for reusable story worlds, persistent campaigns, and Chronicle memory. Infinite Quest is the focused player experience where those stories unfold.</p>
+  </dialog>
+
+  <dialog id="nexusUserProfileDialog" class="confirm-dialog nexus-user-profile-dialog" aria-labelledby="nexusUserProfileTitle">
+    <form id="nexusUserProfileForm">
+      <div class="dialog-heading-row">
+        <div><p class="eyebrow">Account</p><h2 id="nexusUserProfileTitle">User Profile &amp; Settings</h2></div>
+        <button id="closeNexusUserProfile" class="icon-button" type="button" aria-label="Close user profile">×</button>
+      </div>
+      <label>Display name<input id="nexusUserProfileDisplayName" maxlength="120" autocomplete="off" required></label>
+      <label class="nexus-profile-option"><input id="nexusUserProfileAutoSubmitChoices" type="checkbox"><span>Auto-submit story turns when selecting a choice</span></label>
+      <label class="nexus-profile-option"><input id="nexusUserProfileContinuousReading" type="checkbox"><span>Show the story continuously on one page</span></label>
+      <label>Default turn input style for new campaigns
+        <select id="nexusUserProfileDefaultTurnControlStyle">
+          <option value="action_only">Player actions only</option>
+          <option value="flexible_auto">Flexible — Auto</option>
+          <option value="flexible_action">Flexible — Action first</option>
+          <option value="flexible_scene">Flexible — Scene direction first</option>
+        </select>
+      </label>
+      <p id="nexusUserProfileStatus" class="status hidden" role="status" aria-live="polite"></p>
+      <div class="button-row confirm-actions">
+        <button id="cancelNexusUserProfile" class="button secondary" type="button">Cancel</button>
+        <button class="button accent" type="submit">Save profile</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="clipboardImportDialog" class="confirm-dialog paste-dialog" aria-labelledby="clipboardImportTitle">
     <form id="clipboardImportForm">

@@ -37,6 +37,7 @@ describe("API server security and CORS headers", () => {
     expect(response.json()).toMatchObject({
       application: { name: "Infinite Quest Nexus", version: expect.any(String) }
     });
+    expect(response.headers["cache-control"]).toBe("no-store");
 
     await app.close();
   });

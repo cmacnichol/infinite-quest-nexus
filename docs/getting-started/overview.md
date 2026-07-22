@@ -8,8 +8,11 @@ Infinite Quest Nexus preserves story worlds and campaigns outside the browser an
 2. Create or import a world draft in World Library.
 3. Add at least one complete playable character.
 4. Publish an immutable world version.
-5. Create a campaign from that version and choose its player character.
-6. Load the campaign in Infinite Quest and take an action.
+5. Return to the dashboard and select the published world.
+6. Create a campaign with a name and player character; Nexus applies the system defaults for other settings.
+7. Continue in Infinite Quest as the new campaign opens and starts its first turn.
+
+After campaigns exist, their searchable dashboard carousel is the fastest way to resume one. Use **Setup → World Management** or **Setup → Campaign Management** when you need detailed editing or advanced options.
 
 ## Core records
 

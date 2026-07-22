@@ -23,7 +23,9 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("uses Nexus branding and focused management navigation", () => {
-    expect(storyHtml).toContain("<h1>Infinite Quest</h1>");
+    expect(storyHtml).toContain('<strong>Infinite Quest</strong>');
+    expect(storyHtml).toContain('src="/nexus/nexus-mark.png"');
+    expect(storyHtml).toContain('id="btnNexusDashboard"');
     expect(storyHtml).toContain('href="/nexus/#world-library"');
     expect(storyHtml).toContain('href="/nexus/#providers"');
     expect(storyHtml).not.toContain("modelSettingsDialog");
@@ -182,7 +184,8 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('storyLengthProfile: elements.campaignStoryLengthProfile.value');
     expect(managementScript).toContain('turnControlStyle: elements.newCampaignTurnControlStyle.value');
     expect(managementScript).toContain('turnControlStyle: elements.campaignTurnControlStyle.value');
-    expect(managementScript).toContain('document.body.dataset.managementView = providerView ? "providers" : "worlds"');
+    expect(managementScript).toContain('document.body.dataset.managementView = dashboardView ? "dashboard" : providerView ? "providers" : "worlds"');
+    expect(managementCss).toContain('body[data-management-view="dashboard"] .world-management');
     expect(managementCss).toContain('body[data-management-view="providers"] .world-management');
     expect(managementCss).toContain('body[data-management-view="worlds"] .provider-management');
     expect(managementScript).toContain('provider.isDefault');

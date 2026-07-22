@@ -31,6 +31,7 @@ import {
   importWorld,
   listWorldVersionPlayableCharacters,
   listCampaigns,
+  listWorlds,
   migrateCampaignWorld,
   previewWorldImport,
   publishWorld,
@@ -115,6 +116,25 @@ integration("World Library and campaign version integration", () => {
     expect(rows.rows[1]?.content.world.backgroundStory).toBe("Background Two");
     expect(rows.rows[0]?.content.world).not.toHaveProperty("character");
     expect(rows.rows[1]?.content.world).not.toHaveProperty("character");
+  });
+
+  it("lists immutable published world previews without leaking newer draft edits", async () => {
+    const published = await publishedWorld("Dashboard Preview");
+    const detail = await getWorld(pool, published.created.id);
+    await updateWorldDraft(pool, published.created.id, worldDraftUpdateSchema.parse({
+      expectedRevision: detail.draftRevision,
+      content: content(published.title, "Unpublished")
+    }));
+
+    const listed = await listWorlds(pool);
+    const world = listed.find((candidate) => candidate.id === published.created.id);
+
+    expect(world?.latestPreview).toMatchObject({
+      genre: "test",
+      premise: "Premise One",
+      backgroundStory: "Background One",
+      firstAction: "Action One"
+    });
   });
 
   it("adds, edits, and deletes draft characters without changing published versions or campaign snapshots", async () => {

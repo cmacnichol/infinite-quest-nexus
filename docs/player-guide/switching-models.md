@@ -4,7 +4,7 @@ Model selection belongs to a saved text-provider profile and a campaign's provid
 
 ## Change the model on a profile
 
-1. Open Nexus and select **Providers**.
+1. Open **Setup → Provider Setup**.
 2. Edit the applicable **Story text** profile.
 3. Refresh or open the model picker.
 4. Select the intended default model.
@@ -13,7 +13,7 @@ Model selection belongs to a saved text-provider profile and a campaign's provid
 
 ## Change the campaign provider
 
-1. Select the campaign under **Campaigns**.
+1. Open **Setup → Campaign Management** and select the campaign.
 2. Select a different **Text provider profile**.
 3. Select **Save campaign**.
 

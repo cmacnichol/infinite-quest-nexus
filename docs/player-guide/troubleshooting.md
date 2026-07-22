@@ -2,7 +2,7 @@
 
 ## The first scene does not generate
 
-Return to Nexus **Providers** and confirm that an enabled **Story text** profile has a selected model. A new zero-turn campaign submits its opening action automatically when loaded, so configure the provider first.
+Open **Setup → Provider Setup** and confirm that an enabled **Story text** profile has a selected model. A new zero-turn campaign submits its opening action automatically after basic dashboard creation or when first opened, so configure the provider first.
 
 ## Auto chose the wrong input mode
 
@@ -22,7 +22,7 @@ Open the user profile, clear **Auto-submit story turns when selecting a choice**
 
 ## I refreshed during generation
 
-Wait for the player to reconnect to the durable job. Do not submit a duplicate action. If needed, return to Nexus, select the same campaign, and use **Load story** again.
+Wait for the player to reconnect to the durable job. Do not submit a duplicate action. If needed, return to the dashboard and select the same campaign card again.
 
 ## The story completed but no image appeared
 

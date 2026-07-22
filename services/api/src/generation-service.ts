@@ -38,6 +38,7 @@ import {
   formatNarrationParagraphs,
   localRpgAssessment,
   logProviderTransportError,
+  mechanicsLanguageMatches,
   mechanicsLeakFields,
   parseEventExtension,
   parseRpgAssessment,
@@ -55,7 +56,7 @@ import {
   type ActivatedEvent,
   type PrivateRollResolution
 } from "../../../packages/story-engine/src/index.js";
-import { estimateTokens, sha256, stableStringify, stripMechanicsLeakage } from "../../../packages/domain/src/text.js";
+import { estimateTokens, sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { autoEnableCampaignEmbeddingIfAvailable, buildContextPreview, enqueueEmbeddingReindex, rebuildCampaignMemories, storeDerivedTurnMemories } from "./memory-service.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
 import { enqueueAcceptedTurnIllustration } from "./image-service.js";
@@ -121,15 +122,25 @@ type ClaimedJob = {
   orchestration_private: OrchestrationPrivate;
 };
 
-function safeTurnInput(value: string): string {
-  const safety = stripMechanicsLeakage(value);
-  if (!safety.text || safety.changed || containsMechanicsLanguage(value)) {
-    throw Object.assign(new Error("The turn input contains game-mechanics or engine language that cannot be sent to story generation. Edit the input and retry; no part of it was silently removed."), {
+export function safeTurnInput(value: string): string {
+  const trimmed = value.trim();
+  const matches = mechanicsLanguageMatches(trimmed);
+  if (!trimmed || matches.length) {
+    const findings = matches.map((match) => ({
+      category: match.category,
+      text: match.text,
+      index: match.index
+    }));
+    const findingSummary = findings.length
+      ? ` Blocked ${findings.length === 1 ? "fragment" : "fragments"}: ${findings.map((finding) => `"${finding.text}" (${finding.category.replaceAll("_", " ")})`).join(", ")}.`
+      : " The input was empty after trimming whitespace.";
+    throw Object.assign(new Error(`The turn input contains game-mechanics or engine language that cannot be sent to story generation.${findingSummary} Edit the input and retry; no part of it was silently removed.`), {
       statusCode: 400,
-      code: "unsafe_turn_input"
+      code: "unsafe_turn_input",
+      details: { code: "unsafe_turn_input", findings }
     });
   }
-  return value.trim();
+  return trimmed;
 }
 
 async function validateTurnInputMode(
@@ -472,8 +483,8 @@ export async function getGenerationResult(pool: DatabasePool, jobId: string) {
   const result = await pool.query(
     `SELECT j.id, j.status, j.campaign_id AS "campaignId", j.expected_turn_number AS "expectedTurnNumber",
             j.result_turn_id AS "resultTurnId", j.error_code AS "errorCode", j.error_message AS "errorMessage",
-            t.turn_number AS "turnNumber", t.action, t.input_mode AS "inputMode",
-            t.input_mode_source AS "inputModeSource", t.narration, t.choices,
+            t.turn_number AS "turnNumber", t.action, COALESCE(t.input_mode, 'action') AS "inputMode",
+            COALESCE(t.input_mode_source, 'explicit') AS "inputModeSource", t.narration, t.choices,
             t.custom_action_suggestion AS "customActionSuggestion", t.image_prompt AS "imagePrompt",
             t.model_metadata AS "modelMetadata", t.mechanics_private AS mechanics,
             t.accepted_at AS "acceptedAt",

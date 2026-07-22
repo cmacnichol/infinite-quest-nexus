@@ -94,6 +94,7 @@ import { getCampaignCostSummary, turnReportedCosts } from "./cost-service.js";
 import { classifyTurnInput } from "./turn-intent-service.js";
 import { previewCampaignWorldTransfer, transferCampaignWorld } from "./campaign-transfer-service.js";
 import { applicationMetadata } from "./app-metadata.js";
+import { getDashboardStats } from "./dashboard-service.js";
 
 type BuildServerOptions = {
   config: RuntimeConfig;
@@ -146,6 +147,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     reply.header("X-Frame-Options", "DENY");
     reply.header("Content-Security-Policy", "default-src 'self' 'unsafe-inline' data: blob:; img-src * data: blob:; connect-src *");
     reply.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    if (request.url.startsWith("/api/v1/")) reply.header("Cache-Control", "no-store");
 
     const origin = request.headers.origin;
     if (origin) {
@@ -222,6 +224,8 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   });
 
   app.get("/api/v1/meta", async () => ({ application: applicationMetadata() }));
+
+  app.get("/api/v1/dashboard/stats", async () => getDashboardStats(pool));
 
   app.get("/api/v1/session", async () => {
     const user = await getSessionUserProfile(pool);
@@ -422,8 +426,8 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     const ownerUserId = await initialOwnerId(pool);
     const campaignId = uuidSchema.parse(request.params.campaignId);
     const result = await pool.query(
-      `SELECT id, turn_number AS "turnNumber", action, input_mode AS "inputMode",
-              input_mode_source AS "inputModeSource", narration, choices,
+      `SELECT id, turn_number AS "turnNumber", action, COALESCE(input_mode, 'action') AS "inputMode",
+              COALESCE(input_mode_source, 'explicit') AS "inputModeSource", narration, choices,
               custom_action_suggestion AS "customActionSuggestion", image_prompt AS "imagePrompt",
               image_url AS "imageUrl", accepted_at AS "acceptedAt"
          FROM turns
