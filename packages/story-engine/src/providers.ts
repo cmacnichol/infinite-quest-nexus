@@ -870,12 +870,7 @@ export async function discoverImageModels(profile: TextProviderProfile, fetcher:
     if (profile.configuration?.modelDiscoveryEnabled === false) return [];
     const url = `${openAiRoot(profile.baseUrl)}/models`;
     const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile) }, fetcher), profile, "image model discovery", url);
-    const rows = inventoryRows(data).filter((model: any) => {
-      const capability = explicitImageCapability(model);
-      const identity = String(model?.id || model?.key || model?.name || model?.display_name || "");
-      return capability === true || (capability === null && IMAGE_GENERATION_PATTERN.test(identity));
-    });
-    return inventoryItems(rows);
+    return inventoryItems(imageInventoryRows(inventoryRows(data)));
   }
   if (profile.providerType !== "openrouter") {
     const url = profile.providerType === "lmstudio"
