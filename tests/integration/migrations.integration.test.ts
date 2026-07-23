@@ -97,6 +97,89 @@ integration("standard database migration runner", () => {
           legacy: true
         }
       });
+      const profileState = await isolatedPool.query(
+        "SELECT character_profile, character_profile_revision FROM campaigns WHERE id = $1",
+        [campaign.rows[0]!.id]
+      );
+      expect(profileState.rows[0]).toEqual({ character_profile: null, character_profile_revision: 0 });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("deterministically seeds structured campaign profiles from pre-0036 snapshots", async () => {
+    const databaseName = `infinitequest_profile_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-profile-migrations-"));
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      for (const file of await readdir(resolve("database/migrations"))) {
+        if (file.endsWith(".sql") && file < "0036_structured_character_profiles.sql") {
+          await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
+        }
+      }
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await migrateDatabase(isolatedPool, migrationDirectory);
+      const owner = await isolatedPool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'");
+      const world = await isolatedPool.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id, title) VALUES ($1, 'Structured Existing World') RETURNING id",
+        [owner.rows[0]!.id]
+      );
+      const characterSnapshot = {
+        id: "mira",
+        name: "Mira",
+        characterText: "Original legacy source.",
+        profile: {
+          identity: { aliases: ["The Fox"], pronouns: "she/her" },
+          story: { role: "Scout" },
+          appearance: { hair: "black braid" },
+          unclassifiedNotes: ""
+        },
+        importedExtension: { preserve: true }
+      };
+      const version = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
+         VALUES ($1,$2,1,$3) RETURNING id`,
+        [world.rows[0]!.id, owner.rows[0]!.id, JSON.stringify({
+          schemaVersion: 5,
+          world: { title: "Structured Existing World" },
+          playableCharacters: [characterSnapshot]
+        })]
+      );
+      const campaign = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO campaigns (
+           owner_user_id, world_version_id, title, selected_character_id, character_snapshot
+         ) VALUES ($1,$2,'Structured Existing Campaign','mira',$3) RETURNING id`,
+        [owner.rows[0]!.id, version.rows[0]!.id, JSON.stringify(characterSnapshot)]
+      );
+
+      await migrateDatabase(isolatedPool, resolve("database/migrations"));
+
+      const migrated = await isolatedPool.query<any>(
+        `SELECT character_snapshot, character_profile, character_profile_revision
+           FROM campaigns WHERE id = $1`,
+        [campaign.rows[0]!.id]
+      );
+      expect(migrated.rows[0]).toEqual({
+        character_snapshot: characterSnapshot,
+        character_profile: { name: "Mira", profile: characterSnapshot.profile },
+        character_profile_revision: 1
+      });
+      const audit = await isolatedPool.query<any>(
+        `SELECT revision, previous_profile, next_profile, edit_source
+           FROM campaign_character_profile_edits WHERE campaign_id = $1`,
+        [campaign.rows[0]!.id]
+      );
+      expect(audit.rows).toEqual([{
+        revision: 1,
+        previous_profile: null,
+        next_profile: { name: "Mira", profile: characterSnapshot.profile },
+        edit_source: "world_version_seed"
+      }]);
     } finally {
       if (isolatedPool) await isolatedPool.end();
       await dropTestDatabaseWhenIdle(pool, databaseName);

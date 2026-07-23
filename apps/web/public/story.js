@@ -2221,8 +2221,16 @@ function openWorldSetup() {
   if ($("setupTone")) $("setupTone").textContent = world.tone || "None specified";
 
   if ($("setupCharacter")) {
-    const charName = pc.characterSnapshot?.name || world.character || "Player Character";
-    const charDesc = pc.characterSnapshot?.characterText || pc.characterSnapshot?.description || world.character || "No character details recorded.";
+    const structured = pc.characterProfile;
+    const profile = structured?.profile;
+    const structuredText = profile ? [
+      ...Object.values(profile.identity || {}).flatMap((value) => Array.isArray(value) ? value : [value]),
+      ...Object.values(profile.story || {}),
+      ...Object.values(profile.appearance || {}).flatMap((value) => Array.isArray(value) ? value : [value]),
+      profile.unclassifiedNotes
+    ].map((value) => String(value || "").trim()).filter(Boolean).join("\n\n") : "";
+    const charName = pc.selectedCharacterName || structured?.name || pc.characterSnapshot?.name || world.character || "Player Character";
+    const charDesc = structuredText || pc.characterSnapshot?.characterText || pc.characterSnapshot?.description || world.character || "No character details recorded.";
     $("setupCharacter").textContent = charName && charDesc && charName !== charDesc ? `${charName}\n\n${charDesc}` : (charDesc || charName);
   }
 

@@ -1,4 +1,12 @@
-import type { PlayableCharacter, WorldContent } from "../../contracts/src/world-library.js";
+import {
+  campaignCharacterProfileSchema,
+  characterProfileSchema,
+  type CampaignCharacterProfile,
+  type CharacterProfile,
+  type PlayableCharacter,
+  type WorldContent
+} from "../../contracts/src/world-library.js";
+import { stripMechanicsLeakage, truncateAtBoundary } from "./text.js";
 
 export type CampaignCharacterSeed = {
   character: PlayableCharacter;
@@ -54,6 +62,7 @@ export function assessWorldCampaignReadiness(content: WorldContent): WorldCampai
     const id = typeof character.id === "string" ? character.id.trim() : "";
     const name = typeof character.name === "string" ? character.name.trim() : "";
     const characterText = typeof character.characterText === "string" ? character.characterText.trim() : "";
+    const hasProfile = character.profile ? hasCharacterProfileGuidance(character.profile) : false;
 
     if (!id) {
       issues.push({
@@ -80,7 +89,7 @@ export function assessWorldCampaignReadiness(content: WorldContent): WorldCampai
         ...(id ? { characterId: id } : {})
       });
     }
-    if (!characterText) {
+    if (!characterText && !hasProfile) {
       issues.push({
         code: "missing-character-text",
         message: `Playable character ${name ? `"${name}"` : characterIndex + 1} is missing character guidance.`,
@@ -134,4 +143,143 @@ export function characterTextFromSnapshot(snapshot: unknown): string | null {
   return typeof (snapshot as Record<string, unknown>).characterText === "string"
     ? String((snapshot as Record<string, unknown>).characterText).trim()
     : null;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function nonemptyEntries(value: Record<string, unknown>): Record<string, unknown> {
+  const entries: Array<[string, unknown]> = [];
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === "string") {
+      if (item.trim()) entries.push([key, item.trim()]);
+      continue;
+    }
+    if (Array.isArray(item)) {
+      const values = item.map((entry) => String(entry).trim()).filter(Boolean);
+      if (values.length) entries.push([key, values]);
+      continue;
+    }
+    const nested = objectValue(item);
+    if (!nested) continue;
+    const cleaned = nonemptyEntries(nested);
+    if (Object.keys(cleaned).length) entries.push([key, cleaned]);
+  }
+  return Object.fromEntries(entries);
+}
+
+export function hasCharacterProfileGuidance(profile: CharacterProfile): boolean {
+  const cleaned = nonemptyEntries(profile.story as unknown as Record<string, unknown>);
+  return Object.keys(cleaned).length > 0;
+}
+
+export function campaignProfileFromCharacter(character: PlayableCharacter): CampaignCharacterProfile | null {
+  if (!character.profile) return null;
+  return campaignCharacterProfileSchema.parse({ name: character.name, profile: character.profile });
+}
+
+export function effectiveCampaignCharacter(
+  campaignProfile: unknown,
+  snapshot: unknown
+): { name: string; profile: CharacterProfile | null; legacyGuidance: string } {
+  const stored = campaignCharacterProfileSchema.safeParse(campaignProfile);
+  const source = objectValue(snapshot);
+  const snapshotProfile = characterProfileSchema.safeParse(source?.profile);
+  const name = stored.success
+    ? stored.data.name
+    : typeof source?.name === "string" ? source.name.trim() : "";
+  return {
+    name,
+    profile: stored.success ? stored.data.profile : snapshotProfile.success ? snapshotProfile.data : null,
+    legacyGuidance: typeof source?.characterText === "string" ? source.characterText.trim() : ""
+  };
+}
+
+export function characterNarrativeContext(
+  campaignProfile: unknown,
+  snapshot: unknown,
+  maximumCharacters = 12_000,
+  maximumFieldCharacters = 1_600
+): Record<string, unknown> | null {
+  const effective = effectiveCampaignCharacter(campaignProfile, snapshot);
+  let remaining = Math.max(0, maximumCharacters);
+  const boundedText = (value: unknown, fieldMaximum = maximumFieldCharacters): string => {
+    if (remaining <= 0) return "";
+    const sanitized = stripMechanicsLeakage(String(value || "").trim()).text;
+    const bounded = truncateAtBoundary(sanitized, Math.min(fieldMaximum, remaining));
+    remaining -= bounded.length;
+    return bounded;
+  };
+  const visit = (value: unknown): unknown => {
+    if (typeof value === "string") return boundedText(value);
+    if (Array.isArray(value)) {
+      return value.map((item) => boundedText(item, Math.min(400, maximumFieldCharacters))).filter(Boolean);
+    }
+    const source = objectValue(value);
+    if (!source) return undefined;
+    return nonemptyEntries(Object.fromEntries(Object.entries(source).map(([key, item]) => [key, visit(item)])));
+  };
+  const name = boundedText(effective.name, 200);
+  if (effective.profile) {
+    const profile = visit(effective.profile) as Record<string, unknown>;
+    return nonemptyEntries({ name, ...profile });
+  }
+  return effective.name || effective.legacyGuidance
+    ? nonemptyEntries({ name, guidance: boundedText(effective.legacyGuidance) })
+    : null;
+}
+
+export function characterLegacyText(campaignProfile: unknown, snapshot: unknown): string | null {
+  const effective = effectiveCampaignCharacter(campaignProfile, snapshot);
+  if (!effective.profile) {
+    return [effective.name, effective.legacyGuidance].filter(Boolean).join("\n\n") || null;
+  }
+  const sections: string[] = [effective.name];
+  const append = (heading: string, values: unknown[]) => {
+    const content = values.flatMap((value) => Array.isArray(value) ? value : [value])
+      .map((value) => String(value || "").trim()).filter(Boolean);
+    if (content.length) sections.push(`${heading}\n${content.join("\n")}`);
+  };
+  append("Identity", [effective.profile.identity.aliases.length ? `Aliases: ${effective.profile.identity.aliases.join(", ")}` : "", effective.profile.identity.pronouns]);
+  append("Story", Object.values(effective.profile.story));
+  append("Appearance", Object.values(effective.profile.appearance));
+  append("Other notes", [effective.profile.unclassifiedNotes]);
+  return sections.filter(Boolean).join("\n\n") || null;
+}
+
+export function characterVisualReference(
+  campaignProfile: unknown,
+  snapshot: unknown,
+  maximumCharacters = 900
+): string {
+  const effective = effectiveCampaignCharacter(campaignProfile, snapshot);
+  const profile = effective.profile;
+  const appearanceValues = profile ? [
+    profile.appearance.ancestryOrSpecies ? `Ancestry or species: ${profile.appearance.ancestryOrSpecies}` : "",
+    profile.appearance.apparentAge ? `Apparent age: ${profile.appearance.apparentAge}` : "",
+    profile.appearance.genderPresentation ? `Gender presentation: ${profile.appearance.genderPresentation}` : "",
+    profile.appearance.build ? `Build: ${profile.appearance.build}` : "",
+    profile.appearance.skinOrComplexion ? `Skin or complexion: ${profile.appearance.skinOrComplexion}` : "",
+    profile.appearance.face ? `Face: ${profile.appearance.face}` : "",
+    profile.appearance.eyes ? `Eyes: ${profile.appearance.eyes}` : "",
+    profile.appearance.hair ? `Hair: ${profile.appearance.hair}` : "",
+    profile.appearance.distinguishingFeatures.length ? `Distinguishing features: ${profile.appearance.distinguishingFeatures.join("; ")}` : "",
+    profile.appearance.clothing ? `Clothing: ${profile.appearance.clothing}` : "",
+    profile.appearance.equipmentAndAccessories ? `Equipment and accessories: ${profile.appearance.equipmentAndAccessories}` : "",
+    profile.appearance.otherVisualDetails ? `Other visual details: ${profile.appearance.otherVisualDetails}` : ""
+  ].filter(Boolean) : [];
+  if (profile && appearanceValues.length === 0) return "";
+  const values = profile ? [
+    effective.name ? `Name: ${effective.name}` : "",
+    profile.identity.aliases.length ? `Aliases: ${profile.identity.aliases.join(", ")}` : "",
+    ...appearanceValues
+  ] : [
+    effective.name ? `Name: ${effective.name}` : "",
+    effective.legacyGuidance
+  ];
+  const sanitized = stripMechanicsLeakage(values.filter(Boolean).join("\n")).text;
+  return truncateAtBoundary(sanitized, maximumCharacters);
 }

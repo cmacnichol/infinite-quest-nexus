@@ -15,7 +15,12 @@ import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { listAssets, queryAssets, readAssetDerivative, selectTurnIllustration, selectWorldCover, updateAssetMetadata } from "../../services/api/src/asset-service.js";
 import { getTurnIllustrationResolution, runIllustrationResolutionJob } from "../../services/api/src/illustration-resolution-service.js";
-import { generateTurnIllustrationSegments, listCampaignIllustrationSegments, previewIllustrationBackfill } from "../../services/api/src/segmented-illustration-service.js";
+import {
+  generateTurnIllustrationSegments,
+  listCampaignIllustrationSegments,
+  previewIllustrationBackfill,
+  runIllustrationPromptJob
+} from "../../services/api/src/segmented-illustration-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 import { createWorld, getWorld } from "../../services/api/src/world-service.js";
 
@@ -48,6 +53,7 @@ integration("independent illustration pipeline", () => {
   let assetRoot = "";
   let failImages = false;
   const imageRequests: Array<Record<string, unknown>> = [];
+  const refinementRequests: Array<Record<string, unknown>> = [];
   const sogniRequests: Array<{ body: Record<string, unknown>; idempotencyKey: string }> = [];
 
   beforeAll(async () => {
@@ -90,6 +96,20 @@ integration("independent illustration pipeline", () => {
           }
           response.writeHead(200, { "content-type": "application/json" });
           response.end(JSON.stringify({ id: crypto.randomUUID(), data: [{ b64_json: tinyPng }], usage: { cost: 0.04 } }));
+          return;
+        }
+        if (JSON.stringify(parsed).includes("expert visual translator and prompt engineer")) {
+          refinementRequests.push(parsed);
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({
+            id: crypto.randomUUID(),
+            model: "synthetic-text-model",
+            choices: [{
+              message: { content: "Mira, raising a lantern, fogbound road, eerie moonlight, cinematic fantasy illustration" },
+              finish_reason: "stop"
+            }],
+            usage: { prompt_tokens: 300, completion_tokens: 40, total_tokens: 340 }
+          }));
           return;
         }
         response.writeHead(200, { "content-type": "application/json" });
@@ -179,6 +199,22 @@ integration("independent illustration pipeline", () => {
 
   it("creates historical segment jobs without changing accepted turn or Chronicle state", async () => {
     const imported = await campaign();
+    const ownerUserId = await initialOwnerId(pool);
+    const profile = {
+      name: "Mira",
+      profile: {
+        identity: { aliases: ["The Lantern Bearer"], pronouns: "she/her" },
+        story: { role: "Guide" },
+        appearance: { hair: "black braid", clothing: "weathered blue cloak" },
+        unclassifiedNotes: ""
+      }
+    };
+    await pool.query(
+      `UPDATE campaigns
+          SET character_profile = $3, character_profile_revision = 3, updated_at = now()
+        WHERE id = $1 AND owner_user_id = $2`,
+      [imported.campaignId, ownerUserId, JSON.stringify(profile)]
+    );
     await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
       enabled: true,
       providerProfileId: imageProviderId,
@@ -216,12 +252,66 @@ integration("independent illustration pipeline", () => {
       (segment: any) => segment.turnId === turnId
     );
     expect(segments).toHaveLength(result.segmentCount);
-    const jobs = await pool.query<{ image_count: number }>(
-      "SELECT image_count FROM image_jobs WHERE segment_id = ANY($1::uuid[]) ORDER BY created_at",
+    const jobs = await pool.query<{ image_count: number; prompt: string }>(
+      "SELECT image_count, prompt FROM image_jobs WHERE segment_id = ANY($1::uuid[]) ORDER BY created_at",
       [segments.map((segment: any) => segment.id)]
     );
     expect(jobs.rows).toHaveLength(result.segmentCount);
     expect(jobs.rows.every((job) => job.image_count === 2)).toBe(true);
+    expect(jobs.rows.every((job) => job.prompt.includes("weathered blue cloak"))).toBe(true);
+    expect(jobs.rows.every((job) => (
+      job.prompt.match(/CANONICAL CHARACTER REFERENCE:/g)?.length === 1
+    ))).toBe(true);
+    const originalSet = await pool.query<{ id: string; character_visual_reference: string }>(
+      `SELECT id, character_visual_reference FROM turn_illustration_sets
+        WHERE turn_id = $1 AND is_active = true`,
+      [turnId]
+    );
+    expect(originalSet.rows[0]?.character_visual_reference).toContain("weathered blue cloak");
+    expect(segments.every((segment: any) => !segment.resolvedPrompt.includes("CANONICAL CHARACTER REFERENCE:"))).toBe(true);
+
+    const revisedProfile = {
+      ...profile,
+      profile: {
+        ...profile.profile,
+        appearance: { ...profile.profile.appearance, clothing: "dark green travel coat" }
+      }
+    };
+    await pool.query(
+      `UPDATE campaigns
+          SET character_profile = $3, character_profile_revision = 4, updated_at = now()
+        WHERE id = $1 AND owner_user_id = $2`,
+      [imported.campaignId, ownerUserId, JSON.stringify(revisedProfile)]
+    );
+    const rebuilt = await generateTurnIllustrationSegments(
+      pool,
+      turnId,
+      illustrationSegmentRequestSchema.parse({ mode: "rebuild" })
+    );
+    expect(rebuilt.duplicate).toBe(false);
+    const sets = await pool.query<{ id: string; is_active: boolean; character_visual_reference: string }>(
+      `SELECT id, is_active, character_visual_reference
+         FROM turn_illustration_sets WHERE turn_id = $1 ORDER BY created_at`,
+      [turnId]
+    );
+    expect(sets.rows.find((set) => set.id === originalSet.rows[0]?.id)).toMatchObject({
+      is_active: false,
+      character_visual_reference: expect.stringContaining("weathered blue cloak")
+    });
+    expect(sets.rows.find((set) => set.is_active)).toMatchObject({
+      character_visual_reference: expect.stringContaining("dark green travel coat")
+    });
+    const rebuiltJobs = await pool.query<{ prompt: string }>(
+      `SELECT jobs.prompt FROM image_jobs jobs
+         JOIN turn_illustration_segments segments ON segments.id = jobs.segment_id
+         JOIN turn_illustration_sets sets ON sets.id = segments.illustration_set_id
+        WHERE sets.turn_id = $1 AND sets.is_active = true`,
+      [turnId]
+    );
+    expect(rebuiltJobs.rows.every((job) => job.prompt.includes("dark green travel coat"))).toBe(true);
+    expect(rebuiltJobs.rows.every((job) => (
+      job.prompt.match(/CANONICAL CHARACTER REFERENCE:/g)?.length === 1
+    ))).toBe(true);
     await expect(previewIllustrationBackfill(pool, imported.campaignId, "missing"))
       .resolves.toMatchObject({ settings: { segmentWordCount: 100, imagesPerSegment: 2, segmentPromptMode: "direct" } });
 
@@ -237,6 +327,72 @@ integration("independent illustration pipeline", () => {
     );
     expect(after.rows).toEqual(before.rows);
     expect(memoriesAfter.rows).toEqual(memoriesBefore.rows);
+  });
+
+  it("sends the visual reference to AI refinement and appends it once to the provider prompt", async () => {
+    const imported = await campaign();
+    const ownerUserId = await initialOwnerId(pool);
+    await pool.query(
+      `UPDATE campaigns
+          SET character_profile = $3, character_profile_revision = 2, updated_at = now()
+        WHERE id = $1 AND owner_user_id = $2`,
+      [imported.campaignId, ownerUserId, JSON.stringify({
+        name: "Mira",
+        profile: {
+          identity: { aliases: ["The Lantern Bearer"], pronouns: "she/her" },
+          story: { role: "Guide" },
+          appearance: { eyes: "gray", clothing: "weathered purple coat" },
+          unclassifiedNotes: ""
+        }
+      })]
+    );
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      enabled: true,
+      providerProfileId: imageProviderId,
+      model: "synthetic-image-model",
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "auto",
+      outputFormat: "png",
+      maxAttempts: 3,
+      segmentWordCount: 100,
+      imagesPerSegment: 1,
+      segmentPromptMode: "ai_refined"
+    }));
+    const turn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number DESC LIMIT 1",
+      [imported.campaignId]
+    );
+    const turnId = turn.rows[0]!.id;
+    const refinementCountBefore = refinementRequests.length;
+    const created = await generateTurnIllustrationSegments(
+      pool,
+      turnId,
+      illustrationSegmentRequestSchema.parse({ mode: "missing" })
+    );
+    for (let index = 0; index < created.segmentCount + 2; index += 1) {
+      if (!await runIllustrationPromptJob(pool, `refinement-worker-${crypto.randomUUID()}`, 30, credentialSecret)) break;
+    }
+
+    const submitted = refinementRequests.slice(refinementCountBefore).map((request) => JSON.stringify(request));
+    expect(submitted).toHaveLength(created.segmentCount);
+    expect(submitted.every((request) => request.includes("weathered purple coat"))).toBe(true);
+    expect(submitted.every((request) => request.includes("STORY CONTEXT"))).toBe(true);
+    const segments = await pool.query<{ direct_prompt: string; resolved_prompt: string; prompt: string }>(
+      `SELECT segments.direct_prompt, segments.resolved_prompt, jobs.prompt
+         FROM turn_illustration_segments segments
+         JOIN image_jobs jobs ON jobs.segment_id = segments.id
+        WHERE segments.turn_id = $1`,
+      [turnId]
+    );
+    expect(segments.rows).toHaveLength(created.segmentCount);
+    for (const row of segments.rows) {
+      expect(row.direct_prompt).not.toContain("CANONICAL CHARACTER REFERENCE:");
+      expect(row.resolved_prompt).not.toContain("CANONICAL CHARACTER REFERENCE:");
+      expect(row.resolved_prompt).toContain("Mira, raising a lantern");
+      expect(row.prompt).toContain("weathered purple coat");
+      expect(row.prompt.match(/CANONICAL CHARACTER REFERENCE:/g)).toHaveLength(1);
+    }
   });
 
   it("generates a world cover with the default image provider without campaign cost attribution", async () => {

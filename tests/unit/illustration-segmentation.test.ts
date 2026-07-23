@@ -49,7 +49,9 @@ describe("illustration segmentation", () => {
       previousNarration: "The bridge vanished into the fog."
     });
     const input = buildIllustrationRefinementInput("Mira raises the lantern as the road bends.", context);
-    expect(context).toContain("Player character: Mira — A traveler in a silver rain cloak.");
+    expect(context).toContain("Player character appearance:");
+    expect(context).toContain("Mira");
+    expect(context).toContain("A traveler in a silver rain cloak.");
     expect(context).toContain("Previous scene: The bridge vanished into the fog.");
     expect(context).not.toContain("Dice roll");
     expect(context.length).toBeLessThanOrEqual(1_800);

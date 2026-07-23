@@ -9,7 +9,7 @@ import {
   buildCanonicalFactProjection,
   canonicalFactDeduplicationKey
 } from "../../../packages/domain/src/canonical-facts.js";
-import { characterTextFromSnapshot } from "../../../packages/domain/src/world-characters.js";
+import { characterNarrativeContext } from "../../../packages/domain/src/world-characters.js";
 import { loadEmbeddingProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
 
@@ -23,7 +23,10 @@ type CampaignScopeRow = {
   active_turn_number: number;
   world_version_id: string;
   world_content: Record<string, unknown>;
+  selected_character_id: string | null;
   character_snapshot: Record<string, unknown> | null;
+  character_profile: Record<string, unknown> | null;
+  character_profile_revision: number;
   scratchpad_private: string;
   scratchpad_safe_for_prompt: boolean;
   trackers: unknown;
@@ -330,17 +333,19 @@ function selectWorldItems(items: unknown, query: string, limit: number): unknown
     .filter((item) => item !== undefined);
 }
 
-function worldFictionCanon(content: Record<string, unknown>, characterSnapshot: unknown, query: string, maximumTokens: number): Record<string, unknown> {
+function worldFictionCanon(
+  content: Record<string, unknown>,
+  characterProfile: unknown,
+  characterSnapshot: unknown,
+  query: string,
+  maximumTokens: number
+): Record<string, unknown> {
   const sourceWorld = typeof content.world === "object" && content.world !== null
     ? content.world as Record<string, unknown>
     : content;
   const { character: _storedCharacter, ...worldWithoutStoredCharacter } = sourceWorld;
-  const selectedCharacterText = characterTextFromSnapshot(characterSnapshot);
-  const world: Record<string, unknown> = {
-    ...worldWithoutStoredCharacter,
-    ...(selectedCharacterText !== null ? { character: selectedCharacterText } : {})
-  };
-  const allowed = ["title", "genre", "tone", "backgroundStory", "character", "premise", "firstAction"];
+  const world: Record<string, unknown> = { ...worldWithoutStoredCharacter };
+  const allowed = ["title", "genre", "tone", "backgroundStory", "premise", "firstAction"];
   const perOverviewLimit = Math.max(300, Math.floor(maximumTokens * 2.6 / allowed.length));
   const overview = Object.fromEntries(allowed.flatMap((key) => {
     const value = world[key];
@@ -348,6 +353,28 @@ function worldFictionCanon(content: Record<string, unknown>, characterSnapshot: 
     return sanitized ? [[key, sanitized]] : [];
   }));
   const result: Record<string, unknown> = { ...overview };
+  const playerCharacter = sanitizedFictionValue(characterNarrativeContext(
+    characterProfile,
+    characterSnapshot,
+    Math.max(800, Math.floor(maximumTokens * 3.2)),
+    Math.max(240, Math.floor(maximumTokens * 0.42))
+  ));
+  if (playerCharacter && typeof playerCharacter === "object") {
+    result.playerCharacter = playerCharacter;
+    if (budgetTokenEstimate(stableStringify(result)) > maximumTokens) {
+      const compact = JSON.parse(JSON.stringify(playerCharacter)) as Record<string, unknown>;
+      for (const section of ["unclassifiedNotes", "appearance", "story"] as const) {
+        if (budgetTokenEstimate(stableStringify({ ...overview, playerCharacter: compact })) <= maximumTokens) break;
+        if (section === "unclassifiedNotes") delete compact.unclassifiedNotes;
+        else if (compact[section] && typeof compact[section] === "object") {
+          compact[section] = Object.fromEntries(Object.entries(compact[section] as Record<string, unknown>).map(([key, value]) => (
+            [key, typeof value === "string" ? truncateAtBoundary(value, 600) : value]
+          )));
+        }
+      }
+      result.playerCharacter = compact;
+    }
+  }
   for (const [key, items] of [["entities", content.entities], ["relationships", content.relationships]] as const) {
     const selected = selectWorldItems(items, query, 16);
     const accepted: unknown[] = [];
@@ -384,7 +411,8 @@ function campaignFictionCanon(campaign: CampaignScopeRow, maximumTokens: number)
 
 async function campaignScope(client: DatabaseClient | DatabasePool, ownerUserId: string, campaignId: string): Promise<CampaignScopeRow> {
   const result = await client.query<CampaignScopeRow>(
-    `SELECT c.id, c.title, c.active_turn_number, c.world_version_id, c.character_snapshot,
+    `SELECT c.id, c.title, c.active_turn_number, c.world_version_id, c.selected_character_id,
+            c.character_snapshot, c.character_profile, c.character_profile_revision,
             wv.content AS world_content,
             cs.scratchpad_private, cs.scratchpad_safe_for_prompt, cs.trackers
        FROM campaigns c
@@ -782,7 +810,13 @@ export async function buildContextPreview(
     sourceWorld.rules,
     Math.max(1200, Math.floor(options.budgetTokens * 0.18 * 3.2))
   );
-  const worldCanon = worldFictionCanon(campaign.world_content, campaign.character_snapshot, expandedQuery, Math.max(384, Math.floor(options.budgetTokens * 0.30)));
+  const worldCanon = worldFictionCanon(
+    campaign.world_content,
+    campaign.character_profile,
+    campaign.character_snapshot,
+    expandedQuery,
+    Math.max(384, Math.floor(options.budgetTokens * 0.30))
+  );
   const campaignCanon = campaignFictionCanon(campaign, Math.max(256, Math.floor(options.budgetTokens * 0.18)));
   const turnMemories = memories.filter((memory) => memory.memory_kind === "turn_fiction");
   const latest = turnMemories.at(-1) ?? null;
@@ -868,7 +902,14 @@ export async function buildContextPreview(
   const expectedForLevel = metrics.compressionEstimates[selectedLevel];
 
   return {
-    campaign: { id: campaign.id, title: campaign.title, activeTurnNumber: campaign.active_turn_number },
+    campaign: {
+      id: campaign.id,
+      title: campaign.title,
+      activeTurnNumber: campaign.active_turn_number,
+      worldVersionId: campaign.world_version_id,
+      selectedCharacterId: campaign.selected_character_id,
+      characterProfileRevision: campaign.character_profile_revision
+    },
     selectedCompression: selectedLevel,
     requestedCompression: options.compression,
     budget: {

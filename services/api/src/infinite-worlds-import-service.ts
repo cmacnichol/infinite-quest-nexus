@@ -4,6 +4,7 @@ import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import type { InfiniteWorldsImportRequest, LegacyStory } from "../../../packages/contracts/src/imports.js";
 import {
   canonicalizeWorldContent,
+  characterProfileSchema,
   playableCharacterSchema,
   portableWorldSchema,
   worldContentSchema,
@@ -51,6 +52,7 @@ const convertedPlayableCharacterSchema = z.object({
   id: z.string().trim().max(200).default(""),
   name: z.string().trim().min(1).max(200),
   character_text: z.string().max(200_000).default(""),
+  profile: characterProfileSchema.optional(),
   rpg_statistics: z.array(z.unknown()).max(10_000).default([]),
   default_triggers: z.array(z.unknown()).max(10_000).default([])
 }).passthrough();
@@ -122,7 +124,7 @@ function worldConversionPrompt(sourceName: string, sourceText: string): { system
   return {
     systemPrompt: `Convert an Infinite Worlds world-editor text export into one compact JSON object. Return JSON only. Preserve source facts and do not invent lore.
 Required fields: title, genre, tone, backgroundStory, playable_characters, premise, firstAction, story_rules, default_triggers, event_triggers, rpg_statistics.
-Return every listed playable character in playable_characters. Each entry needs id, name, character_text, rpg_statistics, and default_triggers. Character skills and tracked items belong only to that character entry; world-wide defaults remain at the top level. Convert skills exactly: 1=20, 2=40, 3=60, 4=80, 5=99. Do not include credentials, model instructions, private reasoning, rolls, checks, dice results, or parser diagnostics in fictional fields.`,
+Return every listed playable character in playable_characters. Each entry needs id, name, character_text, profile, rpg_statistics, and default_triggers. profile uses targeted identity, story, appearance, and unclassifiedNotes fields; populate only source-supported facts and leave unknown values empty. Character skills and tracked items belong only to that character entry; world-wide defaults remain at the top level. Convert skills exactly: 1=20, 2=40, 3=60, 4=80, 5=99. Do not include credentials, model instructions, private reasoning, rolls, checks, dice results, or parser diagnostics in fictional fields.`,
     input: JSON.stringify({ task: "Convert this Infinite Worlds world text for Infinite Quest Nexus.", sourceName, sourceText })
   };
 }
@@ -165,6 +167,7 @@ function mergeConvertedCharacters(
       ...existing,
       ...character,
       character_text: preferText(existing.character_text, character.character_text),
+      profile: character.profile ?? existing.profile,
       rpg_statistics: mergeNamed(existing.rpg_statistics, character.rpg_statistics),
       default_triggers: mergeNamed(existing.default_triggers, character.default_triggers)
     } : character));
@@ -240,6 +243,7 @@ function convertedPlayableCharacters(converted: z.infer<typeof convertedWorldSch
       id,
       name: character.name,
       characterText: character.character_text,
+      ...(character.profile ? { profile: character.profile } : {}),
       rpgStats: convertedRpgStats(character.rpg_statistics, id),
       defaultTriggers: convertedDefaultTriggers(character.default_triggers, id),
       source: { type: "infinite-worlds-text", index }

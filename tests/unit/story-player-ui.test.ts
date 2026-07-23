@@ -312,6 +312,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('id="setupCampaignTitle"');
     expect(storyHtml).toContain('id="setupWorldVersion"');
     expect(storyHtml).toContain('id="setupCharacter"');
+    expect(storyScript).toContain("pc.characterProfile");
+    expect(storyScript).toContain("pc.selectedCharacterName");
     expect(storyScript).toContain('const btnDoneWorldSetup = $("btnDoneWorldSetup");');
   });
 

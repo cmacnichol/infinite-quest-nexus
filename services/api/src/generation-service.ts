@@ -780,12 +780,14 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
       turn_control_style: string;
       selected_character_id: string | null;
       character_snapshot: Record<string, unknown> | null;
+      character_profile: Record<string, unknown> | null;
+      character_profile_revision: number;
       legacy_settings: Record<string, unknown>;
       text_provider_profile_id: string | null;
       image_provider_profile_id: string | null;
     }>(
       `SELECT active_turn_number, world_version_id, title, story_length_profile, turn_control_style,
-              selected_character_id, character_snapshot, legacy_settings,
+              selected_character_id, character_snapshot, character_profile, character_profile_revision, legacy_settings,
               text_provider_profile_id, image_provider_profile_id
          FROM campaigns
         WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
@@ -848,17 +850,28 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
     const newCampaignRes = await client.query<{ id: string }>(
       `INSERT INTO campaigns (
          owner_user_id, world_version_id, title, status, active_turn_number,
-         story_length_profile, turn_control_style, selected_character_id, character_snapshot, legacy_settings,
+         story_length_profile, turn_control_style, selected_character_id, character_snapshot,
+         character_profile, character_profile_revision, legacy_settings,
          text_provider_profile_id, image_provider_profile_id
-       ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+       ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
       [
         ownerUserId, campaign.world_version_id, branchTitle, request.targetTurnNumber,
-        campaign.story_length_profile, campaign.turn_control_style, campaign.selected_character_id, json(campaign.character_snapshot), json(campaign.legacy_settings),
+        campaign.story_length_profile, campaign.turn_control_style, campaign.selected_character_id, json(campaign.character_snapshot),
+        campaign.character_profile ? json(campaign.character_profile) : null,
+        campaign.character_profile ? 1 : 0, json(campaign.legacy_settings),
         campaign.text_provider_profile_id, campaign.image_provider_profile_id
       ]
     );
     const newCampaignId = newCampaignRes.rows[0]?.id;
     if (!newCampaignId) throw new Error("Could not create campaign branch.");
+    if (campaign.character_profile) {
+      await client.query(
+        `INSERT INTO campaign_character_profile_edits (
+           owner_user_id, campaign_id, revision, previous_profile, next_profile, edit_source
+         ) VALUES ($1,$2,1,NULL,$3,'branch')`,
+        [ownerUserId, newCampaignId, json(campaign.character_profile)]
+      );
+    }
 
     const scratchpad = typeof targetSnapshot.scratchpad === "string" ? targetSnapshot.scratchpad : "";
     const trackers = Array.isArray(targetSnapshot.trackers) ? targetSnapshot.trackers : [];
@@ -1403,6 +1416,11 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
       inputTokenLimit,
       reservedOutputTokens: provider.maxOutputTokens,
       estimatedPromptTokens,
+      campaignId: context.campaign.id,
+      worldVersionId: context.campaign.worldVersionId,
+      selectedCharacterId: context.campaign.selectedCharacterId,
+      characterProfileRevision: context.campaign.characterProfileRevision,
+      promptProtocolVersion: job.prompt_protocol_version,
       storyLength,
       selectedMemoryIds: promptContext.chronicle.map((memory) => memory.id),
       selectedMemoryHashes: promptContext.chronicle.map((memory) => sha256(memory.content)),

@@ -27,6 +27,7 @@ const MECHANICS_LANGUAGE_PATTERNS: Array<Pick<MechanicsLanguageMatch, "category"
   { category: "numeric_resolution", pattern: /\btarget\s+(?:number\s+)?(?:of\s+|was\s+|is\s+|[:=]\s*)?\d{1,3}(?:%|\b)/i },
   { category: "numeric_resolution", pattern: /\b(?:stat|skill|ability|attribute)\s+(?:score|value)\b/i },
   { category: "numeric_resolution", pattern: /\b\d{1,3}\s*%\s+(?:chance|target|stat|score)\b/i },
+  { category: "numeric_resolution", pattern: /\b(?:armor\s+class|ac|hit\s+points?|hp|initiative|character\s+level)\s*[:=]?\s*[+-]?\d{1,4}\b/i },
   { category: "result_label", pattern: /\b(?:success|failure)\s+by\s+\d{1,3}\b/i },
   { category: "result_label", pattern: /\b(?:critical|automatic)\s+(?:success|failure)\b/i },
   { category: "result_label", pattern: /\b(?:success|failure)\s+(?:result|outcome|label)\b/i },

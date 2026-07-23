@@ -4,10 +4,12 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import {
   campaignCreateSchema,
+  campaignCharacterProfileUpdateSchema,
   campaignUpdateSchema,
   campaignWorldMigrationSchema,
   resourceDeleteSchema,
   WORLD_CONTENT_SCHEMA_VERSION,
+  characterProfileSchema,
   worldContentSchema,
   worldCreateSchema,
   worldDraftUpdateSchema,
@@ -40,6 +42,10 @@ import {
 } from "../../services/api/src/world-service.js";
 import { buildContextPreview } from "../../services/api/src/memory-service.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
+import {
+  getCampaignCharacterProfile,
+  updateCampaignCharacterProfile
+} from "../../services/api/src/character-profile-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -435,6 +441,171 @@ integration("World Library and campaign version integration", () => {
     expect(exported.settings.storyLength).toBe("extended");
   });
 
+  it("seeds, revisions, audits, exports, and prompts from an editable structured campaign profile", async () => {
+    const title = `Synthetic Structured Character ${crypto.randomUUID()}`;
+    const originalProfile = characterProfileSchema.parse({
+      identity: { aliases: ["The Fox"], pronouns: "she/her" },
+      story: {
+        role: "Scout",
+        personality: "Patient and watchful",
+        goals: "Find the vanished road"
+      },
+      appearance: {
+        eyes: "green",
+        hair: "black braid",
+        clothing: "weathered blue cloak"
+      }
+    });
+    const created = await createWorld(pool, worldCreateSchema.parse({
+      title,
+      content: worldContentSchema.parse({
+        schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
+        world: { title, genre: "fantasy", premise: "The roads move after dusk." },
+        playableCharacters: [{
+          id: "mira",
+          name: "Mira",
+          characterText: "Original legacy source remains unchanged.",
+          profile: originalProfile,
+          importedExtension: { preserve: true }
+        }]
+      })
+    }));
+    const version = await publishWorld(pool, created.id, worldPublishSchema.parse({
+      expectedRevision: created.draftRevision
+    }));
+    const campaign = await createCampaign(pool, campaignCreateSchema.parse({
+      title: `Structured Campaign ${crypto.randomUUID()}`,
+      worldVersionId: version.worldVersionId,
+      selectedCharacterId: "mira"
+    }));
+
+    expect(await getCampaignCharacterProfile(pool, campaign.id)).toMatchObject({
+      characterId: "mira",
+      revision: 1,
+      name: "Mira",
+      profile: originalProfile,
+      inheritedFromSnapshot: false,
+      legacyCharacterText: "Original legacy source remains unchanged."
+    });
+    const origin = await pool.query<any>(
+      "SELECT character_snapshot, character_profile, character_profile_revision FROM campaigns WHERE id = $1",
+      [campaign.id]
+    );
+    expect(origin.rows[0]).toMatchObject({
+      character_snapshot: {
+        name: "Mira",
+        profile: originalProfile,
+        importedExtension: { preserve: true }
+      },
+      character_profile: { name: "Mira", profile: originalProfile },
+      character_profile_revision: 1
+    });
+
+    const ownerUserId = await initialOwnerId(pool);
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id, name, provider_type, provider_role, base_url, default_model
+       ) VALUES ($1,$2,'lmstudio','text','http://provider.invalid','synthetic-model') RETURNING id`,
+      [ownerUserId, `Structured profile provider ${crypto.randomUUID()}`]
+    );
+    await pool.query(
+      `INSERT INTO model_chains (
+         owner_user_id, campaign_id, world_version_id, provider_profile_id, model,
+         endpoint_identity, prompt_protocol_version, context_fingerprint, previous_response_id
+       ) VALUES ($1,$2,$3,$4,'synthetic-model','synthetic-endpoint','old-protocol','old-context','old-response')`,
+      [ownerUserId, campaign.id, version.worldVersionId, provider.rows[0]!.id]
+    );
+    const editedProfile = characterProfileSchema.parse({
+      ...originalProfile,
+      story: { ...originalProfile.story, role: "Expedition leader" },
+      appearance: { ...originalProfile.appearance, clothing: "dark green travel coat" }
+    });
+    const saved = await updateCampaignCharacterProfile(pool, campaign.id, campaignCharacterProfileUpdateSchema.parse({
+      expectedRevision: 1,
+      name: "Mira Vale",
+      profile: editedProfile,
+      editSource: "manual"
+    }));
+    expect(saved).toMatchObject({ revision: 2, name: "Mira Vale", profile: editedProfile });
+    await expect(updateCampaignCharacterProfile(pool, campaign.id, campaignCharacterProfileUpdateSchema.parse({
+      expectedRevision: 1,
+      name: "Stale edit",
+      profile: editedProfile,
+      editSource: "manual"
+    }))).rejects.toMatchObject({ statusCode: 409 });
+    const activeJob = await pool.query<{ id: string }>(
+      `INSERT INTO generation_jobs (
+         owner_user_id, campaign_id, provider_profile_id, idempotency_key,
+         expected_turn_number, action, status
+       ) VALUES ($1,$2,$3,$4,1,'Synthetic action','queued') RETURNING id`,
+      [ownerUserId, campaign.id, provider.rows[0]!.id, crypto.randomUUID()]
+    );
+    await expect(updateCampaignCharacterProfile(pool, campaign.id, campaignCharacterProfileUpdateSchema.parse({
+      expectedRevision: 2,
+      name: "Blocked edit",
+      profile: editedProfile,
+      editSource: "manual"
+    }))).rejects.toMatchObject({ statusCode: 409, details: { code: "generation_active" } });
+    await pool.query("UPDATE generation_jobs SET status = 'failed' WHERE id = $1", [activeJob.rows[0]!.id]);
+
+    const audit = await pool.query<any>(
+      `SELECT revision, edit_source, previous_profile, next_profile
+         FROM campaign_character_profile_edits WHERE campaign_id = $1 ORDER BY revision`,
+      [campaign.id]
+    );
+    expect(audit.rows).toMatchObject([
+      { revision: 1, edit_source: "world_version_seed", previous_profile: null },
+      {
+        revision: 2,
+        edit_source: "manual",
+        previous_profile: { name: "Mira", profile: originalProfile },
+        next_profile: { name: "Mira Vale", profile: editedProfile }
+      }
+    ]);
+    expect(await pool.query("SELECT active FROM model_chains WHERE campaign_id = $1", [campaign.id]))
+      .toMatchObject({ rows: [{ active: false }] });
+    const current = await pool.query<any>(
+      "SELECT character_snapshot, character_profile FROM campaigns WHERE id = $1",
+      [campaign.id]
+    );
+    expect(current.rows[0].character_snapshot).toEqual(origin.rows[0].character_snapshot);
+    expect(current.rows[0].character_profile).toEqual({ name: "Mira Vale", profile: editedProfile });
+
+    const context = await buildContextPreview(pool, campaign.id, {
+      budgetTokens: 8000,
+      compression: "auto",
+      recentTurns: 4,
+      query: "begin"
+    });
+    expect(context.scopes.worldCanon.playerCharacter).toMatchObject({
+      name: "Mira Vale",
+      story: { role: "Expedition leader" },
+      appearance: { clothing: "dark green travel coat" }
+    });
+    expect(JSON.stringify(context.scopes.worldCanon.playerCharacter)).not.toContain("Original legacy source");
+
+    const exported = await exportCampaign(pool, campaign.id);
+    expect(exported.campaign).toMatchObject({
+      selectedCharacterId: "mira",
+      characterProfile: { name: "Mira Vale", profile: editedProfile },
+      characterProfileRevision: 2
+    });
+    expect(exported.world.character).toContain("Mira Vale");
+    expect(exported.world.character).toContain("dark green travel coat");
+
+    const nextVersion = await publishNextVersion(created.id, title, "Two");
+    await migrateCampaignWorld(pool, campaign.id, campaignWorldMigrationSchema.parse({
+      worldVersionId: nextVersion.worldVersionId,
+      note: "Retain edited campaign profile"
+    }));
+    expect(await pool.query(
+      "SELECT character_profile, character_profile_revision FROM campaigns WHERE id = $1",
+      [campaign.id]
+    )).toMatchObject({
+      rows: [{ character_profile: { name: "Mira Vale", profile: editedProfile }, character_profile_revision: 2 }]
+    });
+  });
+
   it("creates isolated campaign character snapshots from one multi-character world version", async () => {
     const title = `Synthetic Roster World ${crypto.randomUUID()}`;
     const rosterContent = worldContentSchema.parse({
@@ -499,10 +670,16 @@ integration("World Library and campaign version integration", () => {
 
     const firstContext = await buildContextPreview(pool, first.id, { budgetTokens: 8000, compression: "auto", recentTurns: 4, query: "begin" });
     const secondContext = await buildContextPreview(pool, second.id, { budgetTokens: 8000, compression: "auto", recentTurns: 4, query: "begin" });
-    expect(firstContext.scopes.worldCanon.character).toBe("First character canon.");
-    expect(secondContext.scopes.worldCanon.character).toBe("Second character canon.");
-    expect((await exportCampaign(pool, first.id)).world.character).toBe("First character canon.");
-    expect((await exportCampaign(pool, second.id)).world.character).toBe("Second character canon.");
+    expect(firstContext.scopes.worldCanon.playerCharacter).toMatchObject({
+      name: "First Character",
+      guidance: "First character canon."
+    });
+    expect(secondContext.scopes.worldCanon.playerCharacter).toMatchObject({
+      name: "Second Character",
+      guidance: "Second character canon."
+    });
+    expect((await exportCampaign(pool, first.id)).world.character).toBe("First Character\n\nFirst character canon.");
+    expect((await exportCampaign(pool, second.id)).world.character).toBe("Second Character\n\nSecond character canon.");
 
     const portableCampaign = await exportCampaign(pool, second.id);
     portableCampaign.world.title = `Roundtrip Character ${crypto.randomUUID()}`;

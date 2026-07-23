@@ -21,8 +21,9 @@ import { removeProviderSecrets, sha256, stableStringify } from "../../../package
 import {
   assessWorldCampaignReadiness,
   campaignCharacterSeed,
+  campaignProfileFromCharacter,
   characterSnapshot,
-  characterTextFromSnapshot,
+  characterLegacyText,
   resolvePlayableCharacters
 } from "../../../packages/domain/src/world-characters.js";
 import { resolveEffectiveProviderId } from "./provider-service.js";
@@ -203,7 +204,7 @@ export async function getWorld(pool: DatabasePool, worldId: string) {
     `SELECT c.id, c.title, c.status, c.active_turn_number AS "activeTurnNumber",
             c.world_version_id AS "worldVersionId", wv.version_number AS "worldVersionNumber",
             c.selected_character_id AS "selectedCharacterId",
-            c.character_snapshot->>'name' AS "selectedCharacterName",
+            COALESCE(c.character_profile->>'name', c.character_snapshot->>'name') AS "selectedCharacterName",
             c.turn_control_style AS "turnControlStyle",
             c.updated_at AS "updatedAt"
        FROM campaigns c
@@ -515,7 +516,7 @@ export async function listCampaigns(pool: DatabasePool) {
             c.story_length_profile AS "storyLengthProfile",
             c.turn_control_style AS "turnControlStyle",
             c.selected_character_id AS "selectedCharacterId",
-            c.character_snapshot->>'name' AS "selectedCharacterName",
+            COALESCE(c.character_profile->>'name', c.character_snapshot->>'name') AS "selectedCharacterName",
             w.id AS "worldId", w.title AS "worldTitle", c.world_version_id AS "worldVersionId",
             c.text_provider_profile_id AS "textProviderProfileId",
             c.image_provider_profile_id AS "imageProviderProfileId",
@@ -569,16 +570,26 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
     if (!readiness.ready) throw httpError(400, readiness.issues[0]?.message || "This world version is not ready for a campaign.");
     const seed = campaignCharacterSeed(content, request.selectedCharacterId);
     const snapshot = characterSnapshot(seed.character);
+    const campaignProfile = campaignProfileFromCharacter(seed.character);
     const campaign = await client.query<{ id: string }>(
       `INSERT INTO campaigns (
          owner_user_id, world_version_id, title, story_length_profile, turn_control_style,
-         selected_character_id, character_snapshot, legacy_settings
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+         selected_character_id, character_snapshot, character_profile, character_profile_revision, legacy_settings
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
       [ownerUserId, request.worldVersionId, request.title, request.storyLengthProfile,
-        request.turnControlStyle, seed.character.id, json(snapshot), json({ useRpgStats: seed.rpgStats.length > 0 })]
+        request.turnControlStyle, seed.character.id, json(snapshot), campaignProfile ? json(campaignProfile) : null,
+        campaignProfile ? 1 : 0, json({ useRpgStats: seed.rpgStats.length > 0 })]
     );
     const campaignId = campaign.rows[0]?.id;
     if (!campaignId) throw new Error("Could not create campaign.");
+    if (campaignProfile) {
+      await client.query(
+        `INSERT INTO campaign_character_profile_edits (
+           owner_user_id, campaign_id, revision, previous_profile, next_profile, edit_source
+         ) VALUES ($1,$2,1,NULL,$3,'world_version_seed')`,
+        [ownerUserId, campaignId, json(campaignProfile)]
+      );
+    }
     const initialTrackers = Array.isArray(content.defaults?.trackers) && content.defaults.trackers.length
       ? content.defaults.trackers : seed.defaultTriggers;
     await client.query(
@@ -945,7 +956,8 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const campaign = await pool.query<any>(
     `SELECT c.title, c.status, c.active_turn_number, c.story_length_profile, c.turn_control_style, c.legacy_settings,
-            c.selected_character_id, c.character_snapshot, w.title AS world_title,
+            c.selected_character_id, c.character_snapshot, c.character_profile, c.character_profile_revision,
+            w.title AS world_title,
             wv.id AS world_version_id, wv.version_number, wv.content, cs.*
        FROM campaigns c
        JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
@@ -973,7 +985,7 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
   );
   const importedHistory = history.rows[0];
   const importProvenance = row.import_provenance && typeof row.import_provenance === "object" ? row.import_provenance : {};
-  const selectedCharacterText = characterTextFromSnapshot(row.character_snapshot);
+  const selectedCharacterText = characterLegacyText(row.character_profile, row.character_snapshot);
   const sourceWorld = row.content.world && typeof row.content.world === "object" ? row.content.world : {};
   const { character: _storedCharacter, ...worldWithoutStoredCharacter } = sourceWorld;
   return {
@@ -987,6 +999,8 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
       sourceWorldVersionNumber: row.version_number,
       selectedCharacterId: row.selected_character_id ?? null,
       characterSnapshot: row.character_snapshot ?? null,
+      characterProfile: row.character_profile ?? null,
+      characterProfileRevision: Number(row.character_profile_revision || 0),
       stateRevision: Number(row.revision || 0)
     },
     world: { ...worldWithoutStoredCharacter, ...(selectedCharacterText !== null ? { character: selectedCharacterText } : {}) },
@@ -1026,7 +1040,7 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
       worldVersionId: row.world_version_id,
       worldVersionNumber: row.version_number,
       selectedCharacterId: row.selected_character_id ?? null,
-      selectedCharacterName: row.character_snapshot?.name ?? null
+      selectedCharacterName: row.character_profile?.name ?? row.character_snapshot?.name ?? null
     }
   };
 }

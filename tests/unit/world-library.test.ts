@@ -167,7 +167,12 @@ describe("playable character generation", () => {
       character: {
         id: "model-controlled-id",
         name: "  Revised Character  ",
-        character_text: "  Complete revised guidance.  ",
+        profile: {
+          identity: { aliases: ["The Cartographer"], pronouns: "they/them" },
+          story: { role: "  Reluctant guide.  ", personality: "Observant and cautious." },
+          appearance: { clothing: "Silver rain cloak.", distinguishingFeatures: ["Ink-stained hands."] },
+          unclassifiedNotes: ""
+        },
         rpg_statistics: [
           { skill: "Resolve", score: 101, note: "Steady", private_reasoning: "discard me" },
           { name: "", value: 55 }
@@ -183,7 +188,12 @@ describe("playable character generation", () => {
     expect(normalized).toMatchObject({
       id: "existing-character",
       name: "Revised Character",
-      characterText: "Complete revised guidance.",
+      characterText: "Existing guidance.",
+      profile: {
+        identity: { aliases: ["The Cartographer"], pronouns: "they/them" },
+        story: { role: "Reluctant guide.", personality: "Observant and cautious." },
+        appearance: { clothing: "Silver rain cloak.", distinguishingFeatures: ["Ink-stained hands."] }
+      },
       source: { type: "world-import", externalId: "source-7" },
       importedField: "preserve-me",
       rpgStats: [{ id: "existing-character-stat-1", name: "Resolve", value: 99, note: "Steady" }],

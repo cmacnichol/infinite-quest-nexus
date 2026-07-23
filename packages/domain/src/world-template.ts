@@ -105,7 +105,8 @@ Required fields: title, genre, tone, backgroundStory, playable_characters, premi
 CRITICAL requirement: You MUST return exactly 3 or 4 distinct, fully fleshed out playable characters in playable_characters. Identify characters pulled from the source material if available, or generate fitting, rich characters that match the setting. Each character entry requires:
 - id (e.g., "char-1", "char-2", "char-3")
 - name (full character name)
-- character_text (detailed background story, personality, appearance, and motivations)
+- character_text (legacy source guidance; may be empty when profile is complete)
+- profile with identity { aliases, pronouns }, story { role, background, personality, motivations, goals, fearsAndConflicts, keyRelationships, narrativeHooks, voiceAndMannerisms, otherGuidance }, appearance { ancestryOrSpecies, apparentAge, genderPresentation, build, skinOrComplexion, face, eyes, hair, distinguishingFeatures, clothing, equipmentAndAccessories, otherVisualDetails }, and unclassifiedNotes
 - rpg_statistics (array of { id, name, value: number (1-99), note }) representing this character's specific skills and attributes
 - default_triggers (array of { id, name, value, rules }) representing items or statuses tracked for this character.
 Also return top-level rpg_statistics, default_triggers, and event_triggers (array of { id, name, condition, action, cooldownTurns }) for world-wide mechanics.

@@ -64,3 +64,23 @@ export function directIllustrationPrompt(segmentText: string): string {
     segmentText.trim()
   ].join("\n");
 }
+
+export function composeIllustrationProviderPrompt(scenePrompt: string, characterVisualReference: string): string {
+  const scene = stripMechanicsLeakage(
+    stripPromptPart(scenePrompt).split(/\n\s*CANONICAL CHARACTER REFERENCE:\s*\n/i, 1)[0]!.trim()
+  ).text;
+  const character = stripMechanicsLeakage(stripPromptPart(characterVisualReference)).text;
+  if (!character) return scene;
+  return [
+    scene,
+    "",
+    "CANONICAL CHARACTER REFERENCE:",
+    "Use these appearance details only if this character is depicted in the requested scene. Do not add the character merely because this reference is present.",
+    character
+  ].join("\n");
+}
+
+function stripPromptPart(value: string): string {
+  return String(value || "").trim();
+}
+import { stripMechanicsLeakage } from "./text.js";

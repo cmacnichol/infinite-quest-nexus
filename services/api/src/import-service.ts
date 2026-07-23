@@ -4,7 +4,7 @@ import type { LegacyStory, LegacyTurn, StoryImportRequest, StoryImportResult } f
 import { storyLengthProfileFromUnknown } from "../../../packages/contracts/src/story-settings.js";
 import { buildTurnFictionMemory, formatLegacySummary, turnNarration } from "../../../packages/story-engine/src/chronicle.js";
 import { estimateTokens, removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
-import { campaignCharacterSeed, characterSnapshot } from "../../../packages/domain/src/world-characters.js";
+import { campaignCharacterSeed, campaignProfileFromCharacter, characterSnapshot } from "../../../packages/domain/src/world-characters.js";
 import {
   canonicalizeWorldContent,
   playableCharacterSchema,
@@ -395,6 +395,13 @@ export async function importLegacyStory(
     const pinnedContent = worldContentSchema.parse(pinnedContentResult.rows[0]?.content);
     const characterSeed = importedCharacterSeed(pinnedContent, request, Boolean(existingTarget));
     const selectedCharacterSnapshot = characterSnapshot(characterSeed.character);
+    const portableProfile = request.story.campaign?.characterProfile;
+    const importedProfile = portableProfile ?? campaignProfileFromCharacter(characterSeed.character);
+    const importedProfileRevision = importedProfile
+      ? portableProfile && request.story.campaign?.characterProfileRevision !== undefined
+        ? Number(request.story.campaign.characterProfileRevision)
+        : 1
+      : 0;
 
     const sanitizedSettings = removeProviderSecrets(request.story.settings);
     delete sanitizedSettings.nexusCampaignId;
@@ -410,13 +417,22 @@ export async function importLegacyStory(
     const campaignInsert = await client.query<{ id: string }>(
       `INSERT INTO campaigns (
          owner_user_id, world_version_id, title, active_turn_number, story_length_profile, turn_control_style,
-         legacy_settings, selected_character_id, character_snapshot
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+         legacy_settings, selected_character_id, character_snapshot, character_profile, character_profile_revision
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
       [ownerUserId, worldVersionId, campaignTitle(request.story), request.story.turns.length, storyLengthProfile,
-        turnControlStyle, json(sanitizedSettings), characterSeed.character.id, json(selectedCharacterSnapshot)]
+        turnControlStyle, json(sanitizedSettings), characterSeed.character.id, json(selectedCharacterSnapshot),
+        importedProfile ? json(importedProfile) : null, importedProfileRevision]
     );
     const campaignId = campaignInsert.rows[0]?.id;
     if (!campaignId) throw new Error("Could not create the imported campaign.");
+    if (importedProfile && importedProfileRevision > 0) {
+      await client.query(
+        `INSERT INTO campaign_character_profile_edits (
+           owner_user_id, campaign_id, revision, previous_profile, next_profile, edit_source
+         ) VALUES ($1,$2,$3,NULL,$4,'imported')`,
+        [ownerUserId, campaignId, importedProfileRevision, json(importedProfile)]
+      );
+    }
 
     const initialTrackers = request.story.trackers ?? [];
     const defaultTriggers = request.story.defaultTriggers ?? request.story.baseTrackersAtStart ?? [];

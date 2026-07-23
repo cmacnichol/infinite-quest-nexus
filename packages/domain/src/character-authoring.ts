@@ -1,15 +1,16 @@
 import { z } from "zod";
 import {
+  characterProfileSchema,
   playableCharacterSchema,
   type PlayableCharacter,
   type WorldContent
 } from "../../contracts/src/world-library.js";
 
-export const CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION = "character-authoring-v1";
+export const CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION = "character-authoring-v2-structured-profile";
 
 const generatedCharacterSchema = z.object({
   name: z.string().trim().min(1).max(200),
-  characterText: z.string().trim().min(1).max(200_000),
+  profile: characterProfileSchema,
   rpgStats: z.array(z.unknown()).max(10_000).default([]),
   defaultTriggers: z.array(z.unknown()).max(10_000).default([])
 });
@@ -66,7 +67,7 @@ function generatedShape(value: unknown): Record<string, unknown> {
   return {
     ...candidate,
     name: candidate.name,
-    characterText: candidate.characterText ?? candidate.character_text,
+    profile: candidate.profile,
     rpgStats: candidate.rpgStats ?? candidate.rpg_statistics ?? [],
     defaultTriggers: candidate.defaultTriggers ?? candidate.default_triggers ?? candidate.startingTrackers ?? []
   };
@@ -81,6 +82,7 @@ function promptCharacter(character: PlayableCharacter) {
     id: character.id,
     name: character.name,
     characterText: clippedText(character.characterText, 12_000),
+    ...(character.profile ? { profile: character.profile } : {}),
     rpgStats: character.rpgStats.slice(0, 100),
     defaultTriggers: character.defaultTriggers.slice(0, 100),
     source: character.source
@@ -93,8 +95,10 @@ export function buildPlayableCharacterGenerationPrompt(
   currentCharacter?: PlayableCharacter
 ): { systemPrompt: string; input: string } {
   const systemPrompt = `You author playable characters for Infinite Quest Nexus.
-Return JSON only: one object with exactly these authored fields: name, characterText, rpgStats, defaultTriggers.
-characterText must be substantial, useful character guidance covering background, personality, appearance, motivations, and narrative hooks.
+Return JSON only: one object with exactly these authored fields: name, profile, rpgStats, defaultTriggers.
+profile must follow this exact nested structure:
+{"identity":{"aliases":[],"pronouns":""},"story":{"role":"","background":"","personality":"","motivations":"","goals":"","fearsAndConflicts":"","keyRelationships":"","narrativeHooks":"","voiceAndMannerisms":"","otherGuidance":""},"appearance":{"ancestryOrSpecies":"","apparentAge":"","genderPresentation":"","build":"","skinOrComplexion":"","face":"","eyes":"","hair":"","distinguishingFeatures":[],"clothing":"","equipmentAndAccessories":"","otherVisualDetails":""},"unclassifiedNotes":""}
+Create substantial, useful story guidance and concrete visual details. Keep unknown details empty instead of using placeholders.
 rpgStats is an array of { name, value, note }; value must be an integer from 1 through 99.
 defaultTriggers is an array of starting trackers shaped as { name, value, rules }.
 Do not return an id or source. Do not include rolls, checks, dice outcomes, private reasoning, parser diagnostics, credentials, or instructions in fictional fields.
@@ -139,7 +143,8 @@ export function normalizeGeneratedPlayableCharacter(
     ...generated,
     id: characterId,
     name: generated.name,
-    characterText: generated.characterText,
+    characterText: currentCharacter?.characterText ?? "",
+    profile: generated.profile,
     rpgStats: normalizeRpgStats(generated.rpgStats, characterId),
     defaultTriggers: normalizeDefaultTriggers(generated.defaultTriggers, characterId),
     source: currentCharacter?.source ?? {
@@ -150,5 +155,5 @@ export function normalizeGeneratedPlayableCharacter(
 }
 
 export function playableCharacterRecoveryInput(): string {
-  return "The preceding character JSON reached its output limit. Return one compact, complete replacement JSON object with name, characterText, rpgStats, and defaultTriggers. Start again at {, close every field and the final }, and omit id and source.";
+  return "The preceding character JSON reached its output limit. Return one compact, complete replacement JSON object with name, profile, rpgStats, and defaultTriggers. Start again at {, close every field and the final }, and omit id and source.";
 }

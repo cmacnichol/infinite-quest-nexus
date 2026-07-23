@@ -54,6 +54,21 @@ integration("cross-world campaign transfer", () => {
       selectedCharacterId: "source-hero"
     }));
     const ownerUserId = await initialOwnerId(pool);
+    const currentProfile = {
+      name: "Transferred Hero",
+      profile: {
+        identity: { aliases: ["The Voyager"], pronouns: "they/them" },
+        story: { role: "World walker" },
+        appearance: { hair: "silver braid" },
+        unclassifiedNotes: ""
+      }
+    };
+    await pool.query(
+      `UPDATE campaigns
+          SET character_profile = $3, character_profile_revision = 4, updated_at = now()
+        WHERE id = $1 AND owner_user_id = $2`,
+      [source.id, ownerUserId, JSON.stringify(currentProfile)]
+    );
     const turn = await pool.query<{ id: string }>(
       `INSERT INTO turns (
          owner_user_id, campaign_id, turn_number, action, narration, choices,
@@ -105,6 +120,8 @@ integration("cross-world campaign transfer", () => {
       active_turn_number: number;
       selected_character_id: string;
       character_snapshot: Record<string, unknown>;
+      character_profile: Record<string, unknown>;
+      character_profile_revision: number;
       revision: number;
       turn_count: number;
       edit_count: number;
@@ -113,7 +130,8 @@ integration("cross-world campaign transfer", () => {
       chain_count: number;
       cost_count: number;
     }>(
-      `SELECT c.world_version_id, c.active_turn_number, c.selected_character_id, c.character_snapshot, cs.revision,
+      `SELECT c.world_version_id, c.active_turn_number, c.selected_character_id, c.character_snapshot,
+              c.character_profile, c.character_profile_revision, cs.revision,
               (SELECT count(*)::int FROM turns WHERE campaign_id = c.id) AS turn_count,
               (SELECT count(*)::int FROM campaign_state_edits WHERE campaign_id = c.id) AS edit_count,
               (SELECT count(*)::int FROM asset_references ar JOIN turns t ON t.id = ar.turn_id
@@ -129,6 +147,8 @@ integration("cross-world campaign transfer", () => {
       world_version_id: targetWorld.worldVersionId,
       active_turn_number: 1,
       selected_character_id: "source-hero",
+      character_profile: currentProfile,
+      character_profile_revision: 1,
       revision: 1,
       turn_count: 1,
       edit_count: 1,
@@ -138,6 +158,13 @@ integration("cross-world campaign transfer", () => {
       cost_count: 0
     });
     expect(copied.rows[0]?.character_snapshot).toMatchObject({ id: "source-hero" });
+    expect(await pool.query(
+      `SELECT revision, edit_source, next_profile
+         FROM campaign_character_profile_edits WHERE campaign_id = $1`,
+      [transferred.targetCampaignId]
+    )).toMatchObject({
+      rows: [{ revision: 1, edit_source: "transfer", next_profile: currentProfile }]
+    });
     const sourceStillExists = await pool.query<{ active_turn_number: number }>("SELECT active_turn_number FROM campaigns WHERE id = $1", [source.id]);
     expect(sourceStillExists.rows[0]?.active_turn_number).toBe(1);
     expect(transferred.chronicleMemoryCount).toBeGreaterThan(0);

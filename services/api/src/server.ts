@@ -8,6 +8,7 @@ import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import { createLoggerOptions } from "../../../packages/logger/src/index.js";
+import { characterLegacyText, effectiveCampaignCharacter } from "../../../packages/domain/src/world-characters.js";
 import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema, storyImportRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
 import {
@@ -32,9 +33,11 @@ import {
 } from "../../../packages/contracts/src/generation.js";
 import {
   campaignCreateSchema,
+  campaignCharacterProfileUpdateSchema,
   campaignUpdateSchema,
   campaignWorldMigrationSchema,
   playableCharacterGenerationRequestSchema,
+  characterProfileOrganizationRequestSchema,
   resourceDeleteSchema,
   worldCreateSchema,
   worldDraftUpdateSchema,
@@ -99,6 +102,12 @@ import {
   updateWorldDraft
 } from "./world-service.js";
 import { generatePlayableCharacter } from "./world-generator-service.js";
+import {
+  getCampaignCharacterProfile,
+  organizeCampaignCharacterProfile,
+  organizeWorldCharacterProfile,
+  updateCampaignCharacterProfile
+} from "./character-profile-service.js";
 import { getCampaignCostSummary, turnReportedCosts } from "./cost-service.js";
 import { classifyTurnInput } from "./turn-intent-service.js";
 import { previewCampaignWorldTransfer, transferCampaignWorld } from "./campaign-transfer-service.js";
@@ -368,6 +377,15 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     )
   ));
 
+  app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/draft/playable-characters/organize", async (request) => (
+    organizeWorldCharacterProfile(
+      pool,
+      uuidSchema.parse(request.params.worldId),
+      characterProfileOrganizationRequestSchema.parse(request.body),
+      config.credentialEncryptionKey
+    )
+  ));
+
   app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/publish", async (request, reply) => (
     reply.code(201).send(await publishWorld(pool, uuidSchema.parse(request.params.worldId), worldPublishSchema.parse(request.body)))
   ));
@@ -414,6 +432,27 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.patch<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId", async (request) => (
     updateCampaign(pool, uuidSchema.parse(request.params.campaignId), campaignUpdateSchema.parse(request.body))
+  ));
+
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/character-profile", async (request) => (
+    getCampaignCharacterProfile(pool, uuidSchema.parse(request.params.campaignId))
+  ));
+
+  app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/character-profile", async (request) => (
+    updateCampaignCharacterProfile(
+      pool,
+      uuidSchema.parse(request.params.campaignId),
+      campaignCharacterProfileUpdateSchema.parse(request.body)
+    )
+  ));
+
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/character-profile/organize", async (request) => (
+    organizeCampaignCharacterProfile(
+      pool,
+      uuidSchema.parse(request.params.campaignId),
+      characterProfileOrganizationRequestSchema.parse(request.body),
+      config.credentialEncryptionKey
+    )
   ));
 
   app.delete<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId", async (request) => (
@@ -497,6 +536,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
               c.story_length_profile AS "storyLengthProfile", c.updated_at AS "updatedAt",
               c.turn_control_style AS "turnControlStyle",
               c.selected_character_id AS "selectedCharacterId", c.character_snapshot AS "characterSnapshot",
+              c.character_profile AS "characterProfile", c.character_profile_revision AS "characterProfileRevision",
               c.legacy_settings AS "legacySettings", c.status,
               w.id AS "worldId", w.title AS "worldTitle", wv.version_number AS "worldVersionNumber",
               wv.content AS "worldContent",
@@ -526,6 +566,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     if (!row) return reply.code(404).send({ error: "Not found", message: "Campaign not found." });
     const content = typeof row.worldContent === "string" ? JSON.parse(row.worldContent) : (row.worldContent || {});
     const worldOverview = content.world || {};
+    const effectiveCharacter = effectiveCampaignCharacter(row.characterProfile, row.characterSnapshot);
     const campaign = {
       id: row.id,
       title: row.title,
@@ -534,7 +575,10 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       storyLengthProfile: row.storyLengthProfile,
       updatedAt: row.updatedAt,
       selectedCharacterId: row.selectedCharacterId,
+      selectedCharacterName: effectiveCharacter.name,
       characterSnapshot: row.characterSnapshot,
+      characterProfile: row.characterProfile,
+      characterProfileRevision: row.characterProfileRevision,
       status: row.status
     };
     const world = {
@@ -545,14 +589,17 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       tone: worldOverview.tone || "",
       premise: worldOverview.premise || "",
       backgroundStory: worldOverview.backgroundStory || "",
-      character: row.characterSnapshot?.characterText || row.characterSnapshot?.name || "",
+      character: characterLegacyText(row.characterProfile, row.characterSnapshot) || "",
       firstAction: worldOverview.firstAction || "",
       rules: worldOverview.rules || "",
       playableCharacters: content.playableCharacters || []
     };
     const playerConfig = {
       selectedCharacterId: row.selectedCharacterId,
+      selectedCharacterName: effectiveCharacter.name,
       characterSnapshot: row.characterSnapshot,
+      characterProfile: row.characterProfile,
+      characterProfileRevision: row.characterProfileRevision,
       rpgStats: row.rpgStats || [],
       trackers: row.trackers || [],
       eventTriggers: row.eventTriggers || [],
