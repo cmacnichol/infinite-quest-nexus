@@ -32,16 +32,27 @@ describe("Nexus management UI contracts", () => {
   it("configures Sogni as an independent illustration provider without exposing stored secrets", () => {
     expect(managementHtml).toContain('<option value="sogni">Sogni AI</option>');
     expect(managementHtml).toContain('id="providerSogniSettings" class="hidden" aria-hidden="true"');
-    expect(managementHtml).toContain('Provider default (safest)');
+    expect(managementHtml).toContain('<option value="provider-default">Provider default</option>');
     expect(managementHtml).toContain('id="providerSogniImageCount"');
     expect(managementHtml).toContain('<option value="2">2 images</option>');
     expect(managementHtml).toContain('id="providerSogniModelDiscoveryEnabled"');
-    expect(managementHtml).toContain('id="providerSogniSupportsSafeContentFilter"');
+    expect(managementHtml).toContain('id="providerSogniSensitiveContentFilter" disabled');
+    expect(managementHtml).not.toContain('id="providerSogniSupportsSafeContentFilter"');
     expect(managementScript).toContain('sogni: "https://api.sogni.ai"');
     expect(managementScript).toContain('maximumPollIntervalMs: Math.round(Number(elements.providerSogniMaximumPollIntervalSeconds.value) * 1000)');
     expect(managementScript).toContain('generationTimeoutMs: Math.round(Number(elements.providerSogniGenerationTimeoutSeconds.value) * 1000)');
     expect(managementScript).toContain('elements.providerApiKey.value = "";');
     expect(managementScript).not.toContain('elements.providerApiKey.value = provider.');
+  });
+
+  it("offers retained images in world and story editing views", () => {
+    expect(managementHtml).toContain('id="chooseWorldCover"');
+    expect(managementHtml).toContain('id="assetLibraryDialog"');
+    expect(managementScript).toContain('/api/v1/assets?limit=250');
+    expect(managementScript).toContain('/cover-asset`');
+    expect(storyHtml).toContain('id="btnChooseImageLibrary"');
+    expect(storyScript).toContain('/assets?limit=250');
+    expect(storyScript).toContain('/illustration-asset`');
   });
 
   it("leaves fiction-boundary validation exclusively to the Nexus Story Engine", () => {

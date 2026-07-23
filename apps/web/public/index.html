@@ -154,6 +154,7 @@
               <img id="worldCoverPreview" class="world-cover-preview hidden" alt="Selected world cover">
               <label>Cover prompt (optional)<textarea id="worldCoverPrompt" rows="3" maxlength="20000" disabled placeholder="Leave blank to build a fiction-only prompt from this world's title, genre, tone, and premise."></textarea></label>
               <div class="button-row">
+                <button id="chooseWorldCover" class="button secondary" type="button" disabled>Choose from library</button>
                 <button id="generateWorldCover" class="button secondary" type="button" disabled>Generate cover</button>
               </div>
               <div id="worldCoverStatus" class="status">Select or create a world to generate cover artwork.</div>
@@ -620,16 +621,15 @@
             <select id="providerSogniQuality"><option value="auto">Automatic</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
           </label>
           <label>Sensitive-content filter
-            <select id="providerSogniSensitiveContentFilter"><option value="provider-default">Provider default (safest)</option><option value="enabled">Request enabled</option><option value="disabled">Request disabled, if account permits</option></select>
+            <select id="providerSogniSensitiveContentFilter" disabled><option value="provider-default">Provider default</option></select>
           </label>
-          <label class="toggle-field"><input id="providerSogniSupportsSafeContentFilter" type="checkbox"> Selected workflow documents filter overrides</label>
           <label>Initial poll interval (seconds)<input id="providerSogniPollIntervalSeconds" type="number" min="1" max="30" step="1" value="2"></label>
           <label>Maximum poll interval (seconds)<input id="providerSogniMaximumPollIntervalSeconds" type="number" min="1" max="30" step="1" value="10"></label>
           <label>Generation timeout (seconds)<input id="providerSogniGenerationTimeoutSeconds" type="number" min="30" max="600" step="5" value="180"></label>
           <label>Submission attempts<input id="providerSogniMaximumAttempts" type="number" min="1" max="5" step="1" value="3"></label>
           <label class="toggle-field"><input id="providerSogniModelDiscoveryEnabled" type="checkbox" checked> Attempt model discovery</label>
         </div>
-        <p class="fieldset-note">Provider-default is safest. Declare override support only after verifying the selected workflow's current documentation; Sogni account eligibility and provider policy still apply.</p>
+        <p class="fieldset-note">Sogni's inline generate_image workflow does not accept a content-filter override. Nexus therefore preserves the provider default and never sends an unsupported filter field.</p>
       </fieldset>
       <details id="providerAdvancedSettings" class="provider-advanced-settings">
         <summary>Advanced request settings</summary>
@@ -699,6 +699,17 @@
         <button id="saveCharacter" class="button primary" type="submit">Add character</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="assetLibraryDialog" class="confirm-dialog asset-library-dialog" aria-labelledby="assetLibraryTitle">
+    <div>
+      <div class="section-heading">
+        <div><p class="eyebrow">Shared artwork</p><h2 id="assetLibraryTitle">Image library</h2><p>Choose any retained generated image.</p></div>
+        <button id="closeAssetLibrary" class="button secondary" type="button">Close</button>
+      </div>
+      <div id="assetLibraryGrid" class="asset-library-grid"><p class="muted">Loading retained images…</p></div>
+      <div id="assetLibraryStatus" class="status" role="status" aria-live="polite"></div>
+    </div>
   </dialog>
 
   <dialog id="forkWorldDialog" class="confirm-dialog" aria-labelledby="forkWorldTitleLabel">

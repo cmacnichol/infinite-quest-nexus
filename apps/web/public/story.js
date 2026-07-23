@@ -418,13 +418,17 @@ function renderScene(turn, index) {
 
   // Image column
   let imageHtml = "";
+  const turnId = turn.id || turn.turnId || "";
+  if (!hasImage && turnId) {
+    narrationHtml += `<div class="row wrap"><button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="choose-image-library">▦ Choose image from library</button></div>`;
+  }
   if (hasImage) {
     const src = turn.imageAssetUrl || turn.imageUrl;
-    const turnId = turn.id || turn.turnId || "";
     imageHtml = `<div class="image-wrap">
       <img src="${escapeHtml(src)}" alt="Illustration for turn ${index + 1}" loading="lazy" />
       <div class="image-actions">
         <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="edit-image-prompt" title="Edit image prompt">✏️</button>
+        <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="choose-image-library" title="Choose retained image">▦</button>
         <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="regenerate-image" title="Regenerate image">🔄</button>
       </div>
     </div>`;
@@ -1362,7 +1366,7 @@ function pollImageJobs() {
   poll();
 }
 
-function updateSceneImage(turnId, assetUrl) {
+function updateSceneImage(turnId, assetUrl, replace = false) {
   if (!turnId || !assetUrl) return;
   // Find the turn index
   const turnIdx = state.turns.findIndex(t => (t.id || t.turnId) === turnId);
@@ -1371,7 +1375,11 @@ function updateSceneImage(turnId, assetUrl) {
   const sceneEl = $(`scene-${turnIdx}`);
   if (!sceneEl) return;
   // Check if image already present
-  if (sceneEl.querySelector(".image-wrap img")) return;
+  const existingImage = sceneEl.querySelector(".image-wrap img");
+  if (existingImage) {
+    if (replace) existingImage.src = assetUrl;
+    return;
+  }
   // Add the image-wrap
   sceneEl.classList.remove("no-image");
   const imgDiv = document.createElement("div");
@@ -1379,6 +1387,7 @@ function updateSceneImage(turnId, assetUrl) {
   imgDiv.innerHTML = `<img src="${escapeHtml(assetUrl)}" alt="Illustration for turn ${turnIdx + 1}" loading="lazy" />
     <div class="image-actions">
       <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="edit-image-prompt" title="Edit image prompt">✏️</button>
+      <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="choose-image-library" title="Choose retained image">▦</button>
       <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="regenerate-image" title="Regenerate image">🔄</button>
     </div>`;
   sceneEl.appendChild(imgDiv);
@@ -1394,6 +1403,54 @@ function openImagePromptEditor(turnId) {
   editor.value = turn.imagePrompt || "";
   dlg._turnId = turnId;
   openManagedModal(dlg);
+}
+
+async function openTurnAssetLibrary(turnId) {
+  const dialog = $("assetLibraryDialog");
+  const grid = $("assetLibraryGrid");
+  const status = $("assetLibraryStatus");
+  if (!dialog || !grid || !status || !turnId) return;
+  grid.innerHTML = '<p class="mini">Loading retained images…</p>';
+  status.textContent = "";
+  dialog.showModal();
+  try {
+    const { assets } = await api("/assets?limit=250");
+    grid.replaceChildren();
+    if (!assets?.length) {
+      grid.innerHTML = '<p class="mini">No generated images have been retained yet.</p>';
+      return;
+    }
+    for (const asset of assets) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "asset-library-item";
+      const image = document.createElement("img");
+      image.src = asset.url;
+      image.alt = "Retained generated image";
+      image.loading = "lazy";
+      const detail = document.createElement("span");
+      detail.textContent = new Date(asset.createdAt).toLocaleString();
+      button.append(image, detail);
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          const result = await api(`/turns/${turnId}/illustration-asset`, { method: "PUT", body: JSON.stringify({ assetId: asset.id }) });
+          updateSceneImage(turnId, result.assetUrl, true);
+          dialog.close();
+          $("imagePromptDialog")?.close();
+          toast("Selected image from the shared library.");
+        } catch (error) {
+          status.textContent = error.message || String(error);
+          button.disabled = false;
+        }
+      });
+      grid.append(button);
+    }
+    status.textContent = `${assets.length} retained image${assets.length === 1 ? "" : "s"}.`;
+  } catch (error) {
+    grid.replaceChildren();
+    status.textContent = error.message || String(error);
+  }
 }
 
 async function regenerateIllustration(turnId, prompt) {
@@ -2105,6 +2162,10 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   const btnImagePromptCancel = $("btnImagePromptCancel");
   if (btnImagePromptCancel) btnImagePromptCancel.addEventListener("click", () => { const d = $("imagePromptDialog"); if (d && d.close) d.close(); });
+  const btnChooseImageLibrary = $("btnChooseImageLibrary");
+  if (btnChooseImageLibrary) btnChooseImageLibrary.addEventListener("click", () => openTurnAssetLibrary($("imagePromptDialog")?._turnId));
+  const btnCloseAssetLibrary = $("btnCloseAssetLibrary");
+  if (btnCloseAssetLibrary) btnCloseAssetLibrary.addEventListener("click", () => $("assetLibraryDialog")?.close());
 
   // Branch dialog
   const branchDlg = $("branchStoryDialog");
@@ -2160,6 +2221,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const turnId = btn.dataset.turnId;
     if (btn.dataset.action === "edit-image-prompt") openImagePromptEditor(turnId);
     if (btn.dataset.action === "regenerate-image") regenerateIllustration(turnId);
+    if (btn.dataset.action === "choose-image-library") openTurnAssetLibrary(turnId);
   });
 
   // A manual scroll means the reader has chosen their own position. Streaming
