@@ -58,6 +58,12 @@ export type ModelInventoryItem = {
   instanceId: string;
   contextLength: number;
   workerCount?: number;
+  workerAvailability?: Array<{
+    type: string;
+    displayName: string;
+    workerCount: number;
+    description: string;
+  }>;
   media?: "image" | "video" | "audio";
   imageOptions?: {
     sizePresets: Array<{ id: string; label: string; width: number; height: number; ratio: string }>;
@@ -104,6 +110,7 @@ export type ImageProviderRequest = {
 export type ImageProviderResult = {
   base64: string;
   mimeType: "image/png" | "image/jpeg" | "image/webp";
+  artifacts: ImageProviderArtifact[];
   responseId: string;
   usage: Record<string, unknown>;
   reportedCost: ReportedProviderCost | null;
@@ -623,7 +630,7 @@ export async function callImageProvider(
   const payload: Record<string, unknown> = {
     model: profile.model,
     prompt: request.prompt,
-    n: 1,
+    n: request.imageCount ?? 1,
     size: request.size,
     quality: request.quality,
     output_format: request.outputFormat,
@@ -634,20 +641,26 @@ export async function callImageProvider(
     headers: headers(profile),
     body: JSON.stringify(payload)
   }, fetcher), profile, "image generation", url);
-  const image = Array.isArray(data.data) ? data.data[0] : undefined;
-  const base64 = String(image?.b64_json || "").replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "").trim();
-  if (!base64) {
-    if (image?.url) throw new Error("The image provider returned only a temporary URL. Configure it to return base64 image data so Nexus can persist the asset safely.");
-    throw new Error("The image provider response did not contain base64 image data.");
-  }
-  const mediaType = String(image?.media_type || `image/${request.outputFormat === "jpeg" ? "jpeg" : request.outputFormat}`).toLowerCase();
-  if (!(["image/png", "image/jpeg", "image/webp"] as const).includes(mediaType as "image/png" | "image/jpeg" | "image/webp")) {
-    throw new Error(`The image provider returned unsupported media type '${mediaType}'.`);
-  }
+  const images = Array.isArray(data.data) ? data.data : [];
+  const artifacts = images.map((image): ImageProviderArtifact => {
+    const base64 = String(image?.b64_json || "").replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "").trim();
+    if (!base64) {
+      if (image?.url) throw new Error("The image provider returned only a temporary URL. Configure it to return base64 image data so Nexus can persist the asset safely.");
+      throw new Error("The image provider response did not contain base64 image data.");
+    }
+    const mediaType = String(image?.media_type || `image/${request.outputFormat === "jpeg" ? "jpeg" : request.outputFormat}`).toLowerCase();
+    if (!(["image/png", "image/jpeg", "image/webp"] as const).includes(mediaType as "image/png" | "image/jpeg" | "image/webp")) {
+      throw new Error(`The image provider returned unsupported media type '${mediaType}'.`);
+    }
+    return { source: "base64", base64, mimeType: mediaType as ImageProviderResult["mimeType"] };
+  });
+  const first = artifacts[0];
+  if (!first || first.source !== "base64") throw new Error("The image provider response did not contain image data.");
   return {
-    base64,
-    mimeType: mediaType as ImageProviderResult["mimeType"],
-    responseId: String(data.id || image?.id || ""),
+    base64: first.base64,
+    mimeType: first.mimeType,
+    artifacts,
+    responseId: String(data.id || images[0]?.id || ""),
     usage: typeof data.usage === "object" && data.usage ? data.usage : {},
     reportedCost: reportedProviderCost(data.usage),
     rawMetadata: { created: data.created || null, provider: data.provider || "" }
@@ -665,7 +678,7 @@ const compatibleImageProviderAdapter: AsyncImageProviderAdapter = {
     const result = await callImageProvider(profile, request, fetcher);
     return {
       mode: "completed",
-      artifacts: [{ source: "base64", base64: result.base64, mimeType: result.mimeType }],
+      artifacts: result.artifacts,
       usage: result.usage,
       reportedCost: result.reportedCost,
       providerMetadata: { responseId: result.responseId, ...result.rawMetadata }

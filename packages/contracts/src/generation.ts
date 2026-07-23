@@ -104,6 +104,19 @@ export const campaignBranchSchema = z.object({
 export const illustrationSourcePolicySchema = z.enum(["off", "library_only", "library_then_generate", "generate_only"]);
 export const illustrationMatchingScopeSchema = z.enum(["campaign", "world", "owner_library", "shared"]);
 export const illustrationConfidenceProfileSchema = z.enum(["strict", "balanced", "broad"]);
+export const illustrationSegmentPromptModeSchema = z.enum(["direct", "ai_refined"]);
+
+export const DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT = `You are an expert visual translator and prompt engineer for AI image generators. Your task is to analyze a provided excerpt of fiction and generate a highly effective, concise prompt to illustrate that exact scene.
+
+Follow these strict rules:
+
+1. ISOLATE THE MOMENT: An image is a single static frame. Analyze the chronology of the passage and select the single most visually compelling or climactic moment to illustrate. Do not attempt to show a sequence of events.
+2. STRICT FIDELITY: Base the visual details ONLY on the provided text. Preserve the exact characters, setting, action, and mood described. Do not invent events, objects, or characters. Exclude all non-diegetic material (e.g., no text overlays, no UI elements, no author notes).
+3. EXTERNALIZE THE INTERNAL: Translate abstract concepts (internal thoughts, smells, unseen threats) into purely visual elements (e.g., facial expressions, body language, atmospheric lighting, color palettes, weather).
+4. KEYWORD EFFICIENCY: AI image generators respond best to concrete nouns, vivid adjectives, and clear stylistic descriptors. Avoid full narrative sentences.
+
+Output ONLY the final image prompt, structured in the following order, separated by commas:
+[Main Subject(s) & Physical Description] + [Specific Action/Pose] + [Setting/Background] + [Lighting & Atmosphere based on mood] + [Medium/Art Style: e.g., cinematic concept art, high fantasy illustration]`;
 
 export const illustrationConfigSchema = z.object({
   enabled: z.boolean().default(false),
@@ -117,7 +130,11 @@ export const illustrationConfigSchema = z.object({
   aspectRatio: z.string().trim().regex(/^\d{1,3}:\d{1,3}$/).default("1:1"),
   quality: z.enum(["auto", "low", "medium", "high"]).default("auto"),
   outputFormat: z.enum(["png", "jpeg", "webp"]).default("png"),
-  maxAttempts: z.coerce.number().int().min(1).max(10).default(3)
+  maxAttempts: z.coerce.number().int().min(1).max(10).default(3),
+  segmentWordCount: z.coerce.number().int().min(100).max(5_000).default(500),
+  imagesPerSegment: z.coerce.number().int().min(1).max(2).default(1),
+  segmentPromptMode: illustrationSegmentPromptModeSchema.default("direct"),
+  refinementPrompt: z.string().trim().min(1).max(4_000).default(DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT)
 }).superRefine((value, context) => {
   const sourcePolicy = value.sourcePolicy ?? (value.enabled ? "generate_only" : "off");
   if (["library_then_generate", "generate_only"].includes(sourcePolicy) && !value.providerProfileId) {
@@ -133,6 +150,26 @@ export const illustrationRequestSchema = z.object({
   model: z.string().trim().max(500).optional(),
   prompt: z.string().trim().min(1).max(20_000).optional(),
   replace: z.boolean().default(false)
+});
+
+export const illustrationSegmentRequestSchema = z.object({
+  mode: z.enum(["missing", "rebuild"]).default("missing"),
+  idempotencyKey: z.string().trim().min(8).max(192).default(() => crypto.randomUUID())
+});
+
+export const illustrationSegmentImageRequestSchema = z.object({
+  prompt: z.string().trim().min(1).max(20_000),
+  variantIndex: z.coerce.number().int().min(0).max(1)
+}).strict();
+
+export const illustrationBackfillPreviewSchema = z.object({
+  mode: z.enum(["missing", "rebuild"]).default("missing")
+});
+
+export const illustrationBackfillRequestSchema = illustrationBackfillPreviewSchema.extend({
+  idempotencyKey: z.string().trim().min(8).max(192),
+  expectedConfigUpdatedAt: z.iso.datetime(),
+  expectedTurnCount: z.coerce.number().int().min(0)
 });
 
 export const worldCoverRequestSchema = z.object({
@@ -389,6 +426,10 @@ export type CampaignRewindRequest = z.infer<typeof campaignRewindSchema>;
 export type CampaignBranchRequest = z.infer<typeof campaignBranchSchema>;
 export type IllustrationConfig = z.infer<typeof illustrationConfigSchema>;
 export type IllustrationRequest = z.infer<typeof illustrationRequestSchema>;
+export type IllustrationSegmentRequest = z.infer<typeof illustrationSegmentRequestSchema>;
+export type IllustrationSegmentImageRequest = z.infer<typeof illustrationSegmentImageRequestSchema>;
+export type IllustrationBackfillPreview = z.infer<typeof illustrationBackfillPreviewSchema>;
+export type IllustrationBackfillRequest = z.infer<typeof illustrationBackfillRequestSchema>;
 export type WorldCoverRequest = z.infer<typeof worldCoverRequestSchema>;
 export type SogniIllustrationProviderConfig = z.infer<typeof sogniIllustrationProviderConfigSchema>;
 export type SogniSdkIllustrationProviderConfig = z.infer<typeof sogniSdkIllustrationProviderConfigSchema>;

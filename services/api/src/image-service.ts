@@ -1,4 +1,9 @@
-import type { IllustrationConfig, IllustrationRequest, WorldCoverRequest } from "../../../packages/contracts/src/generation.js";
+import {
+  DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,
+  type IllustrationConfig,
+  type IllustrationRequest,
+  type WorldCoverRequest
+} from "../../../packages/contracts/src/generation.js";
 import { isIP } from "node:net";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
@@ -30,6 +35,11 @@ type IllustrationConfigRow = {
   quality: IllustrationConfig["quality"];
   output_format: IllustrationConfig["outputFormat"];
   max_attempts: number;
+  segment_word_count?: number;
+  images_per_segment?: number;
+  segment_prompt_mode?: IllustrationConfig["segmentPromptMode"];
+  refinement_prompt?: string;
+  updated_at?: Date;
 };
 
 type ImageJobRow = {
@@ -39,6 +49,8 @@ type ImageJobRow = {
   turn_id: string | null;
   world_id: string | null;
   target_type: "turn_illustration" | "world_cover";
+  segment_id: string | null;
+  image_count: 1 | 2;
   provider_profile_id: string;
   requested_model: string;
   prompt: string;
@@ -84,7 +96,13 @@ function publicConfig(row?: IllustrationConfigRow) {
     aspectRatio: row?.aspect_ratio ?? "1:1",
     quality: row?.quality ?? "auto",
     outputFormat: row?.output_format ?? "png",
-    maxAttempts: row?.max_attempts ?? 3
+    maxAttempts: row?.max_attempts ?? 3,
+    segmentWordCount: row?.segment_word_count ?? 500,
+    imagesPerSegment: row?.images_per_segment ?? 1,
+    segmentPromptMode: row?.segment_prompt_mode ?? "direct",
+    refinementPrompt: row?.refinement_prompt?.trim() || DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,
+    defaultRefinementPrompt: DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,
+    updatedAt: row?.updated_at?.toISOString() ?? null
   };
 }
 
@@ -95,6 +113,8 @@ function publicJob(row: ImageJobRow) {
     turnId: row.turn_id,
     worldId: row.world_id,
     targetType: row.target_type,
+    segmentId: row.segment_id,
+    imageCount: row.image_count,
     providerProfileId: row.provider_profile_id,
     model: row.requested_model,
     status: row.status,
@@ -125,7 +145,7 @@ function publicJob(row: ImageJobRow) {
   };
 }
 
-const jobColumns = `id, owner_user_id, campaign_id, turn_id, world_id, target_type, provider_profile_id, requested_model,
+const jobColumns = `id, owner_user_id, campaign_id, turn_id, world_id, target_type, segment_id, image_count, provider_profile_id, requested_model,
   prompt, status, attempts, max_attempts, size, aspect_ratio, quality, output_format, asset_id,
   provider_type, generation_revision, remote_job_id, provider_status, provider_progress, provider_queue_position, provider_eta_at, submitted_at, last_polled_at,
   next_poll_at, generation_deadline, provider_request_metadata, provider_result_metadata,
@@ -137,7 +157,8 @@ export async function getIllustrationConfig(pool: DatabasePool, campaignId: stri
   if (!campaign.rows[0]) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
   const result = await pool.query<IllustrationConfigRow>(
     `SELECT enabled, source_policy, matching_scope, confidence_profile, repetition_window,
-            provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
+            provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts,
+            segment_word_count, images_per_segment, segment_prompt_mode, refinement_prompt, updated_at
        FROM campaign_illustration_configs WHERE campaign_id = $1 AND owner_user_id = $2`,
     [campaignId, ownerUserId]
   );
@@ -168,26 +189,32 @@ export async function setIllustrationConfig(pool: DatabasePool, campaignId: stri
   const result = await pool.query<IllustrationConfigRow>(
     `INSERT INTO campaign_illustration_configs (
        campaign_id, owner_user_id, enabled, source_policy, matching_scope, confidence_profile, repetition_window,
-       provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
-     ) SELECT c.id, c.owner_user_id, $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
+       provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts,
+       segment_word_count, images_per_segment, segment_prompt_mode, refinement_prompt
+     ) SELECT c.id, c.owner_user_id, $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
          FROM campaigns c WHERE c.id = $1 AND c.owner_user_id = $2
      ON CONFLICT (campaign_id) DO UPDATE SET enabled = EXCLUDED.enabled,
        source_policy = EXCLUDED.source_policy, matching_scope = EXCLUDED.matching_scope,
        confidence_profile = EXCLUDED.confidence_profile, repetition_window = EXCLUDED.repetition_window,
        provider_profile_id = EXCLUDED.provider_profile_id, model = EXCLUDED.model, size = EXCLUDED.size,
        aspect_ratio = EXCLUDED.aspect_ratio, quality = EXCLUDED.quality, output_format = EXCLUDED.output_format,
-       max_attempts = EXCLUDED.max_attempts, updated_at = now()
+       max_attempts = EXCLUDED.max_attempts, segment_word_count = EXCLUDED.segment_word_count,
+       images_per_segment = EXCLUDED.images_per_segment, segment_prompt_mode = EXCLUDED.segment_prompt_mode,
+       refinement_prompt = EXCLUDED.refinement_prompt,
+       updated_at = now()
      RETURNING enabled, source_policy, matching_scope, confidence_profile, repetition_window,
-               provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts`,
+               provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts,
+               segment_word_count, images_per_segment, segment_prompt_mode, refinement_prompt, updated_at`,
     [campaignId, ownerUserId, sourcePolicy !== "off", sourcePolicy, config.matchingScope,
       config.confidenceProfile, config.repetitionWindow, config.providerProfileId, config.model, config.size,
-      config.aspectRatio, config.quality, config.outputFormat, config.maxAttempts]
+      config.aspectRatio, config.quality, config.outputFormat, config.maxAttempts,
+      config.segmentWordCount, config.imagesPerSegment, config.segmentPromptMode, config.refinementPrompt]
   );
   if (!result.rows[0]) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
   return publicConfig(result.rows[0]);
 }
 
-async function insertImageJob(
+export async function insertImageJob(
   client: DatabaseClient | DatabasePool,
   values: {
     ownerUserId: string;
@@ -195,6 +222,8 @@ async function insertImageJob(
     turnId?: string | null;
     worldId?: string | null;
     targetType?: ImageJobRow["target_type"];
+    segmentId?: string | null;
+    targetVariantIndex?: number | null;
     prompt: string;
     config: ReturnType<typeof publicConfig>;
   }
@@ -204,16 +233,24 @@ async function insertImageJob(
   const jobId = crypto.randomUUID();
   const result = await client.query<ImageJobRow>(
     `INSERT INTO image_jobs (
-       id, owner_user_id, campaign_id, turn_id, world_id, target_type, provider_profile_id, requested_model, prompt, prompt_hash,
+       id, owner_user_id, campaign_id, turn_id, world_id, target_type, segment_id, image_count,
+       provider_profile_id, requested_model, prompt, prompt_hash,
        size, aspect_ratio, quality, output_format, max_attempts, provider_type, provider_request_metadata
-     ) SELECT $1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, provider_type,
-              jsonb_build_object('idempotencyKey', ($1::uuid)::text || ':0', 'requestedModel', $8::text, 'targetType', $6::text)
-         FROM provider_profiles WHERE id = $7 AND owner_user_id = $2
+     ) SELECT $1::uuid,$2,$3,$4,$5,$6,$7::uuid,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, provider_type,
+              jsonb_build_object(
+                'idempotencyKey', ($1::uuid)::text || ':0',
+                'requestedModel', $10::text,
+                'targetType', $6::text,
+                'segmentId', ($7::uuid)::text,
+                'targetVariantIndex', $18::integer
+              )
+         FROM provider_profiles WHERE id = $9 AND owner_user_id = $2
      RETURNING ${jobColumns}`,
     [jobId, values.ownerUserId, values.campaignId ?? null, values.turnId ?? null, values.worldId ?? null,
-      values.targetType ?? "turn_illustration", values.config.providerProfileId, values.config.model,
-      prompt, sha256(prompt), values.config.size, values.config.aspectRatio, values.config.quality,
-      values.config.outputFormat, values.config.maxAttempts]
+      values.targetType ?? "turn_illustration", values.segmentId ?? null, values.config.imagesPerSegment,
+      values.config.providerProfileId, values.config.model, prompt, sha256(prompt), values.config.size,
+      values.config.aspectRatio, values.config.quality, values.config.outputFormat, values.config.maxAttempts,
+      values.targetVariantIndex ?? null]
   );
   return result.rows[0] || null;
 }
@@ -303,7 +340,7 @@ export async function enqueueAcceptedTurnIllustration(
          owner_user_id, campaign_id, turn_id, source_policy, matching_scope, confidence_profile,
          repetition_window, query_context_snapshot
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-       ON CONFLICT (turn_id) DO NOTHING RETURNING id`,
+       ON CONFLICT (turn_id) WHERE segment_id IS NULL DO NOTHING RETURNING id`,
       [ownerUserId, campaignId, turnId, row.source_policy, row.matching_scope || "world",
         row.confidence_profile || "balanced", row.repetition_window ?? 5, JSON.stringify({ imagePrompt: imagePrompt.trim() })]
     );
@@ -376,6 +413,19 @@ export async function getImageJob(pool: DatabasePool, jobId: string) {
   return publicJob(result.rows[0]);
 }
 
+export async function getLatestWorldCoverJob(pool: DatabasePool, worldId: string) {
+  const ownerUserId = await initialOwnerId(pool);
+  const world = await pool.query("SELECT id FROM worlds WHERE id = $1 AND owner_user_id = $2", [worldId, ownerUserId]);
+  if (!world.rows[0]) throw Object.assign(new Error("World not found."), { statusCode: 404 });
+  const result = await pool.query<ImageJobRow>(
+    `SELECT ${jobColumns} FROM image_jobs
+      WHERE world_id = $1 AND owner_user_id = $2 AND target_type = 'world_cover'
+      ORDER BY created_at DESC LIMIT 1`,
+    [worldId, ownerUserId]
+  );
+  return result.rows[0] ? publicJob(result.rows[0]) : null;
+}
+
 export async function listCampaignImageJobs(pool: DatabasePool, campaignId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const result = await pool.query<ImageJobRow>(
@@ -395,7 +445,10 @@ export async function retryImageJob(pool: DatabasePool, jobId: string) {
        provider_result_metadata = '{}'::jsonb, response_metadata = '{}'::jsonb,
        provider_request_metadata = jsonb_build_object(
          'idempotencyKey', id::text || ':' || (generation_revision + 1)::text,
-         'requestedModel', requested_model
+         'requestedModel', requested_model,
+         'targetType', target_type,
+         'segmentId', segment_id,
+         'targetVariantIndex', provider_request_metadata->'targetVariantIndex'
        ),
        error_code = NULL, error_message = NULL, completed_at = NULL, updated_at = now()
       WHERE id = $1 AND owner_user_id = $2 AND status IN ('recoverable', 'failed', 'expired', 'cancelled')
@@ -403,6 +456,13 @@ export async function retryImageJob(pool: DatabasePool, jobId: string) {
     [jobId, ownerUserId]
   );
   if (!result.rows[0]) throw Object.assign(new Error("Only terminal unsuccessful image jobs can be retried."), { statusCode: 409 });
+  if (result.rows[0].segment_id) {
+    await pool.query(
+      `UPDATE turn_illustration_segments SET status = 'generating', updated_at = now()
+        WHERE id = $1 AND owner_user_id = $2`,
+      [result.rows[0].segment_id, ownerUserId]
+    );
+  }
   await pool.query(
     `UPDATE illustration_resolution_jobs
         SET status = 'generation_queued', reason_code = 'generation_retried', completed_at = NULL, updated_at = now()
@@ -513,7 +573,16 @@ async function completeImageJob(
     const lease = await client.query<{ lease_owner: string | null }>("SELECT lease_owner FROM image_jobs WHERE id = $1 FOR UPDATE", [job.id]);
     if (lease.rows[0]?.lease_owner !== workerId) throw Object.assign(new Error("Image job lease was lost before commit."), { code: "lease_lost" });
     const assets = [];
-    for (const [variantIndex, image] of downloaded.entries()) {
+    const rawRequestedVariantIndex = job.provider_request_metadata.targetVariantIndex;
+    const requestedVariantIndex = Number(rawRequestedVariantIndex);
+    const hasRequestedVariant = rawRequestedVariantIndex !== null
+      && rawRequestedVariantIndex !== undefined
+      && Boolean(job.segment_id)
+      && Number.isInteger(requestedVariantIndex)
+      && requestedVariantIndex >= 0
+      && requestedVariantIndex <= 1;
+    for (const [artifactIndex, image] of downloaded.entries()) {
+      const variantIndex = hasRequestedVariant ? requestedVariantIndex : artifactIndex;
       const generationContext = {
         imageJobId: job.id,
         targetType: job.target_type,
@@ -535,7 +604,7 @@ async function completeImageJob(
       assets.push(job.target_type === "world_cover"
         ? await persistWorldCover(client, store, job.owner_user_id, image.bytes, image.mimeType, { generationContext })
         : await persistTurnImage(client, store, job.owner_user_id, job.campaign_id!, job.turn_id!, image.bytes, image.mimeType,
-          { generationContext, attachReference: variantIndex === 0 }));
+          { generationContext, attachReference: !job.segment_id && variantIndex === 0 }));
     }
     const primary = assets[0]!;
     const usageQuantity = Number(result.usage.quantity ?? result.usage.images ?? result.usage.image_count);
@@ -544,6 +613,50 @@ async function completeImageJob(
     const providerResponseId = String(result.providerMetadata.responseId || job.remote_job_id || "");
     if (job.target_type === "world_cover") {
       await client.query("UPDATE worlds SET cover_asset_id = $3, updated_at = now() WHERE id = $1 AND owner_user_id = $2", [job.world_id, job.owner_user_id, primary.id]);
+    } else if (job.segment_id) {
+      for (const [artifactIndex, asset] of assets.entries()) {
+        const variantIndex = hasRequestedVariant ? requestedVariantIndex : artifactIndex;
+        await client.query(
+          `INSERT INTO turn_illustration_segment_assets (
+             segment_id, owner_user_id, asset_id, image_job_id, variant_index
+           ) VALUES ($1,$2,$3,$4,$5)
+           ON CONFLICT (segment_id, variant_index)
+           DO UPDATE SET asset_id = EXCLUDED.asset_id, image_job_id = EXCLUDED.image_job_id, created_at = now()`,
+          [job.segment_id, job.owner_user_id, asset.id, job.id, variantIndex]
+        );
+      }
+      await client.query(
+        `UPDATE turn_illustration_segments
+            SET status = 'completed', updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2`,
+        [job.segment_id, job.owner_user_id]
+      );
+      await client.query(
+        `UPDATE turn_illustration_sets sets
+            SET status = CASE
+              WHEN NOT EXISTS (
+                SELECT 1 FROM turn_illustration_segments segments
+                 WHERE segments.illustration_set_id = sets.id
+                   AND segments.status <> 'completed'
+              ) THEN 'completed'
+              WHEN EXISTS (
+                SELECT 1 FROM turn_illustration_segments segments
+                 WHERE segments.illustration_set_id = sets.id
+                   AND segments.status = 'completed'
+              ) THEN 'partial'
+              ELSE 'generating'
+            END,
+            completed_at = CASE
+              WHEN NOT EXISTS (
+                SELECT 1 FROM turn_illustration_segments segments
+                 WHERE segments.illustration_set_id = sets.id
+                   AND segments.status <> 'completed'
+              ) THEN now() ELSE NULL END
+          WHERE sets.id = (
+            SELECT illustration_set_id FROM turn_illustration_segments WHERE id = $1
+          ) AND sets.owner_user_id = $2`,
+        [job.segment_id, job.owner_user_id]
+      );
     } else {
       await client.query("UPDATE turns SET image_url = $3 WHERE id = $1 AND owner_user_id = $2", [job.turn_id, job.owner_user_id, primary.publicUrl]);
     }
@@ -580,6 +693,40 @@ async function completeImageJob(
   });
 }
 
+async function requeueRemoteImageJob(
+  pool: DatabasePool,
+  job: ImageJobRow,
+  workerId: string,
+  code: string,
+  message: string
+): Promise<void> {
+  const retryDelayMs = Math.min(Math.max(job.attempts, 1), 5) * 15_000;
+  await pool.query(
+    `UPDATE image_jobs SET status = 'queued', attempts = attempts,
+       generation_revision = generation_revision + 1,
+       remote_job_id = NULL, provider_status = 'retrying', provider_progress = NULL,
+       provider_queue_position = NULL, provider_eta_at = NULL, submitted_at = NULL,
+       last_polled_at = NULL, next_poll_at = NULL, generation_deadline = NULL,
+       next_attempt_at = now() + ($6::text || ' milliseconds')::interval,
+       provider_result_metadata = '{}'::jsonb,
+       provider_request_metadata = jsonb_build_object(
+         'idempotencyKey', id::text || ':' || (generation_revision + 1)::text,
+         'requestedModel', requested_model,
+         'targetType', target_type,
+         'segmentId', segment_id,
+         'targetVariantIndex', provider_request_metadata->'targetVariantIndex'
+       ),
+       error_code = $3, error_message = $4,
+       lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+     WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $5`,
+    [job.id, job.owner_user_id, code, message.slice(0, 4000), workerId, retryDelayMs]
+  );
+  logger.warn({
+    event: "image_provider_remote_retry", imageJobId: job.id, providerType: job.provider_type,
+    remoteJobId: job.remote_job_id, errorCode: code, nextGenerationRevision: job.generation_revision + 1
+  });
+}
+
 export async function runImageJob(
   pool: DatabasePool,
   workerId: string,
@@ -599,9 +746,15 @@ export async function runImageJob(
       quality: job.quality,
       outputFormat: job.output_format,
       idempotencyKey: `${job.id}:${job.generation_revision}`,
-      imageCount: numberSetting(provider, "defaultImageCount", 1, 1, 2) as 1 | 2
+      imageCount: job.image_count
     } as const;
     if (job.remote_job_id) {
+      const persistedSogniTerminalError = job.provider_type === "sogni_sdk"
+        && ["5001", "5002", "5003", "5005"].includes(job.error_code || "");
+      if (persistedSogniTerminalError && job.attempts < job.max_attempts) {
+        await requeueRemoteImageJob(pool, job, workerId, job.error_code!, job.error_message || "Sogni remote generation failed.");
+        return true;
+      }
       if (job.generation_deadline && job.generation_deadline.getTime() <= Date.now()) {
         throw Object.assign(new Error("The provider generation deadline expired before completion."), { code: "image_generation_expired", expired: true, permanent: true });
       }
@@ -616,7 +769,8 @@ export async function runImageJob(
              provider_progress = COALESCE($4, provider_progress), provider_queue_position = $5,
              provider_eta_at = CASE WHEN $6::double precision IS NULL THEN NULL ELSE now() + ($6::text || ' seconds')::interval END,
              last_polled_at = now(), next_poll_at = now() + ($7::text || ' milliseconds')::interval,
-             provider_result_metadata = $8, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+             provider_result_metadata = $8, error_code = NULL, error_message = NULL,
+             lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
            WHERE id = $1 AND lease_owner = $2`,
           [job.id, workerId, pendingProviderStatus(response.providerMetadata), response.progress ?? null, response.queuePosition ?? null, response.etaSeconds ?? null,
             pollAfterMs, JSON.stringify(withoutTemporaryUrls(response.providerMetadata))]
@@ -633,7 +787,8 @@ export async function runImageJob(
       if (response.status === "failed") {
         throw Object.assign(new Error(response.error.message), {
           code: response.error.code || "provider_generation_failed",
-          permanent: !response.error.retryable
+          permanent: !response.error.retryable,
+          remoteTerminal: true
         });
       }
       await recordProviderHealth(pool, job.owner_user_id, job.provider_profile_id, true);
@@ -692,8 +847,14 @@ export async function runImageJob(
     const permanent = typeof error === "object" && error !== null && "permanent" in error && Boolean((error as { permanent: unknown }).permanent);
     const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "image_generation_failed";
     const expired = typeof error === "object" && error !== null && "expired" in error && Boolean((error as { expired: unknown }).expired);
+    const remoteTerminal = typeof error === "object" && error !== null && "remoteTerminal" in error && Boolean((error as { remoteTerminal: unknown }).remoteTerminal);
     const retryableSubmission = !job.remote_job_id && !permanent && job.attempts < job.max_attempts;
-    const retryablePoll = Boolean(job.remote_job_id) && !permanent && (!job.generation_deadline || job.generation_deadline.getTime() > Date.now());
+    const retryableRemoteFailure = Boolean(job.remote_job_id) && remoteTerminal && !permanent && job.attempts < job.max_attempts;
+    const retryablePoll = Boolean(job.remote_job_id) && !remoteTerminal && !permanent && (!job.generation_deadline || job.generation_deadline.getTime() > Date.now());
+    if (retryableRemoteFailure) {
+      await requeueRemoteImageJob(pool, job, workerId, code, error instanceof Error ? error.message : String(error));
+      return true;
+    }
     const nextStatus = expired ? "expired" : retryablePoll ? "provider_pending" : retryableSubmission ? "queued" : permanent ? "failed" : "recoverable";
     const requestedRetryDelay = typeof error === "object" && error !== null && "retryAfterMs" in error
       ? Number((error as { retryAfterMs: unknown }).retryAfterMs)
@@ -714,6 +875,14 @@ export async function runImageJob(
       [job.id, job.owner_user_id, nextStatus, code,
         (error instanceof Error ? error.message : String(error)).slice(0, 4000), workerId, retryDelayMs]
     );
+    if (job.segment_id && ["recoverable", "failed", "expired"].includes(nextStatus)) {
+      await pool.query(
+        `UPDATE turn_illustration_segments
+            SET status = $3, updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2`,
+        [job.segment_id, job.owner_user_id, nextStatus === "recoverable" ? "recoverable" : "failed"]
+      );
+    }
     if (["failed", "expired"].includes(nextStatus)) {
       await pool.query(
         `UPDATE illustration_resolution_jobs

@@ -16,6 +16,10 @@ OpenRouter image discovery uses its dedicated image-model inventory and removes 
 
 Image jobs receive a fiction-only prompt after story acceptance. Failure never reruns or rejects the story turn.
 
+When a campaign uses **AI-refined visual prompt** mode, **Campaign illustrations** provides a modal editor containing the complete default visual-translation prompt. Each campaign starts with that default and may save its own prompt. **Restore default** replaces the editor contents with the application default.
+
+For each refinement call, Nexus sends the selected accepted fiction excerpt plus a compact fiction-only context: world premise, genre and tone, the selected character description, validated continuity, and a short previous-scene excerpt when available. The context is capped and labeled as continuity reference so the model illustrates the selected excerpt rather than an earlier event. Mechanics, private reasoning, and unsafe scratchpad content remain excluded.
+
 Image provider defaults and campaign settings have different scopes. Campaigns own the selected profile, model, requested size, aspect ratio, quality, format, and attempt count. A Sogni profile additionally owns images per job, sensitive-content filter mode, polling intervals, and the remote generation deadline. Selecting a Sogni profile copies its applicable defaults into the campaign form; later profile edits do not silently rewrite saved campaign settings.
 
 For Sogni-specific profile defaults and troubleshooting, see [Configure Sogni](./sogni.md).

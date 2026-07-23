@@ -70,6 +70,23 @@ function pollIntervalMs(profile: TextProviderProfile): number {
   return value && value >= 1_000 && value <= 30_000 ? value : 2_000;
 }
 
+async function requireAvailableModel(client: SogniClient, profile: TextProviderProfile): Promise<void> {
+  let models;
+  try {
+    models = await client.projects.getAvailableModels(network(profile));
+  } catch (error) {
+    throw new SogniProviderError(normalizedError(error, "Sogni model availability is temporarily unavailable."));
+  }
+  if (!Array.isArray(models)) return;
+  const selected = models.find((model) => model.id === profile.model);
+  if (selected && selected.workerCount > 0) return;
+  throw new SogniProviderError({
+    code: "model_unavailable",
+    message: `Sogni model '${profile.model}' has no available ${network(profile)} network workers. Select a model marked available or switch the profile network.`,
+    retryable: false
+  });
+}
+
 function normalizedError(error: unknown, fallback = "Sogni SDK generation failed."): NormalizedProviderError {
   const value = error as { status?: number; code?: string | number; message?: string } | undefined;
   const status = Number(value?.status || 0) || undefined;
@@ -137,6 +154,7 @@ async function rawPoll(client: SogniClient, raw: RawProject, profile: TextProvid
 
 export async function submitSogniSdkGeneration(profile: TextProviderProfile, request: ImageProviderRequest): Promise<Omit<Extract<ImageProviderSubmissionResult, { mode: "pending" }>, "mode">> {
   const { client } = await session(profile);
+  await requireAvailableModel(client, profile);
   const dimensions = /^(\d+)x(\d+)$/i.exec(request.size);
   const width = request.width ?? Number(dimensions?.[1] || 0);
   const height = request.height ?? Number(dimensions?.[2] || 0);
@@ -181,12 +199,17 @@ export async function submitSogniSdkGeneration(profile: TextProviderProfile, req
 export async function pollSogniSdkGeneration(profile: TextProviderProfile, remoteJobId: string): Promise<ImageProviderPollResult> {
   const { client } = await session(profile);
   const tracked = client.projects.trackedProjects.find((project) => project.id === remoteJobId);
-  if (tracked) return trackedPoll(tracked, profile);
+  const trackedResult = tracked ? trackedPoll(tracked, profile) : null;
+  if (trackedResult?.status === "completed" || trackedResult?.status === "failed") return trackedResult;
   try {
     return await rawPoll(client, await client.projects.get(remoteJobId), profile);
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) {
-      return { status: "pending", pollAfterMs: pollIntervalMs(profile), providerMetadata: { status: "processing", projectId: remoteJobId, recoveredAfterRestart: true } };
+      return trackedResult || {
+        status: "pending",
+        pollAfterMs: pollIntervalMs(profile),
+        providerMetadata: { status: "processing", projectId: remoteJobId, recoveredAfterRestart: true }
+      };
     }
     throw new SogniProviderError(normalizedError(error));
   }
@@ -199,10 +222,25 @@ export async function cancelSogniSdkGeneration(profile: TextProviderProfile, rem
 
 export async function discoverSogniSdkModels(profile: TextProviderProfile): Promise<ModelInventoryItem[]> {
   const { client } = await session(profile);
-  const models = (await client.projects.getAvailableModels(network(profile))).filter((model) => model.media === "image");
+  // The catalog endpoint is the same source used by the REST provider. Do not
+  // depend on the network-status endpoint here: it can be unavailable even
+  // when the catalog remains reachable and still contains selectable models.
+  const models = (await client.projects.getSupportedModels()).filter((model) => model.media === "image");
+  const [fastModels, relaxedModels] = await Promise.all([
+    client.projects.getAvailableModels("fast").catch(() => []),
+    client.projects.getAvailableModels("relaxed").catch(() => [])
+  ]);
+  const workerCountsByType = {
+    fast: new Map((fastModels || []).map((model) => [model.id, model.workerCount])),
+    relaxed: new Map((relaxedModels || []).map((model) => [model.id, model.workerCount]))
+  };
+  const selectedWorkerCounts = workerCountsByType[network(profile)];
   return Promise.all(models.map(async (model) => {
-    const [options, presets] = await Promise.all([client.projects.getModelOptions(model.id), client.projects.getSizePresets(network(profile), model.id)]);
-    const imageOptions = options.type === "image" ? {
+    const [options, presets] = await Promise.all([
+      client.projects.getModelOptions(model.id).catch(() => null),
+      client.projects.getSizePresets(network(profile), model.id).catch(() => [])
+    ]);
+    const imageOptions = options?.type === "image" ? {
       sizePresets: presets.map((preset) => ({ id: preset.id, label: preset.label, width: preset.width, height: preset.height, ratio: preset.ratio })),
       steps: options.steps,
       guidance: options.guidance,
@@ -216,10 +254,24 @@ export async function discoverSogniSdkModels(profile: TextProviderProfile): Prom
     return {
       id: model.id,
       displayName: model.name,
-      loaded: model.workerCount > 0,
+      loaded: (selectedWorkerCounts.get(model.id) || 0) > 0,
       instanceId: model.id,
       contextLength: 0,
-      workerCount: model.workerCount,
+      workerCount: selectedWorkerCounts.get(model.id) || 0,
+      workerAvailability: [
+        {
+          type: "fast",
+          displayName: "Fast GPU workers",
+          workerCount: workerCountsByType.fast.get(model.id) || 0,
+          description: "High-end GPU workers that generate images faster at a higher cost."
+        },
+        {
+          type: "relaxed",
+          displayName: "Relaxed Mac workers",
+          workerCount: workerCountsByType.relaxed.get(model.id) || 0,
+          description: "Mac workers that generate images more slowly at a lower cost."
+        }
+      ],
       media: model.media,
       ...(imageOptions ? { imageOptions } : {})
     };

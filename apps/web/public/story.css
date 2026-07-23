@@ -53,8 +53,49 @@ body::before {
   margin: 0 auto;
 }
 
+.layout.has-illustration {
+  grid-template-columns: minmax(560px, 1fr) minmax(280px, 380px);
+  max-width: min(1420px, 100%);
+}
+
+.layout.has-segmented-illustrations {
+  max-width: min(1420px, 100%);
+}
+
+.layout.has-segmented-illustrations .story-shell {
+  overflow: clip;
+}
+
+.story-illustration-panel {
+  position: sticky;
+  top: 76px;
+  align-self: start;
+  min-width: 0;
+}
+.story-illustration-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 9px;
+  padding: 0 2px;
+  color: var(--muted);
+  font-size: .82rem;
+  font-weight: 750;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+.story-illustration-content .image-wrap {
+  position: relative;
+  top: auto;
+  min-height: 300px;
+}
+
 @media (max-width: 1120px) {
-  .layout { grid-template-columns: 1fr; }
+  .layout,
+  .layout.has-illustration,
+  .layout.has-segmented-illustrations { grid-template-columns: 1fr; max-width: min(1040px, 100%); }
+  .story-illustration-panel { position: relative; top: auto; }
 }
 
 .panel {
@@ -127,9 +168,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .replacement-pending-banner span { color: var(--muted); }
 .action-tag { color: var(--gold2); background: rgba(241,194,50,.08); border: 1px solid rgba(241,194,50,.22); border-radius: 13px; padding: 9px 11px; line-height: 1.35; }
 
-.scene { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 42%); gap: 18px; align-items: start; }
-.scene.no-image { grid-template-columns: minmax(0, 1fr); }
-@media (max-width: 780px) { .scene { grid-template-columns: 1fr; } }
+.scene { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; }
 
 .narration { font-size: 1.03rem; line-height: 1.68; color: #fff; }
 .narration p { margin: 0 0 1em; }
@@ -144,6 +183,42 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .image-job-status progress { width: 100%; height: 12px; accent-color: var(--accent); }
 .image-job-overlay { position: absolute; inset: auto 12px 12px; width: auto; padding: 12px; border-radius: 12px; color: #fff; background: rgba(14,10,22,.84); backdrop-filter: blur(8px); }
 .image-placeholder { padding: 24px; color: var(--dim); text-align: center; }
+.segmented-narration { display: grid; gap: 0; }
+.narration-segment {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
+  gap: clamp(18px, 3vw, 36px);
+  align-items: stretch;
+  scroll-margin-top: 110px;
+}
+.narration-segment-copy { min-width: 0; }
+.segment-illustration-slot { min-width: 0; position: relative; }
+.segment-illustration-sticky { position: sticky; top: 76px; }
+.segment-illustration-content .image-wrap { position: relative; top: auto; min-height: 300px; }
+.segment-illustration-card { position: relative; display: grid; gap: 9px; }
+.segment-image-controls, .segment-history-image-controls { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.segment-image-controls {
+  position: absolute;
+  z-index: 5;
+  top: 10px;
+  right: 10px;
+  justify-content: flex-end;
+  padding: 5px;
+  border-radius: 13px;
+  background: rgba(7, 14, 24, .78);
+  backdrop-filter: blur(10px);
+}
+.segment-image-icon { width: 34px; min-width: 34px; min-height: 34px; padding: 0; font-weight: 800; }
+.narration-segment + .narration-segment { margin-top: 1.25rem; padding-top: 1.25rem; border-top: 1px solid rgba(255,255,255,.08); }
+.illustration-carousel { position: absolute; inset: auto 12px 58px; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 7px 9px; border-radius: 999px; background: rgba(8,10,18,.82); backdrop-filter: blur(8px); }
+.illustration-carousel span { min-width: 42px; text-align: center; color: #fff; font-size: .8rem; font-weight: 800; }
+.segment-illustration-meta { position: absolute; inset: auto 10px 10px; display: flex; flex-wrap: wrap; gap: 6px; pointer-events: none; }
+.segment-illustration-meta span { padding: 4px 7px; border-radius: 999px; background: rgba(8,10,18,.8); color: #fff; font-size: .7rem; backdrop-filter: blur(8px); }
+
+@media (max-width: 1120px) {
+  .narration-segment { grid-template-columns: 1fr; }
+  .segment-illustration-sticky { position: relative; top: auto; }
+}
 
 .choices { display: grid; gap: 10px; }
 .choice { justify-content: flex-start; text-align: left; line-height: 1.38; width: 100%; padding: 12px 14px; border-radius: 16px; color: #f6ecff; background: rgba(201,156,255,.075); border-color: rgba(201,156,255,.22); }

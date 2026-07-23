@@ -12,7 +12,12 @@ describe("durable asynchronous image jobs", () => {
     expect(source).toContain("pollImageProvider(provider, { remoteJobId: job.remote_job_id })");
     expect(source).toContain("remote_job_id = $3");
     expect(source).toContain("response.error.retryable");
-    expect(source).toContain('numberSetting(provider, "defaultImageCount", 1, 1, 2)');
+    expect(source).toContain("retryableRemoteFailure");
+    expect(source).toContain("persistedSogniTerminalError");
+    expect(source).toContain('["5001", "5002", "5003", "5005"]');
+    expect(source).toContain("image_provider_remote_retry");
+    expect(source).toContain("remote_job_id = NULL, provider_status = 'retrying'");
+    expect(source).toContain("imageCount: job.image_count");
     expect(source).not.toContain("sensitiveContentFilterSetting(provider)");
   });
 
@@ -48,8 +53,45 @@ describe("durable asynchronous image jobs", () => {
     expect(migration).toContain("image_jobs_one_active_world_cover_idx");
     expect(migration).toContain("worlds_cover_asset_owner_fk");
     expect(source).toContain("export async function enqueueWorldCover");
+    expect(source).toContain("export async function getLatestWorldCoverJob");
     expect(source).toContain('targetType: "world_cover"');
     expect(source).toContain("persistWorldCover");
     expect(source).toContain("if (job.campaign_id)");
+  });
+
+  it("derives segment-scoped image work without mutating accepted turns", async () => {
+    const migration = await readFile(resolve("database/migrations/0033_segmented_turn_illustrations.sql"), "utf8");
+    const imageService = await readFile(resolve("services/api/src/image-service.ts"), "utf8");
+    const segmentService = await readFile(resolve("services/api/src/segmented-illustration-service.ts"), "utf8");
+
+    expect(migration).toContain("CREATE TABLE turn_illustration_sets");
+    expect(migration).toContain("CREATE TABLE turn_illustration_segments");
+    expect(migration).toContain("CREATE TABLE turn_illustration_segment_assets");
+    expect(migration).toContain("CREATE TABLE illustration_prompt_jobs");
+    expect(migration).toContain("image_jobs_one_active_segment_idx");
+    expect(imageService).toContain("if (job.segment_id)");
+    expect(segmentService).toContain("enqueueAcceptedTurnIllustrationSegments");
+    expect(segmentService).toContain("illustration_prompt_refinement");
+    expect(segmentService).toContain("export async function regenerateSegmentIllustration");
+    expect(segmentService).toContain("export async function removeSegmentIllustrationVariant");
+    expect(segmentService).toContain("turns.turn_number = campaigns.active_turn_number");
+    expect(segmentService).toContain("targetVariantIndex: request.variantIndex");
+    expect(imageService).toContain("hasRequestedVariant");
+    expect(imageService).toContain("provider_request_metadata.targetVariantIndex");
+    expect(segmentService).not.toContain("UPDATE turns SET");
+  });
+
+  it("preserves the applied refinement-instructions migration before renaming its column", async () => {
+    const appliedMigration = await readFile(
+      resolve("database/migrations/0034_campaign_illustration_refinement_instructions.sql"),
+      "utf8"
+    );
+    const renameMigration = await readFile(
+      resolve("database/migrations/0035_campaign_illustration_refinement_prompt.sql"),
+      "utf8"
+    );
+
+    expect(appliedMigration).toContain("ADD COLUMN refinement_instructions");
+    expect(renameMigration).toContain("RENAME COLUMN refinement_instructions TO refinement_prompt");
   });
 });

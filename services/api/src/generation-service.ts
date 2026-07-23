@@ -59,7 +59,7 @@ import {
 import { estimateTokens, sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { autoEnableCampaignEmbeddingIfAvailable, buildContextPreview, enqueueEmbeddingReindex, rebuildCampaignMemories, storeDerivedTurnMemories } from "./memory-service.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
-import { enqueueAcceptedTurnIllustration } from "./image-service.js";
+import { enqueueAcceptedTurnIllustrationSegments } from "./segmented-illustration-service.js";
 import { attributeGenerationCostsToTurn, recordProfileCost, turnReportedCosts } from "./cost-service.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
@@ -902,9 +902,11 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
     await client.query(
       `INSERT INTO campaign_illustration_configs (
          campaign_id, owner_user_id, enabled, source_policy, matching_scope, confidence_profile, repetition_window,
-         provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
+         provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts,
+         segment_word_count, images_per_segment, segment_prompt_mode, refinement_prompt
        ) SELECT $1, owner_user_id, enabled, source_policy, matching_scope, confidence_profile, repetition_window,
-                provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
+                provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts,
+                segment_word_count, images_per_segment, segment_prompt_mode, refinement_prompt
            FROM campaign_illustration_configs WHERE campaign_id = $2 AND owner_user_id = $3 ON CONFLICT DO NOTHING`,
       [newCampaignId, campaignId, ownerUserId]
     );
@@ -1270,7 +1272,7 @@ async function commitStory(
         Math.min(1, 0.5 + job.expected_turn_number / 100), memory.entities, json({ sanitized: memory.sanitized, removedMechanicsSegments: memory.removedMechanicsSegments, generated: true })]
     );
   }
-  await enqueueAcceptedTurnIllustration(client, job.owner_user_id, job.campaign_id, turnId, story.image_prompt);
+  await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
   await enqueueEmbeddingReindex(client, job.campaign_id);
   await client.query(
     `UPDATE generation_jobs SET status = 'completed', result_turn_id = $3, provider_response_id = $4,

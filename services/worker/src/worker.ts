@@ -7,6 +7,7 @@ import { runImageJob } from "../../api/src/image-service.js";
 import { runIllustrationResolutionJob } from "../../api/src/illustration-resolution-service.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { runAssetMetadataBackfill } from "../../api/src/asset-service.js";
+import { runIllustrationPromptJob } from "../../api/src/segmented-illustration-service.js";
 
 function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -25,7 +26,13 @@ export async function runWorker(pool: DatabasePool, config: RuntimeConfig, signa
   while (!signal.aborted) {
     try {
       const generated = await runGenerationJob(pool, workerId, config.workerLeaseSeconds, config.credentialEncryptionKey);
-      const resolved = generated || await runIllustrationResolutionJob(pool, workerId, config.workerLeaseSeconds);
+      const refined = generated || await runIllustrationPromptJob(
+        pool,
+        workerId,
+        config.workerLeaseSeconds,
+        config.credentialEncryptionKey
+      );
+      const resolved = refined || await runIllustrationResolutionJob(pool, workerId, config.workerLeaseSeconds);
       const illustrated = resolved || await runImageJob(
         pool,
         workerId,
@@ -35,7 +42,7 @@ export async function runWorker(pool: DatabasePool, config: RuntimeConfig, signa
       );
       const chronicled = illustrated || await runChronicleJob(pool, workerId, config.workerLeaseSeconds, config.credentialEncryptionKey);
       const backfilled = chronicled || await runAssetMetadataBackfill(pool, { root: config.assetStorageRoot });
-      const worked = generated || resolved || illustrated || chronicled || backfilled;
+      const worked = generated || refined || resolved || illustrated || chronicled || backfilled;
       if (!worked) await wait(config.workerPollIntervalMs, signal);
     } catch (error) {
       logger.error({

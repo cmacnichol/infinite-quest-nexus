@@ -49,7 +49,27 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).not.toContain('elements.providerApiKey.value = provider.');
   });
 
-  it("offers retained images in world and story editing views", () => {
+  it("opens the campaign-scoped AI illustration prompt in a readable modal editor", () => {
+    expect(managementHtml).toContain('id="illustrationPromptDialog"');
+    expect(managementHtml).toContain('id="illustrationRefinementPrompt" maxlength="4000"');
+    expect(managementHtml).toContain('id="restoreDefaultIllustrationPrompt"');
+    expect(managementHtml).toContain("Nexus adds a brief fiction-only story context and the excerpt separately.");
+    expect(managementScript).toContain("refinementPrompt: illustrationRefinementPromptValue");
+    expect(managementScript).toContain("function openIllustrationPromptEditor()");
+    expect(managementScript).toContain("function restoreDefaultIllustrationPrompt()");
+    expect(managementScript).toContain('elements.illustrationSegmentPromptMode.value === "ai_refined"');
+  });
+
+  it("hides text-generation limits for every illustration provider role", () => {
+    expect(managementHtml.match(/class="text-model-setting"/g)).toHaveLength(3);
+    expect(managementScript).toContain('const illustration = elements.providerRole.value === "image";');
+    expect(managementScript).toContain('field.classList.toggle("hidden", illustration)');
+    expect(managementScript).toContain('field.hidden = illustration');
+    expect(managementCss).toContain('.provider-form .text-model-setting.hidden { display: none; }');
+    expect(managementScript).toContain('...(!isIllustrationProviderForm() ? {');
+  });
+
+  it("offers retained images for world covers but not manual story illustration selection", () => {
     expect(managementHtml).toContain('id="chooseWorldCover"');
     expect(managementHtml).toContain('id="assetLibraryDialog"');
     expect(managementHtml).toContain('id="assetLibraryFilters"');
@@ -60,8 +80,10 @@ describe("Nexus management UI contracts", () => {
     expect(imageLibraryScript).toContain('Search image metadata');
     expect(imageLibraryScript).toContain('Edit image metadata');
     expect(managementScript).toContain('/cover-asset`');
-    expect(storyHtml).toContain('id="btnChooseImageLibrary"');
-    expect(storyScript).toContain('import("/nexus/image-library-browser.js")');
+    expect(storyHtml).not.toContain('id="btnChooseImageLibrary"');
+    expect(storyHtml).not.toContain('id="assetLibraryDialog"');
+    expect(storyScript).not.toContain('choose-image-library');
+    expect(storyScript).not.toContain('openTurnAssetLibrary');
     expect(storyScript).toContain('/illustration-asset`');
   });
 
@@ -208,6 +230,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="refreshProviderModels"');
     expect(managementHtml).toContain('id="providerModelDialog"');
     expect(managementHtml).toContain('id="providerModelPickerList"');
+    expect(managementHtml).toContain('>Worker type');
+    expect(managementHtml).toContain('id="providerSogniWorkerTypeNote"');
+    expect(managementHtml).toContain('High-end GPU workers that generate images faster at a higher cost.');
     expect(managementHtml).not.toContain('id="providerDiscoveredModel"');
     expect(managementHtml).toContain('provider-model-settings');
     expect(managementHtml).toContain('title="Maximum combined prompt and response capacity.');
@@ -243,6 +268,8 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("async function refreshProviderModelsFromForm()");
     expect(managementScript).toContain('state.textContent = model.loaded ? "Active" : "Not active"');
     expect(managementScript).toContain("function profileModelValue(model)");
+    expect(managementScript).toContain("function applySogniWorkerTypeOptions(model)");
+    expect(managementScript).toContain('elements.providerSogniNetwork.addEventListener("change", applySogniWorkerAvailability)');
     expect(managementScript).toContain("async function openProviderModelPicker(forceRefresh = false)");
     expect(managementScript).toContain('elements.providerContextTokens.readOnly = true');
     expect(managementScript).toContain('method: "DELETE"');
@@ -393,6 +420,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="generateWorldCover"');
     expect(managementScript).toContain("async function generateWorldCoverImage()");
     expect(managementScript).toContain("async function monitorWorldCoverJob(jobId, worldId)");
+    expect(managementScript).toContain("async function resumeWorldCoverJob(worldId, sequence)");
+    expect(managementScript).toContain('/api/v1/worlds/${worldId}/cover-job');
+    expect(managementScript).toContain("sequence !== worldCoverJobPollSequence");
     expect(managementScript).toContain("/cover`");
   });
 
@@ -426,5 +456,17 @@ describe("Nexus management UI contracts", () => {
     expect(storyScript).toContain('expectedCurrentTurnNumber: currentTurnNumber');
     expect(storyScript).toContain('operationKind: "replace_latest"');
     expect(storyScript).not.toContain("client-side fallback import");
+  });
+
+  it("configures segmented illustrations and previews historical generation cost", () => {
+    expect(managementHtml).toContain('id="illustrationSegmentWordCount"');
+    expect(managementHtml).toContain('id="illustrationImagesPerSegment"');
+    expect(managementHtml).toContain('id="illustrationSegmentPromptMode"');
+    expect(managementHtml).toContain('id="previewIllustrationBackfill"');
+    expect(managementHtml).toContain('id="previewIllustrationRebuild"');
+    expect(managementScript).toContain("async function confirmIllustrationBackfill(mode)");
+    expect(managementScript).toContain("/illustration-backfill/preview");
+    expect(managementScript).toContain("expectedConfigUpdatedAt");
+    expect(managementScript).toContain("Only turns without an active segment set will be queued.");
   });
 });

@@ -18,6 +18,10 @@ import {
   generationRetryLatestRequestSchema,
   illustrationConfigSchema,
   illustrationRequestSchema,
+  illustrationSegmentImageRequestSchema,
+  illustrationSegmentRequestSchema,
+  illustrationBackfillPreviewSchema,
+  illustrationBackfillRequestSchema,
   assetSelectionSchema,
   worldCoverRequestSchema,
   playerCampaignConfigSchema,
@@ -68,6 +72,7 @@ import {
   enqueueWorldCover,
   getIllustrationConfig,
   getImageJob,
+  getLatestWorldCoverJob,
   listCampaignImageJobs,
   retryImageJob,
   setIllustrationConfig
@@ -100,6 +105,14 @@ import { previewCampaignWorldTransfer, transferCampaignWorld } from "./campaign-
 import { applicationMetadata } from "./app-metadata.js";
 import { getDashboardStats } from "./dashboard-service.js";
 import { getTurnIllustrationResolution, rematchTurnIllustration } from "./illustration-resolution-service.js";
+import {
+  enqueueIllustrationBackfill,
+  generateTurnIllustrationSegments,
+  listCampaignIllustrationSegments,
+  previewIllustrationBackfill,
+  regenerateSegmentIllustration,
+  removeSegmentIllustrationVariant
+} from "./segmented-illustration-service.js";
 
 type BuildServerOptions = {
   config: RuntimeConfig;
@@ -671,6 +684,10 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     return reply.code(job.duplicate ? 200 : 202).send(job);
   });
 
+  app.get<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/cover-job", async (request) => (
+    getLatestWorldCoverJob(pool, uuidSchema.parse(request.params.worldId))
+  ));
+
   app.put<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/cover-asset", async (request) => {
     const ownerUserId = await initialOwnerId(pool);
     const body = assetSelectionSchema.parse(request.body);
@@ -688,6 +705,50 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/image-jobs", async (request) => ({
     jobs: await listCampaignImageJobs(pool, uuidSchema.parse(request.params.campaignId))
   }));
+
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-segments", async (request) => (
+    listCampaignIllustrationSegments(pool, uuidSchema.parse(request.params.campaignId))
+  ));
+
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-backfill/preview", async (request) => {
+    const body = illustrationBackfillPreviewSchema.parse(request.body);
+    return previewIllustrationBackfill(pool, uuidSchema.parse(request.params.campaignId), body.mode);
+  });
+
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-backfill", async (request, reply) => (
+    reply.code(202).send(await enqueueIllustrationBackfill(
+      pool,
+      uuidSchema.parse(request.params.campaignId),
+      illustrationBackfillRequestSchema.parse(request.body)
+    ))
+  ));
+
+  app.post<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustration-segments", async (request, reply) => {
+    const result = await generateTurnIllustrationSegments(
+      pool,
+      uuidSchema.parse(request.params.turnId),
+      illustrationSegmentRequestSchema.parse(request.body)
+    );
+    return reply.code(result.duplicate ? 200 : 202).send(result);
+  });
+
+  app.post<{ Params: { segmentId: string } }>("/api/v1/illustration-segments/:segmentId/images", async (request, reply) => {
+    const result = await regenerateSegmentIllustration(
+      pool,
+      uuidSchema.parse(request.params.segmentId),
+      illustrationSegmentImageRequestSchema.parse(request.body)
+    );
+    return reply.code(result.duplicate ? 200 : 202).send(result);
+  });
+
+  app.delete<{ Params: { segmentId: string; variantIndex: string } }>(
+    "/api/v1/illustration-segments/:segmentId/images/:variantIndex",
+    async (request) => removeSegmentIllustrationVariant(
+      pool,
+      uuidSchema.parse(request.params.segmentId),
+      z.coerce.number().int().min(0).max(1).parse(request.params.variantIndex)
+    )
+  );
 
   app.post<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustrations", async (request, reply) => {
     const job = await enqueueIllustration(pool, uuidSchema.parse(request.params.turnId), illustrationRequestSchema.parse(request.body));

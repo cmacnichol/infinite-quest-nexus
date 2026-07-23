@@ -136,6 +136,14 @@
           </div>
         </div>
       </section>
+
+      <aside id="storyIllustrationPanel" class="story-illustration-panel hidden" aria-label="Current turn illustration">
+        <div class="story-illustration-heading">
+          <span>Illustration</span>
+          <span id="storyIllustrationTurn" class="pill"></span>
+        </div>
+        <div id="storyIllustrationContent" class="story-illustration-content"></div>
+      </aside>
     </main>
 
     <p class="footer-note">Nexus campaigns are stored in PostgreSQL. Portable campaign backups remain available in Campaign Management.</p>
@@ -392,28 +400,17 @@
   <dialog id="imagePromptDialog" class="world-gen-dialog">
     <form method="dialog" class="world-gen-card">
       <div>
-        <h3>Edit image prompt</h3>
-        <p class="mini">Adjust the illustration prompt for this turn, then regenerate only the image. The story text and choices will stay the same.</p>
+        <h3 id="imagePromptDialogTitle">Image prompt preview</h3>
+        <p id="imagePromptDialogDescription" class="mini">Review or edit this image's prompt, then regenerate only that image. The accepted story turn and other illustrations will stay unchanged.</p>
       </div>
       <label>Image prompt
         <textarea id="imagePromptEditor" placeholder="Describe the scene you want the image model to render."></textarea>
       </label>
       <div class="row wrap" style="justify-content:flex-end;">
-        <button id="btnChooseImageLibrary" type="button">Choose from library</button>
         <button id="btnImagePromptCancel" type="button">Cancel</button>
         <button id="btnRegenerateImageConfirm" class="primary" type="button">🖼️ Regenerate image</button>
       </div>
     </form>
-  </dialog>
-
-  <dialog id="assetLibraryDialog" class="world-gen-dialog app-dialog wide-dialog">
-    <div class="world-gen-card">
-      <div class="dialog-header"><div><h3>Image library</h3><p class="mini">Filter, inspect, and choose an authorized retained image for this turn.</p></div><button id="btnCloseAssetLibrary" class="small ghost" type="button">✕</button></div>
-      <div id="assetLibraryFilters"></div>
-      <div id="assetLibraryGrid" class="asset-library-grid"><p class="mini">Loading retained images…</p></div>
-      <div class="image-library-load-row"><button id="assetLibraryLoadMore" type="button" hidden>Load more</button></div>
-      <p id="assetLibraryStatus" class="mini" role="status" aria-live="polite"></p>
-    </div>
   </dialog>
 
   <dialog id="editResponseDialog" class="world-gen-dialog app-dialog wide-dialog">

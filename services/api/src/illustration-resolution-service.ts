@@ -3,6 +3,7 @@ import { initialOwnerId, withTransaction } from "../../../packages/database/src/
 import { logger } from "../../../packages/logger/src/index.js";
 import { containsMechanicsLanguage } from "../../../packages/story-engine/src/index.js";
 import { enqueueIllustration } from "./image-service.js";
+import { enqueueSegmentProviderImage } from "./segmented-illustration-service.js";
 
 const MATCH_ALGORITHM_VERSION = "library-match-v1";
 const THRESHOLDS = { strict: 0.68, balanced: 0.52, broad: 0.38 } as const;
@@ -13,6 +14,7 @@ type ResolutionRow = {
   owner_user_id: string;
   campaign_id: string;
   turn_id: string;
+  segment_id: string | null;
   source_policy: "library_only" | "library_then_generate";
   matching_scope: "campaign" | "world" | "owner_library" | "shared";
   confidence_profile: keyof typeof THRESHOLDS;
@@ -98,7 +100,7 @@ export function scoreLibraryCandidate(
 async function claimResolutionJob(pool: DatabasePool, workerId: string, leaseSeconds: number): Promise<ResolutionRow | null> {
   return withTransaction(pool, async (client) => {
     const result = await client.query<ResolutionRow>(
-      `SELECT id, owner_user_id, campaign_id, turn_id, source_policy, matching_scope, confidence_profile,
+      `SELECT id, owner_user_id, campaign_id, turn_id, segment_id, source_policy, matching_scope, confidence_profile,
               repetition_window, query_context_snapshot, attempts, max_attempts
          FROM illustration_resolution_jobs
         WHERE (status IN ('queued', 'recoverable') AND next_attempt_at <= now())
@@ -127,7 +129,8 @@ async function resolutionContext(client: DatabaseClient, job: ResolutionRow) {
     world_version_id: string;
     entities: string[];
   }>(
-    `SELECT turns.image_prompt, world_versions.world_id, campaigns.world_version_id,
+    `SELECT COALESCE(NULLIF(segments.resolved_prompt, ''), turns.image_prompt) AS image_prompt,
+            world_versions.world_id, campaigns.world_version_id,
             COALESCE(ARRAY(
               SELECT DISTINCT unnest(memories.entities)
                 FROM chronicle_memories memories
@@ -137,8 +140,10 @@ async function resolutionContext(client: DatabaseClient, job: ResolutionRow) {
        JOIN campaigns ON campaigns.id = turns.campaign_id AND campaigns.owner_user_id = turns.owner_user_id
        JOIN world_versions ON world_versions.id = campaigns.world_version_id
         AND world_versions.owner_user_id = turns.owner_user_id
+       LEFT JOIN turn_illustration_segments segments
+         ON segments.id = $4 AND segments.owner_user_id = turns.owner_user_id
       WHERE turns.id = $1 AND turns.campaign_id = $2 AND turns.owner_user_id = $3`,
-    [job.turn_id, job.campaign_id, job.owner_user_id]
+    [job.turn_id, job.campaign_id, job.owner_user_id, job.segment_id]
   );
   const row = result.rows[0];
   if (!row) throw Object.assign(new Error("Resolution turn no longer exists."), { code: "turn_missing", permanent: true });
@@ -201,6 +206,43 @@ async function candidates(client: DatabaseClient, job: ResolutionRow, context: A
 }
 
 async function attachMatch(client: DatabaseClient, job: ResolutionRow, assetId: string) {
+  if (job.segment_id) {
+    await client.query(
+      `INSERT INTO turn_illustration_segment_assets (
+         segment_id, owner_user_id, asset_id, variant_index
+       ) VALUES ($1,$2,$3,0)
+       ON CONFLICT (segment_id, variant_index)
+       DO UPDATE SET asset_id = EXCLUDED.asset_id, image_job_id = NULL, created_at = now()`,
+      [job.segment_id, job.owner_user_id, assetId]
+    );
+    await client.query(
+      `UPDATE turn_illustration_segments
+          SET status = 'completed', updated_at = now()
+        WHERE id = $1 AND owner_user_id = $2`,
+      [job.segment_id, job.owner_user_id]
+    );
+    await client.query(
+      `UPDATE turn_illustration_sets sets
+          SET status = CASE WHEN NOT EXISTS (
+            SELECT 1 FROM turn_illustration_segments segments
+             WHERE segments.illustration_set_id = sets.id AND segments.status <> 'completed'
+          ) THEN 'completed' ELSE 'partial' END,
+          completed_at = CASE WHEN NOT EXISTS (
+            SELECT 1 FROM turn_illustration_segments segments
+             WHERE segments.illustration_set_id = sets.id AND segments.status <> 'completed'
+          ) THEN now() ELSE NULL END
+        WHERE sets.id = (
+          SELECT illustration_set_id FROM turn_illustration_segments WHERE id = $1
+        ) AND sets.owner_user_id = $2`,
+      [job.segment_id, job.owner_user_id]
+    );
+    await client.query(
+      `INSERT INTO asset_references (owner_user_id, asset_id, campaign_id, turn_id, asset_role)
+       VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
+      [job.owner_user_id, assetId, job.campaign_id, job.turn_id]
+    );
+    return;
+  }
   await client.query("UPDATE turns SET image_url = $3 WHERE id = $1 AND owner_user_id = $2", [job.turn_id, job.owner_user_id, `/api/v1/assets/${assetId}`]);
   await client.query(
     `DELETE FROM asset_references
@@ -217,14 +259,38 @@ async function attachMatch(client: DatabaseClient, job: ResolutionRow, assetId: 
 async function markResolutionFailure(pool: DatabasePool, job: ResolutionRow, workerId: string, error: unknown) {
   const details = error as { message?: string; code?: string; permanent?: boolean };
   const terminal = details.permanent === true || job.attempts >= job.max_attempts;
-  await pool.query(
-    `UPDATE illustration_resolution_jobs
-        SET status = $3, reason_code = $4, lease_owner = NULL, lease_expires_at = NULL,
-            next_attempt_at = now() + (LEAST(attempts, 6)::text || ' minutes')::interval,
-            updated_at = now(), completed_at = CASE WHEN $3 = 'failed' THEN now() ELSE NULL END
-      WHERE id = $1 AND lease_owner = $2`,
-    [job.id, workerId, terminal ? "failed" : "recoverable", String(details.code || details.message || "matcher_failed").slice(0, 200)]
-  );
+  await withTransaction(pool, async (client) => {
+    await client.query(
+      `UPDATE illustration_resolution_jobs
+          SET status = $3, reason_code = $4, lease_owner = NULL, lease_expires_at = NULL,
+              next_attempt_at = now() + (LEAST(attempts, 6)::text || ' minutes')::interval,
+              updated_at = now(), completed_at = CASE WHEN $3 = 'failed' THEN now() ELSE NULL END
+        WHERE id = $1 AND lease_owner = $2`,
+      [job.id, workerId, terminal ? "failed" : "recoverable", String(details.code || details.message || "matcher_failed").slice(0, 200)]
+    );
+    if (job.segment_id) {
+      await client.query(
+        `UPDATE turn_illustration_segments
+            SET status = $3, updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2`,
+        [job.segment_id, job.owner_user_id, terminal ? "failed" : "queued"]
+      );
+      await client.query(
+        `UPDATE turn_illustration_sets
+            SET status = CASE
+              WHEN EXISTS (
+                SELECT 1 FROM turn_illustration_segments
+                 WHERE illustration_set_id = turn_illustration_sets.id AND status = 'completed'
+              ) THEN 'partial'
+              WHEN $3 THEN 'failed'
+              ELSE 'generating'
+            END
+          WHERE id = (SELECT illustration_set_id FROM turn_illustration_segments WHERE id = $1)
+            AND owner_user_id = $2`,
+        [job.segment_id, job.owner_user_id, terminal]
+      );
+    }
+  });
 }
 
 export async function runIllustrationResolutionJob(pool: DatabasePool, workerId: string, leaseSeconds: number): Promise<boolean> {
@@ -280,6 +346,24 @@ export async function runIllustrationResolutionJob(pool: DatabasePool, workerId:
             WHERE id = $1 AND lease_owner = $2`,
           [job.id, workerId, MATCH_ALGORITHM_VERSION, threshold, JSON.stringify(snapshot)]
         );
+        if (job.segment_id) {
+          await client.query(
+            `UPDATE turn_illustration_segments
+                SET status = 'failed', updated_at = now()
+              WHERE id = $1 AND owner_user_id = $2`,
+            [job.segment_id, job.owner_user_id]
+          );
+          await client.query(
+            `UPDATE turn_illustration_sets
+                SET status = CASE WHEN EXISTS (
+                  SELECT 1 FROM turn_illustration_segments
+                   WHERE illustration_set_id = turn_illustration_sets.id AND status = 'completed'
+                ) THEN 'partial' ELSE 'failed' END
+              WHERE id = (SELECT illustration_set_id FROM turn_illustration_segments WHERE id = $1)
+                AND owner_user_id = $2`,
+            [job.segment_id, job.owner_user_id]
+          );
+        }
         return { kind: "no_match" as const, candidateCount: scored.length, selectedAssetId: null, selectedScore: best?.score ?? null, threshold };
       }
       await client.query(
@@ -292,7 +376,9 @@ export async function runIllustrationResolutionJob(pool: DatabasePool, workerId:
       return { kind: "generate" as const, candidateCount: scored.length, selectedAssetId: null, selectedScore: best?.score ?? null, threshold };
     });
     if (outcome.kind === "generate") {
-      const imageJob = await enqueueIllustration(pool, job.turn_id, { replace: false });
+      const imageJob = job.segment_id
+        ? await enqueueSegmentProviderImage(pool, job.segment_id)
+        : await enqueueIllustration(pool, job.turn_id, { replace: false });
       await pool.query(
         `UPDATE illustration_resolution_jobs
             SET status = 'generation_queued', image_job_id = $3, reason_code = 'generation_queued',

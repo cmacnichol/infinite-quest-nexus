@@ -283,6 +283,15 @@
               <button id="saveIllustrationConfig" class="button primary" type="submit" disabled>Save illustration settings</button>
             </div>
             <div id="illustrationSettings" class="illustration-settings hidden" aria-hidden="true">
+              <div id="illustrationSegmentSettings" class="illustration-settings-group">
+                <label>Words per illustration segment<input id="illustrationSegmentWordCount" type="number" min="100" max="5000" value="500"></label>
+                <label>Images per segment<select id="illustrationImagesPerSegment"><option value="1">1 image</option><option value="2">2 images</option></select></label>
+                <label>Segment prompt mode<select id="illustrationSegmentPromptMode"><option value="direct">Use accepted segment text</option><option value="ai_refined">AI-refined visual prompt</option></select></label>
+              </div>
+              <div id="illustrationRefinementPromptField" class="illustration-refinement-prompt hidden">
+                <div><strong>AI prompt editor</strong><span id="illustrationRefinementPromptSummary" class="field-note">Using the default refinement prompt.</span></div>
+                <button id="openIllustrationPromptEditor" class="button secondary" type="button">Read or edit prompt…</button>
+              </div>
               <div id="illustrationMatchingSettings" class="illustration-settings-group hidden">
                 <label>Matching scope<select id="illustrationMatchingScope"><option value="campaign">Current campaign</option><option value="world">Current world</option><option value="owner_library">Entire personal library</option></select></label>
                 <label>Confidence<select id="illustrationConfidenceProfile"><option value="strict">Strict</option><option value="balanced">Balanced</option><option value="broad">Broad</option></select></label>
@@ -301,6 +310,10 @@
               </div>
             </div>
           </form>
+          <div class="illustration-history-actions">
+            <button id="previewIllustrationBackfill" class="button secondary" type="button" disabled>Generate missing historical illustrations…</button>
+            <button id="previewIllustrationRebuild" class="button secondary" type="button" disabled>Rebuild historical illustration segments…</button>
+          </div>
           <div id="illustrationStatus" class="status">Illustrations are optional child jobs. Image failures never roll back or rerun an accepted story turn.</div>
         </section>
 
@@ -559,6 +572,28 @@
     </div>
   </dialog>
 
+  <dialog id="illustrationPromptDialog" class="confirm-dialog illustration-prompt-dialog" aria-labelledby="illustrationPromptDialogTitle">
+    <form id="illustrationPromptForm">
+      <div class="dialog-heading-row">
+        <div>
+          <p class="eyebrow">Campaign illustrations</p>
+          <h2 id="illustrationPromptDialogTitle">AI image-prompt instructions</h2>
+        </div>
+      </div>
+      <p class="muted">This prompt tells the text model how to translate each accepted fiction excerpt into an image prompt. Nexus adds a brief fiction-only story context and the excerpt separately. Apply your edit here, then save the campaign’s illustration settings to persist it.</p>
+      <label>Prompt
+        <textarea id="illustrationRefinementPrompt" maxlength="4000" required></textarea>
+        <span class="field-note">Keep this focused on visual translation. The generated prompt is still checked for mechanics leakage before it can reach the image provider.</span>
+      </label>
+      <div class="button-row confirm-actions illustration-prompt-actions">
+        <button id="restoreDefaultIllustrationPrompt" class="button secondary" type="button">Restore default</button>
+        <span class="character-action-spacer"></span>
+        <button id="cancelIllustrationPrompt" class="button secondary" type="button">Cancel</button>
+        <button class="button primary" type="submit">Apply to settings</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="deleteDialog" class="confirm-dialog" data-dismiss-mode="cancel" aria-labelledby="deleteDialogTitle">
     <form id="deleteForm" method="dialog">
       <h2 id="deleteDialogTitle">Confirm permanent deletion</h2>
@@ -613,12 +648,12 @@
             <span class="field-label-row"><span>Default model</span><button id="refreshProviderModels" class="mini-icon-button" type="button" aria-label="Refresh models from endpoint" title="Refresh active and inactive models from this endpoint">↻</button></span>
             <input id="providerDefaultModel" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog" placeholder="Click to choose a model">
           </label>
-          <label title="Maximum combined prompt and response capacity. Selecting a discovered model applies the endpoint-advertised value automatically.">Context window
+          <label class="text-model-setting" title="Maximum combined prompt and response capacity. Selecting a discovered model applies the endpoint-advertised value automatically.">Context window
             <input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768" aria-describedby="providerContextSource">
             <span id="providerContextSource" class="field-note">Editable until model discovery supplies a context length.</span>
           </label>
-          <label title="Maximum tokens the provider may generate in one response. This must leave enough context capacity for the prompt.">Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
-          <label title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
+          <label class="text-model-setting" title="Maximum tokens the provider may generate in one response. This must leave enough context capacity for the prompt.">Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
+          <label class="text-model-setting" title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
         </div>
       </fieldset>
       <fieldset id="providerSogniSettings" class="hidden" aria-hidden="true">
@@ -638,7 +673,10 @@
             <select id="providerSogniQuality"><option value="auto">Automatic</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
           </label>
           <div id="providerSogniSdkSettings" class="fieldset-content hidden" aria-hidden="true">
-            <label>Network<select id="providerSogniNetwork"><option value="fast">Fast</option><option value="relaxed">Relaxed</option></select></label>
+            <label title="Fast uses high-end GPU workers for quicker generation at a higher cost. Relaxed uses Mac workers for slower generation at a lower cost.">Worker type
+              <select id="providerSogniNetwork" aria-describedby="providerSogniWorkerTypeNote"><option value="fast" title="High-end GPU workers that generate images faster at a higher cost.">Fast GPU workers</option><option value="relaxed" title="Mac workers that generate images more slowly at a lower cost.">Relaxed Mac workers</option></select>
+              <span id="providerSogniWorkerTypeNote" class="field-note">Fast uses high-end GPU workers for quicker image generation at a higher cost.</span>
+            </label>
             <label>Token type<select id="providerSogniTokenType"><option value="auto">Automatic</option><option value="sogni">SOGNI</option><option value="spark">Spark</option></select></label>
             <label>Content filter<select id="providerSogniContentFilter"><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
             <label>Size preset<select id="providerSogniSizePreset"><option value="custom">Custom dimensions</option></select></label>
