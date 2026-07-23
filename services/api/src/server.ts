@@ -119,6 +119,7 @@ import { previewCampaignWorldTransfer, transferCampaignWorld } from "./campaign-
 import { applicationMetadata } from "./app-metadata.js";
 import { getDashboardStats } from "./dashboard-service.js";
 import { getTurnIllustrationResolution, rematchTurnIllustration } from "./illustration-resolution-service.js";
+import { installRequestSecurity } from "./request-security.js";
 import {
   enqueueIllustrationBackfill,
   generateTurnIllustrationSegments,
@@ -145,16 +146,18 @@ function statusCode(error: unknown): number {
   return 500;
 }
 
-function errorDetails(error: unknown): { name: string; message: string; issues?: unknown; details?: unknown } {
+function errorDetails(error: unknown): { name: string; message: string; code?: string; issues?: unknown; details?: unknown } {
   if (typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === "22P02") {
     return { name: "InvalidUuidError", message: "The provided ID is not a valid UUID." };
   }
   if (error instanceof Error) {
+    const code = "code" in error && typeof error.code === "string" ? error.code : undefined;
     const issues = "issues" in error ? (error as Error & { issues?: unknown }).issues : undefined;
     const details = "details" in error ? (error as Error & { details?: unknown }).details : undefined;
     return {
       name: error.name || "Error",
       message: error.message,
+      ...(code ? { code } : {}),
       ...(issues === undefined ? {} : { issues }),
       ...(details === undefined ? {} : { details })
     };
@@ -169,27 +172,30 @@ function exposeError(error: unknown, code: number): boolean {
 export async function buildServer({ config, pool }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: createLoggerOptions(),
-    bodyLimit: 64 * 1024 * 1024,
+    bodyLimit: config.security.apiDefaultBodyLimitBytes,
+    trustProxy: config.security.trustProxyHops,
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
 
-  app.addHook("onRequest", async (request, reply) => {
-    reply.header("X-Content-Type-Options", "nosniff");
-    reply.header("X-Frame-Options", "DENY");
-    reply.header("Content-Security-Policy", "default-src 'self' 'unsafe-inline' data: blob:; img-src * data: blob:; connect-src *");
-    reply.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
-    if (request.url.startsWith("/api/v1/")) reply.header("Cache-Control", "no-store");
-
-    const origin = request.headers.origin;
-    if (origin && config.security.corsAllowedOrigins.includes(origin)) {
-      reply.header("Access-Control-Allow-Origin", origin);
-      reply.header("Vary", "Origin");
-      reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-      reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-Id, X-Correlation-Id");
-      reply.header("Access-Control-Allow-Credentials", "true");
-    }
+  app.setErrorHandler((error, request, reply) => {
+    const code = statusCode(error);
+    const details = errorDetails(error);
+    const exposed = exposeError(error, code);
+    const transport = providerTransportErrorDetails(error);
+    request.log.error({ err: error, code }, "request_failed");
+    void reply.code(code).send({
+      error: exposed ? details.name || "Provider request failed" : "Internal server error",
+      message: exposed ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
+      correlationId: request.id,
+      ...(!exposed || details.code === undefined ? {} : { code: details.code }),
+      ...(!exposed || details.details === undefined ? {} : { details: details.details }),
+      ...(transport ? { details: { code: transport.timedOut ? "provider_request_timeout" : "provider_transport_error", transport } } : {}),
+      ...(details.issues === undefined ? {} : { issues: details.issues })
+    });
   });
+
+  installRequestSecurity(app, config);
 
   app.options("*", async (_request, reply) => {
     return reply.code(204).send();
@@ -212,22 +218,6 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     decorateReply: false,
     cacheControl: true,
     maxAge: "30d"
-  });
-
-  app.setErrorHandler((error, request, reply) => {
-    const code = statusCode(error);
-    const details = errorDetails(error);
-    const exposed = exposeError(error, code);
-    const transport = providerTransportErrorDetails(error);
-    request.log.error({ err: error, code }, "request_failed");
-    void reply.code(code).send({
-      error: exposed ? details.name || "Provider request failed" : "Internal server error",
-      message: exposed ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
-      correlationId: request.id,
-      ...(!exposed || details.details === undefined ? {} : { details: details.details }),
-      ...(transport ? { details: { code: transport.timedOut ? "provider_request_timeout" : "provider_transport_error", transport } } : {}),
-      ...(details.issues === undefined ? {} : { issues: details.issues })
-    });
   });
 
   app.get("/", async (_request, reply) => reply.redirect("/nexus/", 308));
