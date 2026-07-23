@@ -54,12 +54,25 @@ const SOGNI_DEFAULT_CONFIGURATION = Object.freeze({
   defaultImageCount: 1,
   defaultOutputFormat: "png",
   defaultQuality: "auto",
-  sensitiveContentFilter: "provider-default",
   pollIntervalMs: 2000,
   maximumPollIntervalMs: 10000,
   generationTimeoutMs: 180000,
   maximumAttempts: 3,
   modelDiscoveryEnabled: true
+});
+const SOGNI_SDK_DEFAULT_CONFIGURATION = Object.freeze({
+  ...SOGNI_DEFAULT_CONFIGURATION,
+  network: "fast",
+  tokenType: "auto",
+  contentFilter: "enabled",
+  defaultSizePreset: "custom",
+  defaultSteps: "",
+  defaultGuidance: "",
+  defaultSeed: "",
+  defaultSampler: "",
+  defaultScheduler: "",
+  defaultPreviewCount: 0,
+  generationTimeoutMs: 600000
 });
 
 const modalBaselines = new WeakMap();
@@ -993,8 +1006,20 @@ async function monitorWorldCoverJob(jobId, worldId) {
     if (["failed", "recoverable", "cancelled", "expired"].includes(job.status)) {
       throw new Error(job.errorMessage || "World cover generation did not complete.");
     }
-    const progress = job.providerProgress === null || job.providerProgress === undefined ? "" : ` · ${number(job.providerProgress)}%`;
-    elements.worldCoverStatus.textContent = `World cover ${job.status.replaceAll("_", " ")}${progress}. You can continue editing while it runs.`;
+    const progressValue = Number(job.providerProgress);
+    const progress = Number.isFinite(progressValue) ? ` · ${number(progressValue)}%` : "";
+    const queue = Number.isInteger(job.providerQueuePosition) ? ` · queue ${job.providerQueuePosition}` : "";
+    const etaAt = job.providerEtaAt ? new Date(job.providerEtaAt).getTime() : Number.NaN;
+    const eta = Number.isFinite(etaAt) ? ` · about ${Math.max(0, Math.ceil((etaAt - Date.now()) / 1000))}s remaining` : "";
+    elements.worldCoverStatus.replaceChildren();
+    const label = document.createElement("span");
+    label.textContent = `World cover ${String(job.providerStatus || job.status).replaceAll("_", " ")}${progress}${queue}${eta}. You can continue editing while it runs.`;
+    elements.worldCoverStatus.append(label);
+    const meter = document.createElement("progress");
+    meter.max = 100;
+    if (Number.isFinite(progressValue)) meter.value = Math.max(0, Math.min(100, progressValue));
+    meter.setAttribute("aria-label", "World cover generation progress");
+    elements.worldCoverStatus.append(meter);
     await imageJobDelay(1000);
   }
   throw new Error("World cover generation is still running. Refresh the world to check it again.");
@@ -2000,6 +2025,12 @@ function providerMessage(message, type = "") {
   elements.providerStatus.className = `status ${type}`.trim();
 }
 
+function providerTypeLabel(providerType) {
+  return providerType === "sogni" ? "Sogni Creative Workflow (REST)"
+    : providerType === "sogni_sdk" ? "Sogni Supernet SDK"
+      : providerType;
+}
+
 function applyDiscoveredProviderContext() {
   const option = elements.modelSelect.selectedOptions[0];
   const contextLength = Number(option?.dataset.contextLength || 0);
@@ -2047,7 +2078,7 @@ function populateProviderSelect(select, role, label) {
       : `No enabled ${label} providers`;
   select.replaceChildren(new Option(emptyLabel, ""));
   for (const provider of available) {
-    select.append(new Option(`${provider.name} · ${provider.providerType}${provider.isDefault ? " · default" : ""}`, provider.id));
+    select.append(new Option(`${provider.name} · ${providerTypeLabel(provider.providerType)}${provider.isDefault ? " · default" : ""}`, provider.id));
   }
   select.value = available.some((provider) => provider.id === current) ? current : "";
 }
@@ -2060,7 +2091,7 @@ function populateEmbeddingProviderSelect() {
     const fallback = defaultProvider("embedding");
     elements.embeddingProvider.append(new Option(fallback ? `Use default · ${fallback.name}` : "Select an embedding provider", ""));
     for (const provider of embeddingProviders) {
-      elements.embeddingProvider.append(new Option(`${provider.name} · ${provider.providerType}${provider.isDefault ? " · default" : ""}`, provider.id));
+      elements.embeddingProvider.append(new Option(`${provider.name} · ${providerTypeLabel(provider.providerType)}${provider.isDefault ? " · default" : ""}`, provider.id));
     }
     elements.embeddingProvider.value = embeddingProviders.some((provider) => provider.id === current) ? current : (fallback?.id || "");
     return;
@@ -2087,7 +2118,7 @@ function renderProviderProfiles() {
     const title = document.createElement("strong");
     title.textContent = provider.name;
     const summary = document.createElement("span");
-    summary.textContent = `${provider.providerRole} · ${provider.providerType} · ${provider.defaultModel || "model not selected"} · ${Number(provider.requestTimeoutMs || 300000) / 60000} min timeout`;
+    summary.textContent = `${provider.providerRole} · ${providerTypeLabel(provider.providerType)} · ${provider.defaultModel || "model not selected"} · ${Number(provider.requestTimeoutMs || 300000) / 60000} min timeout`;
     details.append(title, summary);
     const actions = document.createElement("div");
     actions.className = "button-row";
@@ -2177,7 +2208,9 @@ function resetProviderForm() {
 }
 
 function syncProviderRoleSettings(options = {}) {
-  const sogni = elements.providerType.value === "sogni";
+  const sogniRest = elements.providerType.value === "sogni";
+  const sogniSdk = elements.providerType.value === "sogni_sdk";
+  const sogni = sogniRest || sogniSdk;
   if (sogni) elements.providerRole.value = "image";
   const intent = elements.providerRole.value === "intent";
   elements.providerRoleNote.textContent = intent
@@ -2193,6 +2226,14 @@ function syncProviderRoleSettings(options = {}) {
   elements.providerSogniSettings.classList.toggle("hidden", !sogni);
   elements.providerSogniSettings.setAttribute("aria-hidden", String(!sogni));
   for (const control of elements.providerSogniSettings.querySelectorAll("input, select")) control.disabled = !sogni;
+  elements.providerSogniSdkSettings.classList.toggle("hidden", !sogniSdk);
+  elements.providerSogniSdkSettings.setAttribute("aria-hidden", String(!sogniSdk));
+  for (const control of elements.providerSogniSdkSettings.querySelectorAll("input, select")) control.disabled = !sogniSdk;
+  elements.providerSogniRestNote.classList.toggle("hidden", !sogniRest);
+  elements.providerSogniSdkNote.classList.toggle("hidden", !sogniSdk);
+  elements.providerSogniWebpFormat.hidden = !sogniSdk;
+  elements.providerSogniWebpFormat.disabled = !sogniSdk;
+  if (sogniRest && elements.providerSogniOutputFormat.value === "webp") elements.providerSogniOutputFormat.value = "png";
   if (intent && options.applySuggestedDefaults) {
     elements.providerContextTokens.value = "8192";
     elements.providerOutputTokens.value = "256";
@@ -2200,15 +2241,31 @@ function syncProviderRoleSettings(options = {}) {
   }
 }
 
-function applySogniConfiguration(configuration = {}) {
-  const config = { ...SOGNI_DEFAULT_CONFIGURATION, ...configuration };
+function applySogniConfiguration(configuration = {}, providerType = elements.providerType.value) {
+  const config = { ...(providerType === "sogni_sdk" ? SOGNI_SDK_DEFAULT_CONFIGURATION : SOGNI_DEFAULT_CONFIGURATION), ...configuration };
   elements.providerSogniWidth.value = String(config.defaultWidth);
   elements.providerSogniHeight.value = String(config.defaultHeight);
   elements.providerSogniAspectRatio.value = config.defaultAspectRatio;
   elements.providerSogniImageCount.value = String(config.defaultImageCount);
   elements.providerSogniOutputFormat.value = config.defaultOutputFormat;
   elements.providerSogniQuality.value = config.defaultQuality;
-  elements.providerSogniSensitiveContentFilter.value = config.sensitiveContentFilter;
+  elements.providerSogniNetwork.value = config.network || "fast";
+  elements.providerSogniTokenType.value = config.tokenType || "auto";
+  elements.providerSogniContentFilter.value = config.contentFilter || "enabled";
+  const configuredSizePreset = config.defaultSizePreset || "custom";
+  elements.providerSogniSizePreset.replaceChildren(new Option("Custom dimensions", "custom"));
+  if (configuredSizePreset !== "custom") elements.providerSogniSizePreset.append(new Option(configuredSizePreset, configuredSizePreset));
+  elements.providerSogniSizePreset.value = configuredSizePreset;
+  elements.providerSogniSteps.value = config.defaultSteps ?? "";
+  elements.providerSogniGuidance.value = config.defaultGuidance ?? "";
+  elements.providerSogniSeed.value = config.defaultSeed ?? "";
+  elements.providerSogniSampler.replaceChildren(new Option("Model default", ""));
+  if (config.defaultSampler) elements.providerSogniSampler.append(new Option(config.defaultSampler, config.defaultSampler));
+  elements.providerSogniSampler.value = config.defaultSampler || "";
+  elements.providerSogniScheduler.replaceChildren(new Option("Model default", ""));
+  if (config.defaultScheduler) elements.providerSogniScheduler.append(new Option(config.defaultScheduler, config.defaultScheduler));
+  elements.providerSogniScheduler.value = config.defaultScheduler || "";
+  elements.providerSogniPreviewCount.value = String(config.defaultPreviewCount || 0);
   elements.providerSogniPollIntervalSeconds.value = String(Number(config.pollIntervalMs) / 1000);
   elements.providerSogniMaximumPollIntervalSeconds.value = String(Number(config.maximumPollIntervalMs) / 1000);
   elements.providerSogniGenerationTimeoutSeconds.value = String(Number(config.generationTimeoutMs) / 1000);
@@ -2218,8 +2275,9 @@ function applySogniConfiguration(configuration = {}) {
 
 function providerConfigurationFromForm(existingConfig = {}) {
   const configuration = { ...existingConfig, streaming: elements.providerStreaming.checked };
-  if (elements.providerType.value !== "sogni") return configuration;
-  return {
+  const providerType = elements.providerType.value;
+  if (providerType !== "sogni" && providerType !== "sogni_sdk") return configuration;
+  const common = {
     ...configuration,
     defaultWidth: Number(elements.providerSogniWidth.value),
     defaultHeight: Number(elements.providerSogniHeight.value),
@@ -2227,14 +2285,32 @@ function providerConfigurationFromForm(existingConfig = {}) {
     defaultImageCount: Number(elements.providerSogniImageCount.value),
     defaultOutputFormat: elements.providerSogniOutputFormat.value,
     defaultQuality: elements.providerSogniQuality.value,
-    sensitiveContentFilter: elements.providerSogniSensitiveContentFilter.value,
-    workflowSafeContentFilterSupported: false,
     pollIntervalMs: Math.round(Number(elements.providerSogniPollIntervalSeconds.value) * 1000),
     maximumPollIntervalMs: Math.round(Number(elements.providerSogniMaximumPollIntervalSeconds.value) * 1000),
     generationTimeoutMs: Math.round(Number(elements.providerSogniGenerationTimeoutSeconds.value) * 1000),
     maximumAttempts: Number(elements.providerSogniMaximumAttempts.value),
     modelDiscoveryEnabled: elements.providerSogniModelDiscoveryEnabled.checked
   };
+  delete common.sensitiveContentFilter;
+  delete common.workflowSafeContentFilterSupported;
+  if (providerType === "sogni") return common;
+  const sdkConfiguration = {
+    ...common,
+    network: elements.providerSogniNetwork.value,
+    tokenType: elements.providerSogniTokenType.value,
+    contentFilter: elements.providerSogniContentFilter.value,
+    defaultSizePreset: elements.providerSogniSizePreset.value.trim() || "custom",
+    ...(elements.providerSogniSteps.value ? { defaultSteps: Number(elements.providerSogniSteps.value) } : {}),
+    ...(elements.providerSogniGuidance.value ? { defaultGuidance: Number(elements.providerSogniGuidance.value) } : {}),
+    ...(elements.providerSogniSeed.value ? { defaultSeed: Number(elements.providerSogniSeed.value) } : {}),
+    defaultSampler: elements.providerSogniSampler.value.trim(),
+    defaultScheduler: elements.providerSogniScheduler.value.trim(),
+    defaultPreviewCount: Number(elements.providerSogniPreviewCount.value)
+  };
+  for (const key of ["defaultSteps", "defaultGuidance", "defaultSeed"]) {
+    if (!elements[{ defaultSteps: "providerSogniSteps", defaultGuidance: "providerSogniGuidance", defaultSeed: "providerSogniSeed" }[key]].value) delete sdkConfiguration[key];
+  }
+  return sdkConfiguration;
 }
 
 function beginProviderEdit(provider) {
@@ -2249,7 +2325,7 @@ function beginProviderEdit(provider) {
   elements.providerOutputTokens.value = String(provider.maxOutputTokens);
   elements.providerTemperature.value = String(provider.temperature);
   elements.providerRequestTimeoutMinutes.value = String(Number(provider.requestTimeoutMs || 300000) / 60000);
-  applySogniConfiguration(provider.configuration);
+  applySogniConfiguration(provider.configuration, provider.providerType);
   elements.providerStreaming.checked = Boolean(provider.configuration?.streaming || provider.configuration?.streamingSupport);
   elements.providerEnabled.checked = provider.enabled;
   elements.providerIsDefault.checked = provider.isDefault;
@@ -2272,7 +2348,7 @@ async function loadProviders(preselectId = "") {
   const currentImportProviderId = elements.providerSelect.value;
   elements.providerSelect.replaceChildren(new Option(defaultProvider("text") ? `Use default · ${defaultProvider("text").name}` : "Use the default text provider", ""));
   for (const provider of providers.filter((item) => item.providerRole === "text" && item.enabled)) {
-    elements.providerSelect.append(new Option(`${provider.name} · ${provider.providerType}${provider.isDefault ? " · default" : ""}`, provider.id));
+    elements.providerSelect.append(new Option(`${provider.name} · ${providerTypeLabel(provider.providerType)}${provider.isDefault ? " · default" : ""}`, provider.id));
   }
   populateProviderSelect(elements.campaignTextProvider, "text", "text");
   populateProviderSelect(elements.campaignImageProvider, "image", "image");
@@ -2375,6 +2451,7 @@ async function refreshProviderModelsFromForm() {
     if (selected) {
       const value = profileModelValue(selected);
       elements.providerDefaultModel.value = value;
+      applySogniSdkModelOptions(selected);
     }
     applyProfileModelContext();
     renderProviderModelPicker();
@@ -2416,8 +2493,45 @@ function chooseProviderModel(value) {
   }
   elements.providerDefaultModel.value = value;
   applyProfileModelContext();
+  applySogniSdkModelOptions(discoveredProfileModels.find((item) => profileModelValue(item) === value || item.id === value));
   elements.providerModelDialog.close();
   providerMessage(`${value} selected as the profile default. Save the profile to keep this change.`);
+}
+
+function applySogniSdkModelOptions(model) {
+  if (elements.providerType.value !== "sogni_sdk" || !model?.imageOptions) return;
+  const options = model.imageOptions;
+  const selectedPreset = elements.providerSogniSizePreset.value || "custom";
+  elements.providerSogniSizePreset.replaceChildren(new Option("Custom dimensions", "custom"));
+  for (const preset of options.sizePresets) elements.providerSogniSizePreset.append(new Option(`${preset.label} · ${preset.width}×${preset.height}`, preset.id));
+  elements.providerSogniSizePreset.value = options.sizePresets.some((preset) => preset.id === selectedPreset) ? selectedPreset : "custom";
+  const configuredPreset = options.sizePresets.find((preset) => preset.id === elements.providerSogniSizePreset.value);
+  if (configuredPreset) {
+    elements.providerSogniWidth.value = String(configuredPreset.width);
+    elements.providerSogniHeight.value = String(configuredPreset.height);
+    elements.providerSogniAspectRatio.value = configuredPreset.ratio || elements.providerSogniAspectRatio.value;
+  }
+  if (options.steps) {
+    elements.providerSogniSteps.min = String(options.steps.min);
+    elements.providerSogniSteps.max = String(options.steps.max);
+    elements.providerSogniSteps.step = String(options.steps.step);
+    if (!elements.providerSogniSteps.value) elements.providerSogniSteps.value = String(options.steps.default);
+  }
+  if (options.guidance) {
+    elements.providerSogniGuidance.min = String(options.guidance.min);
+    elements.providerSogniGuidance.max = String(options.guidance.max);
+    elements.providerSogniGuidance.step = String(options.guidance.step);
+    if (!elements.providerSogniGuidance.value) elements.providerSogniGuidance.value = String(options.guidance.default);
+  }
+  const selectedSampler = elements.providerSogniSampler.value;
+  elements.providerSogniSampler.replaceChildren(new Option("Model default", ""));
+  for (const sampler of options.samplers) elements.providerSogniSampler.append(new Option(sampler, sampler));
+  elements.providerSogniSampler.value = options.samplers.includes(selectedSampler) ? selectedSampler : options.defaultSampler || "";
+  const selectedScheduler = elements.providerSogniScheduler.value;
+  elements.providerSogniScheduler.replaceChildren(new Option("Model default", ""));
+  for (const scheduler of options.schedulers) elements.providerSogniScheduler.append(new Option(scheduler, scheduler));
+  elements.providerSogniScheduler.value = options.schedulers.includes(selectedScheduler) ? selectedScheduler : options.defaultScheduler || "";
+  elements.providerSogniPreviewCount.max = String(options.maximumPreviews ?? 10);
 }
 
 function renderProviderModelPicker() {
@@ -2588,15 +2702,26 @@ elements.providerType.addEventListener("change", () => {
   const defaults = {
     lmstudio: "http://host.docker.internal:1234",
     openrouter: "https://openrouter.ai/api/v1",
-    sogni: "https://api.sogni.ai"
+    sogni: "https://api.sogni.ai",
+    sogni_sdk: "https://api.sogni.ai"
   };
   const suggested = defaults[elements.providerType.value];
   if (suggested) elements.providerBaseUrl.value = suggested;
-  if (elements.providerType.value === "sogni") {
-    if (elements.providerName.value === "Local LM Studio") elements.providerName.value = "Sogni AI";
+  if (elements.providerType.value === "sogni" || elements.providerType.value === "sogni_sdk") {
+    if (elements.providerName.value === "Local LM Studio") elements.providerName.value = elements.providerType.value === "sogni_sdk" ? "Sogni Supernet SDK" : "Sogni Creative Workflow";
     elements.providerRequestTimeoutMinutes.value = "0.5";
+    applySogniConfiguration({}, elements.providerType.value);
   }
   syncProviderRoleSettings({ applySuggestedDefaults: !editingProviderId });
+});
+
+elements.providerSogniSizePreset.addEventListener("change", () => {
+  const model = discoveredProfileModels.find((item) => profileModelValue(item) === elements.providerDefaultModel.value || item.id === elements.providerDefaultModel.value);
+  const preset = model?.imageOptions?.sizePresets.find((item) => item.id === elements.providerSogniSizePreset.value);
+  if (!preset) return;
+  elements.providerSogniWidth.value = String(preset.width);
+  elements.providerSogniHeight.value = String(preset.height);
+  elements.providerSogniAspectRatio.value = preset.ratio || elements.providerSogniAspectRatio.value;
 });
 
 elements.providerRole.addEventListener("change", () => {
@@ -2784,8 +2909,8 @@ async function saveEmbeddingConfig(event) {
 elements.campaignImageProvider.addEventListener("change", () => {
   const provider = effectiveCampaignProvider("image");
   if (provider?.defaultModel && !elements.illustrationModel.value) elements.illustrationModel.value = provider.defaultModel;
-  if (provider?.providerType === "sogni") {
-    const config = { ...SOGNI_DEFAULT_CONFIGURATION, ...provider.configuration };
+  if (provider?.providerType === "sogni" || provider?.providerType === "sogni_sdk") {
+    const config = { ...(provider.providerType === "sogni_sdk" ? SOGNI_SDK_DEFAULT_CONFIGURATION : SOGNI_DEFAULT_CONFIGURATION), ...provider.configuration };
     elements.illustrationSize.value = `${config.defaultWidth}x${config.defaultHeight}`;
     elements.illustrationAspectRatio.value = config.defaultAspectRatio;
     elements.illustrationQuality.value = config.defaultQuality;
@@ -2809,7 +2934,8 @@ async function discoverIllustrationModels() {
     elements.illustrationModels.replaceChildren();
     for (const model of models) {
       const pricing = modelPricingLabel(model);
-      elements.illustrationModels.append(new Option(`${model.displayName}${pricing ? ` · ${pricing}` : ""}`, model.id));
+      const workers = model.workerCount === undefined ? "" : ` · ${number(model.workerCount)} worker${model.workerCount === 1 ? "" : "s"}`;
+      elements.illustrationModels.append(new Option(`${model.displayName}${workers}${pricing ? ` · ${pricing}` : ""}`, model.id));
     }
     if (models[0]) elements.illustrationModel.value = models[0].id;
     elements.illustrationStatus.textContent = `${models.length} image model entr${models.length === 1 ? "y" : "ies"} found. Confirm the model and save this campaign's illustration settings.`;
@@ -2885,17 +3011,31 @@ async function saveIllustrationConfig(event) {
 
 function renderImageJobStatus(job) {
   elements.illustrationStatus.replaceChildren();
-  elements.illustrationStatus.className = `status ${job.status === "completed" ? "success" : ["recoverable", "failed"].includes(job.status) ? "error" : ""}`.trim();
+  const unsuccessful = ["recoverable", "failed", "cancelled", "expired"].includes(job.status);
+  elements.illustrationStatus.className = `status ${job.status === "completed" ? "success" : unsuccessful ? "error" : ""}`.trim();
   const text = document.createElement("span");
+  const active = ["queued", "generating", "provider_pending", "downloading"].includes(job.status);
+  const progress = Number(job.providerProgress);
+  const progressText = Number.isFinite(progress) ? ` · ${Math.round(progress)}%` : "";
+  const queueText = Number.isInteger(job.providerQueuePosition) ? ` · queue ${job.providerQueuePosition}` : "";
+  const etaAt = job.providerEtaAt ? new Date(job.providerEtaAt).getTime() : Number.NaN;
+  const etaText = Number.isFinite(etaAt) ? ` · about ${Math.max(0, Math.ceil((etaAt - Date.now()) / 1000))}s remaining` : "";
   text.textContent = job.status === "completed"
     ? "Illustration generated and stored in the retained Nexus image library."
     : job.status === "queued"
       ? `Illustration queued${job.attempts ? ` · attempt ${job.attempts} of ${job.maxAttempts}` : ""}. Story acceptance is already complete.`
-      : job.status === "generating"
-        ? `Illustration generating · attempt ${job.attempts} of ${job.maxAttempts}.`
+      : active
+        ? `Illustration ${String(job.providerStatus || job.status).replaceAll("_", " ")}${progressText}${queueText}${etaText} · attempt ${job.attempts} of ${job.maxAttempts}.`
         : `${job.errorMessage || "Illustration generation did not complete."} The accepted story turn is unchanged.`;
   elements.illustrationStatus.append(text);
-  if (["recoverable", "failed"].includes(job.status)) {
+  if (active) {
+    const meter = document.createElement("progress");
+    meter.max = 100;
+    if (Number.isFinite(progress)) meter.value = Math.max(0, Math.min(100, progress));
+    meter.setAttribute("aria-label", "Illustration generation progress");
+    elements.illustrationStatus.append(meter);
+  }
+  if (unsuccessful) {
     const retry = document.createElement("button");
     retry.type = "button";
     retry.className = "button secondary inline-action";
@@ -2917,7 +3057,7 @@ async function monitorImageJob(jobId) {
     if (job.status === "completed") {
       return;
     }
-    if (["recoverable", "failed"].includes(job.status)) return;
+    if (["recoverable", "failed", "cancelled", "expired"].includes(job.status)) return;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 }
@@ -2928,7 +3068,7 @@ async function loadLatestImageJob(monitor = false) {
   const job = jobs[0];
   if (!job) return;
   renderImageJobStatus(job);
-  if (monitor && ["queued", "generating"].includes(job.status)) void monitorImageJob(job.id);
+  if (monitor && ["queued", "generating", "provider_pending", "downloading"].includes(job.status)) void monitorImageJob(job.id);
 }
 
 async function importStoryObject(story, sourceName, requestOverrides = {}) {

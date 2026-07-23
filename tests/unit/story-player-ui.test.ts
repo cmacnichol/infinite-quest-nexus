@@ -223,6 +223,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
 
   it("manages inline illustrations, prompt editing, polling, and per-scene regeneration", () => {
     expect(storyScript).toContain('function pollImageJobs()');
+    expect(storyScript).toContain('function renderSceneImageJob(job)');
+    expect(storyScript).toContain('["queued", "generating", "provider_pending", "downloading"]');
+    expect(storyScript).toContain('aria-label", `Illustration generation progress');
     expect(storyScript).toContain('/campaigns/${state.campaignId}/image-jobs');
     expect(storyScript).toContain('function openImagePromptEditor(turnId)');
     expect(storyScript).toContain('async function regenerateIllustration(turnId, prompt)');

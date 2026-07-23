@@ -1,6 +1,6 @@
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
-import { sogniIllustrationProviderConfigSchema, type ProviderProfileInput, type ProviderProfileUpdate, type ProviderTextRequest } from "../../../packages/contracts/src/generation.js";
+import { sogniIllustrationProviderConfigSchema, sogniSdkIllustrationProviderConfigSchema, type ProviderProfileInput, type ProviderProfileUpdate, type ProviderTextRequest } from "../../../packages/contracts/src/generation.js";
 import { callTextProvider, decryptCredential, encryptCredential, discoverEmbeddingModels, discoverImageModels, discoverModels, logProviderTransportError, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
 
 type ProviderRow = {
@@ -94,6 +94,11 @@ export async function listProviders(pool: DatabasePool) {
 }
 
 export async function createProvider(pool: DatabasePool, input: Omit<ProviderProfileInput, "isDefault" | "requestTimeoutMs"> & { isDefault?: boolean; requestTimeoutMs?: number }, credentialSecret: string) {
+  const configuration = input.providerType === "sogni"
+    ? sogniIllustrationProviderConfigSchema.parse(input.configuration)
+    : input.providerType === "sogni_sdk"
+      ? sogniSdkIllustrationProviderConfigSchema.parse(input.configuration)
+      : input.configuration;
   const encrypted = input.apiKey ? encryptCredential(input.apiKey, credentialSecret) : null;
   return withTransaction(pool, async (client) => {
     const ownerUserId = await initialOwnerId(client);
@@ -108,7 +113,7 @@ export async function createProvider(pool: DatabasePool, input: Omit<ProviderPro
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
        RETURNING ${selectColumns}`,
       [ownerUserId, input.name, input.providerType, input.providerRole, input.baseUrl.replace(/\/+$/, ""), input.defaultModel,
-        input.contextWindowTokens, input.maxOutputTokens, input.temperature, input.requestTimeoutMs ?? 300_000, JSON.stringify(input.configuration),
+        input.contextWindowTokens, input.maxOutputTokens, input.temperature, input.requestTimeoutMs ?? 300_000, JSON.stringify(configuration),
         encrypted?.ciphertext ?? null, encrypted?.nonce ?? null, encrypted?.authTag ?? null, encrypted?.keyVersion ?? null, input.enabled, Boolean(input.isDefault)]
     );
     const row = result.rows[0];
@@ -139,9 +144,11 @@ export async function updateProvider(pool: DatabasePool, providerProfileId: stri
     const current = await client.query<ProviderRow>(`SELECT ${selectColumns} FROM provider_profiles WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [providerProfileId, ownerUserId]);
     const row = current.rows[0];
     if (!row) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
-    if (row.provider_type === "sogni" && input.configuration !== undefined) {
-      const parsed = sogniIllustrationProviderConfigSchema.safeParse(input.configuration);
+    let normalizedConfiguration = input.configuration;
+    if ((row.provider_type === "sogni" || row.provider_type === "sogni_sdk") && input.configuration !== undefined) {
+      const parsed = (row.provider_type === "sogni" ? sogniIllustrationProviderConfigSchema : sogniSdkIllustrationProviderConfigSchema).safeParse(input.configuration);
       if (!parsed.success) throw Object.assign(new Error(parsed.error.issues[0]?.message || "Invalid Sogni provider configuration."), { statusCode: 400 });
+      normalizedConfiguration = parsed.data;
     }
     if (input.isDefault) {
       await client.query("UPDATE provider_profiles SET is_default = false, updated_at = now() WHERE owner_user_id = $1 AND provider_role = $2 AND is_default = true", [ownerUserId, row.provider_role]);
@@ -166,7 +173,7 @@ export async function updateProvider(pool: DatabasePool, providerProfileId: stri
         input.temperature ?? null, input.requestTimeoutMs ?? null, input.enabled ?? null, input.isDefault !== undefined, input.isDefault ?? false,
         input.apiKey !== undefined, encrypted?.ciphertext ?? null, encrypted?.nonce ?? null,
         encrypted?.authTag ?? null, encrypted?.keyVersion ?? null,
-        input.configuration !== undefined, input.configuration !== undefined ? JSON.stringify(input.configuration) : null]
+        input.configuration !== undefined, normalizedConfiguration !== undefined ? JSON.stringify(normalizedConfiguration) : null]
     );
     const updated = result.rows[0];
     if (!updated) throw new Error("Provider profile was not updated.");

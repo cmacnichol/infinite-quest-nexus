@@ -1,5 +1,3 @@
-import type { SensitiveContentFilter } from "../../../../../contracts/src/generation.js";
-
 export const SOGNI_API_BASE_URL = "https://api.sogni.ai";
 const SOGNI_WORKFLOWS_PATH = "/v1/creative-agent/workflows";
 
@@ -26,7 +24,6 @@ export type SogniGenerationRequest = {
   steps?: number;
   guidance?: number;
   scheduler?: string;
-  sensitiveContentFilter: SensitiveContentFilter;
 };
 
 export type SogniArtifact = {
@@ -156,13 +153,6 @@ function imageArguments(profile: SogniProviderProfile, request: SogniGenerationR
     throw new SogniProviderError({
       code: "unsupported_output_format",
       message: "Sogni's documented image project formats are PNG and JPEG; WebP output is not currently supported by this adapter.",
-      retryable: false
-    });
-  }
-  if (request.sensitiveContentFilter !== "provider-default") {
-    throw new SogniProviderError({
-      code: "unsupported_filter_override",
-      message: "Sogni's inline generate_image workflow schema does not accept a safe-content filter override. Use the provider default for this adapter.",
       retryable: false
     });
   }

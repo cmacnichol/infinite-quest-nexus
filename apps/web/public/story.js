@@ -1355,13 +1355,8 @@ function pollImageJobs() {
       const jobs = data.jobs || data || [];
       let anyPending = false;
       for (const job of jobs) {
-        if (job.status === "completed" && job.assetUrl) {
-          // Update the matching scene's image if not already showing
-          updateSceneImage(job.turnId, job.assetUrl);
-        }
-        if (["queued", "generating", "provider_pending", "downloading"].includes(job.status)) {
-          anyPending = true;
-        }
+        renderSceneImageJob(job);
+        if (["queued", "generating", "provider_pending", "downloading"].includes(job.status)) anyPending = true;
       }
       if (anyPending) {
         state.imagePollTimer = setTimeout(poll, IMAGE_POLL_MS);
@@ -1369,6 +1364,73 @@ function pollImageJobs() {
     } catch (_) { /* ignore polling errors */ }
   };
   poll();
+}
+
+function imageJobStatusText(job) {
+  const stage = String(job.providerStatus || job.status || "queued").replaceAll("_", " ");
+  const progress = Number(job.providerProgress);
+  const percentage = Number.isFinite(progress) ? ` · ${Math.round(progress)}%` : "";
+  const queue = Number.isInteger(job.providerQueuePosition) ? ` · queue ${job.providerQueuePosition}` : "";
+  const etaAt = job.providerEtaAt ? new Date(job.providerEtaAt).getTime() : Number.NaN;
+  const etaSeconds = Number.isFinite(etaAt) ? Math.max(0, Math.ceil((etaAt - Date.now()) / 1000)) : null;
+  const eta = etaSeconds === null ? "" : ` · about ${etaSeconds}s remaining`;
+  return `${stage}${percentage}${queue}${eta}`;
+}
+
+function renderSceneImageJob(job) {
+  if (!job.turnId) return;
+  if (job.status === "completed" && job.assetUrl) {
+    updateSceneImage(job.turnId, job.assetUrl, true);
+    return;
+  }
+  const turnIdx = state.turns.findIndex((turn) => (turn.id || turn.turnId) === job.turnId);
+  const sceneEl = turnIdx < 0 ? null : $(`scene-${turnIdx}`);
+  if (!sceneEl) return;
+  const terminalFailure = ["recoverable", "failed", "cancelled", "expired"].includes(job.status);
+  const active = ["queued", "generating", "provider_pending", "downloading"].includes(job.status);
+  if (!terminalFailure && !active) return;
+  sceneEl.classList.remove("no-image");
+  let imageWrap = sceneEl.querySelector(".image-wrap");
+  if (!imageWrap) {
+    imageWrap = document.createElement("div");
+    imageWrap.className = "image-wrap image-job-placeholder";
+    sceneEl.appendChild(imageWrap);
+  }
+  let status = imageWrap.querySelector(".image-job-status");
+  if (!status) {
+    status = document.createElement("div");
+    status.className = imageWrap.querySelector("img") ? "image-job-status image-job-overlay" : "image-job-status";
+    imageWrap.appendChild(status);
+  }
+  status.replaceChildren();
+  const label = document.createElement("p");
+  label.textContent = terminalFailure ? (job.errorMessage || "Illustration generation did not complete.") : `Creating illustration · ${imageJobStatusText(job)}`;
+  status.append(label);
+  if (active) {
+    const progress = document.createElement("progress");
+    progress.max = 100;
+    const value = Number(job.providerProgress);
+    if (Number.isFinite(value)) progress.value = Math.max(0, Math.min(100, value));
+    progress.setAttribute("aria-label", `Illustration generation progress for turn ${turnIdx + 1}`);
+    status.append(progress);
+  } else if (terminalFailure) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "small ghost";
+    retry.textContent = "Retry illustration";
+    retry.addEventListener("click", async () => {
+      retry.disabled = true;
+      try {
+        const queued = await api(`/image-jobs/${job.id}/retry`, { method: "POST", body: "{}" });
+        renderSceneImageJob(queued);
+        pollImageJobs();
+      } catch (error) {
+        toast(`Illustration retry failed: ${error.message}`);
+        retry.disabled = false;
+      }
+    });
+    status.append(retry);
+  }
 }
 
 function updateSceneImage(turnId, assetUrl, replace = false) {
@@ -1380,9 +1442,11 @@ function updateSceneImage(turnId, assetUrl, replace = false) {
   const sceneEl = $(`scene-${turnIdx}`);
   if (!sceneEl) return;
   // Check if image already present
-  const existingImage = sceneEl.querySelector(".image-wrap img");
+  const existingWrap = sceneEl.querySelector(".image-wrap");
+  const existingImage = existingWrap?.querySelector("img");
   if (existingImage) {
     if (replace) existingImage.src = assetUrl;
+    existingWrap.querySelector(".image-job-status")?.remove();
     return;
   }
   // Add the image-wrap
@@ -1398,7 +1462,8 @@ function updateSceneImage(turnId, assetUrl, replace = false) {
       <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="regenerate-image" title="Generate a new image">🖼️</button>
       <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="remove-image" title="Remove illustration">×</button>
     </div>`;
-  sceneEl.appendChild(imgDiv);
+  if (existingWrap) existingWrap.replaceWith(imgDiv);
+  else sceneEl.appendChild(imgDiv);
 }
 
 function openImagePromptEditor(turnId) {

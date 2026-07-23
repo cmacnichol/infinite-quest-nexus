@@ -31,13 +31,16 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("configures Sogni as an independent illustration provider without exposing stored secrets", () => {
-    expect(managementHtml).toContain('<option value="sogni">Sogni AI</option>');
+    expect(managementHtml).toContain('<option value="sogni">Sogni Creative Workflow (REST)</option>');
+    expect(managementHtml).toContain('<option value="sogni_sdk">Sogni Supernet SDK</option>');
     expect(managementHtml).toContain('id="providerSogniSettings" class="hidden" aria-hidden="true"');
-    expect(managementHtml).toContain('<option value="provider-default">Provider default</option>');
     expect(managementHtml).toContain('id="providerSogniImageCount"');
     expect(managementHtml).toContain('<option value="2">2 images</option>');
     expect(managementHtml).toContain('id="providerSogniModelDiscoveryEnabled"');
-    expect(managementHtml).toContain('id="providerSogniSensitiveContentFilter" disabled');
+    expect(managementHtml).not.toContain('id="providerSogniSensitiveContentFilter"');
+    expect(managementHtml).toContain("This Creative Workflow provider does not support NSFW content");
+    expect(managementHtml).toContain('id="providerSogniContentFilter"');
+    expect(managementScript).toContain('contentFilter: "enabled"');
     expect(managementHtml).not.toContain('id="providerSogniSupportsSafeContentFilter"');
     expect(managementScript).toContain('sogni: "https://api.sogni.ai"');
     expect(managementScript).toContain('maximumPollIntervalMs: Math.round(Number(elements.providerSogniMaximumPollIntervalSeconds.value) * 1000)');

@@ -376,7 +376,6 @@ integration("independent illustration pipeline", () => {
         maximumPollIntervalMs: 1_000,
         generationTimeoutMs: 30_000,
         defaultImageCount: 1,
-        sensitiveContentFilter: "provider-default",
         allowPrivateArtifactHosts: true
       }
     }, credentialSecret)).id;
