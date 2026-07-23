@@ -3,18 +3,19 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { generationRequestSchema, illustrationConfigSchema, worldCoverRequestSchema } from "../../packages/contracts/src/generation.js";
+import { generationRequestSchema, illustrationConfigSchema, illustrationSegmentRequestSchema, worldCoverRequestSchema } from "../../packages/contracts/src/generation.js";
 import { assetListQuerySchema } from "../../packages/contracts/src/assets.js";
 import { worldContentSchema, worldCreateSchema } from "../../packages/contracts/src/world-library.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { enqueueGeneration, getGenerationJob, runGenerationJob } from "../../services/api/src/generation-service.js";
-import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, listCampaignImageJobs, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
+import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { listAssets, queryAssets, readAssetDerivative, selectTurnIllustration, selectWorldCover, updateAssetMetadata } from "../../services/api/src/asset-service.js";
 import { getTurnIllustrationResolution, runIllustrationResolutionJob } from "../../services/api/src/illustration-resolution-service.js";
+import { generateTurnIllustrationSegments, listCampaignIllustrationSegments, previewIllustrationBackfill } from "../../services/api/src/segmented-illustration-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 import { createWorld, getWorld } from "../../services/api/src/world-service.js";
 
@@ -176,6 +177,68 @@ integration("independent illustration pipeline", () => {
     return getImageJob(pool, jobId);
   }
 
+  it("creates historical segment jobs without changing accepted turn or Chronicle state", async () => {
+    const imported = await campaign();
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      enabled: true,
+      providerProfileId: imageProviderId,
+      model: "synthetic-image-model",
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "auto",
+      outputFormat: "png",
+      maxAttempts: 3,
+      segmentWordCount: 100,
+      imagesPerSegment: 2,
+      segmentPromptMode: "direct"
+    }));
+    const turn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number DESC LIMIT 1",
+      [imported.campaignId]
+    );
+    expect(turn.rows[0]).toBeDefined();
+    const turnId = turn.rows[0]!.id;
+    const before = await pool.query(
+      `SELECT narration, mechanics_private, state_snapshot_private, model_metadata, import_metadata,
+              image_prompt, choices, turn_number, image_url
+         FROM turns WHERE id = $1`,
+      [turnId]
+    );
+    const memoriesBefore = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_memories WHERE campaign_id = $1",
+      [imported.campaignId]
+    );
+
+    const result = await generateTurnIllustrationSegments(pool, turnId, illustrationSegmentRequestSchema.parse({ mode: "missing" }));
+    expect(result).toMatchObject({ duplicate: false, segmentCount: expect.any(Number) });
+    expect(result.segmentCount).toBeGreaterThan(0);
+    const segments = (await listCampaignIllustrationSegments(pool, imported.campaignId)).segments.filter(
+      (segment: any) => segment.turnId === turnId
+    );
+    expect(segments).toHaveLength(result.segmentCount);
+    const jobs = await pool.query<{ image_count: number }>(
+      "SELECT image_count FROM image_jobs WHERE segment_id = ANY($1::uuid[]) ORDER BY created_at",
+      [segments.map((segment: any) => segment.id)]
+    );
+    expect(jobs.rows).toHaveLength(result.segmentCount);
+    expect(jobs.rows.every((job) => job.image_count === 2)).toBe(true);
+    await expect(previewIllustrationBackfill(pool, imported.campaignId, "missing"))
+      .resolves.toMatchObject({ settings: { segmentWordCount: 100, imagesPerSegment: 2, segmentPromptMode: "direct" } });
+
+    const after = await pool.query(
+      `SELECT narration, mechanics_private, state_snapshot_private, model_metadata, import_metadata,
+              image_prompt, choices, turn_number, image_url
+         FROM turns WHERE id = $1`,
+      [turnId]
+    );
+    const memoriesAfter = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_memories WHERE campaign_id = $1",
+      [imported.campaignId]
+    );
+    expect(after.rows).toEqual(before.rows);
+    expect(memoriesAfter.rows).toEqual(memoriesBefore.rows);
+  });
+
   it("generates a world cover with the default image provider without campaign cost attribution", async () => {
     failImages = false;
     const title = `Synthetic cover world ${crypto.randomUUID()}`;
@@ -195,9 +258,28 @@ integration("independent illustration pipeline", () => {
     }));
     const queued = await enqueueWorldCover(pool, world.id, worldCoverRequestSchema.parse({}));
     expect(queued).toMatchObject({ targetType: "world_cover", worldId: world.id, campaignId: null, turnId: null });
+    await expect(getLatestWorldCoverJob(pool, world.id)).resolves.toMatchObject({ id: queued.id, status: "queued" });
     const completed = await processThroughTerminal(queued.id, "synthetic-world-cover-worker");
     expect(completed).toMatchObject({ status: "completed", assetUrl: expect.stringMatching(/^\/api\/v1\/assets\//) });
+    await expect(getLatestWorldCoverJob(pool, world.id)).resolves.toMatchObject({ id: queued.id, status: "completed" });
     await expect(getWorld(pool, world.id)).resolves.toMatchObject({ imageUrl: completed.assetUrl });
+    const generationContext = await pool.query<{
+      target_type: string;
+      fiction_prompt: string;
+      provider_type: string;
+      model: string;
+      generation_parameters: Record<string, unknown>;
+    }>(
+      `SELECT target_type, fiction_prompt, provider_type, model, generation_parameters
+         FROM asset_generation_contexts
+        WHERE image_job_id = $1`,
+      [queued.id]
+    );
+    expect(generationContext.rows).toEqual([expect.objectContaining({
+      target_type: "world_cover", provider_type: "openai_compatible", model: "synthetic-image-model",
+      fiction_prompt: expect.any(String),
+      generation_parameters: expect.objectContaining({ size: "1024x1536", aspectRatio: "2:3", outputFormat: "png" })
+    })]);
     const costs = await pool.query("SELECT id FROM provider_cost_events WHERE image_job_id = $1", [queued.id]);
     expect(costs.rowCount).toBe(0);
   });

@@ -40,6 +40,9 @@ let discoveredProfileModels = [];
 let discoveredEmbeddingModels = [];
 let providerModelPickerTarget = "provider";
 let embeddingJobPollSequence = 0;
+let worldCoverJobPollSequence = 0;
+let illustrationRefinementPromptValue = "";
+let defaultIllustrationRefinementPrompt = "";
 let sessionUser = null;
 let transferPreviewSequence = 0;
 let transferPreview = null;
@@ -918,6 +921,7 @@ async function loadWorlds(preselectId = "") {
 }
 
 async function selectWorld(worldId) {
+  const coverPollSequence = ++worldCoverJobPollSequence;
   selectedWorld = await api(`/api/v1/worlds/${worldId}`);
   document.querySelectorAll(".world-button").forEach((button) => button.classList.toggle("active", button.dataset.worldId === worldId));
   const overview = selectedWorld.draftContent?.world || {};
@@ -956,6 +960,7 @@ async function selectWorld(worldId) {
   updateWorldVersionDeleteAvailability();
   elements.deleteWorld.disabled = false;
   updateCharacterGeneratorAvailability();
+  void resumeWorldCoverJob(worldId, coverPollSequence);
   await loadWorldVersionPlayableCharacters();
   worldMessage(archived ? "This world is archived. Restore it before editing or publishing." : "Draft loaded from authoritative PostgreSQL storage.");
 }
@@ -989,12 +994,47 @@ function imageJobDelay(milliseconds) {
 }
 
 async function monitorWorldCoverJob(jobId, worldId) {
+  const sequence = ++worldCoverJobPollSequence;
+  return monitorWorldCoverJobWithSequence(jobId, worldId, sequence);
+}
+
+function renderWorldCoverJobStatus(job) {
+  const unsuccessful = ["failed", "recoverable", "cancelled", "expired"].includes(job.status);
+  if (job.status === "completed") {
+    elements.worldCoverStatus.className = "status success";
+    elements.worldCoverStatus.textContent = "World cover generated and stored in the retained Nexus image library.";
+    return;
+  }
+  if (unsuccessful) {
+    elements.worldCoverStatus.className = "status error";
+    elements.worldCoverStatus.textContent = job.errorMessage || "World cover generation did not complete.";
+    return;
+  }
+  const progressValue = Number(job.providerProgress);
+  const hasProgress = Number.isFinite(progressValue) && progressValue > 0;
+  const progress = hasProgress ? ` · ${number(progressValue)}%` : "";
+  const queue = Number.isInteger(job.providerQueuePosition) ? ` · queue ${job.providerQueuePosition}` : "";
+  const etaAt = job.providerEtaAt ? new Date(job.providerEtaAt).getTime() : Number.NaN;
+  const eta = Number.isFinite(etaAt) ? ` · about ${Math.max(0, Math.ceil((etaAt - Date.now()) / 1000))}s remaining` : "";
+  const retry = job.status === "queued" && job.providerStatus === "retrying" ? " after a provider timeout" : "";
+  elements.worldCoverStatus.className = "status";
+  elements.worldCoverStatus.replaceChildren();
+  const label = document.createElement("span");
+  label.textContent = `World cover ${String(job.providerStatus || job.status).replaceAll("_", " ")}${retry}${progress}${queue}${eta}. You can continue editing while it runs.`;
+  elements.worldCoverStatus.append(label);
+  const meter = document.createElement("progress");
+  meter.max = 100;
+  if (hasProgress) meter.value = Math.max(0, Math.min(100, progressValue));
+  meter.setAttribute("aria-label", "World cover generation progress");
+  elements.worldCoverStatus.append(meter);
+}
+
+async function monitorWorldCoverJobWithSequence(jobId, worldId, sequence) {
   for (let poll = 0; poll < 1200; poll += 1) {
-    if (selectedWorld?.id !== worldId) return null;
+    if (selectedWorld?.id !== worldId || sequence !== worldCoverJobPollSequence) return null;
     const job = await api(`/api/v1/image-jobs/${jobId}`);
     if (job.status === "completed") {
-      elements.worldCoverStatus.className = "status success";
-      elements.worldCoverStatus.textContent = "World cover generated and stored in the retained Nexus image library.";
+      renderWorldCoverJobStatus(job);
       selectedWorld.imageUrl = job.assetUrl;
       elements.worldCoverPreview.src = job.assetUrl;
       elements.worldCoverPreview.classList.remove("hidden");
@@ -1006,23 +1046,31 @@ async function monitorWorldCoverJob(jobId, worldId) {
     if (["failed", "recoverable", "cancelled", "expired"].includes(job.status)) {
       throw new Error(job.errorMessage || "World cover generation did not complete.");
     }
-    const progressValue = Number(job.providerProgress);
-    const progress = Number.isFinite(progressValue) ? ` · ${number(progressValue)}%` : "";
-    const queue = Number.isInteger(job.providerQueuePosition) ? ` · queue ${job.providerQueuePosition}` : "";
-    const etaAt = job.providerEtaAt ? new Date(job.providerEtaAt).getTime() : Number.NaN;
-    const eta = Number.isFinite(etaAt) ? ` · about ${Math.max(0, Math.ceil((etaAt - Date.now()) / 1000))}s remaining` : "";
-    elements.worldCoverStatus.replaceChildren();
-    const label = document.createElement("span");
-    label.textContent = `World cover ${String(job.providerStatus || job.status).replaceAll("_", " ")}${progress}${queue}${eta}. You can continue editing while it runs.`;
-    elements.worldCoverStatus.append(label);
-    const meter = document.createElement("progress");
-    meter.max = 100;
-    if (Number.isFinite(progressValue)) meter.value = Math.max(0, Math.min(100, progressValue));
-    meter.setAttribute("aria-label", "World cover generation progress");
-    elements.worldCoverStatus.append(meter);
+    renderWorldCoverJobStatus(job);
     await imageJobDelay(1000);
   }
   throw new Error("World cover generation is still running. Refresh the world to check it again.");
+}
+
+async function resumeWorldCoverJob(worldId, sequence) {
+  try {
+    const job = await api(`/api/v1/worlds/${worldId}/cover-job`);
+    if (!job || selectedWorld?.id !== worldId || sequence !== worldCoverJobPollSequence) return;
+    if (job.status === "completed") return;
+    renderWorldCoverJobStatus(job);
+    if (["queued", "generating", "provider_pending", "downloading"].includes(job.status)) {
+      elements.generateWorldCover.disabled = true;
+      await monitorWorldCoverJobWithSequence(job.id, worldId, sequence);
+    }
+  } catch (error) {
+    if (selectedWorld?.id !== worldId || sequence !== worldCoverJobPollSequence) return;
+    elements.worldCoverStatus.className = "status error";
+    elements.worldCoverStatus.textContent = error.message || String(error);
+  } finally {
+    if (selectedWorld?.id === worldId && sequence === worldCoverJobPollSequence) {
+      elements.generateWorldCover.disabled = selectedWorld.status === "archived";
+    }
+  }
 }
 
 async function generateWorldCoverImage() {
@@ -1571,7 +1619,7 @@ async function loadCampaigns(preselectId = "") {
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
     selectedCampaign = null;
     updateStoryViewLink();
-    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.saveIllustrationConfig, elements.discoverIllustrationModels].forEach((element) => { element.disabled = true; });
+    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor, elements.previewIllustrationBackfill, elements.previewIllustrationRebuild, elements.saveIllustrationConfig, elements.discoverIllustrationModels].forEach((element) => { element.disabled = true; });
     elements.illustrationSourcePolicy.value = "off";
     renderIllustrationSettingsVisibility();
     elements.campaignCostSection.classList.add("hidden");
@@ -1607,7 +1655,7 @@ async function selectCampaign(campaign) {
   elements.saveIllustrationConfig.disabled = false;
   elements.campaignTitle.value = campaign.title;
   elements.campaignStatus.value = campaign.status;
-  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow].forEach((element) => { element.disabled = false; });
+  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor].forEach((element) => { element.disabled = false; });
   elements.campaignTextProvider.value = campaign.textProviderProfileId || "";
   elements.campaignImageProvider.value = campaign.imageProviderProfileId || "";
   elements.campaignTurnControlStyle.value = campaign.turnControlStyle || "flexible_auto";
@@ -1973,6 +2021,16 @@ async function loadIllustrationConfig() {
   elements.illustrationQuality.value = illustrationConfig.quality || "auto";
   elements.illustrationOutputFormat.value = illustrationConfig.outputFormat || "png";
   elements.illustrationMaxAttempts.value = String(illustrationConfig.maxAttempts || 3);
+  elements.illustrationSegmentWordCount.value = String(illustrationConfig.segmentWordCount || 500);
+  const defaultImageCount = effectiveCampaignProvider("image")?.configuration?.defaultImageCount || 1;
+  elements.illustrationImagesPerSegment.value = String(
+    illustrationConfig.updatedAt ? illustrationConfig.imagesPerSegment || 1 : defaultImageCount
+  );
+  elements.illustrationSegmentPromptMode.value = illustrationConfig.segmentPromptMode || "direct";
+  defaultIllustrationRefinementPrompt = illustrationConfig.defaultRefinementPrompt || illustrationConfig.refinementPrompt || "";
+  illustrationRefinementPromptValue = illustrationConfig.refinementPrompt || defaultIllustrationRefinementPrompt;
+  elements.illustrationRefinementPrompt.value = illustrationRefinementPromptValue;
+  renderIllustrationPromptSummary();
   syncIllustrationProviderAvailability(true);
   const provider = effectiveCampaignProvider("image");
   elements.campaignImageProviderSummary.textContent = provider
@@ -1998,6 +2056,39 @@ function illustrationPolicyUsesProvider(policy = elements.illustrationSourcePoli
   return policy === "library_then_generate" || policy === "generate_only";
 }
 
+function renderIllustrationPromptSummary() {
+  const usesDefault = illustrationRefinementPromptValue.trim() === defaultIllustrationRefinementPrompt.trim();
+  elements.illustrationRefinementPromptSummary.textContent = usesDefault
+    ? "Using the default refinement prompt."
+    : "Using a custom campaign prompt.";
+}
+
+function openIllustrationPromptEditor() {
+  elements.illustrationRefinementPrompt.value = illustrationRefinementPromptValue || defaultIllustrationRefinementPrompt;
+  openManagedModal(elements.illustrationPromptDialog);
+  elements.illustrationRefinementPrompt.focus();
+}
+
+function applyIllustrationPrompt(event) {
+  event.preventDefault();
+  const prompt = elements.illustrationRefinementPrompt.value.trim();
+  if (!prompt) {
+    elements.illustrationRefinementPrompt.setCustomValidity("Enter an image-prompt refinement prompt.");
+    elements.illustrationRefinementPrompt.reportValidity();
+    return;
+  }
+  elements.illustrationRefinementPrompt.setCustomValidity("");
+  illustrationRefinementPromptValue = prompt;
+  renderIllustrationPromptSummary();
+  elements.illustrationPromptDialog.close("apply");
+}
+
+function restoreDefaultIllustrationPrompt() {
+  elements.illustrationRefinementPrompt.value = defaultIllustrationRefinementPrompt;
+  elements.illustrationRefinementPrompt.setCustomValidity("");
+  elements.illustrationRefinementPrompt.focus();
+}
+
 function renderIllustrationSettingsVisibility() {
   const policy = elements.illustrationSourcePolicy.value;
   const visible = policy !== "off";
@@ -2005,11 +2096,16 @@ function renderIllustrationSettingsVisibility() {
   elements.illustrationSettings.setAttribute("aria-hidden", String(!visible));
   elements.illustrationMatchingSettings.classList.toggle("hidden", !illustrationPolicyUsesLibrary(policy));
   elements.illustrationProviderSettings.classList.toggle("hidden", !illustrationPolicyUsesProvider(policy));
+  const useRefinementPrompt = visible && elements.illustrationSegmentPromptMode.value === "ai_refined";
+  elements.illustrationRefinementPromptField.classList.toggle("hidden", !useRefinementPrompt);
+  elements.previewIllustrationBackfill.disabled = !selectedCampaign || !visible;
+  elements.previewIllustrationRebuild.disabled = !selectedCampaign || !visible;
 }
 
 function syncIllustrationProviderAvailability(restoreSavedState = false) {
   const hasImageProvider = enabledProviders("image").length > 0;
   if (restoreSavedState) elements.illustrationSourcePolicy.value = illustrationConfig?.sourcePolicy || (illustrationConfig?.enabled ? "generate_only" : "off");
+  const visible = elements.illustrationSourcePolicy.value !== "off";
   elements.illustrationSourcePolicy.disabled = !selectedCampaign;
   for (const option of elements.illustrationSourcePolicy.options) {
     option.disabled = !hasImageProvider && ["library_then_generate", "generate_only"].includes(option.value)
@@ -2017,6 +2113,12 @@ function syncIllustrationProviderAvailability(restoreSavedState = false) {
   }
   elements.campaignImageProvider.disabled = !selectedCampaign || !hasImageProvider;
   elements.discoverIllustrationModels.disabled = !selectedCampaign || !effectiveCampaignProvider("image");
+  elements.illustrationSegmentWordCount.disabled = !selectedCampaign || !visible;
+  elements.illustrationImagesPerSegment.disabled = !selectedCampaign || !visible;
+  elements.illustrationSegmentPromptMode.disabled = !selectedCampaign || !visible;
+  elements.openIllustrationPromptEditor.disabled = !selectedCampaign || !visible || elements.illustrationSegmentPromptMode.value !== "ai_refined";
+  elements.previewIllustrationBackfill.disabled = !selectedCampaign || !visible;
+  elements.previewIllustrationRebuild.disabled = !selectedCampaign || !visible;
   renderIllustrationSettingsVisibility();
 }
 
@@ -2212,6 +2314,7 @@ function syncProviderRoleSettings(options = {}) {
   const sogniSdk = elements.providerType.value === "sogni_sdk";
   const sogni = sogniRest || sogniSdk;
   if (sogni) elements.providerRole.value = "image";
+  const illustration = elements.providerRole.value === "image";
   const intent = elements.providerRole.value === "intent";
   elements.providerRoleNote.textContent = intent
     ? "Classifies Auto as Action or Scene direction only. It never generates story narration. Until explicitly made system default, Auto uses the campaign Story text provider."
@@ -2223,6 +2326,11 @@ function syncProviderRoleSettings(options = {}) {
   elements.providerStreaming.disabled = intent || sogni;
   if (intent || sogni) elements.providerStreaming.checked = false;
   elements.providerRole.disabled = Boolean(editingProviderId) || sogni;
+  for (const field of document.querySelectorAll(".text-model-setting")) {
+    field.classList.toggle("hidden", illustration);
+    field.hidden = illustration;
+    field.setAttribute("aria-hidden", String(illustration));
+  }
   elements.providerSogniSettings.classList.toggle("hidden", !sogni);
   elements.providerSogniSettings.setAttribute("aria-hidden", String(!sogni));
   for (const control of elements.providerSogniSettings.querySelectorAll("input, select")) control.disabled = !sogni;
@@ -2239,6 +2347,10 @@ function syncProviderRoleSettings(options = {}) {
     elements.providerOutputTokens.value = "256";
     elements.providerTemperature.value = "0";
   }
+}
+
+function isIllustrationProviderForm() {
+  return elements.providerRole.value === "image";
 }
 
 function applySogniConfiguration(configuration = {}, providerType = elements.providerType.value) {
@@ -2382,9 +2494,11 @@ async function saveProvider(event) {
         apiKey: elements.providerApiKey.value || undefined,
         isDefault: elements.providerIsDefault.checked,
         defaultModel: elements.providerDefaultModel.value,
-        contextWindowTokens: elements.providerContextTokens.value,
-        maxOutputTokens: elements.providerOutputTokens.value,
-        temperature: elements.providerTemperature.value,
+        ...(!isIllustrationProviderForm() ? {
+          contextWindowTokens: elements.providerContextTokens.value,
+          maxOutputTokens: elements.providerOutputTokens.value,
+          temperature: elements.providerTemperature.value
+        } : {}),
         requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
         enabled: elements.providerEnabled.checked,
         configuration: providerConfigurationFromForm(existingConfig)
@@ -2432,9 +2546,11 @@ async function refreshProviderModelsFromForm() {
           baseUrl: elements.providerBaseUrl.value,
           apiKey: elements.providerApiKey.value || undefined,
           defaultModel: elements.providerDefaultModel.value,
-          contextWindowTokens: elements.providerContextTokens.value,
-          maxOutputTokens: elements.providerOutputTokens.value,
-          temperature: elements.providerTemperature.value,
+          ...(!isIllustrationProviderForm() ? {
+            contextWindowTokens: elements.providerContextTokens.value,
+            maxOutputTokens: elements.providerOutputTokens.value,
+            temperature: elements.providerTemperature.value
+          } : {}),
           requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
           enabled: elements.providerEnabled.checked,
           isDefault: elements.providerIsDefault.checked,
@@ -2498,8 +2614,57 @@ function chooseProviderModel(value) {
   providerMessage(`${value} selected as the profile default. Save the profile to keep this change.`);
 }
 
+function applySogniWorkerTypeOptions(model) {
+  if (elements.providerType.value !== "sogni_sdk") return;
+  const selectedType = elements.providerSogniNetwork.value || "fast";
+  const workerTypes = model?.workerAvailability?.length ? model.workerAvailability : [
+    {
+      type: "fast",
+      displayName: "Fast GPU workers",
+      description: "High-end GPU workers that generate images faster at a higher cost."
+    },
+    {
+      type: "relaxed",
+      displayName: "Relaxed Mac workers",
+      description: "Mac workers that generate images more slowly at a lower cost."
+    }
+  ];
+  elements.providerSogniNetwork.replaceChildren();
+  for (const workerType of workerTypes) {
+    const count = Number(workerType.workerCount);
+    const countLabel = Number.isFinite(count) ? ` · ${number(count)} available` : "";
+    const option = new Option(`${workerType.displayName}${countLabel}`, workerType.type);
+    option.title = workerType.description;
+    elements.providerSogniNetwork.append(option);
+  }
+  elements.providerSogniNetwork.value = workerTypes.some((item) => item.type === selectedType) ? selectedType : workerTypes[0]?.type || "fast";
+  const selected = workerTypes.find((item) => item.type === elements.providerSogniNetwork.value);
+  const selectedCount = Number(selected?.workerCount);
+  const availability = Number.isFinite(selectedCount)
+    ? ` ${number(selectedCount)} worker${selectedCount === 1 ? "" : "s"} currently available for this model.`
+    : "";
+  elements.providerSogniWorkerTypeNote.textContent = `${selected?.description || ""}${availability}`.trim();
+  elements.providerSogniWorkerTypeNote.title = selected?.description || "";
+}
+
+function applySogniWorkerAvailability() {
+  if (elements.providerType.value !== "sogni_sdk") return;
+  const selectedType = elements.providerSogniNetwork.value;
+  for (const model of discoveredProfileModels) {
+    const availability = model.workerAvailability?.find((item) => item.type === selectedType);
+    if (!availability) continue;
+    model.workerCount = Number(availability.workerCount || 0);
+    model.loaded = model.workerCount > 0;
+  }
+  const selectedModel = discoveredProfileModels.find((item) => profileModelValue(item) === elements.providerDefaultModel.value || item.id === elements.providerDefaultModel.value);
+  applySogniWorkerTypeOptions(selectedModel);
+  renderProviderModelPicker();
+}
+
 function applySogniSdkModelOptions(model) {
-  if (elements.providerType.value !== "sogni_sdk" || !model?.imageOptions) return;
+  if (elements.providerType.value !== "sogni_sdk") return;
+  applySogniWorkerTypeOptions(model);
+  if (!model?.imageOptions) return;
   const options = model.imageOptions;
   const selectedPreset = elements.providerSogniSizePreset.value || "custom";
   elements.providerSogniSizePreset.replaceChildren(new Option("Custom dimensions", "custom"));
@@ -2723,6 +2888,8 @@ elements.providerSogniSizePreset.addEventListener("change", () => {
   elements.providerSogniHeight.value = String(preset.height);
   elements.providerSogniAspectRatio.value = preset.ratio || elements.providerSogniAspectRatio.value;
 });
+
+elements.providerSogniNetwork.addEventListener("change", applySogniWorkerAvailability);
 
 elements.providerRole.addEventListener("change", () => {
   discoveredProfileModels = [];
@@ -2990,9 +3157,16 @@ async function saveIllustrationConfig(event) {
         aspectRatio: elements.illustrationAspectRatio.value,
         quality: elements.illustrationQuality.value,
         outputFormat: elements.illustrationOutputFormat.value,
-        maxAttempts: elements.illustrationMaxAttempts.value
+        maxAttempts: elements.illustrationMaxAttempts.value,
+        segmentWordCount: elements.illustrationSegmentWordCount.value,
+        imagesPerSegment: elements.illustrationImagesPerSegment.value,
+        segmentPromptMode: elements.illustrationSegmentPromptMode.value,
+        refinementPrompt: illustrationRefinementPromptValue
       })
     });
+    defaultIllustrationRefinementPrompt = illustrationConfig.defaultRefinementPrompt || defaultIllustrationRefinementPrompt;
+    illustrationRefinementPromptValue = illustrationConfig.refinementPrompt || defaultIllustrationRefinementPrompt;
+    renderIllustrationPromptSummary();
     elements.illustrationStatus.className = "status success";
     elements.illustrationStatus.textContent = sourcePolicy === "off"
       ? "Illustrations disabled. No image endpoint will be called for new turns."
@@ -3006,6 +3180,59 @@ async function saveIllustrationConfig(event) {
     elements.illustrationStatus.textContent = error.message || String(error);
   } finally {
     elements.saveIllustrationConfig.disabled = !selectedCampaign;
+  }
+}
+
+async function confirmIllustrationBackfill(mode) {
+  if (!selectedCampaign) return;
+  const actionButton = mode === "rebuild" ? elements.previewIllustrationRebuild : elements.previewIllustrationBackfill;
+  actionButton.disabled = true;
+  elements.illustrationStatus.className = "status";
+  elements.illustrationStatus.textContent = mode === "rebuild"
+    ? "Estimating historical segment rebuild…"
+    : "Estimating missing historical illustrations…";
+  try {
+    const preview = await api(`/api/v1/campaigns/${selectedCampaign.id}/illustration-backfill/preview`, {
+      method: "POST",
+      body: JSON.stringify({ mode })
+    });
+    if (!preview.turnCount) {
+      elements.illustrationStatus.className = "status success";
+      elements.illustrationStatus.textContent = mode === "rebuild"
+        ? "There are no accepted turns to rebuild."
+        : "Every accepted turn already has an illustration segment set.";
+      return;
+    }
+    const refinement = preview.refinementCallCount
+      ? ` It will also make up to ${number(preview.refinementCallCount)} text prompt-refinement calls.`
+      : "";
+    const confirmed = confirm(
+      `${mode === "rebuild" ? "Rebuild" : "Generate"} illustrations for ${number(preview.turnCount)} turn(s)?\n\n`
+      + `${number(preview.segmentCount)} segments · ${number(preview.imageCount)} images · `
+      + `${number(preview.providerRequestCount)} image-provider requests.${refinement}\n\n`
+      + (mode === "rebuild" ? "Existing active segment sets will be superseded; retained assets remain in the image library." : "Only turns without an active segment set will be queued.")
+    );
+    if (!confirmed) {
+      elements.illustrationStatus.textContent = "Historical illustration generation was not queued.";
+      return;
+    }
+    const result = await api(`/api/v1/campaigns/${selectedCampaign.id}/illustration-backfill`, {
+      method: "POST",
+      body: JSON.stringify({
+        mode,
+        idempotencyKey: crypto.randomUUID(),
+        expectedConfigUpdatedAt: preview.configUpdatedAt,
+        expectedTurnCount: preview.totalCampaignTurns
+      })
+    });
+    elements.illustrationStatus.className = "status success";
+    elements.illustrationStatus.textContent = `Queued ${number(result.queuedSets)} turn illustration set(s). Story turns were not changed.`;
+  } catch (error) {
+    elements.illustrationStatus.className = "status error";
+    elements.illustrationStatus.textContent = error.message || String(error);
+  } finally {
+    renderIllustrationSettingsVisibility();
+    actionButton.disabled = !selectedCampaign || elements.illustrationSourcePolicy.value === "off";
   }
 }
 
@@ -3757,6 +3984,14 @@ elements.embeddingModel.addEventListener("keydown", (event) => {
 });
 elements.embeddingForm.addEventListener("submit", saveEmbeddingConfig);
 elements.illustrationForm.addEventListener("submit", saveIllustrationConfig);
+elements.openIllustrationPromptEditor.addEventListener("click", openIllustrationPromptEditor);
+elements.illustrationPromptForm.addEventListener("submit", applyIllustrationPrompt);
+elements.restoreDefaultIllustrationPrompt.addEventListener("click", restoreDefaultIllustrationPrompt);
+elements.cancelIllustrationPrompt.addEventListener("click", () => requestModalDismissal(elements.illustrationPromptDialog));
+elements.illustrationPromptDialog.addEventListener("close", () => {
+  elements.illustrationRefinementPrompt.value = illustrationRefinementPromptValue;
+  elements.illustrationRefinementPrompt.setCustomValidity("");
+});
 elements.illustrationSourcePolicy.addEventListener("change", () => {
   if (illustrationPolicyUsesProvider() && !enabledProviders("image").length) {
     elements.illustrationSourcePolicy.value = "library_only";
@@ -3769,7 +4004,10 @@ elements.illustrationSourcePolicy.addEventListener("change", () => {
   }
   renderIllustrationSettingsVisibility();
 });
+elements.illustrationSegmentPromptMode.addEventListener("change", syncIllustrationProviderAvailability);
 elements.discoverIllustrationModels.addEventListener("click", discoverIllustrationModels);
+elements.previewIllustrationBackfill.addEventListener("click", () => confirmIllustrationBackfill("missing"));
+elements.previewIllustrationRebuild.addEventListener("click", () => confirmIllustrationBackfill("rebuild"));
 elements.chooseWorldCover.addEventListener("click", chooseWorldCoverFromLibrary);
 async function loadSessionPreferences() {
   const response = await api("/api/v1/session");

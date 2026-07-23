@@ -290,9 +290,11 @@ async function insertCampaignClone(
   await client.query(
     `INSERT INTO campaign_illustration_configs (
        campaign_id, owner_user_id, enabled, source_policy, matching_scope, confidence_profile, repetition_window,
-       provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts, created_at, updated_at
+       provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts,
+       segment_word_count, images_per_segment, segment_prompt_mode, refinement_prompt, created_at, updated_at
      ) SELECT $1, owner_user_id, enabled, source_policy, matching_scope, confidence_profile, repetition_window,
-              provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts, created_at, updated_at
+              provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts,
+              segment_word_count, images_per_segment, segment_prompt_mode, refinement_prompt, created_at, updated_at
          FROM campaign_illustration_configs WHERE owner_user_id = $2 AND campaign_id = $3`,
     [campaignId, ownerUserId, source.id]
   );

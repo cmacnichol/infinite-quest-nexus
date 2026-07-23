@@ -27,7 +27,6 @@ const POLL_INTERVAL_MS = 1000;
 const MAX_POLLS = 900;
 const IMAGE_POLL_MS = 5000;
 const TOAST_DURATION = 3500;
-let imageLibraryBrowser = null;
 
 // ── State ──────────────────────────────────────────────────────
 const state = {
@@ -42,7 +41,15 @@ const state = {
   providers: [],
   abortController: null,
   pendingGeneration: null,
+  generationDisplayActive: false,
+  generationDisplayAction: "",
+  illustrationConfig: null,
+  illustrationSegments: [],
+  illustrationVariantIndexes: new Map(),
+  illustrationSegmentActivity: new Map(),
   imagePollTimer: null,
+  imageJobActivity: new Map(),
+  imageActivityInitialized: false,
   activityLog: [],
   toastTimer: null,
   streamingAutoFollow: true,
@@ -253,6 +260,14 @@ async function loadCampaign(campaignId, options = {}) {
     const turnData = await api(`/campaigns/${campaignId}/turns`);
     state.turns = turnData.turns || [];
     state.runtimeState = await api(`/campaigns/${campaignId}/state`);
+    try {
+      state.illustrationConfig = await api(`/campaigns/${campaignId}/illustration-config`);
+      const segmentData = await api(`/campaigns/${campaignId}/illustration-segments`);
+      state.illustrationSegments = segmentData.segments || [];
+    } catch (_) {
+      state.illustrationConfig = { enabled: false, sourcePolicy: "off" };
+      state.illustrationSegments = [];
+    }
 
     // Set title
     const titleEl = $("storyTitle");
@@ -350,9 +365,8 @@ function reportedCostTooltip(cost) {
 
 // ── Scene Rendering ───────────────────────────────────────────
 function renderScene(turn, index) {
-  const hasImage = turn.imageAssetUrl || turn.imageUrl;
   const sceneDiv = document.createElement("div");
-  sceneDiv.className = `scene${hasImage ? "" : " no-image"}`;
+  sceneDiv.className = "scene";
   sceneDiv.id = `scene-${index}`;
   sceneDiv.dataset.turnNumber = index + 1;
 
@@ -407,7 +421,28 @@ function renderScene(turn, index) {
 
   // Narration text
   if (turn.narration) {
-    narrationHtml += `<div class="narration">${sanitizeNarration(turn.narration)}</div>`;
+    const turnId = turn.id || turn.turnId || "";
+    const segments = state.illustrationSegments
+      .filter((segment) => segment.turnId === turnId)
+      .sort((left, right) => left.ordinal - right.ordinal);
+    narrationHtml += segments.length && illustrationsEnabled()
+      ? `<div class="narration segmented-narration">${segments.map((segment) => `
+          <section class="narration-segment" data-illustration-segment-id="${escapeHtml(segment.id)}"
+            data-turn-id="${escapeHtml(turnId)}" aria-label="Illustration segment ${segment.ordinal + 1}">
+            <div class="narration-segment-copy">${sanitizeNarration(segment.text)}</div>
+            <aside class="segment-illustration-slot" aria-label="Illustration for segment ${segment.ordinal + 1}">
+              <div class="segment-illustration-sticky">
+                <div class="story-illustration-heading">
+                  <span>Illustration</span>
+                  <span class="pill">Turn ${index + 1}</span>
+                </div>
+                <div class="segment-illustration-content" data-segment-id="${escapeHtml(segment.id)}">
+                  ${segmentIllustrationMarkup(turn, index, segment, segments.length)}
+                </div>
+              </div>
+            </aside>
+          </section>`).join("")}</div>`
+      : `<div class="narration">${sanitizeNarration(turn.narration)}</div>`;
   }
 
   // After-event trigger text
@@ -417,29 +452,128 @@ function renderScene(turn, index) {
     });
   }
 
-  // Image column
-  let imageHtml = "";
-  const turnId = turn.id || turn.turnId || "";
-  if (!hasImage && turnId) {
-    narrationHtml += `<div class="row wrap"><button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="choose-image-library">▦ Choose image from library</button></div>`;
+  sceneDiv.innerHTML = `<div class="scene-narration">${narrationHtml}</div>`;
+  return sceneDiv;
+}
+
+function viewedTurnIndex() {
+  return state.viewIndex === -1 ? state.turns.length - 1 : state.viewIndex;
+}
+
+function illustrationsEnabled() {
+  return Boolean(state.illustrationConfig?.enabled)
+    && state.illustrationConfig?.sourcePolicy !== "off";
+}
+
+function illustrationSegmentsForTurn(turnId) {
+  return state.illustrationSegments
+    .filter((segment) => segment.turnId === turnId)
+    .sort((left, right) => left.ordinal - right.ordinal);
+}
+
+function segmentStatusLabel(segment) {
+  if (!segment) return "";
+  if (segment.promptJobStatus === "refining") return "Refining illustration prompt…";
+  if (segment.promptSource === "ai_fallback" && !segment.variants?.length) return "Prompt refinement fell back to accepted segment text.";
+  if (segment.imageJobStatus === "recoverable" || segment.imageJobStatus === "failed") {
+    return segment.errorMessage || "Illustration generation needs attention.";
   }
-  if (hasImage) {
-    const src = turn.imageAssetUrl || turn.imageUrl;
-    imageHtml = `<div class="image-wrap">
-      <img src="${escapeHtml(src)}" alt="Illustration for turn ${index + 1}" loading="lazy" />
-      <div class="image-actions">
-        <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="edit-image-prompt" title="Edit image prompt">✏️</button>
-        <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="choose-image-library" title="Choose retained image">▦</button>
-        <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="find-library-match" title="Find another library match">⌕</button>
-        <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="why-image" title="Why this image?">?</button>
-        <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="regenerate-image" title="Generate a new image">🖼️</button>
-        <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="remove-image" title="Remove illustration">×</button>
-      </div>
-    </div>`;
+  if (["queued", "generating", "provider_pending", "downloading"].includes(segment.imageJobStatus)) {
+    const progress = Number(segment.providerProgress);
+    return `Creating illustration${Number.isFinite(progress) ? ` · ${Math.round(progress)}%` : ""}`;
+  }
+  if (segment.status === "refining") return "Waiting for prompt refinement…";
+  if (!segment.variants?.length) return "Illustration is queued for this segment.";
+  return "";
+}
+
+function segmentIllustrationMarkup(turn, turnIndex, segment, segmentCount) {
+  const turnId = turn.id || turn.turnId || "";
+  const variants = Array.isArray(segment.variants) ? segment.variants : [];
+  const selectedIndex = Math.min(state.illustrationVariantIndexes.get(segment.id) || 0, Math.max(variants.length - 1, 0));
+  const selected = variants[selectedIndex];
+  const selectedVariantIndex = selected?.variantIndex ?? selectedIndex;
+  const status = segmentStatusLabel(segment);
+  const isCurrentTurn = turnIndex === state.turns.length - 1;
+  return `<div class="segment-illustration-card">
+    <div class="image-wrap${selected ? "" : " image-job-placeholder"}">
+    ${selected
+      ? `<img src="${escapeHtml(selected.url)}" alt="Illustration ${selectedIndex + 1} for turn ${turnIndex + 1}, segment ${segment.ordinal + 1}" loading="lazy" />`
+      : `<div class="image-placeholder">${escapeHtml(status || "No illustration is available for this segment yet.")}</div>`}
+    ${variants.length > 1 ? `<div class="illustration-carousel" aria-label="Illustration variants">
+      <button class="small ghost" type="button" data-action="previous-segment-image" data-segment-id="${escapeHtml(segment.id)}" aria-label="Previous illustration">←</button>
+      <span>${selectedIndex + 1} / ${variants.length}</span>
+      <button class="small ghost" type="button" data-action="next-segment-image" data-segment-id="${escapeHtml(segment.id)}" aria-label="Next illustration">→</button>
+    </div>` : ""}
+    ${status && selected ? `<div class="image-job-status image-job-overlay"><p>${escapeHtml(status)}</p></div>` : ""}
+    <div class="segment-illustration-meta">
+      <span>Segment ${segment.ordinal + 1} of ${segmentCount}</span>
+      <span>${segment.endWord - segment.startWord} words</span>
+      ${segment.promptSource === "ai_fallback" ? "<span>Direct fallback</span>" : ""}
+    </div>
+    </div>
+    ${isCurrentTurn ? `<div class="segment-image-controls" aria-label="Controls for this current-turn illustration">
+      <button class="small ghost segment-image-icon" type="button" data-action="edit-segment-image-prompt"
+        data-segment-id="${escapeHtml(segment.id)}" data-variant-index="${selectedVariantIndex}"
+        title="Preview or edit this image prompt" aria-label="Preview or edit this image prompt">✏️</button>
+      <button class="small ghost segment-image-icon" type="button" data-action="regenerate-segment-image"
+        data-segment-id="${escapeHtml(segment.id)}" data-variant-index="${selectedVariantIndex}"
+        title="Regenerate only this image" aria-label="Regenerate only this image">🖼️</button>
+      <button class="small ghost segment-image-icon" type="button" data-action="why-segment-image"
+        data-segment-id="${escapeHtml(segment.id)}" data-variant-index="${selectedVariantIndex}"
+        title="Why this image?" aria-label="Why this image?">?</button>
+    </div>` : `<div class="segment-history-image-controls">
+      <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}"
+        data-action="rebuild-turn-segments">Rebuild this past turn</button>
+    </div>`}
+  </div>`;
+}
+
+function renderStoryIllustration() {
+  const layout = $("appLayout");
+  const panel = $("storyIllustrationPanel");
+  const content = $("storyIllustrationContent");
+  const turnLabel = $("storyIllustrationTurn");
+  const turnIndex = viewedTurnIndex();
+  const turn = state.turns[turnIndex];
+  const visible = illustrationsEnabled() && !state.generationDisplayActive && Boolean(turn);
+  if (!layout || !panel || !content) return;
+
+  const inlineContents = [...document.querySelectorAll(".segment-illustration-content[data-segment-id]")];
+  inlineContents.forEach((segmentContent) => {
+    const segment = state.illustrationSegments.find((item) => item.id === segmentContent.dataset.segmentId);
+    if (!segment) return;
+    const segmentTurnIndex = state.turns.findIndex((item) => (item.id || item.turnId) === segment.turnId);
+    const segmentTurn = state.turns[segmentTurnIndex];
+    if (!segmentTurn) return;
+    segmentContent.innerHTML = segmentIllustrationMarkup(
+      segmentTurn,
+      segmentTurnIndex,
+      segment,
+      illustrationSegmentsForTurn(segment.turnId).length
+    );
+  });
+
+  const inlineVisible = visible && inlineContents.length > 0;
+  const panelVisible = visible && !inlineVisible;
+  layout.classList.toggle("has-illustration", panelVisible);
+  layout.classList.toggle("has-segmented-illustrations", inlineVisible);
+  panel.classList.toggle("hidden", !panelVisible);
+  if (!visible) {
+    content.replaceChildren();
+    return;
+  }
+  if (inlineVisible) {
+    content.replaceChildren();
+    return;
   }
 
-  sceneDiv.innerHTML = `<div class="scene-narration">${narrationHtml}</div>${imageHtml}`;
-  return sceneDiv;
+  if (turnLabel) turnLabel.textContent = `Turn ${turnIndex + 1}`;
+  const turnId = turn.id || turn.turnId || "";
+  content.innerHTML = `<div class="image-wrap image-job-placeholder">
+    <div class="image-placeholder">This accepted turn has no illustration segments yet.</div>
+    <button class="small primary" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="generate-turn-segments">Generate illustrations for this turn</button>
+  </div>`;
 }
 
 function renderAllScenes(options = {}) {
@@ -447,6 +581,12 @@ function renderAllScenes(options = {}) {
   if (!container) return;
 
   container.innerHTML = "";
+
+  if (state.generationDisplayActive) {
+    renderStreamingPreview("", state.pendingGeneration?.action || state.generationDisplayAction);
+    renderStoryIllustration();
+    return;
+  }
 
   if (state.turns.length === 0) {
     const worldName = state.world?.title || state.campaign?.title || "";
@@ -461,6 +601,7 @@ function renderAllScenes(options = {}) {
         <p style="max-width:620px;margin:8px auto 0;line-height:1.55;color:var(--dim);">Type an action or choose from generated options to begin your adventure.</p>
       </div>
     </div>`;
+    renderStoryIllustration();
     return;
   }
 
@@ -476,6 +617,7 @@ function renderAllScenes(options = {}) {
     }
   }
 
+  renderStoryIllustration();
   if (options.autoScroll !== false) scrollToView();
 }
 
@@ -804,6 +946,7 @@ async function runGeneration(action, options = {}) {
     };
     savePendingSubmission(submission);
     recordActivity("generation", "Generation queued", `Action: "${action}"`);
+    beginGenerationDisplay(action);
 
     const jobRes = await enqueueGenerationSubmission(submission);
 
@@ -811,12 +954,10 @@ async function runGeneration(action, options = {}) {
     if (!jobId) throw new Error("No job ID returned from generation request.");
 
     state.pendingGeneration = { ...jobRes, id: jobId, action, operationKind, expectedTurnNumber };
-    renderAllScenes();
     await pollGenerationJob(jobId, action);
   } catch (err) {
-    clearStreamingPreview();
     if (err.pendingGeneration) state.pendingGeneration = err.pendingGeneration;
-    renderAllScenes();
+    restoreGenerationDisplay();
     if (err.name === "AbortError") {
       toast("Generation cancelled.");
       recordActivity("system", "Generation cancelled");
@@ -906,6 +1047,27 @@ function clearStreamingPreview() {
   state.streamingExpectedScrollY = null;
 }
 
+function beginGenerationDisplay(action) {
+  state.generationDisplayActive = true;
+  state.generationDisplayAction = action || "";
+  const container = $("storyArea");
+  if (container) container.replaceChildren();
+  renderStoryIllustration();
+  renderStreamingPreview("", state.generationDisplayAction);
+}
+
+function restoreGenerationDisplay() {
+  state.generationDisplayActive = false;
+  state.generationDisplayAction = "";
+  clearStreamingPreview();
+  renderAllScenes({ autoScroll: false });
+}
+
+function commitGenerationDisplay() {
+  state.generationDisplayActive = false;
+  state.generationDisplayAction = "";
+}
+
 function showGenerationRecovery(jobId, message) {
   const panel = $("generationRecoveryPanel");
   const messageEl = $("generationRecoveryMessage");
@@ -932,8 +1094,10 @@ async function monitorRecoveryJob(retryFirst) {
   showBusy(retryFirst ? "Retrying durable generation…" : "Resuming generation monitoring…");
   try {
     if (retryFirst) await api(`/generation-jobs/${jobId}/retry`, { method: "POST", body: "{}" });
+    beginGenerationDisplay(state.pendingGeneration?.action || "");
     await pollGenerationJob(jobId, state.pendingGeneration?.action || "");
   } catch (error) {
+    restoreGenerationDisplay();
     toast(`Generation recovery failed: ${error.message}`);
   } finally {
     hideBusy();
@@ -950,7 +1114,7 @@ async function discardRecoveryJob() {
     clearPendingSubmission();
     state.pendingGeneration = null;
     hideGenerationRecovery();
-    renderAllScenes();
+    restoreGenerationDisplay();
     toast("Generation job discarded. The accepted turn was preserved.");
   } catch (error) {
     toast(`Could not discard generation: ${error.message}`);
@@ -967,6 +1131,7 @@ async function finalizeCompletedGeneration(result) {
 
   clearPendingSubmission();
   state.pendingGeneration = null;
+  commitGenerationDisplay();
   recordActivity("success", "Turn generated", `Turn ${result.turnNumber || ""} completed.`);
   clearStreamingPreview();
   await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });
@@ -994,7 +1159,8 @@ async function finalizeCompletedGeneration(result) {
 
 async function pollGenerationJob(jobId, action) {
   let retriesUsed = 0;
-  clearStreamingPreview();
+  if (!state.generationDisplayActive) beginGenerationDisplay(action);
+  else renderStreamingPreview("", action || state.generationDisplayAction);
 
   const handleJobUpdate = async (job) => {
     updateGenerationProgress(job);
@@ -1184,12 +1350,15 @@ async function resumePendingGeneration() {
     if (pending?.id) {
       showBusy("Resuming pending generation…");
       recordActivity("system", "Resuming pending generation", `jobId=${pending.id}`);
-      renderAllScenes();
+      beginGenerationDisplay(pending.action || "");
       const progressEl = $("generationProgress");
       if (progressEl) progressEl.classList.remove("hidden");
       try {
         await pollGenerationJob(pending.id, pending.action || "");
         return true;
+      } catch (error) {
+        restoreGenerationDisplay();
+        throw error;
       } finally {
         clearStreamingPreview();
         if (progressEl) progressEl.classList.add("hidden");
@@ -1242,6 +1411,8 @@ function navigateTo(index) {
   const isContinuous = Boolean(state.user?.settings?.continuousReading);
   if (!isContinuous) {
     renderAllScenes();
+  } else {
+    renderStoryIllustration();
   }
   updateStatusBar();
   scrollToView();
@@ -1353,17 +1524,93 @@ function pollImageJobs() {
     try {
       const data = await api(`/campaigns/${state.campaignId}/image-jobs`);
       const jobs = data.jobs || data || [];
+      const segmentData = await api(`/campaigns/${state.campaignId}/illustration-segments`);
+      const segments = segmentData.segments || [];
       let anyPending = false;
+      state.illustrationSegments = segments;
+      renderStoryIllustration();
       for (const job of jobs) {
+        recordImageJobActivity(job, { suppress: !state.imageActivityInitialized });
         renderSceneImageJob(job);
         if (["queued", "generating", "provider_pending", "downloading"].includes(job.status)) anyPending = true;
       }
+      for (const segment of segments) {
+        recordIllustrationSegmentActivity(segment, { suppress: !state.imageActivityInitialized });
+        if (["queued", "refining", "generating"].includes(segment.status)
+          || ["queued", "refining", "recoverable"].includes(segment.promptJobStatus)) anyPending = true;
+      }
+      state.imageActivityInitialized = true;
       if (anyPending) {
         state.imagePollTimer = setTimeout(poll, IMAGE_POLL_MS);
       }
     } catch (_) { /* ignore polling errors */ }
   };
-  poll();
+  return poll();
+}
+
+function recordIllustrationSegmentActivity(segment, options = {}) {
+  if (!segment?.id) return;
+  const signature = [
+    segment.status || "",
+    segment.promptJobStatus || "",
+    segment.promptSource || "",
+    segment.imageJobStatus || "",
+    segment.variants?.length || 0
+  ].join(":");
+  if (state.illustrationSegmentActivity.get(segment.id) === signature) return;
+  state.illustrationSegmentActivity.set(segment.id, signature);
+  if (options.suppress) return;
+  const turnIndex = state.turns.findIndex((turn) => (turn.id || turn.turnId) === segment.turnId);
+  const detail = `turn=${turnIndex + 1} · segment=${segment.ordinal + 1} · prompt=${segment.promptSource || "direct"} · status=${segment.status}`;
+  if (segment.promptJobStatus === "refining") {
+    recordActivity("image", "Refining segment illustration prompt", detail);
+  } else if (segment.promptSource === "ai_fallback") {
+    recordActivity("image", "Segment prompt used direct fallback", detail);
+  } else if (segment.status === "completed") {
+    recordActivity("success", "Illustration segment completed", `${detail} · variants=${segment.variants?.length || 0}`);
+  } else if (segment.status === "failed" || segment.status === "recoverable") {
+    recordActivity("error", "Illustration segment failed", `${detail} · ${segment.errorMessage || ""}`);
+  }
+}
+
+function recordImageJobActivity(job, options = {}) {
+  if (!job?.id) return;
+  const progress = Number(job.providerProgress);
+  const progressBucket = Number.isFinite(progress) ? Math.floor(Math.max(0, Math.min(100, progress)) / 10) * 10 : null;
+  const signature = [
+    job.status || "",
+    job.providerStatus || "",
+    progressBucket ?? "",
+    job.providerQueuePosition ?? "",
+    job.errorCode || "",
+    job.assetId || job.assetUrl || ""
+  ].join(":");
+  if (state.imageJobActivity.get(job.id) === signature) return;
+  state.imageJobActivity.set(job.id, signature);
+  if (options.suppress) return;
+
+  const turnIndex = state.turns.findIndex((turn) => (turn.id || turn.turnId) === job.turnId);
+  const turnDetail = turnIndex >= 0 ? `turn=${turnIndex + 1}` : `turnId=${job.turnId || "unknown"}`;
+  const detail = [
+    turnDetail,
+    `jobId=${job.id}`,
+    `status=${job.status || "queued"}`,
+    job.providerStatus ? `providerStatus=${job.providerStatus}` : "",
+    Number.isFinite(progress) ? `progress=${Math.round(progress)}%` : "",
+    Number.isInteger(job.providerQueuePosition) ? `queue=${job.providerQueuePosition}` : "",
+    job.requestedModel ? `model=${job.requestedModel}` : "",
+    job.errorMessage ? `error=${job.errorMessage}` : ""
+  ].filter(Boolean).join(" · ");
+
+  if (job.status === "completed") {
+    recordActivity("success", "Illustration generated", detail);
+  } else if (["recoverable", "failed", "cancelled", "expired"].includes(job.status)) {
+    recordActivity("error", "Illustration generation failed", detail);
+  } else if (job.status === "queued") {
+    recordActivity("image", "Illustration generation queued", detail);
+  } else {
+    recordActivity("image", "Illustration generation progress", detail);
+  }
 }
 
 function imageJobStatusText(job) {
@@ -1380,21 +1627,27 @@ function imageJobStatusText(job) {
 function renderSceneImageJob(job) {
   if (!job.turnId) return;
   if (job.status === "completed" && job.assetUrl) {
+    if (job.segmentId) return;
     updateSceneImage(job.turnId, job.assetUrl, true);
     return;
   }
   const turnIdx = state.turns.findIndex((turn) => (turn.id || turn.turnId) === job.turnId);
-  const sceneEl = turnIdx < 0 ? null : $(`scene-${turnIdx}`);
-  if (!sceneEl) return;
+  const segmentContent = job.segmentId
+    ? [...document.querySelectorAll(".segment-illustration-content[data-segment-id]")]
+      .find((element) => element.dataset.segmentId === job.segmentId)
+    : null;
+  if (turnIdx < 0 || !illustrationsEnabled() || state.generationDisplayActive) return;
+  if (job.segmentId && !segmentContent) return;
+  if (!job.segmentId && turnIdx !== viewedTurnIndex()) return;
   const terminalFailure = ["recoverable", "failed", "cancelled", "expired"].includes(job.status);
   const active = ["queued", "generating", "provider_pending", "downloading"].includes(job.status);
   if (!terminalFailure && !active) return;
-  sceneEl.classList.remove("no-image");
-  let imageWrap = sceneEl.querySelector(".image-wrap");
+  const content = segmentContent || $("storyIllustrationContent");
+  let imageWrap = content?.querySelector(".image-wrap");
   if (!imageWrap) {
     imageWrap = document.createElement("div");
     imageWrap.className = "image-wrap image-job-placeholder";
-    sceneEl.appendChild(imageWrap);
+    content?.appendChild(imageWrap);
   }
   let status = imageWrap.querySelector(".image-job-status");
   if (!status) {
@@ -1422,6 +1675,7 @@ function renderSceneImageJob(job) {
       retry.disabled = true;
       try {
         const queued = await api(`/image-jobs/${job.id}/retry`, { method: "POST", body: "{}" });
+        recordImageJobActivity(queued);
         renderSceneImageJob(queued);
         pollImageJobs();
       } catch (error) {
@@ -1439,31 +1693,7 @@ function updateSceneImage(turnId, assetUrl, replace = false) {
   const turnIdx = state.turns.findIndex(t => (t.id || t.turnId) === turnId);
   if (turnIdx < 0) return;
   state.turns[turnIdx].imageAssetUrl = assetUrl;
-  const sceneEl = $(`scene-${turnIdx}`);
-  if (!sceneEl) return;
-  // Check if image already present
-  const existingWrap = sceneEl.querySelector(".image-wrap");
-  const existingImage = existingWrap?.querySelector("img");
-  if (existingImage) {
-    if (replace) existingImage.src = assetUrl;
-    existingWrap.querySelector(".image-job-status")?.remove();
-    return;
-  }
-  // Add the image-wrap
-  sceneEl.classList.remove("no-image");
-  const imgDiv = document.createElement("div");
-  imgDiv.className = "image-wrap";
-  imgDiv.innerHTML = `<img src="${escapeHtml(assetUrl)}" alt="Illustration for turn ${turnIdx + 1}" loading="lazy" />
-    <div class="image-actions">
-      <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="edit-image-prompt" title="Edit image prompt">✏️</button>
-      <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="choose-image-library" title="Choose retained image">▦</button>
-      <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="find-library-match" title="Find another library match">⌕</button>
-      <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="why-image" title="Why this image?">?</button>
-      <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="regenerate-image" title="Generate a new image">🖼️</button>
-      <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="remove-image" title="Remove illustration">×</button>
-    </div>`;
-  if (existingWrap) existingWrap.replaceWith(imgDiv);
-  else sceneEl.appendChild(imgDiv);
+  if (turnIdx === viewedTurnIndex()) renderStoryIllustration();
 }
 
 function openImagePromptEditor(turnId) {
@@ -1478,47 +1708,112 @@ function openImagePromptEditor(turnId) {
   openManagedModal(dlg);
 }
 
-async function openTurnAssetLibrary(turnId) {
-  const dialog = $("assetLibraryDialog");
-  const grid = $("assetLibraryGrid");
-  const status = $("assetLibraryStatus");
-  if (!dialog || !grid || !status || !turnId) return;
-  if (!imageLibraryBrowser) {
-    const { createImageLibraryBrowser } = await import("/nexus/image-library-browser.js");
-    imageLibraryBrowser = createImageLibraryBrowser({
-      dialog,
-      grid,
-      status,
-      filterContainer: $("assetLibraryFilters"),
-      loadMore: $("assetLibraryLoadMore"),
-      closeButton: $("btnCloseAssetLibrary")
+function segmentVariant(segmentId, variantIndex) {
+  const segment = state.illustrationSegments.find((item) => item.id === segmentId);
+  if (!segment) return { segment: null, variant: null };
+  const variant = (segment.variants || []).find((item) => item.variantIndex === variantIndex)
+    || segment.variants?.[variantIndex]
+    || null;
+  return { segment, variant };
+}
+
+function openSegmentImagePromptEditor(segmentId, variantIndex) {
+  const { segment, variant } = segmentVariant(segmentId, variantIndex);
+  const dlg = $("imagePromptDialog");
+  const editor = $("imagePromptEditor");
+  if (!segment || !dlg || !editor) return;
+  editor.value = variant?.prompt || segment.resolvedPrompt || segment.directPrompt || "";
+  dlg._turnId = null;
+  dlg._segmentId = segmentId;
+  dlg._variantIndex = variantIndex;
+  const title = $("imagePromptDialogTitle");
+  if (title) title.textContent = `Segment ${segment.ordinal + 1} · Image ${variantIndex + 1} prompt`;
+  openManagedModal(dlg);
+}
+
+async function regenerateSegmentImage(segmentId, variantIndex, prompt) {
+  const { segment, variant } = segmentVariant(segmentId, variantIndex);
+  const effectivePrompt = String(prompt || variant?.prompt || segment?.resolvedPrompt || segment?.directPrompt || "").trim();
+  if (!segment || !effectivePrompt) return toast("This segment does not have a valid illustration prompt.");
+  try {
+    showBusy(`Queueing segment ${segment.ordinal + 1}, image ${variantIndex + 1}…`);
+    const queued = await api(`/illustration-segments/${segmentId}/images`, {
+      method: "POST",
+      body: JSON.stringify({ prompt: effectivePrompt, variantIndex })
     });
+    recordImageJobActivity(queued);
+    pollImageJobs();
+    toast(`Segment ${segment.ordinal + 1}, image ${variantIndex + 1} queued.`);
+  } catch (error) {
+    toast(`Could not regenerate this image: ${error.message}`);
+    recordActivity("error", "Segment illustration regeneration failed", error.message);
+  } finally {
+    hideBusy();
   }
-  await imageLibraryBrowser.open({
-    mode: "picker",
-    context: { campaignId: state.campaignId, worldId: state.world?.id || state.campaign?.worldId || "" },
-    onSelect: async (asset) => {
-      const result = await api(`/turns/${turnId}/illustration-asset`, { method: "PUT", body: JSON.stringify({ assetId: asset.id }) });
-      updateSceneImage(turnId, result.assetUrl, true);
-      $("imagePromptDialog")?.close();
-      toast("Selected image from the library.");
-    }
-  });
+}
+
+function whySegmentImage(segmentId, variantIndex) {
+  const { segment, variant } = segmentVariant(segmentId, variantIndex);
+  if (!segment) return;
+  const promptLabels = {
+    direct: "Direct prompt from the accepted segment",
+    ai_refined: "AI-refined prompt from the accepted segment",
+    ai_fallback: "Direct fallback after prompt refinement failed",
+    legacy: "Legacy turn illustration prompt"
+  };
+  const details = [
+    `Turn segment: ${segment.ordinal + 1}.`,
+    `Image variant: ${variantIndex + 1}.`,
+    `Prompt source: ${promptLabels[segment.promptSource] || segment.promptSource || "Unknown"}.`,
+    variant?.selectionReason ? `Selection: ${variant.selectionReason}.` : (variant?.providerType ? "Selection: generated specifically for this segment." : ""),
+    variant?.matchScore == null ? "" : `Library match score: ${Number(variant.matchScore).toFixed(3)}${variant.matchThreshold == null ? "" : ` against ${Number(variant.matchThreshold).toFixed(3)}`}.`,
+    variant?.matchingAlgorithm ? `Matching method: ${variant.matchingAlgorithm}.` : "",
+    variant?.providerType ? `Provider: ${variant.providerType}.` : "",
+    variant?.model ? `Model: ${variant.model}.` : "",
+    variant?.createdAt ? `Attached: ${new Date(variant.createdAt).toLocaleString()}.` : "",
+    `Source range: words ${segment.startWord + 1}–${segment.endWord}.`,
+    "Prompt used:",
+    variant?.prompt || segment.resolvedPrompt || segment.directPrompt || "Prompt provenance is unavailable for this retained image."
+  ].filter(Boolean).join("\n");
+  showMessage("Why this image?", details);
 }
 
 async function regenerateIllustration(turnId, prompt) {
   try {
     showBusy("Queueing illustration…");
-    await api(`/turns/${turnId}/illustrations`, {
+    const queued = await api(`/turns/${turnId}/illustrations`, {
       method: "POST",
       body: JSON.stringify({ prompt: prompt || undefined, replace: true })
     });
     toast("Illustration queued.");
-    recordActivity("system", "Illustration queued", `turnId=${turnId}`);
+    recordImageJobActivity(queued);
     pollImageJobs();
   } catch (err) {
     toast(`Failed to queue illustration: ${err.message}`);
     recordActivity("error", "Illustration queue failed", err.message);
+  } finally {
+    hideBusy();
+  }
+}
+
+async function generateTurnSegments(turnId, mode = "missing") {
+  if (!turnId || state.busy) return;
+  showBusy(mode === "rebuild" ? "Rebuilding illustration segments…" : "Creating illustration segments…");
+  try {
+    const result = await api(`/turns/${turnId}/illustration-segments`, {
+      method: "POST",
+      body: JSON.stringify({ mode, idempotencyKey: crypto.randomUUID() })
+    });
+    const segmentData = await api(`/campaigns/${state.campaignId}/illustration-segments`);
+    state.illustrationSegments = segmentData.segments || [];
+    renderAllScenes({ autoScroll: false });
+    pollImageJobs();
+    recordActivity("image", mode === "rebuild" ? "Turn illustration segments rebuilt" : "Turn illustration segments queued",
+      `turnId=${turnId} · segments=${result.segmentCount || 0}`);
+    toast(mode === "rebuild" ? "Turn illustration segments rebuilt." : "Turn illustrations queued.");
+  } catch (error) {
+    toast(`Could not queue turn illustrations: ${error.message}`);
+    recordActivity("error", "Turn illustration segmentation failed", error.message);
   } finally {
     hideBusy();
   }
@@ -1962,10 +2257,20 @@ async function exportMarkdown() {
     let md = `# ${title}\n\n`;
     (data.turns || state.turns).forEach((t, i) => {
       const action = String(t.action || "").replace(/[\r\n]+/g, " ");
-      const imageUrl = String(t.imageAssetUrl || t.imageUrl || "").trim().replace(/>/g, "%3E");
+      const turnId = t.id || t.turnId || state.turns[i]?.id || "";
+      const segments = illustrationSegmentsForTurn(turnId);
       md += `## Turn ${i + 1}${action ? ": " + action : ""}\n\n`;
-      if (t.narration) md += t.narration + "\n\n";
-      if (imageUrl) md += `![Turn ${i + 1} illustration](<${imageUrl}>)\n\n`;
+      if (segments.length) {
+        segments.forEach((segment) => {
+          md += `${segment.text.trim()}\n\n`;
+          const imageUrl = String(segment.variants?.[0]?.url || "").replace(/>/g, "%3E");
+          if (imageUrl) md += `![Turn ${i + 1}, segment ${segment.ordinal + 1} illustration](<${imageUrl}>)\n\n`;
+        });
+      } else {
+        const imageUrl = String(t.imageAssetUrl || t.imageUrl || "").trim().replace(/>/g, "%3E");
+        if (t.narration) md += t.narration + "\n\n";
+        if (imageUrl) md += `![Turn ${i + 1} illustration](<${imageUrl}>)\n\n`;
+      }
     });
     downloadBlob(new Blob([md], { type: "text/markdown" }), `${title.replace(/[^a-zA-Z0-9_-]/g, "_")}.md`);
     toast("Markdown export downloaded.");
@@ -1990,16 +2295,20 @@ async function exportPdfWithImages() {
     const title = escapeHtml(titleText);
     const turns = (data.turns || state.turns).map((turn, index) => {
       const action = turn.action ? `: ${escapeHtml(turn.action)}` : "";
-      const narration = String(turn.narration || "")
-        .split("\n")
-        .filter((paragraph) => paragraph.trim())
-        .map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`)
-        .join("");
-      const imageUrl = String(turn.imageAssetUrl || turn.imageUrl || "").trim();
-      const illustration = imageUrl
-        ? `<figure><img src="${escapeHtml(imageUrl)}" alt="Illustration for turn ${index + 1}"><figcaption>Turn ${index + 1} illustration</figcaption></figure>`
-        : "";
-      return `<section class="turn"><h2>Turn ${index + 1}${action}</h2>${narration}${illustration}</section>`;
+      const turnId = turn.id || turn.turnId || state.turns[index]?.id || "";
+      const segments = illustrationSegmentsForTurn(turnId);
+      const content = segments.length
+        ? segments.map((segment) => {
+            const narration = sanitizeNarration(segment.text);
+            const imageUrl = String(segment.variants?.[0]?.url || "").trim();
+            return `${narration}${imageUrl
+              ? `<figure><img src="${escapeHtml(imageUrl)}" alt="Illustration for turn ${index + 1}, segment ${segment.ordinal + 1}"><figcaption>Turn ${index + 1} · Segment ${segment.ordinal + 1}</figcaption></figure>`
+              : ""}`;
+          }).join("")
+        : `${sanitizeNarration(turn.narration || "")}${turn.imageAssetUrl || turn.imageUrl
+          ? `<figure><img src="${escapeHtml(turn.imageAssetUrl || turn.imageUrl)}" alt="Illustration for turn ${index + 1}"><figcaption>Turn ${index + 1} illustration</figcaption></figure>`
+          : ""}`;
+      return `<section class="turn"><h2>Turn ${index + 1}${action}</h2>${content}</section>`;
     }).join("");
     const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>@page{margin:.7in}*{box-sizing:border-box}body{max-width:8.2in;margin:0 auto;color:#17131f;font:12pt/1.58 Georgia,serif}h1{margin:0 0 28px;color:#3f286b;font-size:28pt}h2{margin:0 0 14px;color:#543482;font-size:17pt}.turn{break-inside:avoid;border-top:1px solid #cfc7dc;padding:24px 0}.turn p{orphans:3;widows:3}figure{margin:22px 0 0;break-inside:avoid}img{display:block;max-width:100%;max-height:7.2in;margin:auto;border-radius:10px;object-fit:contain}figcaption{margin-top:7px;color:#70687d;font:9pt/1.3 system-ui,sans-serif;text-align:center}@media print{body{max-width:none}.turn{break-inside:auto}figure{break-inside:avoid}}</style></head><body><h1>${title}</h1>${turns || "<p>No accepted story turns are available yet.</p>"}</body></html>`;
 
@@ -2094,6 +2403,7 @@ async function init() {
   }
   await checkOnboarding();
   await loadCampaign(state.campaignId);
+  await pollImageJobs();
   const resumed = await resumePendingGeneration();
   if (!resumed && state.turns.length === 0 && !state.busy) {
     await startAdventure();
@@ -2271,16 +2581,16 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnRegenerateImageConfirm) btnRegenerateImageConfirm.addEventListener("click", () => {
     const dlg = $("imagePromptDialog");
     const editor = $("imagePromptEditor");
-    if (dlg && dlg._turnId && editor) {
+    if (dlg && dlg._segmentId && editor) {
+      regenerateSegmentImage(dlg._segmentId, dlg._variantIndex || 0, editor.value);
+      if (dlg.close) dlg.close();
+    } else if (dlg && dlg._turnId && editor) {
       regenerateIllustration(dlg._turnId, editor.value);
       if (dlg.close) dlg.close();
     }
   });
   const btnImagePromptCancel = $("btnImagePromptCancel");
   if (btnImagePromptCancel) btnImagePromptCancel.addEventListener("click", () => { const d = $("imagePromptDialog"); if (d && d.close) d.close(); });
-  const btnChooseImageLibrary = $("btnChooseImageLibrary");
-  if (btnChooseImageLibrary) btnChooseImageLibrary.addEventListener("click", () => openTurnAssetLibrary($("imagePromptDialog")?._turnId));
-
   // Branch dialog
   const branchDlg = $("branchStoryDialog");
   if (branchDlg) branchDlg.addEventListener("close", async () => {
@@ -2323,23 +2633,51 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Story area delegated click handler for image actions
-  const storyArea = $("storyArea");
-  if (storyArea) storyArea.addEventListener("click", (e) => {
+  // Story and illustration rail delegated click handler.
+  const handleStoryAction = (e) => {
     const btn = e.target.closest("[data-action]");
     if (!btn) return;
     if (btn.dataset.action === "follow-stream") {
       followStreamingPreview();
       return;
     }
+    if (btn.dataset.action === "previous-segment-image" || btn.dataset.action === "next-segment-image") {
+      const segment = state.illustrationSegments.find((item) => item.id === btn.dataset.segmentId);
+      const count = segment?.variants?.length || 0;
+      if (!segment || count < 2) return;
+      const current = state.illustrationVariantIndexes.get(segment.id) || 0;
+      const offset = btn.dataset.action === "next-segment-image" ? 1 : -1;
+      state.illustrationVariantIndexes.set(segment.id, (current + offset + count) % count);
+      renderStoryIllustration();
+      return;
+    }
+    const segmentId = btn.dataset.segmentId;
+    const variantIndex = Number(btn.dataset.variantIndex || 0);
+    if (btn.dataset.action === "edit-segment-image-prompt") {
+      openSegmentImagePromptEditor(segmentId, variantIndex);
+      return;
+    }
+    if (btn.dataset.action === "regenerate-segment-image") {
+      regenerateSegmentImage(segmentId, variantIndex);
+      return;
+    }
+    if (btn.dataset.action === "why-segment-image") {
+      whySegmentImage(segmentId, variantIndex);
+      return;
+    }
     const turnId = btn.dataset.turnId;
+    if (btn.dataset.action === "generate-turn-segments") generateTurnSegments(turnId, "missing");
+    if (btn.dataset.action === "rebuild-turn-segments") generateTurnSegments(turnId, "rebuild");
     if (btn.dataset.action === "edit-image-prompt") openImagePromptEditor(turnId);
     if (btn.dataset.action === "regenerate-image") regenerateIllustration(turnId);
-    if (btn.dataset.action === "choose-image-library") openTurnAssetLibrary(turnId);
     if (btn.dataset.action === "find-library-match") findAnotherLibraryMatch(turnId);
     if (btn.dataset.action === "why-image") whyIllustration(turnId);
     if (btn.dataset.action === "remove-image") removeIllustration(turnId);
-  });
+  };
+  const storyArea = $("storyArea");
+  if (storyArea) storyArea.addEventListener("click", handleStoryAction);
+  const storyIllustrationPanel = $("storyIllustrationPanel");
+  if (storyIllustrationPanel) storyIllustrationPanel.addEventListener("click", handleStoryAction);
 
   // A manual scroll means the reader has chosen their own position. Streaming
   // updates must not recapture the viewport until they explicitly resume.

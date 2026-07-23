@@ -291,6 +291,27 @@ describe("text provider adapters", () => {
     expect(result.reportedCost).toEqual({ amount: "0.04", currency: "USD" });
   });
 
+  it("returns both requested OpenAI-compatible image variants", async () => {
+    const imageProfile = { ...profile, providerType: "openai_compatible" as const, baseUrl: "http://images.test" };
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body)).n).toBe(2);
+      return new Response(JSON.stringify({
+        id: "image-pair",
+        data: [{ b64_json: "Zmlyc3Q=" }, { b64_json: "c2Vjb25k" }]
+      }), { status: 200 });
+    });
+    const result = await callImageProvider(imageProfile, {
+      prompt: "Two fictional panorama variants.",
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "high",
+      outputFormat: "png",
+      imageCount: 2
+    }, fetcher as typeof fetch);
+    expect(result.artifacts).toHaveLength(2);
+    expect(result.artifacts.map((artifact) => artifact.source === "base64" ? artifact.base64 : "")).toEqual(["Zmlyc3Q=", "c2Vjb25k"]);
+  });
+
   it("uses OpenRouter's dedicated image-model inventory", async () => {
     const imageProfile = { ...profile, providerType: "openrouter" as const, baseUrl: "https://openrouter.ai/api/v1" };
     const fetcher = vi.fn(async (url: string | URL | Request) => {

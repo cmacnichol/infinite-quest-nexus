@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,
   providerProfileInputSchema,
   providerProfileUpdateSchema,
   providerTextRequestSchema,
@@ -117,6 +118,17 @@ describe("generation contracts", () => {
       expect(parsed.matchingScope).toBe("world");
       expect(parsed.size).toBe("1024x1024");
       expect(parsed.outputFormat).toBe("png");
+      expect(parsed.segmentWordCount).toBe(500);
+      expect(parsed.imagesPerSegment).toBe(1);
+      expect(parsed.segmentPromptMode).toBe("direct");
+      expect(parsed.refinementPrompt).toBe(DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT);
+    });
+
+    it("accepts a bounded campaign-specific refinement prompt", () => {
+      expect(illustrationConfigSchema.parse({ refinementPrompt: "Favor painterly fantasy lighting." }).refinementPrompt)
+        .toBe("Favor painterly fantasy lighting.");
+      expect(illustrationConfigSchema.safeParse({ refinementPrompt: "" }).success).toBe(false);
+      expect(illustrationConfigSchema.safeParse({ refinementPrompt: "x".repeat(4_001) }).success).toBe(false);
     });
 
     it("requires providerProfileId when enabled", () => {

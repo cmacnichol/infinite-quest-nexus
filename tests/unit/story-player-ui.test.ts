@@ -46,8 +46,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('id="editStateDialog"');
     expect(storyHtml).toContain('id="worldSetupDialog"');
     expect(storyHtml).toContain('id="imagePromptDialog"');
-    expect(storyHtml).toContain('id="assetLibraryDialog"');
-    expect(storyHtml).toContain('id="assetLibraryFilters"');
+    expect(storyHtml).not.toContain('id="assetLibraryDialog"');
+    expect(storyHtml).not.toContain('id="assetLibraryFilters"');
     expect(storyHtml).toContain('/vendor/photoswipe/photoswipe.css');
     expect(storyHtml).toContain('id="editResponseDialog"');
     expect(storyHtml).toContain('id="retryPromptDialog"');
@@ -69,14 +69,20 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('await loadCampaign(state.campaignId);');
   });
 
-  it("renders scenes with formatted narration, inline illustrations, choices taken, and RPG roll cards", () => {
+  it("renders story narration separately from the illustration rail", () => {
     expect(storyScript).toContain('function renderScene(turn, index)');
-    expect(storyScript).toContain('sceneDiv.className = `scene${hasImage ? "" : " no-image"}`;');
+    expect(storyScript).toContain('sceneDiv.className = "scene";');
     expect(storyScript).toContain('class="narration"');
     expect(storyScript).toContain('class="action-tag"');
     expect(storyScript).toContain('class="roll-disclosure"');
     expect(storyScript).toContain('class="roll-card ${passed ? "success" : "failure"}"');
-    expect(storyScript).toContain('class="image-wrap"');
+    expect(storyHtml).toContain('id="storyIllustrationPanel"');
+    expect(storyHtml).toContain('id="storyIllustrationContent"');
+    expect(storyScript).toContain("function renderStoryIllustration()");
+    expect(storyScript).toContain('class="image-wrap${selected ? "" : " image-job-placeholder"}"');
+    expect(storyCss).toContain(".layout.has-illustration {");
+    expect(storyCss).toContain(".story-illustration-panel {");
+    expect(storyCss).toContain("position: sticky;");
     expect(storyScript).toContain('if (state.turns.length === 0) {');
     expect(storyScript).toContain('class="empty"');
   });
@@ -152,6 +158,17 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyCss).not.toContain('.turn-streaming-preview {\n  display: flex;');
   });
 
+  it("uses a transactional generation display that restores the accepted turn only on failure", () => {
+    expect(storyScript).toContain("function beginGenerationDisplay(action)");
+    expect(storyScript).toContain("function restoreGenerationDisplay()");
+    expect(storyScript).toContain("function commitGenerationDisplay()");
+    expect(storyScript).toContain("container.replaceChildren();");
+    expect(storyScript).toContain("beginGenerationDisplay(action);");
+    expect(storyScript).toContain("restoreGenerationDisplay();");
+    expect(storyScript).toContain("commitGenerationDisplay();");
+    expect(storyScript).toContain("state.generationDisplayActive");
+  });
+
   it("pauses streaming auto-follow after manual scrolling and allows explicit resume", () => {
     expect(storyScript).toContain("streamingAutoFollow: true");
     expect(storyScript).toContain('window.addEventListener("wheel", pauseStreamingAutoFollow');
@@ -221,20 +238,51 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyCss).toContain('.history-card.selected, .history-card[aria-pressed="true"]');
   });
 
-  it("manages inline illustrations, prompt editing, polling, and per-scene regeneration", () => {
+  it("manages the enabled illustration rail, prompt editing, polling, and generation activity", () => {
     expect(storyScript).toContain('function pollImageJobs()');
     expect(storyScript).toContain('function renderSceneImageJob(job)');
+    expect(storyScript).toContain('function recordImageJobActivity(job, options = {})');
+    expect(storyScript).toContain('recordActivity("success", "Illustration generated"');
+    expect(storyScript).toContain('recordActivity("error", "Illustration generation failed"');
+    expect(storyScript).toContain('recordActivity("image", "Illustration generation progress"');
     expect(storyScript).toContain('["queued", "generating", "provider_pending", "downloading"]');
     expect(storyScript).toContain('aria-label", `Illustration generation progress');
     expect(storyScript).toContain('/campaigns/${state.campaignId}/image-jobs');
+    expect(storyScript).toContain('/campaigns/${campaignId}/illustration-config');
+    expect(storyScript).toContain('state.illustrationConfig?.sourcePolicy !== "off"');
     expect(storyScript).toContain('function openImagePromptEditor(turnId)');
     expect(storyScript).toContain('async function regenerateIllustration(turnId, prompt)');
     expect(storyScript).toContain('/turns/${turnId}/illustrations');
-    expect(storyScript).toContain('data-action="regenerate-image"');
-    expect(storyScript).toContain('data-action="find-library-match"');
-    expect(storyScript).toContain('data-action="why-image"');
-    expect(storyScript).toContain('data-action="remove-image"');
+    expect(storyScript).toContain('data-action="edit-segment-image-prompt"');
+    expect(storyScript).toContain('data-action="regenerate-segment-image"');
+    expect(storyScript).toContain('data-action="why-segment-image"');
+    expect(storyScript).not.toContain('class="segment-image-more"');
+    expect(storyScript).toContain('aria-label="Preview or edit this image prompt"');
+    expect(storyScript).toContain('aria-label="Regenerate only this image"');
+    expect(storyScript).not.toContain('aria-label="More image controls"');
+    expect(storyCss).toContain(".segment-image-icon { width: 34px;");
+    expect(storyScript).toContain("function openSegmentImagePromptEditor(segmentId, variantIndex)");
+    expect(storyScript).toContain("async function regenerateSegmentImage(segmentId, variantIndex, prompt)");
+    expect(storyScript).toContain("function whySegmentImage(segmentId, variantIndex)");
+    expect(storyScript).not.toContain("async function removeSegmentImage(segmentId, variantIndex)");
+    expect(storyScript).toContain('/illustration-segments/${segmentId}/images');
+    expect(storyScript).toContain("const isCurrentTurn = turnIndex === state.turns.length - 1;");
+    expect(storyHtml).toContain('id="imagePromptDialogTitle"');
     expect(storyScript).toContain('async function pollIllustrationResolution(turnId)');
+    expect(storyScript).not.toContain("function installIllustrationSegmentObserver()");
+    expect(storyScript).toContain("function segmentIllustrationMarkup(turn, turnIndex, segment, segmentCount)");
+    expect(storyScript).toContain('class="segment-illustration-sticky"');
+    expect(storyScript).toContain('class="segment-illustration-content" data-segment-id=');
+    expect(storyScript).toContain('data-action="generate-turn-segments"');
+    expect(storyScript).toContain('data-action="rebuild-turn-segments"');
+    expect(storyScript).toContain('data-action="previous-segment-image"');
+    expect(storyScript).toContain('data-action="next-segment-image"');
+    expect(storyCss).toContain(".narration-segment {");
+    expect(storyCss).toContain(".segment-illustration-sticky { position: sticky; top: 76px; }");
+    expect(storyCss).toContain(".segment-illustration-content .image-wrap { position: relative;");
+    expect(storyCss).toContain(".layout.has-segmented-illustrations .story-shell");
+    expect(storyCss).toContain("overflow: clip;");
+    expect(storyCss).toContain(".illustration-carousel {");
   });
 
   it("edits authoritative current state while keeping history inspection under the Turn Pill", () => {
