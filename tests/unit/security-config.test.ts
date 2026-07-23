@@ -2,6 +2,21 @@ import { afterEach, describe, expect, it } from "vitest";
 import { loadRuntimeConfig } from "../../packages/database/src/config.js";
 
 const originalEnvironment = { ...process.env };
+const securitySettingNames = [
+  "CORS_ALLOWED_ORIGINS",
+  "PROVIDER_NETWORK_ALLOWLIST",
+  "CSP_IMAGE_ALLOWED_ORIGINS",
+  "API_DEFAULT_BODY_LIMIT_BYTES",
+  "API_IMPORT_BODY_LIMIT_BYTES",
+  "API_ASSET_BODY_LIMIT_BYTES",
+  "API_RATE_LIMIT_WINDOW_SECONDS",
+  "API_RATE_LIMIT_PROVIDER_REQUESTS",
+  "API_RATE_LIMIT_GENERATION_REQUESTS",
+  "API_RATE_LIMIT_IMPORT_REQUESTS",
+  "API_CONCURRENCY_PROVIDER_REQUESTS",
+  "API_CONCURRENCY_IMPORT_REQUESTS",
+  "TRUST_PROXY_HOPS"
+] as const;
 
 afterEach(() => {
   process.env = { ...originalEnvironment };
@@ -9,9 +24,7 @@ afterEach(() => {
 
 function minimumEnvironment(): void {
   process.env.DATABASE_URL = "postgresql://test@localhost/test";
-  delete process.env.CORS_ALLOWED_ORIGINS;
-  delete process.env.PROVIDER_NETWORK_ALLOWLIST;
-  delete process.env.CSP_IMAGE_ALLOWED_ORIGINS;
+  for (const settingName of securitySettingNames) delete process.env[settingName];
 }
 
 describe("runtime security configuration", () => {
@@ -49,6 +62,13 @@ describe("runtime security configuration", () => {
       "host.docker.internal",
       "10.20.0.0/16"
     ]);
+  });
+
+  it("rejects provider CIDR entries with multiple slashes", () => {
+    minimumEnvironment();
+    process.env.PROVIDER_NETWORK_ALLOWLIST = "10.20.0.0/16/extra";
+
+    expect(() => loadRuntimeConfig()).toThrow("PROVIDER_NETWORK_ALLOWLIST");
   });
 
   it("fails instead of clamping invalid security limits", () => {

@@ -66,10 +66,14 @@ const BUILT_IN_PROVIDER_ALLOWLIST = ["localhost", "127.0.0.0/8", "::1/128"] as c
 
 function normalizeProviderAllowlistEntry(value: string): string {
   const entry = value.trim().toLowerCase();
-  const [address = "", prefixText] = entry.split("/");
+  const cidrParts = entry.split("/");
+  if (cidrParts.length > 2) {
+    throw new Error(`PROVIDER_NETWORK_ALLOWLIST contains an invalid CIDR '${value}'.`);
+  }
+  const [address = "", prefixText] = cidrParts;
   if (prefixText !== undefined) {
     const family = isIP(address);
-    const prefix = Number(prefixText);
+    const prefix = /^\d+$/.test(prefixText) ? Number(prefixText) : Number.NaN;
     const maximum = family === 4 ? 32 : family === 6 ? 128 : -1;
     if (!Number.isInteger(prefix) || prefix < 0 || prefix > maximum) {
       throw new Error(`PROVIDER_NETWORK_ALLOWLIST contains an invalid CIDR '${value}'.`);
