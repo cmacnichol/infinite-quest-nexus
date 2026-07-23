@@ -118,85 +118,51 @@
           <p>Drafts are editable. Published versions are immutable, and existing campaigns stay pinned until explicitly migrated.</p>
         </div>
         <div class="button-row">
-          <label class="compact-field">New world title<input id="newWorldTitle" maxlength="200" placeholder="Name a new world"></label>
-          <label class="toggle-field compact-field"><input id="newWorldGenerateCover" type="checkbox"> Generate cover</label>
           <button id="newWorld" class="button primary" type="button">New world</button>
           <button id="refreshWorlds" class="icon-button" type="button" aria-label="Refresh worlds">↻</button>
         </div>
       </div>
-      <div class="world-workspace">
-        <aside>
-          <div id="worldList" class="world-list"><p class="muted">Loading worlds…</p></div>
-        </aside>
-        <form id="worldForm" class="world-form">
-          <div class="world-editor-heading">
-            <div>
-              <h3 id="worldEditorTitle">Select or create a world</h3>
-              <p id="worldEditorMeta" class="muted">No world draft is selected.</p>
-            </div>
-            <label>Published version<select id="worldVersionSelect" disabled><option value="">No published versions</option></select></label>
-          </div>
-          <div class="world-tabs" data-tab-group="world-editor">
-            <button type="button" class="tab-button active" data-tab-target="tab-overview">Overview</button>
-            <button type="button" class="tab-button" data-tab-target="tab-lore">Lore</button>
-            <button type="button" class="tab-button" data-tab-target="tab-mechanics">Mechanics & Characters</button>
-          </div>
-          <div class="world-fields tab-content active" id="tab-overview" data-tab-group="world-editor">
-            <label>Title<input id="worldTitle" required maxlength="200" disabled></label>
-            <label>Genre<input id="worldGenre" maxlength="2000" disabled></label>
-            <label>Tone<input id="worldTone" maxlength="2000" disabled></label>
-            <label class="wide-field">Release notes<input id="worldReleaseNotes" maxlength="10000" disabled placeholder="Describe this published version without changing canon"></label>
-            <section class="wide-field world-cover-editor" aria-labelledby="worldCoverTitle">
-              <div class="campaign-settings-heading">
-                <div>
-                  <strong id="worldCoverTitle">World cover</strong>
-                  <span class="field-note">Generated asynchronously with the default image provider. Cover failures do not affect world drafts or publication.</span>
-                </div>
-              </div>
-              <img id="worldCoverPreview" class="world-cover-preview hidden" alt="Selected world cover">
-              <label>Cover prompt (optional)<textarea id="worldCoverPrompt" rows="3" maxlength="20000" disabled placeholder="Leave blank to build a fiction-only prompt from this world's title, genre, tone, and premise."></textarea></label>
-              <div class="button-row">
-                <button id="chooseWorldCover" class="button secondary" type="button" disabled>Choose from library</button>
-                <button id="generateWorldCover" class="button secondary" type="button" disabled>Generate cover</button>
-              </div>
-              <div id="worldCoverStatus" class="status">Select or create a world to generate cover artwork.</div>
-            </section>
-          </div>
-          <div class="world-fields tab-content" id="tab-lore" data-tab-group="world-editor">
-            <label class="wide-field">Premise<textarea id="worldPremise" rows="3" maxlength="200000" disabled></textarea></label>
-            <label class="wide-field">Background and canon<textarea id="worldBackground" rows="6" maxlength="200000" disabled></textarea></label>
-            <label class="wide-field">Opening action<textarea id="worldFirstAction" rows="2" maxlength="200000" disabled></textarea></label>
-          </div>
-          <div class="world-fields tab-content" id="tab-mechanics" data-tab-group="world-editor">
-            <label class="wide-field">Rules<textarea id="worldRules" rows="3" maxlength="200000" disabled></textarea></label>
-            <div class="wide-field character-roster-field">
-              <div class="character-roster-heading">
-                <strong>Playable character roster</strong>
-                <button id="addPlayableCharacter" class="button secondary compact-button" type="button" disabled>+ Add character</button>
-              </div>
-              <span class="field-note">Playable characters can be authored, imported, or generated. A campaign snapshots the selected character from its published world version.</span>
-              <div id="playableCharacterRoster" class="character-roster"><span class="muted">No playable characters yet. This draft can be saved, but a published version without a character is not campaign-ready.</span></div>
-            </div>
-          </div>
-          <div class="button-row world-actions">
-            <button id="saveWorldDraft" class="button primary" type="submit" disabled>Save draft</button>
-            <button id="publishWorld" class="button secondary" type="button" disabled>Publish version</button>
-            <details class="dropdown-menu">
-              <summary class="button secondary">More actions</summary>
-              <div class="dropdown-content">
-                <button id="forkWorldModalBtn" class="button secondary" type="button" disabled>Fork selected version</button>
-                <button id="createCampaignModalBtn" class="button secondary" type="button" disabled>Create campaign</button>
-                <button id="exportWorld" class="button secondary" type="button" disabled>Export version</button>
-                <button id="deleteWorldVersion" class="button danger" type="button" disabled>Delete selected version</button>
-                <button id="archiveWorld" class="button danger" type="button" disabled>Archive</button>
-                <button id="deleteWorld" class="button danger" type="button" disabled>Delete world</button>
-              </div>
-            </details>
-          </div>
-          <div id="worldCampaignReadiness" class="status" role="status" aria-live="polite">Publish a world version with at least one playable character before creating a campaign.</div>
-          <div id="worldStatus" class="status" role="status" aria-live="polite">World content is stored in PostgreSQL, never embedded in this client.</div>
-        </form>
+      <div class="world-library-toolbar">
+        <label class="carousel-search"><span class="sr-only">Search managed worlds</span><span aria-hidden="true">⌕</span><input id="managementWorldSearch" type="search" placeholder="Search worlds by title, genre, tone, or premise"></label>
+        <div id="managementWorldFilters" class="world-filter-chips" aria-label="Filter worlds by status">
+          <button class="active" type="button" data-world-filter="all" aria-pressed="true">All</button>
+          <button type="button" data-world-filter="draft" aria-pressed="false">Draft</button>
+          <button type="button" data-world-filter="published" aria-pressed="false">Published</button>
+          <button type="button" data-world-filter="archived" aria-pressed="false">Archived</button>
+        </div>
+        <div class="carousel-buttons"><button id="managementWorldPrev" type="button" aria-label="Previous worlds">←</button><button id="managementWorldNext" type="button" aria-label="Next worlds">→</button></div>
       </div>
+      <div id="worldManagementCarousel" class="card-carousel management-world-carousel" tabindex="0" aria-live="polite"><p class="carousel-empty">Loading worlds…</p></div>
+      <section id="worldSelectionPanel" class="selected-world-panel hidden" aria-labelledby="worldEditorTitle">
+        <div class="selected-world-heading">
+          <div>
+            <p class="eyebrow">Selected world</p>
+            <h3 id="worldEditorTitle">Select a world</h3>
+            <p id="worldEditorMeta" class="muted">Choose a card to manage its draft and versions.</p>
+          </div>
+          <button id="editWorldDraft" class="button primary" type="button" disabled>Edit draft</button>
+        </div>
+        <div class="selected-world-versioning">
+          <label>Published version<select id="worldVersionSelect" disabled><option value="">No published versions</option></select></label>
+          <label>Release notes for next version<input id="worldReleaseNotes" maxlength="10000" disabled placeholder="Describe this immutable publication"></label>
+          <button id="publishWorld" class="button secondary" type="button" disabled>Publish version</button>
+        </div>
+        <div class="button-row world-actions">
+          <button id="createCampaignModalBtn" class="button secondary" type="button" disabled>Create campaign</button>
+          <button id="forkWorldModalBtn" class="button secondary" type="button" disabled>Fork selected version</button>
+          <button id="exportWorld" class="button secondary" type="button" disabled>Export version</button>
+          <details class="dropdown-menu">
+            <summary class="button secondary">More actions</summary>
+            <div class="dropdown-content">
+              <button id="deleteWorldVersion" class="button danger" type="button" disabled>Delete selected version</button>
+              <button id="archiveWorld" class="button danger" type="button" disabled>Archive</button>
+              <button id="deleteWorld" class="button danger" type="button" disabled>Delete world</button>
+            </div>
+          </details>
+        </div>
+        <div id="worldCampaignReadiness" class="status" role="status" aria-live="polite">Select a world to check campaign readiness.</div>
+      </section>
+      <div id="worldStatus" class="status" role="status" aria-live="polite">World content is stored in PostgreSQL, never embedded in this client.</div>
     </section>
 
     <section id="campaigns" class="workspace anchor-section world-management">
@@ -718,6 +684,76 @@
       <div class="button-row confirm-actions">
         <button id="cancelProviderEdit" class="button secondary" type="button">Cancel</button>
         <button id="saveProvider" class="button primary" type="submit">Save provider</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="worldAuthorDialog" class="confirm-dialog world-author-dialog" aria-labelledby="worldAuthorDialogTitle">
+    <form id="worldForm" novalidate>
+      <div class="character-dialog-heading">
+        <p class="eyebrow">World Library</p>
+        <h2 id="worldAuthorDialogTitle">Create world</h2>
+        <p id="worldAuthorDialogDescription">Author a reusable world draft. Nothing is published until you choose Publish version.</p>
+      </div>
+      <details id="worldGenerator" class="character-generator">
+        <summary>Generate a complete world with the default text model</summary>
+        <div class="world-generator-fields">
+          <label>World concept or prompt
+            <textarea id="worldGeneratorPrompt" rows="4" maxlength="20000" placeholder="Describe the setting, genre, tone, central conflict, lore, and kinds of playable protagonists you want."></textarea>
+          </label>
+          <button id="generateWorldPreview" class="button secondary" type="button">Generate world</button>
+        </div>
+        <p class="field-note">Generation fills this form with complete world fields and 3–4 playable characters. Review everything before creating the draft.</p>
+        <p id="worldGeneratorAvailability" class="field-note"></p>
+      </details>
+      <div class="world-tabs" data-tab-group="world-author">
+        <button type="button" class="tab-button active" data-tab-target="world-author-overview">Overview</button>
+        <button type="button" class="tab-button" data-tab-target="world-author-lore">Lore</button>
+        <button type="button" class="tab-button" data-tab-target="world-author-mechanics">Mechanics &amp; Characters</button>
+      </div>
+      <div class="world-fields tab-content active" id="world-author-overview" data-tab-group="world-author">
+        <label>Title<input id="worldTitle" required maxlength="200"></label>
+        <label>Genre<input id="worldGenre" maxlength="2000"></label>
+        <label>Tone<input id="worldTone" maxlength="2000"></label>
+      </div>
+      <div class="world-fields tab-content" id="world-author-lore" data-tab-group="world-author">
+        <label class="wide-field">Premise<textarea id="worldPremise" rows="3" maxlength="200000"></textarea></label>
+        <label class="wide-field">Background and canon<textarea id="worldBackground" rows="6" maxlength="200000"></textarea></label>
+        <label class="wide-field">Opening action<textarea id="worldFirstAction" rows="2" maxlength="200000"></textarea></label>
+      </div>
+      <div class="world-fields tab-content" id="world-author-mechanics" data-tab-group="world-author">
+        <label class="wide-field">Rules<textarea id="worldRules" rows="3" maxlength="200000"></textarea></label>
+        <div class="wide-field character-roster-field">
+          <div class="character-roster-heading">
+            <strong>Playable character roster</strong>
+            <button id="addPlayableCharacter" class="button secondary compact-button" type="button">+ Add character</button>
+          </div>
+          <span class="field-note">Playable characters can be authored, imported, or generated. A published version requires at least one complete character before it can start a campaign.</span>
+          <div id="playableCharacterRoster" class="character-roster"><span class="muted">No playable characters yet.</span></div>
+          <input id="worldCharacterRevision" type="hidden" value="0">
+        </div>
+      </div>
+      <details id="worldCoverOptions" class="world-cover-editor">
+        <summary>Cover artwork (optional)</summary>
+        <div class="world-cover-option-fields">
+          <img id="worldCoverPreview" class="world-cover-preview hidden" alt="Selected world cover">
+          <div class="world-cover-choice" role="radiogroup" aria-label="Cover artwork action">
+            <label><input id="worldCoverKeep" type="radio" name="worldCoverMode" value="keep" checked><span id="worldCoverKeepLabel">No cover</span></label>
+            <label><input id="worldCoverGenerateMode" type="radio" name="worldCoverMode" value="generate">Generate new cover</label>
+            <label><input id="worldCoverLibraryMode" type="radio" name="worldCoverMode" value="library">Choose from image library</label>
+            <label id="worldCoverRemoveOption" class="hidden"><input id="worldCoverRemoveMode" type="radio" name="worldCoverMode" value="remove">Remove current cover</label>
+          </div>
+          <label id="worldCoverPromptField" class="hidden">Cover prompt (optional)<textarea id="worldCoverPrompt" rows="3" maxlength="20000" placeholder="Leave blank to build a fiction-only prompt from this world's title, genre, tone, and premise."></textarea></label>
+          <button id="chooseWorldCover" class="button secondary hidden" type="button">Choose retained image</button>
+          <div id="worldCoverStatus" class="status">No cover will be applied.</div>
+          <input id="worldCoverAssetId" type="hidden">
+        </div>
+      </details>
+      <div id="worldAuthorStatus" class="status" role="status" aria-live="polite"></div>
+      <div class="button-row character-dialog-actions">
+        <button id="cancelWorldAuthor" class="button secondary" type="button">Cancel</button>
+        <span class="character-action-spacer"></span>
+        <button id="saveWorldDraft" class="button primary" type="submit">Create world</button>
       </div>
     </form>
   </dialog>

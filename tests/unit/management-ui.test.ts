@@ -199,7 +199,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).not.toContain('id="worldCharacter"');
     expect(managementHtml).not.toContain("Legacy/default character guidance");
     expect(managementScript).toContain("function renderPlayableCharacterRoster(characters = [])");
-    expect(managementScript).toContain("playableCharactersFromContent(selectedWorld.draftContent)");
+    expect(managementScript).toContain("playableCharactersFromContent(worldAuthorWorkingContent)");
     expect(managementScript).not.toContain("Legacy/default character");
     expect(managementScript).toContain("async function loadWorldVersionPlayableCharacters()");
     expect(managementScript).toContain('/playable-characters`');
@@ -235,7 +235,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("function openCharacterDialog(characterId = \"\")");
     expect(managementScript).toContain('card.addEventListener("click", () => openCharacterDialog(character.id));');
     expect(managementScript).toContain('elements.addPlayableCharacter.addEventListener("click", () => openCharacterDialog());');
-    expect(managementScript).toContain("async function persistWorldDraft(content)");
+    expect(managementScript).toContain("function updateWorldAuthorCharacters(characters)");
     expect(managementScript).toContain("async function saveCharacterFromModal(event)");
     expect(managementScript).toContain("async function deleteCharacterFromModal()");
     expect(managementScript).toContain("Published versions and existing campaigns remain unchanged.");
@@ -249,9 +249,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('String(provider.defaultModel || "").trim()');
     expect(managementScript).toContain('elements.characterGenerator.classList.toggle("hidden", !available);');
     expect(managementScript).toContain("async function generateCharacterFromPrompt()");
-    expect(managementScript).toContain("/draft/playable-characters/generate");
-    expect(managementScript).toContain("expectedRevision: selectedWorld.draftRevision");
-    expect(managementScript).toContain("Character generated. Review every field, then save to update the world draft.");
+    expect(managementScript).toContain("/api/v1/worlds/playable-characters/generate-preview");
+    expect(managementScript).toContain("content: worldContentFromForm()");
+    expect(managementScript).toContain("Character generated. Review every field, then add it to the world form.");
     const generator = managementScript.match(/async function generateCharacterFromPrompt\(\) \{[\s\S]*?\n\}/)?.[0] || "";
     expect(generator).not.toContain("persistWorldDraft(");
     expect(generator).toContain("elements.characterName.value = previousName;");
@@ -263,7 +263,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("delete overview.character;");
     expect(managementScript).toContain("const currentOverview = worldOverviewWithoutLegacyCharacter(current.world);");
     expect(managementScript).toContain("schemaVersion: 5");
-    expect(managementScript).not.toContain("elements.worldCharacter");
+    expect(managementScript).not.toContain("elements.worldCharacter.value");
     expect(managementScript).not.toContain("overview.character ||");
   });
 
@@ -481,17 +481,45 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).not.toMatch(/cost tracking page/i);
   });
 
-  it("generates durable world covers from both new-world and edit-world workflows", () => {
-    expect(managementHtml).toContain('id="newWorldGenerateCover"');
+  it("uses one world authoring modal and defers durable covers until the draft is saved", () => {
+    expect(managementHtml.match(/id="worldAuthorDialog"/g)).toHaveLength(1);
+    expect(managementHtml).not.toContain('id="newWorldTitle"');
+    expect(managementHtml).not.toContain('id="newWorldGenerateCover"');
     expect(managementHtml).toContain('id="worldCoverPreview"');
     expect(managementHtml).toContain('id="worldCoverPrompt"');
-    expect(managementHtml).toContain('id="generateWorldCover"');
-    expect(managementScript).toContain("async function generateWorldCoverImage()");
+    expect(managementHtml).toContain('id="worldCoverLibraryMode"');
+    expect(managementScript).toContain("async function applyWorldCoverChoice(worldId)");
     expect(managementScript).toContain("async function monitorWorldCoverJob(jobId, worldId)");
     expect(managementScript).toContain("async function resumeWorldCoverJob(worldId, sequence)");
     expect(managementScript).toContain('/api/v1/worlds/${worldId}/cover-job');
     expect(managementScript).toContain("sequence !== worldCoverJobPollSequence");
+    expect(managementScript).toContain("Open Edit draft to retry.");
+    expect(managementScript).toContain("/cover-asset`");
     expect(managementScript).toContain("/cover`");
+  });
+
+  it("uses a searchable status-filtered carousel and keeps versioning on the management page", () => {
+    expect(managementHtml).toContain('id="managementWorldSearch"');
+    expect(managementHtml).toContain('id="managementWorldFilters"');
+    expect(managementHtml).toContain('data-world-filter="all" aria-pressed="true"');
+    expect(managementHtml).toContain('id="worldManagementCarousel"');
+    expect(managementHtml).toContain('id="worldSelectionPanel"');
+    expect(managementHtml).toContain('id="editWorldDraft"');
+    expect(managementHtml.indexOf('id="worldAuthorDialog"')).toBeGreaterThan(managementHtml.indexOf('id="worldSelectionPanel"'));
+    expect(managementScript).toContain("function renderManagementWorlds()");
+    expect(managementScript).toContain("function createManagementWorldCard(world)");
+    expect(managementScript).toContain('card.addEventListener("click", () => void selectWorld(world.id));');
+    expect(managementScript).toContain('openWorldAuthor("edit")');
+  });
+
+  it("generates complete create-mode previews without creating a world", () => {
+    expect(managementHtml).toContain('id="worldGenerator" class="character-generator"');
+    expect(managementHtml).toContain('id="worldGeneratorPrompt"');
+    expect(managementScript).toContain('elements.worldGenerator.classList.toggle("hidden", mode !== "create");');
+    expect(managementScript).toContain('api("/api/v1/worlds/generate-preview"');
+    expect(managementScript).toContain("authoritativeCreateCompleted");
+    const generator = managementScript.match(/async function generateWorldFromPrompt\(\) \{[\s\S]*?\n\}/)?.[0] || "";
+    expect(generator).not.toContain('api("/api/v1/worlds",');
   });
 
   it("places infrequent imports after the campaign workspace", () => {

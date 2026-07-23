@@ -9,6 +9,8 @@ import {
   WORLD_CONTENT_SCHEMA_VERSION,
   worldContentSchema,
   type PlayableCharacterGenerationRequest,
+  type PlayableCharacterGenerationPreviewRequest,
+  type WorldGenerationPreviewRequest,
   type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
 import {
@@ -60,9 +62,50 @@ const convertedWorldSchema = z.object({
   rpg_statistics: z.array(z.unknown()).max(10_000).default([])
 }).passthrough();
 
+const completeConvertedWorldSchema = convertedWorldSchema.superRefine((world, context) => {
+  for (const [key, label] of [
+    ["genre", "genre"],
+    ["tone", "tone"],
+    ["backgroundStory", "backgroundStory"],
+    ["premise", "premise"],
+    ["firstAction", "firstAction"],
+    ["story_rules", "story_rules"]
+  ] as const) {
+    if (!world[key].trim()) context.addIssue({ code: "custom", path: [key], message: `Generated ${label} is required.` });
+  }
+});
+
 
 const supplementCharactersSchema = z.object({
   playable_characters: z.array(convertedPlayableCharacterSchema).max(10).default([])
+});
+
+const completeGeneratedWorldSchema = worldContentSchema.superRefine((content, context) => {
+  const requiredFields: Array<[keyof typeof content.world, string]> = [
+    ["title", "title"],
+    ["genre", "genre"],
+    ["tone", "tone"],
+    ["premise", "premise"],
+    ["backgroundStory", "background and canon"],
+    ["firstAction", "opening action"],
+    ["rules", "rules"]
+  ];
+  for (const [key, label] of requiredFields) {
+    if (!String(content.world[key] || "").trim()) {
+      context.addIssue({ code: "custom", path: ["world", key], message: `Generated ${label} is required.` });
+    }
+  }
+  if (content.playableCharacters.length < 3 || content.playableCharacters.length > 4) {
+    context.addIssue({ code: "custom", path: ["playableCharacters"], message: "Generated worlds require 3 or 4 playable characters." });
+  }
+  content.playableCharacters.forEach((character, index) => {
+    if (!character.characterText.trim()) {
+      context.addIssue({ code: "custom", path: ["playableCharacters", index, "characterText"], message: "Generated character guidance is required." });
+    }
+    if (!character.profile) {
+      context.addIssue({ code: "custom", path: ["playableCharacters", index, "profile"], message: "Generated character profile is required." });
+    }
+  });
 });
 
 function convertedCharacterId(name: string, index: number, supplied = ""): string {
@@ -120,20 +163,19 @@ export async function generateTemplateWorld(
 
   await onProgress?.("generating_world", 30, "Synthesizing world overview and characters via LLM…");
   const prompt = buildTemplateWorldPrompt(input);
-  let result = await callTextProvider(profile, prompt);
+  const result = await callTextProvider(profile, prompt);
 
   let converted: z.infer<typeof convertedWorldSchema>;
   try {
-    converted = convertedWorldSchema.parse(extractJsonObject(result.content));
+    converted = completeConvertedWorldSchema.parse(extractJsonObject(result.content));
   } catch (error) {
-    if (!result.outputLimited) throw error;
-    await onProgress?.("recovering_world", 50, "Output limit reached. Recovering truncated JSON…");
+    await onProgress?.("recovering_world", 50, result.outputLimited ? "Output limit reached. Recovering truncated JSON…" : "Generated world was incomplete. Requesting a complete replacement…");
     const recovered = await callTextProvider(profile, {
       ...prompt,
       ...(result.responseId ? { previousResponseId: result.responseId } : {}),
-      recoveryInput: "The previous JSON was truncated. Return a complete, compact replacement object with title, genre, tone, backgroundStory, premise, firstAction, story_rules, default_triggers, event_triggers, rpg_statistics, and exactly 3-4 distinct entries in playable_characters. Start again at { and close every field and the final }."
+      recoveryInput: `${result.outputLimited ? "The previous JSON was truncated." : "The previous JSON was incomplete or invalid."} Return a complete, compact replacement object with title, genre, tone, backgroundStory, premise, firstAction, story_rules, default_triggers, event_triggers, rpg_statistics, and exactly 3-4 distinct entries in playable_characters. Every character requires id, name, character_text, profile, rpg_statistics, and default_triggers. Start again at { and close every field and the final }.`
     });
-    converted = convertedWorldSchema.parse(extractJsonObject(recovered.content));
+    converted = completeConvertedWorldSchema.parse(extractJsonObject(recovered.content));
   }
 
   let rawCharacters = [...(converted.playable_characters || [])];
@@ -224,38 +266,63 @@ export async function generateTemplateWorld(
   };
 }
 
+export async function generateWorldPreview(
+  pool: DatabasePool,
+  request: WorldGenerationPreviewRequest,
+  credentialSecret: string
+): Promise<{ title: string; content: WorldContent }> {
+  const ownerUserId = await initialOwnerId(pool);
+  const providerProfileId = await resolveEffectiveProviderId(pool, ownerUserId, "text");
+  if (!providerProfileId) {
+    throw Object.assign(new Error("Add a text provider or mark one as default in Provider Management before generating a world."), {
+      statusCode: 409,
+      details: { code: "default_text_provider_unavailable" }
+    });
+  }
+  const incompleteWorldError = () => Object.assign(
+    new Error("The text provider did not return a complete world. Revise the prompt and try again."),
+    { statusCode: 502, details: { code: "incomplete_generated_world" } }
+  );
+  let generated: { title: string; content: WorldContent };
+  try {
+    generated = await generateTemplateWorld(
+      pool,
+      ownerUserId,
+      providerProfileId,
+      credentialSecret,
+      {
+        sourceName: "new-world-prompt",
+        sourceKind: "prompt",
+        title: request.title || "Untitled World",
+        summary: request.prompt,
+        keywords: [],
+        excerpts: [],
+        prompt: request.prompt
+      }
+    );
+  } catch (error) {
+    if (error instanceof z.ZodError || error instanceof SyntaxError) throw incompleteWorldError();
+    throw error;
+  }
+  try {
+    const content = completeGeneratedWorldSchema.parse(generated.content);
+    return { title: content.world.title, content };
+  } catch {
+    throw incompleteWorldError();
+  }
+}
+
 function characterGenerationError(message: string, statusCode: number, code: string): Error {
   return Object.assign(new Error(message), { statusCode, details: { code } });
 }
 
-export async function generatePlayableCharacter(
+async function generatePlayableCharacterCandidate(
   pool: DatabasePool,
-  worldId: string,
-  request: PlayableCharacterGenerationRequest,
+  ownerUserId: string,
+  content: WorldContent,
+  request: { prompt: string; characterId?: string | undefined },
   credentialSecret: string
 ): Promise<{ character: ReturnType<typeof normalizeGeneratedPlayableCharacter> }> {
-  const ownerUserId = await initialOwnerId(pool);
-  const result = await pool.query<{
-    status: string;
-    revision: number;
-    content: WorldContent;
-  }>(
-    `SELECT w.status, wd.revision, wd.content
-       FROM worlds w
-       JOIN world_drafts wd ON wd.world_id = w.id AND wd.owner_user_id = w.owner_user_id
-      WHERE w.id = $1 AND w.owner_user_id = $2`,
-    [worldId, ownerUserId]
-  );
-  const draft = result.rows[0];
-  if (!draft) throw characterGenerationError("World draft not found.", 404, "world_draft_not_found");
-  if (draft.status === "archived") {
-    throw characterGenerationError("Restore the world before generating a character.", 409, "world_archived");
-  }
-  if (draft.revision !== request.expectedRevision) {
-    throw characterGenerationError("The world draft changed. Reload it before generating a character.", 409, "world_draft_revision_conflict");
-  }
-
-  const content = worldContentSchema.parse(draft.content);
   const currentCharacter = request.characterId
     ? content.playableCharacters.find((character) => character.id === request.characterId)
     : undefined;
@@ -318,4 +385,55 @@ export async function generatePlayableCharacter(
       );
     }
   }
+}
+
+export async function generatePlayableCharacterPreview(
+  pool: DatabasePool,
+  request: PlayableCharacterGenerationPreviewRequest,
+  credentialSecret: string
+) {
+  const ownerUserId = await initialOwnerId(pool);
+  return generatePlayableCharacterCandidate(
+    pool,
+    ownerUserId,
+    worldContentSchema.parse(request.content),
+    request,
+    credentialSecret
+  );
+}
+
+export async function generatePlayableCharacter(
+  pool: DatabasePool,
+  worldId: string,
+  request: PlayableCharacterGenerationRequest,
+  credentialSecret: string
+): Promise<{ character: ReturnType<typeof normalizeGeneratedPlayableCharacter> }> {
+  const ownerUserId = await initialOwnerId(pool);
+  const result = await pool.query<{
+    status: string;
+    revision: number;
+    content: WorldContent;
+  }>(
+    `SELECT w.status, wd.revision, wd.content
+       FROM worlds w
+       JOIN world_drafts wd ON wd.world_id = w.id AND wd.owner_user_id = w.owner_user_id
+      WHERE w.id = $1 AND w.owner_user_id = $2`,
+    [worldId, ownerUserId]
+  );
+  const draft = result.rows[0];
+  if (!draft) throw characterGenerationError("World draft not found.", 404, "world_draft_not_found");
+  if (draft.status === "archived") {
+    throw characterGenerationError("Restore the world before generating a character.", 409, "world_archived");
+  }
+  if (draft.revision !== request.expectedRevision) {
+    throw characterGenerationError("The world draft changed. Reload it before generating a character.", 409, "world_draft_revision_conflict");
+  }
+
+  return generatePlayableCharacterCandidate(
+    pool,
+    ownerUserId,
+    worldContentSchema.parse(draft.content),
+    request,
+    credentialSecret
+  );
 }

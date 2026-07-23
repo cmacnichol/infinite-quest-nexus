@@ -118,6 +118,14 @@ export async function listWorlds(pool: DatabasePool) {
             w.forked_from_world_version_id AS "forkedFromWorldVersionId",
             w.created_at AS "createdAt", w.updated_at AS "updatedAt",
             wd.revision AS "draftRevision", wd.updated_at AS "draftUpdatedAt",
+            CASE WHEN wd.content IS NULL THEN NULL ELSE jsonb_build_object(
+              'title', COALESCE(wd.content -> 'world' ->> 'title', ''),
+              'genre', COALESCE(wd.content -> 'world' ->> 'genre', ''),
+              'tone', COALESCE(wd.content -> 'world' ->> 'tone', ''),
+              'premise', COALESCE(wd.content -> 'world' ->> 'premise', ''),
+              'backgroundStory', COALESCE(wd.content -> 'world' ->> 'backgroundStory', ''),
+              'firstAction', COALESCE(wd.content -> 'world' ->> 'firstAction', '')
+            ) END AS "draftPreview",
             latest.id AS "latestVersionId", latest.version_number AS "latestVersionNumber",
             latest.published_at AS "latestPublishedAt", latest.content -> 'world' AS "latestPreview",
             COALESCE(counts.campaign_count, 0) AS "campaignCount"

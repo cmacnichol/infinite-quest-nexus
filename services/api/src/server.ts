@@ -38,8 +38,10 @@ import {
   campaignWorldMigrationSchema,
   playableCharacterGenerationRequestSchema,
   characterProfileOrganizationRequestSchema,
+  playableCharacterGenerationPreviewRequestSchema,
   resourceDeleteSchema,
   worldCreateSchema,
+  worldGenerationPreviewRequestSchema,
   worldDraftUpdateSchema,
   worldForkSchema,
   worldImportRequestSchema,
@@ -101,7 +103,7 @@ import {
   updateWorld,
   updateWorldDraft
 } from "./world-service.js";
-import { generatePlayableCharacter } from "./world-generator-service.js";
+import { generatePlayableCharacter, generatePlayableCharacterPreview, generateWorldPreview } from "./world-generator-service.js";
 import {
   getCampaignCharacterProfile,
   organizeCampaignCharacterProfile,
@@ -358,6 +360,22 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.post("/api/v1/worlds", async (request, reply) => (
     reply.code(201).send(await createWorld(pool, worldCreateSchema.parse(request.body)))
+  ));
+
+  app.post("/api/v1/worlds/generate-preview", async (request) => (
+    generateWorldPreview(
+      pool,
+      worldGenerationPreviewRequestSchema.parse(request.body),
+      config.credentialEncryptionKey
+    )
+  ));
+
+  app.post("/api/v1/worlds/playable-characters/generate-preview", async (request) => (
+    generatePlayableCharacterPreview(
+      pool,
+      playableCharacterGenerationPreviewRequestSchema.parse(request.body),
+      config.credentialEncryptionKey
+    )
   ));
 
   app.get<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId", async (request) => (
