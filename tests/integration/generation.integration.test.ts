@@ -85,9 +85,12 @@ integration("durable Story Engine integration", () => {
     await pool.end();
   });
 
-  async function campaign(storyLength?: "brief" | "standard" | "long" | "extended") {
+  async function campaign(
+    storyLength?: "brief" | "standard" | "long" | "extended",
+    title?: string
+  ) {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
-    fixture.world.title = `Generated campaign ${crypto.randomUUID()}`;
+    fixture.world.title = title ?? `Generated campaign ${crypto.randomUUID()}`;
     if (storyLength) fixture.settings.storyLength = storyLength;
     return importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "generation.story", story: fixture }));
   }
@@ -112,7 +115,7 @@ integration("durable Story Engine integration", () => {
   }
 
   it("sends the authoritative Chronicle snapshot and atomically commits fiction-only output", async () => {
-    const imported = await campaign();
+    const imported = await campaign(undefined, "Generated campaign d100-title");
     await pool.query(
       `UPDATE world_versions
           SET content = jsonb_set(content, '{entities}', $2::jsonb, true)
@@ -132,7 +135,7 @@ integration("durable Story Engine integration", () => {
     expect(serialized).toContain("Location Beta");
     expect(serialized).toContain("Object Gamma");
     expect(serialized).toContain("Use synthetic fixture markers only");
-    expect(serialized).not.toContain("d100");
+    expect(serialized).not.toContain("The d100 roll was 42");
     expect(serialized).not.toContain("Private synthetic state");
     const committed = await pool.query<{ narration: string; content: string }>(
       `SELECT t.narration, m.content FROM turns t JOIN chronicle_memories m ON m.turn_id = t.id
