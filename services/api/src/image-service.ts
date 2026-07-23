@@ -13,6 +13,7 @@ import { logger } from "../../../packages/logger/src/index.js";
 import {
   containsMechanicsLanguage,
   logProviderTransportError,
+  MAX_IMAGE_ARTIFACT_BYTES,
   pollImageProvider,
   submitImageProvider,
   type ImageProviderArtifact,
@@ -512,7 +513,7 @@ async function claimImageJob(pool: DatabasePool, workerId: string, leaseSeconds:
   });
 }
 
-const MAX_ARTIFACT_BYTES = 20 * 1024 * 1024;
+const MAX_ARTIFACT_BYTES = MAX_IMAGE_ARTIFACT_BYTES;
 
 function numberSetting(profile: TextProviderProfile, key: string, fallback: number, minimum: number, maximum: number): number {
   const value = Number(profile.configuration?.[key]);

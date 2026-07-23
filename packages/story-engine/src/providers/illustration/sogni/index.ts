@@ -126,6 +126,19 @@ function normalizeHttpError(response: Response, data: Record<string, any>, fallb
   };
 }
 
+function transportError(error: unknown): Error {
+  if (error instanceof ProviderDestinationNotAllowedError || error instanceof SogniProviderError) return error;
+  const details = error instanceof Error
+    ? `${error.name} ${error.message} ${String((error as Error & { code?: unknown }).code || "")}`
+    : String(error);
+  const timedOut = /(?:abort|timeout)/i.test(details);
+  return new SogniProviderError({
+    code: timedOut ? "provider_request_timeout" : "provider_transport_error",
+    message: timedOut ? "Sogni request timed out." : "Sogni could not be reached.",
+    retryable: true
+  });
+}
+
 async function requestJson(
   profile: SogniProviderProfile,
   path: string,
@@ -141,13 +154,7 @@ async function requestJson(
       signal: init.signal || AbortSignal.timeout(requestTimeoutMs(profile))
     });
   } catch (error) {
-    if (error instanceof ProviderDestinationNotAllowedError) throw error;
-    const timedOut = error instanceof Error && /(?:abort|timeout)/i.test(`${error.name} ${error.message}`);
-    throw new SogniProviderError({
-      code: timedOut ? "provider_request_timeout" : "provider_transport_error",
-      message: timedOut ? "Sogni request timed out." : "Sogni could not be reached.",
-      retryable: true
-    });
+    throw transportError(error);
   }
   let text: string;
   try {
@@ -160,7 +167,7 @@ async function requestJson(
         retryable: false
       });
     }
-    throw error;
+    throw transportError(error);
   }
   let data: Record<string, any> = {};
   try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* normalized below */ }

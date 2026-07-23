@@ -2,6 +2,7 @@ import type { ProviderType } from "../../contracts/src/generation.js";
 import { logger } from "../../logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
 import {
+  MAX_IMAGE_PROVIDER_RESPONSE_BYTES,
   MAX_PROVIDER_JSON_RESPONSE_BYTES,
   MAX_PROVIDER_SSE_RESPONSE_BYTES,
   ProviderResponseTooLargeError,
@@ -347,11 +348,12 @@ async function checkedJson(
   response: Response,
   profile?: TextProviderProfile,
   operation = "request",
-  url = response.url
+  url = response.url,
+  limitBytes = MAX_PROVIDER_JSON_RESPONSE_BYTES
 ): Promise<Record<string, any>> {
   let text = "";
   try {
-    text = await readBoundedResponseText(response, MAX_PROVIDER_JSON_RESPONSE_BYTES);
+    text = await readBoundedResponseText(response, limitBytes);
   } catch (error) {
     if (!profile
       || error instanceof ProviderDestinationNotAllowedError
@@ -410,7 +412,10 @@ export async function ensureLmStudioModelLoaded(
 
 async function readSseStream(
   response: Response,
-  onChunk: (delta: string, accumulated: string) => void | Promise<void>
+  onChunk: (delta: string, accumulated: string) => void | Promise<void>,
+  profile: TextProviderProfile,
+  operation: string,
+  url: string
 ): Promise<{ content: string; finalData: Record<string, any>; allData: Record<string, any>[] }> {
   const reader = response.body?.getReader();
   if (!reader) throw new Error("Response body stream is not readable.");
@@ -421,54 +426,60 @@ async function readSseStream(
   const allData: Record<string, any>[] = [];
   let receivedBytes = 0;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    receivedBytes += value.byteLength;
-    if (receivedBytes > MAX_PROVIDER_SSE_RESPONSE_BYTES) {
-      await reader.cancel();
-      throw new ProviderResponseTooLargeError(MAX_PROVIDER_SSE_RESPONSE_BYTES);
-    }
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n\r?\n/);
-    buffer = lines.pop() || "";
-    for (const block of lines) {
-      const dataLines = block
-        .split(/\r?\n/)
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim());
-      for (const dataStr of dataLines) {
-        if (!dataStr || dataStr === "[DONE]") continue;
-        try {
-          const parsed = JSON.parse(dataStr);
-          allData.push(parsed);
-          finalData = { ...finalData, ...parsed };
-          let delta = "";
-          if (typeof parsed.content === "string" && parsed.type?.includes("delta")) {
-            delta = parsed.content;
-          } else if (parsed.choices?.[0]?.delta?.content !== undefined) {
-            delta = String(parsed.choices[0].delta.content || "");
-          } else if (typeof parsed.choices?.[0]?.text === "string") {
-            delta = parsed.choices[0].text;
-          } else if (Array.isArray(parsed.output)) {
-            const lastMsg = parsed.output.findLast?.((item: any) => item?.type === "message" || item?.type === "message.delta");
-            if (lastMsg?.content && typeof lastMsg.content === "string") {
-              if (lastMsg.content.startsWith(accumulated)) {
-                delta = lastMsg.content.slice(accumulated.length);
-              } else if (!accumulated.startsWith(lastMsg.content)) {
-                delta = lastMsg.content;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > MAX_PROVIDER_SSE_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new ProviderResponseTooLargeError(MAX_PROVIDER_SSE_RESPONSE_BYTES);
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n\r?\n/);
+      buffer = lines.pop() || "";
+      for (const block of lines) {
+        const dataLines = block
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim());
+        for (const dataStr of dataLines) {
+          if (!dataStr || dataStr === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(dataStr);
+            allData.push(parsed);
+            finalData = { ...finalData, ...parsed };
+            let delta = "";
+            if (typeof parsed.content === "string" && parsed.type?.includes("delta")) {
+              delta = parsed.content;
+            } else if (parsed.choices?.[0]?.delta?.content !== undefined) {
+              delta = String(parsed.choices[0].delta.content || "");
+            } else if (typeof parsed.choices?.[0]?.text === "string") {
+              delta = parsed.choices[0].text;
+            } else if (Array.isArray(parsed.output)) {
+              const lastMsg = parsed.output.findLast?.((item: any) => item?.type === "message" || item?.type === "message.delta");
+              if (lastMsg?.content && typeof lastMsg.content === "string") {
+                if (lastMsg.content.startsWith(accumulated)) {
+                  delta = lastMsg.content.slice(accumulated.length);
+                } else if (!accumulated.startsWith(lastMsg.content)) {
+                  delta = lastMsg.content;
+                }
               }
             }
+            if (delta) {
+              accumulated += delta;
+              await onChunk(delta, accumulated);
+            }
+          } catch {
+            // ignore malformed or non-json SSE event data
           }
-          if (delta) {
-            accumulated += delta;
-            await onChunk(delta, accumulated);
-          }
-        } catch {
-          // ignore malformed or non-json SSE event data
         }
       }
     }
+  } catch (error) {
+    throw transportFailure(profile, operation, url, error, responseStartTimes.get(response) ?? Date.now());
+  } finally {
+    reader.releaseLock();
   }
   return { content: accumulated, finalData, allData };
 }
@@ -494,7 +505,7 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
   const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`;
   const response = await providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile, url), body: JSON.stringify(payload) }, transport);
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
-    const { content, finalData, allData } = await readSseStream(response, request.onChunk);
+    const { content, finalData, allData } = await readSseStream(response, request.onChunk, profile, "story generation", url);
     const stats = allData.findLast((item) => item.stats)?.stats || finalData.stats || {};
     const outputTokens = Number(stats.total_output_tokens || 0);
     const finishValues = [
@@ -561,14 +572,30 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
   let response = await send();
   if (!response.ok) {
     const clone = response.clone();
-    const text = await clone.text();
+    const originalCancellation = response.body?.cancel();
+    let text = "";
+    try {
+      text = await readBoundedResponseText(clone, MAX_PROVIDER_JSON_RESPONSE_BYTES);
+    } catch (error) {
+      throw transportFailure(profile, "story generation", url, error, responseStartTimes.get(response) ?? Date.now());
+    } finally {
+      await originalCancellation?.catch(() => undefined);
+    }
     if (/response_format|json.?mode|structured.?output|grammar/i.test(text)) {
       delete payload.response_format;
       response = await send();
+    } else {
+      let data: Record<string, any> = {};
+      try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* response error below includes preview */ }
+      const message = String(data.error?.message || data.error || text || response.statusText).slice(0, 2000);
+      throw Object.assign(new Error(`Provider request failed (${response.status}): ${message}`), {
+        statusCode: response.status,
+        providerMessage: message
+      });
     }
   }
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
-    const { content, finalData, allData } = await readSseStream(response, request.onChunk);
+    const { content, finalData, allData } = await readSseStream(response, request.onChunk, profile, "story generation", url);
     const usageObj = allData.findLast((item) => item.usage)?.usage || finalData.usage || {};
     const finishReason = String(allData.map((item) => item.choices?.[0]?.finish_reason).find(Boolean) || finalData.finish_reason || "");
     const responseId = String(allData.map((item) => item.id).find(Boolean) || finalData.id || "");
@@ -677,7 +704,7 @@ export async function callImageProvider(
     method: "POST",
     headers: headers(profile, url),
     body: JSON.stringify(payload)
-  }, transport), profile, "image generation", url);
+  }, transport), profile, "image generation", url, MAX_IMAGE_PROVIDER_RESPONSE_BYTES);
   const images = Array.isArray(data.data) ? data.data : [];
   const artifacts = images.map((image): ImageProviderArtifact => {
     const base64 = String(image?.b64_json || "").replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "").trim();

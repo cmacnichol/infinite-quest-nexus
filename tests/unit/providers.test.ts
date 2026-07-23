@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { providerProfileInputSchema } from "../../packages/contracts/src/generation.js";
 import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
 import {
+  MAX_IMAGE_PROVIDER_RESPONSE_BYTES,
   MAX_PROVIDER_JSON_RESPONSE_BYTES,
   MAX_PROVIDER_SSE_RESPONSE_BYTES,
   MAX_SOGNI_RESPONSE_BYTES
@@ -345,6 +346,44 @@ describe("text provider adapters", () => {
     expect(result.artifacts.map((artifact) => artifact.source === "base64" ? artifact.base64 : "")).toEqual(["Zmlyc3Q=", "c2Vjb25k"]);
   });
 
+  it("accepts an image response whose decoded artifact exceeds the generic JSON ceiling", async () => {
+    const imageProfile = { ...profile, providerType: "openai_compatible" as const, baseUrl: "http://images.test" };
+    const base64 = Buffer.alloc(MAX_PROVIDER_JSON_RESPONSE_BYTES + 1).toString("base64");
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      id: "large-image",
+      data: [{ b64_json: base64 }]
+    }), { status: 200 }));
+
+    const result = await callImageProvider(imageProfile, {
+      prompt: "A large fictional panorama.",
+      size: "2048x2048",
+      aspectRatio: "1:1",
+      quality: "high",
+      outputFormat: "png"
+    }, createTestProviderTransport(fetcher as typeof fetch));
+
+    expect(result.base64).toHaveLength(base64.length);
+  });
+
+  it("rejects image provider responses beyond the image-specific ceiling", async () => {
+    const imageProfile = { ...profile, providerType: "openai_compatible" as const, baseUrl: "http://images.test" };
+    const fetcher = vi.fn(async () => new Response("{}", {
+      status: 200,
+      headers: { "content-length": String(MAX_IMAGE_PROVIDER_RESPONSE_BYTES + 1) }
+    }));
+
+    await expect(callImageProvider(imageProfile, {
+      prompt: "An oversized fictional panorama.",
+      size: "2048x2048",
+      aspectRatio: "1:1",
+      quality: "high",
+      outputFormat: "png"
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "provider_response_too_large",
+      limitBytes: MAX_IMAGE_PROVIDER_RESPONSE_BYTES
+    });
+  });
+
   it("uses OpenRouter's dedicated image-model inventory", async () => {
     const imageProfile = { ...profile, providerType: "openrouter" as const, baseUrl: "https://openrouter.ai/api/v1" };
     const fetcher = vi.fn(async (url: string | URL | Request) => {
@@ -487,6 +526,36 @@ describe("text provider adapters", () => {
     expect(cancellations).toBe(2);
   });
 
+  it("bounds response-format fallback inspection and does not retry an oversized error response", async () => {
+    let cancelled = false;
+    const fetcher = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"error":"response_format is unsupported"}'));
+      },
+      cancel() {
+        cancelled = true;
+      }
+    }), {
+      status: 400,
+      headers: { "content-length": String(MAX_PROVIDER_JSON_RESPONSE_BYTES + 1) }
+    }));
+    const openAiProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "openai_compatible",
+      baseUrl: "https://api.openai.com/v1"
+    };
+
+    await expect(callTextProvider(openAiProfile, {
+      systemPrompt: "system",
+      input: "input"
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "provider_response_too_large",
+      limitBytes: MAX_PROVIDER_JSON_RESPONSE_BYTES
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(cancelled).toBe(true);
+  });
+
   it("preserves provider destination denials through the public text adapter", async () => {
     const transport = createProviderTransport({
       policy: {
@@ -569,6 +638,47 @@ describe("text provider adapters", () => {
       permanent: true
     });
     expect(cancelled).toBe(true);
+  });
+
+  it("normalizes a post-header SSE body timeout as a provider transport failure", async () => {
+    const bodyTimeout = Object.assign(new Error("Body Timeout Error"), {
+      name: "AbortError",
+      code: "UND_ERR_BODY_TIMEOUT"
+    });
+    const fetcher = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      pull() {
+        throw bodyTimeout;
+      }
+    }), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" }
+    }));
+    const openAiProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "openai_compatible",
+      baseUrl: "https://api.openai.com/v1"
+    };
+
+    let thrownError: unknown;
+    try {
+      await callTextProvider(openAiProfile, {
+        systemPrompt: "system",
+        input: "input",
+        onChunk: vi.fn()
+      }, createTestProviderTransport(fetcher as typeof fetch));
+    } catch (error) {
+      thrownError = error;
+    }
+
+    expect(thrownError).toMatchObject({
+      code: "provider_request_timeout",
+      statusCode: 504
+    });
+    expect(providerTransportErrorDetails(thrownError)).toMatchObject({
+      timedOut: true,
+      transportCode: "UND_ERR_BODY_TIMEOUT",
+      operation: "story generation"
+    });
   });
 
   it("submits a durable Sogni workflow with bearer auth and an idempotency key", async () => {
@@ -706,6 +816,41 @@ describe("text provider adapters", () => {
       normalized: { retryable: false }
     });
     expect(cancelled).toBe(true);
+  });
+
+  it("normalizes a post-header Sogni body abort as a retryable timeout", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni",
+      baseUrl: "https://api.sogni.ai",
+      model: "flux2",
+      apiKey: "sogni-secret"
+    };
+    const bodyTimeout = Object.assign(new Error("Body Timeout Error"), {
+      name: "AbortError",
+      code: "UND_ERR_BODY_TIMEOUT"
+    });
+    const fetcher = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      pull() {
+        throw bodyTimeout;
+      }
+    }), { status: 201 }));
+
+    await expect(submitImageProvider(sogniProfile, {
+      prompt: "A fictional vista.",
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "auto",
+      outputFormat: "png",
+      idempotencyKey: "illustration-job-4:revision-1"
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "provider_request_timeout",
+      permanent: false,
+      normalized: {
+        code: "provider_request_timeout",
+        retryable: true
+      }
+    });
   });
 
   it("preserves provider destination denials through Sogni submission as permanent", async () => {
