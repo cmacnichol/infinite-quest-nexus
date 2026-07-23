@@ -5,6 +5,7 @@ import { storyLengthProfileFromUnknown } from "../../../packages/contracts/src/s
 import { buildTurnFictionMemory, formatLegacySummary, turnNarration } from "../../../packages/story-engine/src/chronicle.js";
 import { estimateTokens, removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { campaignCharacterSeed, campaignProfileFromCharacter, characterSnapshot } from "../../../packages/domain/src/world-characters.js";
+import { buildScopedEntityCatalog, resolveEntityMetadata } from "../../../packages/domain/src/entity-references.js";
 import {
   canonicalizeWorldContent,
   playableCharacterSchema,
@@ -402,6 +403,11 @@ export async function importLegacyStory(
         ? Number(request.story.campaign.characterProfileRevision)
         : 1
       : 0;
+    const entityCatalog = buildScopedEntityCatalog({
+      worldContent: pinnedContent,
+      characterSnapshot: selectedCharacterSnapshot,
+      characterProfile: importedProfile
+    });
 
     const sanitizedSettings = removeProviderSecrets(request.story.settings);
     delete sanitizedSettings.nexusCampaignId;
@@ -520,12 +526,13 @@ export async function importLegacyStory(
       }
 
       const memory = buildTurnFictionMemory(turn, ordinal);
+      const entityMetadata = resolveEntityMetadata(memory.content, entityCatalog);
       if (memory.sanitized) sanitizedMemoryCount += 1;
       await client.query(
         `INSERT INTO chronicle_memories (
            owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal,
-           content, token_estimate, importance, entities, metadata
-         ) VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,$7,$8,$9,$10)`,
+           content, token_estimate, importance, entities, entity_ids, metadata
+         ) VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,$7,$8,$9,$10,$11)`,
         [
           ownerUserId,
           campaignId,
@@ -535,7 +542,8 @@ export async function importLegacyStory(
           memory.content,
           memory.tokenEstimate,
           Math.min(1, 0.45 + ordinal / Math.max(20, request.story.turns.length * 2)),
-          memory.entities,
+          entityMetadata.entities,
+          entityMetadata.entityIds,
           json({ sanitized: memory.sanitized, removedMechanicsSegments: memory.removedMechanicsSegments })
         ]
       );
@@ -546,6 +554,7 @@ export async function importLegacyStory(
     const importedSummary = Boolean(legacySummary);
     if (legacySummary) {
       const summaryTokens = estimateTokens(legacySummary);
+      const entityMetadata = resolveEntityMetadata(legacySummary, entityCatalog);
       await client.query(
         `INSERT INTO summary_checkpoints (
            owner_user_id, campaign_id, through_turn, summary_kind, content, token_estimate
@@ -561,9 +570,11 @@ export async function importLegacyStory(
       await client.query(
         `INSERT INTO chronicle_memories (
            owner_user_id, campaign_id, world_version_id, memory_kind, ordinal,
-           content, token_estimate, importance, metadata
-         ) VALUES ($1,$2,$3,'legacy_summary',0,$4,$5,0.75,$6)`,
-        [ownerUserId, campaignId, worldVersionId, legacySummary, summaryTokens, json({ derivedFromLegacyFullHistory: true })]
+           content, token_estimate, importance, entities, entity_ids, metadata
+         ) VALUES ($1,$2,$3,'legacy_summary',0,$4,$5,0.75,$6,$7,$8)`,
+        [ownerUserId, campaignId, worldVersionId, legacySummary, summaryTokens,
+          entityMetadata.entities, entityMetadata.entityIds,
+          json({ derivedFromLegacyFullHistory: true })]
       );
       memoryCount += 1;
     }

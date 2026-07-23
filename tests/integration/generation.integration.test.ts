@@ -113,6 +113,16 @@ integration("durable Story Engine integration", () => {
 
   it("sends the authoritative Chronicle snapshot and atomically commits fiction-only output", async () => {
     const imported = await campaign();
+    await pool.query(
+      `UPDATE world_versions
+          SET content = jsonb_set(content, '{entities}', $2::jsonb, true)
+        WHERE id = (SELECT world_version_id FROM campaigns WHERE id = $1)`,
+      [imported.campaignId, JSON.stringify([
+        { id: "test-character", name: "Test Character", kind: "character" },
+        { id: "location-gamma", name: "Location Gamma", kind: "location" },
+        { id: "marker-three", name: "Marker Three", kind: "artifact" }
+      ])]
+    );
     replies.push({ content: validStory() });
     const job = await queue(imported.campaignId);
     expect(await runGenerationJob(pool, "story-worker-a", 30, credentialSecret)).toBe(true);
@@ -130,6 +140,35 @@ integration("durable Story Engine integration", () => {
     );
     expect(committed.rows[0]?.narration).toContain("Marker Three");
     expect(committed.rows[0]?.content).not.toMatch(/roll|dice|check/i);
+    const entityMemories = await pool.query<{ memory_kind: string; entity_ids: string[] }>(
+      `SELECT memory_kind, entity_ids
+         FROM chronicle_memories
+        WHERE campaign_id = $1 AND ordinal = 3
+          AND memory_kind = ANY($2::text[])
+        ORDER BY memory_kind`,
+      [imported.campaignId, ["campaign_summary", "canonical_fact", "open_thread", "turn_fiction"]]
+    );
+    expect(entityMemories.rows).toEqual([
+      {
+        memory_kind: "campaign_summary",
+        entity_ids: expect.arrayContaining([
+          "world:test-character",
+          "world:location-gamma",
+          "world:marker-three"
+        ])
+      },
+      { memory_kind: "canonical_fact", entity_ids: ["world:location-gamma"] },
+      { memory_kind: "open_thread", entity_ids: ["world:marker-three"] },
+      {
+        memory_kind: "turn_fiction",
+        entity_ids: expect.arrayContaining(["world:location-gamma", "world:marker-three"])
+      }
+    ]);
+    const canonicalFacts = await pool.query<{ entity_ids: string[] }>(
+      "SELECT entity_ids FROM campaign_canonical_facts WHERE campaign_id = $1 AND source_turn_number = 3",
+      [imported.campaignId]
+    );
+    expect(canonicalFacts.rows).toEqual([{ entity_ids: ["world:location-gamma"] }]);
     const generationResult = await getGenerationResult(pool, job.id);
     expect(generationResult).toMatchObject({
       status: "completed",
