@@ -8,6 +8,20 @@ const managementScript = readFileSync("apps/web/public/nexus.js", "utf8");
 const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
 
 describe("Nexus management UI contracts", () => {
+  it("dismisses every Nexus modal from its backdrop while protecting unsaved form edits", () => {
+    expect(managementHtml).toContain('id="discardChangesDialog"');
+    expect(managementHtml).toContain("Discard unsaved changes?");
+    expect(managementHtml).toContain('id="deleteDialog" class="confirm-dialog" data-dismiss-mode="cancel"');
+    expect(managementScript).toContain("function modalFormSnapshot(dialog)");
+    expect(managementScript).toContain("function openManagedModal(dialog)");
+    expect(managementScript).toContain("function clickedDialogBackdrop(dialog, event)");
+    expect(managementScript).toContain("function requestModalDismissal(dialog)");
+    expect(managementScript).toContain("function installClickAwayModalDismissal()");
+    expect(managementScript).toContain('dialog.close("cancel")');
+    expect(managementScript).toContain('discardModalTarget?.open');
+    expect(managementScript).toContain("if (dialog === elements.characterDialog && characterModalBusy) return;");
+  });
+
   it("offers an explicit turn-intent provider role without implicit activation", () => {
     expect(managementHtml).toContain('<option value="intent">Turn intent classification</option>');
     expect(managementScript).toContain("Inactive · Story text fallback");

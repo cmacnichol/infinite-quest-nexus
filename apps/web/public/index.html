@@ -542,7 +542,7 @@
     </div>
   </dialog>
 
-  <dialog id="deleteDialog" class="confirm-dialog" aria-labelledby="deleteDialogTitle">
+  <dialog id="deleteDialog" class="confirm-dialog" data-dismiss-mode="cancel" aria-labelledby="deleteDialogTitle">
     <form id="deleteForm" method="dialog">
       <h2 id="deleteDialogTitle">Confirm permanent deletion</h2>
       <p id="deleteDialogMessage"></p>
@@ -772,6 +772,17 @@
       <div class="button-row confirm-actions">
         <button id="cancelTransferCampaign" class="button secondary" type="button">Cancel</button>
         <button id="confirmTransferCampaign" class="button primary" type="submit" disabled>Create transferred campaign</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="discardChangesDialog" class="confirm-dialog" aria-labelledby="discardChangesTitle">
+    <form method="dialog">
+      <h2 id="discardChangesTitle">Discard unsaved changes?</h2>
+      <p>Your edits have not been saved. Keep editing or discard them and close this window.</p>
+      <div class="button-row confirm-actions">
+        <button class="button secondary" type="submit" value="keep" autofocus>Keep editing</button>
+        <button class="button danger" type="submit" value="discard">Discard changes</button>
       </div>
     </form>
   </dialog>

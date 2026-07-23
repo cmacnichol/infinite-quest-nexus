@@ -53,6 +53,62 @@ const SOGNI_DEFAULT_CONFIGURATION = Object.freeze({
   modelDiscoveryEnabled: true
 });
 
+const modalBaselines = new WeakMap();
+let discardModalTarget = null;
+
+function modalFormSnapshot(dialog) {
+  return [...dialog.querySelectorAll("input, select, textarea")].map((control) => {
+    if (control instanceof HTMLInputElement && ["checkbox", "radio"].includes(control.type)) {
+      return `${control.id}:${control.checked}`;
+    }
+    return `${control.id}:${control.value}`;
+  }).join("\u001f");
+}
+
+function openManagedModal(dialog) {
+  if (!dialog || dialog.open) return;
+  refreshModalBaseline(dialog);
+  dialog.showModal();
+}
+
+function refreshModalBaseline(dialog) {
+  modalBaselines.set(dialog, modalFormSnapshot(dialog));
+}
+
+function clickedDialogBackdrop(dialog, event) {
+  const bounds = dialog.getBoundingClientRect();
+  return event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
+}
+
+function requestModalDismissal(dialog) {
+  if (dialog === elements.characterDialog && characterModalBusy) return;
+  if (dialog.dataset.dismissMode === "cancel") {
+    dialog.close("cancel");
+    return;
+  }
+  if (modalBaselines.get(dialog) !== modalFormSnapshot(dialog)) {
+    discardModalTarget = dialog;
+    openManagedModal(elements.discardChangesDialog);
+    return;
+  }
+  dialog.close();
+}
+
+function installClickAwayModalDismissal() {
+  document.querySelectorAll("dialog").forEach((dialog) => {
+    dialog.addEventListener("click", (event) => {
+      if (dialog.open && clickedDialogBackdrop(dialog, event)) requestModalDismissal(dialog);
+    });
+    dialog.addEventListener("close", () => modalBaselines.delete(dialog));
+  });
+  elements.discardChangesDialog.addEventListener("close", () => {
+    if (elements.discardChangesDialog.returnValue === "discard" && discardModalTarget?.open) discardModalTarget.close();
+    discardModalTarget = null;
+  });
+}
+
+installClickAwayModalDismissal();
+
 async function loadApplicationMetadata() {
   try {
     const response = await fetch("/api/v1/meta");
@@ -432,7 +488,7 @@ async function openWorldDetails(worldId) {
   applyArtwork(elements.worldDetailsMedia, preview);
   elements.beginCampaignFromWorld.disabled = !summary.latestVersionId;
   elements.editWorldDetails.href = `#world-library`;
-  elements.worldDetailsDialog.showModal();
+  openManagedModal(elements.worldDetailsDialog);
 }
 
 async function openQuickCampaign() {
@@ -443,7 +499,7 @@ async function openQuickCampaign() {
   elements.quickCampaignCharacter.replaceChildren(new Option("Loading characters…", ""));
   elements.confirmQuickCampaign.disabled = true;
   elements.quickCampaignStatus.className = "status hidden";
-  elements.quickCampaignDialog.showModal();
+  openManagedModal(elements.quickCampaignDialog);
   try {
     const result = await api(`/api/v1/world-versions/${dashboardWorld.latestVersionId}/playable-characters`);
     const characters = Array.isArray(result.characters) ? result.characters : [];
@@ -451,6 +507,7 @@ async function openQuickCampaign() {
     if (!result.readiness?.ready || !characters.length) {
       elements.quickCampaignCharacter.append(new Option("No playable characters available", ""));
       elements.quickCampaignCharacterNote.textContent = result.readiness?.issues?.[0]?.message || "Publish this world with a playable character before creating a campaign.";
+      refreshModalBaseline(elements.quickCampaignDialog);
       return;
     }
     if (characters.length > 1) elements.quickCampaignCharacter.append(new Option("Choose a character", ""));
@@ -460,10 +517,12 @@ async function openQuickCampaign() {
       ? `${characters[0].name} will be snapshotted into the campaign.`
       : `Choose one of ${characters.length} published playable characters.`;
     elements.confirmQuickCampaign.disabled = false;
+    refreshModalBaseline(elements.quickCampaignDialog);
     elements.quickCampaignName.focus();
   } catch (error) {
     elements.quickCampaignStatus.textContent = error.message || String(error);
     elements.quickCampaignStatus.className = "status error";
+    refreshModalBaseline(elements.quickCampaignDialog);
   }
 }
 
@@ -518,7 +577,7 @@ function requestTypedDelete(title, message, details = []) {
   elements.deleteExpectedTitle.textContent = title;
   elements.deleteConfirmationInput.value = "";
   elements.confirmDelete.disabled = true;
-  elements.deleteDialog.showModal();
+  openManagedModal(elements.deleteDialog);
   elements.deleteConfirmationInput.focus();
   return new Promise((resolve) => { pendingDeleteResolve = resolve; });
 }
@@ -717,7 +776,7 @@ function openCharacterDialog(characterId = "") {
   elements.cancelCharacter.textContent = readOnly ? "Close" : "Cancel";
   setCharacterStatus();
   setCharacterModalControls(readOnly);
-  elements.characterDialog.showModal();
+  openManagedModal(elements.characterDialog);
   if (!readOnly) elements.characterName.focus();
 }
 
@@ -1670,7 +1729,7 @@ async function openCampaignTransfer() {
   resetTransferPreview(worlds.some((world) => world.id !== selectedCampaign.worldId && world.status !== "archived" && world.latestVersionNumber)
     ? undefined
     : "No other active world has a published version available.");
-  elements.transferCampaignDialog.showModal();
+  openManagedModal(elements.transferCampaignDialog);
 }
 
 async function commitCampaignTransfer(event) {
@@ -2150,7 +2209,7 @@ function beginProviderEdit(provider) {
   discoveredProfileModels = [];
   elements.providerModelPickerList.replaceChildren();
   elements.providerName.focus();
-  if (elements.providerDialog) elements.providerDialog.showModal();
+  openManagedModal(elements.providerDialog);
   providerMessage(`Editing ${provider.name}. Leave the API key blank to keep the stored credential.`);
   syncProviderRoleSettings();
 }
@@ -2366,7 +2425,7 @@ async function openProviderModelPicker(forceRefresh = false) {
     ? `${discoveredProfileModels.length} cached model entries. Refresh the endpoint to update this inventory.`
     : "Refresh the endpoint to browse its model inventory.";
   elements.providerModelPickerStatus.className = "status";
-  elements.providerModelDialog.showModal();
+  openManagedModal(elements.providerModelDialog);
   renderProviderModelPicker();
   if (forceRefresh || !discoveredProfileModels.length) await refreshProviderModelsFromForm();
   elements.providerModelFilter.focus();
@@ -2388,7 +2447,7 @@ async function openEmbeddingModelPicker(forceRefresh = false) {
     ? `${discoveredEmbeddingModels.length} cached model entries for ${provider.name}. Refresh the endpoint to update this inventory.`
     : `Refresh ${provider.name} to browse its model inventory.`;
   elements.providerModelPickerStatus.className = "status";
-  elements.providerModelDialog.showModal();
+  openManagedModal(elements.providerModelDialog);
   renderProviderModelPicker();
   if (forceRefresh || !discoveredEmbeddingModels.length) await discoverEmbeddingModels();
   elements.providerModelFilter.focus();
@@ -3040,7 +3099,7 @@ function openClipboardImport() {
   elements.clipboardImportStatus.textContent = "No copied content has been validated.";
   elements.clipboardImportStatus.className = "status";
   clipboardGuidance();
-  elements.clipboardImportDialog.showModal();
+  openManagedModal(elements.clipboardImportDialog);
   elements.clipboardImportText.focus();
 }
 
@@ -3313,7 +3372,7 @@ elements.beginCampaignFromWorld?.addEventListener("click", openQuickCampaign);
 elements.cancelQuickCampaign?.addEventListener("click", () => elements.quickCampaignDialog.close());
 elements.quickCampaignForm?.addEventListener("submit", createQuickCampaign);
 elements.advancedCampaignCreation?.addEventListener("click", () => elements.quickCampaignDialog.close());
-elements.openNexusAbout?.addEventListener("click", () => elements.nexusAboutDialog.showModal());
+elements.openNexusAbout?.addEventListener("click", () => openManagedModal(elements.nexusAboutDialog));
 elements.closeNexusAbout?.addEventListener("click", () => elements.nexusAboutDialog.close());
 elements.openNexusUserProfile?.addEventListener("click", openNexusUserProfile);
 elements.closeNexusUserProfile?.addEventListener("click", () => elements.nexusUserProfileDialog.close());
@@ -3397,7 +3456,7 @@ elements.publishWorld.addEventListener("click", publishSelectedWorld);
 if (elements.forkWorldModalBtn) {
   elements.forkWorldModalBtn.addEventListener("click", () => {
     elements.forkWorldTitle.value = `Fork of ${selectedWorld?.world?.title || "World"}`;
-    elements.forkWorldDialog.showModal();
+    openManagedModal(elements.forkWorldDialog);
   });
   elements.cancelForkWorld.addEventListener("click", () => elements.forkWorldDialog.close());
   elements.forkWorldForm.addEventListener("submit", (e) => { e.preventDefault(); forkSelectedWorld(); });
@@ -3411,7 +3470,7 @@ if (elements.createCampaignModalBtn) {
     elements.newCampaignTitle.value = "";
     elements.newCampaignCharacter.value = worldVersionCharacters.length === 1 ? worldVersionCharacters[0].id : "";
     updateCampaignCreationAvailability();
-    elements.createCampaignDialog.showModal();
+    openManagedModal(elements.createCampaignDialog);
   });
   elements.cancelCreateCampaign.addEventListener("click", () => elements.createCampaignDialog.close());
   elements.createCampaignForm.addEventListener("submit", (e) => { e.preventDefault(); createCampaignFromWorld(); });
@@ -3448,7 +3507,7 @@ elements.reindexMemory.addEventListener("click", rebuildMemory);
 if (elements.newProviderButton) {
   elements.newProviderButton.addEventListener("click", () => {
     resetProviderForm();
-    if (elements.providerDialog) elements.providerDialog.showModal();
+    openManagedModal(elements.providerDialog);
   });
 }
 elements.providerForm.addEventListener("submit", saveProvider);
@@ -3528,7 +3587,7 @@ async function openNexusUserProfile() {
     elements.nexusUserProfileDefaultTurnControlStyle.value = sessionUser?.settings?.defaultTurnControlStyle || "flexible_auto";
     elements.nexusUserProfileStatus.textContent = "";
     elements.nexusUserProfileStatus.className = "status hidden";
-    elements.nexusUserProfileDialog.showModal();
+    openManagedModal(elements.nexusUserProfileDialog);
   } catch (error) {
     setStatus(error.message || String(error), "error");
   }

@@ -63,6 +63,54 @@ const state = {
   }
 };
 
+const modalBaselines = new WeakMap();
+let discardModalTarget = null;
+
+function modalFormSnapshot(dialog) {
+  return [...dialog.querySelectorAll("input, select, textarea")].map((control) => {
+    if (control instanceof HTMLInputElement && ["checkbox", "radio"].includes(control.type)) {
+      return `${control.id}:${control.checked}`;
+    }
+    return `${control.id}:${control.value}`;
+  }).join("\u001f");
+}
+
+function openManagedModal(dialog) {
+  if (!dialog || dialog.open || typeof dialog.showModal !== "function") return;
+  modalBaselines.set(dialog, modalFormSnapshot(dialog));
+  dialog.showModal();
+}
+
+function clickedDialogBackdrop(dialog, event) {
+  const bounds = dialog.getBoundingClientRect();
+  return event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
+}
+
+function requestModalDismissal(dialog) {
+  if (modalBaselines.get(dialog) !== modalFormSnapshot(dialog)) {
+    discardModalTarget = dialog;
+    openManagedModal($("discardChangesDialog"));
+    return;
+  }
+  dialog.close();
+}
+
+function installClickAwayModalDismissal() {
+  document.querySelectorAll("dialog").forEach((dialog) => {
+    dialog.addEventListener("click", (event) => {
+      if (dialog.open && clickedDialogBackdrop(dialog, event)) requestModalDismissal(dialog);
+    });
+    dialog.addEventListener("close", () => modalBaselines.delete(dialog));
+  });
+  const discardDialog = $("discardChangesDialog");
+  discardDialog.addEventListener("close", () => {
+    if (discardDialog.returnValue === "discard" && discardModalTarget?.open) discardModalTarget.close();
+    discardModalTarget = null;
+  });
+}
+
+installClickAwayModalDismissal();
+
 // ── API Layer ──────────────────────────────────────────────────
 async function api(path, options = {}) {
   const url = "/api/v1" + path;
@@ -183,7 +231,7 @@ async function checkOnboarding() {
     const hasText = state.providers.some(p => p.providerRole === "text" || !p.providerRole);
     if (!hasText) {
       const dlg = $("gettingStartedDialog");
-      if (dlg && dlg.showModal) dlg.showModal();
+      openManagedModal(dlg);
     }
   } catch (err) {
     recordActivity("error", "Failed to load providers", err.message);
@@ -257,7 +305,7 @@ async function showBackgroundStoryBeforeStart() {
     bodyEl.textContent = background;
     dialog.addEventListener("close", done, { once: true });
     try {
-      dialog.showModal();
+      openManagedModal(dialog);
     } catch (err) {
       dialog.removeEventListener("close", done);
       resolve(false);
@@ -1242,7 +1290,7 @@ function openRetryPromptDialog(originalPrompt) {
     return;
   }
   editor.value = originalPrompt || "";
-  dialog.showModal();
+  openManagedModal(dialog);
   setTimeout(() => {
     editor.focus();
     editor.select();
@@ -1284,7 +1332,7 @@ function promptBranchOrReset(turnIndex) {
   const msg = $("branchStoryMessage");
   if (msg) msg.textContent = `You selected Turn ${turnIndex + 1} (of ${state.turns.length}). Choose what should happen to later turns before continuing.`;
   dlg._turnIndex = turnIndex;
-  if (dlg.showModal) dlg.showModal();
+  openManagedModal(dlg);
 }
 
 // ── Illustration Management ───────────────────────────────────
@@ -1345,7 +1393,7 @@ function openImagePromptEditor(turnId) {
   if (!dlg || !editor) return;
   editor.value = turn.imagePrompt || "";
   dlg._turnId = turnId;
-  if (dlg.showModal) dlg.showModal();
+  openManagedModal(dlg);
 }
 
 async function regenerateIllustration(turnId, prompt) {
@@ -1375,7 +1423,7 @@ async function openEditState() {
     state.runtimeState = await api(`/campaigns/${state.campaignId}/state`);
     renderCurrentRuntimeState();
     switchEditStateTab("overview");
-    if (dlg.showModal) dlg.showModal();
+    openManagedModal(dlg);
   } catch (err) {
     toast(`State could not be loaded: ${err.message}`);
   } finally {
@@ -1490,7 +1538,7 @@ function renderRpgStatsInEditState() {
 function openActivityLog() {
   renderActivityLog();
   const d = $("activityLogDialog");
-  if (d && d.showModal) d.showModal();
+  openManagedModal(d);
 }
 
 function openUserProfile() {
@@ -1504,7 +1552,7 @@ function openUserProfile() {
   if (cbSubmit) cbSubmit.checked = state.user?.settings?.autoSubmitTurnChoices !== false;
   if (cbContinuous) cbContinuous.checked = Boolean(state.user?.settings?.continuousReading);
   if (defaultTurnStyle) defaultTurnStyle.value = state.user?.settings?.defaultTurnControlStyle || "flexible_auto";
-  if (dlg.showModal) dlg.showModal();
+  openManagedModal(dlg);
 }
 
 async function saveUserProfile() {
@@ -1557,7 +1605,7 @@ async function saveUserProfile() {
 
 async function openTurnHistoryModal() {
   const dlg = $("turnHistoryDialog");
-  if (dlg && dlg.showModal) dlg.showModal();
+  openManagedModal(dlg);
   populateHistoryContainer($("turnHistoryModalList"));
 }
 
@@ -1729,7 +1777,7 @@ function openWorldSetup() {
     }
   }
 
-  if (dlg.showModal) dlg.showModal();
+  openManagedModal(dlg);
 }
 
 // ── Export Functions ──────────────────────────────────────────
@@ -1964,7 +2012,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnAboutNexus) btnAboutNexus.addEventListener("click", () => {
     closeNavigationMenus();
     const dialog = $("aboutNexusDialog");
-    if (dialog?.showModal) dialog.showModal();
+    openManagedModal(dialog);
   });
 
   const btnOpenUserProfile = $("btnOpenUserProfile");
@@ -2137,7 +2185,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const dlg = $("activityLogDialog");
     if (!dlg) return;
     renderActivityLog();
-    if (dlg.showModal) dlg.showModal();
+    openManagedModal(dlg);
   }
   const btnCloseActivityLog = $("btnCloseActivityLog");
   if (btnCloseActivityLog) btnCloseActivityLog.addEventListener("click", () => { const d = $("activityLogDialog"); if (d && d.close) d.close(); });
@@ -2170,7 +2218,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (turnIdx < 0) return;
     editor.value = state.turns[turnIdx].narration || "";
     dlg._turnIndex = turnIdx;
-    if (dlg.showModal) dlg.showModal();
+    openManagedModal(dlg);
   });
   const btnEditResponseSave = $("btnEditResponseSave");
   if (btnEditResponseSave) btnEditResponseSave.addEventListener("click", () => {

@@ -490,6 +490,19 @@
     </div>
   </dialog>
 
+  <dialog id="discardChangesDialog" class="world-gen-dialog app-dialog" aria-labelledby="discardChangesTitle">
+    <form method="dialog" class="world-gen-card">
+      <div>
+        <h3 id="discardChangesTitle">Discard unsaved changes?</h3>
+        <p class="mini">Your edits have not been saved. Keep editing or discard them and close this window.</p>
+      </div>
+      <div class="row wrap dialog-actions" style="justify-content:flex-end;">
+        <button type="submit" value="keep" autofocus>Keep editing</button>
+        <button type="submit" value="discard" class="primary">Discard changes</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="/nexus/story.js"></script>
 </body>
 </html>
