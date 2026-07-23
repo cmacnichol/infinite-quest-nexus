@@ -17,6 +17,7 @@ import {
   resolveEffectiveProviderId
 } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
+import { promptFromSnapshot, resolvePromptSnapshot, type PromptSnapshot } from "./prompt-library-service.js";
 
 type TurnControlStyle = "action_only" | "flexible_auto" | "flexible_action" | "flexible_scene";
 
@@ -32,10 +33,11 @@ async function classifyWithProvider(
   campaignId: string,
   profile: TextProviderProfile & { id: string; name: string },
   text: string,
-  operation: string
+  operation: string,
+  promptSnapshot: PromptSnapshot
 ) {
   const result = await callTextProvider({ ...profile, maxOutputTokens: Math.min(profile.maxOutputTokens, 256), temperature: 0 }, {
-    systemPrompt: TURN_INTENT_SYSTEM_PROMPT,
+    systemPrompt: promptFromSnapshot(promptSnapshot, "turn_intent"),
     input: buildTurnIntentPrompt(text)
   });
   if (result.outputLimited) throw new Error("Turn intent classification reached its output limit.");
@@ -71,6 +73,7 @@ export async function classifyTurnInput(
   const campaign = campaignResult.rows[0];
   if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
   const fallback = styleFallback(campaign.turn_control_style, request.preferredFallback);
+  const promptSnapshot = await resolvePromptSnapshot(pool, ownerUserId, campaignId);
   if (campaign.turn_control_style === "action_only") {
     return persistClassification(pool, {
       ownerUserId, campaignId, inputHash: sha256(request.text), classification: "action", resolvedMode: "action",
@@ -84,7 +87,7 @@ export async function classifyTurnInput(
   if (intentProviderId) {
     try {
       const profile = await loadIntentProvider(pool, ownerUserId, intentProviderId, credentialSecret);
-      const result = await classifyWithProvider(pool, ownerUserId, campaignId, profile, request.text, "turn_input_classification");
+      const result = await classifyWithProvider(pool, ownerUserId, campaignId, profile, request.text, "turn_input_classification", promptSnapshot);
       await recordProviderHealth(pool, ownerUserId, intentProviderId, true);
       return persistModelClassification(pool, ownerUserId, campaignId, request.text, result, fallback, intentProviderId, "intent_default");
     } catch (error) {
@@ -96,7 +99,7 @@ export async function classifyTurnInput(
     try {
       const profile = await loadTextProvider(pool, ownerUserId, storyProviderId, credentialSecret);
       const result = await classifyWithProvider(pool, ownerUserId, campaignId, profile, request.text,
-        intentProviderId ? "turn_input_classification_fallback" : "turn_input_classification");
+        intentProviderId ? "turn_input_classification_fallback" : "turn_input_classification", promptSnapshot);
       return persistModelClassification(pool, ownerUserId, campaignId, request.text, result, fallback, storyProviderId, "story_text", failure);
     } catch (error) {
       failure = [failure, error instanceof Error ? error.message : String(error)].filter(Boolean).join("; ");

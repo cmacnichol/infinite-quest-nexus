@@ -56,31 +56,22 @@ export function segmentIllustrationText(text: string, maximumWords: number): Ill
   return segments;
 }
 
-export function directIllustrationPrompt(segmentText: string): string {
-  return [
-    "Create one polished story illustration depicting only the concrete scene described in this passage.",
-    "Preserve the visible characters, setting, mood, actions, and chronology. Do not add typography, captions, logos, interface elements, or non-diegetic overlays.",
-    "",
-    segmentText.trim()
-  ].join("\n");
+export function directIllustrationPrompt(segmentText: string, template?: string): string {
+  const segment = stripMechanicsLeakage(stripPromptPart(segmentText)).text;
+  return renderPromptTemplate(template || PROMPT_TEMPLATE_CATALOG.illustration_direct.defaultContent, { segment });
 }
 
-export function composeIllustrationProviderPrompt(scenePrompt: string, characterVisualReference: string): string {
+export function composeIllustrationProviderPrompt(scenePrompt: string, characterVisualReference: string, template?: string): string {
   const scene = stripMechanicsLeakage(
     stripPromptPart(scenePrompt).split(/\n\s*CANONICAL CHARACTER REFERENCE:\s*\n/i, 1)[0]!.trim()
   ).text;
   const character = stripMechanicsLeakage(stripPromptPart(characterVisualReference)).text;
   if (!character) return scene;
-  return [
-    scene,
-    "",
-    "CANONICAL CHARACTER REFERENCE:",
-    "Use these appearance details only if this character is depicted in the requested scene. Do not add the character merely because this reference is present.",
-    character
-  ].join("\n");
+  return renderPromptTemplate(template || PROMPT_TEMPLATE_CATALOG.illustration_character_reference.defaultContent, { scene, character });
 }
 
 function stripPromptPart(value: string): string {
   return String(value || "").trim();
 }
+import { PROMPT_TEMPLATE_CATALOG, renderPromptTemplate } from "../../contracts/src/prompt-library.js";
 import { stripMechanicsLeakage } from "./text.js";

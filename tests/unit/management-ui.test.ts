@@ -9,6 +9,27 @@ const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
 const imageLibraryScript = readFileSync("apps/web/public/image-library-browser.js", "utf8");
 
 describe("Nexus management UI contracts", () => {
+  it("provides one Setup entrypoint for application and campaign prompt templates", () => {
+    expect(managementHtml).toContain('id="navPromptLibrary"');
+    expect(managementHtml).toContain('id="prompt-library"');
+    expect(managementHtml).toContain('id="promptLibraryScope"');
+    expect(managementHtml).toContain('id="promptLibraryContent"');
+    expect(managementHtml).toContain('id="promptLibraryPreview"');
+    expect(managementHtml).toContain('id="promptLibraryPreviewContent"');
+    expect(managementHtml).toContain('id="promptLibraryCampaign"');
+    expect(managementHtml).toContain('id="promptLibraryCategories"');
+    expect(managementHtml).toContain('id="promptLibraryPrevious"');
+    expect(managementHtml).toContain('id="promptLibraryNext"');
+    expect(managementHtml).toContain('id="promptLibraryDiscard"');
+    expect(managementHtml).toContain('id="promptLibraryUnsaved"');
+    expect(managementScript).toContain('function loadPromptLibrary()');
+    expect(managementScript).toContain('"/api/v1/prompt-library/preview"');
+    expect(managementScript).toContain("promptLibraryEditorBaseline");
+    expect(managementScript).toContain("promptLibraryIsDirty()");
+    expect(managementScript).toContain('"/api/v1/prompt-library/overrides"');
+    expect(managementCss).toContain(".prompt-library-toolbar label.hidden { display: none; }");
+  });
+
   it("explains every structured character field and the AI organizer on hover", () => {
     expect(managementHtml).toContain('id="organizeCharacterProfile"');
     expect(managementHtml).toContain("Uses the current profile, legacy guidance, and world lore, background, and canon");
@@ -105,14 +126,13 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).not.toContain('elements.providerApiKey.value = provider.');
   });
 
-  it("opens the campaign-scoped AI illustration prompt in a readable modal editor", () => {
-    expect(managementHtml).toContain('id="illustrationPromptDialog"');
-    expect(managementHtml).toContain('id="illustrationRefinementPrompt" maxlength="4000"');
-    expect(managementHtml).toContain('id="restoreDefaultIllustrationPrompt"');
-    expect(managementHtml).toContain("Nexus adds a brief fiction-only story context and the excerpt separately.");
-    expect(managementScript).toContain("refinementPrompt: illustrationRefinementPromptValue");
+  it("routes illustration refinement customization through the central Prompt Library", () => {
+    expect(managementHtml).toContain('id="navPromptLibrary"');
+    expect(managementHtml).toContain('id="promptLibraryScope"');
+    expect(managementHtml).toContain('id="promptLibraryContent"');
+    expect(managementScript).not.toContain("refinementPrompt: illustrationRefinementPromptValue");
     expect(managementScript).toContain("function openIllustrationPromptEditor()");
-    expect(managementScript).toContain("function restoreDefaultIllustrationPrompt()");
+    expect(managementScript).toContain('selectedPromptTemplateKey = "illustration_refinement"');
     expect(managementScript).toContain('elements.illustrationSegmentPromptMode.value === "ai_refined"');
   });
 
@@ -319,7 +339,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('storyLengthProfile: elements.campaignStoryLengthProfile.value');
     expect(managementScript).toContain('turnControlStyle: elements.newCampaignTurnControlStyle.value');
     expect(managementScript).toContain('turnControlStyle: elements.campaignTurnControlStyle.value');
-    expect(managementScript).toContain('document.body.dataset.managementView = dashboardView ? "dashboard" : providerView ? "providers" : "worlds"');
+    expect(managementScript).toContain('promptLibraryView ? "prompt-library" : "worlds"');
     expect(managementCss).toContain('body[data-management-view="dashboard"] .world-management');
     expect(managementCss).toContain('body[data-management-view="providers"] .world-management');
     expect(managementCss).toContain('body[data-management-view="worlds"] .provider-management');

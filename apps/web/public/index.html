@@ -26,6 +26,7 @@
           <a id="navWorlds" href="#world-library"><strong>World Management</strong><span>Author and publish reusable worlds</span></a>
           <a id="navCampaigns" href="#campaigns"><strong>Campaign Management</strong><span>Advanced campaign, Chronicle, and image settings</span></a>
           <a id="navProviders" href="#providers"><strong>Provider Setup</strong><span>Text, embedding, intent, and image endpoints</span></a>
+          <a id="navPromptLibrary" href="#prompt-library"><strong>Prompt Library</strong><span>Central application and campaign LLM instructions</span></a>
           <a id="navImports" href="#imports"><strong>Import</strong><span>Bring in portable worlds and campaign backups</span></a>
         </div>
       </div>
@@ -362,6 +363,32 @@
         </details>
         </section>
       </section>
+    </section>
+
+    <section id="prompt-library" class="card prompt-library-card prompt-library-management" aria-labelledby="promptLibraryTitle">
+      <div class="section-heading"><div><p class="eyebrow">Setup</p><h2 id="promptLibraryTitle">Prompt Library</h2><p>Manage every application-owned instruction used with text and image models. Dynamic story data remains separate and is never inserted into these templates.</p></div></div>
+      <div class="prompt-library-toolbar">
+        <label>Find a prompt<input id="promptLibraryFilter" type="search" placeholder="Story, illustration, import…"></label>
+        <label>Scope<select id="promptLibraryScope"><option value="application">Application defaults</option><option value="campaign">Campaign override</option></select></label>
+        <label id="promptLibraryCampaignField" class="hidden">Campaign<select id="promptLibraryCampaign"><option value="">Select a campaign</option></select></label>
+        <span id="promptLibraryCampaignHint" class="field-note">Campaign overrides are available only for runtime prompts.</span>
+      </div>
+      <div id="promptLibraryStatus" class="status">Loading prompt library…</div>
+      <div id="promptLibraryCategories" class="prompt-library-categories" aria-label="Prompt categories"></div>
+      <div class="prompt-library-rail">
+        <button id="promptLibraryPrevious" class="icon-button" type="button" aria-label="Previous prompts">←</button>
+        <div id="promptLibraryList" class="prompt-library-list" tabindex="0"></div>
+        <button id="promptLibraryNext" class="icon-button" type="button" aria-label="Next prompts">→</button>
+      </div>
+      <form id="promptLibraryEditor" class="prompt-library-editor hidden">
+        <h3 id="promptLibraryEditorTitle">Select a prompt</h3>
+        <p id="promptLibraryEditorDescription" class="muted"></p>
+        <p id="promptLibraryEditorMeta" class="field-note"></p>
+        <p id="promptLibraryWarning" class="status warning hidden">Engine-critical prompt: invalid instructions can prevent generation or validation from completing.</p>
+        <label>Instructions<textarea id="promptLibraryContent" rows="14" required></textarea></label>
+        <div class="button-row"><button id="promptLibraryPreview" class="button secondary" type="button" aria-expanded="false">Preview full request</button><button id="promptLibraryReset" class="button secondary" type="button">Reset this scope</button><span id="promptLibraryUnsaved" class="status warning hidden">Unsaved changes</span><button id="promptLibraryDiscard" class="button secondary hidden" type="button">Discard edits</button><span class="character-action-spacer"></span><button class="button primary" type="submit">Save prompt</button></div>
+        <section id="promptLibraryPreviewPanel" class="prompt-library-preview hidden" aria-live="polite"><h4>Sample provider request</h4><p class="field-note">Built on the server with safe sample data. It shows instruction and structured-input sections, estimates tokens, and never calls a provider.</p><pre id="promptLibraryPreviewContent"></pre></section>
+      </form>
     </section>
 
     <section id="imports" class="card import-card world-management" aria-labelledby="import-title">

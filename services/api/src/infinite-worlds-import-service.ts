@@ -26,6 +26,12 @@ import type { FilesystemAssetStore } from "./asset-service.js";
 import { resolvePlayableCharacters } from "../../../packages/domain/src/world-characters.js";
 import { extractCyoaLayers, parseCyoaExport } from "../../../packages/domain/src/world-template.js";
 import { generateTemplateWorld } from "./world-generator-service.js";
+import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
+import {
+  promptFromSnapshot,
+  resolvePromptSnapshot,
+  type PromptSnapshot
+} from "./prompt-library-service.js";
 
 
 export type ImportProgressReport = {
@@ -120,11 +126,19 @@ function matchedStoryCharacterId(content: WorldContent, characterText: string, r
   return exact.length === 1 ? exact[0]?.id : undefined;
 }
 
-function worldConversionPrompt(sourceName: string, sourceText: string): { systemPrompt: string; input: string } {
+export function infiniteWorldsPromptSet(snapshot: PromptSnapshot, batch: number, total: number) {
+  const conversion = promptFromSnapshot(snapshot, "infinite_worlds_conversion");
   return {
-    systemPrompt: `Convert an Infinite Worlds world-editor text export into one compact JSON object. Return JSON only. Preserve source facts and do not invent lore.
-Required fields: title, genre, tone, backgroundStory, playable_characters, premise, firstAction, story_rules, default_triggers, event_triggers, rpg_statistics.
-Return every listed playable character in playable_characters. Each entry needs id, name, character_text, profile, rpg_statistics, and default_triggers. profile uses targeted identity, story, appearance, and unclassifiedNotes fields; populate only source-supported facts and leave unknown values empty. Character skills and tracked items belong only to that character entry; world-wide defaults remain at the top level. Convert skills exactly: 1=20, 2=40, 3=60, 4=80, 5=99. Do not include credentials, model instructions, private reasoning, rolls, checks, dice results, or parser diagnostics in fictional fields.`,
+    conversion,
+    recovery: promptFromSnapshot(snapshot, "infinite_worlds_recovery"),
+    batch: renderPromptTemplate(promptFromSnapshot(snapshot, "infinite_worlds_batch"), { base: conversion, batch, total }),
+    finalTurn: promptFromSnapshot(snapshot, "infinite_worlds_final_turn")
+  };
+}
+
+function worldConversionPrompt(sourceName: string, sourceText: string, systemPrompt: string): { systemPrompt: string; input: string } {
+  return {
+    systemPrompt,
     input: JSON.stringify({ task: "Convert this Infinite Worlds world text for Infinite Quest Nexus.", sourceName, sourceText })
   };
 }
@@ -253,7 +267,8 @@ function convertedPlayableCharacters(converted: z.infer<typeof convertedWorldSch
 
 async function requestConvertedWorld(
   profile: Awaited<ReturnType<typeof loadTextProvider>>,
-  prompt: { systemPrompt: string; input: string }
+  prompt: { systemPrompt: string; input: string },
+  recoveryInput: string
 ) {
   let result = await callTextProvider(profile, prompt);
   try {
@@ -263,7 +278,7 @@ async function requestConvertedWorld(
     result = await callTextProvider(profile, {
       ...prompt,
       ...(result.responseId ? { previousResponseId: result.responseId } : {}),
-      recoveryInput: "The previous JSON was truncated. Return a complete, more compact replacement object. Start again at { and close every field and the final }."
+      recoveryInput
     });
     return convertedWorldSchema.parse(extractJsonObject(result.content));
   }
@@ -273,13 +288,15 @@ async function convertWorldText(pool: DatabasePool, request: InfiniteWorldsImpor
   if (!request.providerProfileId) throw Object.assign(new Error("Select a text provider to convert an Infinite Worlds world TXT export."), { statusCode: 400 });
   const ownerUserId = await initialOwnerId(pool);
   const profile = await loadTextProvider(pool, ownerUserId, request.providerProfileId, credentialSecret, request.model);
+  const snapshot = await resolvePromptSnapshot(pool, ownerUserId);
   const chunks = sourceChunks(request.sourceText);
   if (!chunks.length) throw Object.assign(new Error("The selected world TXT export was empty."), { statusCode: 400 });
   let converted: z.infer<typeof convertedWorldSchema> | null = null;
   for (const [index, chunk] of chunks.entries()) {
-    const basePrompt = worldConversionPrompt(request.sourceName, chunk);
+    const prompts = infiniteWorldsPromptSet(snapshot, index + 1, chunks.length);
+    const basePrompt = worldConversionPrompt(request.sourceName, chunk, prompts.conversion);
     const partial = await requestConvertedWorld(profile, {
-      systemPrompt: `${basePrompt.systemPrompt}\nThis is batch ${index + 1} of ${chunks.length}. Return the full accumulated world object, preserving the supplied partial draft unless this batch corrects it.`,
+      systemPrompt: prompts.batch,
       input: JSON.stringify({
         task: "Accumulate this batch into an Infinite Quest world import.",
         sourceName: request.sourceName,
@@ -288,7 +305,7 @@ async function convertWorldText(pool: DatabasePool, request: InfiniteWorldsImpor
         existingPartialDraft: converted,
         sourceText: chunk
       })
-    });
+    }, prompts.recovery);
     converted = mergeConvertedWorld(converted, partial);
   }
   if (!converted) throw new Error("The text provider did not produce a world import.");
@@ -324,8 +341,9 @@ async function enrichFinalTurn(pool: DatabasePool, request: InfiniteWorldsImport
   if (!request.providerProfileId) throw Object.assign(new Error("Select a text provider to generate missing final-turn choices."), { statusCode: 400 });
   const ownerUserId = await initialOwnerId(pool);
   const profile = await loadTextProvider(pool, ownerUserId, request.providerProfileId, credentialSecret, request.model);
+  const snapshot = await resolvePromptSnapshot(pool, ownerUserId);
   const result = await callTextProvider(profile, {
-    systemPrompt: "Return JSON only with choices (exactly four diegetic next actions), custom_action_suggestion, and image_prompt. Continue from the accepted fictional outcome. Never mention rolls, dice, checks, stats, modifiers, targets, difficulties, parser errors, or private reasoning.",
+    systemPrompt: infiniteWorldsPromptSet(snapshot, 1, 1).finalTurn,
     input: JSON.stringify({ world: story.world, recentTurns: story.turns.slice(-6).map((turn) => ({ action: turn.action, narration: turn.narration ?? turn.story ?? turn.text })) })
   });
   if (result.outputLimited) throw new Error("Final-turn enrichment reached the provider output limit. Import again without enrichment or increase that provider's output allowance.");

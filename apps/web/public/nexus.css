@@ -9,6 +9,25 @@ main, .management-header { width: min(1240px, calc(100% - 32px)); margin: 0 auto
 .product-identity .eyebrow { margin-bottom: 0; }
 .version-badge { display: inline-flex; align-items: center; min-height: 22px; padding: 2px 8px; border: 1px solid color-mix(in srgb, var(--purple) 38%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--purple) 9%, transparent); color: var(--muted); font-size: .72rem; font-weight: 750; letter-spacing: .03em; text-transform: none; }
 .anchor-section, #imports { scroll-margin-top: 78px; }
+
+.prompt-library-toolbar { display: flex; gap: 14px; align-items: end; flex-wrap: wrap; margin: 18px 0; }
+.prompt-library-toolbar label { min-width: 220px; display: grid; gap: 5px; }
+.prompt-library-toolbar label.hidden { display: none; }
+.prompt-library-categories { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.prompt-library-categories button { border: 1px solid var(--line); border-radius: 999px; background: var(--panel-2); color: var(--text); padding: 6px 11px; cursor: pointer; }
+.prompt-library-categories button.active { border-color: var(--purple); background: color-mix(in srgb, var(--panel-2) 70%, var(--purple)); }
+.prompt-library-rail { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; margin: 12px 0 16px; }
+.prompt-library-list { display: flex; gap: 10px; overflow-x: auto; overscroll-behavior-inline: contain; padding: 3px 2px 12px; scroll-snap-type: inline proximity; scrollbar-width: thin; }
+.prompt-library-item { flex: 0 0 min(260px, 78vw); scroll-snap-align: start; text-align: left; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); border-radius: 10px; padding: 12px; cursor: pointer; transition: border-color .15s ease, background .15s ease, transform .15s ease; }
+.prompt-library-item:hover { border-color: var(--purple); background: color-mix(in srgb, var(--panel-2) 82%, var(--purple)); transform: translateY(-1px); }
+.prompt-library-item.active { border-color: var(--purple); outline: 2px solid color-mix(in srgb, var(--purple) 62%, transparent); background: color-mix(in srgb, var(--panel-2) 74%, var(--purple)); }
+.prompt-library-item small { display: block; margin-top: 5px; opacity: .75; }
+.prompt-library-editor { border-top: 1px solid var(--line, #d5d8e0); padding-top: 18px; scroll-margin-top: 16px; }
+.prompt-library-editor > h3 { position: sticky; top: 0; z-index: 2; margin: 0; padding: 10px 0 6px; background: var(--panel); }
+.prompt-library-editor textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.prompt-library-preview { margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); padding: 14px; }
+.prompt-library-preview h4 { margin: 0 0 6px; }
+.prompt-library-preview pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0 0; color: var(--text); font: .82rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 h1, h2, p { margin-top: 0; }
 h1 { margin-bottom: 8px; font-family: Georgia, serif; color: var(--gold); }
 h2 { margin-bottom: 8px; }
@@ -18,9 +37,14 @@ p { color: var(--muted); line-height: 1.55; }
 .provider-card, .world-library-card { margin-bottom: 18px; }
 body[data-management-view="dashboard"] .world-management,
 body[data-management-view="dashboard"] .provider-management,
+body[data-management-view="dashboard"] .prompt-library-management,
 body[data-management-view="dashboard"] .management-header,
 body[data-management-view="providers"] .world-management,
+body[data-management-view="providers"] .prompt-library-management,
 body[data-management-view="worlds"] .provider-management,
+body[data-management-view="worlds"] .prompt-library-management,
+body[data-management-view="prompt-library"] .world-management,
+body[data-management-view="prompt-library"] .provider-management,
 body:not([data-management-view="dashboard"]) .dashboard-home { display: none; }
 .provider-form { display: flex; flex-direction: column; gap: 16px; }
 .provider-model-settings { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: start; }

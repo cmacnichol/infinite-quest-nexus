@@ -15,6 +15,7 @@ import {
 import { effectiveCampaignCharacter } from "../../../packages/domain/src/world-characters.js";
 import { callTextProvider, extractJsonObject } from "../../../packages/story-engine/src/index.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
+import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
 
 export const CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION = "character-profile-organizer-v2";
 
@@ -185,7 +186,8 @@ export async function validateOrganizerResultWithRepair(
   }
 }
 
-export function characterProfileOrganizerPrompt(): string {
+export function characterProfileOrganizerPrompt(template?: string): string {
+  if (template) return template.replaceAll("{{outputTemplate}}", JSON.stringify(CHARACTER_PROFILE_ORGANIZER_OUTPUT_TEMPLATE, null, 2)).replaceAll("{{protocol}}", CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION);
   return `You strictly reorganize existing character facts for Infinite Quest Nexus.
 Return one JSON object only. Do not return Markdown, prose before or after JSON, comments, null values, or additional keys.
 
@@ -211,8 +213,9 @@ ${JSON.stringify(CHARACTER_PROFILE_ORGANIZER_OUTPUT_TEMPLATE, null, 2)}
 Protocol: ${CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION}.`;
 }
 
-export function characterProfileOrganizerRepairPrompt(): string {
-  return `${characterProfileOrganizerPrompt()}
+export function characterProfileOrganizerRepairPrompt(baseTemplate?: string, repairTemplate?: string): string {
+  if (repairTemplate) return repairTemplate.replaceAll("{{base}}", characterProfileOrganizerPrompt(baseTemplate));
+  return `${characterProfileOrganizerPrompt(baseTemplate)}
 
 REPAIR MODE
 The prior response failed evidence validation. Return a complete replacement response, not a patch or explanation.
@@ -260,15 +263,16 @@ async function organize(
   const providerId = await resolveEffectiveProviderId(pool, ownerUserId, "text", campaignTextProviderId);
   if (!providerId) throw httpError(409, "No enabled text provider is available to organize this profile.", "text_provider_unavailable");
   const provider = await loadTextProvider(pool, ownerUserId, providerId, credentialSecret);
+  const promptSnapshot = await resolvePromptSnapshot(pool, ownerUserId);
   const sources = characterProfileOrganizerSources(character, content);
   const result = await callTextProvider(provider, {
-    systemPrompt: characterProfileOrganizerPrompt(),
+    systemPrompt: characterProfileOrganizerPrompt(promptFromSnapshot(promptSnapshot, "character_profile_organizer")),
     input: JSON.stringify(characterProfileOrganizerInput(character.name, sources))
   });
   const initialResponse = extractJsonObject(result.content);
   return validateOrganizerResultWithRepair(initialResponse, sources, async (failure) => {
     const repaired = await callTextProvider(provider, {
-      systemPrompt: characterProfileOrganizerRepairPrompt(),
+      systemPrompt: characterProfileOrganizerRepairPrompt(promptFromSnapshot(promptSnapshot, "character_profile_organizer"), promptFromSnapshot(promptSnapshot, "character_profile_repair")),
       input: JSON.stringify(characterProfileOrganizerRepairInput(character.name, sources, initialResponse, failure))
     });
     return extractJsonObject(repaired.content);

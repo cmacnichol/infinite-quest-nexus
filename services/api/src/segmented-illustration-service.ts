@@ -24,6 +24,7 @@ import {
 import { recordProfileCost } from "./cost-service.js";
 import { insertImageJob } from "./image-service.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
+import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
 
 type SegmentConfigRow = {
   enabled: boolean;
@@ -110,13 +111,14 @@ async function queueSegmentDelivery(
   config: SegmentConfigRow,
   prompt: string,
   promptSource: "direct" | "ai_refined" | "ai_fallback",
-  visualReference = segment.character_visual_reference
+  visualReference = segment.character_visual_reference,
+  characterReferenceTemplate?: string
 ) {
   const sanitizedReference = stripMechanicsLeakage(visualReference).text.trim();
   if (!prompt.trim() || containsMechanicsLanguage(prompt) || containsMechanicsLanguage(sanitizedReference)) {
     throw Object.assign(new Error("The segment illustration prompt failed the fiction-only boundary."), { statusCode: 409 });
   }
-  const providerPrompt = composeIllustrationProviderPrompt(prompt.trim(), sanitizedReference);
+  const providerPrompt = composeIllustrationProviderPrompt(prompt.trim(), sanitizedReference, characterReferenceTemplate);
   await client.query(
     `UPDATE turn_illustration_segments
         SET resolved_prompt = $3, prompt_source = $4, status = 'generating', updated_at = now()
@@ -180,6 +182,7 @@ async function createTurnSet(
   const turn = turnResult.rows[0];
   if (!turn) throw Object.assign(new Error("Accepted turn not found."), { statusCode: 404 });
   const config = await loadConfig(client, ownerUserId, turn.campaign_id);
+  const promptSnapshot = await resolvePromptSnapshot(client, ownerUserId, turn.campaign_id);
   const visualReference = characterVisualReference(turn.character_profile, turn.character_snapshot);
   const active = await client.query<{ id: string }>(
     `SELECT id FROM turn_illustration_sets
@@ -213,7 +216,10 @@ async function createTurnSet(
     if (!sanitizedSegment) {
       throw Object.assign(new Error("A segment contains no fiction-only text suitable for illustration."), { statusCode: 409 });
     }
-    const directPrompt = directIllustrationPrompt(sanitizedSegment);
+    const directPrompt = directIllustrationPrompt(
+      sanitizedSegment,
+      promptFromSnapshot(promptSnapshot, "illustration_direct")
+    );
     const segmentResult = await client.query<SegmentRow>(
       `INSERT INTO turn_illustration_segments (
          owner_user_id, illustration_set_id, campaign_id, turn_id, ordinal,
@@ -229,7 +235,11 @@ async function createTurnSet(
     );
     const segment = segmentResult.rows[0]!;
     if (config.segment_prompt_mode === "direct") {
-      await queueSegmentDelivery(client, ownerUserId, segment, config, directPrompt, "direct");
+      await queueSegmentDelivery(
+        client, ownerUserId, segment, config, directPrompt, "direct",
+        segment.character_visual_reference,
+        promptFromSnapshot(promptSnapshot, "illustration_character_reference")
+      );
       continue;
     }
     const textProviderId = await resolveEffectiveProviderId(
@@ -239,7 +249,11 @@ async function createTurnSet(
       config.campaign_text_provider_id
     );
     if (!textProviderId) {
-      await queueSegmentDelivery(client, ownerUserId, segment, config, directPrompt, "ai_fallback");
+      await queueSegmentDelivery(
+        client, ownerUserId, segment, config, directPrompt, "ai_fallback",
+        segment.character_visual_reference,
+        promptFromSnapshot(promptSnapshot, "illustration_character_reference")
+      );
       continue;
     }
     const provider = await client.query<{ default_model: string }>(
@@ -249,10 +263,10 @@ async function createTurnSet(
     await client.query(
       `INSERT INTO illustration_prompt_jobs (
          owner_user_id, campaign_id, turn_id, segment_id, provider_profile_id,
-         requested_model, max_attempts
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+         requested_model, max_attempts, prompt_snapshot
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [ownerUserId, turn.campaign_id, turnId, segment.id, textProviderId,
-        provider.rows[0]?.default_model || "", config.max_attempts]
+        provider.rows[0]?.default_model || "", config.max_attempts, JSON.stringify(promptSnapshot)]
     );
   }
   return { setId, duplicate: false, segmentCount: pieces.length };
@@ -476,6 +490,7 @@ export async function regenerateSegmentIllustration(
     );
     if (active.rows[0]) return { id: active.rows[0].id, duplicate: true, segmentId, variantIndex: request.variantIndex };
     const config = await loadConfig(client, ownerUserId, segment.campaign_id);
+    const promptSnapshot = await resolvePromptSnapshot(client, ownerUserId, segment.campaign_id);
     const providerProfileId = await resolveEffectiveProviderId(
       client,
       ownerUserId,
@@ -491,7 +506,8 @@ export async function regenerateSegmentIllustration(
       targetVariantIndex: request.variantIndex,
       prompt: composeIllustrationProviderPrompt(
         request.prompt,
-        stripMechanicsLeakage(segment.character_visual_reference).text
+        stripMechanicsLeakage(segment.character_visual_reference).text,
+        promptFromSnapshot(promptSnapshot, "illustration_character_reference")
       ),
       config: { ...imageConfig(config, providerProfileId), imagesPerSegment: 1 }
     });
@@ -553,6 +569,7 @@ export async function enqueueSegmentProviderImage(pool: DatabasePool, segmentId:
     );
     if (existing.rows[0]) return { id: existing.rows[0].id, duplicate: true };
     const config = await loadConfig(client, ownerUserId, segment.campaign_id);
+    const promptSnapshot = await resolvePromptSnapshot(client, ownerUserId, segment.campaign_id);
     const providerProfileId = await resolveEffectiveProviderId(
       client,
       ownerUserId,
@@ -567,7 +584,8 @@ export async function enqueueSegmentProviderImage(pool: DatabasePool, segmentId:
       segmentId,
       prompt: composeIllustrationProviderPrompt(
         segment.resolved_prompt || segment.direct_prompt,
-        stripMechanicsLeakage(segment.character_visual_reference).text
+        stripMechanicsLeakage(segment.character_visual_reference).text,
+        promptFromSnapshot(promptSnapshot, "illustration_character_reference")
       ),
       config: imageConfig(config, providerProfileId)
     });
@@ -736,13 +754,17 @@ export async function runIllustrationPromptJob(
       segment.character_visual_reference
     );
     const result = await callTextProvider(provider, {
-      systemPrompt: config.refinement_prompt.trim() || DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,
+      systemPrompt: promptFromSnapshot(claimed.prompt_snapshot, "illustration_refinement"),
       input: buildIllustrationRefinementInput(segment.source_text, storyContext)
     });
     const prompt = parseRefinedPrompt(result.content);
     await withTransaction(pool, async (client) => {
       const currentConfig = await loadConfig(client, claimed.owner_user_id, claimed.campaign_id);
-      await queueSegmentDelivery(client, claimed.owner_user_id, segment, currentConfig, prompt, "ai_refined");
+      await queueSegmentDelivery(
+        client, claimed.owner_user_id, segment, currentConfig, prompt, "ai_refined",
+        segment.character_visual_reference,
+        promptFromSnapshot(claimed.prompt_snapshot, "illustration_character_reference")
+      );
       await client.query(
         `UPDATE illustration_prompt_jobs
             SET status = 'completed', response_id = $3, completed_at = now(), updated_at = now(),
@@ -768,7 +790,11 @@ export async function runIllustrationPromptJob(
     await withTransaction(pool, async (client) => {
       if (claimed.attempts >= claimed.max_attempts) {
         const config = await loadConfig(client, claimed.owner_user_id, claimed.campaign_id);
-        await queueSegmentDelivery(client, claimed.owner_user_id, segment, config, segment.direct_prompt, "ai_fallback");
+        await queueSegmentDelivery(
+          client, claimed.owner_user_id, segment, config, segment.direct_prompt, "ai_fallback",
+          segment.character_visual_reference,
+          promptFromSnapshot(claimed.prompt_snapshot, "illustration_character_reference")
+        );
         await client.query(
           `UPDATE illustration_prompt_jobs
               SET status = 'fallback', completed_at = now(), updated_at = now(),

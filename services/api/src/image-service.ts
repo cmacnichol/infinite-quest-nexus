@@ -22,6 +22,7 @@ import {
 import { persistTurnImage, persistWorldCover, type FilesystemAssetStore } from "./asset-service.js";
 import { loadImageProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
+import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
 
 type IllustrationConfigRow = {
   enabled: boolean;
@@ -409,9 +410,11 @@ export async function enqueueIllustration(pool: DatabasePool, turnId: string, re
       [config.providerProfileId, ownerUserId]
     );
     if (!provider.rows[0]) throw Object.assign(new Error("Enabled image provider profile not found."), { statusCode: 400 });
+    const promptSnapshot = await resolvePromptSnapshot(client, ownerUserId, turn.campaign_id);
     const prompt = composeIllustrationProviderPrompt(
       request.prompt || turn.image_prompt,
-      characterVisualReference(turn.character_profile, turn.character_snapshot)
+      characterVisualReference(turn.character_profile, turn.character_snapshot),
+      promptFromSnapshot(promptSnapshot, "illustration_character_reference")
     );
     const job = await insertImageJob(client, { ownerUserId, campaignId: turn.campaign_id, turnId, prompt, config });
     if (!job) throw Object.assign(new Error("The accepted turn does not contain a safe fiction-only image prompt."), { statusCode: 409 });

@@ -29,6 +29,7 @@ import {
   buildRpgAssessmentPrompt,
   buildStoryUserPrompt,
   buildSceneCoveragePrompt,
+  compactStoryLengthWordRange,
   callTextProvider,
   containsMechanicsLanguage,
   EVENT_EXTENSION_SYSTEM_PROMPT,
@@ -61,11 +62,26 @@ import { autoEnableCampaignEmbeddingIfAvailable, buildContextPreview, enqueueEmb
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
 import { enqueueAcceptedTurnIllustrationSegments } from "./segmented-illustration-service.js";
 import { attributeGenerationCostsToTurn, recordProfileCost, turnReportedCosts } from "./cost-service.js";
+import { promptFromSnapshot, promptProtocolVersion, resolvePromptSnapshot, type PromptSnapshot } from "./prompt-library-service.js";
+import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
 
 function budgetTokenEstimate(text: string): number {
   return Math.max(estimateTokens(text), Math.ceil(text.length / 3));
+}
+
+function recoveryPromptFromSnapshot(job: ClaimedJob, reason: "output_limit" | "invalid_json" | "invalid_schema" | "mechanics_leak", errors: string[], storyLength: StoryLengthWordRange) {
+  if (reason === "output_limit") {
+    const compact = compactStoryLengthWordRange(storyLength);
+    return renderPromptTemplate(promptFromSnapshot(job.prompt_snapshot, "story_recovery_output_limit"), compact);
+  }
+  if (reason === "mechanics_leak") {
+    const details = errors.length ? ` The fiction-boundary validator found: ${errors.slice(0, 8).join("; ")}` : "";
+    return renderPromptTemplate(promptFromSnapshot(job.prompt_snapshot, "story_recovery_mechanics"), { details });
+  }
+  const detail = errors.length ? ` Correct these validation errors: ${errors.slice(0, 8).join("; ")}.` : "";
+  return renderPromptTemplate(promptFromSnapshot(job.prompt_snapshot, "story_recovery_schema"), { errors: detail });
 }
 
 function storyMemoryDefaultsFromContext(context: unknown) {
@@ -118,6 +134,7 @@ type ClaimedJob = {
     narrationMaxWords?: number;
   };
   prompt_protocol_version: string;
+  prompt_snapshot: PromptSnapshot;
   attempts: number;
   orchestration_private: OrchestrationPrivate;
 };
@@ -263,6 +280,7 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
     if (!providerProfileId) throw Object.assign(new Error("Select a text provider for this campaign or mark a default text provider."), { statusCode: 409 });
     const storyLengthProfile = storyLengthProfileFromUnknown(row.story_length_profile);
     const storyLength = storyLengthWordRange(storyLengthProfile);
+    const promptSnapshot = await resolvePromptSnapshot(client, ownerUserId, campaignId);
     const contextSnapshot = {
       ...request.context,
       storyLengthProfile,
@@ -274,12 +292,12 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
         `INSERT INTO generation_jobs (
            owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
            action, requested_input_mode, resolved_input_mode, input_mode_source, turn_input_classification_id,
-           requested_model, context_options, prompt_protocol_version, recovery_metadata
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+           requested_model, context_options, prompt_protocol_version, recovery_metadata, prompt_snapshot
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
          RETURNING id, status, expected_turn_number AS "expectedTurnNumber", created_at AS "createdAt"`,
         [ownerUserId, campaignId, providerProfileId, request.idempotencyKey, row.active_turn_number + 1,
           request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
-          request.model || "", json(contextSnapshot), STORY_PROMPT_PROTOCOL_VERSION, json({ requestFingerprint })]
+          request.model || "", json(contextSnapshot), promptProtocolVersion(promptSnapshot), json({ requestFingerprint }), json(promptSnapshot)]
       );
       return { ...result.rows[0], duplicate: false };
     } catch (error) {
@@ -416,6 +434,7 @@ export async function enqueueLatestReplacement(pool: DatabasePool, campaignId: s
     }
 
     const storyLength = storyLengthWordRange(storyLengthProfileFromUnknown(campaign.story_length_profile));
+    const promptSnapshot = await resolvePromptSnapshot(client, ownerUserId, campaignId);
     const contextSnapshot = {
       ...request.context,
       storyLengthProfile: storyLength.profile,
@@ -427,15 +446,15 @@ export async function enqueueLatestReplacement(pool: DatabasePool, campaignId: s
         `INSERT INTO generation_jobs (
            owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
            action, requested_input_mode, resolved_input_mode, input_mode_source, turn_input_classification_id,
-           requested_model, context_options, prompt_protocol_version, recovery_metadata,
+           requested_model, context_options, prompt_protocol_version, recovery_metadata, prompt_snapshot,
            operation_kind, replacement_turn_id, base_turn_number, base_state_private, base_scratchpad_safe_for_prompt, status
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'replace_latest',$15,$16,$17,$18,'replacement_queued')
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'replace_latest',$16,$17,$18,$19,'replacement_queued')
          RETURNING id, status, expected_turn_number AS "expectedTurnNumber",
                    operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", created_at AS "createdAt"`,
         [ownerUserId, campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number,
           request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
-          request.model || "", json(contextSnapshot), STORY_PROMPT_PROTOCOL_VERSION,
-          json({ requestFingerprint: sha256(stableStringify(request)) }), replacementTurnId, baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt]
+          request.model || "", json(contextSnapshot), promptProtocolVersion(promptSnapshot),
+          json({ requestFingerprint: sha256(stableStringify(request)) }), json(promptSnapshot), replacementTurnId, baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt]
       );
       return { ...inserted.rows[0], duplicate: false };
     } catch (error) {
@@ -1029,7 +1048,7 @@ async function claimGeneration(pool: DatabasePool, workerId: string, leaseSecond
                  j.action, j.operation_kind, j.replacement_turn_id, j.base_turn_number, j.base_state_private,
                  j.base_scratchpad_safe_for_prompt,
                  j.requested_input_mode, j.resolved_input_mode, j.input_mode_source,
-                 j.requested_model, j.context_options, j.prompt_protocol_version, j.attempts,
+                 j.requested_model, j.context_options, j.prompt_protocol_version, j.prompt_snapshot, j.attempts,
                  j.orchestration_private`,
       [workerId, leaseSeconds]
     );
@@ -1132,7 +1151,7 @@ async function evaluateTriggers(
   if (!triggers.length) return [];
   const response = await callCampaignTextProvider(pool, provider, job,
     phase === "before" ? "event_trigger_before" : "event_trigger_after", {
-    systemPrompt: EVENT_TRIGGER_SYSTEM_PROMPT,
+    systemPrompt: promptFromSnapshot(job.prompt_snapshot, "event_trigger"),
     input: buildEventTriggerPrompt(phase, context, job.action, job.expected_turn_number, triggers, narration)
   });
   if (response.outputLimited) throw new Error("The private event evaluation reached its output limit.");
@@ -1315,7 +1334,8 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
     const effectiveContextWindow = Math.min(provider.contextWindowTokens, requestedContextWindow);
     const inputTokenLimit = effectiveContextWindow - provider.maxOutputTokens;
     const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
-    const fixedPromptEnvelope = budgetTokenEstimate(STORY_SYSTEM_PROMPT)
+    const storySystemPrompt = promptFromSnapshot(job.prompt_snapshot, "story_system");
+    const fixedPromptEnvelope = budgetTokenEstimate(storySystemPrompt)
       + budgetTokenEstimate(buildStoryUserPrompt(emptyPromptContext, safeAction, false, [], storyLength, job.resolved_input_mode))
       + 1024;
     if (inputTokenLimit - fixedPromptEnvelope < 512) {
@@ -1348,7 +1368,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
         let assessmentError = "";
         try {
           const response = await callCampaignTextProvider(pool, provider, job, "rpg_assessment", {
-            systemPrompt: RPG_ASSESSMENT_SYSTEM_PROMPT,
+            systemPrompt: promptFromSnapshot(job.prompt_snapshot, "rpg_assessment"),
             input: buildRpgAssessmentPrompt(promptContext, job.action, inputs.rpgStats)
           });
           if (response.outputLimited) throw new Error("The private RPG assessment reached its output limit.");
@@ -1388,7 +1408,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
     await pool.query(`UPDATE generation_jobs SET status = 'generating', updated_at = now() WHERE id = $1 AND lease_owner = $2`, [job.id, workerId]);
     let storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength, job.resolved_input_mode);
     const removalPriority = ["chronological", "relevant", "summary_checkpoint", "recent", "open_threads"];
-    while (budgetTokenEstimate(STORY_SYSTEM_PROMPT) + budgetTokenEstimate(storyInput) > inputTokenLimit && promptContext.chronicle.length) {
+    while (budgetTokenEstimate(storySystemPrompt) + budgetTokenEstimate(storyInput) > inputTokenLimit && promptContext.chronicle.length) {
       let removalIndex = -1;
       for (const reason of removalPriority) {
         removalIndex = promptContext.chronicle.findIndex((memory) => memory.reason === reason);
@@ -1397,7 +1417,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
       promptContext.chronicle.splice(removalIndex >= 0 ? removalIndex : 0, 1);
       storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength, job.resolved_input_mode);
     }
-    const estimatedPromptTokens = budgetTokenEstimate(STORY_SYSTEM_PROMPT) + budgetTokenEstimate(storyInput);
+    const estimatedPromptTokens = budgetTokenEstimate(storySystemPrompt) + budgetTokenEstimate(storyInput);
     if (estimatedPromptTokens > inputTokenLimit) {
       throw Object.assign(new Error(`The fixed authoritative story context requires about ${estimatedPromptTokens} input tokens but only ${inputTokenLimit} are available.`), { code: "context_budget_exceeded" });
     }
@@ -1449,7 +1469,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
       }
     };
     const supportsStreaming = Boolean(provider.configuration && (provider.configuration.streaming === true || provider.configuration.streamingSupport === true));
-    const baseRequest = { systemPrompt: STORY_SYSTEM_PROMPT, input: storyInput, ...(supportsStreaming ? { onChunk } : {}) };
+    const baseRequest = { systemPrompt: storySystemPrompt, input: storyInput, ...(supportsStreaming ? { onChunk } : {}) };
     let result = await callCampaignTextProvider(pool, provider, job, "story_generation", baseRequest);
     let parsed = parseStoryOutput(result.content, storyMemoryDefaults);
     const firstReason = result.outputLimited ? "output_limit" : (!parsed.ok ? parsed.code : null);
@@ -1472,7 +1492,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
       result = await callCampaignTextProvider(pool, provider, job, "story_recovery", {
         ...baseRequest,
         ...(provider.providerType === "lmstudio" && result.responseId && firstReason !== "mechanics_leak" ? { previousResponseId: result.responseId } : {}),
-        recoveryInput: recoveryInstruction(firstReason, initialValidationErrors, storyLength),
+        recoveryInput: recoveryPromptFromSnapshot(job, firstReason, initialValidationErrors, storyLength),
         rejectedResponse
       });
       parsed = parseStoryOutput(result.content, storyMemoryDefaults);
@@ -1508,7 +1528,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
       let coverage;
       try {
         const coverageResponse = await callCampaignTextProvider(pool, provider, job, "scene_coverage_validation", {
-          systemPrompt: SCENE_COVERAGE_SYSTEM_PROMPT,
+          systemPrompt: promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
           input: buildSceneCoveragePrompt(safeAction, parsed.story.narration)
         });
         coverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
@@ -1519,7 +1539,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
         const rejectedResponse = result.content;
         result = await callCampaignTextProvider(pool, provider, job, "scene_coverage_rewrite", {
           ...baseRequest,
-          recoveryInput: sceneCoverageRewriteInstruction(coverage?.missing_required_beats || ["Coverage could not be verified."], coverage?.contradictions || []),
+          recoveryInput: renderPromptTemplate(promptFromSnapshot(job.prompt_snapshot, "scene_coverage_rewrite"), { validation: stableStringify({ missing_required_beats: coverage?.missing_required_beats || ["Coverage could not be verified."], contradictions: coverage?.contradictions || [] }) }),
           rejectedResponse
         });
         parsed = parseStoryOutput(result.content, storyMemoryDefaults);
@@ -1527,7 +1547,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
         if (parsed.ok && !result.outputLimited) {
           try {
             const coverageResponse = await callCampaignTextProvider(pool, provider, job, "scene_coverage_validation", {
-              systemPrompt: SCENE_COVERAGE_SYSTEM_PROMPT,
+              systemPrompt: promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
               input: buildSceneCoveragePrompt(safeAction, parsed.story.narration)
             });
             repairedCoverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
@@ -1574,7 +1594,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
         const guidance = fictionGuidanceForEvents(immediateEvents);
         if (!guidance.length) throw new Error("Activated extension instructions were not safe for a fiction prompt.");
         const extensionResponse = await callCampaignTextProvider(pool, provider, job, "event_extension", {
-          systemPrompt: EVENT_EXTENSION_SYSTEM_PROMPT,
+          systemPrompt: promptFromSnapshot(job.prompt_snapshot, "event_extension"),
           input: buildEventExtensionPrompt(parsed.story.narration, guidance)
         });
         if (extensionResponse.outputLimited) throw new Error("The optional event extension reached its output limit.");
