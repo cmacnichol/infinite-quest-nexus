@@ -30,6 +30,8 @@ export class ProviderDestinationNotAllowedError extends Error {
   readonly statusCode = 422;
   readonly code = "PROVIDER_DESTINATION_NOT_ALLOWED";
   readonly expose = true;
+  readonly permanent = true;
+  readonly retryable = false;
 
   constructor(readonly stage: "url" | "dns" | "address" | "redirect") {
     super("The provider destination is not allowed by the server network policy.");

@@ -1,3 +1,10 @@
+import { ProviderDestinationNotAllowedError } from "../../../../../security/src/provider-network-policy.js";
+import {
+  MAX_SOGNI_RESPONSE_BYTES,
+  ProviderResponseTooLargeError,
+  readBoundedResponseText
+} from "../../../provider-response.js";
+
 export const SOGNI_API_BASE_URL = "https://api.sogni.ai";
 const SOGNI_WORKFLOWS_PATH = "/v1/creative-agent/workflows";
 
@@ -134,6 +141,7 @@ async function requestJson(
       signal: init.signal || AbortSignal.timeout(requestTimeoutMs(profile))
     });
   } catch (error) {
+    if (error instanceof ProviderDestinationNotAllowedError) throw error;
     const timedOut = error instanceof Error && /(?:abort|timeout)/i.test(`${error.name} ${error.message}`);
     throw new SogniProviderError({
       code: timedOut ? "provider_request_timeout" : "provider_transport_error",
@@ -141,7 +149,19 @@ async function requestJson(
       retryable: true
     });
   }
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await readBoundedResponseText(response, MAX_SOGNI_RESPONSE_BYTES);
+  } catch (error) {
+    if (error instanceof ProviderResponseTooLargeError) {
+      throw new SogniProviderError({
+        code: error.code,
+        message: error.message,
+        retryable: false
+      });
+    }
+    throw error;
+  }
   let data: Record<string, any> = {};
   try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* normalized below */ }
   if (!response.ok) throw new SogniProviderError(normalizeHttpError(response, data, text));

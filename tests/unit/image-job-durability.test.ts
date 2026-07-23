@@ -1,8 +1,20 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
+import { imageProviderFailureMetadata } from "../../services/api/src/image-service.js";
 
 describe("durable asynchronous image jobs", () => {
+  it("classifies provider destination denials as permanent image-job failures", () => {
+    expect(imageProviderFailureMetadata(new ProviderDestinationNotAllowedError("address")))
+      .toMatchObject({
+        code: "PROVIDER_DESTINATION_NOT_ALLOWED",
+        permanent: true,
+        expired: false,
+        remoteTerminal: false
+      });
+  });
+
   it("persists and resumes a provider workflow instead of submitting it twice", async () => {
     const source = await readFile(resolve("services/api/src/image-service.ts"), "utf8");
 

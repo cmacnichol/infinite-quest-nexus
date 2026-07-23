@@ -1,6 +1,12 @@
 import type { Dispatcher } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { providerProfileInputSchema } from "../../packages/contracts/src/generation.js";
+import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
+import {
+  MAX_PROVIDER_JSON_RESPONSE_BYTES,
+  MAX_PROVIDER_SSE_RESPONSE_BYTES,
+  MAX_SOGNI_RESPONSE_BYTES
+} from "../../packages/story-engine/src/provider-response.js";
 import {
   callEmbeddingProvider,
   callImageProvider,
@@ -455,6 +461,53 @@ describe("text provider adapters", () => {
     expect((thrownError as any).statusCode).toBe(500);
   });
 
+  it("rejects oversized generic JSON responses with a safe permanent error", async () => {
+    let cancellations = 0;
+    const fetcher = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{}"));
+      },
+      cancel() {
+        cancellations += 1;
+      }
+    }), {
+      status: 200,
+      headers: { "content-length": String(MAX_PROVIDER_JSON_RESPONSE_BYTES + 1) }
+    }));
+
+    await expect(callTextProvider(
+      profile,
+      { systemPrompt: "system", input: "input" },
+      createTestProviderTransport(fetcher as typeof fetch)
+    )).rejects.toMatchObject({
+      code: "provider_response_too_large",
+      permanent: true,
+      statusCode: 502
+    });
+    expect(cancellations).toBe(2);
+  });
+
+  it("preserves provider destination denials through the public text adapter", async () => {
+    const transport = createProviderTransport({
+      policy: {
+        async approve() {
+          throw new ProviderDestinationNotAllowedError("address");
+        }
+      }
+    });
+
+    await expect(callTextProvider(
+      profile,
+      { systemPrompt: "system", input: "input" },
+      transport
+    )).rejects.toMatchObject({
+      code: "PROVIDER_DESTINATION_NOT_ALLOWED",
+      stage: "address",
+      permanent: true,
+      retryable: false
+    });
+  });
+
   it("sets stream: true when onChunk callback is supplied to callTextProvider", async () => {
     const streamChunks: string[] = [];
     const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
@@ -485,6 +538,37 @@ describe("text provider adapters", () => {
     }, createTestProviderTransport(fetcher as typeof fetch));
     expect(streamChunks).toEqual(["Hello", "Hello world"]);
     expect(result.content).toBe("Hello world");
+  });
+
+  it("cancels oversized SSE responses and returns a safe typed failure", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(MAX_PROVIDER_SSE_RESPONSE_BYTES + 1));
+      },
+      cancel() {
+        cancelled = true;
+      }
+    });
+    const fetcher = vi.fn(async () => new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" }
+    }));
+    const openAiProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "openai_compatible",
+      baseUrl: "https://api.openai.com/v1"
+    };
+
+    await expect(callTextProvider(openAiProfile, {
+      systemPrompt: "system",
+      input: "input",
+      onChunk: vi.fn()
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "provider_response_too_large",
+      permanent: true
+    });
+    expect(cancelled).toBe(true);
   });
 
   it("submits a durable Sogni workflow with bearer auth and an idempotency key", async () => {
@@ -587,6 +671,74 @@ describe("text provider adapters", () => {
     });
   });
 
+  it("rejects oversized Sogni REST responses with a permanent safe failure", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni",
+      baseUrl: "https://api.sogni.ai",
+      model: "flux2",
+      apiKey: "sogni-secret"
+    };
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{}"));
+      },
+      cancel() {
+        cancelled = true;
+      }
+    });
+    const fetcher = vi.fn(async () => new Response(stream, {
+      status: 200,
+      headers: { "content-length": String(MAX_SOGNI_RESPONSE_BYTES + 1) }
+    }));
+
+    await expect(submitImageProvider(sogniProfile, {
+      prompt: "A fictional vista.",
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "auto",
+      outputFormat: "png",
+      idempotencyKey: "illustration-job-3:revision-1"
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "provider_response_too_large",
+      permanent: true,
+      normalized: { retryable: false }
+    });
+    expect(cancelled).toBe(true);
+  });
+
+  it("preserves provider destination denials through Sogni submission as permanent", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni",
+      baseUrl: "https://api.sogni.ai",
+      model: "flux2",
+      apiKey: "sogni-secret"
+    };
+    const transport = createProviderTransport({
+      policy: {
+        async approve() {
+          throw new ProviderDestinationNotAllowedError("address");
+        }
+      }
+    });
+
+    await expect(submitImageProvider(sogniProfile, {
+      prompt: "A fictional vista.",
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "auto",
+      outputFormat: "png",
+      idempotencyKey: "illustration-job-4:revision-1"
+    }, transport)).rejects.toMatchObject({
+      code: "PROVIDER_DESTINATION_NOT_ALLOWED",
+      stage: "address",
+      permanent: true,
+      retryable: false
+    });
+  });
+
   it("uses Sogni's media catalog and keeps image models only", async () => {
     const sogniProfile: TextProviderProfile = {
       ...profile,
@@ -619,7 +771,7 @@ describe("text provider adapters", () => {
     };
     const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       expect(String(url)).toBe("https://socket.sogni.ai/api/v1/models/list");
-      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer sogni-secret");
+      expect(new Headers(init?.headers).get("authorization")).toBeNull();
       return new Response(JSON.stringify([
         { id: "z_image_turbo_bf16", name: "Z-Image Turbo", SID: 10, media: "image" },
         { id: "ace_step_1.5", name: "ACE-Step", SID: 11, media: "audio" }

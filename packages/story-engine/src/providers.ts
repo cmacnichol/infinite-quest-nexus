@@ -1,5 +1,12 @@
 import type { ProviderType } from "../../contracts/src/generation.js";
 import { logger } from "../../logger/src/index.js";
+import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
+import {
+  MAX_PROVIDER_JSON_RESPONSE_BYTES,
+  MAX_PROVIDER_SSE_RESPONSE_BYTES,
+  ProviderResponseTooLargeError,
+  readBoundedResponseText
+} from "./provider-response.js";
 import {
   configureDefaultProviderTransport,
   createProviderTransport,
@@ -232,8 +239,10 @@ function transportFailure(
   url: string,
   cause: unknown,
   startedAt: number
-): ProviderTransportError {
-  if (cause instanceof ProviderTransportError) return cause;
+): Error {
+  if (cause instanceof ProviderTransportError
+    || cause instanceof ProviderDestinationNotAllowedError
+    || cause instanceof ProviderResponseTooLargeError) return cause;
   const chain = errorChain(cause);
   const messages = chain.map((item) => String(item.message || ""));
   const names = chain.map((item) => String(item.name || ""));
@@ -314,10 +323,19 @@ function openAiRoot(baseUrl: string): string {
   return /\/v1$/i.test(root) ? root : `${root}/v1`;
 }
 
-function headers(profile: TextProviderProfile): Record<string, string> {
+function headers(profile: TextProviderProfile, endpoint?: string): Record<string, string> {
+  let forwardAuthorization = Boolean(profile.apiKey);
+  if (endpoint) {
+    try {
+      forwardAuthorization = forwardAuthorization
+        && new URL(endpoint).origin === new URL(profile.baseUrl).origin;
+    } catch {
+      forwardAuthorization = false;
+    }
+  }
   return {
     "content-type": "application/json",
-    ...(profile.apiKey ? { authorization: `Bearer ${profile.apiKey}` } : {}),
+    ...(forwardAuthorization ? { authorization: `Bearer ${profile.apiKey}` } : {}),
     ...(profile.providerType === "openrouter" ? {
       "HTTP-Referer": String(profile.configuration?.httpReferer || "https://github.com/cmacnichol/infinite-quest-nexus"),
       "X-Title": "Infinite Quest Nexus"
@@ -333,9 +351,11 @@ async function checkedJson(
 ): Promise<Record<string, any>> {
   let text = "";
   try {
-    text = await response.text();
+    text = await readBoundedResponseText(response, MAX_PROVIDER_JSON_RESPONSE_BYTES);
   } catch (error) {
-    if (!profile) throw error;
+    if (!profile
+      || error instanceof ProviderDestinationNotAllowedError
+      || error instanceof ProviderResponseTooLargeError) throw error;
     throw transportFailure(profile, operation, url, error, responseStartTimes.get(response) ?? Date.now());
   }
   let data: Record<string, any> = {};
@@ -378,7 +398,7 @@ export async function ensureLmStudioModelLoaded(
     const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/models/load`;
     const response = await providerFetch(profile, operation, url, {
       method: "POST",
-      headers: headers(profile),
+      headers: headers(profile, url),
       body: JSON.stringify({ model: targetModelId })
     }, transport);
     if (!response.ok) return;
@@ -399,10 +419,16 @@ async function readSseStream(
   let accumulated = "";
   let finalData: Record<string, any> = {};
   const allData: Record<string, any>[] = [];
+  let receivedBytes = 0;
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
+    receivedBytes += value.byteLength;
+    if (receivedBytes > MAX_PROVIDER_SSE_RESPONSE_BYTES) {
+      await reader.cancel();
+      throw new ProviderResponseTooLargeError(MAX_PROVIDER_SSE_RESPONSE_BYTES);
+    }
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split(/\r?\n\r?\n/);
     buffer = lines.pop() || "";
@@ -466,7 +492,7 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
   if (request.previousResponseId) payload.previous_response_id = request.previousResponseId;
   else payload.system_prompt = request.systemPrompt;
   const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`;
-  const response = await providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile), body: JSON.stringify(payload) }, transport);
+  const response = await providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile, url), body: JSON.stringify(payload) }, transport);
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
     const { content, finalData, allData } = await readSseStream(response, request.onChunk);
     const stats = allData.findLast((item) => item.stats)?.stats || finalData.stats || {};
@@ -531,7 +557,7 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     payload.stream_options = { include_usage: true };
   }
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
-  const send = () => providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile), body: JSON.stringify(payload) }, transport);
+  const send = () => providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile, url), body: JSON.stringify(payload) }, transport);
   let response = await send();
   if (!response.ok) {
     const clone = response.clone();
@@ -606,7 +632,7 @@ export async function callEmbeddingProvider(
   const url = `${openAiRoot(profile.baseUrl)}/embeddings`;
   const response = await providerFetch(profile, "embedding generation", url, {
     method: "POST",
-    headers: headers(profile),
+    headers: headers(profile, url),
     body: JSON.stringify({ model: profile.model, input: inputs })
   }, transport);
   const data = await checkedJson(response, profile, "embedding generation", url);
@@ -649,7 +675,7 @@ export async function callImageProvider(
   };
   const data = await checkedJson(await providerFetch(profile, "image generation", url, {
     method: "POST",
-    headers: headers(profile),
+    headers: headers(profile, url),
     body: JSON.stringify(payload)
   }, transport), profile, "image generation", url);
   const images = Array.isArray(data.data) ? data.data : [];
@@ -912,7 +938,7 @@ export async function discoverModels(
   const url = profile.providerType === "lmstudio"
     ? `${lmStudioRoot(profile.baseUrl)}/api/v1/models`
     : `${openAiRoot(profile.baseUrl)}/models`;
-  const data = await checkedJson(await providerFetch(profile, "model discovery", url, { headers: headers(profile) }, transport), profile, "model discovery", url);
+  const data = await checkedJson(await providerFetch(profile, "model discovery", url, { headers: headers(profile, url) }, transport), profile, "model discovery", url);
   const rows = inventoryRows(data);
   const items = inventoryItems(rows);
   if (profile.providerType !== "openrouter") return items;
@@ -929,7 +955,7 @@ export async function discoverEmbeddingModels(
 ): Promise<ModelInventoryItem[]> {
   if (profile.providerType !== "openrouter") return discoverModels(profile, transport);
   const url = `${rootUrl(profile.baseUrl)}/embeddings/models`;
-  const data = await checkedJson(await providerFetch(profile, "embedding model discovery", url, { headers: headers(profile) }, transport), profile, "embedding model discovery", url);
+  const data = await checkedJson(await providerFetch(profile, "embedding model discovery", url, { headers: headers(profile, url) }, transport), profile, "embedding model discovery", url);
   return inventoryRows(data).map((model: any) => ({
     id: String(model.id || model.canonical_slug || model.key || ""),
     displayName: String(model.name || model.display_name || model.id || model.canonical_slug || model.key || ""),
@@ -951,18 +977,18 @@ export async function discoverImageModels(
   if (profile.providerType === "sogni") {
     if (profile.configuration?.modelDiscoveryEnabled === false) return [];
     const url = "https://socket.sogni.ai/api/v1/models/list";
-    const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile) }, transport), profile, "image model discovery", url);
+    const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile, url) }, transport), profile, "image model discovery", url);
     return inventoryItems(inventoryRows(data).filter((model: any) => String(model?.media || "").toLowerCase() === "image"));
   }
   if (profile.providerType !== "openrouter") {
     const url = profile.providerType === "lmstudio"
       ? `${lmStudioRoot(profile.baseUrl)}/api/v1/models`
       : `${openAiRoot(profile.baseUrl)}/models`;
-    const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile) }, transport), profile, "image model discovery", url);
+    const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile, url) }, transport), profile, "image model discovery", url);
     return inventoryItems(imageInventoryRows(inventoryRows(data)));
   }
   const url = `${rootUrl(profile.baseUrl)}/images/models`;
-  const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile) }, transport), profile, "image model discovery", url);
+  const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile, url) }, transport), profile, "image model discovery", url);
   const rows = imageInventoryRows(inventoryRows(data)).filter((model: any) => explicitImageCapability(model) !== false);
   return Promise.all(rows.map(async (model: any): Promise<ModelInventoryItem> => {
     const id = String(model.id || model.key || "");
@@ -971,7 +997,7 @@ export async function discoverImageModels(
     if (!entries.length && endpointPath) {
       try {
         const endpointUrl = new URL(endpointPath, `${rootUrl(profile.baseUrl)}/`).toString();
-        const endpointData = await checkedJson(await providerFetch(profile, "image model pricing discovery", endpointUrl, { headers: headers(profile) }, transport), profile, "image model pricing discovery", endpointUrl);
+        const endpointData = await checkedJson(await providerFetch(profile, "image model pricing discovery", endpointUrl, { headers: headers(profile, endpointUrl) }, transport), profile, "image model pricing discovery", endpointUrl);
         entries = (Array.isArray(endpointData.endpoints) ? endpointData.endpoints : []).flatMap((endpoint: any) =>
           pricingEntries(endpoint.pricing, String(endpoint.provider_name || endpoint.provider_slug || ""))
         );

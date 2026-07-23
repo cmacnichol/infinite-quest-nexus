@@ -1,3 +1,4 @@
+import type { LookupFunction } from "node:net";
 import type { Dispatcher } from "undici";
 import { Agent } from "undici";
 import {
@@ -37,17 +38,30 @@ const MAX_REDIRECTS = 3;
 const SOGNI_SDK_ORIGIN = "https://api.sogni.ai";
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+export type PinnedConnectOptions = {
+  servername: string;
+  lookup: LookupFunction;
+};
+
+export function pinnedConnectOptions(destination: ApprovedProviderDestination): PinnedConnectOptions {
+  return {
+    servername: destination.servername,
+    lookup(_hostname, options, callback) {
+      if (options.all) {
+        callback(null, [{ address: destination.address, family: destination.family }]);
+      } else {
+        callback(null, destination.address, destination.family);
+      }
+    }
+  };
+}
+
 function pinnedAgent(destination: ApprovedProviderDestination): Agent {
   return new Agent({
     headersTimeout: MAX_REQUEST_TIMEOUT_MS,
     bodyTimeout: MAX_REQUEST_TIMEOUT_MS,
     connectTimeout: MAX_REQUEST_TIMEOUT_MS,
-    connect: {
-      servername: destination.servername,
-      lookup(_hostname, _options, callback) {
-        callback(null, destination.address, destination.family);
-      }
-    }
+    connect: pinnedConnectOptions(destination)
   });
 }
 
@@ -80,7 +94,12 @@ export function createProviderTransport(options: CreateProviderTransportOptions)
 
   return {
     async fetch(profile, operation, url, init) {
-      let requestedUrl = new URL(url);
+      let requestedUrl: URL;
+      try {
+        requestedUrl = new URL(url);
+      } catch {
+        throw new ProviderDestinationNotAllowedError("url");
+      }
       let initialOrigin = "";
       const method = requestMethod(init);
       let redirectCount = 0;
@@ -101,6 +120,9 @@ export function createProviderTransport(options: CreateProviderTransportOptions)
 
         await response.body?.cancel();
         if (!redirectPermitted(response.status, method) || redirectCount >= MAX_REDIRECTS) {
+          throw new ProviderDestinationNotAllowedError("redirect");
+        }
+        if (init.body instanceof ReadableStream) {
           throw new ProviderDestinationNotAllowedError("redirect");
         }
 

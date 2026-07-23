@@ -1,3 +1,5 @@
+import { once } from "node:events";
+import { createServer } from "node:http";
 import type { Dispatcher } from "undici";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -7,6 +9,7 @@ import {
 } from "../../packages/security/src/provider-network-policy.js";
 import {
   createProviderTransport,
+  pinnedConnectOptions,
   type ProviderTransportProfile
 } from "../../packages/story-engine/src/provider-transport.js";
 
@@ -64,6 +67,53 @@ describe("provider transport destination security", () => {
       servername: "provider.test"
     }));
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the production connector's approved address while retaining Host and TLS SNI", async () => {
+    const destination = approved(new URL("https://provider.test/v1/models"));
+    const connect = pinnedConnectOptions(destination);
+    const callback = vi.fn();
+
+    connect.lookup("must-not-resolve.test", {}, callback);
+
+    expect(connect.servername).toBe("provider.test");
+    expect(callback).toHaveBeenCalledWith(null, "8.8.8.8", 4);
+  });
+
+  it("uses the production Agent to connect to the approved IP without resolving the Host name", async () => {
+    let receivedHost = "";
+    const server = createServer((request, response) => {
+      receivedHost = String(request.headers.host || "");
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Expected a local TCP address.");
+    const url = `http://provider.test:${address.port}/v1/models`;
+    const policy: ProviderNetworkPolicy = {
+      async approve(requestedUrl) {
+        return {
+          url: requestedUrl,
+          origin: requestedUrl.origin,
+          address: "127.0.0.1",
+          family: 4,
+          port: address.port,
+          servername: "provider.test"
+        };
+      }
+    };
+    const transport = createProviderTransport({ policy });
+    try {
+      await expect(transport.fetch(profile, "model discovery", url, {}))
+        .resolves.toMatchObject({ status: 200 });
+      expect(receivedHost).toBe(`provider.test:${address.port}`);
+    } finally {
+      await transport.close();
+      server.close();
+      await once(server, "close");
+    }
   });
 
   it("rejects cross-origin redirects before forwarding authorization", async () => {
@@ -124,6 +174,33 @@ describe("provider transport destination security", () => {
         headers: init.headers
       })
     );
+  });
+
+  it("rejects 307 and 308 replay of a stream body before a second request", async () => {
+    for (const status of [307, 308]) {
+      const fetcher = vi.fn(async () => new Response("redirect", {
+        status,
+        headers: { location: "/next" }
+      }));
+      const transport = createProviderTransport({ policy: approvingPolicy(), fetcher });
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("streamed"));
+          controller.close();
+        }
+      });
+
+      await expect(transport.fetch(
+        profile,
+        "story generation",
+        "https://provider.test/v1/chat",
+        { method: "POST", body, duplex: "half" } as RequestInit
+      )).rejects.toMatchObject({
+        code: "PROVIDER_DESTINATION_NOT_ALLOWED",
+        stage: "redirect"
+      });
+      expect(fetcher).toHaveBeenCalledOnce();
+    }
   });
 
   it("uses the policy-normalized initial origin when checking redirects", async () => {
@@ -192,6 +269,18 @@ describe("provider transport destination security", () => {
       stage: "redirect"
     });
     expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it("converts malformed initial URLs into the safe destination error", async () => {
+    const policy = approvingPolicy();
+    const transport = createProviderTransport({ policy });
+
+    await expect(transport.fetch(profile, "model discovery", "http://[", {}))
+      .rejects.toMatchObject({
+        code: "PROVIDER_DESTINATION_NOT_ALLOWED",
+        stage: "url"
+      });
+    expect(policy.approve).not.toHaveBeenCalled();
   });
 
   it("preserves GET and HEAD methods across 301, 302, and 303 redirects", async () => {
