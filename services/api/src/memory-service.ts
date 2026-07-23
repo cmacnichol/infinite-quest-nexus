@@ -9,6 +9,12 @@ import {
   buildCanonicalFactProjection,
   canonicalFactDeduplicationKey
 } from "../../../packages/domain/src/canonical-facts.js";
+import {
+  buildScopedEntityCatalog,
+  expandEntityQuery,
+  matchEntityReferences,
+  resolveEntityMetadata
+} from "../../../packages/domain/src/entity-references.js";
 import { characterNarrativeContext } from "../../../packages/domain/src/world-characters.js";
 import { loadEmbeddingProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
@@ -41,6 +47,7 @@ type MemoryRow = {
   token_estimate: number;
   importance: number;
   entities: string[];
+  entity_ids: string[];
   relevance: number;
   lexicalRelevance?: number;
   semanticRelevance?: number;
@@ -431,12 +438,13 @@ async function allMemories(
   ownerUserId: string,
   campaignId: string,
   query: string,
+  queryEntityIds: string[],
   recentTurns = 8,
   throughTurnNumber?: number
 ): Promise<MemoryRow[]> {
   const result = await client.query<MemoryRow>(
     `WITH base AS (
-       SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, created_at,
+       SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids, created_at,
               CASE WHEN $3 = '' THEN 0::real
                    ELSE ts_rank_cd(search_document, websearch_to_tsquery('english', $3)) END AS relevance
          FROM chronicle_memories
@@ -452,19 +460,24 @@ async function allMemories(
               row_number() OVER (PARTITION BY memory_kind ORDER BY relevance DESC, ordinal DESC) AS lexical_rank
          FROM base
      )
-     SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, relevance
+     SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids, relevance
        FROM ranked
       WHERE memory_kind IN ('campaign_summary','legacy_summary','open_thread')
-         OR (memory_kind = 'canonical_fact' AND (recent_rank <= 64 OR ($3 <> '' AND lexical_rank <= 64)))
+         OR (memory_kind = 'canonical_fact' AND (
+              recent_rank <= 64
+              OR ($3 <> '' AND lexical_rank <= 64)
+              OR entity_ids && $6::text[]
+            ))
          OR (memory_kind = 'turn_fiction' AND (
               recent_rank <= GREATEST(32, $4::integer * 2)
               OR sequence_rank <= 8
               OR mod(sequence_rank - 1, GREATEST(1, CEIL(kind_count / 32.0)::integer)) = 0
               OR ($3 <> '' AND lexical_rank <= 96)
+              OR entity_ids && $6::text[]
             ))
       ORDER BY ordinal ASC, memory_kind, id
       LIMIT 512`,
-    [ownerUserId, campaignId, query.trim(), recentTurns, throughTurnNumber ?? null]
+    [ownerUserId, campaignId, query.trim(), recentTurns, throughTurnNumber ?? null, queryEntityIds]
   );
   if (throughTurnNumber === undefined) return result.rows;
   const historicalFacts = await client.query<MemoryRow>(
@@ -472,7 +485,7 @@ async function allMemories(
             source_turn_number AS ordinal,
             '- [fact_id: ' || id || '] ' || content AS content,
             GREATEST(1, CEIL(length(content) / 4.0))::integer AS token_estimate,
-            0.85::real AS importance, entities,
+            0.85::real AS importance, entities, entity_ids,
             CASE WHEN $3 = '' THEN 0::real
                  ELSE ts_rank_cd(to_tsvector('english', content), websearch_to_tsquery('english', $3)) END AS relevance
        FROM campaign_canonical_facts
@@ -680,14 +693,17 @@ async function applySemanticRelevance(
   memories: MemoryRow[],
   credentialSecret: string,
   costAttribution: { generationJobId?: string; operation?: "retrieval_embedding" | "context_preview_embedding" },
+  queryEntityIds: string[],
   throughTurnNumber?: number
 ) {
   const normalizedQuery = query.toLocaleLowerCase();
+  const queryEntityIdSet = new Set(queryEntityIds);
   const newestOrdinal = memories.reduce((maximum, memory) => Math.max(maximum, memory.ordinal), 0);
   for (const memory of memories) {
     memory.lexicalRelevance = Number(memory.relevance);
     const lexical = Math.min(1, Math.max(0, Number(memory.lexicalRelevance || 0) * 8));
-    const entityScore = memory.entities.some((entity) => normalizedQuery.includes(entity.toLocaleLowerCase())) ? 1 : 0;
+    const entityScore = memory.entity_ids.some((id) => queryEntityIdSet.has(id))
+      || memory.entities.some((entity) => normalizedQuery.includes(entity.toLocaleLowerCase())) ? 1 : 0;
     const recencyScore = newestOrdinal > 0 ? Math.max(0, 1 - (newestOrdinal - memory.ordinal) / Math.max(20, newestOrdinal)) : 0;
     memory.relevance = lexical > 0 || entityScore > 0
       ? lexical * 0.65 + entityScore * 0.15 + recencyScore * 0.1 + memory.importance * 0.1
@@ -721,7 +737,7 @@ async function applySemanticRelevance(
     const queryVector = result.embeddings[0];
     if (!queryVector) throw new Error("Embedding provider returned no query vector.");
     const scored = await pool.query<MemoryRow & { embedding_content_hash: string; semantic_relevance: number }>(
-      `SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities,
+      `SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids,
               0::real AS relevance, embedding_content_hash,
               (1 - (embedding <=> $5::vector))::real AS semantic_relevance
          FROM chronicle_memories
@@ -748,7 +764,8 @@ async function applySemanticRelevance(
     for (const memory of memories) {
       const lexical = Math.min(1, Math.max(0, Number(memory.lexicalRelevance || 0) * 8));
       const semanticScore = Math.max(0, semantic.get(memory.id) ?? 0);
-      const entityScore = memory.entities.some((entity) => normalizedQuery.includes(entity.toLocaleLowerCase())) ? 1 : 0;
+      const entityScore = memory.entity_ids.some((id) => queryEntityIdSet.has(id))
+        || memory.entities.some((entity) => normalizedQuery.includes(entity.toLocaleLowerCase())) ? 1 : 0;
       const recencyScore = newestOrdinal > 0 ? Math.max(0, 1 - (newestOrdinal - memory.ordinal) / Math.max(20, newestOrdinal)) : 0;
       memory.semanticRelevance = semanticScore;
       const semanticMatched = semanticScore >= 0.2;
@@ -789,9 +806,25 @@ export async function buildContextPreview(
     campaign.scratchpad_safe_for_prompt = scope.scratchpadSafeForPrompt === true;
     campaign.trackers = Array.isArray(scope.stateOverride.trackers) ? scope.stateOverride.trackers : [];
   }
-  const memories = await allMemories(pool, ownerUserId, campaignId, options.query, options.recentTurns, scope.throughTurnNumber);
+  const entityCatalog = buildScopedEntityCatalog({
+    worldContent: campaign.world_content,
+    characterSnapshot: campaign.character_snapshot,
+    characterProfile: campaign.character_profile
+  });
+  const entityExpandedQuery = expandEntityQuery(options.query, entityCatalog);
+  const queryEntityIds = matchEntityReferences(options.query, entityCatalog)
+    .map((match) => match.entity.id);
+  const memories = await allMemories(
+    pool,
+    ownerUserId,
+    campaignId,
+    entityExpandedQuery,
+    queryEntityIds,
+    options.recentTurns,
+    scope.throughTurnNumber
+  );
   const latestHint = memories.filter((memory) => memory.memory_kind === "turn_fiction").at(-1)?.content ?? "";
-  const expandedQuery = [options.query, truncateAtBoundary(latestHint, 1200)].filter(Boolean).join("\n");
+  const expandedQuery = [entityExpandedQuery, truncateAtBoundary(latestHint, 1200)].filter(Boolean).join("\n");
   const retrieval = await applySemanticRelevance(
     pool,
     ownerUserId,
@@ -800,6 +833,7 @@ export async function buildContextPreview(
     memories,
     credentialSecret,
     costAttribution,
+    queryEntityIds,
     scope.throughTurnNumber
   );
   const metrics = memoryMetricsFromRows(await metricsRow(pool, ownerUserId, campaignId, scope.throughTurnNumber));
@@ -1298,6 +1332,11 @@ async function embedCampaignMemories(
 
 export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserId: string, campaignId: string): Promise<number> {
   const scope = await campaignScope(client, ownerUserId, campaignId);
+  const entityCatalog = buildScopedEntityCatalog({
+    worldContent: scope.world_content,
+    characterSnapshot: scope.character_snapshot,
+    characterProfile: scope.character_profile
+  });
   const turns = await client.query<{
     id: string;
     turn_number: number;
@@ -1332,11 +1371,12 @@ export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserI
   );
   for (const turn of turns.rows) {
     const memory = buildTurnFictionMemory({ action: turn.action, narration: turn.narration }, turn.turn_number);
+    const entityMetadata = resolveEntityMetadata(memory.content, entityCatalog);
     await client.query(
       `INSERT INTO chronicle_memories (
          owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal,
-         content, token_estimate, importance, entities, metadata
-       ) VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,$7,$8,$9,$10)`,
+         content, token_estimate, importance, entities, entity_ids, metadata
+       ) VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,$7,$8,$9,$10,$11)`,
       [
         ownerUserId,
         campaignId,
@@ -1346,7 +1386,8 @@ export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserI
         memory.content,
         memory.tokenEstimate,
         Math.min(1, 0.45 + turn.turn_number / Math.max(20, turns.rows.length * 2)),
-        memory.entities,
+        entityMetadata.entities,
+        entityMetadata.entityIds,
         json({ sanitized: memory.sanitized, removedMechanicsSegments: memory.removedMechanicsSegments, reindexed: true })
       ]
     );
