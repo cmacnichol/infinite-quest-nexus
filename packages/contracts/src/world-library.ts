@@ -123,6 +123,11 @@ export const worldCreateSchema = z.object({
   content: worldContentSchema.optional()
 });
 
+export const worldGenerationPreviewRequestSchema = z.object({
+  title: z.string().trim().max(200).default(""),
+  prompt: z.string().trim().min(1).max(20_000)
+}).strict();
+
 export const worldDraftUpdateSchema = z.object({
   expectedRevision: z.coerce.number().int().positive(),
   title: title.optional(),
@@ -170,6 +175,12 @@ export const characterProfileOrganizationResultSchema = z.object({
   conflicts: z.array(z.string().max(4_000)).max(100),
   warnings: z.array(z.string().max(4_000)).max(100),
   protocolVersion: z.string().trim().min(1).max(100)
+}).strict();
+
+export const playableCharacterGenerationPreviewRequestSchema = z.object({
+  content: worldContentSchema,
+  prompt: z.string().trim().min(1).max(20_000),
+  characterId: characterId.optional()
 }).strict();
 
 export const worldForkSchema = z.object({
@@ -233,9 +244,11 @@ export type CampaignCharacterProfileUpdate = z.infer<typeof campaignCharacterPro
 export type CharacterProfileOrganizationRequest = z.infer<typeof characterProfileOrganizationRequestSchema>;
 export type CharacterProfileOrganizationResult = z.infer<typeof characterProfileOrganizationResultSchema>;
 export type WorldCreateRequest = z.infer<typeof worldCreateSchema>;
+export type WorldGenerationPreviewRequest = z.infer<typeof worldGenerationPreviewRequestSchema>;
 export type WorldDraftUpdateRequest = z.infer<typeof worldDraftUpdateSchema>;
 export type WorldPublishRequest = z.infer<typeof worldPublishSchema>;
 export type PlayableCharacterGenerationRequest = z.infer<typeof playableCharacterGenerationRequestSchema>;
+export type PlayableCharacterGenerationPreviewRequest = z.infer<typeof playableCharacterGenerationPreviewRequestSchema>;
 export type WorldForkRequest = z.infer<typeof worldForkSchema>;
 export type WorldStatusUpdateRequest = z.infer<typeof worldStatusUpdateSchema>;
 export type WorldImportRequest = z.infer<typeof worldImportRequestSchema>;

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { buildTemplateWorldPrompt, extractCyoaLayers, parseCyoaExport } from "../../packages/domain/src/world-template.js";
+import { playableCharacterGenerationPreviewRequestSchema, worldGenerationPreviewRequestSchema } from "../../packages/contracts/src/world-library.js";
 
 describe("CYOA and Modular Template World creation", () => {
   it("parses valid writing.com CYOA JSON export and validates root structure", () => {
@@ -73,5 +74,27 @@ describe("CYOA and Modular Template World creation", () => {
     const payload = JSON.parse(prompt.input);
     expect(payload.task).toContain("Create a new Story World with 3-4 playable characters from this concept prompt");
     expect(payload.prompt).toBe("Create a cyberpunk detective world where androids and humans coexist.");
+  });
+
+  it("validates side-effect-free world and character preview requests", () => {
+    expect(worldGenerationPreviewRequestSchema.parse({ prompt: "Build a luminous mystery world." })).toEqual({
+      title: "",
+      prompt: "Build a luminous mystery world."
+    });
+    expect(() => worldGenerationPreviewRequestSchema.parse({ prompt: " " })).toThrow();
+    expect(playableCharacterGenerationPreviewRequestSchema.parse({
+      content: {
+        world: {
+          title: "Luminous Mystery",
+          genre: "",
+          tone: "",
+          premise: "",
+          backgroundStory: "",
+          firstAction: "",
+          rules: ""
+        }
+      },
+      prompt: "Create a skeptical archivist."
+    }).content.playableCharacters).toEqual([]);
   });
 });
