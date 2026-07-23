@@ -727,8 +727,8 @@ export async function cancelImageProvider(
   await adapter.cancel(profile, request.remoteJobId, fetcher);
 }
 
-function inventoryRows(data: Record<string, any>): any[] {
-  return Array.isArray(data.models) ? data.models : Array.isArray(data.data) ? data.data : [];
+function inventoryRows(data: Record<string, any> | any[]): any[] {
+  return Array.isArray(data) ? data : Array.isArray(data.models) ? data.models : Array.isArray(data.data) ? data.data : [];
 }
 
 function inventoryItems(models: any[]): ModelInventoryItem[] {
@@ -868,9 +868,9 @@ export async function discoverEmbeddingModels(profile: TextProviderProfile, fetc
 export async function discoverImageModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
   if (profile.providerType === "sogni") {
     if (profile.configuration?.modelDiscoveryEnabled === false) return [];
-    const url = `${openAiRoot(profile.baseUrl)}/models`;
+    const url = `${rootUrl(profile.baseUrl).replace(/\/v1$/i, "")}/api/v1/models/list`;
     const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile) }, fetcher), profile, "image model discovery", url);
-    return inventoryItems(imageInventoryRows(inventoryRows(data)));
+    return inventoryItems(inventoryRows(data).filter((model: any) => String(model?.media || "").toLowerCase() === "image"));
   }
   if (profile.providerType !== "openrouter") {
     const url = profile.providerType === "lmstudio"

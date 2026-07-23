@@ -125,6 +125,10 @@ export const worldCoverRequestSchema = z.object({
   replace: z.boolean().default(false)
 }).strict();
 
+export const assetSelectionSchema = z.object({
+  assetId: z.uuid()
+}).strict();
+
 export const sensitiveContentFilterSchema = z.enum(["provider-default", "enabled", "disabled"]);
 
 export const sogniIllustrationProviderConfigSchema = z.object({
@@ -154,6 +158,13 @@ export const sogniIllustrationProviderConfigSchema = z.object({
   }
   if (value.defaultWidth * value.defaultHeight > 40_000_000) {
     context.addIssue({ code: "custom", path: ["defaultWidth"], message: "Default image dimensions exceed the 40 megapixel limit." });
+  }
+  if (value.sensitiveContentFilter !== "provider-default" || value.workflowSafeContentFilterSupported) {
+    context.addIssue({
+      code: "custom",
+      path: ["sensitiveContentFilter"],
+      message: "Sogni inline workflows currently support only the provider-default content filter."
+    });
   }
 });
 

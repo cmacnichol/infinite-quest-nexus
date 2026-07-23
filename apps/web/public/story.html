@@ -397,10 +397,19 @@
         <textarea id="imagePromptEditor" placeholder="Describe the scene you want the image model to render."></textarea>
       </label>
       <div class="row wrap" style="justify-content:flex-end;">
+        <button id="btnChooseImageLibrary" type="button">Choose from library</button>
         <button id="btnImagePromptCancel" type="button">Cancel</button>
         <button id="btnRegenerateImageConfirm" class="primary" type="button">🖼️ Regenerate image</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="assetLibraryDialog" class="world-gen-dialog app-dialog wide-dialog">
+    <div class="world-gen-card">
+      <div class="dialog-header"><div><h3>Image library</h3><p class="mini">Choose any retained generated image for this turn.</p></div><button id="btnCloseAssetLibrary" class="small ghost" type="button">✕</button></div>
+      <div id="assetLibraryGrid" class="asset-library-grid"><p class="mini">Loading retained images…</p></div>
+      <p id="assetLibraryStatus" class="mini" role="status" aria-live="polite"></p>
+    </div>
   </dialog>
 
   <dialog id="editResponseDialog" class="world-gen-dialog app-dialog wide-dialog">

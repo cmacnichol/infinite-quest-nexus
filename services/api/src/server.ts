@@ -18,6 +18,7 @@ import {
   generationRetryLatestRequestSchema,
   illustrationConfigSchema,
   illustrationRequestSchema,
+  assetSelectionSchema,
   worldCoverRequestSchema,
   playerCampaignConfigSchema,
   providerProfileInputSchema,
@@ -57,7 +58,7 @@ import {
   getChronicleMetrics,
   setCampaignEmbeddingConfig
 } from "./memory-service.js";
-import { readAsset, type FilesystemAssetStore } from "./asset-service.js";
+import { listAssets, readAsset, selectTurnIllustration, selectWorldCover, type FilesystemAssetStore } from "./asset-service.js";
 import { createProvider, deleteProvider, discoverUnsavedProviderModels, generateProviderText, listProviders, providerModels, setDefaultProvider, updateProvider } from "./provider-service.js";
 import { branchCampaign, discardGeneration, enqueueGeneration, enqueueLatestReplacement, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, syncPlayerCampaignConfig } from "./generation-service.js";
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "./campaign-state-service.js";
@@ -661,6 +662,12 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     return reply.code(job.duplicate ? 200 : 202).send(job);
   });
 
+  app.put<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/cover-asset", async (request) => {
+    const ownerUserId = await initialOwnerId(pool);
+    const body = assetSelectionSchema.parse(request.body);
+    return selectWorldCover(pool, ownerUserId, uuidSchema.parse(request.params.worldId), body.assetId);
+  });
+
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-config", async (request) => (
     setIllustrationConfig(
       pool,
@@ -676,6 +683,12 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.post<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustrations", async (request, reply) => {
     const job = await enqueueIllustration(pool, uuidSchema.parse(request.params.turnId), illustrationRequestSchema.parse(request.body));
     return reply.code(job.duplicate ? 200 : 202).send(job);
+  });
+
+  app.put<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustration-asset", async (request) => {
+    const ownerUserId = await initialOwnerId(pool);
+    const body = assetSelectionSchema.parse(request.body);
+    return selectTurnIllustration(pool, ownerUserId, uuidSchema.parse(request.params.turnId), body.assetId);
   });
 
   app.get<{ Params: { jobId: string } }>("/api/v1/image-jobs/:jobId", async (request) => (
@@ -694,6 +707,12 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       .header("cache-control", "private, max-age=31536000, immutable")
       .header("etag", `\"${asset.contentHash}\"`)
       .send(asset.bytes);
+  });
+
+  app.get<{ Querystring: { limit?: string } }>("/api/v1/assets", async (request) => {
+    const ownerUserId = await initialOwnerId(pool);
+    const limit = z.coerce.number().int().min(1).max(250).default(100).parse(request.query.limit);
+    return { assets: await listAssets(pool, ownerUserId, limit) };
   });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/metrics", async (request) => {

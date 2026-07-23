@@ -34,6 +34,7 @@ let sessionUser = null;
 let transferPreviewSequence = 0;
 let transferPreview = null;
 let transferIdempotencyKey = "";
+let assetLibrarySelection = null;
 const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
 const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
 const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
@@ -45,7 +46,6 @@ const SOGNI_DEFAULT_CONFIGURATION = Object.freeze({
   defaultOutputFormat: "png",
   defaultQuality: "auto",
   sensitiveContentFilter: "provider-default",
-  workflowSafeContentFilterSupported: false,
   pollIntervalMs: 2000,
   maximumPollIntervalMs: 10000,
   generationTimeoutMs: 180000,
@@ -534,6 +534,7 @@ function setWorldEditorDisabled(disabled) {
     elements.worldRules,
     elements.worldReleaseNotes,
     elements.worldCoverPrompt,
+    elements.chooseWorldCover,
     elements.generateWorldCover,
     elements.addPlayableCharacter,
     elements.forkWorldTitle,
@@ -956,6 +957,78 @@ async function generateWorldCoverImage() {
   } finally {
     if (selectedWorld?.id === worldId) elements.generateWorldCover.disabled = selectedWorld.status === "archived";
   }
+}
+
+function renderAssetLibrary(assets) {
+  elements.assetLibraryGrid.replaceChildren();
+  if (!assets.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No generated images have been retained yet.";
+    elements.assetLibraryGrid.append(empty);
+    return;
+  }
+  for (const asset of assets) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "asset-library-item";
+    const image = document.createElement("img");
+    image.src = asset.url;
+    image.alt = "Retained generated image";
+    image.loading = "lazy";
+    const detail = document.createElement("span");
+    detail.textContent = new Date(asset.createdAt).toLocaleString();
+    button.append(image, detail);
+    button.addEventListener("click", async () => {
+      if (!assetLibrarySelection) return;
+      button.disabled = true;
+      try {
+        await assetLibrarySelection(asset);
+        elements.assetLibraryDialog.close();
+      } catch (error) {
+        elements.assetLibraryStatus.className = "status error";
+        elements.assetLibraryStatus.textContent = error.message || String(error);
+        button.disabled = false;
+      }
+    });
+    elements.assetLibraryGrid.append(button);
+  }
+}
+
+async function openAssetLibrary(onSelect) {
+  assetLibrarySelection = onSelect;
+  elements.assetLibraryStatus.textContent = "Loading retained images…";
+  elements.assetLibraryStatus.className = "status";
+  elements.assetLibraryDialog.showModal();
+  try {
+    const { assets } = await api("/api/v1/assets?limit=250");
+    renderAssetLibrary(assets || []);
+    elements.assetLibraryStatus.textContent = `${assets?.length || 0} retained image${assets?.length === 1 ? "" : "s"}.`;
+  } catch (error) {
+    elements.assetLibraryGrid.replaceChildren();
+    elements.assetLibraryStatus.className = "status error";
+    elements.assetLibraryStatus.textContent = error.message || String(error);
+  }
+}
+
+async function chooseWorldCoverFromLibrary() {
+  if (!selectedWorld) return;
+  const worldId = selectedWorld.id;
+  await openAssetLibrary(async (asset) => {
+    const result = await api(`/api/v1/worlds/${worldId}/cover-asset`, {
+      method: "PUT",
+      body: JSON.stringify({ assetId: asset.id })
+    });
+    if (selectedWorld?.id !== worldId) return;
+    selectedWorld.imageUrl = result.assetUrl;
+    elements.worldCoverPreview.src = result.assetUrl;
+    elements.worldCoverPreview.classList.remove("hidden");
+    elements.worldCoverStatus.className = "status success";
+    elements.worldCoverStatus.textContent = "Selected a retained image from the shared library.";
+    const cached = worlds.find((world) => world.id === worldId);
+    if (cached) cached.imageUrl = result.assetUrl;
+    renderDashboardWorlds();
+  });
 }
 
 async function saveWorldDraft(event) {
@@ -2098,7 +2171,6 @@ function applySogniConfiguration(configuration = {}) {
   elements.providerSogniOutputFormat.value = config.defaultOutputFormat;
   elements.providerSogniQuality.value = config.defaultQuality;
   elements.providerSogniSensitiveContentFilter.value = config.sensitiveContentFilter;
-  elements.providerSogniSupportsSafeContentFilter.checked = config.workflowSafeContentFilterSupported === true;
   elements.providerSogniPollIntervalSeconds.value = String(Number(config.pollIntervalMs) / 1000);
   elements.providerSogniMaximumPollIntervalSeconds.value = String(Number(config.maximumPollIntervalMs) / 1000);
   elements.providerSogniGenerationTimeoutSeconds.value = String(Number(config.generationTimeoutMs) / 1000);
@@ -2118,7 +2190,7 @@ function providerConfigurationFromForm(existingConfig = {}) {
     defaultOutputFormat: elements.providerSogniOutputFormat.value,
     defaultQuality: elements.providerSogniQuality.value,
     sensitiveContentFilter: elements.providerSogniSensitiveContentFilter.value,
-    workflowSafeContentFilterSupported: elements.providerSogniSupportsSafeContentFilter.checked,
+    workflowSafeContentFilterSupported: false,
     pollIntervalMs: Math.round(Number(elements.providerSogniPollIntervalSeconds.value) * 1000),
     maximumPollIntervalMs: Math.round(Number(elements.providerSogniMaximumPollIntervalSeconds.value) * 1000),
     generationTimeoutMs: Math.round(Number(elements.providerSogniGenerationTimeoutSeconds.value) * 1000),
@@ -3510,6 +3582,8 @@ elements.illustrationEnabled.addEventListener("change", () => {
   renderIllustrationSettingsVisibility();
 });
 elements.discoverIllustrationModels.addEventListener("click", discoverIllustrationModels);
+elements.chooseWorldCover.addEventListener("click", chooseWorldCoverFromLibrary);
+elements.closeAssetLibrary.addEventListener("click", () => elements.assetLibraryDialog.close());
 async function loadSessionPreferences() {
   const response = await api("/api/v1/session");
   sessionUser = response.user || null;

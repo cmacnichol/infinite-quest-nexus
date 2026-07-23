@@ -393,9 +393,10 @@ function numberSetting(profile: TextProviderProfile, key: string, fallback: numb
   return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, Math.round(value))) : fallback;
 }
 
-function sensitiveContentFilterSetting(profile: TextProviderProfile): "provider-default" | "enabled" | "disabled" {
-  const value = profile.configuration?.sensitiveContentFilter;
-  return value === "enabled" || value === "disabled" ? value : "provider-default";
+function sensitiveContentFilterSetting(_profile: TextProviderProfile): "provider-default" {
+  // Direct Sogni generate_image workflow steps do not accept a filter override.
+  // Preserve provider policy even for profiles saved before this was enforced.
+  return "provider-default";
 }
 
 function artifactMimeType(bytes: Buffer, declared?: string): "image/png" | "image/jpeg" | "image/webp" {

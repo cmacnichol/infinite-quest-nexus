@@ -34,6 +34,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('id="editStateDialog"');
     expect(storyHtml).toContain('id="worldSetupDialog"');
     expect(storyHtml).toContain('id="imagePromptDialog"');
+    expect(storyHtml).toContain('id="assetLibraryDialog"');
     expect(storyHtml).toContain('id="editResponseDialog"');
     expect(storyHtml).toContain('id="retryPromptDialog"');
     expect(storyHtml).toContain('id="retryPromptEditor"');

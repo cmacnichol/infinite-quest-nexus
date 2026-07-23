@@ -159,11 +159,10 @@ function imageArguments(profile: SogniProviderProfile, request: SogniGenerationR
       retryable: false
     });
   }
-  const supportsFilter = profile.configuration?.workflowSafeContentFilterSupported === true;
-  if (request.sensitiveContentFilter !== "provider-default" && !supportsFilter) {
+  if (request.sensitiveContentFilter !== "provider-default") {
     throw new SogniProviderError({
       code: "unsupported_filter_override",
-      message: "This Sogni profile has not declared support for workflow safe-content filter overrides.",
+      message: "Sogni's inline generate_image workflow schema does not accept a safe-content filter override. Use the provider default for this adapter.",
       retryable: false
     });
   }
@@ -178,9 +177,6 @@ function imageArguments(profile: SogniProviderProfile, request: SogniGenerationR
     ...(request.steps !== undefined ? { steps: request.steps } : {}),
     ...(request.guidance !== undefined ? { guidance: request.guidance } : {}),
     ...(request.scheduler ? { scheduler: request.scheduler } : {}),
-    ...(supportsFilter && request.sensitiveContentFilter !== "provider-default"
-      ? { safeContentFilter: request.sensitiveContentFilter === "enabled" }
-      : {})
   };
 }
 

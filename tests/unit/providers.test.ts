@@ -482,6 +482,28 @@ describe("text provider adapters", () => {
     });
   });
 
+  it("rejects unsupported Sogni inline content-filter overrides", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni",
+      baseUrl: "https://api.sogni.ai",
+      model: "flux2",
+      apiKey: "sogni-secret",
+      configuration: { workflowSafeContentFilterSupported: true }
+    };
+    await expect(submitImageProvider(sogniProfile, {
+      prompt: "A fictional vista.",
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "auto",
+      outputFormat: "png",
+      sensitiveContentFilter: "enabled",
+      idempotencyKey: "illustration-job-filter:revision-1"
+    })).rejects.toMatchObject({
+      normalized: { code: "unsupported_filter_override", retryable: false }
+    });
+  });
+
   it("polls and cancels Sogni workflows without forwarding credentials to artifact URLs", async () => {
     const sogniProfile: TextProviderProfile = {
       ...profile,
@@ -539,7 +561,7 @@ describe("text provider adapters", () => {
     });
   });
 
-  it("filters Sogni inventories when image capability signals are available", async () => {
+  it("uses Sogni's media catalog and keeps image models only", async () => {
     const sogniProfile: TextProviderProfile = {
       ...profile,
       providerType: "sogni",
@@ -547,18 +569,21 @@ describe("text provider adapters", () => {
       model: "flux2",
       apiKey: "sogni-secret"
     };
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ data: [
-      { id: "qwen-chat", capabilities: { output_modalities: ["text"] } },
-      { id: "flux2", capabilities: { output_modalities: ["image"] } },
-      { id: "vendor/custom-image-renderer" }
-    ] }), { status: 200 }));
+    const fetcher = vi.fn(async (url: string | URL | Request) => {
+      expect(String(url)).toBe("https://api.sogni.ai/api/v1/models/list");
+      return new Response(JSON.stringify([
+        { id: "qwen-chat", name: "Qwen chat", SID: 1, media: "text" },
+        { id: "flux2", name: "Flux 2", SID: 2, media: "image" },
+        { id: "wan22", name: "Wan 2.2", SID: 3, media: "video" },
+        { id: "unclassified", name: "Unclassified", SID: 4 }
+      ]), { status: 200 });
+    });
     expect(await discoverImageModels(sogniProfile, fetcher as typeof fetch)).toEqual([
-      { id: "flux2", displayName: "flux2", loaded: false, instanceId: "flux2", contextLength: 0 },
-      { id: "vendor/custom-image-renderer", displayName: "vendor/custom-image-renderer", loaded: false, instanceId: "vendor/custom-image-renderer", contextLength: 0 }
+      { id: "flux2", displayName: "Flux 2", loaded: false, instanceId: "flux2", contextLength: 0 }
     ]);
   });
 
-  it("preserves Sogni's documented opaque model inventory", async () => {
+  it("does not use Sogni's LLM-only OpenAI model catalog for images", async () => {
     const sogniProfile: TextProviderProfile = {
       ...profile,
       providerType: "sogni",
@@ -567,26 +592,18 @@ describe("text provider adapters", () => {
       apiKey: "sogni-secret"
     };
     const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      expect(String(url)).toBe("https://api.sogni.ai/v1/models");
+      expect(String(url)).toBe("https://api.sogni.ai/api/v1/models/list");
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer sogni-secret");
-      return new Response(JSON.stringify({
-        object: "list",
-        data: [
-          {
-            id: "qwen3.6-35b-a3b-gguf-iq4xs",
-            object: "model",
-            created: 1_776_384_000,
-            owned_by: "qwen",
-            capabilities: { reasoning: true }
-          }
-        ]
-      }), { status: 200 });
+      return new Response(JSON.stringify([
+        { id: "z_image_turbo_bf16", name: "Z-Image Turbo", SID: 10, media: "image" },
+        { id: "ace_step_1.5", name: "ACE-Step", SID: 11, media: "audio" }
+      ]), { status: 200 });
     });
     expect(await discoverImageModels(sogniProfile, fetcher as typeof fetch)).toEqual([{
-      id: "qwen3.6-35b-a3b-gguf-iq4xs",
-      displayName: "qwen3.6-35b-a3b-gguf-iq4xs",
+      id: "z_image_turbo_bf16",
+      displayName: "Z-Image Turbo",
       loaded: false,
-      instanceId: "qwen3.6-35b-a3b-gguf-iq4xs",
+      instanceId: "z_image_turbo_bf16",
       contextLength: 0
     }]);
   });

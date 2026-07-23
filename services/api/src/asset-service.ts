@@ -29,6 +29,16 @@ export type StoredAsset = {
   contentHash: string;
 };
 
+export type AssetLibraryItem = {
+  id: string;
+  url: string;
+  mimeType: string;
+  byteLength: number;
+  createdAt: string;
+  campaignId: string | null;
+  turnId: string | null;
+};
+
 function parseDataImage(value: string): { mimeType: string; bytes: Buffer; extension: string } | null {
   const match = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\r\n]+)$/i.exec(value.trim());
   if (!match?.[1] || !match[2]) return null;
@@ -155,4 +165,89 @@ export async function readAsset(pool: DatabasePool, store: FilesystemAssetStore,
     throw new Error("Stored asset metadata failed validation.");
   }
   return { bytes: await readFile(absolutePath), mimeType: asset.mime_type, contentHash: asset.content_hash };
+}
+
+export async function listAssets(pool: DatabasePool, ownerUserId: string, limit = 100): Promise<AssetLibraryItem[]> {
+  const boundedLimit = Math.max(1, Math.min(250, Math.trunc(limit)));
+  const result = await pool.query<{
+    id: string;
+    mime_type: string;
+    byte_length: string;
+    created_at: Date;
+    campaign_id: string | null;
+    turn_id: string | null;
+  }>(
+    `SELECT id, mime_type, byte_length::text, created_at, campaign_id, turn_id
+       FROM assets
+      WHERE owner_user_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT $2`,
+    [ownerUserId, boundedLimit]
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    url: `/api/v1/assets/${row.id}`,
+    mimeType: row.mime_type,
+    byteLength: Number(row.byte_length),
+    createdAt: row.created_at.toISOString(),
+    campaignId: row.campaign_id,
+    turnId: row.turn_id
+  }));
+}
+
+async function requireOwnedAsset(client: DatabaseClient, ownerUserId: string, assetId: string): Promise<void> {
+  const result = await client.query("SELECT id FROM assets WHERE id = $1 AND owner_user_id = $2", [assetId, ownerUserId]);
+  if (!result.rowCount) throw Object.assign(new Error("Asset not found."), { statusCode: 404 });
+}
+
+export async function selectWorldCover(pool: DatabasePool, ownerUserId: string, worldId: string, assetId: string): Promise<{ assetUrl: string }> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await requireOwnedAsset(client, ownerUserId, assetId);
+    const updated = await client.query(
+      "UPDATE worlds SET cover_asset_id = $3, updated_at = now() WHERE id = $1 AND owner_user_id = $2 RETURNING id",
+      [worldId, ownerUserId, assetId]
+    );
+    if (!updated.rowCount) throw Object.assign(new Error("World not found."), { statusCode: 404 });
+    await client.query("COMMIT");
+    return { assetUrl: `/api/v1/assets/${assetId}` };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function selectTurnIllustration(pool: DatabasePool, ownerUserId: string, turnId: string, assetId: string): Promise<{ assetUrl: string }> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await requireOwnedAsset(client, ownerUserId, assetId);
+    const turn = await client.query<{ campaign_id: string }>(
+      "SELECT campaign_id FROM turns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE",
+      [turnId, ownerUserId]
+    );
+    const campaignId = turn.rows[0]?.campaign_id;
+    if (!campaignId) throw Object.assign(new Error("Turn not found."), { statusCode: 404 });
+    const assetUrl = `/api/v1/assets/${assetId}`;
+    await client.query("UPDATE turns SET image_url = $3 WHERE id = $1 AND owner_user_id = $2", [turnId, ownerUserId, assetUrl]);
+    await client.query(
+      "DELETE FROM asset_references WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_id = $3 AND asset_role = 'turn_illustration'",
+      [ownerUserId, campaignId, turnId]
+    );
+    await client.query(
+      `INSERT INTO asset_references (owner_user_id, asset_id, campaign_id, turn_id, asset_role)
+       VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
+      [ownerUserId, assetId, campaignId, turnId]
+    );
+    await client.query("COMMIT");
+    return { assetUrl };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
