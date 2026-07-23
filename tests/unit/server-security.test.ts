@@ -96,7 +96,10 @@ describe("API server security and CORS headers", () => {
         headers: { host: "nexus.test", origin: "https://evil.test" }
       });
       expect(response.statusCode).toBe(403);
-      expect(response.json()).toMatchObject({ error: "OriginNotAllowedError" });
+      expect(response.json()).toMatchObject({
+        error: "OriginNotAllowedError",
+        code: "ORIGIN_NOT_ALLOWED"
+      });
     }
     await app.close();
   });
@@ -110,6 +113,22 @@ describe("API server security and CORS headers", () => {
       payload: {}
     });
     expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({ code: "ORIGIN_NOT_ALLOWED" });
+    await app.close();
+  });
+
+  it("rejects malformed Host headers with the typed origin error", async () => {
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const response = await app.inject({
+      method: "GET",
+      url: "/health/live",
+      headers: { host: "localhost:not-a-port" }
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({
+      error: "OriginNotAllowedError",
+      code: "ORIGIN_NOT_ALLOWED"
+    });
     await app.close();
   });
 

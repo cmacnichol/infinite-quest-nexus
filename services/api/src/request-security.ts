@@ -28,9 +28,15 @@ export function installRequestSecurity(app: FastifyInstance, config: RuntimeConf
 
     const host = request.headers.host;
     if (!host) throw new OriginNotAllowedError();
+    let effectiveOrigin: string;
+    try {
+      effectiveOrigin = new URL(`${request.protocol}://${host}`).origin;
+    } catch {
+      throw new OriginNotAllowedError();
+    }
     const decision = evaluateRequestOrigin(
       request.headers.origin,
-      new URL(`${request.protocol}://${host}`).origin,
+      effectiveOrigin,
       config.security.corsAllowedOrigins
     );
     if (!decision.allowed) throw new OriginNotAllowedError();
