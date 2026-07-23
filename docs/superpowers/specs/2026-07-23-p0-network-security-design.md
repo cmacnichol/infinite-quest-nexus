@@ -95,11 +95,11 @@ Origin validation runs in an `onRequest` hook before body parsing.
 ### Decision algorithm
 
 1. If the request has no `Origin` header, allow it. This preserves PowerShell, curl, health, migration, and smoke-test clients.
-2. If the origin is the application's effective same origin, allow it.
+2. If the origin is the effective same origin and its hostname is localhost or loopback, allow it.
 3. If the normalized origin exactly matches a configured `CORS_ALLOWED_ORIGINS` entry, allow it and return that exact value in `Access-Control-Allow-Origin`.
-4. Otherwise return `403` with code `ORIGIN_NOT_ALLOWED`.
+4. Otherwise return `403` with code `ORIGIN_NOT_ALLOWED`, including when an arbitrary hostile `Origin` matches an arbitrary hostile `Host`.
 
-The effective same origin is derived from the direct request unless `TRUST_PROXY_HOPS` explicitly enables trusted forwarded protocol and host handling.
+The effective same origin is derived from the direct request unless `TRUST_PROXY_HOPS` explicitly enables trusted forwarded protocol and host handling. LAN and public browser origins must be listed explicitly even when their `Origin` and `Host` values match. This prevents DNS rebinding from turning an attacker-controlled hostname into an implicitly trusted same origin.
 
 ### Response behavior
 
@@ -305,7 +305,7 @@ Security errors use the existing API error envelope and correlation ID.
 
 | HTTP | Code | Meaning |
 | ---: | --- | --- |
-| 403 | `ORIGIN_NOT_ALLOWED` | Browser origin is neither same-origin nor configured |
+| 403 | `ORIGIN_NOT_ALLOWED` | Browser origin is neither loopback same-origin nor explicitly configured |
 | 413 | `REQUEST_TOO_LARGE` | Request exceeds its route policy |
 | 422 | `PROVIDER_DESTINATION_NOT_ALLOWED` | Provider URL, address, or redirect violates outbound policy |
 | 429 | `REQUEST_LIMIT_EXCEEDED` | Shared rate or concurrency limit is exhausted |
@@ -320,7 +320,7 @@ No error includes internal addresses, allowlist contents, credentials, raw datab
 Test pure and dependency-injected components for:
 
 - origin normalization, exact matches, wildcard rejection, scheme/port distinctions, and lookalike hosts;
-- same-origin behavior with direct and explicitly trusted proxy requests;
+- loopback same-origin and explicitly configured origin behavior with direct and trusted-proxy requests;
 - CSP construction and rejection of invalid image origins;
 - hostname, IPv4, IPv6, and CIDR matching;
 - built-in localhost behavior;
@@ -337,7 +337,7 @@ Test pure and dependency-injected components for:
 
 Use Fastify injection and the real test database to cover:
 
-- same-origin, configured cross-origin, hostile, and missing-origin requests;
+- loopback same-origin, configured LAN/public, hostile, rebinding, and missing-origin requests;
 - permitted and denied preflights;
 - absence of credentialed CORS and `X-User-Id`;
 - route-specific body limits;
@@ -372,7 +372,7 @@ Rollback to the previous application version is safe because the new tables are 
 The deliverable is complete when:
 
 1. A hostile browser origin cannot read or mutate any API resource.
-2. Same-origin browsers and origin-less administrative clients continue to work.
+2. Loopback browsers, configured LAN/public browser origins, and origin-less administrative clients continue to work.
 3. Public HTTPS providers work without allowlist entries.
 4. Localhost works by default; other private providers work only when configured.
 5. Blocked, rebinding, mixed-answer, and cross-origin redirect destinations receive no authenticated request.
