@@ -141,6 +141,20 @@ integration("World Library and campaign version integration", () => {
       backgroundStory: "Background One",
       firstAction: "Action One"
     });
+    expect(world?.draftPreview).toMatchObject({
+      genre: "test",
+      premise: "Premise Unpublished",
+      backgroundStory: "Background Unpublished",
+      firstAction: "Action Unpublished"
+    });
+    expect(Object.keys(world?.draftPreview || {}).sort()).toEqual([
+      "backgroundStory",
+      "firstAction",
+      "genre",
+      "premise",
+      "title",
+      "tone"
+    ]);
   });
 
   it("adds, edits, and deletes draft characters without changing published versions or campaign snapshots", async () => {

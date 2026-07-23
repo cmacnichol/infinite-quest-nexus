@@ -16,6 +16,11 @@ let selectedCampaign = null;
 let worlds = [];
 let campaigns = [];
 let selectedWorld = null;
+let managementWorldFilter = "all";
+let worldAuthorMode = "create";
+let worldAuthorWorkingContent = null;
+let worldAuthorSelectedCover = null;
+let worldAuthorBusy = false;
 let dashboardWorld = null;
 const dashboardWorldDetails = new Map();
 let worldVersionCharacters = [];
@@ -148,6 +153,7 @@ function clickedDialogBackdrop(dialog, event) {
 
 function requestModalDismissal(dialog) {
   if (dialog === elements.characterDialog && characterModalBusy) return;
+  if (dialog === elements.worldAuthorDialog && worldAuthorBusy) return;
   if (dialog.dataset.dismissMode === "cancel") {
     dialog.close("cancel");
     return;
@@ -816,23 +822,12 @@ function requestTypedDelete(title, message, details = []) {
 
 function setWorldEditorDisabled(disabled) {
   [
-    elements.worldTitle,
-    elements.worldGenre,
-    elements.worldTone,
-    elements.worldPremise,
-    elements.worldBackground,
-    elements.worldFirstAction,
-    elements.worldRules,
+    elements.editWorldDraft,
     elements.worldReleaseNotes,
-    elements.worldCoverPrompt,
-    elements.chooseWorldCover,
-    elements.generateWorldCover,
-    elements.addPlayableCharacter,
     elements.forkWorldTitle,
     elements.newCampaignTitle,
     elements.newCampaignCharacter,
     elements.newCampaignTurnControlStyle,
-    elements.saveWorldDraft,
     elements.publishWorld,
     elements.forkWorldModalBtn,
     elements.confirmForkWorld,
@@ -852,7 +847,7 @@ function worldOverviewWithoutLegacyCharacter(world = {}) {
 }
 
 function worldContentFromForm() {
-  const current = selectedWorld?.draftContent || {};
+  const current = worldAuthorWorkingContent || selectedWorld?.draftContent || {};
   const currentOverview = worldOverviewWithoutLegacyCharacter(current.world);
   return {
     ...current,
@@ -904,7 +899,8 @@ function configuredDefaultTextProvider() {
 function updateCharacterGeneratorAvailability() {
   const available = characterModalScope === "world"
     && Boolean(configuredDefaultTextProvider())
-    && selectedWorld?.status !== "archived";
+    && Boolean(worldAuthorWorkingContent)
+    && (worldAuthorMode === "create" || selectedWorld?.status !== "archived");
   elements.characterGenerator.classList.toggle("hidden", !available);
   if (!available) elements.characterGenerator.open = false;
   elements.generateCharacter.disabled = !available || characterModalBusy;
@@ -1037,9 +1033,12 @@ function populateCharacterForm(character, readOnly = false) {
 function setCharacterModalControls(readOnly, busy = false) {
   characterModalBusy = busy;
   elements.characterDialog.dataset.readOnly = String(readOnly);
-  for (const control of [elements.characterName, elements.addCharacterStat, elements.addCharacterTracker, elements.organizeCharacterProfile]) {
+  for (const control of [elements.characterName, elements.addCharacterStat, elements.addCharacterTracker]) {
     control.disabled = readOnly || busy;
   }
+  const organizationAvailable = characterModalScope === "campaign" || worldAuthorMode === "edit";
+  elements.organizeCharacterProfile.disabled = readOnly || busy || !organizationAvailable;
+  elements.organizeCharacterProfile.classList.toggle("hidden", characterModalScope === "world" && !organizationAvailable);
   elements.characterDialog.querySelectorAll(".character-profile-section input, .character-profile-section textarea").forEach((control) => {
     control.disabled = readOnly || busy;
   });
@@ -1053,11 +1052,20 @@ function setCharacterModalControls(readOnly, busy = false) {
   updateCharacterGeneratorAvailability();
 }
 
+function updateWorldAuthorCharacters(characters) {
+  worldAuthorWorkingContent = {
+    ...(worldAuthorWorkingContent || {}),
+    playableCharacters: characters.map((character) => copyJsonValue(character))
+  };
+  elements.worldCharacterRevision.value = String(Number(elements.worldCharacterRevision.value || 0) + 1);
+  renderPlayableCharacterRoster(worldAuthorWorkingContent.playableCharacters);
+}
+
 function openCharacterDialog(characterId = "") {
-  if (!selectedWorld) return;
-  const readOnly = selectedWorld.status === "archived";
+  if (!elements.worldAuthorDialog.open || !worldAuthorWorkingContent) return;
+  const readOnly = false;
   const character = characterId
-    ? playableCharactersFromContent(selectedWorld.draftContent).find((item) => item.id === characterId)
+    ? playableCharactersFromContent(worldAuthorWorkingContent).find((item) => item.id === characterId)
     : null;
   if (characterId && !character) {
     worldMessage("That character is no longer present in this world draft.", "error");
@@ -1070,12 +1078,11 @@ function openCharacterDialog(characterId = "") {
   const initial = character || { id: "", name: "", characterText: "", rpgStats: [], defaultTriggers: [], source: { type: "world-library-editor" } };
   populateCharacterForm(initial, readOnly);
   elements.characterGeneratorPrompt.value = "";
-  elements.characterDialogTitle.textContent = readOnly ? "View character" : character ? "Edit character" : "Add character";
-  elements.characterDialogDescription.textContent = readOnly
-    ? "This world is archived. Restore it before changing this character."
-    : character
-      ? "Update this character in the current world draft."
-      : "Create a playable character for this world draft.";
+  elements.characterGenerator.open = false;
+  elements.characterDialogTitle.textContent = character ? "Edit character" : "Add character";
+  elements.characterDialogDescription.textContent = character
+    ? "Update this character in the world authoring form."
+    : "Create a playable character for this world authoring form.";
   elements.saveCharacter.textContent = character ? "Save changes" : "Add character";
   elements.saveCharacter.classList.toggle("hidden", readOnly);
   elements.deleteCharacter.classList.toggle("hidden", !character || readOnly);
@@ -1152,7 +1159,7 @@ function renderPlayableCharacterRoster(characters = []) {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "character-roster-card";
-    card.setAttribute("aria-label", `${selectedWorld?.status === "archived" ? "View" : "Edit"} ${String(character.name || "unnamed character")}`);
+    card.setAttribute("aria-label", `Edit ${String(character.name || "unnamed character")}`);
     const name = document.createElement("strong");
     name.textContent = String(character.name || "Unnamed character");
     const detail = document.createElement("span");
@@ -1167,67 +1174,122 @@ function renderPlayableCharacterRoster(characters = []) {
   }
 }
 
+function managementWorldPreview(world) {
+  return world?.draftPreview || world?.latestPreview || {};
+}
+
+function managementWorldMatchesFilter(world) {
+  if (managementWorldFilter === "archived") return world.status === "archived";
+  if (world.status === "archived") return managementWorldFilter === "all";
+  if (managementWorldFilter === "draft") return !world.latestVersionId;
+  if (managementWorldFilter === "published") return Boolean(world.latestVersionId);
+  return true;
+}
+
+function createManagementWorldCard(world) {
+  const preview = managementWorldPreview(world);
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = `dashboard-card world-card management-world-card${selectedWorld?.id === world.id ? " selected" : ""}`;
+  card.dataset.worldId = world.id;
+  card.dataset.status = world.status;
+  card.setAttribute("aria-pressed", String(selectedWorld?.id === world.id));
+  card.setAttribute("aria-label", `Select ${world.title}`);
+  const art = document.createElement("div");
+  art.className = "card-art";
+  applyArtwork(art, world);
+  const version = document.createElement("span");
+  version.className = "card-badge";
+  version.textContent = world.latestVersionNumber ? `Published · v${world.latestVersionNumber}` : "Unpublished draft";
+  const status = document.createElement("span");
+  status.className = "card-badge secondary";
+  status.textContent = world.status;
+  art.append(version, status);
+  const body = document.createElement("div");
+  body.className = "card-body";
+  const title = document.createElement("h3");
+  title.textContent = world.title;
+  const description = document.createElement("p");
+  description.textContent = String(preview.premise || preview.backgroundStory || "No premise has been authored yet.");
+  const meta = document.createElement("div");
+  meta.className = "card-meta";
+  const genre = document.createElement("span");
+  genre.textContent = String(preview.genre || "Uncharted genre");
+  const campaignsCount = document.createElement("span");
+  campaignsCount.textContent = `${number(world.campaignCount)} campaign${Number(world.campaignCount) === 1 ? "" : "s"}`;
+  meta.append(genre, campaignsCount);
+  const cta = document.createElement("div");
+  cta.className = "card-cta";
+  const updated = new Date(world.draftUpdatedAt || world.updatedAt);
+  const ctaLabel = document.createElement("span");
+  ctaLabel.textContent = Number.isNaN(updated.valueOf()) ? "Select world" : `Updated ${updated.toLocaleDateString()}`;
+  const ctaArrow = document.createElement("span");
+  ctaArrow.setAttribute("aria-hidden", "true");
+  ctaArrow.textContent = "→";
+  cta.append(ctaLabel, ctaArrow);
+  body.append(title, description, meta, cta);
+  card.append(art, body);
+  card.addEventListener("click", () => void selectWorld(world.id));
+  return card;
+}
+
+function renderManagementWorlds() {
+  const query = elements.managementWorldSearch.value.trim().toLocaleLowerCase();
+  const matches = worlds.filter(managementWorldMatchesFilter).filter((world) => {
+    const preview = managementWorldPreview(world);
+    return [world.title, preview.genre, preview.tone, preview.premise, preview.backgroundStory]
+      .join(" ")
+      .toLocaleLowerCase()
+      .includes(query);
+  });
+  elements.worldManagementCarousel.replaceChildren();
+  if (!matches.length) {
+    const empty = document.createElement("p");
+    empty.className = "carousel-empty";
+    empty.textContent = query ? "No worlds match that search and filter." : "No worlds match this status filter.";
+    elements.worldManagementCarousel.append(empty);
+    return;
+  }
+  matches.forEach((world) => elements.worldManagementCarousel.append(createManagementWorldCard(world)));
+}
+
 async function loadWorlds(preselectId = "") {
   ({ worlds } = await api("/api/v1/worlds"));
   renderDashboardWorlds();
+  renderManagementWorlds();
   void hydrateDashboardWorlds();
   void loadDashboardStats();
-  elements.worldList.replaceChildren();
   if (!worlds.length) {
-    const empty = document.createElement("p");
-    empty.className = "muted";
-    empty.textContent = "No worlds yet. Create one or import a portable world.";
-    elements.worldList.append(empty);
     selectedWorld = null;
     worldVersionCharacters = [];
     worldVersionCampaignReady = false;
     playableCharacterLoadSequence += 1;
-    renderPlayableCharacterRoster([]);
+    elements.worldSelectionPanel.classList.add("hidden");
     setWorldEditorDisabled(true);
-    updateCharacterGeneratorAvailability();
-    elements.worldCampaignReadiness.textContent = "Select or create a world before checking campaign readiness.";
-    elements.worldCampaignReadiness.className = "status";
+    elements.worldCampaignReadiness.textContent = "Create a world before checking campaign readiness.";
     return;
-  }
-  for (const world of worlds) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "world-button";
-    button.dataset.worldId = world.id;
-    const title = document.createElement("strong");
-    title.textContent = world.title;
-    const details = document.createElement("span");
-    details.textContent = `${world.status} · ${world.latestVersionNumber ? `version ${world.latestVersionNumber}` : "unpublished"} · ${number(world.campaignCount)} campaign${Number(world.campaignCount) === 1 ? "" : "s"}`;
-    button.append(title, details);
-    button.addEventListener("click", () => selectWorld(world.id));
-    elements.worldList.append(button);
   }
   const targetId = preselectId || selectedWorld?.id;
   if (targetId && worlds.some((world) => world.id === targetId)) await selectWorld(targetId);
+  else if (selectedWorld && !worlds.some((world) => world.id === selectedWorld.id)) {
+    selectedWorld = null;
+    elements.worldSelectionPanel.classList.add("hidden");
+    setWorldEditorDisabled(true);
+    renderManagementWorlds();
+  } else if (!selectedWorld) {
+    elements.worldSelectionPanel.classList.add("hidden");
+    setWorldEditorDisabled(true);
+  }
 }
 
 async function selectWorld(worldId) {
   const coverPollSequence = ++worldCoverJobPollSequence;
   selectedWorld = await api(`/api/v1/worlds/${worldId}`);
-  document.querySelectorAll(".world-button").forEach((button) => button.classList.toggle("active", button.dataset.worldId === worldId));
-  const overview = selectedWorld.draftContent?.world || {};
+  renderManagementWorlds();
+  elements.worldSelectionPanel.classList.remove("hidden");
   elements.worldEditorTitle.textContent = selectedWorld.title;
-  elements.worldEditorMeta.textContent = `${selectedWorld.status} · draft revision ${selectedWorld.draftRevision} · ${selectedWorld.versions.length} published version${selectedWorld.versions.length === 1 ? "" : "s"}`;
-  elements.worldTitle.value = overview.title || selectedWorld.title;
-  elements.worldGenre.value = overview.genre || "";
-  elements.worldTone.value = overview.tone || "";
-  elements.worldPremise.value = overview.premise || "";
-  elements.worldBackground.value = overview.backgroundStory || "";
-  renderPlayableCharacterRoster(playableCharactersFromContent(selectedWorld.draftContent));
-  elements.worldFirstAction.value = overview.firstAction || "";
-  elements.worldRules.value = overview.rules || "";
+  elements.worldEditorMeta.textContent = `${selectedWorld.status} · draft revision ${selectedWorld.draftRevision} · ${selectedWorld.versions.length} published version${selectedWorld.versions.length === 1 ? "" : "s"} · ${number(selectedWorld.campaigns?.length || 0)} campaign${Number(selectedWorld.campaigns?.length || 0) === 1 ? "" : "s"}`;
   elements.worldReleaseNotes.value = "";
-  const coverUrl = artworkUrl(selectedWorld);
-  elements.worldCoverPreview.src = coverUrl;
-  elements.worldCoverPreview.classList.toggle("hidden", !coverUrl);
-  elements.worldCoverStatus.textContent = coverUrl
-    ? "This cover is stored in the retained Nexus image library. Generate again to replace it."
-    : "No cover has been generated for this world.";
   elements.worldVersionSelect.replaceChildren(new Option(selectedWorld.versions.length ? "Latest published version" : "No published versions", ""));
   for (const version of selectedWorld.versions) {
     elements.worldVersionSelect.append(new Option(`Version ${version.versionNumber}${version.releaseNotes ? ` · ${version.releaseNotes}` : ""}`, version.id));
@@ -1236,9 +1298,9 @@ async function selectWorld(worldId) {
   setWorldEditorDisabled(false);
   const archived = selectedWorld.status === "archived";
   elements.archiveWorld.textContent = archived ? "Restore" : "Archive";
-  elements.saveWorldDraft.disabled = archived;
+  elements.editWorldDraft.disabled = archived;
+  elements.worldReleaseNotes.disabled = archived;
   elements.publishWorld.disabled = archived;
-  elements.addPlayableCharacter.disabled = archived;
   elements.createCampaignModalBtn.disabled = true;
   elements.confirmCreateCampaign.disabled = true;
   elements.exportWorld.disabled = !selectedWorld.versions.length;
@@ -1246,32 +1308,124 @@ async function selectWorld(worldId) {
   updateWorldVersionDeleteAvailability();
   elements.deleteWorld.disabled = false;
   updateCharacterGeneratorAvailability();
-  void resumeWorldCoverJob(worldId, coverPollSequence);
   await loadWorldVersionPlayableCharacters();
-  worldMessage(archived ? "This world is archived. Restore it before editing or publishing." : "Draft loaded from authoritative PostgreSQL storage.");
+  worldMessage(archived ? "This world is archived. Restore it before editing or publishing." : "World selected. Draft editing opens in the authoring modal.");
+  void resumeWorldCoverJob(worldId, coverPollSequence);
 }
 
-async function newWorld() {
-  const title = elements.newWorldTitle.value.trim();
-  if (!title) {
-    worldMessage("Enter a title for the new world.", "error");
-    elements.newWorldTitle.focus();
+function emptyWorldContent() {
+  return {
+    schemaVersion: 5,
+    world: { title: "", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" },
+    playableCharacters: [],
+    entities: [],
+    relationships: [],
+    rpgStats: [],
+    defaultTriggers: [],
+    eventTriggers: [],
+    assets: [],
+    defaults: {}
+  };
+}
+
+function setWorldAuthorStatus(message = "", type = "") {
+  elements.worldAuthorStatus.textContent = message;
+  elements.worldAuthorStatus.className = `status ${type}`.trim();
+}
+
+function populateWorldAuthorForm(content) {
+  worldAuthorWorkingContent = copyJsonValue(content || emptyWorldContent());
+  const overview = worldAuthorWorkingContent.world || {};
+  elements.worldTitle.value = overview.title || "";
+  elements.worldGenre.value = overview.genre || "";
+  elements.worldTone.value = overview.tone || "";
+  elements.worldPremise.value = overview.premise || "";
+  elements.worldBackground.value = overview.backgroundStory || "";
+  elements.worldFirstAction.value = overview.firstAction || "";
+  elements.worldRules.value = overview.rules || "";
+  elements.worldCharacterRevision.value = "0";
+  renderPlayableCharacterRoster(playableCharactersFromContent(worldAuthorWorkingContent));
+}
+
+function resetWorldCoverAuthoring() {
+  worldAuthorSelectedCover = null;
+  elements.worldCoverAssetId.value = "";
+  elements.worldCoverPrompt.value = "";
+  elements.worldCoverKeep.checked = true;
+  const coverUrl = worldAuthorMode === "edit" ? artworkUrl(selectedWorld) : "";
+  elements.worldCoverPreview.src = coverUrl;
+  elements.worldCoverPreview.classList.toggle("hidden", !coverUrl);
+  elements.worldCoverKeepLabel.textContent = coverUrl ? "Keep current cover" : "No cover";
+  elements.worldCoverRemoveOption.classList.toggle("hidden", !coverUrl);
+  elements.worldCoverOptions.open = false;
+  updateWorldCoverChoice();
+}
+
+function openWorldAuthor(mode) {
+  if (mode === "edit" && (!selectedWorld || selectedWorld.status === "archived")) return;
+  worldAuthorMode = mode;
+  worldAuthorBusy = false;
+  elements.worldAuthorDialogTitle.textContent = mode === "create" ? "Create world" : `Edit ${selectedWorld.title}`;
+  elements.worldAuthorDialogDescription.textContent = mode === "create"
+    ? "Author a reusable world draft. Nothing is published until you choose Publish version."
+    : `Update draft revision ${selectedWorld.draftRevision}. Published versions and existing campaigns remain unchanged.`;
+  elements.saveWorldDraft.textContent = mode === "create" ? "Create world" : "Save changes";
+  elements.worldGenerator.classList.toggle("hidden", mode !== "create");
+  elements.worldGenerator.open = false;
+  elements.worldGeneratorPrompt.value = "";
+  const textAvailable = Boolean(configuredDefaultTextProvider());
+  elements.generateWorldPreview.disabled = !textAvailable;
+  elements.worldGeneratorAvailability.innerHTML = textAvailable
+    ? "Generation uses the configured default text provider."
+    : 'Configure a default text provider in <a href="#providers">Provider Setup</a> to enable generation.';
+  populateWorldAuthorForm(mode === "create" ? emptyWorldContent() : selectedWorld.draftContent);
+  resetWorldCoverAuthoring();
+  setWorldAuthorStatus(mode === "create" ? "Enter a title manually or generate a complete world from a concept." : "Review your changes before saving this draft.");
+  openManagedModal(elements.worldAuthorDialog);
+  elements.worldTitle.focus();
+}
+
+function newWorld() {
+  openWorldAuthor("create");
+}
+
+async function generateWorldFromPrompt() {
+  if (worldAuthorMode !== "create" || worldAuthorBusy) return;
+  const prompt = elements.worldGeneratorPrompt.value.trim();
+  if (!prompt) {
+    setWorldAuthorStatus("Describe the world you want the default text model to create.", "error");
+    elements.worldGeneratorPrompt.focus();
     return;
   }
-  worldMessage("Creating world draft…");
+  const current = worldContentFromForm();
+  const hasAuthoredContent = [
+    current.world.title,
+    current.world.genre,
+    current.world.tone,
+    current.world.premise,
+    current.world.backgroundStory,
+    current.world.firstAction,
+    current.world.rules,
+    ...current.playableCharacters
+  ].some((value) => typeof value === "object" || String(value || "").trim());
+  if (hasAuthoredContent && !window.confirm("Replace the current world fields and playable-character roster with generated content?")) return;
+  worldAuthorBusy = true;
+  elements.generateWorldPreview.disabled = true;
+  elements.saveWorldDraft.disabled = true;
+  setWorldAuthorStatus("Generating a complete world and playable-character roster…");
   try {
-    const generateCover = elements.newWorldGenerateCover.checked;
-    const world = await api("/api/v1/worlds", { method: "POST", body: JSON.stringify({ title }) });
-    elements.newWorldTitle.value = "";
-    await loadWorlds(world.id);
-    if (generateCover) {
-      worldMessage("World draft created. Queuing its cover with the default image provider…", "success");
-      await generateWorldCoverImage();
-    } else {
-      worldMessage("World draft created. It must be published before a campaign can use it.", "success");
-    }
+    const generated = await api("/api/v1/worlds/generate-preview", {
+      method: "POST",
+      body: JSON.stringify({ title: elements.worldTitle.value.trim(), prompt })
+    });
+    populateWorldAuthorForm(generated.content);
+    setWorldAuthorStatus("World generated. Review every field and character before creating the draft.", "success");
   } catch (error) {
-    worldMessage(error.message || String(error), "error");
+    setWorldAuthorStatus(error.message || String(error), "error");
+  } finally {
+    worldAuthorBusy = false;
+    elements.generateWorldPreview.disabled = !configuredDefaultTextProvider();
+    elements.saveWorldDraft.disabled = false;
   }
 }
 
@@ -1322,11 +1476,10 @@ async function monitorWorldCoverJobWithSequence(jobId, worldId, sequence) {
     if (job.status === "completed") {
       renderWorldCoverJobStatus(job);
       selectedWorld.imageUrl = job.assetUrl;
-      elements.worldCoverPreview.src = job.assetUrl;
-      elements.worldCoverPreview.classList.remove("hidden");
       const cached = worlds.find((world) => world.id === worldId);
       if (cached) cached.imageUrl = job.assetUrl;
       renderDashboardWorlds();
+      renderManagementWorlds();
       return job;
     }
     if (["failed", "recoverable", "cancelled", "expired"].includes(job.status)) {
@@ -1344,46 +1497,38 @@ async function resumeWorldCoverJob(worldId, sequence) {
     if (!job || selectedWorld?.id !== worldId || sequence !== worldCoverJobPollSequence) return;
     if (job.status === "completed") return;
     renderWorldCoverJobStatus(job);
+    if (["failed", "recoverable", "cancelled", "expired"].includes(job.status)) {
+      worldMessage(job.errorMessage || "World cover generation did not complete. Open Edit draft to retry.", "error");
+      return;
+    }
     if (["queued", "generating", "provider_pending", "downloading"].includes(job.status)) {
-      elements.generateWorldCover.disabled = true;
       await monitorWorldCoverJobWithSequence(job.id, worldId, sequence);
     }
   } catch (error) {
     if (selectedWorld?.id !== worldId || sequence !== worldCoverJobPollSequence) return;
     elements.worldCoverStatus.className = "status error";
     elements.worldCoverStatus.textContent = error.message || String(error);
-  } finally {
-    if (selectedWorld?.id === worldId && sequence === worldCoverJobPollSequence) {
-      elements.generateWorldCover.disabled = selectedWorld.status === "archived";
-    }
+    worldMessage(`${error.message || String(error)} Open Edit draft to retry the cover.`, "error");
   }
 }
 
-async function generateWorldCoverImage() {
-  if (!selectedWorld) return;
-  const worldId = selectedWorld.id;
-  elements.generateWorldCover.disabled = true;
-  elements.worldCoverStatus.className = "status";
-  elements.worldCoverStatus.textContent = "Queuing a world cover with the default image provider…";
-  try {
-    const job = await api(`/api/v1/worlds/${worldId}/cover`, {
-      method: "POST",
-      body: JSON.stringify({
-        prompt: elements.worldCoverPrompt.value.trim(),
-        size: "1024x1536",
-        aspectRatio: "2:3",
-        quality: "auto",
-        outputFormat: "png",
-        replace: Boolean(selectedWorld.imageUrl)
-      })
-    });
-    await monitorWorldCoverJob(job.id, worldId);
-  } catch (error) {
-    elements.worldCoverStatus.className = "status error";
-    elements.worldCoverStatus.textContent = error.message || String(error);
-  } finally {
-    if (selectedWorld?.id === worldId) elements.generateWorldCover.disabled = selectedWorld.status === "archived";
+function updateWorldCoverChoice() {
+  const mode = document.querySelector('input[name="worldCoverMode"]:checked')?.value || "keep";
+  elements.worldCoverPromptField.classList.toggle("hidden", mode !== "generate");
+  elements.chooseWorldCover.classList.toggle("hidden", mode !== "library");
+  if (mode === "generate") {
+    if (defaultProvider("image")) {
+      elements.worldCoverStatus.textContent = "A new cover will be queued after the world draft is saved.";
+    } else {
+      elements.worldCoverStatus.innerHTML = 'Configure a default image provider in <a href="#providers">Provider Setup</a>. The world can still be saved without a cover.';
+    }
   }
+  else if (mode === "library") {
+    elements.worldCoverStatus.textContent = worldAuthorSelectedCover
+      ? `Selected retained image: ${worldAuthorSelectedCover.title || "Untitled image"}.`
+      : "Choose an authorized retained image from the library.";
+  } else if (mode === "remove") elements.worldCoverStatus.textContent = "The current cover will be removed after the draft is saved.";
+  else elements.worldCoverStatus.textContent = worldAuthorMode === "edit" && artworkUrl(selectedWorld) ? "The current cover will be kept." : "No cover will be applied.";
 }
 
 async function openAssetLibrary(onSelect, context = {}) {
@@ -1391,57 +1536,109 @@ async function openAssetLibrary(onSelect, context = {}) {
 }
 
 async function chooseWorldCoverFromLibrary() {
-  if (!selectedWorld) return;
-  const worldId = selectedWorld.id;
   await openAssetLibrary(async (asset) => {
-    const result = await api(`/api/v1/worlds/${worldId}/cover-asset`, {
-      method: "PUT",
-      body: JSON.stringify({ assetId: asset.id })
-    });
-    if (selectedWorld?.id !== worldId) return;
-    selectedWorld.imageUrl = result.assetUrl;
-    elements.worldCoverPreview.src = result.assetUrl;
+    worldAuthorSelectedCover = asset;
+    elements.worldCoverAssetId.value = asset.id;
+    elements.worldCoverLibraryMode.checked = true;
+    elements.worldCoverPreview.src = asset.url;
     elements.worldCoverPreview.classList.remove("hidden");
     elements.worldCoverStatus.className = "status success";
-    elements.worldCoverStatus.textContent = "Selected a retained image from the image library.";
-    const cached = worlds.find((world) => world.id === worldId);
-    if (cached) cached.imageUrl = result.assetUrl;
-    renderDashboardWorlds();
-  }, { worldId });
+    elements.worldCoverStatus.textContent = `Selected retained image: ${asset.title || "Untitled image"}.`;
+  }, worldAuthorMode === "edit" && selectedWorld ? { worldId: selectedWorld.id } : {});
+}
+
+async function applyWorldCoverChoice(worldId) {
+  const mode = document.querySelector('input[name="worldCoverMode"]:checked')?.value || "keep";
+  if (mode === "keep") return "";
+  if (mode === "library") {
+    const assetId = elements.worldCoverAssetId.value;
+    if (!assetId) throw new Error("Choose a retained image before saving the world.");
+    await api(`/api/v1/worlds/${worldId}/cover-asset`, { method: "PUT", body: JSON.stringify({ assetId }) });
+    await loadWorlds(worldId);
+    return " Retained cover attached.";
+  }
+  if (mode === "remove") {
+    await api(`/api/v1/worlds/${worldId}/cover-asset`, { method: "PUT", body: JSON.stringify({ assetId: null }) });
+    await loadWorlds(worldId);
+    return " Cover removed.";
+  }
+  const job = await api(`/api/v1/worlds/${worldId}/cover`, {
+    method: "POST",
+    body: JSON.stringify({
+      prompt: elements.worldCoverPrompt.value.trim(),
+      size: "1024x1536",
+      aspectRatio: "2:3",
+      quality: "auto",
+      outputFormat: "png",
+      replace: Boolean(selectedWorld?.imageUrl)
+    })
+  });
+  void monitorWorldCoverJob(job.id, worldId).catch((error) => worldMessage(`World saved, but cover generation failed: ${error.message || String(error)}`, "error"));
+  return " Cover generation queued.";
 }
 
 async function saveWorldDraft(event) {
   event.preventDefault();
-  if (!selectedWorld) return;
+  if (worldAuthorBusy) return;
+  const title = elements.worldTitle.value.trim();
+  if (!title) {
+    setWorldAuthorStatus("Enter a title for the world.", "error");
+    elements.worldTitle.focus();
+    return;
+  }
+  worldAuthorBusy = true;
   elements.saveWorldDraft.disabled = true;
-  worldMessage("Saving world draft…");
+  elements.cancelWorldAuthor.disabled = true;
+  const mode = worldAuthorMode;
+  const expectedRevision = selectedWorld?.draftRevision;
+  const content = worldContentFromForm();
+  setWorldAuthorStatus(mode === "create" ? "Creating authoritative world draft…" : "Saving world draft…");
+  let worldId = selectedWorld?.id || "";
+  let authoritativeCreateCompleted = false;
   try {
-    const saved = await persistWorldDraft(worldContentFromForm());
-    worldMessage(`Draft revision ${saved.revision} saved. Existing campaigns remain unchanged.`, "success");
+    if (mode === "create") {
+      const created = await api("/api/v1/worlds", { method: "POST", body: JSON.stringify({ title, content }) });
+      worldId = created.id;
+      authoritativeCreateCompleted = true;
+    } else {
+      await api(`/api/v1/worlds/${worldId}/draft`, {
+        method: "PUT",
+        body: JSON.stringify({ expectedRevision, title, content })
+      });
+    }
+    await loadWorlds(worldId);
+    elements.worldAuthorDialog.close("saved");
+    let coverMessage = "";
+    try {
+      coverMessage = await applyWorldCoverChoice(worldId);
+    } catch (coverError) {
+      worldMessage(`World ${mode === "create" ? "created" : "saved"}, but its cover could not be updated: ${coverError.message || String(coverError)}`, "error");
+      return;
+    }
+    worldMessage(
+      mode === "create"
+        ? `World draft created.${coverMessage} Publish a version when it is ready for campaigns.`
+        : `Draft saved.${coverMessage} Published versions and existing campaigns remain unchanged.`,
+      "success"
+    );
   } catch (error) {
-    worldMessage(error.message || String(error), "error");
+    if (mode === "create" && authoritativeCreateCompleted) {
+      elements.worldAuthorDialog.close("saved");
+      worldMessage(`World created, but the management library could not reload it: ${error.message || String(error)} Refresh worlds before trying again.`, "error");
+      return;
+    }
+    setWorldAuthorStatus(error.statusCode === 409
+      ? "The world draft changed while this modal was open. Your entries are still here; close and reload the world before saving."
+      : error.message || String(error), "error");
   } finally {
-    elements.saveWorldDraft.disabled = selectedWorld?.status === "archived";
+    worldAuthorBusy = false;
+    elements.saveWorldDraft.disabled = false;
+    elements.cancelWorldAuthor.disabled = false;
   }
 }
 
-async function persistWorldDraft(content) {
-  if (!selectedWorld) throw new Error("Select a world draft first.");
-  const worldId = selectedWorld.id;
-  const saved = await api(`/api/v1/worlds/${worldId}/draft`, {
-    method: "PUT",
-    body: JSON.stringify({
-      expectedRevision: selectedWorld.draftRevision,
-      title: elements.worldTitle.value,
-      content
-    })
-  });
-  await loadWorlds(worldId);
-  return saved;
-}
-
 async function generateCharacterFromPrompt() {
-  if (!selectedWorld || characterModalBusy || selectedWorld.status === "archived") return;
+  if (!worldAuthorWorkingContent || characterModalBusy) return;
   const prompt = elements.characterGeneratorPrompt.value.trim();
   if (!prompt) {
     setCharacterStatus("Describe the character you want the default text model to create.", "error");
@@ -1459,10 +1656,10 @@ async function generateCharacterFromPrompt() {
   setCharacterModalControls(false, true);
   setCharacterStatus("Generating a complete character from the current world draft…");
   try {
-    const result = await api(`/api/v1/worlds/${selectedWorld.id}/draft/playable-characters/generate`, {
+    const result = await api("/api/v1/worlds/playable-characters/generate-preview", {
       method: "POST",
       body: JSON.stringify({
-        expectedRevision: selectedWorld.draftRevision,
+        content: worldContentFromForm(),
         prompt,
         ...(editingCharacterId ? { characterId: editingCharacterId } : {})
       })
@@ -1479,7 +1676,7 @@ async function generateCharacterFromPrompt() {
       ...(editingCharacterId && base.source !== undefined ? { source: base.source } : {})
     };
     populateCharacterForm(merged, false);
-    setCharacterStatus("Character generated. Review every field, then save to update the world draft.", "success");
+    setCharacterStatus("Character generated. Review every field, then add it to the world form.", "success");
   } catch (error) {
     // Fields are populated only after a complete response has passed the client boundary checks.
     elements.characterName.value = previousName;
@@ -1488,9 +1685,7 @@ async function generateCharacterFromPrompt() {
       const value = profileValue(previousProfile, path);
       elements[id].value = Array.isArray(value) ? value.join(path === "identity.aliases" ? ", " : "\n") : String(value || "");
     }
-    setCharacterStatus(error.statusCode === 409
-      ? "The world draft changed while this modal was open. Your entries are still here; close and reload the world before trying again."
-      : error.message || String(error), "error");
+    setCharacterStatus(error.message || String(error), "error");
   } finally {
     setCharacterModalControls(false, false);
   }
@@ -1654,9 +1849,8 @@ async function saveCharacterFromModal(event) {
     }
     return;
   }
-  if (!selectedWorld || selectedWorld.status === "archived") return;
-  const content = worldContentFromForm();
-  const roster = playableCharactersFromContent(content).map((item) => copyJsonValue(item));
+  if (!worldAuthorWorkingContent || (worldAuthorMode === "edit" && selectedWorld?.status === "archived")) return;
+  const roster = playableCharactersFromContent(worldAuthorWorkingContent).map((item) => copyJsonValue(item));
   if (editingCharacterId) {
     const index = roster.findIndex((item) => item.id === editingCharacterId);
     if (index < 0) {
@@ -1672,43 +1866,23 @@ async function saveCharacterFromModal(event) {
     }
     roster.push(character);
   }
-  setCharacterModalControls(false, true);
-  setCharacterStatus(editingCharacterId ? "Saving character changes…" : "Adding character to the world draft…");
-  try {
-    const saved = await persistWorldDraft({ ...content, playableCharacters: roster });
-    const action = editingCharacterId ? "updated" : "added";
-    elements.characterDialog.close();
-    worldMessage(`${character.name} ${action} in draft revision ${saved.revision}. Published versions and existing campaigns remain unchanged.`, "success");
-  } catch (error) {
-    setCharacterStatus(error.statusCode === 409
-      ? "The world draft changed while this modal was open. Your entries are still here; close and reload the world before saving."
-      : error.message || String(error), "error");
-    setCharacterModalControls(false, false);
-  }
+  updateWorldAuthorCharacters(roster);
+  elements.characterDialog.close("saved");
+  setWorldAuthorStatus(`${character.name} ${editingCharacterId ? "updated" : "added"}. Save the world form to persist this change.`, "success");
 }
 
 async function deleteCharacterFromModal() {
-  if (!selectedWorld || !editingCharacterId || characterModalBusy || selectedWorld.status === "archived") return;
+  if (!worldAuthorWorkingContent || !editingCharacterId || characterModalBusy) return;
   const name = elements.characterName.value.trim() || "this character";
   if (!window.confirm(`Delete “${name}” from the current draft? Published versions and existing campaigns remain unchanged. Removing the last character makes this world unavailable for new campaigns until another character is added and published.`)) return;
-  const content = worldContentFromForm();
-  const roster = playableCharactersFromContent(content).filter((item) => item.id !== editingCharacterId);
-  if (roster.length === playableCharactersFromContent(content).length) {
+  const roster = playableCharactersFromContent(worldAuthorWorkingContent).filter((item) => item.id !== editingCharacterId);
+  if (roster.length === playableCharactersFromContent(worldAuthorWorkingContent).length) {
     setCharacterStatus("This character is no longer present in the selected draft.", "error");
     return;
   }
-  setCharacterModalControls(false, true);
-  setCharacterStatus("Deleting character from the world draft…");
-  try {
-    const saved = await persistWorldDraft({ ...content, playableCharacters: roster });
-    elements.characterDialog.close();
-    worldMessage(`${name} deleted from draft revision ${saved.revision}. Published versions and existing campaigns remain unchanged.`, "success");
-  } catch (error) {
-    setCharacterStatus(error.statusCode === 409
-      ? "The world draft changed while this modal was open. Your entries are still here; close and reload the world before deleting."
-      : error.message || String(error), "error");
-    setCharacterModalControls(false, false);
-  }
+  updateWorldAuthorCharacters(roster);
+  elements.characterDialog.close("deleted");
+  setWorldAuthorStatus(`${name} removed. Save the world form to persist this change.`, "success");
 }
 
 async function publishSelectedWorld() {
@@ -4289,7 +4463,25 @@ elements.campaignImportWorld.addEventListener("change", loadCampaignImportVersio
 elements.campaignImportVersion.addEventListener("change", refreshPortableCampaignPreview);
 elements.importBrowserState.addEventListener("click", importBrowserState);
 elements.newWorld.addEventListener("click", newWorld);
-elements.generateWorldCover.addEventListener("click", generateWorldCoverImage);
+elements.editWorldDraft.addEventListener("click", () => openWorldAuthor("edit"));
+elements.generateWorldPreview.addEventListener("click", generateWorldFromPrompt);
+elements.cancelWorldAuthor.addEventListener("click", () => requestModalDismissal(elements.worldAuthorDialog));
+elements.chooseWorldCover.addEventListener("click", chooseWorldCoverFromLibrary);
+document.querySelectorAll('input[name="worldCoverMode"]').forEach((control) => control.addEventListener("change", updateWorldCoverChoice));
+elements.managementWorldSearch.addEventListener("input", renderManagementWorlds);
+elements.managementWorldFilters.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-world-filter]");
+  if (!button) return;
+  managementWorldFilter = button.dataset.worldFilter;
+  elements.managementWorldFilters.querySelectorAll("[data-world-filter]").forEach((candidate) => {
+    const active = candidate === button;
+    candidate.classList.toggle("active", active);
+    candidate.setAttribute("aria-pressed", String(active));
+  });
+  renderManagementWorlds();
+});
+elements.managementWorldPrev.addEventListener("click", () => scrollCarousel(elements.worldManagementCarousel, -1));
+elements.managementWorldNext.addEventListener("click", () => scrollCarousel(elements.worldManagementCarousel, 1));
 elements.refreshWorlds.addEventListener("click", () => loadWorlds().catch((error) => worldMessage(error.message || String(error), "error")));
 elements.worldForm.addEventListener("submit", saveWorldDraft);
 elements.addPlayableCharacter.addEventListener("click", () => openCharacterDialog());
@@ -4324,6 +4516,10 @@ elements.characterDialog.addEventListener("close", () => {
 elements.characterDialog.addEventListener("cancel", (event) => {
   if (characterModalBusy) event.preventDefault();
 });
+elements.worldAuthorDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  requestModalDismissal(elements.worldAuthorDialog);
+});
 elements.worldVersionSelect.addEventListener("change", () => {
   updateWorldVersionDeleteAvailability();
   loadWorldVersionPlayableCharacters().catch((error) => worldMessage(error.message || String(error), "error"));
@@ -4334,7 +4530,7 @@ elements.newCampaignCharacter.addEventListener("change", () => {
 elements.publishWorld.addEventListener("click", publishSelectedWorld);
 if (elements.forkWorldModalBtn) {
   elements.forkWorldModalBtn.addEventListener("click", () => {
-    elements.forkWorldTitle.value = `Fork of ${selectedWorld?.world?.title || "World"}`;
+    elements.forkWorldTitle.value = `Fork of ${selectedWorld?.title || "World"}`;
     openManagedModal(elements.forkWorldDialog);
   });
   elements.cancelForkWorld.addEventListener("click", () => elements.forkWorldDialog.close());
@@ -4459,7 +4655,6 @@ elements.illustrationSegmentPromptMode.addEventListener("change", syncIllustrati
 elements.discoverIllustrationModels.addEventListener("click", discoverIllustrationModels);
 elements.previewIllustrationBackfill.addEventListener("click", () => confirmIllustrationBackfill("missing"));
 elements.previewIllustrationRebuild.addEventListener("click", () => confirmIllustrationBackfill("rebuild"));
-elements.chooseWorldCover.addEventListener("click", chooseWorldCoverFromLibrary);
 elements.promptLibraryFilter?.addEventListener("input", renderPromptLibrary);
 elements.promptLibraryScope?.addEventListener("change", () => {
   if (promptLibraryIsDirty()) {
