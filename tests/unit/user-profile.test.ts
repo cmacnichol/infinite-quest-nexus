@@ -22,7 +22,21 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve("local-data/assets"),
     credentialEncryptionKey: "",
-    corsAllowedOrigins: ["*"],
+    security: {
+      corsAllowedOrigins: [],
+      providerNetworkAllowlist: ["localhost", "127.0.0.0/8", "::1/128"],
+      cspImageAllowedOrigins: [],
+      apiDefaultBodyLimitBytes: 1_048_576,
+      apiImportBodyLimitBytes: 16_777_216,
+      apiAssetBodyLimitBytes: 33_554_432,
+      apiRateLimitWindowSeconds: 60,
+      apiRateLimitProviderRequests: 10,
+      apiRateLimitGenerationRequests: 12,
+      apiRateLimitImportRequests: 4,
+      apiConcurrencyProviderRequests: 2,
+      apiConcurrencyImportRequests: 1,
+      trustProxyHops: 0
+    },
     ...overrides
   };
 }
