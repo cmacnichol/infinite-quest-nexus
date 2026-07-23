@@ -679,6 +679,10 @@ export async function deleteCampaign(pool: DatabasePool, campaignId: string, req
         WHERE campaign_id = $1 AND owner_user_id = $2
           AND status IN ('queued','generating','provider_pending','downloading')
        UNION ALL
+       SELECT 'illustration-resolution' AS kind FROM illustration_resolution_jobs
+        WHERE campaign_id = $1 AND owner_user_id = $2
+          AND status IN ('queued','matching','recoverable','generation_queued')
+       UNION ALL
        SELECT 'memory' AS kind FROM chronicle_jobs
         WHERE campaign_id = $1 AND owner_user_id = $2 AND status IN ('queued','running')
        LIMIT 1`,

@@ -27,6 +27,7 @@ const POLL_INTERVAL_MS = 1000;
 const MAX_POLLS = 900;
 const IMAGE_POLL_MS = 5000;
 const TOAST_DURATION = 3500;
+let imageLibraryBrowser = null;
 
 // ── State ──────────────────────────────────────────────────────
 const state = {
@@ -429,7 +430,10 @@ function renderScene(turn, index) {
       <div class="image-actions">
         <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="edit-image-prompt" title="Edit image prompt">✏️</button>
         <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="choose-image-library" title="Choose retained image">▦</button>
-        <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="regenerate-image" title="Regenerate image">🔄</button>
+        <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="find-library-match" title="Find another library match">⌕</button>
+        <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="why-image" title="Why this image?">?</button>
+        <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="regenerate-image" title="Generate a new image">🖼️</button>
+        <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="remove-image" title="Remove illustration">×</button>
       </div>
     </div>`;
   }
@@ -985,6 +989,7 @@ async function finalizeCompletedGeneration(result) {
   }
 
   pollImageJobs();
+  if (result.resultTurnId) void pollIllustrationResolution(result.resultTurnId).catch(() => undefined);
 }
 
 async function pollGenerationJob(jobId, action) {
@@ -1354,7 +1359,7 @@ function pollImageJobs() {
           // Update the matching scene's image if not already showing
           updateSceneImage(job.turnId, job.assetUrl);
         }
-        if (job.status === "pending" || job.status === "generating") {
+        if (["queued", "generating", "provider_pending", "downloading"].includes(job.status)) {
           anyPending = true;
         }
       }
@@ -1388,7 +1393,10 @@ function updateSceneImage(turnId, assetUrl, replace = false) {
     <div class="image-actions">
       <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="edit-image-prompt" title="Edit image prompt">✏️</button>
       <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="choose-image-library" title="Choose retained image">▦</button>
-      <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="regenerate-image" title="Regenerate image">🔄</button>
+      <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="find-library-match" title="Find another library match">⌕</button>
+      <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="why-image" title="Why this image?">?</button>
+      <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="regenerate-image" title="Generate a new image">🖼️</button>
+      <button class="small ghost" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="remove-image" title="Remove illustration">×</button>
     </div>`;
   sceneEl.appendChild(imgDiv);
 }
@@ -1410,47 +1418,27 @@ async function openTurnAssetLibrary(turnId) {
   const grid = $("assetLibraryGrid");
   const status = $("assetLibraryStatus");
   if (!dialog || !grid || !status || !turnId) return;
-  grid.innerHTML = '<p class="mini">Loading retained images…</p>';
-  status.textContent = "";
-  dialog.showModal();
-  try {
-    const { assets } = await api("/assets?limit=250");
-    grid.replaceChildren();
-    if (!assets?.length) {
-      grid.innerHTML = '<p class="mini">No generated images have been retained yet.</p>';
-      return;
-    }
-    for (const asset of assets) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "asset-library-item";
-      const image = document.createElement("img");
-      image.src = asset.url;
-      image.alt = "Retained generated image";
-      image.loading = "lazy";
-      const detail = document.createElement("span");
-      detail.textContent = new Date(asset.createdAt).toLocaleString();
-      button.append(image, detail);
-      button.addEventListener("click", async () => {
-        button.disabled = true;
-        try {
-          const result = await api(`/turns/${turnId}/illustration-asset`, { method: "PUT", body: JSON.stringify({ assetId: asset.id }) });
-          updateSceneImage(turnId, result.assetUrl, true);
-          dialog.close();
-          $("imagePromptDialog")?.close();
-          toast("Selected image from the shared library.");
-        } catch (error) {
-          status.textContent = error.message || String(error);
-          button.disabled = false;
-        }
-      });
-      grid.append(button);
-    }
-    status.textContent = `${assets.length} retained image${assets.length === 1 ? "" : "s"}.`;
-  } catch (error) {
-    grid.replaceChildren();
-    status.textContent = error.message || String(error);
+  if (!imageLibraryBrowser) {
+    const { createImageLibraryBrowser } = await import("/nexus/image-library-browser.js");
+    imageLibraryBrowser = createImageLibraryBrowser({
+      dialog,
+      grid,
+      status,
+      filterContainer: $("assetLibraryFilters"),
+      loadMore: $("assetLibraryLoadMore"),
+      closeButton: $("btnCloseAssetLibrary")
+    });
   }
+  await imageLibraryBrowser.open({
+    mode: "picker",
+    context: { campaignId: state.campaignId, worldId: state.world?.id || state.campaign?.worldId || "" },
+    onSelect: async (asset) => {
+      const result = await api(`/turns/${turnId}/illustration-asset`, { method: "PUT", body: JSON.stringify({ assetId: asset.id }) });
+      updateSceneImage(turnId, result.assetUrl, true);
+      $("imagePromptDialog")?.close();
+      toast("Selected image from the library.");
+    }
+  });
 }
 
 async function regenerateIllustration(turnId, prompt) {
@@ -1468,6 +1456,69 @@ async function regenerateIllustration(turnId, prompt) {
     recordActivity("error", "Illustration queue failed", err.message);
   } finally {
     hideBusy();
+  }
+}
+
+function showMessage(title, message) {
+  const dialog = $("messagePopupDialog");
+  if (!dialog) return toast(message);
+  $("messagePopupTitle").textContent = title;
+  $("messagePopupBody").textContent = message;
+  if (dialog.open) dialog.close();
+  openManagedModal(dialog);
+}
+
+async function whyIllustration(turnId) {
+  try {
+    const resolution = await api(`/turns/${turnId}/illustration-resolution`);
+    const candidate = resolution.candidates?.[0];
+    const details = [
+      `Outcome: ${resolution.reasonCode || resolution.status}.`,
+      `Policy: ${resolution.sourcePolicy}; scope: ${resolution.matchingScope}; confidence: ${resolution.confidenceProfile}.`,
+      resolution.selectedScore == null ? "" : `Selected score ${Number(resolution.selectedScore).toFixed(3)} against threshold ${Number(resolution.resolvedThreshold).toFixed(3)}.`,
+      candidate?.scoreComponents ? `Evidence: ${Object.entries(candidate.scoreComponents).map(([key, value]) => `${key}=${typeof value === "number" ? value.toFixed(3) : value}`).join(", ")}.` : ""
+    ].filter(Boolean).join("\n");
+    showMessage("Why this image?", details);
+  } catch (error) {
+    toast(error.message || "No automatic match evidence is available for this image.");
+  }
+}
+
+async function pollIllustrationResolution(turnId) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const resolution = await api(`/turns/${turnId}/illustration-resolution`);
+    if (resolution.status === "completed" && resolution.selectedAssetId) {
+      updateSceneImage(turnId, `/api/v1/assets/${resolution.selectedAssetId}`, true);
+      toast("Selected another library match.");
+      return;
+    }
+    if (resolution.status === "no_match") return toast("No other library image met the confidence threshold.");
+    if (resolution.status === "generation_queued") { pollImageJobs(); return; }
+    if (resolution.status === "failed") return toast(`Image matching failed: ${resolution.reasonCode || "unknown error"}.`);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  toast("Image matching is still running.");
+}
+
+async function findAnotherLibraryMatch(turnId) {
+  try {
+    await api(`/turns/${turnId}/illustration-match`, { method: "POST", body: "{}" });
+    toast("Searching for another retained match.");
+    void pollIllustrationResolution(turnId);
+  } catch (error) {
+    toast(error.message || "This image was not selected by automatic library matching.");
+  }
+}
+
+async function removeIllustration(turnId) {
+  try {
+    await api(`/turns/${turnId}/illustration-asset`, { method: "PUT", body: JSON.stringify({ assetId: null }) });
+    const turn = state.turns.find((item) => (item.id || item.turnId) === turnId);
+    if (turn) { turn.imageAssetUrl = ""; turn.imageUrl = ""; }
+    renderAllScenes();
+    toast("Illustration removed. The retained asset was not deleted.");
+  } catch (error) {
+    toast(`Could not remove illustration: ${error.message}`);
   }
 }
 
@@ -2164,8 +2215,6 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnImagePromptCancel) btnImagePromptCancel.addEventListener("click", () => { const d = $("imagePromptDialog"); if (d && d.close) d.close(); });
   const btnChooseImageLibrary = $("btnChooseImageLibrary");
   if (btnChooseImageLibrary) btnChooseImageLibrary.addEventListener("click", () => openTurnAssetLibrary($("imagePromptDialog")?._turnId));
-  const btnCloseAssetLibrary = $("btnCloseAssetLibrary");
-  if (btnCloseAssetLibrary) btnCloseAssetLibrary.addEventListener("click", () => $("assetLibraryDialog")?.close());
 
   // Branch dialog
   const branchDlg = $("branchStoryDialog");
@@ -2222,6 +2271,9 @@ document.addEventListener("DOMContentLoaded", () => {
     if (btn.dataset.action === "edit-image-prompt") openImagePromptEditor(turnId);
     if (btn.dataset.action === "regenerate-image") regenerateIllustration(turnId);
     if (btn.dataset.action === "choose-image-library") openTurnAssetLibrary(turnId);
+    if (btn.dataset.action === "find-library-match") findAnotherLibraryMatch(turnId);
+    if (btn.dataset.action === "why-image") whyIllustration(turnId);
+    if (btn.dataset.action === "remove-image") removeIllustration(turnId);
   });
 
   // A manual scroll means the reader has chosen their own position. Streaming

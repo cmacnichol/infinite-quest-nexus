@@ -672,13 +672,23 @@ export async function rewindCampaign(pool: DatabasePool, campaignId: string, req
         FOR UPDATE`,
       [campaignId, ownerUserId, request.targetTurnNumber]
     );
+    const futureResolutions = await client.query<{ status: string }>(
+      `SELECT status FROM illustration_resolution_jobs
+        WHERE campaign_id = $1 AND owner_user_id = $2
+          AND turn_id IN (SELECT id FROM turns WHERE campaign_id = $1 AND turn_number > $3)
+        FOR UPDATE`,
+      [campaignId, ownerUserId, request.targetTurnNumber]
+    );
     const activeChronicle = await client.query(
       `SELECT id FROM chronicle_jobs
         WHERE campaign_id = $1 AND owner_user_id = $2 AND status = 'running'
         LIMIT 1 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
-    if (activeGeneration.rows[0] || futureIllustrations.rows.some((row) => row.status === "generating") || activeChronicle.rows[0]) {
+    if (activeGeneration.rows[0]
+        || futureIllustrations.rows.some((row) => ["queued", "generating", "provider_pending", "downloading"].includes(row.status))
+        || futureResolutions.rows.some((row) => ["queued", "matching", "recoverable", "generation_queued"].includes(row.status))
+        || activeChronicle.rows[0]) {
       throw Object.assign(new Error("Wait for active campaign work to finish before resetting to an earlier turn."), { statusCode: 409 });
     }
 
@@ -891,8 +901,10 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
 
     await client.query(
       `INSERT INTO campaign_illustration_configs (
-         campaign_id, owner_user_id, enabled, provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
-       ) SELECT $1, owner_user_id, enabled, provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
+         campaign_id, owner_user_id, enabled, source_policy, matching_scope, confidence_profile, repetition_window,
+         provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
+       ) SELECT $1, owner_user_id, enabled, source_policy, matching_scope, confidence_profile, repetition_window,
+                provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
            FROM campaign_illustration_configs WHERE campaign_id = $2 AND owner_user_id = $3 ON CONFLICT DO NOTHING`,
       [newCampaignId, campaignId, ownerUserId]
     );

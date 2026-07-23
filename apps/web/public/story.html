@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Infinite Quest</title>
   <link rel="stylesheet" href="/nexus/story.css" />
+  <link rel="stylesheet" href="/vendor/photoswipe/photoswipe.css" />
+  <link rel="stylesheet" href="/nexus/image-library-browser.css" />
 </head>
 <body>
   <header class="universal-nav">
@@ -406,8 +408,10 @@
 
   <dialog id="assetLibraryDialog" class="world-gen-dialog app-dialog wide-dialog">
     <div class="world-gen-card">
-      <div class="dialog-header"><div><h3>Image library</h3><p class="mini">Choose any retained generated image for this turn.</p></div><button id="btnCloseAssetLibrary" class="small ghost" type="button">✕</button></div>
+      <div class="dialog-header"><div><h3>Image library</h3><p class="mini">Filter, inspect, and choose an authorized retained image for this turn.</p></div><button id="btnCloseAssetLibrary" class="small ghost" type="button">✕</button></div>
+      <div id="assetLibraryFilters"></div>
       <div id="assetLibraryGrid" class="asset-library-grid"><p class="mini">Loading retained images…</p></div>
+      <div class="image-library-load-row"><button id="assetLibraryLoadMore" type="button" hidden>Load more</button></div>
       <p id="assetLibraryStatus" class="mini" role="status" aria-live="polite"></p>
     </div>
   </dialog>

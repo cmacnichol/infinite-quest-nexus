@@ -4,15 +4,17 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema, illustrationConfigSchema, worldCoverRequestSchema } from "../../packages/contracts/src/generation.js";
+import { assetListQuerySchema } from "../../packages/contracts/src/assets.js";
 import { worldContentSchema, worldCreateSchema } from "../../packages/contracts/src/world-library.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { enqueueGeneration, getGenerationJob, runGenerationJob } from "../../services/api/src/generation-service.js";
-import { enqueueIllustration, enqueueWorldCover, getImageJob, listCampaignImageJobs, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
+import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, listCampaignImageJobs, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
-import { listAssets, selectTurnIllustration, selectWorldCover } from "../../services/api/src/asset-service.js";
+import { listAssets, queryAssets, readAssetDerivative, selectTurnIllustration, selectWorldCover, updateAssetMetadata } from "../../services/api/src/asset-service.js";
+import { getTurnIllustrationResolution, runIllustrationResolutionJob } from "../../services/api/src/illustration-resolution-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 import { createWorld, getWorld } from "../../services/api/src/world-service.js";
 
@@ -211,6 +213,44 @@ integration("independent illustration pipeline", () => {
     const library = await listAssets(pool, ownerUserId);
     const asset = library.find((item) => item.url === completed.assetUrl);
     expect(asset).toBeDefined();
+    expect(asset).toMatchObject({ width: 1, height: 1, origin: "generated", reviewStatus: "eligible" });
+    const thumbnail = await readAssetDerivative(pool, { root: assetRoot }, ownerUserId, asset!.id, "thumbnail");
+    expect(thumbnail.mimeType).toBe("image/webp");
+    expect(thumbnail.bytes.length).toBeGreaterThan(0);
+
+    const updated = await updateAssetMetadata(pool, ownerUserId, asset!.id, {
+      expectedRevision: asset!.metadataRevision,
+      title: "A luminous violet stone arch at night",
+      tags: ["violet", "arch", "night"],
+      reuseScope: "owner_library",
+      automaticReuseEnabled: true,
+      reviewStatus: "eligible",
+      favorite: true
+    });
+    await expect(updateAssetMetadata(pool, ownerUserId, asset!.id, {
+      expectedRevision: asset!.metadataRevision,
+      title: "Stale edit"
+    })).rejects.toMatchObject({ statusCode: 409 });
+    const filtered = await queryAssets(pool, ownerUserId, assetListQuerySchema.parse({
+      q: "violet arch", origin: ["generated"], tags: ["night"], reviewStatus: ["eligible"], reuseScope: ["owner_library"],
+      favorite: true, sort: "newest", limit: 20
+    }));
+    expect(filtered.assets.map((item) => item.id)).toContain(asset!.id);
+    expect(filtered.assets.find((item) => item.id === asset!.id)?.metadataRevision).toBe(updated.metadataRevision);
+    expect(filtered.facets.tags.night).toBeGreaterThanOrEqual(1);
+    await pool.query(
+      `INSERT INTO assets (owner_user_id, content_hash, storage_driver, storage_path, mime_type, byte_length, pixel_width, pixel_height)
+       VALUES ($1,$2,'filesystem',$3,'image/png',68,1,1), ($1,$4,'filesystem',$5,'image/png',68,1,1)`,
+      [ownerUserId, "a".repeat(64), "aa/cursor-a.png", "b".repeat(64), "bb/cursor-b.png"]
+    );
+    const firstPageQuery = assetListQuerySchema.parse({ limit: 1 });
+    const firstPage = await queryAssets(pool, ownerUserId, firstPageQuery);
+    expect(firstPage.nextCursor).toBeTruthy();
+    const secondPage = await queryAssets(pool, ownerUserId, { ...firstPageQuery, cursor: firstPage.nextCursor! });
+    expect(secondPage.assets[0]?.id).not.toBe(firstPage.assets[0]?.id);
+    await expect(queryAssets(pool, ownerUserId, {
+      ...firstPageQuery, q: "different filter", cursor: firstPage.nextCursor!
+    })).rejects.toMatchObject({ statusCode: 400 });
 
     const targetTitle = `Synthetic library target ${crypto.randomUUID()}`;
     const targetWorld = await createWorld(pool, worldCreateSchema.parse({ title: targetTitle }));
@@ -220,6 +260,7 @@ integration("independent illustration pipeline", () => {
     const imported = await campaign();
     const turn = await pool.query<{ id: string }>("SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId]);
     const turnId = turn.rows[0]!.id;
+    await pool.query("UPDATE turns SET image_prompt = $2 WHERE id = $1", [turnId, "A luminous violet stone arch at night"]);
     await expect(selectTurnIllustration(pool, ownerUserId, turnId, asset!.id)).resolves.toEqual({ assetUrl: asset!.url });
     const selected = await pool.query<{ image_url: string }>("SELECT image_url FROM turns WHERE id = $1", [turnId]);
     expect(selected.rows[0]?.image_url).toBe(asset!.url);
@@ -228,6 +269,20 @@ integration("independent illustration pipeline", () => {
       [ownerUserId, asset!.id, turnId]
     );
     expect(reference.rowCount).toBe(1);
+
+    await pool.query(
+      `INSERT INTO illustration_resolution_jobs (
+         owner_user_id, campaign_id, turn_id, source_policy, matching_scope, confidence_profile, repetition_window
+       ) VALUES ($1,$2,$3,'library_only','owner_library','broad',0)`,
+      [ownerUserId, imported.campaignId, turnId]
+    );
+    await expect(runIllustrationResolutionJob(pool, "synthetic-library-match-worker", 30)).resolves.toBe(true);
+    const resolution = await getTurnIllustrationResolution(pool, turnId) as { candidates: Array<{ score: number }> };
+    expect(resolution.candidates[0]?.score).toBeGreaterThanOrEqual(0.38);
+    expect(resolution).toMatchObject({
+      status: "completed", selectedAssetId: asset!.id, reasonCode: "matched",
+      candidates: [expect.objectContaining({ assetId: asset!.id, rank: 1 })]
+    });
   });
 
   it.skip("queues after story commit, sends only the fiction prompt, and stores generated bytes", async () => {
@@ -244,6 +299,51 @@ integration("independent illustration pipeline", () => {
     expect(turn.rows[0]?.image_url).toMatch(/^\/api\/v1\/assets\//);
     const costSummary = await getCampaignCostSummary(pool, imported.campaignId);
     expect(costSummary.totals[0]?.byCategory.image).toBe("0.040000000000");
+  });
+
+  it("runs library-only resolution without an image provider", async () => {
+    const imported = await campaign();
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      sourcePolicy: "library_only", matchingScope: "campaign", confidenceProfile: "strict",
+      providerProfileId: null, model: ""
+    }));
+    await expect(getIllustrationConfig(pool, imported.campaignId)).resolves.toMatchObject({
+      sourcePolicy: "library_only", providerProfileId: null
+    });
+    const ownerUserId = await initialOwnerId(pool);
+    const turn = await pool.query<{ id: string }>("SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId]);
+    const turnId = turn.rows[0]!.id;
+    await pool.query("UPDATE turns SET image_prompt = $2, image_url = '' WHERE id = $1", [turnId, "An unmatched obsidian observatory in a snowstorm"]);
+    const resolutionId = await withTransaction(pool, (client) => enqueueAcceptedTurnIllustration(
+      client, ownerUserId, imported.campaignId, turnId, "An unmatched obsidian observatory in a snowstorm"
+    ));
+    expect(resolutionId).toBeTruthy();
+    await expect(runIllustrationResolutionJob(pool, "synthetic-library-only-worker", 30)).resolves.toBe(true);
+    await expect(getTurnIllustrationResolution(pool, turnId)).resolves.toMatchObject({ status: "no_match", imageJobId: null });
+    const providerJobs = await pool.query("SELECT id FROM image_jobs WHERE turn_id = $1", [turnId]);
+    expect(providerJobs.rowCount).toBe(0);
+  });
+
+  it("queues exactly one provider job after a durable library-first no-match", async () => {
+    const imported = await campaign();
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      sourcePolicy: "library_then_generate", matchingScope: "campaign", confidenceProfile: "strict",
+      providerProfileId: imageProviderId, model: "synthetic-image-model"
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const turn = await pool.query<{ id: string }>("SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId]);
+    const turnId = turn.rows[0]!.id;
+    await pool.query("UPDATE turns SET image_prompt = $2, image_url = '' WHERE id = $1", [turnId, "A singular copper lighthouse beneath green auroras"]);
+    await withTransaction(pool, (client) => enqueueAcceptedTurnIllustration(
+      client, ownerUserId, imported.campaignId, turnId, "A singular copper lighthouse beneath green auroras"
+    ));
+    await expect(runIllustrationResolutionJob(pool, "synthetic-library-first-worker", 30)).resolves.toBe(true);
+    const resolution = await getTurnIllustrationResolution(pool, turnId) as { status: string; imageJobId: string | null };
+    expect(resolution).toMatchObject({ status: "generation_queued", imageJobId: expect.any(String) });
+    await expect(runIllustrationResolutionJob(pool, "synthetic-library-first-worker-duplicate", 30)).resolves.toBe(false);
+    const providerJobs = await pool.query("SELECT id FROM image_jobs WHERE turn_id = $1", [turnId]);
+    expect(providerJobs.rowCount).toBe(1);
+    await pool.query("UPDATE image_jobs SET status = 'cancelled' WHERE turn_id = $1", [turnId]);
   });
 
   it.skip("preserves the accepted story when the independent image endpoint fails", async () => {
