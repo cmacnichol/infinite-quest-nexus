@@ -12,7 +12,7 @@ Chronicle supplements lexical retrieval with entity matches extracted largely fr
 
 Chronicle records carry derived `entity_ids` metadata for retrieval. These identifiers refer to a catalog built from the campaign's pinned immutable world version, selected-character snapshot, and campaign character profile. Schema-v5 aliases under `characterProfile.profile.identity.aliases` augment the selected character's snapshot aliases without changing its stable scoped identity.
 
-The catalog is reconstructed from authoritative world and campaign data and is therefore rebuildable alongside the rest of Chronicle. Migration `0037_chronicle_entity_identity.sql` adds GIN-indexed arrays to Chronicle memories and canonical facts, then requests a deduplicated Chronicle reindex for every existing campaign.
+The catalog is reconstructed from authoritative world and campaign data and is therefore rebuildable alongside the rest of Chronicle. Migration `0039_chronicle_entity_identity.sql` adds GIN-indexed arrays to Chronicle memories and canonical facts, then requests a deduplicated Chronicle reindex for every existing campaign.
 
 Indexing resolves known names and aliases deterministically before applying capitalization-based extraction as a fallback for newly discovered or otherwise uncatalogued names. An alias is resolved only when it identifies one catalog entry within the applicable scope. Ambiguous aliases remain unresolved text and must not be guessed or attached to every matching entity.
 
