@@ -92,9 +92,10 @@ function promptCharacter(character: PlayableCharacter) {
 export function buildPlayableCharacterGenerationPrompt(
   content: WorldContent,
   userPrompt: string,
-  currentCharacter?: PlayableCharacter
+  currentCharacter?: PlayableCharacter,
+  systemPromptOverride?: string
 ): { systemPrompt: string; input: string } {
-  const systemPrompt = `You author playable characters for Infinite Quest Nexus.
+  const systemPrompt = systemPromptOverride || `You author playable characters for Infinite Quest Nexus.
 Return JSON only: one object with exactly these authored fields: name, profile, rpgStats, defaultTriggers.
 profile must follow this exact nested structure:
 {"identity":{"aliases":[],"pronouns":""},"story":{"role":"","background":"","personality":"","motivations":"","goals":"","fearsAndConflicts":"","keyRelationships":"","narrativeHooks":"","voiceAndMannerisms":"","otherGuidance":""},"appearance":{"ancestryOrSpecies":"","apparentAge":"","genderPresentation":"","build":"","skinOrComplexion":"","face":"","eyes":"","hair":"","distinguishingFeatures":[],"clothing":"","equipmentAndAccessories":"","otherVisualDetails":""},"unclassifiedNotes":""}

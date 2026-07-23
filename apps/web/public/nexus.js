@@ -51,6 +51,16 @@ let sessionUser = null;
 let transferPreviewSequence = 0;
 let transferPreview = null;
 let transferIdempotencyKey = "";
+let promptLibrary = null;
+let selectedPromptTemplateKey = "";
+let promptLibraryPreviewVisible = false;
+let promptLibraryEditorBaseline = "";
+let promptLibraryEditorContext = "";
+let promptLibraryCategory = "All";
+let promptLibraryActiveScope = "application";
+let promptLibraryActiveCampaignId = "";
+let promptLibraryPreviewTimer = 0;
+let promptLibraryPreviewSequence = 0;
 const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
 const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
 const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
@@ -220,18 +230,22 @@ function applyManagementView() {
   const hash = window.location.hash || "#dashboard";
   const dashboardView = hash === "#dashboard";
   const providerView = hash === "#providers";
-  document.body.dataset.managementView = dashboardView ? "dashboard" : providerView ? "providers" : "worlds";
-  elements.managementTitle.textContent = providerView ? "Provider Management" : hash === "#campaigns" ? "Campaign Management" : "World Management";
+  const promptLibraryView = hash === "#prompt-library";
+  document.body.dataset.managementView = dashboardView ? "dashboard" : providerView ? "providers" : promptLibraryView ? "prompt-library" : "worlds";
+  elements.managementTitle.textContent = providerView ? "Provider Management" : promptLibraryView ? "Prompt Library" : hash === "#campaigns" ? "Campaign Management" : "World Management";
   elements.managementDescription.textContent = providerView
     ? "Add and manage provider profiles independently for story text, turn intent, image generation, and Chronicle embeddings."
-    : hash === "#campaigns"
+    : promptLibraryView
+      ? "Edit the application-owned instructions used for text and image generation. Changes apply to newly queued work."
+      : hash === "#campaigns"
       ? "Configure campaigns, Chronicle memory, provider selection, illustrations, and world-version migrations."
       : "Author reusable versioned worlds, configure campaigns, and inspect the fiction-only memory selected for generation.";
   document.title = dashboardView ? "Infinite Quest Nexus" : `${elements.managementTitle.textContent} · Infinite Quest Nexus`;
 
-  [elements.navDashboard, elements.navProviders, elements.navWorlds, elements.navCampaigns, elements.navImports].forEach((link) => link?.classList.remove("active"));
+  [elements.navDashboard, elements.navProviders, elements.navPromptLibrary, elements.navWorlds, elements.navCampaigns, elements.navImports].forEach((link) => link?.classList.remove("active"));
   if (dashboardView) elements.navDashboard?.classList.add("active");
   if (providerView) elements.navProviders?.classList.add("active");
+  if (promptLibraryView) { elements.navPromptLibrary?.classList.add("active"); void loadPromptLibrary(); }
   if (hash === "#world-library") elements.navWorlds?.classList.add("active");
   if (hash === "#campaigns") elements.navCampaigns?.classList.add("active");
   if (hash === "#imports") elements.navImports?.classList.add("active");
@@ -259,6 +273,168 @@ async function api(path, options = {}) {
     throw error;
   }
   return payload;
+}
+
+function promptLibraryCampaignId() {
+  return elements.promptLibraryScope?.value === "campaign" ? elements.promptLibraryCampaign?.value || "" : "";
+}
+
+function promptLibrarySelectedTemplate() {
+  return promptLibrary?.templates?.find((template) => template.key === selectedPromptTemplateKey) || null;
+}
+
+function promptLibraryIsDirty() {
+  return Boolean(promptLibraryEditorContext && elements.promptLibraryContent.value !== promptLibraryEditorBaseline);
+}
+
+function renderPromptLibraryDirtyState() {
+  const dirty = promptLibraryIsDirty();
+  elements.promptLibraryUnsaved?.classList.toggle("hidden", !dirty);
+  elements.promptLibraryDiscard?.classList.toggle("hidden", !dirty);
+}
+
+function syncPromptLibraryCampaigns() {
+  if (!elements.promptLibraryCampaign) return;
+  const current = elements.promptLibraryCampaign.value || selectedCampaign?.id || "";
+  elements.promptLibraryCampaign.replaceChildren(
+    new Option("Select a campaign", ""),
+    ...campaigns.map((campaign) => new Option(campaign.title, campaign.id))
+  );
+  if (campaigns.some((campaign) => campaign.id === current)) elements.promptLibraryCampaign.value = current;
+  elements.promptLibraryCampaignField?.classList.toggle("hidden", elements.promptLibraryScope.value !== "campaign");
+}
+
+async function renderPromptLibraryPreview() {
+  const template = promptLibrarySelectedTemplate();
+  if (!template || !elements.promptLibraryPreviewPanel) return;
+  elements.promptLibraryPreviewPanel.classList.toggle("hidden", !promptLibraryPreviewVisible);
+  elements.promptLibraryPreview.setAttribute("aria-expanded", String(promptLibraryPreviewVisible));
+  elements.promptLibraryPreview.textContent = promptLibraryPreviewVisible ? "Hide full request" : "Preview full request";
+  if (!promptLibraryPreviewVisible) return;
+  const sequence = ++promptLibraryPreviewSequence;
+  elements.promptLibraryPreviewContent.textContent = "Building sample request…";
+  try {
+    const preview = await api("/api/v1/prompt-library/preview", {
+      method: "POST",
+      body: JSON.stringify({ key: template.key, content: elements.promptLibraryContent.value })
+    });
+    if (sequence !== promptLibraryPreviewSequence) return;
+    const sections = preview.sections.map((section) => `── ${section.label} [${section.role}] ──\n${section.content}`).join("\n\n");
+    const unresolved = preview.unresolvedVariables.length ? preview.unresolvedVariables.map((name) => `{{${name}}}`).join(", ") : "none";
+    elements.promptLibraryPreviewContent.textContent = `Estimated tokens: ${preview.estimatedTokens.toLocaleString()}\nUnresolved variables: ${unresolved}\n\n${sections}`;
+  } catch (error) {
+    if (sequence === promptLibraryPreviewSequence) elements.promptLibraryPreviewContent.textContent = error.message || String(error);
+  }
+}
+
+function schedulePromptLibraryPreview() {
+  clearTimeout(promptLibraryPreviewTimer);
+  if (promptLibraryPreviewVisible) promptLibraryPreviewTimer = setTimeout(() => void renderPromptLibraryPreview(), 250);
+}
+
+function selectPromptLibraryTemplate(key) {
+  if (key === selectedPromptTemplateKey) return;
+  if (promptLibraryIsDirty()) {
+    elements.promptLibraryStatus.textContent = "Save or discard the current edits before switching prompts.";
+    elements.promptLibraryStatus.className = "status warning";
+    return;
+  }
+  selectedPromptTemplateKey = key;
+  renderPromptLibrary(true);
+}
+
+function renderPromptLibrary(loadEditor = false) {
+  if (!elements.promptLibraryList || !promptLibrary) return;
+  const filter = (elements.promptLibraryFilter?.value || "").trim().toLowerCase();
+  const campaignScope = elements.promptLibraryScope?.value === "campaign";
+  syncPromptLibraryCampaigns();
+  elements.promptLibraryCampaignHint.textContent = campaignScope
+    ? (promptLibraryCampaignId() ? "Only campaign-runtime prompts can be overridden; authoring and import prompts remain application-wide." : "Choose a campaign to manage its runtime overrides.")
+    : "Application defaults apply to all new work unless an eligible campaign override exists.";
+  const categories = ["All", ...new Set(promptLibrary.templates.map((template) => template.category))];
+  elements.promptLibraryCategories?.replaceChildren(...categories.map((category) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = category;
+    button.classList.toggle("active", category === promptLibraryCategory);
+    button.addEventListener("click", () => { promptLibraryCategory = category; renderPromptLibrary(); });
+    return button;
+  }));
+  const templates = promptLibrary.templates.filter((template) => !campaignScope || template.campaignOverrideAllowed)
+    .filter((template) => promptLibraryCategory === "All" || template.category === promptLibraryCategory)
+    .filter((template) => !filter || `${template.title} ${template.category} ${template.description}`.toLowerCase().includes(filter));
+  elements.promptLibraryList.replaceChildren(...templates.map((template) => {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = `prompt-library-item${template.key === selectedPromptTemplateKey ? " active" : ""}`;
+    button.dataset.promptKey = template.key;
+    button.setAttribute("aria-pressed", String(template.key === selectedPromptTemplateKey));
+    const title = document.createElement("strong"); title.textContent = template.title;
+    const source = document.createElement("small"); source.textContent = `${template.category} · ${template.effectiveSource}`;
+    const description = document.createElement("small"); description.textContent = template.description;
+    button.append(title, source, description);
+    button.addEventListener("click", () => selectPromptLibraryTemplate(template.key));
+    return button;
+  }));
+  const template = promptLibrarySelectedTemplate();
+  elements.promptLibraryEditor.classList.toggle("hidden", !template);
+  if (!template) return;
+  elements.promptLibraryEditorTitle.textContent = template.title;
+  elements.promptLibraryEditorDescription.textContent = template.description;
+  elements.promptLibraryEditorMeta.textContent = `Effective source: ${template.effectiveSource}. Variables: ${template.variables.length ? template.variables.map((name) => `{{${name}}}`).join(", ") : "none"}. Limit: ${template.maxLength.toLocaleString()} characters.`;
+  elements.promptLibraryContent.maxLength = template.maxLength;
+  const context = `${elements.promptLibraryScope.value}:${promptLibraryCampaignId()}:${template.key}`;
+  if (loadEditor || context !== promptLibraryEditorContext) {
+    promptLibraryEditorContext = context;
+    promptLibraryEditorBaseline = template.effectiveContent;
+    elements.promptLibraryContent.value = template.effectiveContent;
+  }
+  elements.promptLibraryWarning?.classList.toggle("hidden", template.category !== "Story Engine");
+  const resetAvailable = campaignScope ? template.effectiveSource === "campaign" : template.effectiveSource === "application";
+  elements.promptLibraryReset.textContent = campaignScope ? "Use inherited application prompt" : "Restore shipped default";
+  elements.promptLibraryReset.disabled = !resetAvailable;
+  renderPromptLibraryDirtyState();
+  if (promptLibraryPreviewVisible) schedulePromptLibraryPreview();
+  requestAnimationFrame(() => elements.promptLibraryList.querySelector(".prompt-library-item.active")?.scrollIntoView({ block: "nearest", inline: "nearest" }));
+}
+
+async function loadPromptLibrary() {
+  if (!elements.promptLibraryStatus) return;
+  syncPromptLibraryCampaigns();
+  const campaignId = promptLibraryCampaignId();
+  if (elements.promptLibraryScope?.value === "campaign" && !campaignId) {
+    elements.promptLibraryStatus.textContent = "Select a campaign before editing campaign overrides.";
+    elements.promptLibraryStatus.className = "status error";
+    promptLibrary = { templates: [] }; renderPromptLibrary(); return;
+  }
+  elements.promptLibraryStatus.textContent = "Loading prompt library…"; elements.promptLibraryStatus.className = "status";
+  try {
+    promptLibrary = await api(`/api/v1/prompt-library${campaignId ? `?campaignId=${encodeURIComponent(campaignId)}` : ""}`);
+    if (!selectedPromptTemplateKey) selectedPromptTemplateKey = promptLibrary.templates[0]?.key || "";
+    promptLibraryActiveScope = elements.promptLibraryScope.value;
+    promptLibraryActiveCampaignId = campaignId;
+    elements.promptLibraryStatus.textContent = "Changes apply to newly queued jobs; queued and retried jobs retain their snapshotted prompt.";
+    elements.promptLibraryStatus.className = "status";
+    renderPromptLibrary(true);
+  } catch (error) { elements.promptLibraryStatus.textContent = error.message || String(error); elements.promptLibraryStatus.className = "status error"; }
+}
+
+async function savePromptLibraryTemplate(event) {
+  event.preventDefault();
+  const template = promptLibrarySelectedTemplate(); if (!template) return;
+  const scope = elements.promptLibraryScope.value;
+  try {
+    const response = await api("/api/v1/prompt-library/overrides", { method: "PUT", body: JSON.stringify({ key: template.key, scope, ...(scope === "campaign" ? { campaignId: promptLibraryCampaignId() } : {}), content: elements.promptLibraryContent.value }) });
+    promptLibrary = response.library; elements.promptLibraryStatus.textContent = "Prompt saved. New jobs will use this version."; elements.promptLibraryStatus.className = "status success"; renderPromptLibrary(true);
+  } catch (error) { elements.promptLibraryStatus.textContent = error.message || String(error); elements.promptLibraryStatus.className = "status error"; }
+}
+
+async function resetPromptLibraryTemplate() {
+  const template = promptLibrarySelectedTemplate(); if (!template) return;
+  const scope = elements.promptLibraryScope.value;
+  try {
+    const response = await api("/api/v1/prompt-library/overrides", { method: "DELETE", body: JSON.stringify({ key: template.key, scope, ...(scope === "campaign" ? { campaignId: promptLibraryCampaignId() } : {}) }) });
+    promptLibrary = response.library; elements.promptLibraryStatus.textContent = scope === "campaign" ? "Campaign override removed; the inherited application prompt is active." : "Application override removed; the shipped default is active."; elements.promptLibraryStatus.className = "status success"; renderPromptLibrary(true);
+  } catch (error) { elements.promptLibraryStatus.textContent = error.message || String(error); elements.promptLibraryStatus.className = "status error"; }
 }
 
 function setStatus(message, type = "") {
@@ -2328,9 +2504,11 @@ function renderIllustrationPromptSummary() {
 }
 
 function openIllustrationPromptEditor() {
-  elements.illustrationRefinementPrompt.value = illustrationRefinementPromptValue || defaultIllustrationRefinementPrompt;
-  openManagedModal(elements.illustrationPromptDialog);
-  elements.illustrationRefinementPrompt.focus();
+  elements.promptLibraryScope.value = "campaign";
+  syncPromptLibraryCampaigns();
+  elements.promptLibraryCampaign.value = selectedCampaign?.id || "";
+  selectedPromptTemplateKey = "illustration_refinement";
+  window.location.hash = "#prompt-library";
 }
 
 function applyIllustrationPrompt(event) {
@@ -3422,8 +3600,7 @@ async function saveIllustrationConfig(event) {
         maxAttempts: elements.illustrationMaxAttempts.value,
         segmentWordCount: elements.illustrationSegmentWordCount.value,
         imagesPerSegment: elements.illustrationImagesPerSegment.value,
-        segmentPromptMode: elements.illustrationSegmentPromptMode.value,
-        refinementPrompt: illustrationRefinementPromptValue
+        segmentPromptMode: elements.illustrationSegmentPromptMode.value
       })
     });
     defaultIllustrationRefinementPrompt = illustrationConfig.defaultRefinementPrompt || defaultIllustrationRefinementPrompt;
@@ -4283,6 +4460,43 @@ elements.discoverIllustrationModels.addEventListener("click", discoverIllustrati
 elements.previewIllustrationBackfill.addEventListener("click", () => confirmIllustrationBackfill("missing"));
 elements.previewIllustrationRebuild.addEventListener("click", () => confirmIllustrationBackfill("rebuild"));
 elements.chooseWorldCover.addEventListener("click", chooseWorldCoverFromLibrary);
+elements.promptLibraryFilter?.addEventListener("input", renderPromptLibrary);
+elements.promptLibraryScope?.addEventListener("change", () => {
+  if (promptLibraryIsDirty()) {
+    elements.promptLibraryScope.value = promptLibraryActiveScope;
+    elements.promptLibraryStatus.textContent = "Save or discard the current edits before changing scope.";
+    elements.promptLibraryStatus.className = "status warning";
+    return;
+  }
+  selectedPromptTemplateKey = "";
+  void loadPromptLibrary();
+});
+elements.promptLibraryCampaign?.addEventListener("change", () => {
+  if (promptLibraryIsDirty()) {
+    elements.promptLibraryCampaign.value = promptLibraryActiveCampaignId;
+    elements.promptLibraryStatus.textContent = "Save or discard the current edits before changing campaigns.";
+    elements.promptLibraryStatus.className = "status warning";
+    return;
+  }
+  selectedPromptTemplateKey = "";
+  void loadPromptLibrary();
+});
+elements.promptLibraryEditor?.addEventListener("submit", savePromptLibraryTemplate);
+elements.promptLibraryReset?.addEventListener("click", resetPromptLibraryTemplate);
+elements.promptLibraryPreview?.addEventListener("click", () => { promptLibraryPreviewVisible = !promptLibraryPreviewVisible; void renderPromptLibraryPreview(); });
+elements.promptLibraryContent?.addEventListener("input", () => { renderPromptLibraryDirtyState(); schedulePromptLibraryPreview(); });
+elements.promptLibraryDiscard?.addEventListener("click", () => {
+  elements.promptLibraryContent.value = promptLibraryEditorBaseline;
+  renderPromptLibraryDirtyState();
+  schedulePromptLibraryPreview();
+});
+elements.promptLibraryPrevious?.addEventListener("click", () => elements.promptLibraryList.scrollBy({ left: -Math.max(260, elements.promptLibraryList.clientWidth * .8), behavior: "smooth" }));
+elements.promptLibraryNext?.addEventListener("click", () => elements.promptLibraryList.scrollBy({ left: Math.max(260, elements.promptLibraryList.clientWidth * .8), behavior: "smooth" }));
+window.addEventListener("beforeunload", (event) => {
+  if (!promptLibraryIsDirty()) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 async function loadSessionPreferences() {
   const response = await api("/api/v1/session");
   sessionUser = response.user || null;

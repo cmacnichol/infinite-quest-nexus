@@ -1,0 +1,11 @@
+name: infinitequest-ui-test
+
+volumes:
+  infinitequest-postgres:
+    name: infinitequest-ui-test-postgres
+  infinitequest-assets:
+    name: infinitequest-ui-test-assets
+
+networks:
+  infinitequest-backend:
+    name: infinitequest-ui-test-backend

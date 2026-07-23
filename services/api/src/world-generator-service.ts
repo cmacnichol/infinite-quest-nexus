@@ -12,6 +12,7 @@ import {
   type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
 import {
+  CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION,
   buildPlayableCharacterGenerationPrompt,
   normalizeGeneratedPlayableCharacter,
   playableCharacterRecoveryInput
@@ -19,6 +20,7 @@ import {
 import { buildTemplateWorldPrompt, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
 import { callTextProvider, extractJsonObject } from "../../../packages/story-engine/src/index.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
+import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
 
 const coerceText = (val: unknown): string => {
   if (val === null || val === undefined) return "";
@@ -119,7 +121,8 @@ export async function generateTemplateWorld(
   const profile = await loadTextProvider(pool, ownerUserId, providerProfileId, credentialSecret, model);
 
   await onProgress?.("generating_world", 30, "Synthesizing world overview and characters via LLM…");
-  const prompt = buildTemplateWorldPrompt(input);
+  const promptSnapshot = await resolvePromptSnapshot(pool, ownerUserId);
+  const prompt = buildTemplateWorldPrompt(input, promptFromSnapshot(promptSnapshot, "world_generation"));
   let result = await callTextProvider(profile, prompt);
 
   let converted: z.infer<typeof convertedWorldSchema>;
@@ -131,7 +134,7 @@ export async function generateTemplateWorld(
     const recovered = await callTextProvider(profile, {
       ...prompt,
       ...(result.responseId ? { previousResponseId: result.responseId } : {}),
-      recoveryInput: "The previous JSON was truncated. Return a complete, compact replacement object with title, genre, tone, backgroundStory, premise, firstAction, story_rules, default_triggers, event_triggers, rpg_statistics, and exactly 3-4 distinct entries in playable_characters. Start again at { and close every field and the final }."
+      recoveryInput: promptFromSnapshot(promptSnapshot, "world_generation_recovery")
     });
     converted = convertedWorldSchema.parse(extractJsonObject(recovered.content));
   }
@@ -151,7 +154,7 @@ export async function generateTemplateWorld(
     const needed = 3 - rawCharacters.length;
     await onProgress?.("supplementing_characters", 70, `Generating ${needed} additional playable character${needed === 1 ? "" : "s"} to meet the 3-4 character target…`);
     const supplementResult = await callTextProvider(profile, {
-      systemPrompt: `You are expanding a Story World character roster. Return JSON only with a single object containing a playable_characters array with exactly ${needed} new, distinct, fitting playable characters. Each entry requires id, name, character_text, profile, rpg_statistics (array of { name, value (1-99), note }), and default_triggers (array of { name, value, rules }). profile must use the same identity, story, appearance, and unclassifiedNotes structure supplied for existing characters. Do not repeat existing characters.`,
+      systemPrompt: promptFromSnapshot(promptSnapshot, "world_roster_supplement").replaceAll("{{needed}}", String(needed)),
       input: JSON.stringify({
         worldTitle: converted.title,
         genre: converted.genre,
@@ -272,7 +275,8 @@ export async function generatePlayableCharacter(
     );
   }
   const profile = await loadTextProvider(pool, ownerUserId, providerProfileId, credentialSecret);
-  const prompt = buildPlayableCharacterGenerationPrompt(content, request.prompt, currentCharacter);
+  const promptSnapshot = await resolvePromptSnapshot(pool, ownerUserId);
+  const prompt = buildPlayableCharacterGenerationPrompt(content, request.prompt, currentCharacter, promptFromSnapshot(promptSnapshot, "character_generation").replaceAll("{{protocol}}", CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION));
   let generatedId = currentCharacter?.id || randomUUID();
   while (!currentCharacter && content.playableCharacters.some((character) => character.id === generatedId)) {
     generatedId = randomUUID();

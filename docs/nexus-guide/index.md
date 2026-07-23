@@ -12,6 +12,7 @@ The [Nexus dashboard](./dashboard.md) is the main landing page. It provides libr
 - [Campaigns](./campaigns/create.md)
 - [Chronicle](./chronicle/inspect.md)
 - [Providers](./providers/text.md)
+- [Prompt Library](./prompt-library.md)
 - [Turn intent classification](./providers/turn-intent.md)
 
 ## Safety model

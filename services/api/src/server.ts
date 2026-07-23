@@ -58,6 +58,7 @@ import {
 import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js";
 import { getImportProgress, importInfiniteWorlds, previewInfiniteWorldsImport } from "./infinite-worlds-import-service.js";
 import { getSessionUserProfile, updateSessionUserProfile } from "./user-service.js";
+import { listPromptLibrary, previewPromptTemplate, resetPromptOverride, savePromptOverride } from "./prompt-library-service.js";
 import {
   buildContextPreview,
   enqueueChronicleReindex,
@@ -281,6 +282,14 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.put("/api/v1/user/profile", async (request) => ({
     user: await updateSessionUserProfile(pool, userProfileUpdateSchema.parse(request.body))
   }));
+
+  app.get("/api/v1/prompt-library", async (request) => {
+    const query = z.object({ campaignId: z.uuid().optional() }).parse(request.query);
+    return listPromptLibrary(pool, query.campaignId);
+  });
+  app.put("/api/v1/prompt-library/overrides", async (request) => ({ library: await savePromptOverride(pool, request.body) }));
+  app.delete("/api/v1/prompt-library/overrides", async (request) => ({ library: await resetPromptOverride(pool, request.body) }));
+  app.post("/api/v1/prompt-library/preview", async (request) => previewPromptTemplate(request.body));
 
   app.get("/api/v1/providers", async () => ({ providers: await listProviders(pool) }));
 

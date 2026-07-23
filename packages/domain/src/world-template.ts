@@ -99,8 +99,8 @@ export function extractCyoaLayers(parsed: CyoaExport, sourceName = "cyoa-export.
   };
 }
 
-export function buildTemplateWorldPrompt(input: TemplateWorldInput): { systemPrompt: string; input: string } {
-  const systemPrompt = `Convert narrative excerpts, story descriptions, or prompt ideas into a complete, high-fidelity Infinite Quest Nexus Story World JSON object. Return JSON only. Preserve narrative tone and diegetic lore without inventing contradictory facts.
+export function buildTemplateWorldPrompt(input: TemplateWorldInput, systemPromptOverride?: string): { systemPrompt: string; input: string } {
+  const systemPrompt = systemPromptOverride || `Convert narrative excerpts, story descriptions, or prompt ideas into a complete, high-fidelity Infinite Quest Nexus Story World JSON object. Return JSON only. Preserve narrative tone and diegetic lore without inventing contradictory facts.
 Required fields: title, genre, tone, backgroundStory, playable_characters, premise, firstAction, story_rules, default_triggers, event_triggers, rpg_statistics.
 CRITICAL requirement: You MUST return exactly 3 or 4 distinct, fully fleshed out playable characters in playable_characters. Identify characters pulled from the source material if available, or generate fitting, rich characters that match the setting. Each character entry requires:
 - id (e.g., "char-1", "char-2", "char-3")
