@@ -22,7 +22,7 @@
     "test:sogni-live": "vitest run tests/live/sogni-sdk-durability.live.test.ts"
   },
   "dependencies": {
-    "@fastify/static": "^10.1.0",
+    "@fastify/static": "^10.1.1",
     "@sogni-ai/sogni-client": "5.1.0",
     "fastify": "^5.4.0",
     "node-pg-migrate": "9.0.0",
