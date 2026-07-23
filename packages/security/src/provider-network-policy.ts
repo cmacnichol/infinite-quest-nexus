@@ -86,7 +86,15 @@ function normalizeHostname(hostname: string): string {
 function normalizeMappedIpv6(value: string): string | null {
   const mappedIpv4 = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(value);
   if (mappedIpv4) return mappedIpv4[1]!;
-  return null;
+  if (isIP(value) !== 6) return null;
+
+  const canonical = normalizeHostname(new URL(`http://[${value}]`).hostname);
+  const mappedIpv4Hextets = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(canonical);
+  if (!mappedIpv4Hextets) return null;
+
+  const high = Number.parseInt(mappedIpv4Hextets[1]!, 16);
+  const low = Number.parseInt(mappedIpv4Hextets[2]!, 16);
+  return `${high >>> 8}.${high & 0xff}.${low >>> 8}.${low & 0xff}`;
 }
 
 function normalizeResolvedAddress(value: ResolvedAddress): ResolvedAddress {
@@ -152,12 +160,24 @@ export function createProviderNetworkPolicy(options: CreateProviderNetworkPolicy
   return {
     async approve(url: URL, _operation: string): Promise<ApprovedProviderDestination> {
       const normalizedUrl = new URL(url.toString());
-      const hostname = normalizeHostname(normalizedUrl.hostname);
+      let hostname = normalizeHostname(normalizedUrl.hostname);
       if (!["http:", "https:"].includes(normalizedUrl.protocol)
         || normalizedUrl.username
         || normalizedUrl.password
         || normalizedUrl.hash) {
         throw new ProviderDestinationNotAllowedError("url");
+      }
+
+      const originalLiteralFamily = isIP(hostname);
+      if (originalLiteralFamily) {
+        const normalizedLiteral = normalizeResolvedAddress({
+          address: hostname,
+          family: originalLiteralFamily as AddressFamily
+        });
+        if (normalizedLiteral.family !== originalLiteralFamily) {
+          normalizedUrl.hostname = normalizedLiteral.address;
+          hostname = normalizedLiteral.address;
+        }
       }
 
       const literalFamily = isIP(hostname);
