@@ -13,7 +13,15 @@ describe("durable asynchronous image jobs", () => {
     expect(source).toContain("remote_job_id = $3");
     expect(source).toContain("response.error.retryable");
     expect(source).toContain('numberSetting(provider, "defaultImageCount", 1, 1, 2)');
-    expect(source).toContain("sensitiveContentFilterSetting(provider)");
+    expect(source).not.toContain("sensitiveContentFilterSetting(provider)");
+  });
+
+  it("persists SDK queue position and ETA while removing obsolete REST filter settings", async () => {
+    const migration = await readFile(resolve("database/migrations/0032_sogni_sdk_provider.sql"), "utf8");
+    expect(migration).toContain("'sogni_sdk'");
+    expect(migration).toContain("configuration - 'sensitiveContentFilter' - 'workflowSafeContentFilterSupported'");
+    expect(migration).toContain("provider_queue_position");
+    expect(migration).toContain("provider_eta_at");
   });
 
   it("adds poll scheduling, deadlines, progress, and sanitized provider metadata", async () => {

@@ -18,10 +18,12 @@
     "test": "pnpm test:unit && pnpm test:integration",
     "test:unit": "vitest run tests/unit",
     "test:watch": "vitest",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:sogni-live": "vitest run tests/live/sogni-sdk-durability.live.test.ts"
   },
   "dependencies": {
     "@fastify/static": "^10.1.0",
+    "@sogni-ai/sogni-client": "5.1.0",
     "fastify": "^5.4.0",
     "node-pg-migrate": "9.0.0",
     "pg": "^8.16.3",

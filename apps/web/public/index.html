@@ -587,7 +587,8 @@
             <select id="providerType">
               <option value="lmstudio">LM Studio native</option>
               <option value="openrouter">OpenRouter</option>
-              <option value="sogni">Sogni AI</option>
+              <option value="sogni">Sogni Creative Workflow (REST)</option>
+              <option value="sogni_sdk">Sogni Supernet SDK</option>
               <option value="manifest">Manifest</option>
               <option value="openai_compatible">OpenAI-compatible</option>
             </select>
@@ -631,21 +632,31 @@
           <label>Default height<input id="providerSogniHeight" type="number" min="256" max="8192" step="8" value="720"></label>
           <label>Aspect ratio<input id="providerSogniAspectRatio" maxlength="10" value="16:9" pattern="[0-9]{1,3}:[0-9]{1,3}"></label>
           <label>Output format
-            <select id="providerSogniOutputFormat"><option value="png">PNG</option><option value="jpeg">JPEG</option></select>
+            <select id="providerSogniOutputFormat"><option value="png">PNG</option><option value="jpeg">JPEG</option><option id="providerSogniWebpFormat" value="webp">WebP</option></select>
           </label>
           <label>Quality
             <select id="providerSogniQuality"><option value="auto">Automatic</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
           </label>
-          <label>Sensitive-content filter
-            <select id="providerSogniSensitiveContentFilter" disabled><option value="provider-default">Provider default</option></select>
-          </label>
+          <div id="providerSogniSdkSettings" class="fieldset-content hidden" aria-hidden="true">
+            <label>Network<select id="providerSogniNetwork"><option value="fast">Fast</option><option value="relaxed">Relaxed</option></select></label>
+            <label>Token type<select id="providerSogniTokenType"><option value="auto">Automatic</option><option value="sogni">SOGNI</option><option value="spark">Spark</option></select></label>
+            <label>Content filter<select id="providerSogniContentFilter"><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
+            <label>Size preset<select id="providerSogniSizePreset"><option value="custom">Custom dimensions</option></select></label>
+            <label>Steps<input id="providerSogniSteps" type="number" min="1" max="500" placeholder="Model default"></label>
+            <label>Guidance<input id="providerSogniGuidance" type="number" min="0" max="100" step="0.1" placeholder="Model default"></label>
+            <label>Fixed seed<input id="providerSogniSeed" type="number" min="0" max="4294967295" placeholder="Random"></label>
+            <label>Sampler<select id="providerSogniSampler"><option value="">Model default</option></select></label>
+            <label>Scheduler<select id="providerSogniScheduler"><option value="">Model default</option></select></label>
+            <label>Preview count<input id="providerSogniPreviewCount" type="number" min="0" max="10" value="0"></label>
+          </div>
           <label>Initial poll interval (seconds)<input id="providerSogniPollIntervalSeconds" type="number" min="1" max="30" step="1" value="2"></label>
           <label>Maximum poll interval (seconds)<input id="providerSogniMaximumPollIntervalSeconds" type="number" min="1" max="30" step="1" value="10"></label>
           <label>Generation timeout (seconds)<input id="providerSogniGenerationTimeoutSeconds" type="number" min="30" max="600" step="5" value="180"></label>
           <label>Submission attempts<input id="providerSogniMaximumAttempts" type="number" min="1" max="5" step="1" value="3"></label>
           <label class="toggle-field"><input id="providerSogniModelDiscoveryEnabled" type="checkbox" checked> Attempt model discovery</label>
         </div>
-        <p class="fieldset-note">Sogni's inline generate_image workflow does not accept a content-filter override. Nexus therefore preserves the provider default and never sends an unsupported filter field.</p>
+        <p id="providerSogniRestNote" class="fieldset-note">This Creative Workflow provider does not support NSFW content or disabling Sogni’s content filtering.</p>
+        <p id="providerSogniSdkNote" class="fieldset-note hidden">The SDK provider defaults content filtering to enabled. Disabling it maps explicitly to Sogni’s <code>disableNSFWFilter</code> project option.</p>
       </fieldset>
       <details id="providerAdvancedSettings" class="provider-advanced-settings">
         <summary>Advanced request settings</summary>

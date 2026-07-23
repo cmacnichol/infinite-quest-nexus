@@ -138,6 +138,11 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 
 .image-wrap { min-height: 260px; border-radius: 18px; overflow: hidden; border: 1px solid rgba(255,255,255,.12); background: radial-gradient(circle at 30% 20%, rgba(201,156,255,.1), rgba(0,0,0,.28)); display: grid; place-items: center; box-shadow: 0 18px 45px rgba(0,0,0,.26); position: sticky; top: 14px; }
 .image-wrap img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.image-job-placeholder { padding: 28px; text-align: center; }
+.image-job-status { display: grid; width: min(100%, 360px); gap: 12px; place-items: center; color: var(--muted); }
+.image-job-status p { margin: 0; }
+.image-job-status progress { width: 100%; height: 12px; accent-color: var(--accent); }
+.image-job-overlay { position: absolute; inset: auto 12px 12px; width: auto; padding: 12px; border-radius: 12px; color: #fff; background: rgba(14,10,22,.84); backdrop-filter: blur(8px); }
 .image-placeholder { padding: 24px; color: var(--dim); text-align: center; }
 
 .choices { display: grid; gap: 10px; }

@@ -7,6 +7,12 @@ import {
   submitSogniGeneration,
   type NormalizedProviderError as SogniNormalizedProviderError
 } from "./providers/illustration/sogni/index.js";
+import {
+  cancelSogniSdkGeneration,
+  discoverSogniSdkModels,
+  pollSogniSdkGeneration,
+  submitSogniSdkGeneration
+} from "./providers/illustration/sogni-sdk/index.js";
 
 export type TextProviderProfile = {
   providerType: ProviderType;
@@ -51,6 +57,19 @@ export type ModelInventoryItem = {
   loaded: boolean;
   instanceId: string;
   contextLength: number;
+  workerCount?: number;
+  media?: "image" | "video" | "audio";
+  imageOptions?: {
+    sizePresets: Array<{ id: string; label: string; width: number; height: number; ratio: string }>;
+    steps?: { min: number; max: number; step: number; default: number };
+    guidance?: { min: number; max: number; step: number; default: number };
+    samplers: string[];
+    defaultSampler?: string;
+    schedulers: string[];
+    defaultScheduler?: string;
+    outputFormats: Array<"png" | "jpeg" | "webp">;
+    maximumPreviews: number;
+  };
   pricing?: {
     category: "text" | "image";
     entries: Array<{ billable: string; unit: string; costUsd: number; provider?: string }>;
@@ -80,7 +99,6 @@ export type ImageProviderRequest = {
   steps?: number;
   guidance?: number;
   scheduler?: string;
-  sensitiveContentFilter?: "provider-default" | "enabled" | "disabled";
 };
 
 export type ImageProviderResult = {
@@ -109,12 +127,15 @@ export type ImageProviderSubmissionResult =
   | {
       mode: "pending";
       remoteJobId: string;
+      progress?: number;
+      queuePosition?: number;
+      etaSeconds?: number;
       pollAfterMs?: number;
       providerMetadata: Record<string, unknown>;
     };
 
 export type ImageProviderPollResult =
-  | { status: "pending"; progress?: number; pollAfterMs?: number; providerMetadata: Record<string, unknown> }
+  | { status: "pending"; progress?: number; queuePosition?: number; etaSeconds?: number; pollAfterMs?: number; providerMetadata: Record<string, unknown> }
   | {
       status: "completed";
       artifacts: ImageProviderArtifact[];
@@ -662,7 +683,6 @@ const sogniImageProviderAdapter: AsyncImageProviderAdapter = {
       idempotencyKey: String(request.idempotencyKey || ""),
       imageCount,
       outputFormat: request.outputFormat,
-      sensitiveContentFilter: request.sensitiveContentFilter ?? "provider-default",
       ...(request.negativePrompt !== undefined ? { negativePrompt: request.negativePrompt } : {}),
       ...((request.width !== undefined || dimensions) ? { width: request.width ?? Number(dimensions?.[1]) } : {}),
       ...((request.height !== undefined || dimensions) ? { height: request.height ?? Number(dimensions?.[2]) } : {}),
@@ -685,12 +705,23 @@ const sogniImageProviderAdapter: AsyncImageProviderAdapter = {
   cancel: cancelSogniGeneration
 };
 
+const sogniSdkImageProviderAdapter: AsyncImageProviderAdapter = {
+  async submit(profile, request) {
+    return { mode: "pending", ...await submitSogniSdkGeneration(profile, request) };
+  },
+  async poll(profile, remoteJobId) {
+    return pollSogniSdkGeneration(profile, remoteJobId);
+  },
+  cancel: cancelSogniSdkGeneration
+};
+
 export const imageProviderRegistry: Readonly<Partial<Record<ProviderType, AsyncImageProviderAdapter>>> = Object.freeze({
   lmstudio: compatibleImageProviderAdapter,
   openrouter: compatibleImageProviderAdapter,
   openai_compatible: compatibleImageProviderAdapter,
   manifest: compatibleImageProviderAdapter,
-  sogni: sogniImageProviderAdapter
+  sogni: sogniImageProviderAdapter,
+  sogni_sdk: sogniSdkImageProviderAdapter
 });
 
 function imageProviderAdapter(profile: TextProviderProfile): AsyncImageProviderAdapter {
@@ -866,9 +897,13 @@ export async function discoverEmbeddingModels(profile: TextProviderProfile, fetc
 }
 
 export async function discoverImageModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
+  if (profile.providerType === "sogni_sdk") {
+    if (profile.configuration?.modelDiscoveryEnabled === false) return [];
+    return discoverSogniSdkModels(profile);
+  }
   if (profile.providerType === "sogni") {
     if (profile.configuration?.modelDiscoveryEnabled === false) return [];
-    const url = `${rootUrl(profile.baseUrl).replace(/\/v1$/i, "")}/api/v1/models/list`;
+    const url = "https://socket.sogni.ai/api/v1/models/list";
     const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile) }, fetcher), profile, "image model discovery", url);
     return inventoryItems(inventoryRows(data).filter((model: any) => String(model?.media || "").toLowerCase() === "image"));
   }

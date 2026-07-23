@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import { sha256 } from "../../../packages/domain/src/text.js";
+import { logger } from "../../../packages/logger/src/index.js";
 import {
   containsMechanicsLanguage,
   logProviderTransportError,
@@ -54,6 +55,8 @@ type ImageJobRow = {
   remote_job_id: string | null;
   provider_status: string | null;
   provider_progress: string | null;
+  provider_queue_position: number | null;
+  provider_eta_at: Date | null;
   submitted_at: Date | null;
   last_polled_at: Date | null;
   next_poll_at: Date | null;
@@ -108,6 +111,8 @@ function publicJob(row: ImageJobRow) {
     remoteJobId: row.remote_job_id,
     providerStatus: row.provider_status,
     providerProgress: row.provider_progress === null ? null : Number(row.provider_progress),
+    providerQueuePosition: row.provider_queue_position,
+    providerEtaAt: row.provider_eta_at,
     submittedAt: row.submitted_at,
     lastPolledAt: row.last_polled_at,
     nextPollAt: row.next_poll_at,
@@ -122,7 +127,7 @@ function publicJob(row: ImageJobRow) {
 
 const jobColumns = `id, owner_user_id, campaign_id, turn_id, world_id, target_type, provider_profile_id, requested_model,
   prompt, status, attempts, max_attempts, size, aspect_ratio, quality, output_format, asset_id,
-  provider_type, generation_revision, remote_job_id, provider_status, provider_progress, submitted_at, last_polled_at,
+  provider_type, generation_revision, remote_job_id, provider_status, provider_progress, provider_queue_position, provider_eta_at, submitted_at, last_polled_at,
   next_poll_at, generation_deadline, provider_request_metadata, provider_result_metadata,
   error_code, error_message, created_at, updated_at, completed_at`;
 
@@ -433,10 +438,9 @@ function numberSetting(profile: TextProviderProfile, key: string, fallback: numb
   return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, Math.round(value))) : fallback;
 }
 
-function sensitiveContentFilterSetting(_profile: TextProviderProfile): "provider-default" {
-  // Direct Sogni generate_image workflow steps do not accept a filter override.
-  // Preserve provider policy even for profiles saved before this was enforced.
-  return "provider-default";
+function pendingProviderStatus(metadata: Record<string, unknown>): string {
+  const status = String(metadata.status || "pending").trim().toLowerCase();
+  return status.slice(0, 100) || "pending";
 }
 
 function artifactMimeType(bytes: Buffer, declared?: string): "image/png" | "image/jpeg" | "image/webp" {
@@ -523,7 +527,9 @@ async function completeImageJob(
           aspectRatio: job.aspect_ratio,
           quality: job.quality,
           outputFormat: job.output_format,
-          sensitiveContentFilter: sensitiveContentFilterSetting(provider)
+          ...(provider.providerType === "sogni_sdk"
+            ? { contentFilterEnabled: provider.configuration?.contentFilter !== false }
+            : {})
         }
       };
       assets.push(job.target_type === "world_cover"
@@ -568,6 +574,10 @@ async function completeImageJob(
       }, { usage: result.usage, reportedCost: result.reportedCost, responseId: providerResponseId });
     }
   });
+  logger.info({
+    event: "image_provider_completed", imageJobId: job.id, providerType: provider.providerType,
+    remoteJobId: job.remote_job_id, stage: "completed", progress: 100, artifactCount: downloaded.length
+  });
 }
 
 export async function runImageJob(
@@ -589,8 +599,7 @@ export async function runImageJob(
       quality: job.quality,
       outputFormat: job.output_format,
       idempotencyKey: `${job.id}:${job.generation_revision}`,
-      imageCount: numberSetting(provider, "defaultImageCount", 1, 1, 2) as 1 | 2,
-      sensitiveContentFilter: sensitiveContentFilterSetting(provider)
+      imageCount: numberSetting(provider, "defaultImageCount", 1, 1, 2) as 1 | 2
     } as const;
     if (job.remote_job_id) {
       if (job.generation_deadline && job.generation_deadline.getTime() <= Date.now()) {
@@ -603,13 +612,21 @@ export async function runImageJob(
           Math.max(numberSetting(provider, "pollIntervalMs", 2_000, 1_000, 30_000), Number(response.pollAfterMs || 0))
         );
         await pool.query(
-          `UPDATE image_jobs SET status = 'provider_pending', provider_status = 'pending',
-             provider_progress = COALESCE($3, provider_progress), last_polled_at = now(),
-             next_poll_at = now() + ($4::text || ' milliseconds')::interval,
-             provider_result_metadata = $5, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+          `UPDATE image_jobs SET status = 'provider_pending', provider_status = $3,
+             provider_progress = COALESCE($4, provider_progress), provider_queue_position = $5,
+             provider_eta_at = CASE WHEN $6::double precision IS NULL THEN NULL ELSE now() + ($6::text || ' seconds')::interval END,
+             last_polled_at = now(), next_poll_at = now() + ($7::text || ' milliseconds')::interval,
+             provider_result_metadata = $8, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
            WHERE id = $1 AND lease_owner = $2`,
-          [job.id, workerId, response.progress ?? null, pollAfterMs, JSON.stringify(withoutTemporaryUrls(response.providerMetadata))]
+          [job.id, workerId, pendingProviderStatus(response.providerMetadata), response.progress ?? null, response.queuePosition ?? null, response.etaSeconds ?? null,
+            pollAfterMs, JSON.stringify(withoutTemporaryUrls(response.providerMetadata))]
         );
+        logger.info({
+          event: "image_provider_status", imageJobId: job.id, providerType: provider.providerType,
+          remoteJobId: job.remote_job_id, stage: pendingProviderStatus(response.providerMetadata),
+          progress: response.progress ?? null, queuePosition: response.queuePosition ?? null, etaSeconds: response.etaSeconds ?? null,
+          reconciliation: response.providerMetadata.recoveredAfterRestart === true
+        });
         await recordProviderHealth(pool, job.owner_user_id, job.provider_profile_id, true);
         return true;
       }
@@ -634,16 +651,26 @@ export async function runImageJob(
           numberSetting(provider, "maximumPollIntervalMs", 10_000, 1_000, 30_000),
           Math.max(numberSetting(provider, "pollIntervalMs", 2_000, 1_000, 30_000), Number(response.pollAfterMs || 0))
         );
-        const generationTimeoutMs = numberSetting(provider, "generationTimeoutMs", 180_000, 30_000, 600_000);
+        const generationTimeoutMs = numberSetting(provider, "generationTimeoutMs", provider.providerType === "sogni_sdk" ? 600_000 : 180_000,
+          30_000, provider.providerType === "sogni_sdk" ? 3_600_000 : 600_000);
         const persisted = await pool.query(
-          `UPDATE image_jobs SET status = 'provider_pending', remote_job_id = $3, provider_status = 'pending',
-             submitted_at = COALESCE(submitted_at, now()), next_poll_at = now() + ($4::text || ' milliseconds')::interval,
-             generation_deadline = COALESCE(generation_deadline, now() + ($5::text || ' milliseconds')::interval),
-             provider_result_metadata = $6, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+          `UPDATE image_jobs SET status = 'provider_pending', remote_job_id = $3, provider_status = $4,
+             provider_progress = $5, provider_queue_position = $6,
+             provider_eta_at = CASE WHEN $7::double precision IS NULL THEN NULL ELSE now() + ($7::text || ' seconds')::interval END,
+             submitted_at = COALESCE(submitted_at, now()), next_poll_at = now() + ($8::text || ' milliseconds')::interval,
+             generation_deadline = COALESCE(generation_deadline, now() + ($9::text || ' milliseconds')::interval),
+             provider_result_metadata = $10, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
            WHERE id = $1 AND lease_owner = $2 AND remote_job_id IS NULL RETURNING id`,
-          [job.id, workerId, response.remoteJobId, pollAfterMs, generationTimeoutMs, JSON.stringify(withoutTemporaryUrls(response.providerMetadata))]
+          [job.id, workerId, response.remoteJobId, pendingProviderStatus(response.providerMetadata), response.progress ?? null, response.queuePosition ?? null, response.etaSeconds ?? null,
+            pollAfterMs, generationTimeoutMs, JSON.stringify(withoutTemporaryUrls(response.providerMetadata))]
         );
         if (!persisted.rows[0]) throw Object.assign(new Error("Image job lease was lost before the remote job identifier was persisted."), { code: "lease_lost" });
+        logger.info({
+          event: "image_provider_submitted", imageJobId: job.id, providerType: provider.providerType,
+          remoteJobId: response.remoteJobId, stage: pendingProviderStatus(response.providerMetadata),
+          progress: response.progress ?? null, queuePosition: response.queuePosition ?? null, etaSeconds: response.etaSeconds ?? null,
+          submitPersistBoundary: "remote_id_persisted"
+        });
         return true;
       }
       await completeImageJob(pool, job, workerId, store, provider, {

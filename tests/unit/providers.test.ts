@@ -482,28 +482,6 @@ describe("text provider adapters", () => {
     });
   });
 
-  it("rejects unsupported Sogni inline content-filter overrides", async () => {
-    const sogniProfile: TextProviderProfile = {
-      ...profile,
-      providerType: "sogni",
-      baseUrl: "https://api.sogni.ai",
-      model: "flux2",
-      apiKey: "sogni-secret",
-      configuration: { workflowSafeContentFilterSupported: true }
-    };
-    await expect(submitImageProvider(sogniProfile, {
-      prompt: "A fictional vista.",
-      size: "1024x1024",
-      aspectRatio: "1:1",
-      quality: "auto",
-      outputFormat: "png",
-      sensitiveContentFilter: "enabled",
-      idempotencyKey: "illustration-job-filter:revision-1"
-    })).rejects.toMatchObject({
-      normalized: { code: "unsupported_filter_override", retryable: false }
-    });
-  });
-
   it("polls and cancels Sogni workflows without forwarding credentials to artifact URLs", async () => {
     const sogniProfile: TextProviderProfile = {
       ...profile,
@@ -570,7 +548,7 @@ describe("text provider adapters", () => {
       apiKey: "sogni-secret"
     };
     const fetcher = vi.fn(async (url: string | URL | Request) => {
-      expect(String(url)).toBe("https://api.sogni.ai/api/v1/models/list");
+      expect(String(url)).toBe("https://socket.sogni.ai/api/v1/models/list");
       return new Response(JSON.stringify([
         { id: "qwen-chat", name: "Qwen chat", SID: 1, media: "text" },
         { id: "flux2", name: "Flux 2", SID: 2, media: "image" },
@@ -583,7 +561,7 @@ describe("text provider adapters", () => {
     ]);
   });
 
-  it("does not use Sogni's LLM-only OpenAI model catalog for images", async () => {
+  it("uses Sogni's Supernet media catalog instead of the LLM-only REST catalog", async () => {
     const sogniProfile: TextProviderProfile = {
       ...profile,
       providerType: "sogni",
@@ -592,7 +570,7 @@ describe("text provider adapters", () => {
       apiKey: "sogni-secret"
     };
     const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      expect(String(url)).toBe("https://api.sogni.ai/api/v1/models/list");
+      expect(String(url)).toBe("https://socket.sogni.ai/api/v1/models/list");
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer sogni-secret");
       return new Response(JSON.stringify([
         { id: "z_image_turbo_bf16", name: "Z-Image Turbo", SID: 10, media: "image" },

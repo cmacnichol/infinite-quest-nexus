@@ -7,6 +7,7 @@ import {
   illustrationConfigSchema,
   illustrationGenerationRequestSchema,
   sogniIllustrationProviderConfigSchema,
+  sogniSdkIllustrationProviderConfigSchema,
   storyTurnOutputSchema,
   worldCoverRequestSchema
 } from "../../packages/contracts/src/generation.js";
@@ -172,15 +173,27 @@ describe("generation contracts", () => {
   });
 
   describe("Sogni illustration contracts", () => {
-    it("accepts bounded async provider settings and defaults filtering safely", () => {
+    it("accepts bounded REST settings without exposing unsupported filter controls", () => {
       expect(sogniIllustrationProviderConfigSchema.parse({})).toMatchObject({
         pollIntervalMs: 2_000,
         maximumPollIntervalMs: 10_000,
         generationTimeoutMs: 180_000,
-        defaultImageCount: 1,
-        sensitiveContentFilter: "provider-default"
+        defaultImageCount: 1
       });
+      expect(sogniIllustrationProviderConfigSchema.parse({ sensitiveContentFilter: "disabled", workflowSafeContentFilterSupported: true })).not.toHaveProperty("sensitiveContentFilter");
       expect(sogniIllustrationProviderConfigSchema.safeParse({ pollIntervalMs: 10_000, maximumPollIntervalMs: 2_000 }).success).toBe(false);
+    });
+
+    it("defaults the SDK filter to enabled and validates advanced controls", () => {
+      expect(sogniSdkIllustrationProviderConfigSchema.parse({})).toMatchObject({
+        contentFilter: "enabled",
+        network: "fast",
+        tokenType: "auto",
+        defaultSizePreset: "custom",
+        defaultPreviewCount: 0
+      });
+      expect(sogniSdkIllustrationProviderConfigSchema.safeParse({ contentFilter: "provider-default" }).success).toBe(false);
+      expect(sogniSdkIllustrationProviderConfigSchema.safeParse({ defaultSeed: 4_294_967_296 }).success).toBe(false);
     });
 
     it("limits Sogni generation requests to two images and paired dimensions", () => {
