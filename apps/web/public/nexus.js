@@ -4733,9 +4733,9 @@ window.addEventListener("beforeunload", (event) => {
 async function loadSessionPreferences() {
   const response = await api("/api/v1/session");
   sessionUser = response.user || null;
-  const style = sessionUser?.settings?.defaultTurnControlStyle;
-  if (["action_only", "flexible_auto", "flexible_action", "flexible_scene"].includes(style)) {
-    elements.newCampaignTurnControlStyle.value = style;
+  const defaultTurnControlStyle = sessionUser?.settings?.defaultTurnControlStyle;
+  if (["action_only", "flexible_auto", "flexible_action", "flexible_scene"].includes(defaultTurnControlStyle)) {
+    elements.newCampaignTurnControlStyle.value = defaultTurnControlStyle;
   }
 }
 

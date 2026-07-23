@@ -9,6 +9,10 @@ const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
 const imageLibraryScript = readFileSync("apps/web/public/image-library-browser.js", "utf8");
 
 describe("Nexus management UI contracts", () => {
+  it("navigates to provider management with an anchor", () => {
+    expect(storyHtml).toContain('<a id="btnGettingConfigureProviders" class="buttonish accent grow" href="/nexus/">Open Provider Management in Nexus</a>');
+  });
+
   it("provides one Setup entrypoint for application and campaign prompt templates", () => {
     expect(managementHtml).toContain('id="navPromptLibrary"');
     expect(managementHtml).toContain('id="prompt-library"');

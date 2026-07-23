@@ -397,6 +397,7 @@ button.dashboard-card { width: 100%; padding: 0; cursor: pointer; font: inherit;
 .character-action-spacer { flex: 1; }
 .character-dialog-modal[data-read-only="true"] .character-collection > .button { display: none; }
 .provider-dialog-header { border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-bottom: 16px; }
+.provider-dialog-heading { padding: 24px 24px 0; }
 fieldset { border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 0 0 16px; }
 legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
 .fieldset-content { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: end; }
