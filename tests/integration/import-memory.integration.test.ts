@@ -65,6 +65,59 @@ integration("legacy import and Chronicle integration", () => {
     expect(draft.rows[0]).toMatchObject({ revision: 1 });
   });
 
+  it("indexes scoped entity identities while importing turns and summaries", async () => {
+    const ownerUserId = await initialOwnerId(pool);
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Entity import ${crypto.randomUUID()}`;
+    const baseContent = await pool.query<{ content: Record<string, unknown> }>(
+      `SELECT wv.content
+         FROM campaigns c JOIN world_versions wv ON wv.id = c.world_version_id
+        WHERE c.id = $1`,
+      [campaignId]
+    );
+    const targetContent = {
+      ...baseContent.rows[0]!.content,
+      entities: [
+        { id: "marker-one", name: "Marker One", kind: "artifact" },
+        { id: "location-alpha", name: "Location Alpha", kind: "location" }
+      ]
+    };
+    const world = await pool.query<{ id: string }>(
+      "INSERT INTO worlds (owner_user_id, title, status) VALUES ($1,$2,'active') RETURNING id",
+      [ownerUserId, `Entity import target ${crypto.randomUUID()}`]
+    );
+    const version = await pool.query<{ id: string }>(
+      `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
+       VALUES ($1,$2,1,$3) RETURNING id`,
+      [world.rows[0]!.id, ownerUserId, JSON.stringify(targetContent)]
+    );
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: `entity-import-${crypto.randomUUID()}.story`,
+      story: fixture,
+      targetWorldVersionId: version.rows[0]!.id,
+      characterStrategy: "map_to_target"
+    }));
+
+    const memories = await pool.query<{ memory_kind: string; entity_ids: string[] }>(
+      `SELECT memory_kind, entity_ids
+         FROM chronicle_memories
+        WHERE campaign_id = $1
+          AND ((memory_kind = 'turn_fiction' AND ordinal = 1) OR memory_kind = 'legacy_summary')
+        ORDER BY memory_kind`,
+      [imported.campaignId]
+    );
+    expect(memories.rows).toEqual([
+      {
+        memory_kind: "legacy_summary",
+        entity_ids: expect.arrayContaining(["world:location-alpha", "world:marker-one"])
+      },
+      {
+        memory_kind: "turn_fiction",
+        entity_ids: expect.arrayContaining(["world:marker-one", "world:location-alpha"])
+      }
+    ]);
+  });
+
   it("attaches a portable campaign to another world while preserving its character snapshot", async () => {
     const ownerUserId = await initialOwnerId(pool);
     const portable = JSON.parse(JSON.stringify(await exportCampaign(pool, campaignId)));
@@ -429,6 +482,82 @@ integration("legacy import and Chronicle integration", () => {
       [imported.campaignId]
     );
     expect(rebuiltIds.rows.map((fact) => fact.id)).toEqual([originalFactId, replacementFactId]);
+  });
+
+  it("retrieves canonical entity mentions through scoped aliases", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Alias memory ${crypto.randomUUID()}`;
+    const imported = await importLegacyStory(
+      pool,
+      storyImportRequestSchema.parse({ sourceName: "alias-memory.story", story: fixture })
+    );
+    const isolatedFixture = structuredClone(fixture);
+    isolatedFixture.world.title = `Isolated alias memory ${crypto.randomUUID()}`;
+    const isolated = await importLegacyStory(
+      pool,
+      storyImportRequestSchema.parse({ sourceName: "isolated-alias-memory.story", story: isolatedFixture })
+    );
+    const ownerUserId = await initialOwnerId(pool);
+    const campaigns = await pool.query<{ id: string; world_version_id: string }>(
+      "SELECT id, world_version_id FROM campaigns WHERE id = ANY($1::uuid[])",
+      [[imported.campaignId, isolated.campaignId]]
+    );
+    for (const campaign of campaigns.rows) {
+      await pool.query(
+        `UPDATE world_versions
+            SET content = jsonb_set(content, '{entities}', $2::jsonb, true)
+          WHERE id = $1`,
+        [campaign.world_version_id, JSON.stringify([
+          { id: "warden", name: "Lady Seraphine", aliases: ["the warden"], kind: "character" }
+        ])]
+      );
+    }
+    await pool.query(
+      "UPDATE turns SET narration = $2 WHERE campaign_id = $1 AND turn_number = 2",
+      [imported.campaignId, "Lady Seraphine sealed the moonlit archive before dawn."]
+    );
+    await pool.query(
+      "UPDATE turns SET narration = $2 WHERE campaign_id = $1 AND turn_number = 2",
+      [isolated.campaignId, "Lady Seraphine hid the cross-campaign secret beneath the observatory."]
+    );
+    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, imported.campaignId));
+    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, isolated.campaignId));
+
+    const indexed = await pool.query<{ entity_ids: string[] }>(
+      `SELECT entity_ids FROM chronicle_memories
+        WHERE campaign_id = $1 AND memory_kind = 'turn_fiction' AND ordinal = 2`,
+      [imported.campaignId]
+    );
+    expect(indexed.rows[0]?.entity_ids).toContain("world:warden");
+
+    const context = await buildContextPreview(pool, imported.campaignId, {
+      budgetTokens: 4096,
+      compression: "auto",
+      query: "What did the warden seal?",
+      recentTurns: 1
+    });
+    const serialized = JSON.stringify(context.scopes);
+    expect(serialized).toContain("Lady Seraphine sealed the moonlit archive");
+    expect(serialized).not.toContain("cross-campaign secret");
+    expect(serialized).not.toContain("world:warden");
+
+    const historical = await buildContextPreview(
+      pool,
+      imported.campaignId,
+      { budgetTokens: 4096, compression: "auto", query: "What did the warden seal?", recentTurns: 1 },
+      "",
+      {},
+      { throughTurnNumber: 1 }
+    );
+    expect(JSON.stringify(historical.scopes)).not.toContain("Lady Seraphine sealed the moonlit archive");
+
+    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, imported.campaignId));
+    const rebuilt = await pool.query<{ entity_ids: string[] }>(
+      `SELECT entity_ids FROM chronicle_memories
+        WHERE campaign_id = $1 AND memory_kind = 'turn_fiction' AND ordinal = 2`,
+      [imported.campaignId]
+    );
+    expect(rebuilt.rows[0]?.entity_ids).toEqual(indexed.rows[0]?.entity_ids);
   });
 
   it("moves imported data-URL illustrations into filesystem asset storage", async () => {

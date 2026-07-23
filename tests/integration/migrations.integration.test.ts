@@ -21,6 +21,50 @@ integration("standard database migration runner", () => {
     if (pool) await pool.end();
   });
 
+  it("adds scoped entity identity columns and indexes to Chronicle records", async () => {
+    const columns = await pool.query<{
+      table_name: string;
+      is_nullable: string;
+      column_default: string | null;
+    }>(
+      `SELECT table_name, is_nullable, column_default
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND column_name = 'entity_ids'
+          AND table_name = ANY($1::text[])
+        ORDER BY table_name`,
+      [["campaign_canonical_facts", "chronicle_memories"]]
+    );
+    expect(columns.rows).toEqual([
+      {
+        table_name: "campaign_canonical_facts",
+        is_nullable: "NO",
+        column_default: "ARRAY[]::text[]"
+      },
+      {
+        table_name: "chronicle_memories",
+        is_nullable: "NO",
+        column_default: "ARRAY[]::text[]"
+      }
+    ]);
+
+    const indexes = await pool.query<{ indexname: string }>(
+      `SELECT indexname
+         FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname = ANY($1::text[])
+        ORDER BY indexname`,
+      [[
+        "campaign_canonical_facts_entity_ids_idx",
+        "chronicle_memories_entity_ids_idx"
+      ]]
+    );
+    expect(indexes.rows.map((row) => row.indexname)).toEqual([
+      "campaign_canonical_facts_entity_ids_idx",
+      "chronicle_memories_entity_ids_idx"
+    ]);
+  });
+
   it("blocks maintenance migrations on an existing database until explicitly allowed", async () => {
     const sourceDirectory = resolve("database/migrations");
     const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-migrations-"));
