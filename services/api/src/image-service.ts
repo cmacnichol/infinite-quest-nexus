@@ -8,6 +8,7 @@ import { isIP } from "node:net";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import { sha256 } from "../../../packages/domain/src/text.js";
+import { characterVisualReference, composeIllustrationProviderPrompt } from "../../../packages/domain/src/index.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import {
   containsMechanicsLanguage,
@@ -360,8 +361,16 @@ export async function enqueueAcceptedTurnIllustration(
 export async function enqueueIllustration(pool: DatabasePool, turnId: string, request: IllustrationRequest) {
   const ownerUserId = await initialOwnerId(pool);
   return withTransaction(pool, async (client) => {
-    const turnResult = await client.query<{ campaign_id: string; image_prompt: string }>(
-      `SELECT campaign_id, image_prompt FROM turns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
+    const turnResult = await client.query<{
+      campaign_id: string;
+      image_prompt: string;
+      character_profile: Record<string, unknown> | null;
+      character_snapshot: Record<string, unknown> | null;
+    }>(
+      `SELECT turns.campaign_id, turns.image_prompt, campaigns.character_profile, campaigns.character_snapshot
+         FROM turns JOIN campaigns
+           ON campaigns.id = turns.campaign_id AND campaigns.owner_user_id = turns.owner_user_id
+        WHERE turns.id = $1 AND turns.owner_user_id = $2 FOR UPDATE OF turns`,
       [turnId, ownerUserId]
     );
     const turn = turnResult.rows[0];
@@ -400,7 +409,11 @@ export async function enqueueIllustration(pool: DatabasePool, turnId: string, re
       [config.providerProfileId, ownerUserId]
     );
     if (!provider.rows[0]) throw Object.assign(new Error("Enabled image provider profile not found."), { statusCode: 400 });
-    const job = await insertImageJob(client, { ownerUserId, campaignId: turn.campaign_id, turnId, prompt: request.prompt || turn.image_prompt, config });
+    const prompt = composeIllustrationProviderPrompt(
+      request.prompt || turn.image_prompt,
+      characterVisualReference(turn.character_profile, turn.character_snapshot)
+    );
+    const job = await insertImageJob(client, { ownerUserId, campaignId: turn.campaign_id, turnId, prompt, config });
     if (!job) throw Object.assign(new Error("The accepted turn does not contain a safe fiction-only image prompt."), { statusCode: 409 });
     return { ...publicJob(job), duplicate: false };
   });

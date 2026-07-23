@@ -433,6 +433,19 @@ integration("durable Story Engine integration", () => {
 
   it("branches an existing campaign up to a specific turn into a separate independent campaign", async () => {
     const imported = await campaign();
+    const branchProfile = {
+      name: "Branch Hero",
+      profile: {
+        identity: { aliases: ["The Split Path"], pronouns: "she/her" },
+        story: { role: "Pathfinder" },
+        appearance: { eyes: "amber" },
+        unclassifiedNotes: ""
+      }
+    };
+    await pool.query(
+      "UPDATE campaigns SET character_profile = $2, character_profile_revision = 5, updated_at = now() WHERE id = $1",
+      [imported.campaignId, JSON.stringify(branchProfile)]
+    );
     replies.push({ content: validStory() });
     await queue(imported.campaignId);
     await runGenerationJob(pool, "story-worker-branch", 30, credentialSecret);
@@ -444,6 +457,20 @@ integration("durable Story Engine integration", () => {
       activeTurnNumber: 2
     });
     expect(branched.id).not.toBe(imported.campaignId);
+    expect(await pool.query(
+      `SELECT character_profile, character_profile_revision
+         FROM campaigns WHERE id = $1`,
+      [branched.id]
+    )).toMatchObject({
+      rows: [{ character_profile: branchProfile, character_profile_revision: 1 }]
+    });
+    expect(await pool.query(
+      `SELECT revision, edit_source, next_profile
+         FROM campaign_character_profile_edits WHERE campaign_id = $1`,
+      [branched.id]
+    )).toMatchObject({
+      rows: [{ revision: 1, edit_source: "branch", next_profile: branchProfile }]
+    });
 
     const parentCampaign = await pool.query<{ active_turn_number: number }>(
       "SELECT active_turn_number FROM campaigns WHERE id = $1",

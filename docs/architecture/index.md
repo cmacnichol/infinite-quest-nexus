@@ -30,12 +30,14 @@ Architecture decision records (ADRs) preserve consequential design decisions and
 - [ADR 0015: Deletable unused world versions](./0015-deletable-unused-world-versions.md)
 - [ADR 0016: Reviewed character authoring](./0016-reviewed-character-authoring.md)
 - [ADR 0019: Cross-world campaign transfer creates an independent copy](./0019-cross-world-campaign-transfer.md)
+- [ADR 0023: Structured world and campaign character profiles](./0023-structured-character-profiles.md)
 
 ADR 0014 supersedes only the backward-compatibility portions of ADR 0013 that allowed legacy top-level character guidance to remain authoritative. It does not supersede structured rosters or campaign character snapshots.
 
 ## Illustrations
 
 - [ADR 0008: Independent durable illustration pipeline](./0008-independent-illustration-pipeline.md)
+- [ADR 0023: Structured world and campaign character profiles](./0023-structured-character-profiles.md)
 - [Proposal: Context-aware image library and PhotoSwipe browser](./image-library-enhancement-proposal.md)
 - [Future enhancement: Image Library Phase 6](./image-library-phase-6-future-enhancement.md)
 

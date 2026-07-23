@@ -7,7 +7,15 @@ import type {
 import { DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT } from "../../../packages/contracts/src/generation.js";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
-import { directIllustrationPrompt, segmentIllustrationText, sha256, stripMechanicsLeakage, truncateAtBoundary } from "../../../packages/domain/src/index.js";
+import {
+  characterVisualReference,
+  composeIllustrationProviderPrompt,
+  directIllustrationPrompt,
+  segmentIllustrationText,
+  sha256,
+  stripMechanicsLeakage,
+  truncateAtBoundary
+} from "../../../packages/domain/src/index.js";
 import {
   callTextProvider,
   containsMechanicsLanguage,
@@ -48,6 +56,7 @@ type SegmentRow = {
   source_text: string;
   direct_prompt: string;
   resolved_prompt: string;
+  character_visual_reference: string;
 };
 
 async function loadConfig(client: DatabaseClient | DatabasePool, ownerUserId: string, campaignId: string): Promise<SegmentConfigRow> {
@@ -100,11 +109,14 @@ async function queueSegmentDelivery(
   segment: SegmentRow,
   config: SegmentConfigRow,
   prompt: string,
-  promptSource: "direct" | "ai_refined" | "ai_fallback"
+  promptSource: "direct" | "ai_refined" | "ai_fallback",
+  visualReference = segment.character_visual_reference
 ) {
-  if (!prompt.trim() || containsMechanicsLanguage(prompt)) {
+  const sanitizedReference = stripMechanicsLeakage(visualReference).text.trim();
+  if (!prompt.trim() || containsMechanicsLanguage(prompt) || containsMechanicsLanguage(sanitizedReference)) {
     throw Object.assign(new Error("The segment illustration prompt failed the fiction-only boundary."), { statusCode: 409 });
   }
+  const providerPrompt = composeIllustrationProviderPrompt(prompt.trim(), sanitizedReference);
   await client.query(
     `UPDATE turn_illustration_segments
         SET resolved_prompt = $3, prompt_source = $4, status = 'generating', updated_at = now()
@@ -125,7 +137,7 @@ async function queueSegmentDelivery(
        ON CONFLICT (segment_id) WHERE segment_id IS NOT NULL DO NOTHING`,
       [ownerUserId, segment.campaign_id, segment.turn_id, segment.id, config.source_policy,
         config.matching_scope, config.confidence_profile, config.repetition_window,
-        JSON.stringify({ imagePrompt: prompt.trim(), segmentId: segment.id, segmentTextHash: sha256(segment.source_text) })]
+        JSON.stringify({ imagePrompt: providerPrompt, segmentId: segment.id, segmentTextHash: sha256(segment.source_text) })]
     );
     return;
   }
@@ -141,7 +153,7 @@ async function queueSegmentDelivery(
     campaignId: segment.campaign_id,
     turnId: segment.turn_id,
     segmentId: segment.id,
-    prompt,
+    prompt: providerPrompt,
     config: imageConfig(config, providerProfileId)
   });
   if (!job) throw Object.assign(new Error("The segment image job could not be created."), { statusCode: 409 });
@@ -153,13 +165,22 @@ async function createTurnSet(
   turnId: string,
   mode: "missing" | "rebuild"
 ) {
-  const turnResult = await client.query<{ campaign_id: string; narration: string }>(
-    `SELECT campaign_id, narration FROM turns WHERE id = $1 AND owner_user_id = $2 FOR SHARE`,
+  const turnResult = await client.query<{
+    campaign_id: string;
+    narration: string;
+    character_profile: Record<string, unknown> | null;
+    character_snapshot: Record<string, unknown> | null;
+  }>(
+    `SELECT turns.campaign_id, turns.narration, campaigns.character_profile, campaigns.character_snapshot
+       FROM turns JOIN campaigns
+         ON campaigns.id = turns.campaign_id AND campaigns.owner_user_id = turns.owner_user_id
+      WHERE turns.id = $1 AND turns.owner_user_id = $2 FOR SHARE OF turns, campaigns`,
     [turnId, ownerUserId]
   );
   const turn = turnResult.rows[0];
   if (!turn) throw Object.assign(new Error("Accepted turn not found."), { statusCode: 404 });
   const config = await loadConfig(client, ownerUserId, turn.campaign_id);
+  const visualReference = characterVisualReference(turn.character_profile, turn.character_snapshot);
   const active = await client.query<{ id: string }>(
     `SELECT id FROM turn_illustration_sets
       WHERE turn_id = $1 AND owner_user_id = $2 AND is_active = true
@@ -179,12 +200,12 @@ async function createTurnSet(
   const setResult = await client.query<{ id: string }>(
     `INSERT INTO turn_illustration_sets (
        owner_user_id, campaign_id, turn_id, source_text_hash, segment_word_count,
-       images_per_segment, prompt_mode, status
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       images_per_segment, prompt_mode, status, character_visual_reference
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
      RETURNING id`,
     [ownerUserId, turn.campaign_id, turnId, sha256(turn.narration), config.segment_word_count,
       config.images_per_segment, config.segment_prompt_mode,
-      config.segment_prompt_mode === "ai_refined" ? "refining" : "queued"]
+      config.segment_prompt_mode === "ai_refined" ? "refining" : "queued", visualReference]
   );
   const setId = setResult.rows[0]!.id;
   for (const piece of pieces) {
@@ -200,11 +221,11 @@ async function createTurnSet(
          direct_prompt, resolved_prompt, prompt_source, status
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'direct',$14)
        RETURNING id, owner_user_id, campaign_id, turn_id, illustration_set_id,
-                 source_text, direct_prompt, resolved_prompt`,
+                 source_text, direct_prompt, resolved_prompt, $15::text AS character_visual_reference`,
       [ownerUserId, setId, turn.campaign_id, turnId, piece.ordinal, piece.startOffset, piece.endOffset,
         piece.startWord, piece.endWord, piece.text, sha256(piece.text), directPrompt,
         config.segment_prompt_mode === "direct" ? directPrompt : "",
-        config.segment_prompt_mode === "ai_refined" ? "refining" : "queued"]
+        config.segment_prompt_mode === "ai_refined" ? "refining" : "queued", visualReference]
     );
     const segment = segmentResult.rows[0]!;
     if (config.segment_prompt_mode === "direct") {
@@ -421,7 +442,7 @@ export async function regenerateSegmentIllustration(
     const result = await client.query<SegmentRow & { images_per_segment: 1 | 2 }>(
       `SELECT segments.id, segments.owner_user_id, segments.campaign_id, segments.turn_id,
               segments.illustration_set_id, segments.source_text, segments.direct_prompt,
-              segments.resolved_prompt, sets.images_per_segment
+              segments.resolved_prompt, sets.images_per_segment, sets.character_visual_reference
          FROM turn_illustration_segments segments
          JOIN turn_illustration_sets sets
            ON sets.id = segments.illustration_set_id AND sets.owner_user_id = segments.owner_user_id
@@ -468,7 +489,10 @@ export async function regenerateSegmentIllustration(
       turnId: segment.turn_id,
       segmentId,
       targetVariantIndex: request.variantIndex,
-      prompt: request.prompt,
+      prompt: composeIllustrationProviderPrompt(
+        request.prompt,
+        stripMechanicsLeakage(segment.character_visual_reference).text
+      ),
       config: { ...imageConfig(config, providerProfileId), imagesPerSegment: 1 }
     });
     if (!job) throw Object.assign(new Error("The edited illustration prompt could not be queued."), { statusCode: 409 });
@@ -509,10 +533,13 @@ export async function enqueueSegmentProviderImage(pool: DatabasePool, segmentId:
   const ownerUserId = await initialOwnerId(pool);
   return withTransaction(pool, async (client) => {
     const result = await client.query<SegmentRow>(
-      `SELECT id, owner_user_id, campaign_id, turn_id, illustration_set_id,
-              source_text, direct_prompt, resolved_prompt
-         FROM turn_illustration_segments
-        WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
+      `SELECT segments.id, segments.owner_user_id, segments.campaign_id, segments.turn_id,
+              segments.illustration_set_id, segments.source_text, segments.direct_prompt,
+              segments.resolved_prompt, sets.character_visual_reference
+         FROM turn_illustration_segments segments
+         JOIN turn_illustration_sets sets
+           ON sets.id = segments.illustration_set_id AND sets.owner_user_id = segments.owner_user_id
+        WHERE segments.id = $1 AND segments.owner_user_id = $2 FOR UPDATE OF segments`,
       [segmentId, ownerUserId]
     );
     const segment = result.rows[0];
@@ -538,7 +565,10 @@ export async function enqueueSegmentProviderImage(pool: DatabasePool, segmentId:
       campaignId: segment.campaign_id,
       turnId: segment.turn_id,
       segmentId,
-      prompt: segment.resolved_prompt || segment.direct_prompt,
+      prompt: composeIllustrationProviderPrompt(
+        segment.resolved_prompt || segment.direct_prompt,
+        stripMechanicsLeakage(segment.character_visual_reference).text
+      ),
       config: imageConfig(config, providerProfileId)
     });
     if (!job) throw Object.assign(new Error("The segment image job could not be created."), { statusCode: 409 });
@@ -564,6 +594,8 @@ type IllustrationStoryContext = {
   campaignTitle: string;
   worldContent: Record<string, unknown>;
   characterSnapshot: Record<string, unknown> | null;
+  characterProfile?: Record<string, unknown> | null;
+  characterVisualReference?: string;
   continuity: string;
   previousNarration: string;
 };
@@ -577,8 +609,11 @@ export function buildBriefIllustrationStoryContext(context: IllustrationStoryCon
   const overview = context.worldContent.world && typeof context.worldContent.world === "object"
     ? context.worldContent.world as Record<string, unknown>
     : context.worldContent;
-  const characterName = briefFictionText(context.characterSnapshot?.name, 120);
-  const characterDescription = briefFictionText(context.characterSnapshot?.characterText, 500);
+  const characterDescription = briefFictionText(
+    context.characterVisualReference
+      || characterVisualReference(context.characterProfile, context.characterSnapshot),
+    900
+  );
   const lines = [
     briefFictionText(overview.title, 160) ? `World: ${briefFictionText(overview.title, 160)}` : "",
     briefFictionText(context.campaignTitle, 160) ? `Campaign: ${briefFictionText(context.campaignTitle, 160)}` : "",
@@ -586,8 +621,8 @@ export function buildBriefIllustrationStoryContext(context: IllustrationStoryCon
       ? `Genre and tone: ${[briefFictionText(overview.genre, 100), briefFictionText(overview.tone, 160)].filter(Boolean).join("; ")}`
       : "",
     briefFictionText(overview.premise, 420) ? `Premise: ${briefFictionText(overview.premise, 420)}` : "",
-    characterName || characterDescription
-      ? `Player character: ${[characterName, characterDescription].filter(Boolean).join(" — ")}`
+    characterDescription
+      ? `Player character appearance:\n${characterDescription}`
       : "",
     briefFictionText(context.continuity, 360) ? `Continuity: ${briefFictionText(context.continuity, 360)}` : "",
     briefFictionText(context.previousNarration, 500) ? `Previous scene: ${briefFictionText(context.previousNarration, 500)}` : ""
@@ -608,17 +643,19 @@ async function loadBriefIllustrationStoryContext(
   pool: DatabasePool,
   ownerUserId: string,
   campaignId: string,
-  turnId: string
+  turnId: string,
+  visualReference = ""
 ): Promise<string> {
   const result = await pool.query<{
     campaign_title: string;
     world_content: Record<string, unknown>;
     character_snapshot: Record<string, unknown> | null;
+    character_profile: Record<string, unknown> | null;
     continuity: string;
     previous_narration: string;
   }>(
     `SELECT campaigns.title AS campaign_title, world_versions.content AS world_content,
-            campaigns.character_snapshot,
+            campaigns.character_snapshot, campaigns.character_profile,
             CASE WHEN state.scratchpad_safe_for_prompt THEN state.scratchpad_private ELSE '' END AS continuity,
             COALESCE(previous.narration, '') AS previous_narration
        FROM turns target
@@ -639,6 +676,8 @@ async function loadBriefIllustrationStoryContext(
     campaignTitle: row.campaign_title,
     worldContent: row.world_content,
     characterSnapshot: row.character_snapshot,
+    characterProfile: row.character_profile,
+    characterVisualReference: visualReference,
     continuity: row.continuity,
     previousNarration: row.previous_narration
   }) : "";
@@ -669,9 +708,13 @@ export async function runIllustrationPromptJob(
   });
   if (!claimed) return false;
   const segmentResult = await pool.query<SegmentRow>(
-    `SELECT id, owner_user_id, campaign_id, turn_id, illustration_set_id,
-            source_text, direct_prompt, resolved_prompt
-       FROM turn_illustration_segments WHERE id = $1 AND owner_user_id = $2`,
+    `SELECT segments.id, segments.owner_user_id, segments.campaign_id, segments.turn_id,
+            segments.illustration_set_id, segments.source_text, segments.direct_prompt,
+            segments.resolved_prompt, sets.character_visual_reference
+       FROM turn_illustration_segments segments
+       JOIN turn_illustration_sets sets
+         ON sets.id = segments.illustration_set_id AND sets.owner_user_id = segments.owner_user_id
+      WHERE segments.id = $1 AND segments.owner_user_id = $2`,
     [claimed.segment_id, claimed.owner_user_id]
   );
   const segment = segmentResult.rows[0];
@@ -689,7 +732,8 @@ export async function runIllustrationPromptJob(
       pool,
       claimed.owner_user_id,
       claimed.campaign_id,
-      claimed.turn_id
+      claimed.turn_id,
+      segment.character_visual_reference
     );
     const result = await callTextProvider(provider, {
       systemPrompt: config.refinement_prompt.trim() || DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,

@@ -38,6 +38,7 @@ type SourceRow = {
   turn_control_style: string;
   selected_character_id: string | null;
   character_snapshot: Record<string, unknown> | null;
+  character_profile: Record<string, unknown> | null;
   legacy_settings: Record<string, unknown>;
   text_provider_profile_id: string | null;
   image_provider_profile_id: string | null;
@@ -73,7 +74,7 @@ type TargetRow = {
 async function loadSource(client: DatabaseClient | DatabasePool, ownerUserId: string, campaignId: string, lock = false): Promise<SourceRow> {
   const result = await client.query<SourceRow>(
     `SELECT c.id, c.title, c.status, c.active_turn_number, c.story_length_profile, c.turn_control_style,
-            c.selected_character_id, c.character_snapshot, c.legacy_settings,
+            c.selected_character_id, c.character_snapshot, c.character_profile, c.legacy_settings,
             c.text_provider_profile_id, c.image_provider_profile_id, c.world_version_id,
             w.id AS world_id, w.title AS world_title, wv.version_number AS world_version_number,
             wv.content AS world_content, cs.revision AS state_revision,
@@ -181,7 +182,9 @@ export async function previewCampaignWorldTransfer(pool: DatabasePool, campaignI
   ]);
   const findings = compatibility(source, target, counts);
   const targetContent: WorldContent = worldContentSchema.parse(target.content);
-  const snapshotName = typeof source.character_snapshot?.name === "string" ? source.character_snapshot.name : null;
+  const snapshotName = typeof source.character_profile?.name === "string"
+    ? source.character_profile.name
+    : typeof source.character_snapshot?.name === "string" ? source.character_snapshot.name : null;
   return {
     allowed: !findings.some((finding) => finding.severity === "blocking"),
     source: {
@@ -230,14 +233,25 @@ async function insertCampaignClone(
   const campaignResult = await client.query<{ id: string }>(
     `INSERT INTO campaigns (
        owner_user_id, world_version_id, title, status, active_turn_number, story_length_profile, turn_control_style,
-       selected_character_id, character_snapshot, legacy_settings, text_provider_profile_id, image_provider_profile_id
-     ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+       selected_character_id, character_snapshot, character_profile, character_profile_revision,
+       legacy_settings, text_provider_profile_id, image_provider_profile_id
+     ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
     [ownerUserId, target.id, title, source.active_turn_number, source.story_length_profile, source.turn_control_style,
-      source.selected_character_id, json(source.character_snapshot), json(transferableLegacySettings(source.legacy_settings)),
+      source.selected_character_id, json(source.character_snapshot),
+      source.character_profile ? json(source.character_profile) : null, source.character_profile ? 1 : 0,
+      json(transferableLegacySettings(source.legacy_settings)),
       source.text_provider_profile_id, source.image_provider_profile_id]
   );
   const campaignId = campaignResult.rows[0]?.id;
   if (!campaignId) throw new Error("Could not create the transferred campaign.");
+  if (source.character_profile) {
+    await client.query(
+      `INSERT INTO campaign_character_profile_edits (
+         owner_user_id, campaign_id, revision, previous_profile, next_profile, edit_source
+       ) VALUES ($1,$2,1,NULL,$3,'transfer')`,
+      [ownerUserId, campaignId, json(source.character_profile)]
+    );
+  }
   const provenance = {
     ...(source.import_provenance || {}),
     transfer: { type: "nexus_world_transfer", transferId, sourceCampaignId: source.id, sourceWorldVersionId: source.world_version_id }

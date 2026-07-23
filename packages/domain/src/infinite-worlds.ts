@@ -6,7 +6,7 @@ import {
   type WorldContent
 } from "../../contracts/src/world-library.js";
 import { stripMechanicsLeakage } from "./text.js";
-import { campaignCharacterSeed } from "./world-characters.js";
+import { campaignCharacterSeed, characterLegacyText, characterSnapshot } from "./world-characters.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -291,7 +291,10 @@ export function parseInfiniteWorldsStory(value: string): InfiniteWorldsStory {
 export function infiniteWorldsStoryToLegacyStory(parsed: InfiniteWorldsStory, worldContent: WorldContent, sourceName: string, selectedCharacterId?: string): LegacyStory {
   if (!parsed.turns.length) throw new Error("No '-- Turn N --' sections were found in the Infinite Worlds story text.");
   const seed = campaignCharacterSeed(worldContent, selectedCharacterId);
-  const overview = { ...worldContent.world, character: seed.character.characterText };
+  const overview = {
+    ...worldContent.world,
+    character: characterLegacyText(null, characterSnapshot(seed.character)) || seed.character.name
+  };
   const turns = parsed.turns.map((turn, index) => ({
     turnNumber: index + 1,
     action: stripMechanicsLeakage(turn.action || (index === 0 ? overview.firstAction || "Imported opening scene" : "Continue.")).text,

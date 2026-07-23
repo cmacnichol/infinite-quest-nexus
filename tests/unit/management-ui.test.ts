@@ -9,6 +9,62 @@ const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
 const imageLibraryScript = readFileSync("apps/web/public/image-library-browser.js", "utf8");
 
 describe("Nexus management UI contracts", () => {
+  it("explains every structured character field and the AI organizer on hover", () => {
+    expect(managementHtml).toContain('id="organizeCharacterProfile"');
+    expect(managementHtml).toContain("Uses the current profile, legacy guidance, and world lore, background, and canon");
+    for (const fieldId of [
+      "characterName", "characterGuidance", "characterAliases", "characterPronouns",
+      "characterRole", "characterBackground", "characterPersonality", "characterMotivations",
+      "characterGoals", "characterFearsAndConflicts", "characterKeyRelationships",
+      "characterNarrativeHooks", "characterVoiceAndMannerisms", "characterOtherGuidance",
+      "characterAncestryOrSpecies", "characterApparentAge", "characterGenderPresentation",
+      "characterBuild", "characterSkinOrComplexion", "characterFace", "characterEyes",
+      "characterHair", "characterDistinguishingFeatures", "characterClothing",
+      "characterEquipmentAndAccessories", "characterOtherVisualDetails", "characterUnclassifiedNotes"
+    ]) {
+      const index = managementHtml.indexOf(`id="${fieldId}"`);
+      expect(index, `${fieldId} should be present`).toBeGreaterThan(-1);
+      expect(managementHtml.slice(Math.max(0, index - 500), index)).toContain("title=");
+    }
+    expect(managementScript).toContain('label.title = field.title;');
+  });
+
+  it("shows example placeholders in empty editable character fields", () => {
+    for (const fieldId of [
+      "characterName", "characterAliases", "characterPronouns", "characterRole",
+      "characterBackground", "characterPersonality", "characterMotivations", "characterGoals",
+      "characterFearsAndConflicts", "characterKeyRelationships", "characterNarrativeHooks",
+      "characterVoiceAndMannerisms", "characterOtherGuidance", "characterAncestryOrSpecies",
+      "characterApparentAge", "characterGenderPresentation", "characterBuild",
+      "characterSkinOrComplexion", "characterFace", "characterEyes", "characterHair",
+      "characterDistinguishingFeatures", "characterClothing", "characterEquipmentAndAccessories",
+      "characterOtherVisualDetails", "characterUnclassifiedNotes"
+    ]) {
+      const index = managementHtml.indexOf(`id="${fieldId}"`);
+      expect(index, `${fieldId} should be present`).toBeGreaterThan(-1);
+      expect(managementHtml.slice(index, index + 700)).toContain("placeholder=");
+    }
+    expect(managementScript).toContain("input.placeholder = field.placeholder;");
+  });
+
+  it("shows a subtle live progress indicator while AI organization is running", () => {
+    expect(managementHtml).toContain('id="organizeCharacterProfileProgress"');
+    expect(managementHtml).toContain('aria-label="Organizing character profile"');
+    expect(managementHtml).toContain('class="organize-profile-spinner"');
+    expect(managementCss).toContain(".organize-profile-progress");
+    expect(managementCss).toContain(".organize-profile-progress.hidden { display: none; }");
+    expect(managementCss).toContain("@keyframes organize-profile-spin");
+    expect(managementScript).toContain("function setCharacterProfileOrganizationProgress(active)");
+    expect(managementScript).toContain("setCharacterProfileOrganizationProgress(true);");
+    expect(managementScript).toContain("setCharacterProfileOrganizationProgress(false);");
+  });
+
+  it("places character organization status above the profile fields", () => {
+    const statusIndex = managementHtml.indexOf('id="characterStatus"');
+    expect(statusIndex).toBeGreaterThan(managementHtml.indexOf('id="organizeCharacterProfile"'));
+    expect(statusIndex).toBeLessThan(managementHtml.indexOf('id="characterAliases"'));
+  });
+
   it("dismisses every Nexus modal from its backdrop while protecting unsaved form edits", () => {
     expect(managementHtml).toContain('id="discardChangesDialog"');
     expect(managementHtml).toContain("Discard unsaved changes?");
@@ -158,7 +214,11 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml.match(/id="characterDialog"/g)).toHaveLength(1);
     expect(managementHtml).toContain('id="characterForm"');
     expect(managementHtml).toContain('id="characterName" required');
-    expect(managementHtml).toContain('id="characterGuidance" required');
+    expect(managementHtml).toContain('id="characterGuidance"');
+    expect(managementHtml).toContain('id="characterRole"');
+    expect(managementHtml).toContain('id="characterAncestryOrSpecies"');
+    expect(managementHtml).toContain('id="organizeCharacterProfile"');
+    expect(managementHtml).toContain('id="characterProfileReviewDialog"');
     expect(managementHtml).toContain('id="characterStats"');
     expect(managementHtml).toContain('id="addCharacterStat"');
     expect(managementHtml).toContain('id="characterTrackers"');
@@ -180,7 +240,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("async function deleteCharacterFromModal()");
     expect(managementScript).toContain("Published versions and existing campaigns remain unchanged.");
     expect(managementScript).toContain("if (!name) throw new Error(\"Enter a character name.\");");
-    expect(managementScript).toContain("if (!characterText) throw new Error");
+    expect(managementScript).toContain("if (!profileHasGuidance(profile) && !characterText)");
     expect(managementScript).toContain("must be a whole number from 1 to 99");
   });
 
@@ -198,11 +258,11 @@ describe("Nexus management UI contracts", () => {
     expect(generator).toContain("elements.characterGuidance.value = previousGuidance;");
   });
 
-  it("strips legacy overview guidance when saving version-4 drafts", () => {
+  it("strips legacy overview guidance when saving version-5 drafts", () => {
     expect(managementScript).toContain("function worldOverviewWithoutLegacyCharacter(world = {})");
     expect(managementScript).toContain("delete overview.character;");
     expect(managementScript).toContain("const currentOverview = worldOverviewWithoutLegacyCharacter(current.world);");
-    expect(managementScript).toContain("schemaVersion: 4");
+    expect(managementScript).toContain("schemaVersion: 5");
     expect(managementScript).not.toContain("elements.worldCharacter");
     expect(managementScript).not.toContain("overview.character ||");
   });
@@ -382,6 +442,14 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('elements.illustrationSourcePolicy.disabled = !selectedCampaign');
     expect(managementScript).toContain('function illustrationPolicyUsesProvider');
     expect(managementScript).toContain('body: JSON.stringify({ imageProviderProfileId: elements.campaignImageProvider.value || null })');
+  });
+
+  it("keeps segment prompt preferences editable when automatic illustrations are off", () => {
+    expect(managementScript).toContain("const settingsVisible = Boolean(selectedCampaign);");
+    expect(managementScript).toContain("const automaticIllustrationsActive = policy !== \"off\";");
+    expect(managementScript).toContain("elements.illustrationSegmentPromptMode.disabled = !selectedCampaign;");
+    expect(managementScript).toContain("elements.openIllustrationPromptEditor.disabled = !selectedCampaign || elements.illustrationSegmentPromptMode.value !== \"ai_refined\";");
+    expect(managementScript).toContain("elements.previewIllustrationBackfill.disabled = !selectedCampaign || !automaticIllustrationsActive;");
   });
 
   it("shows durable semantic indexing progress, health, and story-provider context budgeting", () => {

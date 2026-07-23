@@ -4,6 +4,7 @@ import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import {
   canonicalizeWorldContent,
+  characterProfileSchema,
   playableCharacterSchema,
   WORLD_CONTENT_SCHEMA_VERSION,
   worldContentSchema,
@@ -39,6 +40,7 @@ const convertedPlayableCharacterSchema = z.object({
   id: z.string().trim().max(200).default(""),
   name: z.preprocess((v) => (typeof v === "string" ? v : coerceText(v)), z.string().trim().min(1).max(200)),
   character_text: flexibleLongText,
+  profile: characterProfileSchema.optional(),
   rpg_statistics: z.array(z.unknown()).max(10_000).default([]),
   default_triggers: z.array(z.unknown()).max(10_000).default([])
 }).passthrough();
@@ -149,7 +151,7 @@ export async function generateTemplateWorld(
     const needed = 3 - rawCharacters.length;
     await onProgress?.("supplementing_characters", 70, `Generating ${needed} additional playable character${needed === 1 ? "" : "s"} to meet the 3-4 character target…`);
     const supplementResult = await callTextProvider(profile, {
-      systemPrompt: `You are expanding a Story World character roster. Return JSON only with a single object containing a playable_characters array with exactly ${needed} new, distinct, fitting playable characters. Each entry requires id, name, character_text, rpg_statistics (array of { name, value (1-99), note }), and default_triggers (array of { name, value, rules }). Do not repeat existing characters.`,
+      systemPrompt: `You are expanding a Story World character roster. Return JSON only with a single object containing a playable_characters array with exactly ${needed} new, distinct, fitting playable characters. Each entry requires id, name, character_text, profile, rpg_statistics (array of { name, value (1-99), note }), and default_triggers (array of { name, value, rules }). profile must use the same identity, story, appearance, and unclassifiedNotes structure supplied for existing characters. Do not repeat existing characters.`,
       input: JSON.stringify({
         worldTitle: converted.title,
         genre: converted.genre,
@@ -184,6 +186,7 @@ export async function generateTemplateWorld(
       id,
       name: character.name,
       characterText: character.character_text,
+      ...(character.profile ? { profile: character.profile } : {}),
       rpgStats: convertedRpgStats(character.rpg_statistics, id),
       defaultTriggers: convertedDefaultTriggers(character.default_triggers, id),
       source: { type: "template-world-generator", index }

@@ -4,7 +4,7 @@ import {
   type StoryLengthWordRange
 } from "../../contracts/src/story-settings.js";
 
-export const STORY_PROMPT_PROTOCOL_VERSION = "story-v10-turn-input-modes";
+export const STORY_PROMPT_PROTOCOL_VERSION = "story-v11-structured-character-profile";
 
 export const STORY_SYSTEM_PROMPT = `You are the fiction writer for Infinite Quest.
 Return only one valid JSON object. Do not use Markdown.

@@ -24,6 +24,10 @@ let playableCharacterLoadSequence = 0;
 let editingCharacterId = "";
 let characterModalWorkingCharacter = null;
 let characterModalBusy = false;
+let characterModalScope = "world";
+let campaignCharacterProfileRevision = 0;
+let characterProfileOrganizationResult = null;
+let characterProfileOrganizationApplied = false;
 const characterRowOriginals = new WeakMap();
 const legacyStorageKey = "infiniteQuestNexusClientState.v1";
 let detectedBrowserStory = null;
@@ -50,6 +54,33 @@ let transferIdempotencyKey = "";
 const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
 const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
 const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
+const CHARACTER_PROFILE_FIELDS = Object.freeze({
+  "identity.aliases": "characterAliases",
+  "identity.pronouns": "characterPronouns",
+  "story.role": "characterRole",
+  "story.background": "characterBackground",
+  "story.personality": "characterPersonality",
+  "story.motivations": "characterMotivations",
+  "story.goals": "characterGoals",
+  "story.fearsAndConflicts": "characterFearsAndConflicts",
+  "story.keyRelationships": "characterKeyRelationships",
+  "story.narrativeHooks": "characterNarrativeHooks",
+  "story.voiceAndMannerisms": "characterVoiceAndMannerisms",
+  "story.otherGuidance": "characterOtherGuidance",
+  "appearance.ancestryOrSpecies": "characterAncestryOrSpecies",
+  "appearance.apparentAge": "characterApparentAge",
+  "appearance.genderPresentation": "characterGenderPresentation",
+  "appearance.build": "characterBuild",
+  "appearance.skinOrComplexion": "characterSkinOrComplexion",
+  "appearance.face": "characterFace",
+  "appearance.eyes": "characterEyes",
+  "appearance.hair": "characterHair",
+  "appearance.distinguishingFeatures": "characterDistinguishingFeatures",
+  "appearance.clothing": "characterClothing",
+  "appearance.equipmentAndAccessories": "characterEquipmentAndAccessories",
+  "appearance.otherVisualDetails": "characterOtherVisualDetails",
+  unclassifiedNotes: "characterUnclassifiedNotes"
+});
 const SOGNI_DEFAULT_CONFIGURATION = Object.freeze({
   defaultWidth: 1280,
   defaultHeight: 720,
@@ -649,7 +680,7 @@ function worldContentFromForm() {
   const currentOverview = worldOverviewWithoutLegacyCharacter(current.world);
   return {
     ...current,
-    schemaVersion: 4,
+    schemaVersion: 5,
     world: {
       ...currentOverview,
       title: elements.worldTitle.value,
@@ -695,7 +726,9 @@ function configuredDefaultTextProvider() {
 }
 
 function updateCharacterGeneratorAvailability() {
-  const available = Boolean(configuredDefaultTextProvider()) && selectedWorld?.status !== "archived";
+  const available = characterModalScope === "world"
+    && Boolean(configuredDefaultTextProvider())
+    && selectedWorld?.status !== "archived";
   elements.characterGenerator.classList.toggle("hidden", !available);
   if (!available) elements.characterGenerator.open = false;
   elements.generateCharacter.disabled = !available || characterModalBusy;
@@ -707,6 +740,10 @@ function setCharacterStatus(message = "", type = "") {
   elements.characterStatus.className = `status ${type}${message ? "" : " hidden"}`.trim();
 }
 
+function setCharacterProfileOrganizationProgress(active) {
+  elements.organizeCharacterProfileProgress.classList.toggle("hidden", !active);
+}
+
 function addCharacterEditorRow(kind, row = {}, readOnly = false) {
   const isStat = kind === "stat";
   const container = isStat ? elements.characterStats : elements.characterTrackers;
@@ -716,22 +753,24 @@ function addCharacterEditorRow(kind, row = {}, readOnly = false) {
 
   const fields = isStat
     ? [
-      { key: "name", label: "Name", value: row.name ?? row.skill ?? row.stat ?? "", maxlength: 200 },
-      { key: "value", label: "Value (1–99)", value: row.value ?? row.score ?? row.rating ?? "", type: "number", min: 1, max: 99 },
-      { key: "note", label: "Note", value: row.note ?? row.covers ?? "", maxlength: 2000 }
+      { key: "name", label: "Name", title: "The name of this RPG statistic.", placeholder: "e.g., Resolve", value: row.name ?? row.skill ?? row.stat ?? "", maxlength: 200 },
+      { key: "value", label: "Value (1–99)", title: "The current numeric value for this statistic.", placeholder: "e.g., 12", value: row.value ?? row.score ?? row.rating ?? "", type: "number", min: 1, max: 99 },
+      { key: "note", label: "Note", title: "What this statistic represents or covers. It is mechanics-only guidance.", placeholder: "e.g., Resists fear and mental strain", value: row.note ?? row.covers ?? "", maxlength: 2000 }
     ]
     : [
-      { key: "name", label: "Name", value: row.name ?? row.label ?? row.title ?? "", maxlength: 300 },
-      { key: "value", label: "Starting value", value: row.value ?? row.initialValue ?? "", maxlength: 6000 },
-      { key: "rules", label: "Update rules", value: row.rules ?? row.updateRules ?? row.description ?? "", maxlength: 4000 }
+      { key: "name", label: "Name", title: "The name shown for this campaign tracker.", placeholder: "e.g., Lantern oil", value: row.name ?? row.label ?? row.title ?? "", maxlength: 300 },
+      { key: "value", label: "Starting value", title: "The value assigned to this tracker when the campaign begins.", placeholder: "e.g., 3 uses", value: row.value ?? row.initialValue ?? "", maxlength: 6000 },
+      { key: "rules", label: "Update rules", title: "How the tracker changes during play. These rules are not copied into the character profile.", placeholder: "e.g., Reduce by one after each night of travel", value: row.rules ?? row.updateRules ?? row.description ?? "", maxlength: 4000 }
     ];
   for (const field of fields) {
     const label = document.createElement("label");
     label.textContent = field.label;
+    label.title = field.title;
     const input = document.createElement("input");
     input.dataset.characterField = field.key;
     input.type = field.type || "text";
     input.value = String(field.value);
+    input.placeholder = field.placeholder;
     if (field.maxlength) input.maxLength = field.maxlength;
     if (field.min) input.min = String(field.min);
     if (field.max) input.max = String(field.max);
@@ -750,10 +789,69 @@ function addCharacterEditorRow(kind, row = {}, readOnly = false) {
   container.append(editor);
 }
 
+function emptyCharacterProfile() {
+  return {
+    identity: { aliases: [], pronouns: "" },
+    story: {
+      role: "", background: "", personality: "", motivations: "", goals: "",
+      fearsAndConflicts: "", keyRelationships: "", narrativeHooks: "",
+      voiceAndMannerisms: "", otherGuidance: ""
+    },
+    appearance: {
+      ancestryOrSpecies: "", apparentAge: "", genderPresentation: "", build: "",
+      skinOrComplexion: "", face: "", eyes: "", hair: "", distinguishingFeatures: [],
+      clothing: "", equipmentAndAccessories: "", otherVisualDetails: ""
+    },
+    unclassifiedNotes: ""
+  };
+}
+
+function profileValue(profile, path) {
+  return path.split(".").reduce((value, key) => value?.[key], profile);
+}
+
+function setProfileValue(profile, path, value) {
+  const keys = path.split(".");
+  let target = profile;
+  for (const key of keys.slice(0, -1)) {
+    target[key] ||= {};
+    target = target[key];
+  }
+  target[keys.at(-1)] = value;
+}
+
+function profileFromForm() {
+  const profile = emptyCharacterProfile();
+  for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+    const raw = elements[id].value.trim();
+    const value = path === "identity.aliases"
+      ? raw.split(",").map((entry) => entry.trim()).filter(Boolean)
+      : path === "appearance.distinguishingFeatures"
+        ? raw.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean)
+        : raw;
+    setProfileValue(profile, path, value);
+  }
+  return profile;
+}
+
+function profileHasGuidance(profile) {
+  return Object.keys(CHARACTER_PROFILE_FIELDS).filter((path) => path.startsWith("story.")).some((path) => {
+    const value = profileValue(profile, path);
+    return Array.isArray(value) ? value.length > 0 : Boolean(String(value || "").trim());
+  });
+}
+
 function populateCharacterForm(character, readOnly = false) {
   characterModalWorkingCharacter = copyJsonValue(character);
   elements.characterName.value = String(character.name || "");
   elements.characterGuidance.value = String(character.characterText || "");
+  const profile = character.profile || emptyCharacterProfile();
+  for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+    const value = profileValue(profile, path);
+    elements[id].value = Array.isArray(value)
+      ? value.join(path === "identity.aliases" ? ", " : "\n")
+      : String(value || "");
+  }
   elements.characterStats.replaceChildren();
   elements.characterTrackers.replaceChildren();
   for (const stat of Array.isArray(character.rpgStats) ? character.rpgStats : []) addCharacterEditorRow("stat", stat, readOnly);
@@ -763,13 +861,16 @@ function populateCharacterForm(character, readOnly = false) {
 function setCharacterModalControls(readOnly, busy = false) {
   characterModalBusy = busy;
   elements.characterDialog.dataset.readOnly = String(readOnly);
-  for (const control of [elements.characterName, elements.characterGuidance, elements.addCharacterStat, elements.addCharacterTracker]) {
+  for (const control of [elements.characterName, elements.addCharacterStat, elements.addCharacterTracker, elements.organizeCharacterProfile]) {
     control.disabled = readOnly || busy;
   }
+  elements.characterDialog.querySelectorAll(".character-profile-section input, .character-profile-section textarea").forEach((control) => {
+    control.disabled = readOnly || busy;
+  });
   elements.characterDialog.querySelectorAll(".character-edit-row input, .character-row-remove").forEach((control) => {
     control.disabled = readOnly || busy;
   });
-  elements.characterGeneratorPrompt.disabled = busy;
+  elements.characterGeneratorPrompt.disabled = busy || characterModalScope === "campaign";
   elements.saveCharacter.disabled = readOnly || busy;
   elements.deleteCharacter.disabled = readOnly || busy;
   elements.cancelCharacter.disabled = busy;
@@ -787,6 +888,9 @@ function openCharacterDialog(characterId = "") {
     return;
   }
   editingCharacterId = character?.id || "";
+  characterModalScope = "world";
+  characterProfileOrganizationResult = null;
+  characterProfileOrganizationApplied = false;
   const initial = character || { id: "", name: "", characterText: "", rpgStats: [], defaultTriggers: [], source: { type: "world-library-editor" } };
   populateCharacterForm(initial, readOnly);
   elements.characterGeneratorPrompt.value = "";
@@ -800,6 +904,8 @@ function openCharacterDialog(characterId = "") {
   elements.saveCharacter.classList.toggle("hidden", readOnly);
   elements.deleteCharacter.classList.toggle("hidden", !character || readOnly);
   elements.cancelCharacter.textContent = readOnly ? "Close" : "Cancel";
+  elements.characterMechanicsFields.classList.remove("hidden");
+  elements.characterDialog.querySelector(".eyebrow").textContent = "World Library";
   setCharacterStatus();
   setCharacterModalControls(readOnly);
   openManagedModal(elements.characterDialog);
@@ -837,8 +943,11 @@ function characterRowsFromForm(kind, characterId) {
 function characterFromForm() {
   const name = elements.characterName.value.trim();
   const characterText = elements.characterGuidance.value.trim();
+  const profile = profileFromForm();
   if (!name) throw new Error("Enter a character name.");
-  if (!characterText) throw new Error("Enter character guidance covering who this character is and how they should be portrayed.");
+  if (!profileHasGuidance(profile) && !characterText) {
+    throw new Error("Enter targeted character profile details or retain valid legacy guidance.");
+  }
   const base = characterModalWorkingCharacter || {};
   const id = String(base.id || opaqueCharacterId());
   return {
@@ -846,6 +955,7 @@ function characterFromForm() {
     id,
     name,
     characterText,
+    profile,
     rpgStats: characterRowsFromForm("stat", id),
     defaultTriggers: characterRowsFromForm("tracker", id),
     source: base.source && typeof base.source === "object" ? base.source : {}
@@ -1169,6 +1279,7 @@ async function generateCharacterFromPrompt() {
   }
   const previousName = elements.characterName.value;
   const previousGuidance = elements.characterGuidance.value;
+  const previousProfile = profileFromForm();
   setCharacterModalControls(false, true);
   setCharacterStatus("Generating a complete character from the current world draft…");
   try {
@@ -1181,7 +1292,7 @@ async function generateCharacterFromPrompt() {
       })
     });
     const candidate = result?.character;
-    if (!candidate || typeof candidate !== "object" || !String(candidate.name || "").trim() || !String(candidate.characterText || "").trim()) {
+    if (!candidate || typeof candidate !== "object" || !String(candidate.name || "").trim() || !candidate.profile) {
       throw new Error("The text model did not return a complete character.");
     }
     const base = characterModalWorkingCharacter || {};
@@ -1197,6 +1308,10 @@ async function generateCharacterFromPrompt() {
     // Fields are populated only after a complete response has passed the client boundary checks.
     elements.characterName.value = previousName;
     elements.characterGuidance.value = previousGuidance;
+    for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+      const value = profileValue(previousProfile, path);
+      elements[id].value = Array.isArray(value) ? value.join(path === "identity.aliases" ? ", " : "\n") : String(value || "");
+    }
     setCharacterStatus(error.statusCode === 409
       ? "The world draft changed while this modal was open. Your entries are still here; close and reload the world before trying again."
       : error.message || String(error), "error");
@@ -1205,9 +1320,46 @@ async function generateCharacterFromPrompt() {
   }
 }
 
-async function saveCharacterFromModal(event) {
-  event.preventDefault();
-  if (!selectedWorld || characterModalBusy || selectedWorld.status === "archived") return;
+function renderCharacterProfileReview(result) {
+  characterProfileOrganizationResult = result;
+  elements.characterProfileReviewList.replaceChildren();
+  const existingProfile = profileFromForm();
+  for (const [path] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+    const value = profileValue(result.candidate, path);
+    const existingValue = profileValue(existingProfile, path);
+    const hasProposed = Array.isArray(value) ? value.length > 0 : Boolean(String(value || "").trim());
+    const hasExisting = Array.isArray(existingValue) ? existingValue.length > 0 : Boolean(String(existingValue || "").trim());
+    if (!hasProposed && !hasExisting) continue;
+    const evidence = (result.evidence || []).filter((entry) => entry.path === path);
+    const row = document.createElement("div");
+    row.className = "character-profile-review-row";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = hasProposed;
+    checkbox.dataset.profilePath = path;
+    const label = document.createElement("label");
+    const heading = document.createElement("strong");
+    heading.textContent = path;
+    const existing = document.createElement("code");
+    existing.textContent = `Existing: ${Array.isArray(existingValue) ? existingValue.join("; ") : String(existingValue || "(empty)")}`;
+    const proposed = document.createElement("code");
+    proposed.textContent = `Proposed: ${Array.isArray(value) ? value.join("; ") : String(value || "(empty)")}`;
+    const sources = document.createElement("span");
+    sources.className = "character-profile-review-evidence";
+    sources.textContent = evidence.map((entry) => `${entry.source}: “${entry.quote}”`).join(" · ");
+    label.append(heading, existing, proposed, sources);
+    row.append(checkbox, label);
+    elements.characterProfileReviewList.append(row);
+  }
+  const notices = [...(result.conflicts || []), ...(result.warnings || []),
+    ...(result.unassignedText || []).map((text) => `Unassigned: ${text}`)];
+  elements.characterProfileReviewWarnings.textContent = notices.join("\n");
+  elements.characterProfileReviewWarnings.classList.toggle("hidden", notices.length === 0);
+  openManagedModal(elements.characterProfileReviewDialog);
+}
+
+async function organizeCharacterProfile() {
+  if (characterModalBusy) return;
   let character;
   try {
     character = characterFromForm();
@@ -1215,6 +1367,118 @@ async function saveCharacterFromModal(event) {
     setCharacterStatus(error.message || String(error), "error");
     return;
   }
+  const campaignScope = characterModalScope === "campaign";
+  if (campaignScope ? !selectedCampaign : !selectedWorld) return;
+  const endpoint = campaignScope
+    ? `/api/v1/campaigns/${selectedCampaign.id}/character-profile/organize`
+    : `/api/v1/worlds/${selectedWorld.id}/draft/playable-characters/organize`;
+  const expectedRevision = campaignScope ? campaignCharacterProfileRevision : selectedWorld.draftRevision;
+  setCharacterModalControls(false, true);
+  setCharacterProfileOrganizationProgress(true);
+  setCharacterStatus("Organizing supplied facts into targeted profile fields…");
+  try {
+    const result = await api(endpoint, {
+      method: "POST",
+      body: JSON.stringify({ expectedRevision, character })
+    });
+    renderCharacterProfileReview(result);
+    setCharacterStatus("Review the evidence-backed proposals before applying them.", "success");
+  } catch (error) {
+    setCharacterStatus(error.message || String(error), "error");
+  } finally {
+    setCharacterProfileOrganizationProgress(false);
+    setCharacterModalControls(false, false);
+  }
+}
+
+function applyCharacterProfileReview() {
+  if (!characterProfileOrganizationResult) return;
+  let appliedCount = 0;
+  for (const checkbox of elements.characterProfileReviewList.querySelectorAll("[data-profile-path]:checked")) {
+    const path = checkbox.dataset.profilePath;
+    const id = CHARACTER_PROFILE_FIELDS[path];
+    const value = profileValue(characterProfileOrganizationResult.candidate, path);
+    elements[id].value = Array.isArray(value)
+      ? value.join(path === "identity.aliases" ? ", " : "\n")
+      : String(value || "");
+    appliedCount += 1;
+  }
+  characterProfileOrganizationApplied = appliedCount > 0;
+  elements.characterProfileReviewDialog.close();
+  setCharacterStatus("Selected proposals applied to the unsaved form. Save the character to persist them.", "success");
+}
+
+async function openCampaignCharacterDialog() {
+  if (!selectedCampaign) return;
+  try {
+    const result = await api(`/api/v1/campaigns/${selectedCampaign.id}/character-profile`);
+    characterModalScope = "campaign";
+    campaignCharacterProfileRevision = result.revision;
+    editingCharacterId = result.characterId || "";
+    characterProfileOrganizationResult = null;
+    characterProfileOrganizationApplied = false;
+    populateCharacterForm({
+      id: result.characterId || "",
+      name: result.name || "Player Character",
+      characterText: result.legacyCharacterText || "",
+      profile: result.profile || emptyCharacterProfile(),
+      rpgStats: result.rpgStats || [],
+      defaultTriggers: result.defaultTriggers || [],
+      source: { type: "campaign-character-profile" }
+    });
+    elements.characterDialog.querySelector(".eyebrow").textContent = "Campaign";
+    elements.characterDialogTitle.textContent = "Edit campaign character profile";
+    elements.characterDialogDescription.textContent = "This editable campaign copy can diverge without changing its immutable world-version snapshot.";
+    elements.characterGenerator.classList.add("hidden");
+    elements.characterMechanicsFields.classList.add("hidden");
+    elements.deleteCharacter.classList.add("hidden");
+    elements.saveCharacter.classList.remove("hidden");
+    elements.saveCharacter.textContent = "Save campaign profile";
+    elements.cancelCharacter.textContent = "Cancel";
+    setCharacterStatus();
+    setCharacterModalControls(false);
+    openManagedModal(elements.characterDialog);
+    elements.characterName.focus();
+  } catch (error) {
+    campaignMessage(error.message || String(error), "error");
+  }
+}
+
+async function saveCharacterFromModal(event) {
+  event.preventDefault();
+  if (characterModalBusy) return;
+  let character;
+  try {
+    character = characterFromForm();
+  } catch (error) {
+    setCharacterStatus(error.message || String(error), "error");
+    return;
+  }
+  if (characterModalScope === "campaign") {
+    if (!selectedCampaign) return;
+    setCharacterModalControls(false, true);
+    setCharacterStatus("Saving campaign character profile…");
+    try {
+      const saved = await api(`/api/v1/campaigns/${selectedCampaign.id}/character-profile`, {
+        method: "PUT",
+        body: JSON.stringify({
+          expectedRevision: campaignCharacterProfileRevision,
+          name: character.name,
+          profile: character.profile,
+          editSource: characterProfileOrganizationApplied ? "ai_organized" : "manual"
+        })
+      });
+      campaignCharacterProfileRevision = saved.revision;
+      elements.characterDialog.close();
+      await loadCampaigns(selectedCampaign.id);
+      campaignMessage(`Campaign character profile saved at revision ${saved.revision}.`, "success");
+    } catch (error) {
+      setCharacterStatus(error.message || String(error), "error");
+      setCharacterModalControls(false, false);
+    }
+    return;
+  }
+  if (!selectedWorld || selectedWorld.status === "archived") return;
   const content = worldContentFromForm();
   const roster = playableCharactersFromContent(content).map((item) => copyJsonValue(item));
   if (editingCharacterId) {
@@ -1619,7 +1883,7 @@ async function loadCampaigns(preselectId = "") {
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
     selectedCampaign = null;
     updateStoryViewLink();
-    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor, elements.previewIllustrationBackfill, elements.previewIllustrationRebuild, elements.saveIllustrationConfig, elements.discoverIllustrationModels].forEach((element) => { element.disabled = true; });
+    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.editCampaignCharacter, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor, elements.previewIllustrationBackfill, elements.previewIllustrationRebuild, elements.saveIllustrationConfig, elements.discoverIllustrationModels].forEach((element) => { element.disabled = true; });
     elements.illustrationSourcePolicy.value = "off";
     renderIllustrationSettingsVisibility();
     elements.campaignCostSection.classList.add("hidden");
@@ -1655,7 +1919,7 @@ async function selectCampaign(campaign) {
   elements.saveIllustrationConfig.disabled = false;
   elements.campaignTitle.value = campaign.title;
   elements.campaignStatus.value = campaign.status;
-  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor].forEach((element) => { element.disabled = false; });
+  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.transferCampaign, elements.editCampaignCharacter, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor].forEach((element) => { element.disabled = false; });
   elements.campaignTextProvider.value = campaign.textProviderProfileId || "";
   elements.campaignImageProvider.value = campaign.imageProviderProfileId || "";
   elements.campaignTurnControlStyle.value = campaign.turnControlStyle || "flexible_auto";
@@ -2091,21 +2355,21 @@ function restoreDefaultIllustrationPrompt() {
 
 function renderIllustrationSettingsVisibility() {
   const policy = elements.illustrationSourcePolicy.value;
-  const visible = policy !== "off";
-  elements.illustrationSettings.classList.toggle("hidden", !visible);
-  elements.illustrationSettings.setAttribute("aria-hidden", String(!visible));
-  elements.illustrationMatchingSettings.classList.toggle("hidden", !illustrationPolicyUsesLibrary(policy));
-  elements.illustrationProviderSettings.classList.toggle("hidden", !illustrationPolicyUsesProvider(policy));
-  const useRefinementPrompt = visible && elements.illustrationSegmentPromptMode.value === "ai_refined";
+  const settingsVisible = Boolean(selectedCampaign);
+  const automaticIllustrationsActive = policy !== "off";
+  elements.illustrationSettings.classList.toggle("hidden", !settingsVisible);
+  elements.illustrationSettings.setAttribute("aria-hidden", String(!settingsVisible));
+  elements.illustrationMatchingSettings.classList.toggle("hidden", !automaticIllustrationsActive || !illustrationPolicyUsesLibrary(policy));
+  elements.illustrationProviderSettings.classList.toggle("hidden", !automaticIllustrationsActive || !illustrationPolicyUsesProvider(policy));
+  const useRefinementPrompt = settingsVisible && elements.illustrationSegmentPromptMode.value === "ai_refined";
   elements.illustrationRefinementPromptField.classList.toggle("hidden", !useRefinementPrompt);
-  elements.previewIllustrationBackfill.disabled = !selectedCampaign || !visible;
-  elements.previewIllustrationRebuild.disabled = !selectedCampaign || !visible;
+  elements.previewIllustrationBackfill.disabled = !selectedCampaign || !automaticIllustrationsActive;
+  elements.previewIllustrationRebuild.disabled = !selectedCampaign || !automaticIllustrationsActive;
 }
 
 function syncIllustrationProviderAvailability(restoreSavedState = false) {
   const hasImageProvider = enabledProviders("image").length > 0;
   if (restoreSavedState) elements.illustrationSourcePolicy.value = illustrationConfig?.sourcePolicy || (illustrationConfig?.enabled ? "generate_only" : "off");
-  const visible = elements.illustrationSourcePolicy.value !== "off";
   elements.illustrationSourcePolicy.disabled = !selectedCampaign;
   for (const option of elements.illustrationSourcePolicy.options) {
     option.disabled = !hasImageProvider && ["library_then_generate", "generate_only"].includes(option.value)
@@ -2113,12 +2377,10 @@ function syncIllustrationProviderAvailability(restoreSavedState = false) {
   }
   elements.campaignImageProvider.disabled = !selectedCampaign || !hasImageProvider;
   elements.discoverIllustrationModels.disabled = !selectedCampaign || !effectiveCampaignProvider("image");
-  elements.illustrationSegmentWordCount.disabled = !selectedCampaign || !visible;
-  elements.illustrationImagesPerSegment.disabled = !selectedCampaign || !visible;
-  elements.illustrationSegmentPromptMode.disabled = !selectedCampaign || !visible;
-  elements.openIllustrationPromptEditor.disabled = !selectedCampaign || !visible || elements.illustrationSegmentPromptMode.value !== "ai_refined";
-  elements.previewIllustrationBackfill.disabled = !selectedCampaign || !visible;
-  elements.previewIllustrationRebuild.disabled = !selectedCampaign || !visible;
+  elements.illustrationSegmentWordCount.disabled = !selectedCampaign;
+  elements.illustrationImagesPerSegment.disabled = !selectedCampaign;
+  elements.illustrationSegmentPromptMode.disabled = !selectedCampaign;
+  elements.openIllustrationPromptEditor.disabled = !selectedCampaign || elements.illustrationSegmentPromptMode.value !== "ai_refined";
   renderIllustrationSettingsVisibility();
 }
 
@@ -3858,12 +4120,24 @@ elements.characterForm.addEventListener("submit", saveCharacterFromModal);
 elements.cancelCharacter.addEventListener("click", () => elements.characterDialog.close());
 elements.deleteCharacter.addEventListener("click", deleteCharacterFromModal);
 elements.generateCharacter.addEventListener("click", generateCharacterFromPrompt);
+elements.organizeCharacterProfile.addEventListener("click", organizeCharacterProfile);
+elements.cancelCharacterProfileReview.addEventListener("click", () => {
+  characterProfileOrganizationResult = null;
+  characterProfileOrganizationApplied = false;
+  elements.characterProfileReviewDialog.close();
+});
+elements.applyCharacterProfileReview.addEventListener("click", applyCharacterProfileReview);
+elements.editCampaignCharacter.addEventListener("click", openCampaignCharacterDialog);
 elements.addCharacterStat.addEventListener("click", () => addCharacterEditorRow("stat"));
 elements.addCharacterTracker.addEventListener("click", () => addCharacterEditorRow("tracker"));
 elements.characterDialog.addEventListener("close", () => {
   editingCharacterId = "";
   characterModalWorkingCharacter = null;
   characterModalBusy = false;
+  characterModalScope = "world";
+  characterProfileOrganizationResult = null;
+  characterProfileOrganizationApplied = false;
+  setCharacterProfileOrganizationProgress(false);
   elements.characterGenerator.open = false;
   elements.characterGeneratorPrompt.value = "";
   elements.characterStats.replaceChildren();

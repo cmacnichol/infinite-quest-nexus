@@ -69,6 +69,16 @@ integration("legacy import and Chronicle integration", () => {
     const ownerUserId = await initialOwnerId(pool);
     const portable = JSON.parse(JSON.stringify(await exportCampaign(pool, campaignId)));
     portable.campaign.title = `Portable transferred campaign ${crypto.randomUUID()}`;
+    portable.campaign.characterProfile = {
+      name: "Portable Hero",
+      profile: {
+        identity: { aliases: ["The Wayfinder"], pronouns: "they/them" },
+        story: { role: "Explorer" },
+        appearance: { clothing: "red travel coat" },
+        unclassifiedNotes: ""
+      }
+    };
+    portable.campaign.characterProfileRevision = 7;
     const sourceCharacter = portable.campaign.characterSnapshot;
     const world = await pool.query<{ id: string }>(
       "INSERT INTO worlds (owner_user_id, title, status) VALUES ($1,$2,'active') RETURNING id",
@@ -106,14 +116,32 @@ integration("legacy import and Chronicle integration", () => {
       targetWorldVersionId: version.rows[0]!.id,
       characterStrategy: "preserve_source"
     }));
-    const imported = await pool.query<{ world_version_id: string; character_snapshot: unknown }>(
-      "SELECT world_version_id, character_snapshot FROM campaigns WHERE id = $1 AND owner_user_id = $2",
+    const imported = await pool.query<{
+      world_version_id: string;
+      character_snapshot: unknown;
+      character_profile: unknown;
+      character_profile_revision: number;
+    }>(
+      `SELECT world_version_id, character_snapshot, character_profile, character_profile_revision
+         FROM campaigns WHERE id = $1 AND owner_user_id = $2`,
       [result.campaignId, ownerUserId]
     );
     expect(imported.rows[0]).toMatchObject({
       world_version_id: version.rows[0]!.id,
-      character_snapshot: sourceCharacter
+      character_snapshot: sourceCharacter,
+      character_profile: portable.campaign.characterProfile,
+      character_profile_revision: 7
     });
+    const profileAudit = await pool.query<any>(
+      `SELECT revision, edit_source, next_profile
+         FROM campaign_character_profile_edits WHERE campaign_id = $1`,
+      [result.campaignId]
+    );
+    expect(profileAudit.rows).toMatchObject([{
+      revision: 7,
+      edit_source: "imported",
+      next_profile: portable.campaign.characterProfile
+    }]);
   });
 
   it("reconnects an exact ledger when its saved world-version id is stale", async () => {

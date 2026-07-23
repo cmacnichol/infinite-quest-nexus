@@ -19,13 +19,58 @@ const shortText = z.preprocess(coerceToString, z.string().max(2000).default(""))
 const longText = z.preprocess(coerceToString, z.string().max(200_000).default(""));
 const characterId = z.string().trim().min(1).max(200);
 
-export const WORLD_CONTENT_SCHEMA_VERSION = 4;
+export const WORLD_CONTENT_SCHEMA_VERSION = 5;
+
+const profileText = z.preprocess(coerceToString, z.string().trim().max(20_000).default(""));
+const profileShortText = z.preprocess(coerceToString, z.string().trim().max(2_000).default(""));
+
+export const characterProfileSchema = z.object({
+  identity: z.object({
+    aliases: z.array(z.string().trim().min(1).max(200)).max(20).default([]),
+    pronouns: profileShortText
+  }).passthrough().default({ aliases: [], pronouns: "" }),
+  story: z.object({
+    role: profileText,
+    background: profileText,
+    personality: profileText,
+    motivations: profileText,
+    goals: profileText,
+    fearsAndConflicts: profileText,
+    keyRelationships: profileText,
+    narrativeHooks: profileText,
+    voiceAndMannerisms: profileText,
+    otherGuidance: profileText
+  }).passthrough().default({
+    role: "", background: "", personality: "", motivations: "", goals: "",
+    fearsAndConflicts: "", keyRelationships: "", narrativeHooks: "",
+    voiceAndMannerisms: "", otherGuidance: ""
+  }),
+  appearance: z.object({
+    ancestryOrSpecies: profileShortText,
+    apparentAge: profileShortText,
+    genderPresentation: profileShortText,
+    build: profileShortText,
+    skinOrComplexion: profileShortText,
+    face: profileText,
+    eyes: profileShortText,
+    hair: profileText,
+    distinguishingFeatures: z.array(z.string().trim().min(1).max(2_000)).max(50).default([]),
+    clothing: profileText,
+    equipmentAndAccessories: profileText,
+    otherVisualDetails: profileText
+  }).passthrough().default({
+    ancestryOrSpecies: "", apparentAge: "", genderPresentation: "", build: "",
+    skinOrComplexion: "", face: "", eyes: "", hair: "", distinguishingFeatures: [],
+    clothing: "", equipmentAndAccessories: "", otherVisualDetails: ""
+  }),
+  unclassifiedNotes: longText
+}).passthrough();
 
 export const playableCharacterSchema = z.object({
-
   id: characterId,
   name: z.string().trim().min(1).max(200),
   characterText: longText,
+  profile: characterProfileSchema.optional(),
   rpgStats: z.array(z.unknown()).max(10_000).default([]),
   defaultTriggers: z.array(z.unknown()).max(10_000).default([]),
   source: z.record(z.string(), z.unknown()).default({})
@@ -95,6 +140,38 @@ export const playableCharacterGenerationRequestSchema = z.object({
   characterId: characterId.optional()
 }).strict();
 
+export const characterProfileEditSourceSchema = z.enum(["manual", "ai_organized", "imported"]);
+
+export const campaignCharacterProfileSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  profile: characterProfileSchema
+}).strict();
+
+export const campaignCharacterProfileUpdateSchema = campaignCharacterProfileSchema.extend({
+  expectedRevision: z.coerce.number().int().min(0),
+  editSource: characterProfileEditSourceSchema.default("manual")
+}).strict();
+
+export const characterProfileOrganizationRequestSchema = z.object({
+  expectedRevision: z.coerce.number().int().min(0),
+  character: playableCharacterSchema
+}).strict();
+
+export const characterProfileEvidenceSchema = z.object({
+  path: z.string().trim().min(1).max(300),
+  source: z.string().trim().min(1).max(100),
+  quote: z.string().trim().min(1).max(4_000)
+}).strict();
+
+export const characterProfileOrganizationResultSchema = z.object({
+  candidate: characterProfileSchema,
+  evidence: z.array(characterProfileEvidenceSchema).max(500),
+  unassignedText: z.array(z.string().max(20_000)).max(100),
+  conflicts: z.array(z.string().max(4_000)).max(100),
+  warnings: z.array(z.string().max(4_000)).max(100),
+  protocolVersion: z.string().trim().min(1).max(100)
+}).strict();
+
 export const worldForkSchema = z.object({
   title,
   sourceWorldVersionId: z.uuid().optional()
@@ -150,6 +227,11 @@ export const worldVersionDeleteSchema = z.object({
 });
 
 export type PlayableCharacter = z.infer<typeof playableCharacterSchema>;
+export type CharacterProfile = z.infer<typeof characterProfileSchema>;
+export type CampaignCharacterProfile = z.infer<typeof campaignCharacterProfileSchema>;
+export type CampaignCharacterProfileUpdate = z.infer<typeof campaignCharacterProfileUpdateSchema>;
+export type CharacterProfileOrganizationRequest = z.infer<typeof characterProfileOrganizationRequestSchema>;
+export type CharacterProfileOrganizationResult = z.infer<typeof characterProfileOrganizationResultSchema>;
 export type WorldCreateRequest = z.infer<typeof worldCreateSchema>;
 export type WorldDraftUpdateRequest = z.infer<typeof worldDraftUpdateSchema>;
 export type WorldPublishRequest = z.infer<typeof worldPublishSchema>;

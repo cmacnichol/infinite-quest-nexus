@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { campaignCharacterProfileSchema } from "./world-library.js";
 
 const coerceToString = (val: unknown): string | undefined => {
   if (val === null || val === undefined) return undefined;
@@ -58,6 +59,8 @@ const portableCampaignMetadataSchema = z.object({
   sourceWorldVersionNumber: z.number().int().positive().optional(),
   selectedCharacterId: z.string().trim().min(1).max(200).nullable().optional(),
   characterSnapshot: z.record(z.string(), z.unknown()).nullable().optional(),
+  characterProfile: campaignCharacterProfileSchema.nullable().optional(),
+  characterProfileRevision: z.number().int().nonnegative().default(0),
   stateRevision: z.number().int().nonnegative().default(0)
 }).passthrough();
 
