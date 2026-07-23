@@ -1,10 +1,12 @@
-# Enhancement proposal: Context-aware image library and illustration source policies
+# Enhancement proposal: Context-aware image library, PhotoSwipe browser, and illustration source policies
 
-**Status:** Deferred proposal. Review again before implementation because the asset, identity, and illustration schemas may change.
+**Status:** Phases 1-5 implemented in the current worktree. Phase 6 remains optional and deliberately gated on authentication, grants, classification provenance, and measured semantic-matching value.
+
+The baseline implementation is anchored by migration `0031_context_aware_image_library`, the owner-scoped asset query contract, the shared `image-library-browser.js` controller, the PhotoSwipe 5 self-hosted distribution, and durable illustration-resolution jobs. Shared-library publication and matching remain unavailable until an explicit authorization model exists.
 
 ## Summary
 
-Infinite Quest Nexus should retain every successfully generated image as an owner-scoped library asset with durable generation provenance and searchable fictional context. Campaigns should be able to reuse those assets automatically before spending time or provider credits on a new image.
+Infinite Quest Nexus should retain every successfully generated image as an owner-scoped library asset with durable generation provenance and searchable fictional context. The web application should provide a first-class image-library browser: a filterable thumbnail grid for discovery and PhotoSwipe 5 for full-size, keyboard-, pointer-, and touch-friendly browsing, inspection, and selection. Campaigns should be able to reuse those assets automatically before spending time or provider credits on a new image.
 
 The Campaign editor should expose one illustration source policy:
 
@@ -17,10 +19,14 @@ Library matching begins only after the Story Engine has accepted a turn and vali
 
 This proposal extends, but does not replace, [ADR 0008](./0008-independent-illustration-pipeline.md). Text and image providers remain independent, and library-only operation must not require an image provider or embedding provider.
 
+PhotoSwipe is a presentation dependency, not an authority or search engine. Nexus APIs own authorization, metadata filtering, ordering, pagination, attachment, and edits. PhotoSwipe receives only the authorized result set currently loaded by the application.
+
 ## Goals
 
 - Retain generated images for later use across supported add and edit views.
 - Store enough sanitized context to find and understand an image later.
+- Provide a responsive in-app browser with zoom, swipe, keyboard navigation, captions, and a direct selection action by integrating PhotoSwipe 5.
+- Provide combinable, owner-scoped metadata filters with stable pagination, sort controls, removable filter chips, and facet counts where practical.
 - Support automatic, best-effort matching without requiring an external provider.
 - Avoid new generation when an existing image is an appropriate match.
 - Permit a campaign to use library images when no image provider is configured.
@@ -38,6 +44,8 @@ This proposal extends, but does not replace, [ADR 0008](./0008-independent-illus
 - Do not require semantic embeddings for baseline matching.
 - Do not silently publish an owner's private images to other users.
 - Do not guarantee that every turn receives an image. A poor match is worse than no image.
+- Do not use PhotoSwipe client filters as a substitute for server-side authorization or metadata queries.
+- Do not require PhotoSwipe to edit metadata, execute asset mutations, or retain library state; those remain Nexus UI and API responsibilities.
 
 ## Current implementation boundary
 
@@ -49,7 +57,9 @@ The current implementation already provides useful foundations:
 - Accepted turns enqueue optional image work after story and Chronicle validation.
 - The library can attach a retained asset manually to supported world-cover and turn-illustration views.
 
-The missing capabilities are first-class per-image context, creator and visibility metadata, searchable library indexes, durable match decisions, provider-independent illustration policies, and automatic match orchestration. Generation context is currently split across the asset, image job, turn, and provider-result metadata. Additional artifacts may be less directly related to their generation job than the primary asset.
+The missing capabilities are first-class per-image context, intrinsic dimensions and thumbnail derivatives, creator and visibility metadata, searchable library indexes, a full-size image browser, durable match decisions, provider-independent illustration policies, and automatic match orchestration. Generation context is currently split across the asset, image job, turn, and provider-result metadata. Additional artifacts may be less directly related to their generation job than the primary asset.
+
+The current library UI fetches at most 250 assets and renders a date-only selection grid in both the Nexus management and player views. It has no server-side metadata query contract, pagination cursor, facets, full-size browser, or reusable client component. The enhancement should replace those parallel implementations with one shared browser contract and behavior, even if the current static scripts require thin view-specific adapters.
 
 The current campaign illustration constraint also assumes that enabling illustrations requires a provider and model. That constraint must evolve because **Library only** is valid without either.
 
@@ -141,6 +151,8 @@ asset_library_entries
 ```
 
 Keep mutable curation fields separate from immutable generation provenance.
+
+PhotoSwipe requires the intrinsic width and height of each image before display. Persist `pixel_width` and `pixel_height` on the immutable asset record or an immutable technical-metadata record, validate them when bytes are ingested, and backfill them by decoding retained files. Do not trust provider-declared dimensions without verifying the stored bytes. Consider a bounded thumbnail derivative record keyed by source asset, transform version, dimensions, and format; derivatives are rebuildable and must inherit the source asset's authorization.
 
 ### Generation contexts
 
@@ -327,7 +339,20 @@ Do not silently downgrade or rewrite the stored policy when a provider is tempor
 
 ## Image library experience
 
-The shared library should support filtering by:
+The image library should be one reusable experience with two coordinated layers:
+
+1. A Nexus-owned discovery surface containing the query, metadata filters, sort controls, result count, active-filter chips, thumbnail grid, pagination, selection state, and metadata editor.
+2. A PhotoSwipe 5 detail surface for browsing the currently authorized and filtered result sequence at full size.
+
+Opening a thumbnail should enter PhotoSwipe at that asset. A picker invocation should expose a clear **Use this image** action in the PhotoSwipe UI as well as a grid-level selection action. A browse-only invocation should omit the selection control. Closing PhotoSwipe returns focus to the originating thumbnail without losing the query, scroll position, loaded pages, or selection context.
+
+Each grid item should show its title or accessible fallback, origin, creation date, creator when authorized, usage count, primary context, reuse scope, and content/review state. Detailed provenance can show prompt and allowlisted generation settings without exposing secrets or private orchestration. Supported add and edit views select an asset by reference and never duplicate stored bytes. Initial reuse targets are world covers and turn illustrations; later targets should use the same browser invocation contract.
+
+### Metadata filters and query behavior
+
+Custom filtering belongs to the Nexus query API and discovery UI. PhotoSwipe should browse the resulting ordered collection; its extension API may render the active filter summary or library actions, but it must not decide which assets the user is authorized to receive.
+
+The library should support combinable filters for:
 
 - Created by me
 - Owned by me
@@ -338,10 +363,53 @@ The shared library should support filtering by:
 - Generated, imported, or user-uploaded origin
 - Character, entity, location, tag, model, provider, date, and content status
 - Eligible or excluded from automatic reuse
+- Favorite, archived state, reuse scope, review status, MIME type, and broad aspect-ratio class
 
-Each item should show its title, origin, creation date, creator when authorized, usage count, primary context, reuse scope, and content/review state. Detailed provenance can show prompt and generation settings without exposing secrets or private orchestration.
+The first filter release should prioritize useful metadata that can be indexed reliably: text query, scope, campaign, world, world version, origin, tags, canonical characters/entities, canonical location, provider, model, date range, review status, automatic-reuse eligibility, favorite, and archived state. Content categories and shared-library filters can remain hidden until their data and authorization models exist.
 
-Supported add and edit views should select an asset by reference. They must not duplicate stored bytes. The initial reuse targets are world covers and turn illustrations; later targets can adopt the same picker contract.
+Use explicit query semantics:
+
+- Multiple values within one facet use documented `any` behavior by default; separate `allTags` behavior may be added for tags.
+- Different facets combine with `and` semantics.
+- Unknown metadata is not silently treated as a match; the UI may offer an explicit **Unknown** value where useful.
+- Sort options are constrained and stable, initially newest, oldest, title, and most used, with asset ID as the final tie-breaker.
+- Cursor pagination carries the normalized filter and sort definition or rejects a cursor reused with a different query.
+- The API returns only authorized facet counts. Facets must not reveal the existence of excluded assets.
+- URL state may preserve non-sensitive filters and sort order in the management view, but must not include private prompts or unrestricted metadata.
+
+Filter changes should be debounced, cancel stale requests, reset pagination, update the result count and active-filter chips, and announce the result change through an accessible live region. Provide **Clear all** and individual chip removal. Empty and no-match states should distinguish an empty library from filters that exclude all authorized images.
+
+### PhotoSwipe 5 integration
+
+Use the PhotoSwipe 5 Lightbox module and dynamically import its Core module when the browser is first opened. Install and pin the compatible `photoswipe@5` package through pnpm, self-host its JavaScript and CSS in the application image, and do not depend on a public CDN or expose `node_modules` as a static directory. The implementation phase must add a documented build or copy step for the browser assets and preserve the repository's reproducible container build.
+
+Build PhotoSwipe item data from the API response rather than scraping presentation text from the DOM. Each item needs at least:
+
+```text
+id
+src                       authorized full-size asset URL
+width / height            verified intrinsic dimensions
+msrc or thumbnailSrc      authorized bounded thumbnail URL
+alt                       safe accessible description
+title / caption           safe plain-text display fields
+metadata summary          bounded fields for custom UI
+```
+
+Use PhotoSwipe's array data source for the currently loaded ordered result set. The grid may load additional cursor pages; when the viewer approaches the end of loaded items, it may prefetch the next page and extend the in-memory data source without changing the frozen filter/sort definition for that open session. If reliable extension proves brittle, close and reopen on the enlarged result set rather than presenting an incorrect index or duplicate slide. A changed filter starts a new browser result session.
+
+Register a custom caption or metadata panel through PhotoSwipe's supported UI/event APIs. Render text with DOM text nodes, never untrusted `innerHTML`. The panel should show title, caption, tags, primary world/campaign context, origin, dimensions, creator when authorized, created date, review/reuse state, and a concise provenance link or action. Keep long prompts and advanced metadata in a separate Nexus details view so the image remains usable on small screens.
+
+Picker mode should register **Use this image** as a custom PhotoSwipe button that calls the same validated selection callback as the grid. Other useful actions are **View details**, **Favorite**, and **Edit metadata** when allowed, but these remain Nexus API mutations and should be added only with loading, error, and optimistic-concurrency handling. Never place delete, publish, ownership transfer, or moderation actions in the first PhotoSwipe integration.
+
+Preserve progressive enhancement and accessibility:
+
+- Grid thumbnails remain links or buttons with useful labels and a direct full-image fallback.
+- Captions and alternative text remain available outside PhotoSwipe.
+- Keyboard focus, Escape-to-close, arrow navigation, reduced-motion preferences, screen-reader announcements, and touch gestures are tested.
+- Animated GIF behavior, failed image loads, unsupported formats, and missing dimensions have explicit fallbacks.
+- Serve responsive full-size variants where practical and avoid sending unnecessarily large originals; PhotoSwipe documentation recommends responsive images and cautions against very large source images.
+
+PhotoSwipe is not a metadata-filtering library. Its `itemData`, `numItems`, `thumbEl`, `placeholderSrc`, events, and custom UI hooks are integration points for displaying Nexus results, not a reason to move database filtering into the browser.
 
 ## Turn-level controls
 
@@ -364,7 +432,8 @@ Shared contracts should define constrained enums and responses rather than accep
 
 ```text
 GET/PUT  /api/v1/campaigns/:campaignId/illustration-config
-GET      /api/v1/assets?scope=&creator=&worldId=&campaignId=&tags=&eligible=
+GET      /api/v1/assets?q=&scope=&creator=&worldId=&worldVersionId=&campaignId=&origin=&tags=&entityIds=&locationIds=&provider=&model=&reviewStatus=&reuseScope=&eligible=&favorite=&archived=&mimeType=&aspect=&createdFrom=&createdTo=&sort=&cursor=&limit=
+GET      /api/v1/assets/facets?...
 GET/PATCH /api/v1/assets/:assetId/library-metadata
 GET      /api/v1/turns/:turnId/illustration-resolution
 POST     /api/v1/turns/:turnId/illustration-match
@@ -374,11 +443,14 @@ POST     /api/v1/turns/:turnId/illustrations
 
 The exact route split should be reviewed to avoid duplicating existing library and illustration endpoints. Every query and mutation must derive the user from server identity, enforce ownership or sharing grants, and validate world/campaign relationships.
 
+The asset-list contract should return a stable cursor, total count when it can be computed within the agreed performance budget, authorized facet counts, verified dimensions, thumbnail and full-size URLs, accessible display text, and the bounded metadata needed by the grid and PhotoSwipe. Do not expose filesystem paths, provider credentials, raw provider payloads, or signed upstream URLs. Cache validators must account for metadata edits as well as immutable image bytes.
+
 Match APIs should return bounded explanations, not private ranking internals or unrestricted context snapshots. Manual match requests must be idempotent or use an explicit replacement revision.
 
 ## Indexing and performance
 
 - Add owner-first indexes for library scope, reuse eligibility, review status, world, campaign, creator, and creation date.
+- Add indexes that support the shipped filter combinations and stable cursor sorts; confirm them with representative `EXPLAIN (ANALYZE, BUFFERS)` plans before widening the default page size.
 - Normalize canonical entity/location relationships into indexed rows when practical rather than relying exclusively on JSON containment.
 - Use PostgreSQL full-text search for the provider-independent baseline.
 - Reuse compatible stored embeddings only as a derived index. Embeddings may be rebuilt and must never become required provenance.
@@ -446,38 +518,86 @@ Library reuse incurs no image-provider charge. Cost attribution remains attached
 - Deleting or anonymizing a user may require a defined provenance-retention policy before multi-user authentication ships.
 - Image files should not be mutated merely to embed internal user UUIDs. Database metadata is the authoritative ownership and provenance record.
 
-## Suggested implementation phases
+## Phased implementation plan
 
-### Phase 1: Durable metadata
+Each phase should be independently deployable, preserve accepted-turn behavior, include migrations and rollback notes, and update tests associated with every changed file. Later phases may refine earlier contracts but must not require a big-bang release.
 
-- Add library curation, creator, reuse scope, and generation-context records.
-- Capture complete provenance for every generated variant.
-- Add server-scoped library filters and metadata editing.
-- Backfill reliable existing provenance.
+### Phase 1: Asset metadata foundation
 
-### Phase 2: Manual shared library
+**Outcome:** every new retained image has the safe technical, curation, and provenance data needed by the browser and future matcher.
 
-- Complete reusable selection across supported add and edit views.
-- Add filters, reuse eligibility, review status, and provenance details.
-- Preserve reference-based attachment and deduplicated storage.
+- Add library curation, creator, reuse scope, generation-context, verified pixel dimensions, and derivative metadata.
+- Decode stored bytes to verify MIME type and dimensions during ingestion; generate bounded thumbnails asynchronously or during persistence without blocking story acceptance.
+- Capture complete immutable provenance for every generated variant while keeping mutable title, caption, notes, tags, favorite, review, and reuse fields separate.
+- Add optimistic-concurrency behavior for mutable metadata.
+- Backfill existing assets idempotently, marking uncertain fields `unreviewed` or unknown rather than inventing values.
+- Add owner-first indexes and authorization tests before exposing new fields.
 
-### Phase 3: Provider-independent matching
+**Exit criteria:** newly created and backfilled assets can produce a safe browser item with full-size URL, thumbnail URL or fallback, verified dimensions, accessible text, and bounded metadata.
 
-- Add resolution jobs, current-campaign/current-world scopes, structured filtering, full-text scoring, thresholds, contradiction rules, and explanations.
-- Ship `off` and `library_only` policies first.
-- Measure false-match behavior before enabling fallback automation.
+### Phase 2: Filtered library API
 
-### Phase 4: Fallback generation
+**Outcome:** Nexus can query an authorized image library efficiently and consistently without loading all assets into the browser.
 
-- Add `library_then_generate` and `generate_only` policies.
-- Connect no-match decisions to existing provider image jobs.
-- Add repetition control, manual rematch, and explicit new-generation actions.
+- Replace the fixed `limit=250` behavior with cursor pagination, stable constrained sorts, normalized filter contracts, and bounded page sizes.
+- Implement the initial indexed facets: text, scope, campaign, world/version, origin, tags, canonical entity/location, provider/model, date, review state, reuse eligibility, favorite, and archive state.
+- Return authorized facet counts and total count only within a measured query budget; otherwise return a documented approximate or omitted total.
+- Add metadata read/update endpoints with schema validation and concurrency checks.
+- Prove cross-user isolation and ensure counts, cursors, errors, and timing do not reveal unauthorized assets.
+- Record representative query plans and pagination behavior in integration tests.
 
-### Phase 5: Semantic and shared enhancements
+**Exit criteria:** API and contract tests demonstrate stable, owner-scoped paging and correct `and`/`any` filter semantics on a realistically sized fixture set.
 
-- Add optional semantic scoring using compatible derived embeddings.
-- Add authorized shared-library publication and grants only after authentication and collaboration rules exist.
+### Phase 3: Shared grid and PhotoSwipe 5 browser
+
+**Outcome:** World Library and Infinite Quest use one filterable, accessible image-browser behavior for browsing and manual selection.
+
+- Add pinned `photoswipe@5` assets to the reproducible application build, self-host the CSS and modules, and dynamically load Core on first open.
+- Replace the duplicate date-only grids with a shared browser controller plus thin management/player adapters.
+- Add search, custom metadata filters, facet controls, active-filter chips, sorting, empty states, cursor-based load-more/infinite scroll, and restoration of query/scroll state.
+- Open the filtered result set in PhotoSwipe with verified dimensions, thumbnails, responsive sources where available, accessible captions, metadata summary, counter, and focus restoration.
+- Add browse mode and picker mode. Picker mode provides a **Use this image** action that attaches the asset by reference through the existing validated API.
+- Keep filters and mutations Nexus-owned; freeze query/sort during an open PhotoSwipe session and prefetch bounded next pages near the end.
+- Test keyboard, screen reader, touch, reduced motion, narrow viewport, failed image, and direct-image fallback behavior.
+
+**Exit criteria:** users can filter, inspect, zoom, swipe, and select authorized images from both initial target views without losing state or duplicating asset bytes.
+
+### Phase 4: Provider-independent matching and library-only policy
+
+**Outcome:** campaigns can illustrate accepted turns entirely from retained assets, with no image or embedding provider.
+
+- Add durable resolution jobs, current-campaign/current-world matching scopes, structured filtering, full-text scoring, thresholds, contradiction rules, and bounded explanations.
+- Ship `off` and `library_only` policies first; keep automatic reuse more conservative than manual browser selection.
+- Add **Find another library match**, **Why this image?**, and exclusion-from-automatic-reuse controls to the browser/detail flow.
+- Measure false matches and rematch/exclusion behavior against sanitized fixtures before enabling automatic provider fallback.
+
+**Exit criteria:** library-only campaigns deterministically attach only above-threshold assets, survive restarts and retries, and complete accepted turns normally when no match exists.
+
+### Phase 5: Library-first fallback generation
+
+**Outcome:** campaigns can reuse first and generate exactly once only when reuse has produced a durable no-match decision.
+
+- Add `library_then_generate` and `generate_only` policies and progressive campaign-editor controls.
+- Connect durable no-match decisions to the existing provider image jobs with idempotency and provider-availability outcomes.
+- Add repetition control, manual rematch, and distinct **Generate a new image** behavior.
+- Surface newly generated assets in the active library/browser result when they satisfy the frozen filter, without corrupting the current PhotoSwipe index.
+- Verify cost attribution, retry, rewind, branch, deletion, and failure behavior.
+
+**Exit criteria:** an accepted turn never waits on illustration success, and fallback generation is neither skipped nor duplicated across retries.
+
+### Phase 6: Semantic, sharing, and advanced browser enhancements
+
+**Outcome:** optional quality and collaboration features extend the stable owner-scoped baseline.
+
+The background, prerequisites, detailed workstreams, guardrails, and completion criteria are retained in [Image Library Phase 6 future enhancement](./image-library-phase-6-future-enhancement.md). This phase is not scheduled or approved merely by appearing in this plan.
+
+- Add optional semantic scoring using compatible derived embeddings without weakening hard contradictions or authorization.
+- Add authorized shared-library publication, grants, shared facets, and creator display only after authentication and collaboration rules exist.
+- Add advanced content-category filters only after classification provenance and moderation rules are defined.
+- Consider saved filter views, bulk curation, comparison mode, and richer PhotoSwipe metadata actions based on measured use rather than making them Phase 3 dependencies.
 - Tune scoring from sanitized evaluation fixtures and observed opt-out/rematch behavior.
+
+**Exit criteria:** optional capabilities can be disabled without breaking the Phase 1-5 library, browser, or illustration workflows.
 
 ## Required tests
 
@@ -490,6 +610,23 @@ Library reuse incurs no image-provider charge. Cost attribution remains attached
 - Cross-user asset discovery, matching, and attachment are rejected without an explicit grant.
 - Pre-authentication creation resolves owner and creator to `initial-owner` idempotently.
 - Backfill is idempotent and does not invent unavailable metadata.
+- Stored dimensions are decoded from retained bytes, and thumbnail derivatives inherit source authorization.
+- Metadata updates enforce schema validation and optimistic concurrency.
+- Asset cursors cannot be reused with a different normalized filter or sort definition.
+- Facet counts and pagination never include unauthorized assets.
+
+### Library queries and browser
+
+- Filter facets implement the documented `and`, `any`, unknown-value, and date-boundary semantics.
+- Stable sorting and tie-breaking prevent duplicates or omissions while paging through an unchanged result set.
+- A stale response cannot replace results from a newer filter request.
+- Active-filter chips, individual removal, **Clear all**, result count, empty states, and accessible announcements stay synchronized.
+- PhotoSwipe opens at the selected grid item and receives only the current authorized filtered result sequence.
+- Approaching the loaded boundary prefetches or falls back without duplicate slides, incorrect counters, or silently changing filters.
+- Captions and metadata are rendered as safe text; imported markup cannot execute.
+- Closing restores focus, scroll, filters, sort, and picker context.
+- Picker and browse modes expose the correct controls, and **Use this image** uses the same validated reference API as grid selection.
+- Keyboard, touch, reduced-motion, narrow-viewport, failed-load, missing-dimension, and progressive fallback behavior are covered.
 
 ### Policy behavior
 
@@ -532,6 +669,8 @@ Library reuse incurs no image-provider charge. Cost attribution remains attached
 - A turn explains whether its image was reused or newly generated.
 - Manual **Find another library match** and **Generate a new image** remain distinct.
 - Accessible status text communicates no-match and unavailable-fallback outcomes without relying on color.
+- The metadata-filtered grid and PhotoSwipe browser behave consistently in World Library and Infinite Quest picker entry points.
+- Generated images appear in the library after completion without destabilizing an already open filtered browser session.
 
 ## Acceptance criteria
 
@@ -545,18 +684,33 @@ This enhancement is complete when:
 - Library-first mode falls back exactly once when appropriate and never blocks story completion.
 - Every reuse decision is owner-scoped, explainable, recoverable, and idempotent.
 - Manual library reuse works across the intended add and edit views without duplicating asset bytes.
+- Users can search and combine supported metadata filters with stable, owner-scoped pagination and understandable active-filter state.
+- PhotoSwipe 5 provides full-size browse, zoom, swipe, keyboard navigation, accessible captions, and picker selection over the current authorized result set.
+- Browser state survives opening and closing PhotoSwipe, and an unsupported or failed lightbox still leaves a usable direct-image path.
 - Provider and library safety policies are both enforced at their correct boundaries.
 - Tests cover identity isolation, deduplication, matching quality, workflow recovery, and provider-independent behavior.
 
-## Decisions to confirm before implementation
+## Recorded baseline decisions and deferred questions
 
-- Whether `asset_library_entries` should be a separate table or selected fields should live on `assets`.
-- Which normalized scene attributes are sufficiently stable for the first metadata schema.
-- Whether world-version mismatch is a hard rejection or a scored penalty for each asset category.
-- Initial Strict, Balanced, and Broad thresholds and the sanitized evaluation set used to calibrate them.
-- Default matching scope and recent-turn repetition window.
-- Whether imported images require explicit review before all automatic reuse or only outside their original campaign.
-- How creator provenance is displayed after future ownership transfer or shared publication.
-- Whether resolution candidate evidence is retained indefinitely or summarized after a retention period.
-- Export/import behavior for image metadata and binary assets without treating foreign user UUIDs as authorization.
-- The authorization and moderation model required before `shared` scope is enabled.
+The implemented baseline records these decisions:
+
+- Mutable curation lives in `asset_library_entries`; immutable bytes and technical identity remain in `assets`.
+- Generation context stores bounded entity, character, and location JSON alongside owner, world, version, campaign, turn, provider, and model provenance.
+- Campaign and world affinity contribute deterministic score components; the selected matching scope remains an eligibility boundary.
+- Strict, Balanced, and Broad thresholds begin at `0.68`, `0.52`, and `0.38`. These values must be recalibrated from sanitized production-like fixtures before broad matching is made the default.
+- Matching defaults to world scope with a five-turn repetition window.
+- Imported and backfilled images remain `unreviewed` and ineligible for automatic reuse until explicitly curated.
+- Match-candidate evidence is bounded to the ten highest-ranked candidates per durable resolution job.
+- Rebuildable 480-pixel WebP thumbnails use the existing content-addressed asset store and an explicit transform version.
+- Facet totals are exact for the currently authorized, filtered result set and page sizes remain bounded.
+- The browser uses a checked-in shared ES module and self-hosts the pinned PhotoSwipe distribution through an allowlisted server route; no public CDN or general `node_modules` static exposure is used.
+- Management filters remain in component state for this baseline; sensitive prompt/context fields are never placed in URLs.
+
+The following remain Phase 6 or separate migration decisions: creator display after ownership transfer or publication, evidence-retention policy, portable binary export/import, authorization and moderation for shared scope, responsive full-size derivatives and maximum served dimensions, estimated facets at substantially larger scale, and safe URL persistence or saved filter views.
+
+## PhotoSwipe references
+
+- [Getting Started](https://photoswipe.com/getting-started/) — Lightbox/Core split, dynamic import, required dimensions, responsive images, progressive fallback, and supported browsers.
+- [Data Sources](https://photoswipe.com/data-sources/) — array and dynamic data sources, separate DOM/data handling, and thumbnail/placeholder integration.
+- [Filters](https://photoswipe.com/filters/) and [Events](https://photoswipe.com/events/) — supported hooks for item data and lifecycle integration. These are PhotoSwipe extension hooks, not Nexus metadata-query filters.
+- [Caption](https://photoswipe.com/caption/) and [Adding UI elements](https://photoswipe.com/adding-ui-elements/) — accessible custom captions and picker/detail actions.

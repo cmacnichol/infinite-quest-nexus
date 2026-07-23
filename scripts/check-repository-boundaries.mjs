@@ -30,6 +30,7 @@ const historicalRuntimeReference = /\blegacyIndex(?:Path|Cache)?\b|\bLEGACY_INDE
 const legacyMigrationMarker = /infiniteQuestNexusClientState\.v1|\/imports\/legacy-story|\bLegacyStory\b|\blegacyStorySchema\b/u;
 
 const browserNetworkAllowlist = new Map([
+  ["apps/web/public/image-library-browser.js", new Set(["fetch(path,"])],
   ["apps/web/public/nexus.js", new Set(["fetch(path,"])],
   ["apps/web/public/story.js", new Set(["fetch(url,"])]
 ]);

@@ -47,6 +47,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('id="worldSetupDialog"');
     expect(storyHtml).toContain('id="imagePromptDialog"');
     expect(storyHtml).toContain('id="assetLibraryDialog"');
+    expect(storyHtml).toContain('id="assetLibraryFilters"');
+    expect(storyHtml).toContain('/vendor/photoswipe/photoswipe.css');
     expect(storyHtml).toContain('id="editResponseDialog"');
     expect(storyHtml).toContain('id="retryPromptDialog"');
     expect(storyHtml).toContain('id="retryPromptEditor"');
@@ -226,6 +228,10 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('async function regenerateIllustration(turnId, prompt)');
     expect(storyScript).toContain('/turns/${turnId}/illustrations');
     expect(storyScript).toContain('data-action="regenerate-image"');
+    expect(storyScript).toContain('data-action="find-library-match"');
+    expect(storyScript).toContain('data-action="why-image"');
+    expect(storyScript).toContain('data-action="remove-image"');
+    expect(storyScript).toContain('async function pollIllustrationResolution(turnId)');
   });
 
   it("edits authoritative current state while keeping history inspection under the Turn Pill", () => {

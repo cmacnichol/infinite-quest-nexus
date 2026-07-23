@@ -18,6 +18,10 @@ import { recordProfileCost } from "./cost-service.js";
 
 type IllustrationConfigRow = {
   enabled: boolean;
+  source_policy?: "off" | "library_only" | "library_then_generate" | "generate_only";
+  matching_scope?: "campaign" | "world" | "owner_library" | "shared";
+  confidence_profile?: "strict" | "balanced" | "broad";
+  repetition_window?: number;
   provider_profile_id: string | null;
   model: string;
   size: string;
@@ -64,8 +68,13 @@ type ImageJobRow = {
 };
 
 function publicConfig(row?: IllustrationConfigRow) {
+  const sourcePolicy = row?.source_policy ?? (row?.enabled ? "generate_only" : "off");
   return {
-    enabled: row?.enabled ?? false,
+    enabled: sourcePolicy !== "off",
+    sourcePolicy,
+    matchingScope: row?.matching_scope ?? "world",
+    confidenceProfile: row?.confidence_profile ?? "balanced",
+    repetitionWindow: row?.repetition_window ?? 5,
     providerProfileId: row?.provider_profile_id ?? null,
     model: row?.model ?? "",
     size: row?.size ?? "1024x1024",
@@ -122,7 +131,8 @@ export async function getIllustrationConfig(pool: DatabasePool, campaignId: stri
   const campaign = await pool.query("SELECT id FROM campaigns WHERE id = $1 AND owner_user_id = $2", [campaignId, ownerUserId]);
   if (!campaign.rows[0]) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
   const result = await pool.query<IllustrationConfigRow>(
-    `SELECT enabled, provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
+    `SELECT enabled, source_policy, matching_scope, confidence_profile, repetition_window,
+            provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
        FROM campaign_illustration_configs WHERE campaign_id = $1 AND owner_user_id = $2`,
     [campaignId, ownerUserId]
   );
@@ -131,10 +141,15 @@ export async function getIllustrationConfig(pool: DatabasePool, campaignId: stri
 
 export async function setIllustrationConfig(pool: DatabasePool, campaignId: string, config: IllustrationConfig) {
   const ownerUserId = await initialOwnerId(pool);
-  if (config.enabled && !config.providerProfileId) {
+  const sourcePolicy = config.sourcePolicy ?? (config.enabled ? "generate_only" : "off");
+  if (config.matchingScope === "shared") {
+    throw Object.assign(new Error("Shared-library matching is unavailable until authentication and grants are implemented."), { statusCode: 409 });
+  }
+  const needsProvider = sourcePolicy === "library_then_generate" || sourcePolicy === "generate_only";
+  if (needsProvider && !config.providerProfileId) {
     throw Object.assign(new Error("Add and enable an image provider before enabling illustrations."), { statusCode: 409 });
   }
-  if (config.enabled && !config.model.trim()) {
+  if (needsProvider && !config.model.trim()) {
     throw Object.assign(new Error("Select an image model before enabling illustrations."), { statusCode: 400 });
   }
   if (config.providerProfileId) {
@@ -147,15 +162,20 @@ export async function setIllustrationConfig(pool: DatabasePool, campaignId: stri
   }
   const result = await pool.query<IllustrationConfigRow>(
     `INSERT INTO campaign_illustration_configs (
-       campaign_id, owner_user_id, enabled, provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
-     ) SELECT c.id, c.owner_user_id, $3,$4,$5,$6,$7,$8,$9,$10
+       campaign_id, owner_user_id, enabled, source_policy, matching_scope, confidence_profile, repetition_window,
+       provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts
+     ) SELECT c.id, c.owner_user_id, $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
          FROM campaigns c WHERE c.id = $1 AND c.owner_user_id = $2
      ON CONFLICT (campaign_id) DO UPDATE SET enabled = EXCLUDED.enabled,
+       source_policy = EXCLUDED.source_policy, matching_scope = EXCLUDED.matching_scope,
+       confidence_profile = EXCLUDED.confidence_profile, repetition_window = EXCLUDED.repetition_window,
        provider_profile_id = EXCLUDED.provider_profile_id, model = EXCLUDED.model, size = EXCLUDED.size,
        aspect_ratio = EXCLUDED.aspect_ratio, quality = EXCLUDED.quality, output_format = EXCLUDED.output_format,
        max_attempts = EXCLUDED.max_attempts, updated_at = now()
-     RETURNING enabled, provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts`,
-    [campaignId, ownerUserId, config.enabled, config.providerProfileId, config.model, config.size,
+     RETURNING enabled, source_policy, matching_scope, confidence_profile, repetition_window,
+               provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts`,
+    [campaignId, ownerUserId, sourcePolicy !== "off", sourcePolicy, config.matchingScope,
+      config.confidenceProfile, config.repetitionWindow, config.providerProfileId, config.model, config.size,
       config.aspectRatio, config.quality, config.outputFormat, config.maxAttempts]
   );
   if (!result.rows[0]) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
@@ -261,15 +281,29 @@ export async function enqueueAcceptedTurnIllustration(
   imagePrompt: string
 ): Promise<string | null> {
   const configResult = await client.query<IllustrationConfigRow & { campaign_provider_profile_id: string | null }>(
-    `SELECT c.enabled, c.provider_profile_id, c.model, c.size, c.aspect_ratio, c.quality, c.output_format, c.max_attempts,
+    `SELECT c.enabled, c.source_policy, c.matching_scope, c.confidence_profile, c.repetition_window,
+            c.provider_profile_id, c.model, c.size, c.aspect_ratio, c.quality, c.output_format, c.max_attempts,
             campaign.image_provider_profile_id AS campaign_provider_profile_id
        FROM campaign_illustration_configs c
        JOIN campaigns campaign ON campaign.id = c.campaign_id AND campaign.owner_user_id = c.owner_user_id
-      WHERE c.campaign_id = $1 AND c.owner_user_id = $2 AND c.enabled = true`,
+      WHERE c.campaign_id = $1 AND c.owner_user_id = $2 AND c.source_policy <> 'off'`,
     [campaignId, ownerUserId]
   );
   const row = configResult.rows[0];
   if (!row) return null;
+  if (!imagePrompt.trim() || containsMechanicsLanguage(imagePrompt)) return null;
+  if (row.source_policy === "library_only" || row.source_policy === "library_then_generate") {
+    const resolution = await client.query<{ id: string }>(
+      `INSERT INTO illustration_resolution_jobs (
+         owner_user_id, campaign_id, turn_id, source_policy, matching_scope, confidence_profile,
+         repetition_window, query_context_snapshot
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (turn_id) DO NOTHING RETURNING id`,
+      [ownerUserId, campaignId, turnId, row.source_policy, row.matching_scope || "world",
+        row.confidence_profile || "balanced", row.repetition_window ?? 5, JSON.stringify({ imagePrompt: imagePrompt.trim() })]
+    );
+    return resolution.rows[0]?.id || null;
+  }
   const configuredProviderId = row.provider_profile_id;
   row.provider_profile_id = await resolveEffectiveProviderId(client, ownerUserId, "image", row.campaign_provider_profile_id);
   if (!row.provider_profile_id) return null;
@@ -364,6 +398,12 @@ export async function retryImageJob(pool: DatabasePool, jobId: string) {
     [jobId, ownerUserId]
   );
   if (!result.rows[0]) throw Object.assign(new Error("Only terminal unsuccessful image jobs can be retried."), { statusCode: 409 });
+  await pool.query(
+    `UPDATE illustration_resolution_jobs
+        SET status = 'generation_queued', reason_code = 'generation_retried', completed_at = NULL, updated_at = now()
+      WHERE image_job_id = $1 AND owner_user_id = $2`,
+    [jobId, ownerUserId]
+  );
   return publicJob(result.rows[0]);
 }
 
@@ -469,10 +509,27 @@ async function completeImageJob(
     const lease = await client.query<{ lease_owner: string | null }>("SELECT lease_owner FROM image_jobs WHERE id = $1 FOR UPDATE", [job.id]);
     if (lease.rows[0]?.lease_owner !== workerId) throw Object.assign(new Error("Image job lease was lost before commit."), { code: "lease_lost" });
     const assets = [];
-    for (const image of downloaded) {
+    for (const [variantIndex, image] of downloaded.entries()) {
+      const generationContext = {
+        imageJobId: job.id,
+        targetType: job.target_type,
+        variantIndex,
+        prompt: job.prompt,
+        providerProfileId: job.provider_profile_id,
+        providerType: job.provider_type || provider.providerType,
+        model: job.requested_model,
+        generationParameters: {
+          size: job.size,
+          aspectRatio: job.aspect_ratio,
+          quality: job.quality,
+          outputFormat: job.output_format,
+          sensitiveContentFilter: sensitiveContentFilterSetting(provider)
+        }
+      };
       assets.push(job.target_type === "world_cover"
-        ? await persistWorldCover(client, store, job.owner_user_id, image.bytes, image.mimeType)
-        : await persistTurnImage(client, store, job.owner_user_id, job.campaign_id!, job.turn_id!, image.bytes, image.mimeType));
+        ? await persistWorldCover(client, store, job.owner_user_id, image.bytes, image.mimeType, { generationContext })
+        : await persistTurnImage(client, store, job.owner_user_id, job.campaign_id!, job.turn_id!, image.bytes, image.mimeType,
+          { generationContext, attachReference: variantIndex === 0 }));
     }
     const primary = assets[0]!;
     const usageQuantity = Number(result.usage.quantity ?? result.usage.images ?? result.usage.image_count);
@@ -497,6 +554,12 @@ async function completeImageJob(
         JSON.stringify({ ...result.providerMetadata, artifactCount: assets.length, assetIds: assets.map((asset) => asset.id) }),
         persistedUsageQuantity, usageUnit, result.reportedCost?.amount ?? null, result.reportedCost?.currency ?? null,
         providerResponseId, workerId]
+    );
+    await client.query(
+      `UPDATE illustration_resolution_jobs
+          SET status = 'completed', reason_code = 'generated', completed_at = now(), updated_at = now()
+        WHERE image_job_id = $1 AND owner_user_id = $2 AND status = 'generation_queued'`,
+      [job.id, job.owner_user_id]
     );
     if (job.campaign_id) {
       await recordProfileCost(client, provider, {
@@ -624,6 +687,14 @@ export async function runImageJob(
       [job.id, job.owner_user_id, nextStatus, code,
         (error instanceof Error ? error.message : String(error)).slice(0, 4000), workerId, retryDelayMs]
     );
+    if (["failed", "expired"].includes(nextStatus)) {
+      await pool.query(
+        `UPDATE illustration_resolution_jobs
+            SET status = 'failed', reason_code = $3, completed_at = now(), updated_at = now()
+          WHERE image_job_id = $1 AND owner_user_id = $2 AND status = 'generation_queued'`,
+        [job.id, job.owner_user_id, `generation_${code}`.slice(0, 200)]
+      );
+    }
   }
   return true;
 }

@@ -144,6 +144,7 @@ textarea { resize: vertical; }
 .illustration-controls .toggle-field { display: flex; align-items: center; gap: 9px; color: var(--text); font-size: .9rem; }
 .illustration-controls .toggle-field input { width: auto; }
 .illustration-settings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: end; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.illustration-settings-group { display: contents; }
 .illustration-settings .field-note { grid-column: 1 / -1; margin: 0; }
 .context-controls .query-field { grid-column: 1 / -1; }
 .field-help { margin: 10px 0 18px; border: 1px solid var(--line); border-radius: 10px; background: #101522; color: var(--muted); padding: 10px 13px; }

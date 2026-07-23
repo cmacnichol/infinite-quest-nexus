@@ -36,6 +36,8 @@ ADR 0014 supersedes only the backward-compatibility portions of ADR 0013 that al
 ## Illustrations
 
 - [ADR 0008: Independent durable illustration pipeline](./0008-independent-illustration-pipeline.md)
+- [Proposal: Context-aware image library and PhotoSwipe browser](./image-library-enhancement-proposal.md)
+- [Future enhancement: Image Library Phase 6](./image-library-phase-6-future-enhancement.md)
 
 ## Reading historical decisions
 

@@ -95,8 +95,16 @@ export const campaignBranchSchema = z.object({
   expectedCurrentTurnNumber: z.coerce.number().int().min(1).optional()
 });
 
+export const illustrationSourcePolicySchema = z.enum(["off", "library_only", "library_then_generate", "generate_only"]);
+export const illustrationMatchingScopeSchema = z.enum(["campaign", "world", "owner_library", "shared"]);
+export const illustrationConfidenceProfileSchema = z.enum(["strict", "balanced", "broad"]);
+
 export const illustrationConfigSchema = z.object({
   enabled: z.boolean().default(false),
+  sourcePolicy: illustrationSourcePolicySchema.optional(),
+  matchingScope: illustrationMatchingScopeSchema.default("world"),
+  confidenceProfile: illustrationConfidenceProfileSchema.default("balanced"),
+  repetitionWindow: z.coerce.number().int().min(0).max(100).default(5),
   providerProfileId: z.uuid().nullable().default(null),
   model: z.string().trim().max(500).default(""),
   size: z.string().trim().regex(/^\d{2,5}x\d{2,5}$/).default("1024x1024"),
@@ -105,8 +113,13 @@ export const illustrationConfigSchema = z.object({
   outputFormat: z.enum(["png", "jpeg", "webp"]).default("png"),
   maxAttempts: z.coerce.number().int().min(1).max(10).default(3)
 }).superRefine((value, context) => {
-  if (value.enabled && !value.providerProfileId) context.addIssue({ code: "custom", path: ["providerProfileId"], message: "Select an image provider when illustrations are enabled." });
-  if (value.enabled && !value.model) context.addIssue({ code: "custom", path: ["model"], message: "Select an image model when illustrations are enabled." });
+  const sourcePolicy = value.sourcePolicy ?? (value.enabled ? "generate_only" : "off");
+  if (["library_then_generate", "generate_only"].includes(sourcePolicy) && !value.providerProfileId) {
+    context.addIssue({ code: "custom", path: ["providerProfileId"], message: "Select an image provider when generation is enabled." });
+  }
+  if (["library_then_generate", "generate_only"].includes(sourcePolicy) && !value.model) {
+    context.addIssue({ code: "custom", path: ["model"], message: "Select an image model when generation is enabled." });
+  }
 });
 
 export const illustrationRequestSchema = z.object({
@@ -126,7 +139,7 @@ export const worldCoverRequestSchema = z.object({
 }).strict();
 
 export const assetSelectionSchema = z.object({
-  assetId: z.uuid()
+  assetId: z.uuid().nullable()
 }).strict();
 
 export const sensitiveContentFilterSchema = z.enum(["provider-default", "enabled", "disabled"]);

@@ -6,6 +6,7 @@ const storyScript = readFileSync("apps/web/public/story.js", "utf8");
 const managementHtml = readFileSync("apps/web/public/index.html", "utf8");
 const managementScript = readFileSync("apps/web/public/nexus.js", "utf8");
 const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
+const imageLibraryScript = readFileSync("apps/web/public/image-library-browser.js", "utf8");
 
 describe("Nexus management UI contracts", () => {
   it("dismisses every Nexus modal from its backdrop while protecting unsaved form edits", () => {
@@ -48,10 +49,16 @@ describe("Nexus management UI contracts", () => {
   it("offers retained images in world and story editing views", () => {
     expect(managementHtml).toContain('id="chooseWorldCover"');
     expect(managementHtml).toContain('id="assetLibraryDialog"');
-    expect(managementScript).toContain('/api/v1/assets?limit=250');
+    expect(managementHtml).toContain('id="assetLibraryFilters"');
+    expect(managementHtml).toContain('/vendor/photoswipe/photoswipe.css');
+    expect(managementScript).toContain('createImageLibraryBrowser');
+    expect(imageLibraryScript).toContain('/api/v1/assets?${parameters(');
+    expect(imageLibraryScript).toContain('PhotoSwipeLightbox');
+    expect(imageLibraryScript).toContain('Search image metadata');
+    expect(imageLibraryScript).toContain('Edit image metadata');
     expect(managementScript).toContain('/cover-asset`');
     expect(storyHtml).toContain('id="btnChooseImageLibrary"');
-    expect(storyScript).toContain('/assets?limit=250');
+    expect(storyScript).toContain('import("/nexus/image-library-browser.js")');
     expect(storyScript).toContain('/illustration-asset`');
   });
 
@@ -338,8 +345,12 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="illustrationSettings" class="illustration-settings hidden" aria-hidden="true"');
     expect(managementScript).toContain('function renderIllustrationSettingsVisibility()');
     expect(managementScript).toContain('function syncIllustrationProviderAvailability(restoreSavedState = false)');
-    expect(managementScript).toContain('elements.illustrationEnabled.disabled = !selectedCampaign || !hasImageProvider');
-    expect(managementScript).toContain('Add and enable an illustration provider in Provider Management before enabling images.');
+    expect(managementHtml).toContain('id="illustrationSourcePolicy"');
+    expect(managementHtml).toContain('<option value="library_only">Library only</option>');
+    expect(managementHtml).toContain('id="illustrationMatchingScope"');
+    expect(managementHtml).toContain('id="illustrationConfidenceProfile"');
+    expect(managementScript).toContain('elements.illustrationSourcePolicy.disabled = !selectedCampaign');
+    expect(managementScript).toContain('function illustrationPolicyUsesProvider');
     expect(managementScript).toContain('body: JSON.stringify({ imageProviderProfileId: elements.campaignImageProvider.value || null })');
   });
 

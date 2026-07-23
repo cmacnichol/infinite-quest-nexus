@@ -43,6 +43,7 @@ import {
 import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
 import { formatNarrationParagraphs } from "../../../packages/story-engine/src/narration-formatting.js";
 import { userProfileUpdateSchema } from "../../../packages/contracts/src/users.js";
+import { assetListQuerySchema, assetMetadataUpdateSchema } from "../../../packages/contracts/src/assets.js";
 import {
   campaignTransferCommitRequestSchema,
   campaignTransferPreviewRequestSchema
@@ -58,7 +59,7 @@ import {
   getChronicleMetrics,
   setCampaignEmbeddingConfig
 } from "./memory-service.js";
-import { listAssets, readAsset, selectTurnIllustration, selectWorldCover, type FilesystemAssetStore } from "./asset-service.js";
+import { queryAssets, readAsset, readAssetDerivative, selectTurnIllustration, selectWorldCover, updateAssetMetadata, type FilesystemAssetStore } from "./asset-service.js";
 import { createProvider, deleteProvider, discoverUnsavedProviderModels, generateProviderText, listProviders, providerModels, setDefaultProvider, updateProvider } from "./provider-service.js";
 import { branchCampaign, discardGeneration, enqueueGeneration, enqueueLatestReplacement, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, syncPlayerCampaignConfig } from "./generation-service.js";
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "./campaign-state-service.js";
@@ -98,6 +99,7 @@ import { classifyTurnInput } from "./turn-intent-service.js";
 import { previewCampaignWorldTransfer, transferCampaignWorld } from "./campaign-transfer-service.js";
 import { applicationMetadata } from "./app-metadata.js";
 import { getDashboardStats } from "./dashboard-service.js";
+import { getTurnIllustrationResolution, rematchTurnIllustration } from "./illustration-resolution-service.js";
 
 type BuildServerOptions = {
   config: RuntimeConfig;
@@ -178,6 +180,13 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     prefix: "/nexus/",
     index: ["index.html"],
     decorateReply: true
+  });
+  await app.register(fastifyStatic, {
+    root: resolve(process.cwd(), "node_modules/photoswipe/dist"),
+    prefix: "/vendor/photoswipe/",
+    decorateReply: false,
+    cacheControl: true,
+    maxAge: "30d"
   });
 
   app.setErrorHandler((error, request, reply) => {
@@ -691,6 +700,14 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     return selectTurnIllustration(pool, ownerUserId, uuidSchema.parse(request.params.turnId), body.assetId);
   });
 
+  app.get<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustration-resolution", async (request) => (
+    getTurnIllustrationResolution(pool, uuidSchema.parse(request.params.turnId))
+  ));
+
+  app.post<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustration-match", async (request, reply) => (
+    reply.code(202).send(await rematchTurnIllustration(pool, uuidSchema.parse(request.params.turnId)))
+  ));
+
   app.get<{ Params: { jobId: string } }>("/api/v1/image-jobs/:jobId", async (request) => (
     getImageJob(pool, uuidSchema.parse(request.params.jobId))
   ));
@@ -709,10 +726,35 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       .send(asset.bytes);
   });
 
-  app.get<{ Querystring: { limit?: string } }>("/api/v1/assets", async (request) => {
+  app.get<{ Params: { assetId: string } }>("/api/v1/assets/:assetId/thumbnail", async (request, reply) => {
     const ownerUserId = await initialOwnerId(pool);
-    const limit = z.coerce.number().int().min(1).max(250).default(100).parse(request.query.limit);
-    return { assets: await listAssets(pool, ownerUserId, limit) };
+    const asset = await readAssetDerivative(pool, assetStore, ownerUserId, uuidSchema.parse(request.params.assetId), "thumbnail");
+    return reply
+      .type(asset.mimeType)
+      .header("cache-control", "private, max-age=31536000, immutable")
+      .header("etag", `\"${asset.contentHash}\"`)
+      .send(asset.bytes);
+  });
+
+  app.get<{ Querystring: Record<string, unknown> }>("/api/v1/assets", async (request) => {
+    const ownerUserId = await initialOwnerId(pool);
+    return queryAssets(pool, ownerUserId, assetListQuerySchema.parse(request.query));
+  });
+
+  app.get<{ Querystring: Record<string, unknown> }>("/api/v1/assets/facets", async (request) => {
+    const ownerUserId = await initialOwnerId(pool);
+    const result = await queryAssets(pool, ownerUserId, assetListQuerySchema.parse({ ...request.query, cursor: undefined, limit: 1 }));
+    return { total: result.total, facets: result.facets };
+  });
+
+  app.patch<{ Params: { assetId: string } }>("/api/v1/assets/:assetId/library-metadata", async (request) => {
+    const ownerUserId = await initialOwnerId(pool);
+    return updateAssetMetadata(
+      pool,
+      ownerUserId,
+      uuidSchema.parse(request.params.assetId),
+      assetMetadataUpdateSchema.parse(request.body)
+    );
   });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/metrics", async (request) => {

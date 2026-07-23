@@ -1,4 +1,14 @@
+import { createImageLibraryBrowser } from "/nexus/image-library-browser.js";
+
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+const assetLibraryBrowser = createImageLibraryBrowser({
+  dialog: elements.assetLibraryDialog,
+  grid: elements.assetLibraryGrid,
+  status: elements.assetLibraryStatus,
+  filterContainer: elements.assetLibraryFilters,
+  loadMore: elements.assetLibraryLoadMore,
+  closeButton: elements.closeAssetLibrary
+});
 let selectedFile = null;
 let selectedImportSource = null;
 let selectedImport = null;
@@ -34,7 +44,6 @@ let sessionUser = null;
 let transferPreviewSequence = 0;
 let transferPreview = null;
 let transferIdempotencyKey = "";
-let assetLibrarySelection = null;
 const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
 const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
 const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
@@ -914,7 +923,7 @@ async function selectWorld(worldId) {
   elements.worldCoverPreview.src = coverUrl;
   elements.worldCoverPreview.classList.toggle("hidden", !coverUrl);
   elements.worldCoverStatus.textContent = coverUrl
-    ? "This cover is stored in Nexus shared asset storage. Generate again to replace it."
+    ? "This cover is stored in the retained Nexus image library. Generate again to replace it."
     : "No cover has been generated for this world.";
   elements.worldVersionSelect.replaceChildren(new Option(selectedWorld.versions.length ? "Latest published version" : "No published versions", ""));
   for (const version of selectedWorld.versions) {
@@ -972,7 +981,7 @@ async function monitorWorldCoverJob(jobId, worldId) {
     const job = await api(`/api/v1/image-jobs/${jobId}`);
     if (job.status === "completed") {
       elements.worldCoverStatus.className = "status success";
-      elements.worldCoverStatus.textContent = "World cover generated and stored in Nexus shared asset storage.";
+      elements.worldCoverStatus.textContent = "World cover generated and stored in the retained Nexus image library.";
       selectedWorld.imageUrl = job.assetUrl;
       elements.worldCoverPreview.src = job.assetUrl;
       elements.worldCoverPreview.classList.remove("hidden");
@@ -1018,56 +1027,8 @@ async function generateWorldCoverImage() {
   }
 }
 
-function renderAssetLibrary(assets) {
-  elements.assetLibraryGrid.replaceChildren();
-  if (!assets.length) {
-    const empty = document.createElement("p");
-    empty.className = "muted";
-    empty.textContent = "No generated images have been retained yet.";
-    elements.assetLibraryGrid.append(empty);
-    return;
-  }
-  for (const asset of assets) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "asset-library-item";
-    const image = document.createElement("img");
-    image.src = asset.url;
-    image.alt = "Retained generated image";
-    image.loading = "lazy";
-    const detail = document.createElement("span");
-    detail.textContent = new Date(asset.createdAt).toLocaleString();
-    button.append(image, detail);
-    button.addEventListener("click", async () => {
-      if (!assetLibrarySelection) return;
-      button.disabled = true;
-      try {
-        await assetLibrarySelection(asset);
-        elements.assetLibraryDialog.close();
-      } catch (error) {
-        elements.assetLibraryStatus.className = "status error";
-        elements.assetLibraryStatus.textContent = error.message || String(error);
-        button.disabled = false;
-      }
-    });
-    elements.assetLibraryGrid.append(button);
-  }
-}
-
-async function openAssetLibrary(onSelect) {
-  assetLibrarySelection = onSelect;
-  elements.assetLibraryStatus.textContent = "Loading retained images…";
-  elements.assetLibraryStatus.className = "status";
-  elements.assetLibraryDialog.showModal();
-  try {
-    const { assets } = await api("/api/v1/assets?limit=250");
-    renderAssetLibrary(assets || []);
-    elements.assetLibraryStatus.textContent = `${assets?.length || 0} retained image${assets?.length === 1 ? "" : "s"}.`;
-  } catch (error) {
-    elements.assetLibraryGrid.replaceChildren();
-    elements.assetLibraryStatus.className = "status error";
-    elements.assetLibraryStatus.textContent = error.message || String(error);
-  }
+async function openAssetLibrary(onSelect, context = {}) {
+  await assetLibraryBrowser.open({ mode: onSelect ? "picker" : "browse", onSelect, context });
 }
 
 async function chooseWorldCoverFromLibrary() {
@@ -1083,11 +1044,11 @@ async function chooseWorldCoverFromLibrary() {
     elements.worldCoverPreview.src = result.assetUrl;
     elements.worldCoverPreview.classList.remove("hidden");
     elements.worldCoverStatus.className = "status success";
-    elements.worldCoverStatus.textContent = "Selected a retained image from the shared library.";
+    elements.worldCoverStatus.textContent = "Selected a retained image from the image library.";
     const cached = worlds.find((world) => world.id === worldId);
     if (cached) cached.imageUrl = result.assetUrl;
     renderDashboardWorlds();
-  });
+  }, { worldId });
 }
 
 async function saveWorldDraft(event) {
@@ -1585,8 +1546,8 @@ async function loadCampaigns(preselectId = "") {
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
     selectedCampaign = null;
     updateStoryViewLink();
-    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationEnabled, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.saveIllustrationConfig, elements.discoverIllustrationModels].forEach((element) => { element.disabled = true; });
-    elements.illustrationEnabled.checked = false;
+    [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.saveIllustrationConfig, elements.discoverIllustrationModels].forEach((element) => { element.disabled = true; });
+    elements.illustrationSourcePolicy.value = "off";
     renderIllustrationSettingsVisibility();
     elements.campaignCostSection.classList.add("hidden");
     return;
@@ -1621,7 +1582,7 @@ async function selectCampaign(campaign) {
   elements.saveIllustrationConfig.disabled = false;
   elements.campaignTitle.value = campaign.title;
   elements.campaignStatus.value = campaign.status;
-  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationEnabled, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts].forEach((element) => { element.disabled = false; });
+  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.transferCampaign, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow].forEach((element) => { element.disabled = false; });
   elements.campaignTextProvider.value = campaign.textProviderProfileId || "";
   elements.campaignImageProvider.value = campaign.imageProviderProfileId || "";
   elements.campaignTurnControlStyle.value = campaign.turnControlStyle || "flexible_auto";
@@ -1977,6 +1938,10 @@ async function loadEmbeddingConfig() {
 async function loadIllustrationConfig() {
   if (!selectedCampaign) return;
   illustrationConfig = await api(`/api/v1/campaigns/${selectedCampaign.id}/illustration-config`);
+  elements.illustrationSourcePolicy.value = illustrationConfig.sourcePolicy || (illustrationConfig.enabled ? "generate_only" : "off");
+  elements.illustrationMatchingScope.value = illustrationConfig.matchingScope || "world";
+  elements.illustrationConfidenceProfile.value = illustrationConfig.confidenceProfile || "balanced";
+  elements.illustrationRepetitionWindow.value = String(illustrationConfig.repetitionWindow ?? 5);
   elements.illustrationModel.value = illustrationConfig.model || "";
   elements.illustrationSize.value = illustrationConfig.size || "1024x1024";
   elements.illustrationAspectRatio.value = illustrationConfig.aspectRatio || "1:1";
@@ -1990,27 +1955,41 @@ async function loadIllustrationConfig() {
     : enabledProviders("image").length
       ? "Select an image provider for this campaign before enabling illustrations."
       : "Add and enable an illustration provider in Provider Management before images can be enabled.";
-  elements.illustrationStatus.textContent = illustrationConfig.enabled && provider
-    ? `Automatic illustrations are enabled with ${illustrationConfig.model}. Endpoint health: ${providers.find((provider) => provider.id === illustrationConfig.providerProfileId)?.healthStatus || "unknown"}. They run after story acceptance and cannot change the accepted turn.`
-    : illustrationConfig.enabled
-      ? "Illustrations were configured previously, but no enabled image provider is available now. Automatic image jobs are disabled until a provider is restored and the settings are saved."
-      : "Illustrations are disabled for this campaign. Story generation is unaffected.";
+  const policy = elements.illustrationSourcePolicy.value;
+  elements.illustrationStatus.textContent = policy === "off"
+    ? "Illustrations are disabled for this campaign. Story generation is unaffected."
+    : policy === "library_only"
+      ? `Library only; ${illustrationConfig.matchingScope || "world"}; ${illustrationConfig.confidenceProfile || "balanced"} matching. No image provider is required.`
+      : provider
+        ? `${policy === "library_then_generate" ? "Try the library first, then generate" : "Generate"} with ${illustrationConfig.model}. Endpoint health: ${providers.find((item) => item.id === illustrationConfig.providerProfileId)?.healthStatus || "unknown"}.`
+        : "The saved policy requires fallback generation, but no enabled image provider is currently available. Story generation remains unaffected.";
+}
+
+function illustrationPolicyUsesLibrary(policy = elements.illustrationSourcePolicy.value) {
+  return policy === "library_only" || policy === "library_then_generate";
+}
+
+function illustrationPolicyUsesProvider(policy = elements.illustrationSourcePolicy.value) {
+  return policy === "library_then_generate" || policy === "generate_only";
 }
 
 function renderIllustrationSettingsVisibility() {
-  const visible = elements.illustrationEnabled.checked && enabledProviders("image").length > 0;
+  const policy = elements.illustrationSourcePolicy.value;
+  const visible = policy !== "off";
   elements.illustrationSettings.classList.toggle("hidden", !visible);
   elements.illustrationSettings.setAttribute("aria-hidden", String(!visible));
+  elements.illustrationMatchingSettings.classList.toggle("hidden", !illustrationPolicyUsesLibrary(policy));
+  elements.illustrationProviderSettings.classList.toggle("hidden", !illustrationPolicyUsesProvider(policy));
 }
 
 function syncIllustrationProviderAvailability(restoreSavedState = false) {
   const hasImageProvider = enabledProviders("image").length > 0;
-  if (restoreSavedState) elements.illustrationEnabled.checked = Boolean(illustrationConfig?.enabled && hasImageProvider);
-  if (!hasImageProvider) elements.illustrationEnabled.checked = false;
-  elements.illustrationEnabled.disabled = !selectedCampaign || !hasImageProvider;
-  elements.illustrationEnabled.title = hasImageProvider
-    ? "Enable independent illustration jobs for accepted turns."
-    : "Add and enable an illustration provider in Provider Management first.";
+  if (restoreSavedState) elements.illustrationSourcePolicy.value = illustrationConfig?.sourcePolicy || (illustrationConfig?.enabled ? "generate_only" : "off");
+  elements.illustrationSourcePolicy.disabled = !selectedCampaign;
+  for (const option of elements.illustrationSourcePolicy.options) {
+    option.disabled = !hasImageProvider && ["library_then_generate", "generate_only"].includes(option.value)
+      && option.value !== elements.illustrationSourcePolicy.value;
+  }
   elements.campaignImageProvider.disabled = !selectedCampaign || !hasImageProvider;
   elements.discoverIllustrationModels.disabled = !selectedCampaign || !effectiveCampaignProvider("image");
   renderIllustrationSettingsVisibility();
@@ -2846,7 +2825,8 @@ async function saveIllustrationConfig(event) {
   event.preventDefault();
   if (!selectedCampaign) return;
   const provider = effectiveCampaignProvider("image");
-  if (elements.illustrationEnabled.checked && !provider) {
+  const sourcePolicy = elements.illustrationSourcePolicy.value;
+  if (illustrationPolicyUsesProvider(sourcePolicy) && !provider) {
     elements.illustrationStatus.className = "status error";
     elements.illustrationStatus.textContent = enabledProviders("image").length
       ? "Select an image provider for this campaign before enabling illustrations."
@@ -2854,7 +2834,7 @@ async function saveIllustrationConfig(event) {
     elements.campaignImageProvider.focus();
     return;
   }
-  if (elements.illustrationEnabled.checked && !elements.illustrationModel.value.trim()) {
+  if (illustrationPolicyUsesProvider(sourcePolicy) && !elements.illustrationModel.value.trim()) {
     elements.illustrationStatus.className = "status error";
     elements.illustrationStatus.textContent = "Select or enter an image model before enabling illustrations.";
     elements.illustrationModel.focus();
@@ -2864,16 +2844,21 @@ async function saveIllustrationConfig(event) {
   elements.illustrationStatus.className = "status";
   elements.illustrationStatus.textContent = "Saving independent illustration configuration…";
   try {
-    const updatedCampaign = await api(`/api/v1/campaigns/${selectedCampaign.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ imageProviderProfileId: elements.campaignImageProvider.value || null })
-    });
-    selectedCampaign = { ...selectedCampaign, ...updatedCampaign };
+    if (illustrationPolicyUsesProvider(sourcePolicy)) {
+      const updatedCampaign = await api(`/api/v1/campaigns/${selectedCampaign.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ imageProviderProfileId: elements.campaignImageProvider.value || null })
+      });
+      selectedCampaign = { ...selectedCampaign, ...updatedCampaign };
+    }
     illustrationConfig = await api(`/api/v1/campaigns/${selectedCampaign.id}/illustration-config`, {
       method: "PUT",
       body: JSON.stringify({
-        enabled: elements.illustrationEnabled.checked,
-        providerProfileId: provider?.id || null,
+        sourcePolicy,
+        matchingScope: elements.illustrationMatchingScope.value,
+        confidenceProfile: elements.illustrationConfidenceProfile.value,
+        repetitionWindow: elements.illustrationRepetitionWindow.value,
+        providerProfileId: illustrationPolicyUsesProvider(sourcePolicy) ? provider?.id || null : null,
         model: elements.illustrationModel.value,
         size: elements.illustrationSize.value,
         aspectRatio: elements.illustrationAspectRatio.value,
@@ -2883,9 +2868,13 @@ async function saveIllustrationConfig(event) {
       })
     });
     elements.illustrationStatus.className = "status success";
-    elements.illustrationStatus.textContent = illustrationConfig.enabled
-      ? "Automatic illustration child jobs are enabled. Story turns still commit successfully if the image endpoint is unavailable."
-      : "Illustrations disabled. No image endpoint will be called for new turns.";
+    elements.illustrationStatus.textContent = sourcePolicy === "off"
+      ? "Illustrations disabled. No image endpoint will be called for new turns."
+      : sourcePolicy === "library_only"
+        ? "Library-only matching enabled. It works without image or embedding providers."
+        : sourcePolicy === "library_then_generate"
+          ? "Library-first matching enabled with provider fallback after a durable no-match."
+          : "Generate-only illustration jobs enabled.";
   } catch (error) {
     elements.illustrationStatus.className = "status error";
     elements.illustrationStatus.textContent = error.message || String(error);
@@ -2899,7 +2888,7 @@ function renderImageJobStatus(job) {
   elements.illustrationStatus.className = `status ${job.status === "completed" ? "success" : ["recoverable", "failed"].includes(job.status) ? "error" : ""}`.trim();
   const text = document.createElement("span");
   text.textContent = job.status === "completed"
-    ? "Illustration generated and stored in Nexus shared asset storage."
+    ? "Illustration generated and stored in the retained Nexus image library."
     : job.status === "queued"
       ? `Illustration queued${job.attempts ? ` · attempt ${job.attempts} of ${job.maxAttempts}` : ""}. Story acceptance is already complete.`
       : job.status === "generating"
@@ -3628,21 +3617,20 @@ elements.embeddingModel.addEventListener("keydown", (event) => {
 });
 elements.embeddingForm.addEventListener("submit", saveEmbeddingConfig);
 elements.illustrationForm.addEventListener("submit", saveIllustrationConfig);
-elements.illustrationEnabled.addEventListener("change", () => {
-  if (elements.illustrationEnabled.checked && !enabledProviders("image").length) {
-    elements.illustrationEnabled.checked = false;
+elements.illustrationSourcePolicy.addEventListener("change", () => {
+  if (illustrationPolicyUsesProvider() && !enabledProviders("image").length) {
+    elements.illustrationSourcePolicy.value = "library_only";
     elements.illustrationStatus.className = "status error";
-    elements.illustrationStatus.textContent = "Add and enable an illustration provider in Provider Management before enabling images.";
+    elements.illustrationStatus.textContent = "No image provider is available, so Library only was selected.";
   }
   const provider = effectiveCampaignProvider("image");
-  if (elements.illustrationEnabled.checked && provider?.defaultModel && !elements.illustrationModel.value.trim()) {
+  if (illustrationPolicyUsesProvider() && provider?.defaultModel && !elements.illustrationModel.value.trim()) {
     elements.illustrationModel.value = provider.defaultModel;
   }
   renderIllustrationSettingsVisibility();
 });
 elements.discoverIllustrationModels.addEventListener("click", discoverIllustrationModels);
 elements.chooseWorldCover.addEventListener("click", chooseWorldCoverFromLibrary);
-elements.closeAssetLibrary.addEventListener("click", () => elements.assetLibraryDialog.close());
 async function loadSessionPreferences() {
   const response = await api("/api/v1/session");
   sessionUser = response.user || null;

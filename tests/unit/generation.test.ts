@@ -112,6 +112,8 @@ describe("generation contracts", () => {
     it("applies defaults when empty", () => {
       const parsed = illustrationConfigSchema.parse({});
       expect(parsed.enabled).toBe(false);
+      expect(parsed.sourcePolicy).toBeUndefined();
+      expect(parsed.matchingScope).toBe("world");
       expect(parsed.size).toBe("1024x1024");
       expect(parsed.outputFormat).toBe("png");
     });
@@ -151,6 +153,21 @@ describe("generation contracts", () => {
 
       const result = illustrationConfigSchema.safeParse(input);
       expect(result.success).toBe(true);
+    });
+
+    it("allows library-only operation without image or embedding providers", () => {
+      const parsed = illustrationConfigSchema.parse({ sourcePolicy: "library_only", confidenceProfile: "strict" });
+      expect(parsed).toMatchObject({ sourcePolicy: "library_only", confidenceProfile: "strict", matchingScope: "world" });
+      expect(parsed.providerProfileId).toBeNull();
+    });
+
+    it("requires a provider and model only for provider-dependent policies", () => {
+      expect(illustrationConfigSchema.safeParse({ sourcePolicy: "library_then_generate" }).success).toBe(false);
+      expect(illustrationConfigSchema.safeParse({
+        sourcePolicy: "library_then_generate",
+        providerProfileId: "123e4567-e89b-12d3-a456-426614174000",
+        model: "image-model"
+      }).success).toBe(true);
     });
   });
 

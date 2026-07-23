@@ -382,7 +382,7 @@ export async function deleteProvider(pool: DatabasePool, providerProfileId: stri
       await client.query("DELETE FROM generation_jobs WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
     } else if (provider.provider_role === "image") {
       await client.query("UPDATE campaigns SET image_provider_profile_id = NULL WHERE owner_user_id = $1 AND image_provider_profile_id = $2", [ownerUserId, providerProfileId]);
-      await client.query("UPDATE campaign_illustration_configs SET enabled = false, provider_profile_id = NULL WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
+      await client.query("UPDATE campaign_illustration_configs SET provider_profile_id = NULL, updated_at = now() WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
       await client.query("DELETE FROM image_jobs WHERE owner_user_id = $1 AND provider_profile_id = $2", [ownerUserId, providerProfileId]);
     } else if (provider.provider_role === "embedding") {
       await client.query("UPDATE campaign_memory_configs SET embedding_enabled = false, embedding_provider_profile_id = NULL WHERE owner_user_id = $1 AND embedding_provider_profile_id = $2", [ownerUserId, providerProfileId]);
