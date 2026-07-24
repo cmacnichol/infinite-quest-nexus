@@ -75,7 +75,7 @@ export type AssetLibraryResult = {
 
 type GenerationContext = {
   imageJobId: string;
-  targetType: "turn_illustration" | "world_cover";
+  targetType: "turn_illustration" | "world_cover" | "streaming_illustration";
   variantIndex: number;
   prompt: string;
   providerProfileId: string;
@@ -235,8 +235,8 @@ export async function importTurnImage(
   client: DatabaseClient,
   store: FilesystemAssetStore,
   ownerUserId: string,
-  campaignId: string,
-  turnId: string,
+  campaignId: string | null,
+  turnId: string | null,
   imageUrl: string
 ): Promise<StoredAsset | null> {
   const parsed = parseDataImage(imageUrl);
@@ -248,8 +248,8 @@ export async function persistTurnImage(
   client: DatabaseClient,
   store: FilesystemAssetStore,
   ownerUserId: string,
-  campaignId: string,
-  turnId: string,
+  campaignId: string | null,
+  turnId: string | null,
   bytes: Buffer,
   mimeType: string,
   options?: { generationContext?: GenerationContext; attachReference?: boolean }
@@ -274,7 +274,7 @@ async function persistImage(
   ownerUserId: string,
   bytes: Buffer,
   mimeType: string,
-  provenance?: { campaignId: string; turnId: string },
+  provenance?: { campaignId: string | null; turnId: string | null },
   options?: { generationContext?: GenerationContext; attachReference?: boolean }
 ): Promise<StoredAsset> {
   const extension = ALLOWED_IMAGE_TYPES.get(mimeType);

@@ -50,8 +50,9 @@ type ImageJobRow = {
   campaign_id: string | null;
   turn_id: string | null;
   world_id: string | null;
-  target_type: "turn_illustration" | "world_cover";
+  target_type: "turn_illustration" | "world_cover" | "streaming_illustration";
   segment_id: string | null;
+  generation_job_id: string | null;
   image_count: 1 | 2;
   provider_profile_id: string;
   requested_model: string;
@@ -116,6 +117,7 @@ function publicJob(row: ImageJobRow) {
     worldId: row.world_id,
     targetType: row.target_type,
     segmentId: row.segment_id,
+    generationJobId: row.generation_job_id,
     imageCount: row.image_count,
     providerProfileId: row.provider_profile_id,
     model: row.requested_model,
@@ -151,7 +153,7 @@ const jobColumns = `id, owner_user_id, campaign_id, turn_id, world_id, target_ty
   prompt, status, attempts, max_attempts, size, aspect_ratio, quality, output_format, asset_id,
   provider_type, generation_revision, remote_job_id, provider_status, provider_progress, provider_queue_position, provider_eta_at, submitted_at, last_polled_at,
   next_poll_at, generation_deadline, provider_request_metadata, provider_result_metadata,
-  error_code, error_message, created_at, updated_at, completed_at`;
+  error_code, error_message, created_at, updated_at, completed_at, generation_job_id`;
 
 export async function getIllustrationConfig(pool: DatabasePool, campaignId: string) {
   const ownerUserId = await initialOwnerId(pool);
@@ -225,6 +227,7 @@ export async function insertImageJob(
     worldId?: string | null;
     targetType?: ImageJobRow["target_type"];
     segmentId?: string | null;
+    generationJobId?: string | null;
     targetVariantIndex?: number | null;
     prompt: string;
     config: ReturnType<typeof publicConfig>;
@@ -237,7 +240,8 @@ export async function insertImageJob(
     `INSERT INTO image_jobs (
        id, owner_user_id, campaign_id, turn_id, world_id, target_type, segment_id, image_count,
        provider_profile_id, requested_model, prompt, prompt_hash,
-       size, aspect_ratio, quality, output_format, max_attempts, provider_type, provider_request_metadata
+       size, aspect_ratio, quality, output_format, max_attempts, provider_type, provider_request_metadata,
+       generation_job_id
      ) SELECT $1::uuid,$2,$3,$4,$5,$6,$7::uuid,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, provider_type,
               jsonb_build_object(
                 'idempotencyKey', ($1::uuid)::text || ':0',
@@ -245,14 +249,15 @@ export async function insertImageJob(
                 'targetType', $6::text,
                 'segmentId', ($7::uuid)::text,
                 'targetVariantIndex', $18::integer
-              )
+              ),
+              $19::uuid
          FROM provider_profiles WHERE id = $9 AND owner_user_id = $2
      RETURNING ${jobColumns}`,
     [jobId, values.ownerUserId, values.campaignId ?? null, values.turnId ?? null, values.worldId ?? null,
       values.targetType ?? "turn_illustration", values.segmentId ?? null, values.config.imagesPerSegment,
       values.config.providerProfileId, values.config.model, prompt, sha256(prompt), values.config.size,
       values.config.aspectRatio, values.config.quality, values.config.outputFormat, values.config.maxAttempts,
-      values.targetVariantIndex ?? null]
+      values.targetVariantIndex ?? null, values.generationJobId ?? null]
   );
   return result.rows[0] || null;
 }

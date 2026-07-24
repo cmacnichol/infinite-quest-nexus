@@ -43,6 +43,7 @@ const state = {
   pendingGeneration: null,
   generationDisplayActive: false,
   generationDisplayAction: "",
+  generationJobId: null,
   illustrationConfig: null,
   illustrationSegments: [],
   illustrationVariantIndexes: new Map(),
@@ -999,6 +1000,7 @@ function renderStreamingPreview(narrationText, action) {
           <div class="action-tag">➜ ${escapeHtml(actionText)}</div>
         </div>
         <div class="narration streaming-narration"></div>
+        <div class="streaming-illustrations"></div>
       </div>
     `;
   }
@@ -1059,6 +1061,7 @@ function beginGenerationDisplay(action) {
 function restoreGenerationDisplay() {
   state.generationDisplayActive = false;
   state.generationDisplayAction = "";
+  state.generationJobId = null;
   clearStreamingPreview();
   renderAllScenes({ autoScroll: false });
 }
@@ -1066,6 +1069,8 @@ function restoreGenerationDisplay() {
 function commitGenerationDisplay() {
   state.generationDisplayActive = false;
   state.generationDisplayAction = "";
+  state.generationJobId = null;
+  $("streamingPreviewCard")?.remove();
 }
 
 function showGenerationRecovery(jobId, message) {
@@ -1159,8 +1164,11 @@ async function finalizeCompletedGeneration(result) {
 
 async function pollGenerationJob(jobId, action) {
   let retriesUsed = 0;
+  state.generationJobId = jobId;
   if (!state.generationDisplayActive) beginGenerationDisplay(action);
   else renderStreamingPreview("", action || state.generationDisplayAction);
+  
+  pollImageJobs();
 
   const handleJobUpdate = async (job) => {
     updateGenerationProgress(job);
@@ -1625,18 +1633,38 @@ function imageJobStatusText(job) {
 }
 
 function renderSceneImageJob(job) {
-  if (!job.turnId) return;
+  const isStreaming = job.targetType === "streaming_illustration";
+  if (!job.turnId && !isStreaming) return;
+  if (isStreaming && job.generationJobId !== state.generationJobId) return;
   if (job.status === "completed" && job.assetUrl) {
     if (job.segmentId) return;
+    if (isStreaming) return;
     updateSceneImage(job.turnId, job.assetUrl, true);
     return;
   }
-  const turnIdx = state.turns.findIndex((turn) => (turn.id || turn.turnId) === job.turnId);
-  const segmentContent = job.segmentId
-    ? [...document.querySelectorAll(".segment-illustration-content[data-segment-id]")]
-      .find((element) => element.dataset.segmentId === job.segmentId)
-    : null;
-  if (turnIdx < 0 || !illustrationsEnabled() || state.generationDisplayActive) return;
+  const turnIdx = job.turnId ? state.turns.findIndex((turn) => (turn.id || turn.turnId) === job.turnId) : -1;
+  
+  let segmentContent = null;
+  if (isStreaming) {
+    if (!state.generationDisplayActive) return;
+    const container = $("streamingPreviewCard")?.querySelector(".streaming-illustrations");
+    if (container && job.segmentId) {
+      segmentContent = container.querySelector(`.segment-illustration-content[data-segment-id="${escapeHtml(job.segmentId)}"]`);
+      if (!segmentContent) {
+        segmentContent = document.createElement("div");
+        segmentContent.className = "segment-illustration-content streaming-segment";
+        segmentContent.dataset.segmentId = job.segmentId;
+        container.appendChild(segmentContent);
+      }
+    }
+  } else if (job.segmentId) {
+    segmentContent = [...document.querySelectorAll(".segment-illustration-content[data-segment-id]")]
+      .find((element) => element.dataset.segmentId === job.segmentId);
+  }
+
+  if (turnIdx < 0 && !isStreaming) return;
+  if (!illustrationsEnabled()) return;
+  if (state.generationDisplayActive && !isStreaming) return;
   if (job.segmentId && !segmentContent) return;
   if (!job.segmentId && turnIdx !== viewedTurnIndex()) return;
   const terminalFailure = ["recoverable", "failed", "cancelled", "expired"].includes(job.status);

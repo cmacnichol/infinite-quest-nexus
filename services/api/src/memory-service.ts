@@ -458,7 +458,8 @@ async function allMemories(
               row_number() OVER (PARTITION BY memory_kind ORDER BY ordinal DESC, created_at DESC) AS recent_rank,
               row_number() OVER (PARTITION BY memory_kind ORDER BY ordinal ASC, created_at ASC) AS sequence_rank,
               count(*) OVER (PARTITION BY memory_kind) AS kind_count,
-              row_number() OVER (PARTITION BY memory_kind ORDER BY relevance DESC, ordinal DESC) AS lexical_rank
+              row_number() OVER (PARTITION BY memory_kind ORDER BY relevance DESC, ordinal DESC) AS lexical_rank,
+              row_number() OVER (PARTITION BY memory_kind ORDER BY CASE WHEN entity_ids && $6::text[] THEN 1 ELSE 0 END DESC, ordinal DESC) AS entity_rank
          FROM base
      )
      SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids, relevance
@@ -467,14 +468,14 @@ async function allMemories(
          OR (memory_kind = 'canonical_fact' AND (
               recent_rank <= 64
               OR ($3 <> '' AND lexical_rank <= 64)
-              OR entity_ids && $6::text[]
+              OR (entity_ids && $6::text[] AND entity_rank <= 64)
             ))
          OR (memory_kind = 'turn_fiction' AND (
               recent_rank <= GREATEST(32, $4::integer * 2)
               OR sequence_rank <= 8
               OR mod(sequence_rank - 1, GREATEST(1, CEIL(kind_count / 32.0)::integer)) = 0
               OR ($3 <> '' AND lexical_rank <= 96)
-              OR entity_ids && $6::text[]
+              OR (entity_ids && $6::text[] AND entity_rank <= 64)
             ))
       ORDER BY ordinal ASC, memory_kind, id
       LIMIT 512`,

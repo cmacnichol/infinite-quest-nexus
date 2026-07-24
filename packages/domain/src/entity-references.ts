@@ -151,7 +151,11 @@ type AliasCandidate = {
   entity: EntityReference;
 };
 
+const unambiguousAliasesCache = new WeakMap<readonly EntityReference[], AliasCandidate[]>();
+
 function unambiguousAliases(catalog: readonly EntityReference[]): AliasCandidate[] {
+  let cached = unambiguousAliasesCache.get(catalog);
+  if (cached) return cached;
   const aliases = new Map<string, AliasCandidate[]>();
   for (const entity of catalog) {
     for (const alias of entity.aliases) {
@@ -164,21 +168,32 @@ function unambiguousAliases(catalog: readonly EntityReference[]): AliasCandidate
       aliases.set(normalized, entries);
     }
   }
-  return [...aliases.values()]
+  const result = [...aliases.values()]
     .filter((entries) => entries.length === 1)
     .map(([entry]) => entry!)
     .sort((left, right) => (
       right.normalized.length - left.normalized.length
       || left.normalized.localeCompare(right.normalized)
     ));
+  unambiguousAliasesCache.set(catalog, result);
+  return result;
 }
 
+const phrasePatternCache = new Map<string, RegExp>();
+
 function phrasePattern(normalizedAlias: string): RegExp {
+  let pattern = phrasePatternCache.get(normalizedAlias);
+  if (pattern) {
+    pattern.lastIndex = 0;
+    return pattern;
+  }
   const escaped = normalizedAlias
     .split(" ")
     .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
     .join("\\s+");
-  return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, "gu");
+  pattern = new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, "gu");
+  phrasePatternCache.set(normalizedAlias, pattern);
+  return pattern;
 }
 
 /** Finds unambiguous, whole-phrase references, preferring the longest overlap. */

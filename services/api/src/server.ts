@@ -835,9 +835,11 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     return selectTurnIllustration(pool, ownerUserId, uuidSchema.parse(request.params.turnId), body.assetId);
   });
 
-  app.get<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustration-resolution", async (request) => (
-    getTurnIllustrationResolution(pool, uuidSchema.parse(request.params.turnId))
-  ));
+  app.get<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustration-resolution", async (request, reply) => {
+    const resolution = await getTurnIllustrationResolution(pool, uuidSchema.parse(request.params.turnId));
+    if (!resolution) return reply.code(404).send({ error: "Not found" });
+    return resolution;
+  });
 
   app.post<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustration-match", async (request, reply) => (
     reply.code(202).send(await rematchTurnIllustration(pool, uuidSchema.parse(request.params.turnId)))
