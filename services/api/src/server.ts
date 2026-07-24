@@ -544,12 +544,16 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     return reply.code(result.reused ? 200 : 201).send(result);
   });
 
-  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/export", async (request, reply) => (
-    reply
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/export", async (request, reply) => {
+    const archive = await exportCampaign(pool, uuidSchema.parse(request.params.campaignId), assetStore);
+    if (!assetStore) {
+        return reply.header("content-disposition", 'attachment; filename="infinite-quest-campaign.json"').send(archive);
+    }
+    return reply
       .header("content-disposition", 'attachment; filename="infinite-quest-campaign.zip"')
       .type("application/zip")
-      .send(await exportCampaign(pool, uuidSchema.parse(request.params.campaignId), assetStore))
-  ));
+      .send(archive);
+  });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/turns", async (request) => {
     const ownerUserId = await initialOwnerId(pool);

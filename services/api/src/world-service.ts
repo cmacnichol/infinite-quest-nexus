@@ -1,4 +1,5 @@
-import * as archiver from "archiver";
+import * as archiverLib from "archiver";
+const archiver = (archiverLib as any).default || archiverLib;
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import {
@@ -1056,7 +1057,7 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string, ass
 
   if (!assetStore) return payload;
 
-  const archive = (archiver as any)('zip', { zlib: { level: 9 } });
+  const archive = archiver('zip', { zlib: { level: 9 } });
 
   archive.append(JSON.stringify(payload, null, 2), { name: 'campaign.json' });
 

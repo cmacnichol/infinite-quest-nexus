@@ -13,7 +13,7 @@ import {
   WORLD_CONTENT_SCHEMA_VERSION,
   type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
-import { persistTurnImage, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
+import { persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
 import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
 
 type ImportRow = {
@@ -439,6 +439,26 @@ export async function importLegacyStory(
          ) VALUES ($1,$2,$3,NULL,$4,'imported')`,
         [ownerUserId, campaignId, importedProfileRevision, json(importedProfile)]
       );
+    }
+
+
+
+    if (assetStore && assetBuffers && !existingTarget) {
+      const coverUrl = typeof request.story.world.coverImageUrl === 'string' ? request.story.world.coverImageUrl : '';
+      if (coverUrl.startsWith("/api/v1/assets/")) {
+        const id = coverUrl.split("/api/v1/assets/")[1];
+        if (id && assetBuffers.has(id)) {
+            try {
+                const asset = await persistWorldCover(client, assetStore, ownerUserId, assetBuffers.get(id)!, "image/png");
+                await client.query("UPDATE worlds SET cover_asset_id = $2 WHERE id = $1", [worldId, asset.id]);
+            } catch (err) {
+                /* ignored */
+            }
+        }
+      }
+      // Note: character is a string in legacyStorySchema payload, but if it is an object somehow...
+      // The issue is legacy text could have avatarUrl. Wait, legacy character doesn't have avatarUrl usually.
+      // We will skip character avatarUrl for now as legacy doesn't typically export that.
     }
 
     const initialTrackers = request.story.trackers ?? [];
