@@ -1,3 +1,4 @@
+import * as archiver from "archiver";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import {
@@ -27,6 +28,7 @@ import {
   resolvePlayableCharacters
 } from "../../../packages/domain/src/world-characters.js";
 import { resolveEffectiveProviderId } from "./provider-service.js";
+import { readAsset, type FilesystemAssetStore } from "./asset-service.js";
 import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
 import { turnReportedCosts } from "./cost-service.js";
 
@@ -960,7 +962,7 @@ export async function migrateCampaignWorld(pool: DatabasePool, campaignId: strin
   });
 }
 
-export async function exportCampaign(pool: DatabasePool, campaignId: string) {
+export async function exportCampaign(pool: DatabasePool, campaignId: string, assetStore: FilesystemAssetStore | null = null) {
   const ownerUserId = await initialOwnerId(pool);
   const campaign = await pool.query<any>(
     `SELECT c.title, c.status, c.active_turn_number, c.story_length_profile, c.turn_control_style, c.legacy_settings,
@@ -996,7 +998,7 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
   const selectedCharacterText = characterLegacyText(row.character_profile, row.character_snapshot);
   const sourceWorld = row.content.world && typeof row.content.world === "object" ? row.content.world : {};
   const { character: _storedCharacter, ...worldWithoutStoredCharacter } = sourceWorld;
-  return {
+  const payload = {
     format: "infinite-quest-campaign",
     formatVersion: 3,
     exportedAt: new Date().toISOString(),
@@ -1051,4 +1053,42 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string) {
       selectedCharacterName: row.character_profile?.name ?? row.character_snapshot?.name ?? null
     }
   };
+
+  if (!assetStore) return payload;
+
+  const archive = (archiver as any)('zip', { zlib: { level: 9 } });
+
+  archive.append(JSON.stringify(payload, null, 2), { name: 'campaign.json' });
+
+  const assetPromises = [];
+  const imageUrls = turns.rows.map((t: any) => t.image_url).filter(Boolean);
+  if (row.content.world?.coverImageUrl) imageUrls.push(row.content.world.coverImageUrl);
+  if (row.content.world?.character?.avatarUrl) imageUrls.push(row.content.world.character.avatarUrl);
+
+  const seenIds = new Set();
+
+  for (const url of imageUrls) {
+    if (typeof url === 'string' && url.startsWith('/api/v1/assets/')) {
+        const id = url.split('/api/v1/assets/')[1];
+        if (!id) continue;
+        if (!seenIds.has(id)) {
+            seenIds.add(id);
+            assetPromises.push((async () => {
+                try {
+                    const asset = await readAsset(pool, assetStore, ownerUserId, id);
+                    const ext = asset.mimeType === "image/png" ? ".png" : asset.mimeType === "image/jpeg" ? ".jpg" : asset.mimeType === "image/webp" ? ".webp" : asset.mimeType === "image/gif" ? ".gif" : "";
+                    archive.append(asset.bytes, { name: `assets/${id}${ext}` });
+                } catch (err) {
+                    /* ignored */
+                }
+            })());
+        }
+    }
+  }
+
+  await Promise.all(assetPromises);
+
+  void archive.finalize();
+
+  return archive;
 }
