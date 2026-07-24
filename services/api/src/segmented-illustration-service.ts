@@ -5,6 +5,7 @@ import type {
   IllustrationSegmentRequest
 } from "../../../packages/contracts/src/generation.js";
 import { DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT } from "../../../packages/contracts/src/generation.js";
+import { logger } from "../../../packages/logger/src/index.js";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import {
@@ -960,7 +961,8 @@ export async function runIllustrationPromptJob(
     try {
       prompt = parseRefinedPrompt(result.content);
     } catch (parseError) {
-      console.error("Failed to parse refined illustration prompt:", {
+      logger.error({
+        event: "illustration_refinement_parse_error",
         error: parseError instanceof Error ? parseError.message : String(parseError),
         rawContent: result.content
       });
