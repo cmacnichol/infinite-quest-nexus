@@ -1,5 +1,5 @@
-import * as archiverLib from "archiver";
-const archiver = (archiverLib as any).default || archiverLib;
+import { ZipArchive } from "archiver";
+
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import {
@@ -963,7 +963,9 @@ export async function migrateCampaignWorld(pool: DatabasePool, campaignId: strin
   });
 }
 
-export async function exportCampaign(pool: DatabasePool, campaignId: string, assetStore: FilesystemAssetStore | null = null) {
+export async function exportCampaign(pool: DatabasePool, campaignId: string, assetStore: FilesystemAssetStore): Promise<ZipArchive>;
+export async function exportCampaign(pool: DatabasePool, campaignId: string, assetStore?: null): Promise<Record<string, any>>;
+export async function exportCampaign(pool: DatabasePool, campaignId: string, assetStore: FilesystemAssetStore | null = null): Promise<ZipArchive | Record<string, any>> {
   const ownerUserId = await initialOwnerId(pool);
   const campaign = await pool.query<any>(
     `SELECT c.title, c.status, c.active_turn_number, c.story_length_profile, c.turn_control_style, c.legacy_settings,
@@ -1057,7 +1059,7 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string, ass
 
   if (!assetStore) return payload;
 
-  const archive = archiver('zip', { zlib: { level: 9 } });
+  const archive = new ZipArchive({ zlib: { level: 9 } });
 
   archive.append(JSON.stringify(payload, null, 2), { name: 'campaign.json' });
 
