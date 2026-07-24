@@ -56,6 +56,49 @@ export function segmentIllustrationText(text: string, maximumWords: number): Ill
   return segments;
 }
 
+export class StreamingSegmentTracker {
+  public emittedSegmentCount = 0;
+  public accumulatedWordCount = 0;
+  private lastProcessedWordIndex = 0;
+
+  constructor(private readonly segmentWordCount: number) {
+    if (!Number.isInteger(segmentWordCount) || segmentWordCount < 1) {
+      throw new Error("Segment word count must be a positive integer.");
+    }
+  }
+
+  detectNewSegments(narrationText: string): IllustrationSegment[] {
+    const words = wordTokens(narrationText);
+    this.accumulatedWordCount = words.length;
+
+    if (words.length === 0 || words.length - this.lastProcessedWordIndex < this.segmentWordCount) {
+      return [];
+    }
+
+    const segments = segmentIllustrationText(narrationText, this.segmentWordCount);
+    
+    // Filter to only segments that we haven't emitted yet AND that are "complete"
+    // A segment is complete if it's not the last one, OR if we have enough words beyond it
+    // to consider the next segment started. Actually, if it's the last one in the `segments` array,
+    // it might still be growing, unless it perfectly aligns with the end of the text.
+    // To be safe during streaming, we only emit a segment if there are words AFTER it 
+    // (i.e. it's not the final segment in the array), OR if its word count reached the exact maximum and we're sure it's done.
+    // Simpler rule: just don't emit the very last segment from segmentIllustrationText during streaming, 
+    // because it represents the "current" incomplete segment.
+    
+    const completeSegments = segments.slice(0, -1); 
+    const newSegments = completeSegments.filter(s => s.ordinal >= this.emittedSegmentCount);
+
+    if (newSegments.length > 0) {
+      const lastNew = newSegments[newSegments.length - 1]!;
+      this.lastProcessedWordIndex = lastNew.endWord;
+      this.emittedSegmentCount += newSegments.length;
+    }
+
+    return newSegments;
+  }
+}
+
 export function directIllustrationPrompt(segmentText: string, template?: string): string {
   const segment = stripMechanicsLeakage(stripPromptPart(segmentText)).text;
   return renderPromptTemplate(template || PROMPT_TEMPLATE_CATALOG.illustration_direct.defaultContent, { segment });

@@ -54,14 +54,29 @@ import {
   SCENE_COVERAGE_SYSTEM_PROMPT,
   sceneCoverageRewriteInstruction,
   providerTransportErrorDetails,
+  isNarrationFieldComplete,
   type ActivatedEvent,
   type PrivateRollResolution
 } from "../../../packages/story-engine/src/index.js";
-import { estimateTokens, sha256, stableStringify } from "../../../packages/domain/src/text.js";
+import {
+  StreamingSegmentTracker,
+  characterVisualReference,
+  sha256,
+  stableStringify,
+  estimateTokens
+} from "../../../packages/domain/src/index.js";
 import { buildScopedEntityCatalog, resolveEntityMetadata } from "../../../packages/domain/src/entity-references.js";
 import { autoEnableCampaignEmbeddingIfAvailable, buildContextPreview, enqueueEmbeddingReindex, rebuildCampaignMemories, storeDerivedTurnMemories } from "./memory-service.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
-import { enqueueAcceptedTurnIllustrationSegments } from "./segmented-illustration-service.js";
+import {
+  enqueueAcceptedTurnIllustrationSegments,
+  loadConfig as loadStreamingIllustrationConfig,
+  createProvisionalSet,
+  createProvisionalSegment,
+  promoteProvisionalSet,
+  orphanProvisionalSet,
+  type SegmentConfigRow
+} from "./segmented-illustration-service.js";
 import { attributeGenerationCostsToTurn, recordProfileCost, turnReportedCosts } from "./cost-service.js";
 import { promptFromSnapshot, promptProtocolVersion, resolvePromptSnapshot, type PromptSnapshot } from "./prompt-library-service.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
@@ -138,6 +153,7 @@ type ClaimedJob = {
   prompt_snapshot: PromptSnapshot;
   attempts: number;
   orchestration_private: OrchestrationPrivate;
+  streaming_segments_state?: unknown;
 };
 
 export function safeTurnInput(value: string): string {
@@ -245,9 +261,8 @@ type OrchestrationPrivate = {
   extensionError?: string;
 };
 
-type OrchestrationInputs = {
+export type OrchestrationInputs = {
   useRpgStats: boolean;
-  suppressEventTriggers: boolean;
   rpgStats: PlayerRpgStat[];
   eventTriggers: PlayerEventTrigger[];
   pendingEventTriggers: ActivatedEvent[];
@@ -257,6 +272,9 @@ type OrchestrationInputs = {
     supersededFacts: string[];
     openThreads?: string[];
   };
+  suppressEventTriggers: boolean;
+  characterProfile: Record<string, unknown> | null;
+  characterSnapshot: Record<string, unknown> | null;
 };
 
 export async function enqueueGeneration(pool: DatabasePool, campaignId: string, request: GenerationRequest) {
@@ -1034,7 +1052,7 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
   });
 }
 
-async function claimGeneration(pool: DatabasePool, workerId: string, leaseSeconds: number): Promise<ClaimedJob | null> {
+export async function claimGeneration(pool: DatabasePool, workerId: string, leaseSeconds: number): Promise<ClaimedJob | null> {
   return withTransaction(pool, async (client) => {
     const result = await client.query<ClaimedJob>(
       `WITH candidate AS (
@@ -1050,7 +1068,7 @@ async function claimGeneration(pool: DatabasePool, workerId: string, leaseSecond
                  j.base_scratchpad_safe_for_prompt,
                  j.requested_input_mode, j.resolved_input_mode, j.input_mode_source,
                  j.requested_model, j.context_options, j.prompt_protocol_version, j.prompt_snapshot, j.attempts,
-                 j.orchestration_private`,
+                 j.orchestration_private, j.streaming_segments_state`,
       [workerId, leaseSeconds]
     );
     return result.rows[0] ?? null;
@@ -1074,8 +1092,10 @@ async function loadOrchestrationInputs(pool: DatabasePool, job: ClaimedJob): Pro
     event_triggers: unknown;
     pending_event_triggers: unknown;
     state_snapshot_private: Record<string, unknown> | null;
+    character_profile: Record<string, unknown> | null;
+    character_snapshot: Record<string, unknown> | null;
   }>(
-    `SELECT c.legacy_settings, cs.rpg_stats, cs.event_triggers, cs.pending_event_triggers,
+    `SELECT c.legacy_settings, c.character_profile, c.character_snapshot, cs.rpg_stats, cs.event_triggers, cs.pending_event_triggers,
             latest.state_snapshot_private
        FROM campaigns c
        JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
@@ -1112,18 +1132,21 @@ async function loadOrchestrationInputs(pool: DatabasePool, job: ClaimedJob): Pro
   const openThreads = Array.isArray(latestSnapshot.openThreads)
     ? latestSnapshot.openThreads.filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
     : undefined;
+  const storyMemoryDefaults = {
+    ...(continuitySummary ? { continuitySummary } : {}),
+    canonicalFacts: [],
+    supersededFacts: [],
+    ...(openThreads ? { openThreads } : {})
+  };
   return {
     useRpgStats: row.legacy_settings?.useRpgStats === true,
-    suppressEventTriggers: row.legacy_settings?.suppressEventTriggers === true,
     rpgStats,
     eventTriggers,
     pendingEventTriggers,
-    storyMemoryDefaults: {
-      ...(continuitySummary ? { continuitySummary } : {}),
-      canonicalFacts: [],
-      supersededFacts: [],
-      ...(openThreads ? { openThreads } : {})
-    }
+    storyMemoryDefaults,
+    suppressEventTriggers: Boolean(row.legacy_settings?.suppressEventTriggers),
+    characterProfile: row.character_profile,
+    characterSnapshot: row.character_snapshot
   };
 }
 
@@ -1138,6 +1161,11 @@ async function persistOrchestration(pool: DatabasePool, job: ClaimedJob, patch: 
   if (!result.rows[0]) throw Object.assign(new Error("Generation lease was lost while persisting private orchestration."), { code: "lease_lost" });
   job.orchestration_private = merged;
   return merged;
+}
+
+function extractTurnFacts(memory: { facts: Record<string, string>; status: string }) {
+  if (memory.status !== "active") return {};
+  return memory.facts || {};
 }
 
 async function evaluateTriggers(
@@ -1327,7 +1355,22 @@ async function commitStory(
         json({ sanitized: memory.sanitized, removedMechanicsSegments: memory.removedMechanicsSegments, generated: true })]
     );
   }
-  await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
+  const streamingState = job.streaming_segments_state as any;
+  if (streamingState?.provisionalSetId) {
+    const illustrationConfig = await loadStreamingIllustrationConfig(client, job.owner_user_id, job.campaign_id)
+      .catch(() => null);
+    if (illustrationConfig) {
+      await promoteProvisionalSet(
+        client, job.owner_user_id, job.id, turnId, job.campaign_id,
+        story.narration, illustrationConfig
+      );
+    } else {
+      // Fallback
+      await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
+    }
+  } else {
+    await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
+  }
   await enqueueEmbeddingReindex(client, job.campaign_id);
   await client.query(
     `UPDATE generation_jobs SET status = 'completed', result_turn_id = $3, provider_response_id = $4,
@@ -1339,9 +1382,7 @@ async function commitStory(
   return turnId;
 }
 
-export async function runGenerationJob(pool: DatabasePool, workerId: string, leaseSeconds: number, credentialSecret: string): Promise<boolean> {
-  const job = await claimGeneration(pool, workerId, leaseSeconds);
-  if (!job) return false;
+export async function executeGenerationJob(pool: DatabasePool, workerId: string, job: ClaimedJob, leaseSeconds: number, credentialSecret: string): Promise<boolean> {
   const heartbeat = setInterval(() => {
     void pool.query(
       `UPDATE generation_jobs SET lease_expires_at = now() + ($3::text || ' seconds')::interval, updated_at = now()
@@ -1474,6 +1515,15 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
       ...storyMemoryDefaultsFromContext(promptContext),
       ...inputs.storyMemoryDefaults
     };
+
+    const illustrationConfig = await loadStreamingIllustrationConfig(pool, job.owner_user_id, job.campaign_id)
+      .catch(() => null);
+    const segmentTracker = illustrationConfig
+      ? new StreamingSegmentTracker(illustrationConfig.segment_word_count)
+      : null;
+    let provisionalSetId: string | null = null;
+    let singleSectionDetected = false;
+
     let lastPartialUpdate = 0;
     let lastPartialContent = "";
     const onChunk = async (_delta: string, accumulated: string) => {
@@ -1481,6 +1531,7 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
       if (now - lastPartialUpdate >= 350 && accumulated !== lastPartialContent) {
         lastPartialUpdate = now;
         lastPartialContent = accumulated;
+        
         try {
           await pool.query(
             `UPDATE generation_jobs SET partial_output = $2, updated_at = now() WHERE id = $1 AND lease_owner = $3`,
@@ -1488,6 +1539,57 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
           );
         } catch {
           // ignore transient update errors during active streaming
+        }
+
+        if (segmentTracker && illustrationConfig) {
+          try {
+            const narration = extractPartialNarration(accumulated);
+            if (narration) {
+              const newSegments = segmentTracker.detectNewSegments(narration);
+              for (const segment of newSegments) {
+                if (!provisionalSetId) {
+                  provisionalSetId = await createProvisionalSet(
+                    pool, job.owner_user_id, job.campaign_id, job.id,
+                    characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
+                  );
+                  await pool.query(
+                    `UPDATE generation_jobs SET streaming_segments_state = jsonb_set(streaming_segments_state, '{provisionalSetId}', $2) WHERE id = $1`,
+                    [job.id, JSON.stringify(provisionalSetId)]
+                  );
+                }
+                await createProvisionalSegment(
+                  pool, job.owner_user_id, job.campaign_id, job.id,
+                  provisionalSetId, segment, illustrationConfig,
+                  characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
+                );
+              }
+              
+              if (!singleSectionDetected && isNarrationFieldComplete(accumulated) && segmentTracker.emittedSegmentCount === 0 && segmentTracker.accumulatedWordCount > 0) {
+                singleSectionDetected = true;
+                if (!provisionalSetId) {
+                  provisionalSetId = await createProvisionalSet(
+                    pool, job.owner_user_id, job.campaign_id, job.id,
+                    characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
+                  );
+                  await pool.query(
+                    `UPDATE generation_jobs SET streaming_segments_state = jsonb_set(streaming_segments_state, '{provisionalSetId}', $2) WHERE id = $1`,
+                    [job.id, JSON.stringify(provisionalSetId)]
+                  );
+                }
+                await createProvisionalSegment(
+                  pool, job.owner_user_id, job.campaign_id, job.id,
+                  provisionalSetId,
+                  { ordinal: 0, startWord: 0, endWord: segmentTracker.accumulatedWordCount,
+                    startOffset: 0, endOffset: narration.length,
+                    wordCount: segmentTracker.accumulatedWordCount, text: narration },
+                  illustrationConfig,
+                  characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
+                );
+              }
+            }
+          } catch {
+            // streaming illustration failures must not affect text generation
+          }
         }
       }
     };
@@ -1656,8 +1758,19 @@ export async function runGenerationJob(pool: DatabasePool, workerId: string, lea
       [job.id, job.owner_user_id, code, (error instanceof Error ? error.message : String(error)).slice(0, 4000),
         json(transportError ? { transportError } : {}), workerId]
     );
+    if (job.streaming_segments_state && (job.streaming_segments_state as any).provisionalSetId) {
+      try {
+        await orphanProvisionalSet(pool, job.owner_user_id, job.id);
+      } catch {}
+    }
   } finally {
     clearInterval(heartbeat);
   }
   return true;
+}
+
+export async function runGenerationJob(pool: DatabasePool, workerId: string, leaseSeconds: number, credentialSecret: string): Promise<boolean> {
+  const job = await claimGeneration(pool, workerId, leaseSeconds);
+  if (!job) return false;
+  return executeGenerationJob(pool, workerId, job, leaseSeconds, credentialSecret);
 }

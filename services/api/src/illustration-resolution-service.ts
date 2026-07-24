@@ -442,7 +442,7 @@ export async function getTurnIllustrationResolution(pool: DatabasePool, turnId: 
       WHERE jobs.turn_id = $1 AND jobs.owner_user_id = $2`,
     [turnId, ownerUserId]
   );
-  if (!result.rows[0]) throw Object.assign(new Error("Illustration resolution not found."), { statusCode: 404 });
+  if (!result.rows[0]) return null;
   return result.rows[0];
 }
 

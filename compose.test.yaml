@@ -1,0 +1,58 @@
+name: infinitequest-test
+
+services:
+  postgres-test:
+    image: pgvector/pgvector:0.8.5-pg18-trixie
+    environment:
+      POSTGRES_DB: infinitequest
+      POSTGRES_USER: infinitequest
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-testpassword123}
+    volumes:
+      - infinitequest-test-postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U infinitequest -d infinitequest"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    networks:
+      - infinitequest-test-backend
+
+  infinitequest-app-test:
+    build:
+      context: .
+    image: infinitequest-nexus-test:local
+    environment:
+      APP_ROLE: all
+      APP_PORT: 8080
+      DATABASE_URL: postgresql://infinitequest:${POSTGRES_PASSWORD:-testpassword123}@postgres-test:5432/infinitequest
+      ASSET_STORAGE_DRIVER: filesystem
+      ASSET_STORAGE_ROOT: /var/lib/infinitequest/assets
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-testkey12345678901234567890123456}
+    ports:
+      - "8085:8080"
+    volumes:
+      - infinitequest-test-assets:/var/lib/infinitequest/assets
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - infinitequest-test-backend
+
+volumes:
+  infinitequest-test-postgres:
+  infinitequest-test-assets:
+
+networks:
+  infinitequest-test-backend:
+    name: infinitequest-test-backend

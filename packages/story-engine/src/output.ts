@@ -85,6 +85,25 @@ export function extractPartialNarration(content: string): string {
   return formatNarrationParagraphs(unescaped);
 }
 
+export function isNarrationFieldComplete(raw: string): boolean {
+  if (!raw || !raw.startsWith("{")) return false;
+  const match = /["']narration["']\s*:\s*"/i.exec(raw);
+  if (!match) return false;
+  const start = match.index + match[0].length;
+  let escaped = false;
+  for (let index = start; index < raw.length; index += 1) {
+    const character = raw[index];
+    if (escaped) {
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === '"') {
+      return true; // We found the closing quote for the narration field
+    }
+  }
+  return false;
+}
+
 function storyTextFields(story: StoryTurnOutput): Array<[string, string]> {
   return [
     ["narration", story.narration],

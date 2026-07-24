@@ -5,7 +5,8 @@ import type { ImageProviderPollResult, ImageProviderRequest, ImageProviderSubmis
 import { SogniProviderError, type NormalizedProviderError } from "../sogni/index.js";
 
 type Session = { client: SogniClient; key: string };
-const sessions = new Map<string, Promise<Session>>();
+type CachedSession = { pending: Promise<Session>; idleTimer?: NodeJS.Timeout };
+const sessions = new Map<string, CachedSession>();
 let createClient = (clientConfig: SogniClientConfig) => SogniClient.createInstance(clientConfig);
 
 function providerConfig(profile: TextProviderProfile): Record<string, unknown> {
@@ -42,13 +43,14 @@ async function session(profile: TextProviderProfile): Promise<Session> {
   const profilePrefix = `${String((profile as TextProviderProfile & { id?: string }).id || profile.baseUrl)}:`;
   for (const [existingKey, existing] of sessions) {
     if (existingKey !== key && existingKey.startsWith(profilePrefix)) {
+      if (existing.idleTimer) clearTimeout(existing.idleTimer);
       sessions.delete(existingKey);
-      void existing.then(({ client }) => client.dispose()).catch(() => undefined);
+      void existing.pending.then(({ client }) => client.dispose()).catch(() => undefined);
     }
   }
-  let pending = sessions.get(key);
-  if (!pending) {
-    pending = createClient({
+  let cached = sessions.get(key);
+  if (!cached) {
+    const pending = createClient({
       appId: `infinitequest-${hostname()}-${String((profile as TextProviderProfile & { id?: string }).id || "profile").slice(0, 12)}-${randomUUID()}`,
       appSource: "infinite-quest-nexus",
       apiKey: profile.apiKey.trim(),
@@ -60,9 +62,15 @@ async function session(profile: TextProviderProfile): Promise<Session> {
       sessions.delete(key);
       throw error;
     });
-    sessions.set(key, pending);
+    cached = { pending };
+    sessions.set(key, cached);
   }
-  return pending;
+  if (cached.idleTimer) clearTimeout(cached.idleTimer);
+  cached.idleTimer = setTimeout(() => {
+    sessions.delete(key);
+    void cached!.pending.then(({ client }) => client.dispose()).catch(() => undefined);
+  }, 15_000).unref();
+  return cached.pending;
 }
 
 function pollIntervalMs(profile: TextProviderProfile): number {
@@ -279,7 +287,10 @@ export async function discoverSogniSdkModels(profile: TextProviderProfile): Prom
 }
 
 export function disposeSogniSdkSessions(): void {
-  for (const pending of sessions.values()) void pending.then(({ client }) => client.dispose()).catch(() => undefined);
+  for (const cached of sessions.values()) {
+    if (cached.idleTimer) clearTimeout(cached.idleTimer);
+    void cached.pending.then(({ client }) => client.dispose()).catch(() => undefined);
+  }
   sessions.clear();
 }
 

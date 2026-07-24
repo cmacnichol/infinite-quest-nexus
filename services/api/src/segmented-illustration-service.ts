@@ -5,6 +5,7 @@ import type {
   IllustrationSegmentRequest
 } from "../../../packages/contracts/src/generation.js";
 import { DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT } from "../../../packages/contracts/src/generation.js";
+import { logger } from "../../../packages/logger/src/index.js";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import {
@@ -26,7 +27,7 @@ import { insertImageJob } from "./image-service.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
 import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
 
-type SegmentConfigRow = {
+export type SegmentConfigRow = {
   enabled: boolean;
   source_policy: "off" | "library_only" | "library_then_generate" | "generate_only";
   matching_scope: IllustrationConfig["matchingScope"];
@@ -52,7 +53,8 @@ type SegmentRow = {
   id: string;
   owner_user_id: string;
   campaign_id: string;
-  turn_id: string;
+  turn_id: string | null;
+  generation_job_id: string | null;
   illustration_set_id: string;
   source_text: string;
   direct_prompt: string;
@@ -60,7 +62,7 @@ type SegmentRow = {
   character_visual_reference: string;
 };
 
-async function loadConfig(client: DatabaseClient | DatabasePool, ownerUserId: string, campaignId: string): Promise<SegmentConfigRow> {
+export async function loadConfig(client: DatabaseClient | DatabasePool, ownerUserId: string, campaignId: string): Promise<SegmentConfigRow> {
   const result = await client.query<SegmentConfigRow>(
     `SELECT config.enabled, config.source_policy, config.matching_scope, config.confidence_profile,
             config.repetition_window, config.provider_profile_id, config.model, config.size,
@@ -154,11 +156,202 @@ async function queueSegmentDelivery(
     ownerUserId,
     campaignId: segment.campaign_id,
     turnId: segment.turn_id,
+    generationJobId: segment.generation_job_id,
+    targetType: segment.turn_id ? "turn_illustration" : "streaming_illustration",
     segmentId: segment.id,
     prompt: providerPrompt,
     config: imageConfig(config, providerProfileId)
   });
   if (!job) throw Object.assign(new Error("The segment image job could not be created."), { statusCode: 409 });
+}
+
+export async function createProvisionalSet(
+  client: DatabaseClient | DatabasePool,
+  ownerUserId: string,
+  campaignId: string,
+  generationJobId: string,
+  visualReference?: string
+): Promise<string> {
+  const existing = await client.query<{ id: string }>(
+    `SELECT id FROM turn_illustration_sets
+      WHERE generation_job_id = $1 AND owner_user_id = $2`,
+    [generationJobId, ownerUserId]
+  );
+  if (existing.rows[0]) return existing.rows[0].id;
+
+  const config = await loadConfig(client, ownerUserId, campaignId);
+  const setResult = await client.query<{ id: string }>(
+    `INSERT INTO turn_illustration_sets (
+       owner_user_id, campaign_id, generation_job_id, source_text_hash, segment_word_count,
+       images_per_segment, prompt_mode, status, character_visual_reference
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,'provisional',$8)
+     RETURNING id`,
+    [ownerUserId, campaignId, generationJobId, sha256("provisional"), config.segment_word_count,
+      config.images_per_segment, config.segment_prompt_mode, visualReference || ""]
+  );
+  return setResult.rows[0]!.id;
+}
+
+export async function createProvisionalSegment(
+  client: DatabaseClient | DatabasePool,
+  ownerUserId: string,
+  campaignId: string,
+  generationJobId: string,
+  setId: string,
+  segmentData: {
+    ordinal: number;
+    startOffset: number;
+    endOffset: number;
+    startWord: number;
+    endWord: number;
+    wordCount: number;
+    text: string;
+  },
+  config: SegmentConfigRow,
+  visualReference?: string
+) {
+  const promptSnapshot = await resolvePromptSnapshot(client, ownerUserId, campaignId);
+  const sanitizedSegment = stripMechanicsLeakage(segmentData.text).text;
+  if (!sanitizedSegment) return; // Silent skip if no fiction text
+
+  const directPrompt = directIllustrationPrompt(
+    sanitizedSegment,
+    promptFromSnapshot(promptSnapshot, "illustration_direct")
+  );
+
+  const segmentResult = await client.query<SegmentRow>(
+    `INSERT INTO turn_illustration_segments (
+       owner_user_id, illustration_set_id, campaign_id, generation_job_id, ordinal,
+       start_offset, end_offset, start_word, end_word, source_text, source_text_hash,
+       direct_prompt, resolved_prompt, prompt_source, status
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'direct',$14)
+     ON CONFLICT (illustration_set_id, ordinal) DO NOTHING
+     RETURNING id, owner_user_id, campaign_id, turn_id, illustration_set_id,
+               source_text, direct_prompt, resolved_prompt, $15::text AS character_visual_reference`,
+    [ownerUserId, setId, campaignId, generationJobId, segmentData.ordinal, segmentData.startOffset, segmentData.endOffset,
+      segmentData.startWord, segmentData.endWord, segmentData.text, sha256(segmentData.text), directPrompt,
+      config.segment_prompt_mode === "direct" ? directPrompt : "",
+      config.segment_prompt_mode === "ai_refined" ? "refining" : "queued", visualReference || ""]
+  );
+  const segment = segmentResult.rows[0];
+  if (!segment) return; // Already exists
+
+  if (config.segment_prompt_mode === "direct") {
+    const providerPrompt = composeIllustrationProviderPrompt(
+      directPrompt.trim(),
+      (visualReference || "").trim(),
+      promptFromSnapshot(promptSnapshot, "illustration_character_reference")
+    );
+    await client.query(
+      `UPDATE turn_illustration_segments
+          SET resolved_prompt = $3, status = 'generating', updated_at = now()
+        WHERE id = $1 AND owner_user_id = $2`,
+      [segment.id, ownerUserId, directPrompt.trim()]
+    );
+    const providerProfileId = await resolveEffectiveProviderId(
+      client, ownerUserId, "image", config.provider_profile_id || config.campaign_image_provider_id
+    );
+    if (providerProfileId) {
+      await insertImageJob(client, {
+        ownerUserId,
+        campaignId,
+        generationJobId, // New field needed in insertImageJob
+        targetType: "streaming_illustration",
+        segmentId: segment.id,
+        prompt: providerPrompt,
+        config: imageConfig(config, providerProfileId)
+      });
+    }
+  } else {
+    // ai_refined
+    const textProviderId = await resolveEffectiveProviderId(
+      client, ownerUserId, "text", config.campaign_text_provider_id
+    );
+    if (textProviderId) {
+      const provider = await client.query<{ default_model: string }>(
+        "SELECT default_model FROM provider_profiles WHERE id = $1 AND owner_user_id = $2",
+        [textProviderId, ownerUserId]
+      );
+      await client.query(
+        `INSERT INTO illustration_prompt_jobs (
+           owner_user_id, campaign_id, generation_job_id, segment_id, provider_profile_id, requested_model
+         ) VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (segment_id) DO NOTHING`,
+        [ownerUserId, campaignId, generationJobId, segment.id, textProviderId, provider.rows[0]?.default_model || ""]
+      );
+    }
+  }
+}
+
+export async function promoteProvisionalSet(
+  client: DatabaseClient | DatabasePool,
+  ownerUserId: string,
+  generationJobId: string,
+  turnId: string,
+  campaignId: string,
+  finalNarration: string,
+  config: SegmentConfigRow,
+  visualReference?: string
+) {
+  // Update the set
+  const setResult = await client.query<{ id: string, character_visual_reference: string }>(
+    `UPDATE turn_illustration_sets
+        SET turn_id = $3, status = $4, source_text_hash = $5
+      WHERE generation_job_id = $1 AND owner_user_id = $2 AND status = 'provisional'
+      RETURNING id, character_visual_reference`,
+    [generationJobId, ownerUserId, turnId, config.segment_prompt_mode === "ai_refined" ? "refining" : "queued", sha256(finalNarration)]
+  );
+  if (!setResult.rows[0]) return;
+  const setId = setResult.rows[0].id;
+  const dbVisualReference = setResult.rows[0].character_visual_reference;
+
+  // Update segments
+  await client.query(
+    `UPDATE turn_illustration_segments SET turn_id = $3
+      WHERE generation_job_id = $1 AND owner_user_id = $2`,
+    [generationJobId, ownerUserId, turnId]
+  );
+
+  // Update image jobs
+  await client.query(
+    `UPDATE image_jobs SET turn_id = $3, target_type = 'turn_illustration'
+      WHERE generation_job_id = $1 AND owner_user_id = $2 AND target_type = 'streaming_illustration'`,
+    [generationJobId, ownerUserId, turnId]
+  );
+
+  // Update prompt jobs
+  await client.query(
+    `UPDATE illustration_prompt_jobs SET turn_id = $3
+      WHERE generation_job_id = $1 AND owner_user_id = $2`,
+    [generationJobId, ownerUserId, turnId]
+  );
+
+  // Segment any remaining text
+  const pieces = segmentIllustrationText(finalNarration, config.segment_word_count);
+  const existingSegments = await client.query<{ ordinal: number }>(
+    `SELECT ordinal FROM turn_illustration_segments
+      WHERE illustration_set_id = $1 AND owner_user_id = $2`,
+    [setId, ownerUserId]
+  );
+  const existingOrdinals = new Set(existingSegments.rows.map(r => r.ordinal));
+
+  for (const piece of pieces) {
+    if (!existingOrdinals.has(piece.ordinal)) {
+      await createProvisionalSegment(client, ownerUserId, campaignId, generationJobId, setId, piece, config, visualReference || dbVisualReference);
+    }
+  }
+}
+
+export async function orphanProvisionalSet(
+  client: DatabaseClient | DatabasePool,
+  ownerUserId: string,
+  generationJobId: string
+) {
+  await client.query(
+    `UPDATE turn_illustration_sets SET status = 'orphaned'
+      WHERE generation_job_id = $1 AND owner_user_id = $2 AND status = 'provisional'`,
+    [generationJobId, ownerUserId]
+  );
 }
 
 async function createTurnSet(
@@ -455,6 +648,7 @@ export async function regenerateSegmentIllustration(
   return withTransaction(pool, async (client) => {
     const result = await client.query<SegmentRow & { images_per_segment: 1 | 2 }>(
       `SELECT segments.id, segments.owner_user_id, segments.campaign_id, segments.turn_id,
+              segments.generation_job_id,
               segments.illustration_set_id, segments.source_text, segments.direct_prompt,
               segments.resolved_prompt, sets.images_per_segment, sets.character_visual_reference
          FROM turn_illustration_segments segments
@@ -502,6 +696,7 @@ export async function regenerateSegmentIllustration(
       ownerUserId,
       campaignId: segment.campaign_id,
       turnId: segment.turn_id,
+      targetType: "turn_illustration",
       segmentId,
       targetVariantIndex: request.variantIndex,
       prompt: composeIllustrationProviderPrompt(
@@ -550,6 +745,7 @@ export async function enqueueSegmentProviderImage(pool: DatabasePool, segmentId:
   return withTransaction(pool, async (client) => {
     const result = await client.query<SegmentRow>(
       `SELECT segments.id, segments.owner_user_id, segments.campaign_id, segments.turn_id,
+              segments.generation_job_id,
               segments.illustration_set_id, segments.source_text, segments.direct_prompt,
               segments.resolved_prompt, sets.character_visual_reference
          FROM turn_illustration_segments segments
@@ -581,6 +777,8 @@ export async function enqueueSegmentProviderImage(pool: DatabasePool, segmentId:
       ownerUserId,
       campaignId: segment.campaign_id,
       turnId: segment.turn_id,
+      generationJobId: segment.generation_job_id,
+      targetType: segment.turn_id ? "turn_illustration" : "streaming_illustration",
       segmentId,
       prompt: composeIllustrationProviderPrompt(
         segment.resolved_prompt || segment.direct_prompt,
@@ -598,9 +796,10 @@ export function parseRefinedPrompt(content: string): string {
   const normalized = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
   let prompt = normalized;
   if (normalized.startsWith("{")) {
-    const parsed = JSON.parse(normalized) as { image_prompt?: unknown };
-    if (typeof parsed.image_prompt !== "string") throw new Error("Prompt refinement did not return image_prompt.");
-    prompt = parsed.image_prompt.trim();
+    const parsed = JSON.parse(normalized) as Record<string, unknown>;
+    const extracted = parsed.image_prompt ?? parsed.prompt ?? parsed.imagePrompt;
+    if (typeof extracted !== "string") throw new Error("Prompt refinement did not return image_prompt.");
+    prompt = extracted.trim();
   }
   if (!prompt || prompt.length > 20_000 || containsMechanicsLanguage(prompt)) {
     throw new Error("Refined prompt failed the fiction-only boundary.");
@@ -727,6 +926,7 @@ export async function runIllustrationPromptJob(
   if (!claimed) return false;
   const segmentResult = await pool.query<SegmentRow>(
     `SELECT segments.id, segments.owner_user_id, segments.campaign_id, segments.turn_id,
+            segments.generation_job_id,
             segments.illustration_set_id, segments.source_text, segments.direct_prompt,
             segments.resolved_prompt, sets.character_visual_reference
        FROM turn_illustration_segments segments
@@ -757,7 +957,17 @@ export async function runIllustrationPromptJob(
       systemPrompt: promptFromSnapshot(claimed.prompt_snapshot, "illustration_refinement"),
       input: buildIllustrationRefinementInput(segment.source_text, storyContext)
     });
-    const prompt = parseRefinedPrompt(result.content);
+    let prompt: string;
+    try {
+      prompt = parseRefinedPrompt(result.content);
+    } catch (parseError) {
+      logger.error({
+        event: "illustration_refinement_parse_error",
+        error: parseError instanceof Error ? parseError.message : String(parseError),
+        rawContent: result.content
+      });
+      throw parseError;
+    }
     await withTransaction(pool, async (client) => {
       const currentConfig = await loadConfig(client, claimed.owner_user_id, claimed.campaign_id);
       await queueSegmentDelivery(
