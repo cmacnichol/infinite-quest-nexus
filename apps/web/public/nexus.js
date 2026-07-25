@@ -2163,7 +2163,7 @@ async function deleteSelectedWorldVersion() {
 }
 
 async function downloadJson(path, filename) {
-  const response = await fetch(path, { headers: { accept: "application/json" } });
+  const response = await fetch(path, { headers: { accept: "application/json, application/zip" } });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload.message || `Export failed with HTTP ${response.status}.`);
@@ -2491,8 +2491,8 @@ async function commitCampaignTransfer(event) {
 async function exportSelectedCampaign() {
   if (!selectedCampaign) return;
   try {
-    await downloadJson(`/api/v1/campaigns/${selectedCampaign.id}/export`, "infinite-quest-campaign.json");
-    campaignMessage("Portable campaign exported without provider profiles or credentials.", "success");
+    await downloadJson(`/api/v1/campaigns/${selectedCampaign.id}/export`, "infinite-quest-campaign.zip");
+    campaignMessage("Portable campaign with images exported without provider profiles or credentials.", "success");
   } catch (error) {
     campaignMessage(error.message || String(error), "error");
   }
@@ -3919,10 +3919,32 @@ async function importStoryObject(story, sourceName, requestOverrides = {}) {
   });
   if (!preview.valid) throw new Error(preview.warnings.join(" ") || "The campaign export is not valid for import.");
   setStatus(`Importing ${story.turns?.length || 0} turns into PostgreSQL and building Chronicle memory…`);
-  const result = await api("/api/v1/imports/legacy-story", {
-    method: "POST",
-    body: JSON.stringify(request)
-  });
+
+  let result;
+  if (selectedFile && selectedFile.name.toLowerCase().endsWith('.zip') && selectedImportSource?.origin === "file") {
+    const formData = new FormData();
+    formData.append("file", selectedFile);
+    formData.append("requestOverrides", JSON.stringify(requestOverrides));
+
+    const response = await fetch("/api/v1/imports/legacy-story", {
+      method: "POST",
+      body: formData
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        const error = new Error(payload.message || `Request failed with HTTP ${response.status}.`);
+        error.details = payload.details || payload.issues;
+        throw error;
+    }
+    result = payload;
+  } else {
+    result = await api("/api/v1/imports/legacy-story", {
+      method: "POST",
+      body: JSON.stringify(request)
+    });
+  }
+
   const duplicate = result.duplicate ? "The story was already imported; the existing campaign was selected." : "Import completed.";
   setStatus(`${duplicate} ${result.stats.turnCount} turns and ${result.stats.memoryCount} memories are available. Complete history is approximately ${number(result.stats.estimatedHistoryTokens)} tokens. Use “Load story” in Campaigns to open the database-backed story.`, "success");
   await loadWorlds(result.worldId);
@@ -4116,7 +4138,15 @@ async function previewImportSource(sourceName, sourceText, sourceKind = "auto", 
 }
 
 async function previewImportFile(file) {
-  const sourceText = await file.text();
+  let sourceText;
+  if (file.name.toLowerCase().endsWith('.zip')) {
+    const zip = await new JSZip().loadAsync(file);
+    const campaignJsonFile = zip.file("campaign.json") || zip.file("infinite-quest-campaign.json");
+    if (!campaignJsonFile) throw new Error("The zip archive does not contain campaign.json.");
+    sourceText = await campaignJsonFile.async("string");
+  } else {
+    sourceText = await file.text();
+  }
   await previewImportSource(file.name, sourceText, elements.infiniteWorldsKind.value, "file");
 }
 

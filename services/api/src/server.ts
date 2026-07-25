@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import { mkdir } from "node:fs/promises";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
+import fastifyMultipart from "@fastify/multipart";
+import JSZip from "jszip";
 import { z } from "zod";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
@@ -200,6 +202,9 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   await mkdir(config.assetStorageRoot, { recursive: true });
   const assetStore: FilesystemAssetStore = { root: config.assetStorageRoot };
+  await app.register(fastifyMultipart, {
+    limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
+  });
   await app.register(fastifyStatic, {
     root: config.webRoot,
     prefix: "/nexus/",
@@ -326,8 +331,40 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   ));
 
   app.post("/api/v1/imports/legacy-story", async (request, reply) => {
-    const body = storyImportRequestSchema.parse(request.body);
-    const result = await importLegacyStory(pool, body, assetStore);
+    let body;
+    let assetBuffers = new Map<string, Buffer>();
+
+    if (request.isMultipart()) {
+      const parts = request.parts();
+      for await (const part of parts) {
+        if (part.type === 'file' && part.fieldname === 'file') {
+          const buffer = await part.toBuffer();
+          const zip = await JSZip.loadAsync(buffer);
+          const campaignJsonFile = zip.file("campaign.json") || zip.file("infinite-quest-campaign.json");
+          if (!campaignJsonFile) throw new Error("Could not find campaign.json in the zip archive.");
+          body = JSON.parse(await campaignJsonFile.async("string"));
+
+          for (const [filename, file] of Object.entries(zip.files)) {
+            if (!file.dir && filename.startsWith("assets/")) {
+                const imgBuffer = await file.async("nodebuffer");
+                const name = filename.split('/').pop()!;
+                const id = name.split('.')[0]!;
+                assetBuffers.set(id, imgBuffer);
+            }
+          }
+        } else if (part.type === 'field' && part.fieldname === 'requestOverrides') {
+            const overrides = JSON.parse(part.value as string);
+            if (!body) body = overrides;
+            else Object.assign(body, overrides);
+        }
+      }
+      if (!body) throw new Error("Multipart request missing required file or requestOverrides.");
+    } else {
+      body = request.body;
+    }
+
+    const parsedBody = storyImportRequestSchema.parse(body);
+    const result = await importLegacyStory(pool, parsedBody, assetStore, assetBuffers);
     return reply.code(result.duplicate ? 200 : 201).send(result);
   });
 
@@ -507,11 +544,16 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     return reply.code(result.reused ? 200 : 201).send(result);
   });
 
-  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/export", async (request, reply) => (
-    reply
-      .header("content-disposition", 'attachment; filename="infinite-quest-campaign.json"')
-      .send(await exportCampaign(pool, uuidSchema.parse(request.params.campaignId)))
-  ));
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/export", async (request, reply) => {
+    const archive = await exportCampaign(pool, uuidSchema.parse(request.params.campaignId), assetStore);
+    if (!assetStore) {
+        return reply.header("content-disposition", 'attachment; filename="infinite-quest-campaign.json"').send(archive);
+    }
+    return reply
+      .header("content-disposition", 'attachment; filename="infinite-quest-campaign.zip"')
+      .type("application/zip")
+      .send(archive);
+  });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/turns", async (request) => {
     const ownerUserId = await initialOwnerId(pool);

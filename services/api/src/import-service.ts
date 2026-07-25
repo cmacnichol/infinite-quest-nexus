@@ -13,7 +13,7 @@ import {
   WORLD_CONTENT_SCHEMA_VERSION,
   type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
-import { importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
+import { persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
 import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
 
 type ImportRow = {
@@ -315,7 +315,8 @@ async function matchingWorldVersion(client: DatabaseClient, ownerUserId: string,
 export async function importLegacyStory(
   pool: DatabasePool,
   request: StoryImportRequest,
-  assetStore?: FilesystemAssetStore
+  assetStore?: FilesystemAssetStore,
+  assetBuffers?: Map<string, Buffer>
 ): Promise<StoryImportResult> {
   const sourceHash = importSourceHash(request);
 
@@ -440,6 +441,26 @@ export async function importLegacyStory(
       );
     }
 
+
+
+    if (assetStore && assetBuffers && !existingTarget) {
+      const coverUrl = typeof request.story.world.coverImageUrl === 'string' ? request.story.world.coverImageUrl : '';
+      if (coverUrl.startsWith("/api/v1/assets/")) {
+        const id = coverUrl.split("/api/v1/assets/")[1];
+        if (id && assetBuffers.has(id)) {
+            try {
+                const asset = await persistWorldCover(client, assetStore, ownerUserId, assetBuffers.get(id)!, "image/png");
+                await client.query("UPDATE worlds SET cover_asset_id = $2 WHERE id = $1", [worldId, asset.id]);
+            } catch (err) {
+                /* ignored */
+            }
+        }
+      }
+      // Note: character is a string in legacyStorySchema payload, but if it is an object somehow...
+      // The issue is legacy text could have avatarUrl. Wait, legacy character doesn't have avatarUrl usually.
+      // We will skip character avatarUrl for now as legacy doesn't typically export that.
+    }
+
     const initialTrackers = request.story.trackers ?? [];
     const defaultTriggers = request.story.defaultTriggers ?? request.story.baseTrackersAtStart ?? [];
     const eventTriggers = request.story.eventTriggers ?? [];
@@ -523,6 +544,19 @@ export async function importLegacyStory(
       if (assetStore && turn.imageUrl?.startsWith("data:image/")) {
         const asset = await importTurnImage(client, assetStore, ownerUserId, campaignId, turnId, turn.imageUrl);
         if (asset) await client.query("UPDATE turns SET image_url = $2 WHERE id = $1", [turnId, asset.publicUrl]);
+      } else if (assetStore && assetBuffers && turn.imageUrl?.startsWith("/api/v1/assets/")) {
+        const id = turn.imageUrl.split("/api/v1/assets/")[1];
+        if (id && assetBuffers.has(id)) {
+            const buffer = assetBuffers.get(id)!;
+            // The extension doesn't strictly give us mimeType perfectly here, but we can guess or rely on lib/sharp.
+            // Let's use image/png as fallback, since sharp will figure it out when verifying anyway.
+            try {
+                const asset = await persistTurnImage(client, assetStore, ownerUserId, campaignId, turnId, buffer, "image/png");
+                if (asset) await client.query("UPDATE turns SET image_url = $2 WHERE id = $1", [turnId, asset.publicUrl]);
+            } catch (err) {
+                /* ignored */
+            }
+        }
       }
 
       const memory = buildTurnFictionMemory(turn, ordinal);

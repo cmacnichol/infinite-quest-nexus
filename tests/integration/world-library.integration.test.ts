@@ -451,7 +451,7 @@ integration("World Library and campaign version integration", () => {
 
     const updated = await updateCampaign(pool, campaign.id, campaignUpdateSchema.parse({ storyLengthProfile: "extended" }));
     expect(updated.storyLengthProfile).toBe("extended");
-    const exported = await exportCampaign(pool, campaign.id);
+    const exported = await exportCampaign(pool, campaign.id, null);
     expect(exported.settings.storyLength).toBe("extended");
   });
 
@@ -598,7 +598,7 @@ integration("World Library and campaign version integration", () => {
     });
     expect(JSON.stringify(context.scopes.worldCanon.playerCharacter)).not.toContain("Original legacy source");
 
-    const exported = await exportCampaign(pool, campaign.id);
+    const exported = await exportCampaign(pool, campaign.id, null);
     expect(exported.campaign).toMatchObject({
       selectedCharacterId: "mira",
       characterProfile: { name: "Mira Vale", profile: editedProfile },
@@ -692,10 +692,10 @@ integration("World Library and campaign version integration", () => {
       name: "Second Character",
       guidance: "Second character canon."
     });
-    expect((await exportCampaign(pool, first.id)).world.character).toBe("First Character\n\nFirst character canon.");
-    expect((await exportCampaign(pool, second.id)).world.character).toBe("Second Character\n\nSecond character canon.");
+    expect((await exportCampaign(pool, first.id, null)).world.character).toBe("First Character\n\nFirst character canon.");
+    expect((await exportCampaign(pool, second.id, null)).world.character).toBe("Second Character\n\nSecond character canon.");
 
-    const portableCampaign = await exportCampaign(pool, second.id);
+    const portableCampaign = await exportCampaign(pool, second.id, null);
     portableCampaign.world.title = `Roundtrip Character ${crypto.randomUUID()}`;
     const roundtrip = await importLegacyStory(pool, storyImportRequestSchema.parse({
       sourceName: "synthetic-character-roundtrip.story",
@@ -816,7 +816,7 @@ integration("World Library and campaign version integration", () => {
         promptProtocolVersion: "synthetic-protocol"
       })]
     );
-    const exported = await exportCampaign(pool, campaign.id);
+    const exported = await exportCampaign(pool, campaign.id, null);
     const serialized = JSON.stringify(exported);
     expect(exported).toMatchObject({
       format: "infinite-quest-campaign",

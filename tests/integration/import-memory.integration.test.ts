@@ -120,7 +120,7 @@ integration("legacy import and Chronicle integration", () => {
 
   it("attaches a portable campaign to another world while preserving its character snapshot", async () => {
     const ownerUserId = await initialOwnerId(pool);
-    const portable = JSON.parse(JSON.stringify(await exportCampaign(pool, campaignId)));
+    const portable = JSON.parse(JSON.stringify(await exportCampaign(pool, campaignId, null)));
     portable.campaign.title = `Portable transferred campaign ${crypto.randomUUID()}`;
     portable.campaign.characterProfile = {
       name: "Portable Hero",
@@ -272,7 +272,7 @@ integration("legacy import and Chronicle integration", () => {
   });
 
   it("round-trips loadable story settings and history without credentials", async () => {
-    const exported = await exportCampaign(pool, campaignId) as Record<string, any>;
+    const exported = await exportCampaign(pool, campaignId, null) as Record<string, any>;
     expect(exported.format).toBe("infinite-quest-campaign");
     expect(exported.settings.aiProvider).toBe("openrouter");
     expect(exported.settings).not.toHaveProperty("apiKey");
