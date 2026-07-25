@@ -1063,30 +1063,61 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string, ass
 
   archive.append(JSON.stringify(payload, null, 2), { name: 'campaign.json' });
 
-  const assetPromises = [];
-  const imageUrls = turns.rows.map((t: any) => t.image_url).filter(Boolean);
-  if (row.content.world?.coverImageUrl) imageUrls.push(row.content.world.coverImageUrl);
-  if (row.content.world?.character?.avatarUrl) imageUrls.push(row.content.world.character.avatarUrl);
+  const assetIdsResult = await pool.query<{ asset_id: string }>(
+    `SELECT DISTINCT asset_id FROM (
+       SELECT ar.asset_id FROM asset_references ar WHERE ar.campaign_id = $1 AND ar.owner_user_id = $2 AND ar.asset_id IS NOT NULL
+       UNION
+       SELECT tisa.asset_id FROM turn_illustration_segment_assets tisa
+         JOIN turn_illustration_segments tis ON tis.id = tisa.segment_id
+        WHERE tis.campaign_id = $1 AND tis.owner_user_id = $2 AND tisa.asset_id IS NOT NULL
+       UNION
+       SELECT ij.asset_id FROM image_jobs ij WHERE ij.campaign_id = $1 AND ij.owner_user_id = $2 AND ij.asset_id IS NOT NULL
+       UNION
+       SELECT w.cover_asset_id AS asset_id FROM worlds w
+         JOIN world_versions wv ON wv.world_id = w.id
+         JOIN campaigns c ON c.world_version_id = wv.id
+        WHERE c.id = $1 AND c.owner_user_id = $2 AND w.cover_asset_id IS NOT NULL
+     ) campaign_assets`,
+    [campaignId, ownerUserId]
+  );
 
-  const seenIds = new Set();
+  const uuidRegex = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g;
+  const rawUrls: string[] = [
+    ...turns.rows.map((t: any) => t.image_url),
+    row.content?.world?.coverImageUrl,
+    row.content?.world?.character?.avatarUrl
+  ].filter(Boolean);
 
-  for (const url of imageUrls) {
-    if (typeof url === 'string' && url.startsWith('/api/v1/assets/')) {
-        const id = url.split('/api/v1/assets/')[1];
-        if (!id) continue;
-        if (!seenIds.has(id)) {
-            seenIds.add(id);
-            assetPromises.push((async () => {
-                try {
-                    const asset = await readAsset(pool, assetStore, ownerUserId, id);
-                    const ext = asset.mimeType === "image/png" ? ".png" : asset.mimeType === "image/jpeg" ? ".jpg" : asset.mimeType === "image/webp" ? ".webp" : asset.mimeType === "image/gif" ? ".gif" : "";
-                    archive.append(asset.bytes, { name: `assets/${id}${ext}` });
-                } catch (err) {
-                    /* ignored */
-                }
-            })());
+  const seenIds = new Set<string>(assetIdsResult.rows.map((r) => r.asset_id));
+
+  for (const url of rawUrls) {
+    if (typeof url === 'string') {
+      const matches = url.match(uuidRegex);
+      if (matches) {
+        for (const match of matches) {
+          seenIds.add(match);
         }
+      }
     }
+  }
+
+  const assetPromises = [];
+
+  for (const id of seenIds) {
+    assetPromises.push(
+      (async () => {
+        try {
+          const asset = await readAsset(pool, assetStore, ownerUserId, id);
+          const ext = asset.mimeType === "image/png" ? ".png"
+                    : asset.mimeType === "image/jpeg" ? ".jpg"
+                    : asset.mimeType === "image/webp" ? ".webp"
+                    : asset.mimeType === "image/gif" ? ".gif" : "";
+          archive.append(asset.bytes, { name: `assets/${id}${ext}` });
+        } catch (err) {
+          /* ignored */
+        }
+      })()
+    );
   }
 
   await Promise.all(assetPromises);

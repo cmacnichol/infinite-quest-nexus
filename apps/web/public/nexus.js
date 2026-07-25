@@ -3921,7 +3921,8 @@ async function importStoryObject(story, sourceName, requestOverrides = {}) {
   setStatus(`Importing ${story.turns?.length || 0} turns into PostgreSQL and building Chronicle memory…`);
 
   let result;
-  if (selectedFile && selectedFile.name.toLowerCase().endsWith('.zip') && selectedImportSource?.origin === "file") {
+  const isZipFile = selectedFile && (selectedFile.name.toLowerCase().endsWith('.zip') || selectedFile.name.toLowerCase().endsWith('.story')) && selectedImportSource?.origin === "file";
+  if (isZipFile) {
     const formData = new FormData();
     formData.append("file", selectedFile);
     formData.append("requestOverrides", JSON.stringify(requestOverrides));
@@ -4139,12 +4140,19 @@ async function previewImportSource(sourceName, sourceText, sourceKind = "auto", 
 
 async function previewImportFile(file) {
   let sourceText;
-  if (file.name.toLowerCase().endsWith('.zip')) {
-    const zip = await new JSZip().loadAsync(file);
-    const campaignJsonFile = zip.file("campaign.json") || zip.file("infinite-quest-campaign.json");
-    if (!campaignJsonFile) throw new Error("The zip archive does not contain campaign.json.");
-    sourceText = await campaignJsonFile.async("string");
-  } else {
+  const lowerName = file.name.toLowerCase();
+  if (lowerName.endsWith('.zip') || lowerName.endsWith('.story')) {
+    try {
+      const zip = await new JSZip().loadAsync(file);
+      const campaignJsonFile = zip.file("campaign.json") || zip.file("infinite-quest-campaign.json");
+      if (campaignJsonFile) {
+        sourceText = await campaignJsonFile.async("string");
+      }
+    } catch {
+      /* Not a zip archive; fall back to plain text */
+    }
+  }
+  if (!sourceText) {
     sourceText = await file.text();
   }
   await previewImportSource(file.name, sourceText, elements.infiniteWorldsKind.value, "file");
