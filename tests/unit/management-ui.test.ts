@@ -194,7 +194,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('value="world_json"');
     expect(managementHtml).toContain('value="world_text"');
     expect(managementHtml).toContain('value="story_text"');
-    expect(managementHtml).toContain('accept=".story,.json,.txt,application/json,text/plain"');
+    expect(managementHtml).toContain('accept=".zip,.story,.json,.txt,application/zip,application/x-zip-compressed,application/json,text/plain"');
     expect(managementScript).toContain('/api/v1/imports/infinite-worlds/preview');
     expect(managementScript).toContain('/api/v1/imports/infinite-worlds');
   });
