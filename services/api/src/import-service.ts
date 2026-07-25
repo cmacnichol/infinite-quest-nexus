@@ -446,7 +446,8 @@ export async function importLegacyStory(
     if (assetStore && assetBuffers && !existingTarget) {
       const coverUrl = typeof request.story.world.coverImageUrl === 'string' ? request.story.world.coverImageUrl : '';
       if (coverUrl.startsWith("/api/v1/assets/")) {
-        const id = coverUrl.split("/api/v1/assets/")[1];
+        const match = coverUrl.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
+        const id = match ? match[0] : null;
         if (id && assetBuffers.has(id)) {
             try {
                 const asset = await persistWorldCover(client, assetStore, ownerUserId, assetBuffers.get(id)!, "image/png");
@@ -545,11 +546,10 @@ export async function importLegacyStory(
         const asset = await importTurnImage(client, assetStore, ownerUserId, campaignId, turnId, turn.imageUrl);
         if (asset) await client.query("UPDATE turns SET image_url = $2 WHERE id = $1", [turnId, asset.publicUrl]);
       } else if (assetStore && assetBuffers && turn.imageUrl?.startsWith("/api/v1/assets/")) {
-        const id = turn.imageUrl.split("/api/v1/assets/")[1];
+        const match = turn.imageUrl.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
+        const id = match ? match[0] : null;
         if (id && assetBuffers.has(id)) {
             const buffer = assetBuffers.get(id)!;
-            // The extension doesn't strictly give us mimeType perfectly here, but we can guess or rely on lib/sharp.
-            // Let's use image/png as fallback, since sharp will figure it out when verifying anyway.
             try {
                 const asset = await persistTurnImage(client, assetStore, ownerUserId, campaignId, turnId, buffer, "image/png");
                 if (asset) await client.query("UPDATE turns SET image_url = $2 WHERE id = $1", [turnId, asset.publicUrl]);
