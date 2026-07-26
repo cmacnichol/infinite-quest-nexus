@@ -614,4 +614,31 @@ describe("Nexus management UI contracts", () => {
     expect(campaignArchiveCommit).toContain("previewToken: selectedImport.previewToken");
     expect(campaignArchiveCommit).not.toContain("FormData");
   });
+
+  it("keeps Campaign Archive previews current, recoverable, and safely refreshable", () => {
+    expect(managementHtml).toContain('id="previewCampaignArchiveAgain"');
+    expect(managementHtml).toContain("Preview again");
+    const archivePreviewStart = managementScript.indexOf("async function previewCampaignArchive(file)");
+    const archivePreviewEnd = managementScript.indexOf("\nasync function refreshCampaignArchivePreview()", archivePreviewStart);
+    const archivePreview = managementScript.slice(archivePreviewStart, archivePreviewEnd);
+    expect(archivePreview).toContain("campaignArchivePreviewSequence");
+    expect(archivePreview).toContain("campaignArchivePreviewAbortController");
+    expect(archivePreview).toContain("signal: abortController.signal");
+    expect(archivePreview).toContain("isCampaignArchivePreviewCurrent(previewSequence, file, destination)");
+    expect(managementScript).toContain("sameCampaignArchiveDestination(destination, campaignArchiveDestination())");
+    const sourceChangeStart = managementScript.indexOf('elements.importSourceType.addEventListener("change"');
+    const sourceChangeEnd = managementScript.indexOf("\nelements.infiniteWorldsKind", sourceChangeStart);
+    const sourceChange = managementScript.slice(sourceChangeStart, sourceChangeEnd);
+    expect(sourceChange).toContain("const sourceRefreshSequence = beginCampaignImportRefresh();");
+    expect(sourceChange.indexOf("beginCampaignImportRefresh()")).toBeLessThan(sourceChange.indexOf("previewImportFile(selectedFile)"));
+    expect(managementScript).toContain("Campaign Archive imports require a .zip backup.");
+    expect(managementScript).toContain("clearCampaignArchivePreview();\n      throw new Error");
+    expect(managementScript).toContain("handleCampaignImportRefreshError");
+    const destinationChangeStart = managementScript.indexOf('elements.campaignImportDestination.addEventListener("change"');
+    const destinationChangeEnd = managementScript.indexOf("\nelements.importBrowserState", destinationChangeStart);
+    const destinationChange = managementScript.slice(destinationChangeStart, destinationChangeEnd);
+    expect(destinationChange).toContain("refresh.catch((error) => handleCampaignImportRefreshError(error, refreshSequence))");
+    expect(managementScript).toContain("elements.previewCampaignArchiveAgain.addEventListener");
+    expect(managementScript).toContain("Your file is still selected; preview it again before importing.");
+  });
 });
