@@ -4051,7 +4051,7 @@ function handleCampaignImportRefreshError(error, sequence) {
 }
 
 function campaignArchiveErrorCode(error) {
-  return error?.details?.code || error?.code || "";
+  return error?.details?.code || error?.code || error?.name || "";
 }
 
 function campaignArchivePreviewField(label, value) {
@@ -4132,6 +4132,7 @@ async function previewCampaignArchive(file) {
   if (!isCampaignArchivePreviewCurrent(previewSequence, file, destination)) return false;
   if (!response.ok) {
     const error = new Error(payload.message || `Request failed with HTTP ${response.status}.`);
+    error.name = payload.error || "ApiError";
     error.details = payload.details || payload;
     error.code = payload.code || payload.details?.code;
     throw error;
@@ -4494,6 +4495,9 @@ async function importStory() {
       await loadCampaigns(result.campaignId);
       const outcome = result.duplicate ? "The Campaign Archive was already imported; the existing campaign was selected." : "Campaign Archive imported.";
       setStatus(`${outcome} ${number(result.stats.turnCount)} turns, ${number(result.stats.memoryCount)} Chronicle memories, and ${number(result.stats.assetCount)} original images are available.`, "success");
+      selectedImport = null;
+      elements.previewCampaignArchiveAgain.classList.add("hidden");
+      elements.importStory.disabled = true;
     } else {
       await importStoryObject(selectedImport.request.story, selectedImport.request.sourceName, selectedImport.request);
     }
