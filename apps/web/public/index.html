@@ -394,8 +394,14 @@
     <section id="imports" class="card import-card world-management" aria-labelledby="import-title">
       <div>
         <h2 id="import-title">Import a world or campaign</h2>
-        <p>Upload a file or paste its copied contents. Infinite Quest <code>.story</code> exports include the world and story history. Infinite Worlds world JSON contains only world details; import its matching story TXT separately after selecting the imported world.</p>
+        <p>Upload a file or paste its copied contents. Campaign Archive imports one standalone campaign with its attached world and original images; provider profiles and credentials remain excluded. Infinite Quest <code>.story</code> exports include the world and story history. Infinite Worlds world JSON contains only world details; import its matching story TXT separately after selecting the imported world.</p>
       </div>
+      <label>Import source
+        <select id="importSourceType">
+          <option value="auto">Detect world, campaign, or Infinite Worlds content</option>
+          <option value="campaign_archive">Campaign backup (.zip)</option>
+        </select>
+      </label>
       <label class="file-field">
         <span>Infinite Quest <code>.story</code>/campaign or world export (.zip/JSON/TXT), or Infinite Worlds JSON/TXT</span>
         <input id="storyFile" type="file" accept=".zip,.story,.json,.txt,application/zip,application/x-zip-compressed,application/json,text/plain">

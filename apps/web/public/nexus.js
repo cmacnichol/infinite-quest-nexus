@@ -2492,7 +2492,7 @@ async function exportSelectedCampaign() {
   if (!selectedCampaign) return;
   try {
     await downloadJson(`/api/v1/campaigns/${selectedCampaign.id}/export`, "infinite-quest-campaign.zip");
-    campaignMessage("Portable campaign with images exported without provider profiles or credentials.", "success");
+    campaignMessage("Campaign Archive exported with the exact attached world and associated original images; provider profiles and credentials are excluded.", "success");
   } catch (error) {
     campaignMessage(error.message || String(error), "error");
   }
@@ -3997,6 +3997,116 @@ function updateCampaignImportDestinationVisibility() {
   elements.campaignImportVersionField.classList.toggle("hidden", !existing);
 }
 
+function campaignArchiveDestination() {
+  if (elements.campaignImportDestination.value === "existing") {
+    return { kind: "existing_world_version", worldVersionId: elements.campaignImportVersion.value };
+  }
+  return { kind: "embedded" };
+}
+
+function campaignArchiveErrorCode(error) {
+  return error?.details?.code || error?.code || "";
+}
+
+function campaignArchivePreviewField(label, value) {
+  const field = document.createElement("div");
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const detail = document.createElement("dd");
+  detail.textContent = value;
+  field.append(term, detail);
+  return field;
+}
+
+function renderCampaignArchivePreview(preview) {
+  const destination = preview.destination.operation === "create_world"
+    ? "Create attached world"
+    : preview.destination.operation === "reuse_world_version"
+      ? "Reuse matching attached world version"
+      : "Attach to selected world version";
+  const character = preview.campaign.selectedCharacter
+    ? `${preview.campaign.selectedCharacter.name} (${preview.campaign.selectedCharacter.id})`
+    : "No selected character snapshot";
+  const title = document.createElement("h3");
+  title.textContent = `Campaign Archive: ${preview.campaign.title}`;
+  const fields = document.createElement("dl");
+  fields.append(
+    campaignArchivePreviewField("World", `${preview.world.title} · version ${preview.world.versionNumber}`),
+    campaignArchivePreviewField("Destination", destination),
+    campaignArchivePreviewField("History", `${number(preview.campaign.acceptedTurnCount)} accepted turns`),
+    campaignArchivePreviewField("Chronicle", `${number(preview.chronicle.memoryCount)} Chronicle memories · ${number(preview.chronicle.summaryCount)} summaries`),
+    campaignArchivePreviewField("Original images", `${number(preview.assets.originalCount)} original images · ${number(preview.assets.totalBytes)} bytes`),
+    campaignArchivePreviewField("Selected character", character),
+    campaignArchivePreviewField("Provider data", "Provider profiles and credentials are excluded")
+  );
+  elements.importPreview.className = "import-preview campaign-archive-preview";
+  elements.importPreview.replaceChildren(title, fields);
+  if (preview.warnings.length) {
+    const warnings = document.createElement("p");
+    warnings.className = "archive-warning";
+    warnings.textContent = preview.warnings.join(" ");
+    elements.importPreview.append(warnings);
+  }
+}
+
+async function previewCampaignArchive(file) {
+  if (elements.campaignImportOptions.classList.contains("hidden")) {
+    elements.campaignImportDestination.value = "embedded";
+    elements.campaignImportWorld.value = "";
+    elements.campaignImportVersion.replaceChildren(new Option("Choose a target world first", ""));
+  }
+  showInfiniteWorldsOptions(false);
+  showCampaignImportOptions(true);
+  const destination = campaignArchiveDestination();
+  if (destination.kind === "existing_world_version" && !destination.worldVersionId) {
+    selectedImport = null;
+    elements.importStory.disabled = true;
+    elements.importPreview.className = "import-preview muted";
+    elements.importPreview.textContent = "Choose a published target world version before previewing this Campaign Archive.";
+    setStatus("Select the exact destination version, then preview the Campaign Archive.");
+    return;
+  }
+  selectedImport = null;
+  elements.importStory.disabled = true;
+  elements.importPreview.className = "import-preview muted";
+  elements.importPreview.textContent = "Uploading the Campaign Archive once for server validation…";
+  setStatus("Validating Campaign Archive without writing to the database…");
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("destination", JSON.stringify(destination));
+  const response = await fetch("/api/v1/imports/campaign-archive/preview", { method: "POST", body: formData });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.message || `Request failed with HTTP ${response.status}.`);
+    error.details = payload.details || payload;
+    error.code = payload.code || payload.details?.code;
+    throw error;
+  }
+  selectedImportSource = { sourceName: file.name, sourceKind: "campaign_archive", origin: "file" };
+  selectedImport = { kind: "campaign_archive", previewToken: payload.previewToken, destination, preview: payload };
+  renderCampaignArchivePreview(payload);
+  elements.importStory.disabled = false;
+  setStatus("Campaign Archive and destination validated. Import will use this preview without uploading the ZIP again.", "success");
+}
+
+async function refreshCampaignArchivePreview() {
+  if (!selectedFile) return;
+  elements.importStory.disabled = true;
+  await previewCampaignArchive(selectedFile);
+}
+
+function campaignArchiveImportActive() {
+  return selectedImport?.kind === "campaign_archive" || elements.importSourceType.value === "campaign_archive";
+}
+
+async function refreshCampaignImportPreview() {
+  if (campaignArchiveImportActive()) {
+    await refreshCampaignArchivePreview();
+    return;
+  }
+  await refreshPortableCampaignPreview();
+}
+
 function campaignImportRequest(sourceName, story) {
   const targetWorldVersionId = elements.campaignImportDestination.value === "existing"
     ? elements.campaignImportVersion.value : "";
@@ -4039,11 +4149,12 @@ async function refreshPortableCampaignPreview() {
 }
 
 async function loadCampaignImportVersions() {
+  if (campaignArchiveImportActive()) elements.importStory.disabled = true;
   elements.campaignImportVersion.replaceChildren(new Option("Loading published versions…", ""));
   const worldId = elements.campaignImportWorld.value;
   if (!worldId) {
     elements.campaignImportVersion.replaceChildren(new Option("Choose a target world first", ""));
-    await refreshPortableCampaignPreview();
+    await refreshCampaignImportPreview();
     return;
   }
   const world = await api(`/api/v1/worlds/${worldId}`);
@@ -4053,7 +4164,7 @@ async function loadCampaignImportVersions() {
     ...versions.map((version) => new Option(`Version ${version.versionNumber}${version.releaseNotes ? ` · ${version.releaseNotes}` : ""}`, version.id))
   );
   if (versions.length === 1) elements.campaignImportVersion.value = versions[0].id;
-  await refreshPortableCampaignPreview();
+  await refreshCampaignImportPreview();
 }
 
 async function previewInfiniteWorldsSource(sourceName, sourceText, sourceKind) {
@@ -4141,6 +4252,19 @@ async function previewImportSource(sourceName, sourceText, sourceKind = "auto", 
 async function previewImportFile(file) {
   let sourceText;
   const lowerName = file.name.toLowerCase();
+  const archiveSource = elements.importSourceType.value === "campaign_archive";
+  const archiveCandidate = archiveSource || ((lowerName.endsWith(".zip") || lowerName.endsWith(".story")) && elements.importSourceType.value === "auto");
+  if (archiveCandidate) {
+    if (archiveSource && !lowerName.endsWith(".zip")) {
+      throw new Error("Campaign Archive imports require a .zip backup.");
+    }
+    try {
+      await previewCampaignArchive(file);
+      return;
+    } catch (error) {
+      if (!(lowerName.endsWith(".story") && campaignArchiveErrorCode(error) === "archive-format-unrecognized")) throw error;
+    }
+  }
   if (lowerName.endsWith('.zip') || lowerName.endsWith('.story')) {
     try {
       const zip = await new JSZip().loadAsync(file);
@@ -4298,11 +4422,29 @@ async function importStory() {
       const result = await api("/api/v1/imports/world", { method: "POST", body: JSON.stringify(selectedImport.request) });
       await loadWorlds(result.worldId);
       setStatus(result.duplicate ? "The world was already imported; the existing World Library record was selected." : "World imported with an immutable version and editable draft.", "success");
+    } else if (selectedImport.kind === "campaign_archive") {
+      setStatus("Importing the validated Campaign Archive…");
+      const result = await api("/api/v1/imports/campaign-archive", {
+        method: "POST",
+        body: JSON.stringify({
+          previewToken: selectedImport.previewToken,
+          destination: selectedImport.destination
+        })
+      });
+      await loadWorlds(result.worldId);
+      await loadCampaigns(result.campaignId);
+      const outcome = result.duplicate ? "The Campaign Archive was already imported; the existing campaign was selected." : "Campaign Archive imported.";
+      setStatus(`${outcome} ${number(result.stats.turnCount)} turns, ${number(result.stats.memoryCount)} Chronicle memories, and ${number(result.stats.assetCount)} original images are available.`, "success");
     } else {
       await importStoryObject(selectedImport.request.story, selectedImport.request.sourceName, selectedImport.request);
     }
   } catch (error) {
     if (progressTimer) clearInterval(progressTimer);
+    if (campaignArchiveErrorCode(error) === "archive-preview-stale" && selectedFile) {
+      selectedImport = null;
+      setStatus("This Campaign Archive preview is no longer valid. Your file is still selected; preview it again before importing.", "error");
+      return;
+    }
     setStatus(error.message || String(error), "error");
   } finally {
     if (progressTimer) clearInterval(progressTimer);
@@ -4405,7 +4547,7 @@ elements.storyFile.addEventListener("change", async () => {
     setStatus("Choose a story file to begin.");
     return;
   }
-  elements.infiniteWorldsKind.value = "auto";
+  if (elements.importSourceType.value === "auto") elements.infiniteWorldsKind.value = "auto";
   setStatus(`Reading and validating ${selectedFile.name}…`);
   try {
     await previewImportFile(selectedFile);
@@ -4413,6 +4555,14 @@ elements.storyFile.addEventListener("change", async () => {
     elements.importPreview.textContent = "Validation failed; no database content was changed.";
     setStatus(error.message || String(error), "error");
   }
+});
+elements.importSourceType.addEventListener("change", () => {
+  if (!selectedFile) return;
+  previewImportFile(selectedFile).catch((error) => {
+    elements.importPreview.className = "import-preview muted";
+    elements.importPreview.textContent = "Validation failed; no database content was changed.";
+    setStatus(error.message || String(error), "error");
+  });
 });
 elements.infiniteWorldsKind.addEventListener("change", () => {
   if (selectedImportSource) previewImportSource(selectedImportSource.sourceName, selectedImportSource.sourceText, elements.infiniteWorldsKind.value, selectedImportSource.origin).catch((error) => setStatus(error.message || String(error), "error"));
@@ -4490,15 +4640,16 @@ document.querySelectorAll(".nav-menu-panel a, .nav-menu-panel button").forEach((
   control.addEventListener("click", () => closeNavigationMenus());
 });
 elements.campaignImportDestination.addEventListener("change", async () => {
+  if (campaignArchiveImportActive()) elements.importStory.disabled = true;
   updateCampaignImportDestinationVisibility();
   if (elements.campaignImportDestination.value === "existing") {
     await loadCampaignImportVersions();
   } else {
-    await refreshPortableCampaignPreview();
+    await refreshCampaignImportPreview();
   }
 });
 elements.campaignImportWorld.addEventListener("change", loadCampaignImportVersions);
-elements.campaignImportVersion.addEventListener("change", refreshPortableCampaignPreview);
+elements.campaignImportVersion.addEventListener("change", refreshCampaignImportPreview);
 elements.importBrowserState.addEventListener("click", importBrowserState);
 elements.newWorld.addEventListener("click", newWorld);
 elements.editWorldDraft.addEventListener("click", () => openWorldAuthor("edit"));

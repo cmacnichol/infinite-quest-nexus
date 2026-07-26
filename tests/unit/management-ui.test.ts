@@ -589,4 +589,29 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("expectedConfigUpdatedAt");
     expect(managementScript).toContain("Only turns without an active segment set will be queued.");
   });
+
+  it("previews and commits one standalone Campaign Archive without uploading it twice", () => {
+    expect(managementHtml).toContain('id="importSourceType"');
+    expect(managementHtml).toContain('<option value="auto">Detect world, campaign, or Infinite Worlds content</option>');
+    expect(managementHtml).toContain('<option value="campaign_archive">Campaign backup (.zip)</option>');
+    expect(managementHtml).toContain("one standalone campaign with its attached world and original images");
+    expect(managementHtml).toContain("provider profiles and credentials remain excluded");
+    expect(managementHtml).toContain('role="status" aria-live="polite"');
+    expect(managementScript).toContain('"/api/v1/imports/campaign-archive/preview"');
+    expect(managementScript).toContain('"/api/v1/imports/campaign-archive"');
+    expect(managementScript).toContain('previewToken: selectedImport.previewToken');
+    expect(managementScript).toContain('accepted turns');
+    expect(managementScript).toContain('Chronicle memories');
+    expect(managementScript).toContain('original images');
+    expect(managementScript).toContain('selected character');
+    expect(managementScript).toContain('Provider profiles and credentials are excluded');
+    expect(managementScript).toContain('archive-preview-stale');
+    expect(managementScript).toContain('function previewImportSource(');
+    expect(managementScript).toContain('function validateClipboardImport(');
+    const archiveCommitStart = managementScript.indexOf('else if (selectedImport.kind === "campaign_archive")');
+    const archiveCommitEnd = managementScript.indexOf("\n    } else {", archiveCommitStart);
+    const campaignArchiveCommit = managementScript.slice(archiveCommitStart, archiveCommitEnd);
+    expect(campaignArchiveCommit).toContain("previewToken: selectedImport.previewToken");
+    expect(campaignArchiveCommit).not.toContain("FormData");
+  });
 });
