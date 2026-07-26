@@ -8,10 +8,40 @@ import {
   sampleValuesForPrompt
 } from "../../packages/contracts/src/prompt-library.js";
 import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../../packages/domain/src/illustrations.js";
+import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
 import { promptProtocolVersion, type PromptSnapshot } from "../../services/api/src/prompt-library-service.js";
 import { infiniteWorldsPromptSet } from "../../services/api/src/infinite-worlds-import-service.js";
 
 describe("Prompt Library catalog", () => {
+  it("requires both narrative guidance and a structured profile for generated characters", () => {
+    const generation = PROMPT_TEMPLATE_CATALOG.world_generation.defaultContent;
+    const recovery = PROMPT_TEMPLATE_CATALOG.world_generation_recovery.defaultContent;
+    const supplement = PROMPT_TEMPLATE_CATALOG.world_roster_supplement.defaultContent;
+
+    for (const prompt of [generation, recovery, supplement]) {
+      expect(prompt).toContain("character_text");
+      expect(prompt).toContain("profile");
+    }
+    expect(generation).toContain("character_text must be non-empty");
+    expect(generation).not.toContain("may be empty when profile is complete");
+    expect(recovery).toContain("complete replacement");
+  });
+
+  it("uses the same complete-character requirements in the fallback world prompt", () => {
+    const prompt = buildTemplateWorldPrompt({
+      sourceName: "test",
+      sourceKind: "prompt",
+      title: "The Moving Roads",
+      summary: "Roads move beneath moonlight.",
+      keywords: [],
+      excerpts: []
+    }).systemPrompt;
+
+    expect(prompt).toContain("character_text must be non-empty");
+    expect(prompt).toContain("profile with identity");
+    expect(prompt).not.toContain("may be empty when profile is complete");
+  });
+
   it("enforces campaign ownership with a composite database relationship", () => {
     const migration = readFileSync("database/migrations/0038_prompt_library_hardening.sql", "utf8");
     expect(migration).toContain("FOREIGN KEY (campaign_id, owner_user_id)");

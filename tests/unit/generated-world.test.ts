@@ -7,7 +7,9 @@ import {
   applicationOwnedCharacterIds,
   applicationOwnedDefaultTriggers,
   applicationOwnedEventTriggers,
-  applicationOwnedRpgStats
+  applicationOwnedRpgStats,
+  incompleteGeneratedWorldError,
+  selectCompleteGeneratedCharacters
 } from "../../services/api/src/world-generator-service.js";
 
 function profile() {
@@ -67,6 +69,19 @@ function completeWorld(characterCount = 3) {
 }
 
 describe("generated world completion", () => {
+  it("retains complete characters and replaces incomplete entries", () => {
+    const candidates = [
+      { id: "complete", name: "Complete", character_text: "Guidance", profile: profile(), rpg_statistics: [], default_triggers: [] },
+      { id: "no-profile", name: "No Profile", character_text: "Guidance", rpg_statistics: [], default_triggers: [] },
+      { id: "no-guidance", name: "No Guidance", character_text: "", profile: profile(), rpg_statistics: [], default_triggers: [] }
+    ];
+
+    const selected = selectCompleteGeneratedCharacters(candidates);
+
+    expect(selected.characters.map((character) => character.id)).toEqual(["complete"]);
+    expect(selected.needed).toBe(2);
+  });
+
   it("accepts a complete world with three structured characters", () => {
     expect(parseCompleteGeneratedWorld(completeWorld()).playableCharacters).toHaveLength(3);
   });
@@ -173,5 +188,30 @@ describe("generated world completion", () => {
       message: expect.any(String)
     }));
     expect(JSON.stringify(issues)).not.toContain(marker);
+  });
+
+  it("exposes safe structured issues without provider content", () => {
+    let validationError: unknown;
+    try {
+      parseCompleteGeneratedWorld({
+        world: { title: "PRIVATE_TITLE" },
+        playableCharacters: []
+      });
+    } catch (error) {
+      validationError = error;
+    }
+    const failure = incompleteGeneratedWorldError(validationError) as Error & {
+      statusCode: number;
+      expose: boolean;
+      details: { code: string; issues: Array<{ path: string }> };
+    };
+
+    expect(failure).toMatchObject({
+      statusCode: 502,
+      expose: true,
+      details: { code: "incomplete_generated_world" }
+    });
+    expect(failure.details.issues.some((issue) => issue.path === "world.genre")).toBe(true);
+    expect(JSON.stringify(failure.details)).not.toContain("PRIVATE_TITLE");
   });
 });
