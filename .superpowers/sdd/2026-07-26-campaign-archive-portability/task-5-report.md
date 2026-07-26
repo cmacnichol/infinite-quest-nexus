@@ -79,3 +79,44 @@ This report is force-staged in the following documentation commit because the SD
 - The Linux path correction is platform-safe by construction and is exercised by the PostgreSQL commit path when that suite is run on Linux; this environment cannot execute that DB-backed path because `TEST_DATABASE_URL` is absent.
 - Legacy compatibility remains intentionally restrictive: only the legacy campaign JSON and supported UUID-named image assets are accepted, after shared ZIP validation.
 - The report, plan, and ledger scope were preserved; only this report was appended.
+
+## Fix round 2 of 5: scoped re-review findings
+
+### Changed files
+
+- `services/api/src/campaign-archive-service.ts`: centralizes the Campaign Archive world projection/hash as `portableWorldContentHash`, which applies the same portable sanitization and canonicalization used by export; export, decode, preview attachment/reuse checks, and legacy adaptation use that path.
+- `services/api/src/import-service.ts`: uses `portableWorldContentHash` again while the commit transaction revalidates an explicit destination version.
+- `tests/unit/campaign-archive-service.test.ts`: directly proves a destination-only provider `apiKey` does not change the export-compatible world hash.
+- `tests/integration/campaign-archive.integration.test.ts`: adds explicit-secret preview/commit coverage (including a post-preview secret change), repeat preview/import idempotency returning `duplicate: true`, and rollback count checks for worlds, campaigns, and imports as well as assets/files.
+
+### RED/GREEN evidence
+
+- RED: `C:\Git\InfiniteQuest\node_modules\.bin\vitest.cmd run tests/unit/campaign-archive-service.test.ts` failed as expected with `TypeError: portableWorldContentHash is not a function` before the shared export-compatible hash function existed.
+- GREEN: `C:\Git\InfiniteQuest\node_modules\.bin\vitest.cmd run tests/unit/campaign-archive-service.test.ts` — 1 file / 5 tests passed after the implementation.
+- GREEN: `C:\Git\InfiniteQuest\node_modules\.bin\vitest.cmd run tests/unit/campaign-archive-service.test.ts tests/unit/archive-io.test.ts tests/unit/asset-archive-service.test.ts tests/unit/archive-contracts.test.ts` — 4 files / 120 tests passed, 2 existing skips.
+- GREEN: `pnpm check` — passed, including repository-boundary, data-safety, TypeScript/no-emit, and browser syntax checks.
+- GREEN: `pnpm build` — passed.
+- GREEN: `git diff --check` — passed.
+
+### PostgreSQL status
+
+`TEST_DATABASE_URL` remains unset. The focused Campaign Archive integration command loaded but skipped honestly:
+
+```powershell
+C:\Git\InfiniteQuest\node_modules\.bin\vitest.cmd run --config vitest.integration.config.ts tests/integration/campaign-archive.integration.test.ts
+```
+
+Result: 1 file skipped / 13 tests skipped. The added real-database cases are not represented as passed: explicit destination compatibility before and after preview, repeat destination-aware idempotency, and forced rollback with relational-row/file cleanup still require a PostgreSQL run.
+
+### Commit
+
+`a7e31e1` — `Align campaign archive world compatibility`
+
+This ignored report is force-staged in the following documentation commit.
+
+### Self-review
+
+- The hash helper deliberately accepts `unknown` because database content and decoded portable payloads cross the same boundary; it delegates to the existing sanitizer/canonicalizer rather than duplicating removal rules.
+- The repeat-import assertion proves the completed `imports` result is returned only after a new preview for the same destination; reusing an already consumed token remains correctly stale.
+- The forced rollback test establishes no new `worlds`, `campaigns`, or `imports` rows relative to the pre-import baseline, but needs PostgreSQL execution before its trigger/filesystem behavior is considered verified.
+- The plan and ledger were not modified.
