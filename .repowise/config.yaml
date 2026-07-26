@@ -1,0 +1,9 @@
+editor_files:
+  agents_md: true
+provider: codex_cli
+model: codex_cli/default
+embedder: mock
+reasoning: auto
+distill:
+  commands:
+    enabled: true
