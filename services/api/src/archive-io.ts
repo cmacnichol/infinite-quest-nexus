@@ -1,6 +1,6 @@
 import { ZipArchive, type Archiver } from "archiver";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, type WriteStream } from "node:fs";
+import type { WriteStream } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -217,8 +217,6 @@ function inspectCentralDirectory(
   limits: ArchiveLimits
 ): {
   filesByPath: Map<string, ZipFile>;
-  normalizedEntries: Map<ZipFile, NormalizedArchivePath>;
-  directories: Set<string>;
   uncompressedBytes: number;
 } {
   if (files.length > limits.maxEntries) {
@@ -227,15 +225,12 @@ function inspectCentralDirectory(
 
   const paths = new Map<string, "file" | "directory">();
   const filesByPath = new Map<string, ZipFile>();
-  const normalizedEntries = new Map<ZipFile, NormalizedArchivePath>();
-  const directories = new Set<string>();
   let uncompressedBytes = 0;
 
   for (const file of files) {
     const directory = file.type === "Directory" || file.path.endsWith("/");
     const normalized = normalizeArchivePath(file.path, directory);
     const path = normalized.comparisonPath;
-    normalizedEntries.set(file, normalized);
 
     if ((file.flags & 0x0001) !== 0) {
       throw archiveError("archive-entry-unsafe", "Encrypted archive entries are not supported.", { path });
@@ -257,7 +252,6 @@ function inspectCentralDirectory(
       if (paths.get(ancestor) === "file") {
         throw archiveError("archive-entry-duplicate", "An archive file collides with a directory path.", { path });
       }
-      directories.add(ancestor);
     }
     if (!directory) {
       for (const existing of paths.keys()) {
@@ -280,14 +274,12 @@ function inspectCentralDirectory(
       }
     }
 
-    if (directory) {
-      directories.add(path);
-    } else {
+    if (!directory) {
       filesByPath.set(path, file);
     }
   }
 
-  return { filesByPath, normalizedEntries, directories, uncompressedBytes };
+  return { filesByPath, uncompressedBytes };
 }
 
 async function measureEntry(file: ZipFile, maximumBytes: number, collect: boolean): Promise<StreamMeasurement> {
