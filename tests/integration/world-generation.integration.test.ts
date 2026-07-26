@@ -21,6 +21,8 @@ import {
   getImportProgress,
   importInfiniteWorlds
 } from "../../services/api/src/infinite-worlds-import-service.js";
+import { generateWorldPreview } from "../../services/api/src/world-generator-service.js";
+import { getWorldGenerationProgress } from "../../services/api/src/world-generation-progress-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -49,18 +51,18 @@ function profile(role: string) {
   };
 }
 
-function character(name: string, includeProfile: boolean) {
+function character(name: string, includeProfile: boolean, privateMarker = "") {
   return {
     id: `provider-${name.toLocaleLowerCase().replaceAll(" ", "-")}`,
     name,
-    character_text: `${name} is prepared to explore the submerged citadel.`,
+    character_text: `${name} is prepared to explore the submerged citadel.${privateMarker}`,
     ...(includeProfile ? { profile: profile(name) } : {}),
     rpg_statistics: [],
     default_triggers: []
   };
 }
 
-function worldResponse(includeProfiles: boolean): string {
+function worldResponse(includeProfiles: boolean, privateMarker = ""): string {
   return JSON.stringify({
     title: "The Sunken Citadel",
     genre: "Fantasy exploration",
@@ -70,9 +72,9 @@ function worldResponse(includeProfiles: boolean): string {
     firstAction: "Examine the glowing runes on the bronze archway.",
     story_rules: "Ancient enchantments distort sound and light underwater.",
     playable_characters: [
-      character("Elara the Diver", includeProfiles),
-      character("Thalor the Scholar", includeProfiles),
-      character("Kael the Guard", includeProfiles)
+      character("Elara the Diver", includeProfiles, privateMarker),
+      character("Thalor the Scholar", includeProfiles, privateMarker),
+      character("Kael the Guard", includeProfiles, privateMarker)
     ],
     rpg_statistics: [],
     default_triggers: [],
@@ -80,12 +82,12 @@ function worldResponse(includeProfiles: boolean): string {
   });
 }
 
-function supplementResponse(includeProfiles: boolean): string {
+function supplementResponse(includeProfiles: boolean, privateMarker = ""): string {
   return JSON.stringify({
     playable_characters: [
-      character("Elara the Diver", includeProfiles),
-      character("Thalor the Scholar", includeProfiles),
-      character("Kael the Guard", includeProfiles)
+      character("Elara the Diver", includeProfiles, privateMarker),
+      character("Thalor the Scholar", includeProfiles, privateMarker),
+      character("Kael the Guard", includeProfiles, privateMarker)
     ]
   });
 }
@@ -189,6 +191,89 @@ integration("generated CYOA world persistence", () => {
       }
     };
   }
+
+  async function persistenceCounts() {
+    const result = await pool.query<{
+      worlds: number;
+      world_versions: number;
+      world_drafts: number;
+      imports: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::int FROM worlds WHERE owner_user_id = $1) AS worlds,
+         (SELECT count(*)::int FROM world_versions WHERE owner_user_id = $1) AS world_versions,
+         (SELECT count(*)::int FROM world_drafts WHERE owner_user_id = $1) AS world_drafts,
+         (SELECT count(*)::int FROM imports WHERE owner_user_id = $1) AS imports`,
+      [ownerUserId]
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error("Expected persistence counts.");
+    return row;
+  }
+
+  it("repairs a manual preview without persisting world or import records", async () => {
+    const progressKey = `manual-preview-success-${crypto.randomUUID()}`;
+    replies.push(
+      { content: worldResponse(false) },
+      { content: supplementResponse(true) }
+    );
+    const before = await persistenceCounts();
+
+    const preview = await generateWorldPreview(pool, {
+      title: "The Sunken Citadel",
+      prompt: "Build a playable world from the submerged citadel premise.",
+      progressKey
+    }, credentialSecret);
+
+    expect(preview.content.playableCharacters).toHaveLength(3);
+    expect(preview.content.playableCharacters.every(
+      (entry) => Boolean(entry.characterText.trim() && entry.profile)
+    )).toBe(true);
+    await expect(getWorldGenerationProgress(pool, ownerUserId, progressKey)).resolves.toMatchObject({
+      status: "completed",
+      phase: "completed",
+      progressPercent: 100,
+      message: "World and character generation completed."
+    });
+    expect(await persistenceCounts()).toEqual(before);
+  });
+
+  it("fails an incomplete manual preview safely without persisting records", async () => {
+    const progressKey = `manual-preview-failure-${crypto.randomUUID()}`;
+    const privateMarker = `PRIVATE_MANUAL_PREVIEW_${crypto.randomUUID()}`;
+    replies.push(
+      { content: worldResponse(false, privateMarker) },
+      { content: supplementResponse(false, privateMarker) }
+    );
+    const before = await persistenceCounts();
+
+    await expect(generateWorldPreview(pool, {
+      title: "The Sunken Citadel",
+      prompt: `Build a playable world without exposing ${privateMarker}.`,
+      progressKey
+    }, credentialSecret)).rejects.toMatchObject({
+      statusCode: 502,
+      expose: true,
+      details: { code: "incomplete_generated_world" }
+    });
+
+    const progress = await getWorldGenerationProgress(pool, ownerUserId, progressKey);
+    expect(progress).toMatchObject({
+      status: "failed",
+      phase: "failed",
+      progressPercent: 100
+    });
+    expect(progress?.message).toContain(
+      "The text provider did not return a complete world. Review the missing fields and try again."
+    );
+    expect(progress?.message).toContain(
+      "playable_characters.0.profile: Generated structured character profile is required."
+    );
+    expect(progress?.errorMessage).toBe(progress?.message);
+    expect(JSON.stringify(progress)).not.toContain(privateMarker);
+    expect(progress?.message.length).toBeLessThanOrEqual(500);
+    expect(await persistenceCounts()).toEqual(before);
+  });
 
   it("does not persist a world or import when supplementation remains incomplete", async () => {
     const sourceName = `incomplete-generated-cyoa-${crypto.randomUUID()}.json`;
