@@ -490,9 +490,10 @@ export function normalizeRawWorldJson(raw: unknown): Record<string, unknown> {
       narrative_hook: coerceText(character.narrative_hook ?? character.narrativeHook ?? story.narrativeHooks).trim() || concept
     };
   };
+  const hasSeedArray = Array.isArray(obj.character_seeds) || Array.isArray(obj.characterSeeds);
   const seedSource = getArr("character_seeds", "characterSeeds");
   const legacyCharacters = getArr("playable_characters", "playableCharacters", "playable_character_list", "characters");
-  const normalizedSeeds = (seedSource.length ? seedSource : legacyCharacters)
+  const normalizedSeeds = (hasSeedArray ? seedSource : legacyCharacters)
     .map((item, index) => normalizeGeneratedSeed(item, index));
   const normalizedChars = legacyCharacters.map((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return item;
