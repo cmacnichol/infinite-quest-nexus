@@ -1,19 +1,18 @@
 import { ZipArchive, type Archiver } from "archiver";
 import { createHash, randomUUID } from "node:crypto";
-import type { WriteStream } from "node:fs";
+import type { BigIntStats } from "node:fs";
 import {
   lstat,
   mkdir,
   open,
   realpath,
   rename,
-  rm,
   stat,
   unlink,
   type FileHandle
 } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { Readable, Transform, type TransformCallback } from "node:stream";
+import { Readable, Transform, Writable, type TransformCallback } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
 import unzipper, { type File as ZipFile } from "unzipper";
 import {
@@ -27,12 +26,21 @@ import {
 } from "../../../packages/contracts/src/archives.js";
 import type { ArchiveLimits as RuntimeArchiveLimits } from "../../../packages/database/src/config.js";
 
-const INSPECTED_FILES = Symbol("inspectedArchiveFiles");
+const STAGED_IDENTITY = Symbol("stagedArchiveIdentity");
+const INSPECTED_IDENTITY = Symbol("inspectedArchiveIdentity");
+const INSPECTED_LIMITS = Symbol("inspectedArchiveLimits");
 const FIXED_ZIP_DATE = new Date("1980-01-01T00:00:00.000Z");
 const UNIX_HOST = 3;
 const UNIX_FILE_TYPE_MASK = 0o170000;
 const UNIX_DIRECTORY_TYPE = 0o040000;
 const UNIX_REGULAR_FILE_TYPE = 0o100000;
+const EOCD_SIGNATURE = 0x06054b50;
+const ZIP64_EOCD_SIGNATURE = 0x06064b50;
+const ZIP64_LOCATOR_SIGNATURE = 0x07064b50;
+const LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
+const EOCD_MINIMUM_BYTES = 22;
+const EOCD_MAXIMUM_COMMENT_BYTES = 65_535;
+const EOCD_TAIL_BYTES = EOCD_MINIMUM_BYTES + EOCD_MAXIMUM_COMMENT_BYTES;
 
 export type ArchiveLimits = RuntimeArchiveLimits;
 
@@ -40,6 +48,18 @@ export type StagedArchive = {
   relativePath: string;
   absolutePath: string;
   compressedBytes: number;
+};
+
+type FileIdentity = {
+  device: bigint;
+  inode: bigint;
+  size: bigint;
+  modifiedNanoseconds: bigint;
+  changedNanoseconds: bigint;
+};
+
+type InternalStagedArchive = StagedArchive & {
+  [STAGED_IDENTITY]: FileIdentity;
 };
 
 export type InspectedArchiveEntry = ArchiveEntry & {
@@ -55,7 +75,8 @@ export type InspectedArchive = {
 };
 
 type InternalInspectedArchive = InspectedArchive & {
-  [INSPECTED_FILES]: ReadonlyMap<string, ZipFile>;
+  [INSPECTED_IDENTITY]: FileIdentity;
+  [INSPECTED_LIMITS]: ArchiveLimits;
 };
 
 export type ArchiveArtifactEntry = {
@@ -93,6 +114,14 @@ type StreamMeasurement = {
   byteLength: number;
   sha256: string;
   buffer?: Buffer;
+};
+
+type StableDirectory = {
+  root: string;
+  directory: string;
+  device: bigint;
+  inode: bigint;
+  anchor?: FileHandle;
 };
 
 function archiveError(
@@ -136,9 +165,115 @@ function assertUnderRoot(root: string, target: string): void {
   }
 }
 
+function fileIdentity(value: BigIntStats): FileIdentity {
+  return {
+    device: value.dev,
+    inode: value.ino,
+    size: value.size,
+    modifiedNanoseconds: value.mtimeNs,
+    changedNanoseconds: value.ctimeNs
+  };
+}
+
+function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
+  return left.device === right.device
+    && left.inode === right.inode
+    && left.size === right.size
+    && left.modifiedNanoseconds === right.modifiedNanoseconds
+    && left.changedNanoseconds === right.changedNanoseconds;
+}
+
+function sameFileObject(left: FileIdentity, right: FileIdentity): boolean {
+  return left.device === right.device
+    && left.inode === right.inode
+    && left.size === right.size
+    && left.modifiedNanoseconds === right.modifiedNanoseconds;
+}
+
+function sameDirectoryIdentity(
+  directory: Pick<StableDirectory, "device" | "inode">,
+  value: BigIntStats
+): boolean {
+  return directory.device === value.dev && directory.inode === value.ino;
+}
+
+async function assertNoSymlinkSegments(root: string, targetDirectory: string): Promise<void> {
+  const pathFromRoot = relative(root, targetDirectory);
+  if (!pathFromRoot) return;
+  const segments = pathFromRoot.split(sep);
+  let current = root;
+  for (const segment of segments) {
+    current = resolve(current, segment);
+    const value = await lstat(current);
+    if (value.isSymbolicLink() || !value.isDirectory()) {
+      throw archiveError("archive-entry-unsafe", "Archive storage directories must not be symbolic links or junctions.");
+    }
+  }
+}
+
+async function stabilizeDirectory(root: string, directory: string): Promise<StableDirectory> {
+  if (process.platform !== "linux" && process.platform !== "win32") {
+    throw archiveError(
+      "archive-entry-unsafe",
+      "This platform does not provide the required stable archive-directory mutation semantics."
+    );
+  }
+  await assertNoSymlinkSegments(root, directory);
+  const resolvedDirectory = await realpath(directory);
+  if (resolvedDirectory !== root) assertUnderRoot(root, resolvedDirectory);
+  if (resolvedDirectory !== directory) {
+    throw archiveError("archive-entry-unsafe", "Archive storage directories must resolve without indirection.");
+  }
+  const value = await stat(directory, { bigint: true });
+  if (!value.isDirectory()) {
+    throw archiveError("archive-entry-unsafe", "Archive storage requires a directory.");
+  }
+
+  let anchor: FileHandle | undefined;
+  if (process.platform === "linux") {
+    anchor = await open(directory, "r");
+    const anchored = await anchor.stat({ bigint: true });
+    if (!anchored.isDirectory() || anchored.dev !== value.dev || anchored.ino !== value.ino) {
+      await closeHandle(anchor);
+      throw archiveError("archive-entry-unsafe", "The archive storage directory changed during validation.");
+    }
+  }
+
+  return {
+    root,
+    directory,
+    device: value.dev,
+    inode: value.ino,
+    ...(anchor ? { anchor } : {})
+  };
+}
+
+async function assertDirectoryStable(directory: StableDirectory): Promise<void> {
+  let resolved: string;
+  let value: BigIntStats;
+  try {
+    resolved = await realpath(directory.directory);
+    value = await stat(directory.directory, { bigint: true });
+  } catch {
+    throw archiveError("archive-entry-unsafe", "The archive storage directory changed during the filesystem operation.");
+  }
+  if (resolved !== directory.root) assertUnderRoot(directory.root, resolved);
+  if (resolved !== directory.directory || !value.isDirectory() || !sameDirectoryIdentity(directory, value)) {
+    throw archiveError("archive-entry-unsafe", "The archive storage directory changed during the filesystem operation.");
+  }
+}
+
+function stableChildPath(directory: StableDirectory, filename: string): string {
+  if (directory.anchor) {
+    return `/proc/self/fd/${directory.anchor.fd}/${filename}`;
+  }
+  return resolve(directory.directory, filename);
+}
+
 async function prepareRootDirectory(archiveRoot: string, child: "staging" | "artifacts"): Promise<{
   root: string;
   directory: string;
+  stable: StableDirectory;
 }> {
   const configuredRoot = resolve(archiveRoot);
   await mkdir(configuredRoot, { recursive: true });
@@ -146,9 +281,8 @@ async function prepareRootDirectory(archiveRoot: string, child: "staging" | "art
   const childPath = resolve(root, child);
   assertUnderRoot(root, childPath);
   await mkdir(childPath, { recursive: true });
-  const directory = await realpath(childPath);
-  assertUnderRoot(root, directory);
-  return { root, directory };
+  const stable = await stabilizeDirectory(root, childPath);
+  return { root, directory: childPath, stable };
 }
 
 class CompressedByteCounter extends Transform {
@@ -170,33 +304,77 @@ class CompressedByteCounter extends Transform {
   }
 }
 
+function fileHandleWritable(handle: FileHandle): Writable {
+  let position = 0;
+  return new Writable({
+    write(chunk: Buffer | string, encoding: BufferEncoding, callback) {
+      const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
+      void (async () => {
+        let offset = 0;
+        while (offset < value.byteLength) {
+          const result = await handle.write(
+            value,
+            offset,
+            value.byteLength - offset,
+            position
+          );
+          if (result.bytesWritten === 0) throw new Error("The archive file write made no progress.");
+          offset += result.bytesWritten;
+          position += result.bytesWritten;
+        }
+      })().then(() => callback(), callback);
+    }
+  });
+}
+
 export async function stageArchiveUpload(
   source: NodeJS.ReadableStream,
   archiveRoot: string,
   limits: ArchiveLimits
 ): Promise<StagedArchive> {
-  const { root, directory } = await prepareRootDirectory(archiveRoot, "staging");
+  const { root, directory, stable } = await prepareRootDirectory(archiveRoot, "staging");
   const filename = `${randomUUID()}.zip`;
   const absolutePath = resolve(directory, filename);
   assertUnderRoot(root, absolutePath);
   const relativePath = `staging/${filename}`;
+  const operationPath = stableChildPath(stable, filename);
   const counter = new CompressedByteCounter(limits.maxCompressedBytes);
-  const output = (await open(absolutePath, "wx", 0o640)).createWriteStream();
+  let handle: FileHandle | undefined;
+  let output: Writable | undefined;
+  let identity: FileIdentity | undefined;
 
   try {
+    await assertDirectoryStable(stable);
+    handle = await open(operationPath, "wx", 0o640);
+    identity = fileIdentity(await handle.stat({ bigint: true }));
+    await assertDirectoryStable(stable);
+    output = fileHandleWritable(handle);
     await pipeline(source as Readable, counter, output);
     if ((source as NodeJS.ReadableStream & { truncated?: boolean }).truncated === true) {
       throw archiveError("archive-limit-exceeded", "The compressed archive upload was truncated.");
     }
-    return {
+    await handle.sync();
+    identity = fileIdentity(await handle.stat({ bigint: true }));
+    if (identity.size !== BigInt(counter.byteLength)) {
+      throw archiveError("archive-checksum-mismatch", "The staged archive size changed during upload.");
+    }
+    await assertDirectoryStable(stable);
+    const staged: InternalStagedArchive = {
       relativePath,
       absolutePath,
-      compressedBytes: counter.byteLength
+      compressedBytes: counter.byteLength,
+      [STAGED_IDENTITY]: identity
     };
+    await closeHandle(handle);
+    handle = undefined;
+    return staged;
   } catch (error) {
-    output.destroy();
-    await rm(absolutePath, { force: true });
+    output?.destroy();
+    if (identity) await removePathWithIdentity(operationPath, identity);
+    await closeHandle(handle);
     throw error;
+  } finally {
+    await closeHandle(stable.anchor);
   }
 }
 
@@ -282,6 +460,281 @@ function inspectCentralDirectory(
   return { filesByPath, uncompressedBytes };
 }
 
+async function readExactRange(handle: FileHandle, position: number, length: number): Promise<Buffer> {
+  if (!safeInteger(position) || !safeInteger(length) || length === 0) {
+    throw archiveError("archive-format-unrecognized", "The ZIP archive contains invalid bounded metadata.");
+  }
+  const buffer = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    const result = await handle.read(buffer, offset, length - offset, position + offset);
+    if (result.bytesRead === 0) {
+      throw archiveError("archive-format-unrecognized", "The ZIP archive metadata is truncated.");
+    }
+    offset += result.bytesRead;
+  }
+  return buffer;
+}
+
+function checkedZipNumber(value: bigint, archiveSize: number): number {
+  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER) || value > BigInt(archiveSize)) {
+    throw archiveError("archive-format-unrecognized", "The ZIP archive declares an invalid metadata offset.");
+  }
+  return Number(value);
+}
+
+function assertEncodedRecordCount(recordCount: bigint, limits: ArchiveLimits): void {
+  if (recordCount > BigInt(limits.maxEntries)) {
+    throw archiveError("archive-limit-exceeded", "The archive contains too many encoded central-directory records.");
+  }
+}
+
+async function preflightZipMetadata(
+  handle: FileHandle,
+  archiveSize: number,
+  limits: ArchiveLimits
+): Promise<void> {
+  if (!safeInteger(archiveSize) || archiveSize < EOCD_MINIMUM_BYTES) {
+    throw archiveError("archive-format-unrecognized", "The uploaded file is not a recognized ZIP archive.");
+  }
+  const tailLength = Math.min(archiveSize, EOCD_TAIL_BYTES);
+  const tailStart = archiveSize - tailLength;
+  const tail = await readExactRange(handle, tailStart, tailLength);
+  let relativeEocdOffset = -1;
+  for (let offset = tail.length - EOCD_MINIMUM_BYTES; offset >= 0; offset -= 1) {
+    if (tail.readUInt32LE(offset) !== EOCD_SIGNATURE) continue;
+    const commentLength = tail.readUInt16LE(offset + 20);
+    if (offset + EOCD_MINIMUM_BYTES + commentLength === tail.length) {
+      relativeEocdOffset = offset;
+      break;
+    }
+  }
+  if (relativeEocdOffset < 0) {
+    throw archiveError("archive-format-unrecognized", "The ZIP end-of-central-directory record is missing or malformed.");
+  }
+
+  const eocd = tail.subarray(relativeEocdOffset, relativeEocdOffset + EOCD_MINIMUM_BYTES);
+  const eocdOffset = tailStart + relativeEocdOffset;
+  const diskNumber = eocd.readUInt16LE(4);
+  const diskStart = eocd.readUInt16LE(6);
+  const recordsOnDisk = eocd.readUInt16LE(8);
+  const records = eocd.readUInt16LE(10);
+  const centralSize = eocd.readUInt32LE(12);
+  const centralOffset = eocd.readUInt32LE(16);
+  const zip64 = diskNumber === 0xffff
+    || diskStart === 0xffff
+    || recordsOnDisk === 0xffff
+    || records === 0xffff
+    || centralSize === 0xffffffff
+    || centralOffset === 0xffffffff;
+
+  if (!zip64) {
+    if (diskNumber !== 0 || diskStart !== 0 || recordsOnDisk !== records) {
+      throw archiveError("archive-format-unrecognized", "Multi-disk ZIP archives are not supported.");
+    }
+    assertEncodedRecordCount(BigInt(records), limits);
+    if (centralOffset + centralSize > eocdOffset) {
+      throw archiveError("archive-format-unrecognized", "The ZIP central-directory bounds are invalid.");
+    }
+    return;
+  }
+
+  const locatorOffset = eocdOffset - 20;
+  if (locatorOffset < 0) {
+    throw archiveError("archive-format-unrecognized", "The ZIP64 locator is missing.");
+  }
+  const locator = await readExactRange(handle, locatorOffset, 20);
+  if (locator.readUInt32LE(0) !== ZIP64_LOCATOR_SIGNATURE
+    || locator.readUInt32LE(4) !== 0
+    || locator.readUInt32LE(16) !== 1) {
+    throw archiveError("archive-format-unrecognized", "The ZIP64 locator is invalid.");
+  }
+  const zip64Offset = checkedZipNumber(locator.readBigUInt64LE(8), archiveSize);
+  if (zip64Offset + 56 > locatorOffset) {
+    throw archiveError("archive-format-unrecognized", "The ZIP64 end-of-central-directory record is truncated.");
+  }
+  const zip64Record = await readExactRange(handle, zip64Offset, 56);
+  if (zip64Record.readUInt32LE(0) !== ZIP64_EOCD_SIGNATURE) {
+    throw archiveError("archive-format-unrecognized", "The ZIP64 end-of-central-directory signature is invalid.");
+  }
+  const zip64RecordSize = zip64Record.readBigUInt64LE(4);
+  if (zip64RecordSize < 44n
+    || BigInt(zip64Offset) + 12n + zip64RecordSize !== BigInt(locatorOffset)) {
+    throw archiveError("archive-format-unrecognized", "The ZIP64 end-of-central-directory size is invalid.");
+  }
+  const zip64DiskNumber = zip64Record.readUInt32LE(16);
+  const zip64DiskStart = zip64Record.readUInt32LE(20);
+  const zip64RecordsOnDisk = zip64Record.readBigUInt64LE(24);
+  const zip64Records = zip64Record.readBigUInt64LE(32);
+  if (zip64DiskNumber !== 0 || zip64DiskStart !== 0 || zip64RecordsOnDisk !== zip64Records) {
+    throw archiveError("archive-format-unrecognized", "Multi-disk ZIP64 archives are not supported.");
+  }
+  assertEncodedRecordCount(zip64Records, limits);
+  const zip64CentralSize = checkedZipNumber(zip64Record.readBigUInt64LE(40), archiveSize);
+  const zip64CentralOffset = checkedZipNumber(zip64Record.readBigUInt64LE(48), archiveSize);
+  if (zip64CentralOffset + zip64CentralSize > zip64Offset) {
+    throw archiveError("archive-format-unrecognized", "The ZIP64 central-directory bounds are invalid.");
+  }
+}
+
+function archiveHandleSource(handle: FileHandle, archiveSize: number): {
+  size: () => Promise<number>;
+  stream: (offset: number, length?: number) => Readable;
+} {
+  return {
+    size: async () => archiveSize,
+    stream: (offset, length) => {
+      if (!safeInteger(offset) || offset >= archiveSize
+        || (length !== undefined && (!safeInteger(length) || length === 0))) {
+        return Readable.from((async function* invalidRange() {
+          throw new Error("Invalid ZIP source range.");
+        })());
+      }
+      const end = length === undefined
+        ? archiveSize - 1
+        : Math.min(archiveSize - 1, offset + length);
+      let position = offset;
+      let reading = false;
+      return new Readable({
+        read(requestedBytes) {
+          if (reading) return;
+          if (position > end) {
+            this.push(null);
+            return;
+          }
+          reading = true;
+          const byteLength = Math.min(Math.max(1, requestedBytes), 64 * 1024, end - position + 1);
+          const buffer = Buffer.allocUnsafe(byteLength);
+          void handle.read(buffer, 0, byteLength, position).then((result) => {
+            reading = false;
+            if (result.bytesRead === 0) {
+              this.push(null);
+              return;
+            }
+            position += result.bytesRead;
+            this.push(buffer.subarray(0, result.bytesRead));
+          }, (error) => {
+            reading = false;
+            this.destroy(error);
+          });
+        }
+      });
+    }
+  };
+}
+
+async function openArchiveFromHandle(
+  handle: FileHandle,
+  archiveSize: number,
+  limits: ArchiveLimits
+): Promise<unzipper.CentralDirectory> {
+  await preflightZipMetadata(handle, archiveSize, limits);
+  try {
+    const customOpen = unzipper.Open.custom as unknown as (
+      source: ReturnType<typeof archiveHandleSource>,
+      options: { tailSize: number }
+    ) => Promise<unzipper.CentralDirectory>;
+    return await customOpen(archiveHandleSource(handle, archiveSize), {
+      tailSize: Math.min(archiveSize, EOCD_TAIL_BYTES)
+    });
+  } catch (error) {
+    if (error instanceof ArchiveError) throw error;
+    throw archiveError("archive-format-unrecognized", "The uploaded file is not a recognized ZIP archive.");
+  }
+}
+
+function zip64LocalSizes(
+  extra: Buffer,
+  needsUncompressed: boolean,
+  needsCompressed: boolean
+): { uncompressed?: number; compressed?: number } {
+  let offset = 0;
+  while (offset + 4 <= extra.length) {
+    const signature = extra.readUInt16LE(offset);
+    const length = extra.readUInt16LE(offset + 2);
+    const end = offset + 4 + length;
+    if (end > extra.length) break;
+    if (signature === 0x0001) {
+      let valueOffset = offset + 4;
+      const result: { uncompressed?: number; compressed?: number } = {};
+      if (needsUncompressed) {
+        if (valueOffset + 8 > end) return {};
+        const value = extra.readBigUInt64LE(valueOffset);
+        if (value > BigInt(Number.MAX_SAFE_INTEGER)) return {};
+        result.uncompressed = Number(value);
+        valueOffset += 8;
+      }
+      if (needsCompressed) {
+        if (valueOffset + 8 > end) return {};
+        const value = extra.readBigUInt64LE(valueOffset);
+        if (value > BigInt(Number.MAX_SAFE_INTEGER)) return {};
+        result.compressed = Number(value);
+      }
+      return result;
+    }
+    offset = end;
+  }
+  return {};
+}
+
+async function inspectLocalHeaders(
+  handle: FileHandle,
+  files: readonly ZipFile[],
+  archiveSize: number
+): Promise<void> {
+  for (const file of files) {
+    if (!safeInteger(file.offsetToLocalFileHeader)
+      || file.offsetToLocalFileHeader + 30 > archiveSize) {
+      throw archiveError("archive-entry-unsafe", "An archive local-file-header offset is invalid.");
+    }
+    const header = await readExactRange(handle, file.offsetToLocalFileHeader, 30);
+    if (header.readUInt32LE(0) !== LOCAL_FILE_HEADER_SIGNATURE) {
+      throw archiveError("archive-entry-unsafe", "An archive local-file-header signature is invalid.");
+    }
+    const flags = header.readUInt16LE(6);
+    const compressionMethod = header.readUInt16LE(8);
+    const crc32 = header.readUInt32LE(14);
+    const rawCompressedSize = header.readUInt32LE(18);
+    const rawUncompressedSize = header.readUInt32LE(22);
+    const fileNameLength = header.readUInt16LE(26);
+    const extraFieldLength = header.readUInt16LE(28);
+    if (file.offsetToLocalFileHeader + 30 + fileNameLength + extraFieldLength > archiveSize) {
+      throw archiveError("archive-entry-unsafe", "An archive local-file-header is truncated.");
+    }
+    const variable = await readExactRange(
+      handle,
+      file.offsetToLocalFileHeader + 30,
+      fileNameLength + extraFieldLength
+    );
+    const pathBuffer = variable.subarray(0, fileNameLength);
+    const extra = variable.subarray(fileNameLength);
+    const zip64Sizes = zip64LocalSizes(
+      extra,
+      rawUncompressedSize === 0xffffffff,
+      rawCompressedSize === 0xffffffff
+    );
+    const compressedSize = rawCompressedSize === 0xffffffff ? zip64Sizes.compressed : rawCompressedSize;
+    const uncompressedSize = rawUncompressedSize === 0xffffffff ? zip64Sizes.uncompressed : rawUncompressedSize;
+    const usesDataDescriptor = (flags & 0x0008) !== 0;
+    const sizesMatch = usesDataDescriptor
+      ? (compressedSize === undefined || compressedSize === 0 || compressedSize === file.compressedSize)
+        && (uncompressedSize === undefined || uncompressedSize === 0 || uncompressedSize === file.uncompressedSize)
+        && (crc32 === 0 || crc32 === file.crc32)
+      : compressedSize === file.compressedSize
+        && uncompressedSize === file.uncompressedSize
+        && crc32 === file.crc32;
+
+    if (flags !== file.flags
+      || compressionMethod !== file.compressionMethod
+      || !pathBuffer.equals(file.pathBuffer)
+      || !sizesMatch) {
+      throw archiveError("archive-entry-unsafe", "An archive local header disagrees with its central-directory record.", {
+        path: normalizeArchivePath(file.path, file.type === "Directory").comparisonPath
+      });
+    }
+  }
+}
+
 async function measureEntry(file: ZipFile, maximumBytes: number, collect: boolean): Promise<StreamMeasurement> {
   const hash = createHash("sha256");
   const chunks: Buffer[] = [];
@@ -348,6 +801,52 @@ function isJsonEntry(entry: ArchiveEntry): boolean {
     || path.endsWith(".ndjson");
 }
 
+async function withVerifiedStagedArchive<T>(
+  staged: StagedArchive,
+  limits: ArchiveLimits,
+  expectedIdentity: FileIdentity | undefined,
+  operation: (handle: FileHandle, identity: FileIdentity, archiveSize: number) => Promise<T>
+): Promise<T> {
+  const stagedIdentity = (staged as InternalStagedArchive)[STAGED_IDENTITY];
+  if (!stagedIdentity) {
+    throw archiveError("archive-checksum-mismatch", "The staged archive is missing its original file identity.");
+  }
+
+  let handle: FileHandle | undefined;
+  let operationError: unknown;
+  let result: T | undefined;
+  let initialIdentity: FileIdentity | undefined;
+  try {
+    handle = await open(staged.absolutePath, "r");
+    initialIdentity = fileIdentity(await handle.stat({ bigint: true }));
+    if (!sameFileIdentity(initialIdentity, stagedIdentity)
+      || (expectedIdentity !== undefined && !sameFileIdentity(initialIdentity, expectedIdentity))
+      || initialIdentity.size !== BigInt(staged.compressedBytes)
+      || initialIdentity.size > BigInt(limits.maxCompressedBytes)) {
+      throw archiveError("archive-checksum-mismatch", "The staged archive file identity or compressed size changed.");
+    }
+    result = await operation(handle, initialIdentity, Number(initialIdentity.size));
+  } catch (error) {
+    operationError = error instanceof ArchiveError
+      ? error
+      : archiveError("archive-checksum-mismatch", "The staged archive could not be opened and verified.");
+  }
+
+  if (handle && initialIdentity) {
+    try {
+      const finalIdentity = fileIdentity(await handle.stat({ bigint: true }));
+      if (!sameFileIdentity(initialIdentity, finalIdentity)) {
+        operationError = archiveError("archive-checksum-mismatch", "The staged archive changed while it was being read.");
+      }
+    } catch {
+      operationError = archiveError("archive-checksum-mismatch", "The staged archive identity could not be reverified.");
+    }
+  }
+  await closeHandle(handle);
+  if (operationError !== undefined) throw operationError;
+  return result!;
+}
+
 export async function inspectArchive(
   staged: StagedArchive,
   limits: ArchiveLimits,
@@ -357,77 +856,78 @@ export async function inspectArchive(
     throw archiveError("archive-limit-exceeded", "The compressed archive exceeds the configured byte limit.");
   }
 
-  let directory: unzipper.CentralDirectory;
-  try {
-    directory = await unzipper.Open.file(staged.absolutePath);
-  } catch {
-    throw archiveError("archive-format-unrecognized", "The uploaded file is not a recognized ZIP archive.");
-  }
-
-  const central = inspectCentralDirectory(directory.files, limits);
-  const manifestFile = central.filesByPath.get("manifest.json");
-  if (!manifestFile) {
-    throw archiveError("archive-entry-missing", "The archive is missing manifest.json.");
-  }
-  if (manifestFile.uncompressedSize > limits.maxManifestBytes) {
-    throw archiveError("archive-limit-exceeded", "manifest.json exceeds the configured byte limit.");
-  }
-
-  const manifestMeasurement = await measureEntry(manifestFile, limits.maxManifestBytes, true);
-  const manifest = parseManifest(manifestMeasurement.buffer!);
-  if (expectedType !== undefined && manifest.archiveType !== expectedType) {
-    throw archiveError("archive-format-unrecognized", "The archive type does not match the requested operation.");
-  }
-
-  const declaredEntries = new Map<string, ArchiveEntry>();
-  for (const entry of manifest.entries) {
-    const normalized = normalizeArchivePath(entry.path);
-    declaredEntries.set(normalized.comparisonPath, { ...entry, path: normalized.logicalPath });
-  }
-
-  for (const [path] of central.filesByPath) {
-    if (path !== "manifest.json" && !declaredEntries.has(path)) {
-      throw archiveError("archive-entry-unsafe", "The archive contains an undeclared file.", { path });
+  return withVerifiedStagedArchive(staged, limits, undefined, async (handle, identity, archiveSize) => {
+    const directory = await openArchiveFromHandle(handle, archiveSize, limits);
+    const central = inspectCentralDirectory(directory.files, limits);
+    await inspectLocalHeaders(handle, directory.files, archiveSize);
+    const manifestFile = central.filesByPath.get("manifest.json");
+    if (!manifestFile) {
+      throw archiveError("archive-entry-missing", "The archive is missing manifest.json.");
     }
-  }
-
-  const entries = new Map<string, InspectedArchiveEntry>();
-  const inspectedFiles = new Map<string, ZipFile>();
-  for (const [path, declared] of declaredEntries) {
-    const file = central.filesByPath.get(path);
-    if (!file) {
-      throw archiveError("archive-entry-missing", "A manifest entry is missing from the archive.", { path });
-    }
-    if (isJsonEntry(declared)
-      && (file.uncompressedSize > limits.maxJsonEntryBytes || declared.byteLength > limits.maxJsonEntryBytes)) {
-      throw archiveError("archive-limit-exceeded", "A JSON archive entry exceeds the configured byte limit.", { path });
-    }
-    if (file.uncompressedSize !== declared.byteLength) {
-      throw archiveError("archive-checksum-mismatch", "An archive entry length does not match its manifest.", { path });
+    if (manifestFile.uncompressedSize > limits.maxManifestBytes) {
+      throw archiveError("archive-limit-exceeded", "manifest.json exceeds the configured byte limit.");
     }
 
-    const maximumBytes = isJsonEntry(declared) ? limits.maxJsonEntryBytes : limits.maxUncompressedBytes;
-    const measurement = await measureEntry(file, maximumBytes, false);
-    if (measurement.byteLength !== declared.byteLength || measurement.sha256 !== declared.sha256) {
-      throw archiveError("archive-checksum-mismatch", "An archive entry does not match its manifest.", { path });
+    const manifestMeasurement = await measureEntry(
+      manifestFile,
+      Math.min(limits.maxManifestBytes, manifestFile.uncompressedSize),
+      true
+    );
+    const manifest = parseManifest(manifestMeasurement.buffer!);
+    if (expectedType !== undefined && manifest.archiveType !== expectedType) {
+      throw archiveError("archive-format-unrecognized", "The archive type does not match the requested operation.");
     }
 
-    entries.set(path, {
-      ...declared,
-      compressedBytes: file.compressedSize,
-      uncompressedBytes: file.uncompressedSize
-    });
-    inspectedFiles.set(path, file);
-  }
+    const declaredEntries = new Map<string, ArchiveEntry>();
+    for (const entry of manifest.entries) {
+      const normalized = normalizeArchivePath(entry.path);
+      declaredEntries.set(normalized.comparisonPath, { ...entry, path: normalized.logicalPath });
+    }
 
-  const inspected: InternalInspectedArchive = {
-    manifest,
-    staged,
-    entries,
-    uncompressedBytes: central.uncompressedBytes,
-    [INSPECTED_FILES]: inspectedFiles
-  };
-  return inspected;
+    for (const [path] of central.filesByPath) {
+      if (path !== "manifest.json" && !declaredEntries.has(path)) {
+        throw archiveError("archive-entry-unsafe", "The archive contains an undeclared file.", { path });
+      }
+    }
+
+    const entries = new Map<string, InspectedArchiveEntry>();
+    for (const [path, declared] of declaredEntries) {
+      const file = central.filesByPath.get(path);
+      if (!file) {
+        throw archiveError("archive-entry-missing", "A manifest entry is missing from the archive.", { path });
+      }
+      if (isJsonEntry(declared)
+        && (file.uncompressedSize > limits.maxJsonEntryBytes || declared.byteLength > limits.maxJsonEntryBytes)) {
+        throw archiveError("archive-limit-exceeded", "A JSON archive entry exceeds the configured byte limit.", { path });
+      }
+      if (file.uncompressedSize !== declared.byteLength) {
+        throw archiveError("archive-checksum-mismatch", "An archive entry length does not match its manifest.", { path });
+      }
+
+      const configuredMaximum = isJsonEntry(declared) ? limits.maxJsonEntryBytes : limits.maxUncompressedBytes;
+      const maximumBytes = Math.min(configuredMaximum, declared.byteLength, file.uncompressedSize);
+      const measurement = await measureEntry(file, maximumBytes, false);
+      if (measurement.byteLength !== declared.byteLength || measurement.sha256 !== declared.sha256) {
+        throw archiveError("archive-checksum-mismatch", "An archive entry does not match its manifest.", { path });
+      }
+
+      entries.set(path, {
+        ...declared,
+        compressedBytes: file.compressedSize,
+        uncompressedBytes: file.uncompressedSize
+      });
+    }
+
+    const inspected: InternalInspectedArchive = {
+      manifest,
+      staged,
+      entries,
+      uncompressedBytes: central.uncompressedBytes,
+      [INSPECTED_IDENTITY]: identity,
+      [INSPECTED_LIMITS]: limits
+    };
+    return inspected;
+  });
 }
 
 export async function readVerifiedEntry(
@@ -440,8 +940,10 @@ export async function readVerifiedEntry(
   }
   const normalized = normalizeArchivePath(path);
   const entry = archive.entries.get(normalized.comparisonPath);
-  const file = (archive as InternalInspectedArchive)[INSPECTED_FILES]?.get(normalized.comparisonPath);
-  if (!entry || !file) {
+  const internal = archive as InternalInspectedArchive;
+  const identity = internal[INSPECTED_IDENTITY];
+  const limits = internal[INSPECTED_LIMITS];
+  if (!entry || !identity || !limits) {
     throw archiveError("archive-entry-missing", "The requested archive entry does not exist.", {
       path: normalized.comparisonPath
     });
@@ -452,13 +954,28 @@ export async function readVerifiedEntry(
     });
   }
 
-  const measurement = await measureEntry(file, maximumBytes, true);
-  if (measurement.byteLength !== entry.byteLength || measurement.sha256 !== entry.sha256) {
-    throw archiveError("archive-checksum-mismatch", "The requested archive entry no longer matches its manifest.", {
-      path: normalized.comparisonPath
-    });
-  }
-  return measurement.buffer!;
+  return withVerifiedStagedArchive(archive.staged, limits, identity, async (handle, _identity, archiveSize) => {
+    const directory = await openArchiveFromHandle(handle, archiveSize, limits);
+    const central = inspectCentralDirectory(directory.files, limits);
+    await inspectLocalHeaders(handle, directory.files, archiveSize);
+    const file = central.filesByPath.get(normalized.comparisonPath);
+    if (!file
+      || file.compressedSize !== entry.compressedBytes
+      || file.uncompressedSize !== entry.uncompressedBytes) {
+      throw archiveError("archive-checksum-mismatch", "The requested archive entry metadata changed.", {
+        path: normalized.comparisonPath
+      });
+    }
+
+    const streamMaximum = Math.min(maximumBytes, entry.byteLength, entry.uncompressedBytes);
+    const measurement = await measureEntry(file, streamMaximum, true);
+    if (measurement.byteLength !== entry.byteLength || measurement.sha256 !== entry.sha256) {
+      throw archiveError("archive-checksum-mismatch", "The requested archive entry no longer matches its manifest.", {
+        path: normalized.comparisonPath
+      });
+    }
+    return measurement.buffer!;
+  });
 }
 
 function assertWriterEntries(entries: readonly ArchiveArtifactEntry[]): void {
@@ -511,30 +1028,49 @@ async function closeHandle(handle: FileHandle | undefined): Promise<void> {
   }
 }
 
+async function removePathWithIdentity(path: string, identity: FileIdentity): Promise<void> {
+  try {
+    const value = await lstat(path, { bigint: true });
+    const current = fileIdentity(value);
+    if (!value.isFile() || value.isSymbolicLink()
+      || current.device !== identity.device || current.inode !== identity.inode) {
+      return;
+    }
+    await unlink(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 export async function writeArchiveArtifact(
   archiveRoot: string,
   entries: readonly ArchiveArtifactEntry[],
   buildManifest: (entries: readonly ArchiveEntry[]) => ArchiveManifest
 ): Promise<CompletedArchiveArtifact> {
   assertWriterEntries(entries);
-  const { root, directory } = await prepareRootDirectory(archiveRoot, "artifacts");
+  const { root, directory, stable } = await prepareRootDirectory(archiveRoot, "artifacts");
   const id = randomUUID();
   const temporaryPath = resolve(directory, `${id}.zip.tmp`);
   const absolutePath = resolve(directory, `${id}.zip`);
   assertUnderRoot(root, temporaryPath);
   assertUnderRoot(root, absolutePath);
+  const temporaryOperationPath = stableChildPath(stable, `${id}.zip.tmp`);
+  const finalOperationPath = stableChildPath(stable, `${id}.zip`);
 
   let handle: FileHandle | undefined;
-  let output: WriteStream | undefined;
+  let identity: FileIdentity | undefined;
+  let output: Writable | undefined;
   let outputCompleted: Promise<void> | undefined;
   let archive: Archiver | undefined;
   let published = false;
 
   try {
-    handle = await open(temporaryPath, "wx", 0o640);
-    output = handle.createWriteStream({ autoClose: true, flush: true });
+    await assertDirectoryStable(stable);
+    handle = await open(temporaryOperationPath, "wx", 0o640);
+    identity = fileIdentity(await handle.stat({ bigint: true }));
+    await assertDirectoryStable(stable);
+    output = fileHandleWritable(handle);
     outputCompleted = finished(output);
-    handle = undefined;
     archive = new ZipArchive({ forceLocalTime: false, zlib: { level: 9 } });
     archive.on("warning", (error) => output?.destroy(error));
     archive.on("error", (error) => output?.destroy(error));
@@ -572,14 +1108,28 @@ export async function writeArchiveArtifact(
 
     await archive.finalize();
     await outputCompleted;
-    await rename(temporaryPath, absolutePath);
+    await handle.sync();
+    identity = fileIdentity(await handle.stat({ bigint: true }));
+    await assertDirectoryStable(stable);
+    await rename(temporaryOperationPath, finalOperationPath);
     published = true;
+    await assertDirectoryStable(stable);
+    const publishedIdentity = fileIdentity(await handle.stat({ bigint: true }));
+    if (!sameFileObject(identity, publishedIdentity)) {
+      throw archiveError("archive-export-inconsistent", "The archive artifact changed during publication.");
+    }
+    identity = publishedIdentity;
+    const archiveStat = await stat(absolutePath, { bigint: true });
+    if (!sameFileIdentity(identity, fileIdentity(archiveStat))) {
+      throw archiveError("archive-export-inconsistent", "The published archive path does not match the completed artifact.");
+    }
+    await closeHandle(handle);
+    handle = undefined;
 
-    const archiveStat = await stat(absolutePath);
     return {
       relativePath: `artifacts/${id}.zip`,
       absolutePath,
-      byteLength: archiveStat.size,
+      byteLength: Number(archiveStat.size),
       contentFingerprint: manifest.contentFingerprint
     };
   } catch {
@@ -587,10 +1137,16 @@ export async function writeArchiveArtifact(
     archive?.abort();
     output?.destroy();
     await outputCompleted?.catch(() => undefined);
+    if (identity) {
+      await removePathWithIdentity(
+        published ? finalOperationPath : temporaryOperationPath,
+        identity
+      ).catch(() => undefined);
+    }
     await closeHandle(handle);
-    await rm(temporaryPath, { force: true });
-    if (published) await rm(absolutePath, { force: true });
     throw archiveError("archive-export-inconsistent", "The archive artifact could not be completed.");
+  } finally {
+    await closeHandle(stable.anchor);
   }
 }
 
@@ -605,20 +1161,39 @@ export async function removeArchivePath(
   const configuredRoot = resolve(archiveRoot);
   await mkdir(configuredRoot, { recursive: true });
   const root = await realpath(configuredRoot);
-  const target = resolve(root, ...normalized.logicalPath.split("/"));
+  const pathSegments = normalized.logicalPath.split("/");
+  const filename = pathSegments.pop()!;
+  const parentPath = resolve(root, ...pathSegments);
+  const target = resolve(parentPath, filename);
   assertUnderRoot(root, target);
 
-  let targetStat: Awaited<ReturnType<typeof lstat>>;
+  let stable: StableDirectory;
   try {
-    const parent = await realpath(resolve(target, ".."));
-    assertUnderRoot(root, parent);
-    targetStat = await lstat(target);
+    stable = await stabilizeDirectory(root, parentPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  if (!targetStat.isFile() || targetStat.isSymbolicLink()) {
-    throw archiveError("archive-entry-unsafe", "Archive cleanup can remove only regular files.");
+  const operationPath = stableChildPath(stable, filename);
+  let handle: FileHandle | undefined;
+  try {
+    await assertDirectoryStable(stable);
+    const beforeOpen = await lstat(operationPath, { bigint: true });
+    if (!beforeOpen.isFile() || beforeOpen.isSymbolicLink()) {
+      throw archiveError("archive-entry-unsafe", "Archive cleanup can remove only regular files.");
+    }
+    handle = await open(operationPath, "r");
+    const identity = fileIdentity(await handle.stat({ bigint: true }));
+    if (!sameFileIdentity(identity, fileIdentity(beforeOpen)) || !beforeOpen.isFile()) {
+      throw archiveError("archive-entry-unsafe", "The archive cleanup target changed during validation.");
+    }
+    await assertDirectoryStable(stable);
+    await unlink(operationPath);
+    await assertDirectoryStable(stable);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  } finally {
+    await closeHandle(handle);
+    await closeHandle(stable.anchor);
   }
-  await unlink(target);
 }

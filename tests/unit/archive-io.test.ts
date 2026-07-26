@@ -1,12 +1,22 @@
 import { ZipArchive } from "archiver";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { once } from "node:events";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Open } from "unzipper";
 import {
   ArchiveError,
@@ -22,6 +32,43 @@ import {
 import { loadRuntimeConfig } from "../../packages/database/src/config.js";
 import type { ArchiveEntry, ArchiveManifest } from "../../packages/contracts/src/archives.js";
 
+const filesystemRaceHooks = vi.hoisted(() => ({
+  beforeOpen: undefined as undefined | ((path: unknown, flags: unknown) => Promise<boolean>),
+  beforeRename: undefined as undefined | ((source: unknown, target: unknown) => Promise<boolean>),
+  beforeUnlink: undefined as undefined | ((path: unknown) => Promise<boolean>)
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+
+  async function runHook(
+    name: keyof typeof filesystemRaceHooks,
+    args: unknown[]
+  ): Promise<void> {
+    const hook = filesystemRaceHooks[name] as ((...hookArgs: unknown[]) => Promise<boolean>) | undefined;
+    if (!hook) return;
+    filesystemRaceHooks[name] = undefined;
+    const consumed = await hook(...args);
+    if (!consumed) filesystemRaceHooks[name] = hook as never;
+  }
+
+  return {
+    ...actual,
+    open: async (path: unknown, flags: unknown, mode?: unknown) => {
+      await runHook("beforeOpen", [path, flags]);
+      return actual.open(path as string, flags as string, mode as number | undefined);
+    },
+    rename: async (source: unknown, target: unknown) => {
+      await runHook("beforeRename", [source, target]);
+      return actual.rename(source as string, target as string);
+    },
+    unlink: async (path: unknown) => {
+      await runHook("beforeUnlink", [path]);
+      return actual.unlink(path as string);
+    }
+  };
+});
+
 const originalEnvironment = { ...process.env };
 const temporaryRoots: string[] = [];
 const DEFAULT_LIMITS: ArchiveLimits = {
@@ -35,6 +82,9 @@ const DEFAULT_LIMITS: ArchiveLimits = {
 
 afterEach(async () => {
   process.env = { ...originalEnvironment };
+  filesystemRaceHooks.beforeOpen = undefined;
+  filesystemRaceHooks.beforeRename = undefined;
+  filesystemRaceHooks.beforeUnlink = undefined;
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -136,6 +186,45 @@ async function patchSingleEntryCentralDirectory(
   await writeFile(zipPath, buffer);
 }
 
+function centralDirectoryOffsetForPath(buffer: Buffer, path: string): number {
+  const offset = centralDirectoryOffsets(buffer).find((candidate) => {
+    const fileNameLength = buffer.readUInt16LE(candidate + 28);
+    return buffer.subarray(candidate + 46, candidate + 46 + fileNameLength).toString("utf8") === path;
+  });
+  expect(offset).toBeTypeOf("number");
+  return offset!;
+}
+
+function endOfCentralDirectoryOffset(buffer: Buffer): number {
+  const signature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+  const offset = buffer.lastIndexOf(signature);
+  expect(offset).toBeGreaterThanOrEqual(0);
+  return offset;
+}
+
+async function patchZip(
+  zipPath: string,
+  patch: (buffer: Buffer) => Buffer | void
+): Promise<void> {
+  const buffer = await readFile(zipPath);
+  const replacement = patch(buffer);
+  await writeFile(zipPath, replacement ?? buffer);
+}
+
+async function replaceFileWithIdenticalCopy(path: string): Promise<void> {
+  const bytes = await readFile(path);
+  await rename(path, `${path}.replaced`);
+  await writeFile(path, bytes);
+}
+
+async function replaceDirectoryWithJunction(directory: string, outside: string): Promise<string> {
+  const moved = `${directory}.original`;
+  await rename(directory, moved);
+  await mkdir(outside, { recursive: true });
+  await symlink(outside, directory, "junction");
+  return moved;
+}
+
 async function unsafePathFixture(root: string, unsafePath: string): Promise<StagedArchive> {
   const safeName = "x".repeat(Buffer.byteLength(unsafePath, "utf8"));
   const zipPath = join(root, `${crypto.randomUUID()}.zip`);
@@ -208,6 +297,20 @@ describe("archive runtime configuration", () => {
     expect(config.archivePreviewTtlSeconds).toBe(60);
     expect(config.systemArchiveArtifactTtlSeconds).toBe(604_800);
   });
+
+  it.each([
+    ["CAMPAIGN_ARCHIVE_MAX_COMPRESSED_BYTES", "1048576bytes"],
+    ["SYSTEM_ARCHIVE_MAX_ENTRIES", "1.5"],
+    ["CAMPAIGN_ARCHIVE_MAX_EXPANSION_RATIO", "1e2"],
+    ["ARCHIVE_PREVIEW_TTL_SECONDS", "9007199254740992"],
+    ["SYSTEM_ARCHIVE_MAX_MANIFEST_BYTES", "not-a-number"],
+    ["SYSTEM_ARCHIVE_ARTIFACT_TTL_SECONDS", "   "]
+  ])("rejects malformed explicit archive setting %s=%s", (name, value) => {
+    process.env.DATABASE_URL = "postgresql://test@localhost/test";
+    process.env[name] = value;
+
+    expect(() => loadRuntimeConfig()).toThrow(name);
+  });
 });
 
 describe("staged archive uploads", () => {
@@ -243,6 +346,25 @@ describe("staged archive uploads", () => {
     expect(staged.absolutePath).toBe(resolve(root, ...staged.relativePath.split("/")));
     expect(staged.compressedBytes).toBe(10);
     expect(basename(staged.absolutePath)).not.toContain("fixture");
+  });
+
+  it("fails closed when the staging parent is replaced immediately before file creation", async () => {
+    const root = await temporaryRoot();
+    const outside = await temporaryRoot();
+    const staging = join(root, "staging");
+    await mkdir(staging, { recursive: true });
+    filesystemRaceHooks.beforeOpen = async (path) => {
+      if (!String(path).endsWith(".zip")) return false;
+      await replaceDirectoryWithJunction(staging, outside);
+      return true;
+    };
+
+    await expectArchiveError(
+      stageArchiveUpload(Readable.from(Buffer.from("PK fixture")), root, DEFAULT_LIMITS),
+      "archive-entry-unsafe"
+    );
+
+    expect(await readdir(outside)).toEqual([]);
   });
 });
 
@@ -387,6 +509,63 @@ describe("bounded manifest and entry verification", () => {
     );
   });
 
+  it("preflights an oversized classic EOCD record count before ZIP parsing", async () => {
+    const root = await temporaryRoot();
+    const zipPath = join(root, "oversized-eocd-count.zip");
+    await writeZip(zipPath, [{ name: "one.txt", content: Buffer.from("1") }]);
+    await patchZip(zipPath, (buffer) => {
+      const eocd = endOfCentralDirectoryOffset(buffer);
+      buffer.writeUInt16LE(65_534, eocd + 8);
+      buffer.writeUInt16LE(65_534, eocd + 10);
+    });
+
+    await expectArchiveError(
+      inspectArchive(await stagedFixture(root, zipPath), DEFAULT_LIMITS),
+      "archive-limit-exceeded"
+    );
+  });
+
+  it("preflights an oversized ZIP64 EOCD record count before ZIP parsing", async () => {
+    const root = await temporaryRoot();
+    const zipPath = join(root, "oversized-zip64-count.zip");
+    await writeZip(zipPath, [{ name: "one.txt", content: Buffer.from("1") }]);
+    await patchZip(zipPath, (buffer) => {
+      const eocdOffset = endOfCentralDirectoryOffset(buffer);
+      const eocd = Buffer.from(buffer.subarray(eocdOffset));
+      const centralSize = eocd.readUInt32LE(12);
+      const centralOffset = eocd.readUInt32LE(16);
+      eocd.writeUInt16LE(0xffff, 8);
+      eocd.writeUInt16LE(0xffff, 10);
+
+      const zip64Record = Buffer.alloc(56);
+      zip64Record.writeUInt32LE(0x06064b50, 0);
+      zip64Record.writeBigUInt64LE(44n, 4);
+      zip64Record.writeUInt16LE(45, 12);
+      zip64Record.writeUInt16LE(45, 14);
+      zip64Record.writeBigUInt64LE(101n, 24);
+      zip64Record.writeBigUInt64LE(101n, 32);
+      zip64Record.writeBigUInt64LE(BigInt(centralSize), 40);
+      zip64Record.writeBigUInt64LE(BigInt(centralOffset), 48);
+
+      const locator = Buffer.alloc(20);
+      locator.writeUInt32LE(0x07064b50, 0);
+      locator.writeBigUInt64LE(BigInt(eocdOffset), 8);
+      locator.writeUInt32LE(1, 16);
+
+      return Buffer.concat([
+        buffer.subarray(0, eocdOffset),
+        zip64Record,
+        locator,
+        eocd
+      ]);
+    });
+
+    await expectArchiveError(
+      inspectArchive(await stagedFixture(root, zipPath), DEFAULT_LIMITS),
+      "archive-limit-exceeded"
+    );
+  });
+
   it("enforces the declared total-uncompressed-byte limit before opening entries", async () => {
     const root = await temporaryRoot();
     const zipPath = join(root, "uncompressed-limit.zip");
@@ -474,6 +653,46 @@ describe("bounded manifest and entry verification", () => {
     );
   });
 
+  it.each([
+    ["compressed", 18],
+    ["uncompressed", 22]
+  ])("rejects a central/local %s-size disagreement", async (_size, localFieldOffset) => {
+    const root = await temporaryRoot();
+    const zipPath = join(root, `local-${_size}-mismatch.zip`);
+    const data = Buffer.from('{"ok":true}');
+    await writeManifestZip(zipPath, [{ name: "data.json", content: data }]);
+    await patchZip(zipPath, (buffer) => {
+      const central = centralDirectoryOffsetForPath(buffer, "data.json");
+      const local = buffer.readUInt32LE(central + 42);
+      const centralValue = buffer.readUInt32LE(central + (localFieldOffset === 18 ? 20 : 24));
+      buffer.writeUInt32LE(centralValue + 1, local + localFieldOffset);
+    });
+
+    await expectArchiveError(
+      inspectArchive(await stagedFixture(root, zipPath), DEFAULT_LIMITS),
+      "archive-entry-unsafe"
+    );
+  });
+
+  it("stops an entry stream at the manifest-declared byte length", async () => {
+    const root = await temporaryRoot();
+    const zipPath = join(root, "forged-entry-length.zip");
+    const data = Buffer.from("x".repeat(64));
+    const declared = { ...archiveEntry("data.json", data), byteLength: 8 };
+    await writeManifestZip(zipPath, [{ name: "data.json", content: data }], [declared]);
+    await patchZip(zipPath, (buffer) => {
+      const central = centralDirectoryOffsetForPath(buffer, "data.json");
+      const local = buffer.readUInt32LE(central + 42);
+      buffer.writeUInt32LE(8, central + 24);
+      buffer.writeUInt32LE(8, local + 22);
+    });
+
+    await expectArchiveError(
+      inspectArchive(await stagedFixture(root, zipPath), DEFAULT_LIMITS),
+      "archive-limit-exceeded"
+    );
+  });
+
   it("rejects an archive type other than the expected type", async () => {
     const root = await temporaryRoot();
     const zipPath = join(root, "wrong-type.zip");
@@ -502,6 +721,32 @@ describe("bounded manifest and entry verification", () => {
     await expectArchiveError(
       readVerifiedEntry(inspected, "data.json", data.byteLength - 1),
       "archive-limit-exceeded"
+    );
+  });
+
+  it("rejects a staged path replaced with an identical file before inspection", async () => {
+    const root = await temporaryRoot();
+    const zipPath = join(root, "replace-before-inspection.zip");
+    await writeManifestZip(zipPath, []);
+    const staged = await stagedFixture(root, zipPath);
+    await replaceFileWithIdenticalCopy(staged.absolutePath);
+
+    await expectArchiveError(inspectArchive(staged, DEFAULT_LIMITS), "archive-checksum-mismatch");
+  });
+
+  it("rejects replacement and compressed-byte changes before a verified reread", async () => {
+    const root = await temporaryRoot();
+    const zipPath = join(root, "replace-before-read.zip");
+    const data = Buffer.from('{"answer":42}', "utf8");
+    await writeManifestZip(zipPath, [{ name: "data.json", content: data }]);
+    const staged = await stagedFixture(root, zipPath);
+    const inspected = await inspectArchive(staged, DEFAULT_LIMITS);
+    await replaceFileWithIdenticalCopy(staged.absolutePath);
+    await writeFile(staged.absolutePath, Buffer.from("trailing"), { flag: "a" });
+
+    await expectArchiveError(
+      readVerifiedEntry(inspected, "data.json", data.byteLength),
+      "archive-checksum-mismatch"
     );
   });
 });
@@ -561,6 +806,38 @@ describe("archive artifact writing and cleanup", () => {
     expect(await readdir(join(root, "artifacts"))).toEqual([]);
   });
 
+  it("does not publish outside the archive root when the artifacts parent is replaced at rename", async () => {
+    const root = await temporaryRoot();
+    const outside = await temporaryRoot();
+    const artifacts = join(root, "artifacts");
+    filesystemRaceHooks.beforeRename = async (source, target) => {
+      if (!String(source).endsWith(".zip.tmp") || !String(target).endsWith(".zip")) return false;
+      try {
+        const moved = await replaceDirectoryWithJunction(artifacts, outside);
+        await copyFile(join(moved, basename(String(source))), join(outside, basename(String(source))));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+      }
+      return true;
+    };
+
+    let completed: Awaited<ReturnType<typeof writeArchiveArtifact>> | undefined;
+    try {
+      completed = await writeArchiveArtifact(
+        root,
+        [{ path: "data.bin", logicalType: "asset", mediaType: "application/octet-stream", source: Readable.from("safe") }],
+        (entries) => systemManifest(entries)
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(ArchiveError);
+    }
+
+    expect((await readdir(outside)).filter((name) => name.endsWith(".zip"))).toEqual([]);
+    if (completed) {
+      expect(await readFile(completed.absolutePath)).not.toHaveLength(0);
+    }
+  });
+
   it("removes only a root-relative file beneath the configured archive root", async () => {
     const root = await temporaryRoot();
     const artifactPath = join(root, "artifacts", "safe.zip");
@@ -570,6 +847,33 @@ describe("archive artifact writing and cleanup", () => {
     await removeArchivePath(root, "artifacts/safe.zip");
 
     await expect(readFile(artifactPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not unlink an outside file when the cleanup parent is replaced at unlink", async () => {
+    const root = await temporaryRoot();
+    const outside = await temporaryRoot();
+    const artifacts = join(root, "artifacts");
+    const artifactPath = join(artifacts, "safe.zip");
+    const outsidePath = join(outside, "safe.zip");
+    await mkdir(artifacts, { recursive: true });
+    await writeFile(artifactPath, "inside");
+    await writeFile(outsidePath, "outside");
+    filesystemRaceHooks.beforeUnlink = async () => {
+      try {
+        await replaceDirectoryWithJunction(artifacts, outside);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+      }
+      return true;
+    };
+
+    try {
+      await removeArchivePath(root, "artifacts/safe.zip");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ArchiveError);
+    }
+
+    expect(await readFile(outsidePath, "utf8")).toBe("outside");
   });
 
   it.each(["../outside.zip", resolve("outside.zip")])("refuses cleanup outside the configured root: %s", async (path) => {
