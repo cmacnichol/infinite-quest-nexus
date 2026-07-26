@@ -1,3 +1,10 @@
+import { ProviderDestinationNotAllowedError } from "../../../../../security/src/provider-network-policy.js";
+import {
+  MAX_SOGNI_RESPONSE_BYTES,
+  ProviderResponseTooLargeError,
+  readBoundedResponseText
+} from "../../../provider-response.js";
+
 export const SOGNI_API_BASE_URL = "https://api.sogni.ai";
 const SOGNI_WORKFLOWS_PATH = "/v1/creative-agent/workflows";
 
@@ -119,6 +126,19 @@ function normalizeHttpError(response: Response, data: Record<string, any>, fallb
   };
 }
 
+function transportError(error: unknown): Error {
+  if (error instanceof ProviderDestinationNotAllowedError || error instanceof SogniProviderError) return error;
+  const details = error instanceof Error
+    ? `${error.name} ${error.message} ${String((error as Error & { code?: unknown }).code || "")}`
+    : String(error);
+  const timedOut = /(?:abort|timeout)/i.test(details);
+  return new SogniProviderError({
+    code: timedOut ? "provider_request_timeout" : "provider_transport_error",
+    message: timedOut ? "Sogni request timed out." : "Sogni could not be reached.",
+    retryable: true
+  });
+}
+
 async function requestJson(
   profile: SogniProviderProfile,
   path: string,
@@ -134,14 +154,21 @@ async function requestJson(
       signal: init.signal || AbortSignal.timeout(requestTimeoutMs(profile))
     });
   } catch (error) {
-    const timedOut = error instanceof Error && /(?:abort|timeout)/i.test(`${error.name} ${error.message}`);
-    throw new SogniProviderError({
-      code: timedOut ? "provider_request_timeout" : "provider_transport_error",
-      message: timedOut ? "Sogni request timed out." : "Sogni could not be reached.",
-      retryable: true
-    });
+    throw transportError(error);
   }
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await readBoundedResponseText(response, MAX_SOGNI_RESPONSE_BYTES);
+  } catch (error) {
+    if (error instanceof ProviderResponseTooLargeError) {
+      throw new SogniProviderError({
+        code: error.code,
+        message: error.message,
+        retryable: false
+      });
+    }
+    throw transportError(error);
+  }
   let data: Record<string, any> = {};
   try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* normalized below */ }
   if (!response.ok) throw new SogniProviderError(normalizeHttpError(response, data, text));
@@ -181,7 +208,7 @@ function workflowFrom(data: Record<string, any>): Record<string, any> {
 export async function submitSogniGeneration(
   profile: SogniProviderProfile,
   request: SogniGenerationRequest,
-  fetcher: Fetch = fetch
+  fetcher: Fetch
 ): Promise<SogniSubmissionResult> {
   if (!profile.model.trim()) {
     throw new SogniProviderError({ code: "model_required", message: "Select a Sogni image model before generating.", retryable: false });
@@ -255,7 +282,7 @@ function workflowFailure(workflow: Record<string, any>): NormalizedProviderError
 export async function pollSogniGeneration(
   profile: SogniProviderProfile,
   remoteJobId: string,
-  fetcher: Fetch = fetch
+  fetcher: Fetch
 ): Promise<SogniPollResult> {
   const id = remoteJobId.trim();
   if (!/^wf_[A-Za-z0-9._-]+$/.test(id)) {
@@ -293,7 +320,7 @@ export async function pollSogniGeneration(
 export async function cancelSogniGeneration(
   profile: SogniProviderProfile,
   remoteJobId: string,
-  fetcher: Fetch = fetch
+  fetcher: Fetch
 ): Promise<void> {
   const id = remoteJobId.trim();
   if (!/^wf_[A-Za-z0-9._-]+$/.test(id)) {

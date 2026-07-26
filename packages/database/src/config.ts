@@ -1,5 +1,23 @@
 import { readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { resolve } from "node:path";
+import { parseExactOriginList } from "../../security/src/exact-origins.js";
+
+export type RuntimeSecurityConfig = {
+  corsAllowedOrigins: string[];
+  providerNetworkAllowlist: string[];
+  cspImageAllowedOrigins: string[];
+  apiDefaultBodyLimitBytes: number;
+  apiImportBodyLimitBytes: number;
+  apiAssetBodyLimitBytes: number;
+  apiRateLimitWindowSeconds: number;
+  apiRateLimitProviderRequests: number;
+  apiRateLimitGenerationRequests: number;
+  apiRateLimitImportRequests: number;
+  apiConcurrencyProviderRequests: number;
+  apiConcurrencyImportRequests: number;
+  trustProxyHops: number;
+};
 
 export type RuntimeConfig = {
   role: "all" | "api" | "worker" | "migrate";
@@ -16,8 +34,7 @@ export type RuntimeConfig = {
   assetStorageDriver: "filesystem";
   assetStorageRoot: string;
   credentialEncryptionKey: string;
-  corsAllowedOrigins: string[];
-  maxUploadSizeBytes: number;
+  security: RuntimeSecurityConfig;
 };
 
 function secretSetting(name: string): string {
@@ -32,6 +49,47 @@ function integerSetting(name: string, fallback: number, minimum: number, maximum
   const parsed = Number.parseInt(process.env[name] ?? "", 10);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(minimum, Math.min(maximum, parsed));
+}
+
+function requiredIntegerSetting(name: string, fallback: number, minimum: number, maximum: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  if (!/^\d+$/.test(raw)) throw new Error(`${name} must be an integer between ${minimum} and ${maximum}.`);
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}.`);
+  }
+  return parsed;
+}
+
+const BUILT_IN_PROVIDER_ALLOWLIST = ["localhost", "127.0.0.0/8", "::1/128"] as const;
+
+function normalizeProviderAllowlistEntry(value: string): string {
+  const entry = value.trim().toLowerCase();
+  const cidrParts = entry.split("/");
+  if (cidrParts.length > 2) {
+    throw new Error(`PROVIDER_NETWORK_ALLOWLIST contains an invalid CIDR '${value}'.`);
+  }
+  const [address = "", prefixText] = cidrParts;
+  if (prefixText !== undefined) {
+    const family = isIP(address);
+    const prefix = /^\d+$/.test(prefixText) ? Number(prefixText) : Number.NaN;
+    const maximum = family === 4 ? 32 : family === 6 ? 128 : -1;
+    if (!Number.isInteger(prefix) || prefix < 0 || prefix > maximum) {
+      throw new Error(`PROVIDER_NETWORK_ALLOWLIST contains an invalid CIDR '${value}'.`);
+    }
+    return `${address}/${prefix}`;
+  }
+  if (isIP(entry)) return entry;
+  if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(entry)) {
+    throw new Error(`PROVIDER_NETWORK_ALLOWLIST contains an invalid hostname '${value}'.`);
+  }
+  return entry;
+}
+
+export function parseProviderAllowlist(value: string | undefined): string[] {
+  const configured = value?.split(",").map((entry) => entry.trim()).filter(Boolean) ?? [];
+  return [...new Set([...BUILT_IN_PROVIDER_ALLOWLIST, ...configured.map(normalizeProviderAllowlistEntry)])];
 }
 
 function booleanSetting(name: string, fallback: boolean): boolean {
@@ -65,7 +123,20 @@ export function loadRuntimeConfig(): RuntimeConfig {
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve(process.env.ASSET_STORAGE_ROOT?.trim() || "local-data/assets"),
     credentialEncryptionKey: secretSetting("CREDENTIAL_ENCRYPTION_KEY"),
-    corsAllowedOrigins: process.env.CORS_ALLOWED_ORIGINS?.split(",").map((o) => o.trim()).filter(Boolean) ?? ["*"],
-    maxUploadSizeBytes: integerSetting("MAX_UPLOAD_SIZE_MB", 500, 10, 2048) * 1024 * 1024
+    security: {
+      corsAllowedOrigins: parseExactOriginList(process.env.CORS_ALLOWED_ORIGINS, "CORS_ALLOWED_ORIGINS"),
+      providerNetworkAllowlist: parseProviderAllowlist(process.env.PROVIDER_NETWORK_ALLOWLIST),
+      cspImageAllowedOrigins: parseExactOriginList(process.env.CSP_IMAGE_ALLOWED_ORIGINS, "CSP_IMAGE_ALLOWED_ORIGINS"),
+      apiDefaultBodyLimitBytes: requiredIntegerSetting("API_DEFAULT_BODY_LIMIT_BYTES", 1_048_576, 65_536, 67_108_864),
+      apiImportBodyLimitBytes: requiredIntegerSetting("API_IMPORT_BODY_LIMIT_BYTES", 16_777_216, 1_048_576, 67_108_864),
+      apiAssetBodyLimitBytes: requiredIntegerSetting("API_ASSET_BODY_LIMIT_BYTES", 33_554_432, 1_048_576, 67_108_864),
+      apiRateLimitWindowSeconds: requiredIntegerSetting("API_RATE_LIMIT_WINDOW_SECONDS", 60, 1, 3_600),
+      apiRateLimitProviderRequests: requiredIntegerSetting("API_RATE_LIMIT_PROVIDER_REQUESTS", 10, 1, 10_000),
+      apiRateLimitGenerationRequests: requiredIntegerSetting("API_RATE_LIMIT_GENERATION_REQUESTS", 12, 1, 10_000),
+      apiRateLimitImportRequests: requiredIntegerSetting("API_RATE_LIMIT_IMPORT_REQUESTS", 4, 1, 10_000),
+      apiConcurrencyProviderRequests: requiredIntegerSetting("API_CONCURRENCY_PROVIDER_REQUESTS", 2, 1, 1_000),
+      apiConcurrencyImportRequests: requiredIntegerSetting("API_CONCURRENCY_IMPORT_REQUESTS", 1, 1, 1_000),
+      trustProxyHops: requiredIntegerSetting("TRUST_PROXY_HOPS", 0, 0, 16)
+    }
   };
 }

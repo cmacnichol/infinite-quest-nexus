@@ -20,13 +20,28 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve("local-data/assets"),
     credentialEncryptionKey: "",
-    corsAllowedOrigins: ["*"],
-    maxUploadSizeBytes: 50 * 1024 * 1024,
+    security: {
+      corsAllowedOrigins: [],
+      providerNetworkAllowlist: ["localhost", "127.0.0.0/8", "::1/128"],
+      cspImageAllowedOrigins: [],
+      apiDefaultBodyLimitBytes: 1_048_576,
+      apiImportBodyLimitBytes: 16_777_216,
+      apiAssetBodyLimitBytes: 33_554_432,
+      apiRateLimitWindowSeconds: 60,
+      apiRateLimitProviderRequests: 10,
+      apiRateLimitGenerationRequests: 12,
+      apiRateLimitImportRequests: 4,
+      apiConcurrencyProviderRequests: 2,
+      apiConcurrencyImportRequests: 1,
+      trustProxyHops: 0
+    },
     ...overrides
   };
 }
 
 describe("API server security and CORS headers", () => {
+  const mockPool = { query: async () => ({ rows: [] }) } as unknown as DatabasePool;
+
   it("exposes public application metadata without querying the database", async () => {
     const config = makeConfig();
     const mockPool = { query: async () => { throw new Error("Metadata must not query the database."); } } as unknown as DatabasePool;
@@ -58,70 +73,92 @@ describe("API server security and CORS headers", () => {
     await app.close();
   });
 
-  it("sets standard security headers on requests", async () => {
-    const config = makeConfig();
-    const mockPool = { query: async () => ({ rows: [] }) } as unknown as DatabasePool;
-    const app = await buildServer({ config, pool: mockPool });
+  it("allows origin-less and exact same-origin requests", async () => {
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    expect((await app.inject({ method: "GET", url: "/health/live" })).statusCode).toBe(200);
+    const sameOrigin = await app.inject({
+      method: "GET",
+      url: "/health/live",
+      headers: { host: "localhost:8080", origin: "http://localhost:8080" }
+    });
+    expect(sameOrigin.statusCode).toBe(200);
+    expect(sameOrigin.headers["access-control-allow-origin"]).toBe("http://localhost:8080");
+    expect(sameOrigin.headers["access-control-allow-credentials"]).toBeUndefined();
+    await app.close();
+  });
 
+  it("rejects hostile origins and hostile preflights", async () => {
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    for (const method of ["GET", "OPTIONS"] as const) {
+      const response = await app.inject({
+        method,
+        url: "/health/live",
+        headers: { host: "nexus.test", origin: "https://evil.test" }
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toMatchObject({
+        error: "OriginNotAllowedError",
+        code: "ORIGIN_NOT_ALLOWED"
+      });
+    }
+    await app.close();
+  });
+
+  it("rejects DNS-rebinding requests whose hostile Origin matches a hostile Host", async () => {
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/providers/discover-models",
+      headers: { host: "evil.test", origin: "http://evil.test", "content-type": "application/json" },
+      payload: {}
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({ code: "ORIGIN_NOT_ALLOWED" });
+    await app.close();
+  });
+
+  it("rejects malformed Host headers with the typed origin error", async () => {
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
     const response = await app.inject({
       method: "GET",
-      url: "/health/live"
+      url: "/health/live",
+      headers: { host: "localhost:not-a-port" }
     });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({
+      error: "OriginNotAllowedError",
+      code: "ORIGIN_NOT_ALLOWED"
+    });
+    await app.close();
+  });
 
-    expect(response.statusCode).toBe(200);
-    expect(response.headers["x-content-type-options"]).toBe("nosniff");
-    expect(response.headers["x-frame-options"]).toBe("DENY");
-    expect(response.headers["content-security-policy"]).toContain("default-src 'self'");
+  it("sends the enforced CSP without unsafe-inline", async () => {
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const response = await app.inject({ method: "GET", url: "/health/live" });
+    expect(response.headers["content-security-policy"]).toBe(
+      "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    );
+    expect(response.headers["strict-transport-security"]).toBeUndefined();
+    expect(response.headers["referrer-policy"]).toBe("no-referrer");
+    await app.close();
+  });
+
+  it("sends HSTS only for direct or explicitly trusted HTTPS", async () => {
+    const directHttp = await buildServer({ config: makeConfig(), pool: mockPool });
+    expect((await directHttp.inject({ method: "GET", url: "/health/live" })).headers["strict-transport-security"]).toBeUndefined();
+    await directHttp.close();
+
+    const proxied = await buildServer({
+      config: makeConfig({ security: { ...makeConfig().security, trustProxyHops: 1 } }),
+      pool: mockPool
+    });
+    const response = await proxied.inject({
+      method: "GET",
+      url: "/health/live",
+      headers: { "x-forwarded-proto": "https", host: "localhost:8080" }
+    });
     expect(response.headers["strict-transport-security"]).toContain("max-age=31536000");
-
-    await app.close();
-  });
-
-  it("handles CORS headers with wildcard allowed origins", async () => {
-    const config = makeConfig({ corsAllowedOrigins: ["*"] });
-    const mockPool = { query: async () => ({ rows: [] }) } as unknown as DatabasePool;
-    const app = await buildServer({ config, pool: mockPool });
-
-    const response = await app.inject({
-      method: "GET",
-      url: "/health/live",
-      headers: { origin: "https://example.test" }
-    });
-
-    expect(response.headers["access-control-allow-origin"]).toBe("https://example.test");
-    expect(response.headers["vary"]).toBe("Origin");
-    expect(response.headers["access-control-allow-credentials"]).toBe("true");
-
-    const optionsRes = await app.inject({
-      method: "OPTIONS",
-      url: "/health/live",
-      headers: { origin: "https://example.test" }
-    });
-    expect(optionsRes.statusCode).toBe(204);
-
-    await app.close();
-  });
-
-  it("handles CORS headers with restricted allowed origins list", async () => {
-    const config = makeConfig({ corsAllowedOrigins: ["https://trusted.test", "https://app.infinitequest.com"] });
-    const mockPool = { query: async () => ({ rows: [] }) } as unknown as DatabasePool;
-    const app = await buildServer({ config, pool: mockPool });
-
-    const trustedRes = await app.inject({
-      method: "GET",
-      url: "/health/live",
-      headers: { origin: "https://trusted.test" }
-    });
-    expect(trustedRes.headers["access-control-allow-origin"]).toBe("https://trusted.test");
-
-    const untrustedRes = await app.inject({
-      method: "GET",
-      url: "/health/live",
-      headers: { origin: "https://evil.test" }
-    });
-    expect(untrustedRes.headers["access-control-allow-origin"]).toBeUndefined();
-
-    await app.close();
+    await proxied.close();
   });
 
   it("returns 400 InvalidUuidError when PostgreSQL throws 22P02 invalid uuid syntax", async () => {
@@ -147,8 +184,11 @@ describe("API server security and CORS headers", () => {
     await app.close();
   });
 
-  it("respects maxUploadSizeBytes configuration for large request payloads", async () => {
-    const config = makeConfig({ maxUploadSizeBytes: 10 * 1024 * 1024 }); // 10 MB limit
+  it("respects the import body limit for large request payloads", async () => {
+    const baseConfig = makeConfig();
+    const config = makeConfig({
+      security: { ...baseConfig.security, apiImportBodyLimitBytes: 10 * 1024 * 1024 }
+    });
     const mockPool = {} as unknown as DatabasePool;
     const app = await buildServer({ config, pool: mockPool });
 

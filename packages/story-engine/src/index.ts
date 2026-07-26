@@ -3,6 +3,7 @@ export * from "./credentials.js";
 export * from "./mechanics.js";
 export * from "./narration-formatting.js";
 export * from "./output.js";
+export * from "./provider-response.js";
 export * from "./prompt.js";
 export * from "./turn-intent.js";
 export * from "./scene-coverage.js";

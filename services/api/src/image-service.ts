@@ -13,6 +13,7 @@ import { logger } from "../../../packages/logger/src/index.js";
 import {
   containsMechanicsLanguage,
   logProviderTransportError,
+  MAX_IMAGE_ARTIFACT_BYTES,
   pollImageProvider,
   submitImageProvider,
   type ImageProviderArtifact,
@@ -512,7 +513,7 @@ async function claimImageJob(pool: DatabasePool, workerId: string, leaseSeconds:
   });
 }
 
-const MAX_ARTIFACT_BYTES = 20 * 1024 * 1024;
+const MAX_ARTIFACT_BYTES = MAX_IMAGE_ARTIFACT_BYTES;
 
 function numberSetting(profile: TextProviderProfile, key: string, fallback: number, minimum: number, maximum: number): number {
   const value = Number(profile.configuration?.[key]);
@@ -748,6 +749,20 @@ async function requeueRemoteImageJob(
   });
 }
 
+export function imageProviderFailureMetadata(error: unknown): {
+  permanent: boolean;
+  code: string;
+  expired: boolean;
+  remoteTerminal: boolean;
+} {
+  return {
+    permanent: typeof error === "object" && error !== null && "permanent" in error && Boolean((error as { permanent: unknown }).permanent),
+    code: typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "image_generation_failed",
+    expired: typeof error === "object" && error !== null && "expired" in error && Boolean((error as { expired: unknown }).expired),
+    remoteTerminal: typeof error === "object" && error !== null && "remoteTerminal" in error && Boolean((error as { remoteTerminal: unknown }).remoteTerminal)
+  };
+}
+
 export async function runImageJob(
   pool: DatabasePool,
   workerId: string,
@@ -865,10 +880,7 @@ export async function runImageJob(
       workerId
     });
     await recordProviderHealth(pool, job.owner_user_id, job.provider_profile_id, false, error instanceof Error ? error.message : String(error)).catch(() => undefined);
-    const permanent = typeof error === "object" && error !== null && "permanent" in error && Boolean((error as { permanent: unknown }).permanent);
-    const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "image_generation_failed";
-    const expired = typeof error === "object" && error !== null && "expired" in error && Boolean((error as { expired: unknown }).expired);
-    const remoteTerminal = typeof error === "object" && error !== null && "remoteTerminal" in error && Boolean((error as { remoteTerminal: unknown }).remoteTerminal);
+    const { permanent, code, expired, remoteTerminal } = imageProviderFailureMetadata(error);
     const retryableSubmission = !job.remote_job_id && !permanent && job.attempts < job.max_attempts;
     const retryableRemoteFailure = Boolean(job.remote_job_id) && remoteTerminal && !permanent && job.attempts < job.max_attempts;
     const retryablePoll = Boolean(job.remote_job_id) && !remoteTerminal && !permanent && (!job.generation_deadline || job.generation_deadline.getTime() > Date.now());

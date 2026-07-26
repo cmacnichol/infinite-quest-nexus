@@ -21,6 +21,58 @@ integration("standard database migration runner", () => {
     if (pool) await pool.end();
   });
 
+  it("adds minimal owner-scoped admission buckets and leases", async () => {
+    const columns = await pool.query<{
+      table_name: string;
+      column_name: string;
+    }>(
+      `SELECT table_name, column_name
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = ANY($1::text[])
+        ORDER BY table_name, ordinal_position`,
+      [["api_admission_buckets", "api_admission_leases"]]
+    );
+    expect(columns.rows).toEqual([
+      { table_name: "api_admission_buckets", column_name: "owner_user_id" },
+      { table_name: "api_admission_buckets", column_name: "operation" },
+      { table_name: "api_admission_buckets", column_name: "window_started_at" },
+      { table_name: "api_admission_buckets", column_name: "window_expires_at" },
+      { table_name: "api_admission_buckets", column_name: "accepted_count" },
+      { table_name: "api_admission_buckets", column_name: "created_at" },
+      { table_name: "api_admission_buckets", column_name: "updated_at" },
+      { table_name: "api_admission_leases", column_name: "id" },
+      { table_name: "api_admission_leases", column_name: "owner_user_id" },
+      { table_name: "api_admission_leases", column_name: "operation" },
+      { table_name: "api_admission_leases", column_name: "request_id" },
+      { table_name: "api_admission_leases", column_name: "expires_at" },
+      { table_name: "api_admission_leases", column_name: "created_at" }
+    ]);
+    expect(columns.rows.map((row) => row.column_name)).not.toEqual(expect.arrayContaining([
+      "ip_address",
+      "story",
+      "provider",
+      "provider_profile_id",
+      "campaign_id"
+    ]));
+
+    const indexes = await pool.query<{ indexname: string }>(
+      `SELECT indexname
+         FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname = ANY($1::text[])
+        ORDER BY indexname`,
+      [[
+        "api_admission_buckets_expiry_idx",
+        "api_admission_leases_scope_expiry_idx"
+      ]]
+    );
+    expect(indexes.rows.map((row) => row.indexname)).toEqual([
+      "api_admission_buckets_expiry_idx",
+      "api_admission_leases_scope_expiry_idx"
+    ]);
+  });
+
   it("adds scoped entity identity columns and indexes to Chronicle records", async () => {
     const columns = await pool.query<{
       table_name: string;

@@ -1,6 +1,19 @@
 import type { ProviderType } from "../../contracts/src/generation.js";
 import { logger } from "../../logger/src/index.js";
-import { Agent } from "undici";
+import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
+import {
+  MAX_IMAGE_PROVIDER_RESPONSE_BYTES,
+  MAX_PROVIDER_JSON_RESPONSE_BYTES,
+  MAX_PROVIDER_SSE_RESPONSE_BYTES,
+  ProviderResponseTooLargeError,
+  readBoundedResponseText
+} from "./provider-response.js";
+import {
+  configureDefaultProviderTransport,
+  createProviderTransport,
+  defaultProviderTransport,
+  type ProviderTransport
+} from "./provider-transport.js";
 import {
   cancelSogniGeneration,
   pollSogniGeneration,
@@ -13,6 +26,13 @@ import {
   pollSogniSdkGeneration,
   submitSogniSdkGeneration
 } from "./providers/illustration/sogni-sdk/index.js";
+
+export {
+  configureDefaultProviderTransport,
+  createProviderTransport,
+  defaultProviderTransport,
+  type ProviderTransport
+};
 
 export type TextProviderProfile = {
   providerType: ProviderType;
@@ -152,8 +172,6 @@ export type ImageProviderPollResult =
     }
   | { status: "failed"; error: NormalizedProviderError; providerMetadata: Record<string, unknown> };
 
-type Fetch = typeof fetch;
-
 export type ProviderTransportDetails = {
   providerType: ProviderType;
   operation: string;
@@ -183,12 +201,6 @@ export class ProviderTransportError extends Error {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
-const MAX_REQUEST_TIMEOUT_MS = 3_600_000;
-const providerDispatcher = new Agent({
-  headersTimeout: MAX_REQUEST_TIMEOUT_MS,
-  bodyTimeout: MAX_REQUEST_TIMEOUT_MS,
-  connectTimeout: MAX_REQUEST_TIMEOUT_MS
-});
 const responseStartTimes = new WeakMap<Response, number>();
 
 function requestTimeoutMs(profile: TextProviderProfile): number {
@@ -228,8 +240,10 @@ function transportFailure(
   url: string,
   cause: unknown,
   startedAt: number
-): ProviderTransportError {
-  if (cause instanceof ProviderTransportError) return cause;
+): Error {
+  if (cause instanceof ProviderTransportError
+    || cause instanceof ProviderDestinationNotAllowedError
+    || cause instanceof ProviderResponseTooLargeError) return cause;
   const chain = errorChain(cause);
   const messages = chain.map((item) => String(item.message || ""));
   const names = chain.map((item) => String(item.name || ""));
@@ -281,16 +295,15 @@ async function providerFetch(
   operation: string,
   url: string,
   init: RequestInit,
-  fetcher: Fetch
+  transport: ProviderTransport
 ): Promise<Response> {
   const timeoutMs = requestTimeoutMs(profile);
   const startedAt = Date.now();
   try {
-    const response = await fetcher(url, {
+    const response = await transport.fetch(profile, operation, url, {
       ...init,
-      signal: AbortSignal.timeout(timeoutMs),
-      dispatcher: providerDispatcher
-    } as RequestInit);
+      signal: AbortSignal.timeout(timeoutMs)
+    });
     responseStartTimes.set(response, startedAt);
     return response;
   } catch (error) {
@@ -311,10 +324,19 @@ function openAiRoot(baseUrl: string): string {
   return /\/v1$/i.test(root) ? root : `${root}/v1`;
 }
 
-function headers(profile: TextProviderProfile): Record<string, string> {
+function headers(profile: TextProviderProfile, endpoint?: string): Record<string, string> {
+  let forwardAuthorization = Boolean(profile.apiKey);
+  if (endpoint) {
+    try {
+      forwardAuthorization = forwardAuthorization
+        && new URL(endpoint).origin === new URL(profile.baseUrl).origin;
+    } catch {
+      forwardAuthorization = false;
+    }
+  }
   return {
     "content-type": "application/json",
-    ...(profile.apiKey ? { authorization: `Bearer ${profile.apiKey}` } : {}),
+    ...(forwardAuthorization ? { authorization: `Bearer ${profile.apiKey}` } : {}),
     ...(profile.providerType === "openrouter" ? {
       "HTTP-Referer": String(profile.configuration?.httpReferer || "https://github.com/cmacnichol/infinite-quest-nexus"),
       "X-Title": "Infinite Quest Nexus"
@@ -326,13 +348,16 @@ async function checkedJson(
   response: Response,
   profile?: TextProviderProfile,
   operation = "request",
-  url = response.url
+  url = response.url,
+  limitBytes = MAX_PROVIDER_JSON_RESPONSE_BYTES
 ): Promise<Record<string, any>> {
   let text = "";
   try {
-    text = await response.text();
+    text = await readBoundedResponseText(response, limitBytes);
   } catch (error) {
-    if (!profile) throw error;
+    if (!profile
+      || error instanceof ProviderDestinationNotAllowedError
+      || error instanceof ProviderResponseTooLargeError) throw error;
     throw transportFailure(profile, operation, url, error, responseStartTimes.get(response) ?? Date.now());
   }
   let data: Record<string, any> = {};
@@ -359,10 +384,14 @@ export function reportedProviderCost(usage: unknown): ReportedProviderCost | nul
   return { amount: String(rawCost).trim(), currency };
 }
 
-export async function ensureLmStudioModelLoaded(profile: TextProviderProfile, operation: string, fetcher: Fetch = fetch): Promise<void> {
+export async function ensureLmStudioModelLoaded(
+  profile: TextProviderProfile,
+  operation: string,
+  transport: ProviderTransport = defaultProviderTransport()
+): Promise<void> {
   if (profile.providerType !== "lmstudio" || !profile.model.trim()) return;
   try {
-    const models = await discoverModels(profile, fetcher);
+    const models = await discoverModels(profile, transport);
     const requested = profile.model.trim().toLowerCase();
     const matches = models.filter((item) => item.id.trim().toLowerCase() === requested || item.instanceId.trim().toLowerCase() === requested);
     if (!matches.length) return;
@@ -371,9 +400,9 @@ export async function ensureLmStudioModelLoaded(profile: TextProviderProfile, op
     const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/models/load`;
     const response = await providerFetch(profile, operation, url, {
       method: "POST",
-      headers: headers(profile),
+      headers: headers(profile, url),
       body: JSON.stringify({ model: targetModelId })
-    }, fetcher);
+    }, transport);
     if (!response.ok) return;
     await checkedJson(response, profile, operation, url);
   } catch {
@@ -383,7 +412,10 @@ export async function ensureLmStudioModelLoaded(profile: TextProviderProfile, op
 
 async function readSseStream(
   response: Response,
-  onChunk: (delta: string, accumulated: string) => void | Promise<void>
+  onChunk: (delta: string, accumulated: string) => void | Promise<void>,
+  profile: TextProviderProfile,
+  operation: string,
+  url: string
 ): Promise<{ content: string; finalData: Record<string, any>; allData: Record<string, any>[] }> {
   const reader = response.body?.getReader();
   if (!reader) throw new Error("Response body stream is not readable.");
@@ -392,56 +424,68 @@ async function readSseStream(
   let accumulated = "";
   let finalData: Record<string, any> = {};
   const allData: Record<string, any>[] = [];
+  let receivedBytes = 0;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n\r?\n/);
-    buffer = lines.pop() || "";
-    for (const block of lines) {
-      const dataLines = block
-        .split(/\r?\n/)
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim());
-      for (const dataStr of dataLines) {
-        if (!dataStr || dataStr === "[DONE]") continue;
-        try {
-          const parsed = JSON.parse(dataStr);
-          allData.push(parsed);
-          finalData = { ...finalData, ...parsed };
-          let delta = "";
-          if (typeof parsed.content === "string" && parsed.type?.includes("delta")) {
-            delta = parsed.content;
-          } else if (parsed.choices?.[0]?.delta?.content !== undefined) {
-            delta = String(parsed.choices[0].delta.content || "");
-          } else if (typeof parsed.choices?.[0]?.text === "string") {
-            delta = parsed.choices[0].text;
-          } else if (Array.isArray(parsed.output)) {
-            const lastMsg = parsed.output.findLast?.((item: any) => item?.type === "message" || item?.type === "message.delta");
-            if (lastMsg?.content && typeof lastMsg.content === "string") {
-              if (lastMsg.content.startsWith(accumulated)) {
-                delta = lastMsg.content.slice(accumulated.length);
-              } else if (!accumulated.startsWith(lastMsg.content)) {
-                delta = lastMsg.content;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > MAX_PROVIDER_SSE_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new ProviderResponseTooLargeError(MAX_PROVIDER_SSE_RESPONSE_BYTES);
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n\r?\n/);
+      buffer = lines.pop() || "";
+      for (const block of lines) {
+        const dataLines = block
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim());
+        for (const dataStr of dataLines) {
+          if (!dataStr || dataStr === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(dataStr);
+            allData.push(parsed);
+            finalData = { ...finalData, ...parsed };
+            let delta = "";
+            if (typeof parsed.content === "string" && parsed.type?.includes("delta")) {
+              delta = parsed.content;
+            } else if (parsed.choices?.[0]?.delta?.content !== undefined) {
+              delta = String(parsed.choices[0].delta.content || "");
+            } else if (typeof parsed.choices?.[0]?.text === "string") {
+              delta = parsed.choices[0].text;
+            } else if (Array.isArray(parsed.output)) {
+              const lastMsg = parsed.output.findLast?.((item: any) => item?.type === "message" || item?.type === "message.delta");
+              if (lastMsg?.content && typeof lastMsg.content === "string") {
+                if (lastMsg.content.startsWith(accumulated)) {
+                  delta = lastMsg.content.slice(accumulated.length);
+                } else if (!accumulated.startsWith(lastMsg.content)) {
+                  delta = lastMsg.content;
+                }
               }
             }
+            if (delta) {
+              accumulated += delta;
+              await onChunk(delta, accumulated);
+            }
+          } catch {
+            // ignore malformed or non-json SSE event data
           }
-          if (delta) {
-            accumulated += delta;
-            await onChunk(delta, accumulated);
-          }
-        } catch {
-          // ignore malformed or non-json SSE event data
         }
       }
     }
+  } catch (error) {
+    throw transportFailure(profile, operation, url, error, responseStartTimes.get(response) ?? Date.now());
+  } finally {
+    reader.releaseLock();
   }
   return { content: accumulated, finalData, allData };
 }
 
-async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, fetcher: Fetch): Promise<ProviderResult> {
-  await ensureLmStudioModelLoaded(profile, "story generation model loading", fetcher);
+async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
+  await ensureLmStudioModelLoaded(profile, "story generation model loading", transport);
   const rejectedResponse = String(request.rejectedResponse || "").trim()
     .slice(0, Math.max(4000, Math.min(80_000, profile.maxOutputTokens * 4)));
   const payload: Record<string, unknown> = {
@@ -459,9 +503,9 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
   if (request.previousResponseId) payload.previous_response_id = request.previousResponseId;
   else payload.system_prompt = request.systemPrompt;
   const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`;
-  const response = await providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile), body: JSON.stringify(payload) }, fetcher);
+  const response = await providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile, url), body: JSON.stringify(payload) }, transport);
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
-    const { content, finalData, allData } = await readSseStream(response, request.onChunk);
+    const { content, finalData, allData } = await readSseStream(response, request.onChunk, profile, "story generation", url);
     const stats = allData.findLast((item) => item.stats)?.stats || finalData.stats || {};
     const outputTokens = Number(stats.total_output_tokens || 0);
     const finishValues = [
@@ -501,7 +545,7 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
   };
 }
 
-async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, fetcher: Fetch): Promise<ProviderResult> {
+async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
   const rejectedResponse = String(request.rejectedResponse || "").trim()
     .slice(0, Math.max(4000, Math.min(80_000, profile.maxOutputTokens * 4)));
   const messages = [
@@ -524,18 +568,34 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     payload.stream_options = { include_usage: true };
   }
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
-  const send = () => providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile), body: JSON.stringify(payload) }, fetcher);
+  const send = () => providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile, url), body: JSON.stringify(payload) }, transport);
   let response = await send();
   if (!response.ok) {
     const clone = response.clone();
-    const text = await clone.text();
+    const originalCancellation = response.body?.cancel();
+    let text = "";
+    try {
+      text = await readBoundedResponseText(clone, MAX_PROVIDER_JSON_RESPONSE_BYTES);
+    } catch (error) {
+      throw transportFailure(profile, "story generation", url, error, responseStartTimes.get(response) ?? Date.now());
+    } finally {
+      await originalCancellation?.catch(() => undefined);
+    }
     if (/response_format|json.?mode|structured.?output|grammar/i.test(text)) {
       delete payload.response_format;
       response = await send();
+    } else {
+      let data: Record<string, any> = {};
+      try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* response error below includes preview */ }
+      const message = String(data.error?.message || data.error || text || response.statusText).slice(0, 2000);
+      throw Object.assign(new Error(`Provider request failed (${response.status}): ${message}`), {
+        statusCode: response.status,
+        providerMessage: message
+      });
     }
   }
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
-    const { content, finalData, allData } = await readSseStream(response, request.onChunk);
+    const { content, finalData, allData } = await readSseStream(response, request.onChunk, profile, "story generation", url);
     const usageObj = allData.findLast((item) => item.usage)?.usage || finalData.usage || {};
     const finishReason = String(allData.map((item) => item.choices?.[0]?.finish_reason).find(Boolean) || finalData.finish_reason || "");
     const responseId = String(allData.map((item) => item.id).find(Boolean) || finalData.id || "");
@@ -577,27 +637,31 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
   };
 }
 
-export async function callTextProvider(profile: TextProviderProfile, request: ProviderRequest, fetcher: Fetch = fetch): Promise<ProviderResult> {
+export async function callTextProvider(
+  profile: TextProviderProfile,
+  request: ProviderRequest,
+  transport: ProviderTransport = defaultProviderTransport()
+): Promise<ProviderResult> {
   return profile.providerType === "lmstudio"
-    ? callLmStudio(profile, request, fetcher)
-    : callOpenAiCompatible(profile, request, fetcher);
+    ? callLmStudio(profile, request, transport)
+    : callOpenAiCompatible(profile, request, transport);
 }
 
 export async function callEmbeddingProvider(
   profile: TextProviderProfile,
   inputs: string[],
-  fetcher: Fetch = fetch
+  transport: ProviderTransport = defaultProviderTransport()
 ): Promise<EmbeddingResult> {
   if (!inputs.length) return {
     embeddings: [], model: profile.model, responseId: "", usage: { inputTokens: 0, totalTokens: 0 }, reportedCost: null
   };
-  await ensureLmStudioModelLoaded(profile, "embedding model loading", fetcher);
+  await ensureLmStudioModelLoaded(profile, "embedding model loading", transport);
   const url = `${openAiRoot(profile.baseUrl)}/embeddings`;
   const response = await providerFetch(profile, "embedding generation", url, {
     method: "POST",
-    headers: headers(profile),
+    headers: headers(profile, url),
     body: JSON.stringify({ model: profile.model, input: inputs })
-  }, fetcher);
+  }, transport);
   const data = await checkedJson(response, profile, "embedding generation", url);
   const rows = Array.isArray(data.data) ? [...data.data].sort((left: any, right: any) => Number(left?.index || 0) - Number(right?.index || 0)) : [];
   if (rows.length !== inputs.length) throw new Error(`Embedding provider returned ${rows.length} vectors for ${inputs.length} inputs.`);
@@ -622,9 +686,9 @@ export async function callEmbeddingProvider(
 export async function callImageProvider(
   profile: TextProviderProfile,
   request: ImageProviderRequest,
-  fetcher: Fetch = fetch
+  transport: ProviderTransport = defaultProviderTransport()
 ): Promise<ImageProviderResult> {
-  await ensureLmStudioModelLoaded(profile, "image model loading", fetcher);
+  await ensureLmStudioModelLoaded(profile, "image model loading", transport);
   const base = profile.providerType === "openrouter" ? rootUrl(profile.baseUrl) : openAiRoot(profile.baseUrl);
   const url = profile.providerType === "openrouter" ? `${base}/images` : `${base}/images/generations`;
   const payload: Record<string, unknown> = {
@@ -638,9 +702,9 @@ export async function callImageProvider(
   };
   const data = await checkedJson(await providerFetch(profile, "image generation", url, {
     method: "POST",
-    headers: headers(profile),
+    headers: headers(profile, url),
     body: JSON.stringify(payload)
-  }, fetcher), profile, "image generation", url);
+  }, transport), profile, "image generation", url, MAX_IMAGE_PROVIDER_RESPONSE_BYTES);
   const images = Array.isArray(data.data) ? data.data : [];
   const artifacts = images.map((image): ImageProviderArtifact => {
     const base64 = String(image?.b64_json || "").replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "").trim();
@@ -668,14 +732,14 @@ export async function callImageProvider(
 }
 
 type AsyncImageProviderAdapter = {
-  submit(profile: TextProviderProfile, request: ImageProviderRequest, fetcher: Fetch): Promise<ImageProviderSubmissionResult>;
-  poll?(profile: TextProviderProfile, remoteJobId: string, fetcher: Fetch): Promise<ImageProviderPollResult>;
-  cancel?(profile: TextProviderProfile, remoteJobId: string, fetcher: Fetch): Promise<void>;
+  submit(profile: TextProviderProfile, request: ImageProviderRequest, transport: ProviderTransport): Promise<ImageProviderSubmissionResult>;
+  poll?(profile: TextProviderProfile, remoteJobId: string, transport: ProviderTransport): Promise<ImageProviderPollResult>;
+  cancel?(profile: TextProviderProfile, remoteJobId: string, transport: ProviderTransport): Promise<void>;
 };
 
 const compatibleImageProviderAdapter: AsyncImageProviderAdapter = {
-  async submit(profile, request, fetcher) {
-    const result = await callImageProvider(profile, request, fetcher);
+  async submit(profile, request, transport) {
+    const result = await callImageProvider(profile, request, transport);
     return {
       mode: "completed",
       artifacts: result.artifacts,
@@ -687,7 +751,7 @@ const compatibleImageProviderAdapter: AsyncImageProviderAdapter = {
 };
 
 const sogniImageProviderAdapter: AsyncImageProviderAdapter = {
-  async submit(profile, request, fetcher) {
+  async submit(profile, request, transport) {
     const dimensions = /^(\d{2,5})x(\d{2,5})$/.exec(request.size);
     const imageCount = request.imageCount ?? 1;
     if (imageCount !== 1 && imageCount !== 2) throw new Error("Image count must be one or two.");
@@ -704,18 +768,28 @@ const sogniImageProviderAdapter: AsyncImageProviderAdapter = {
       ...(request.steps !== undefined ? { steps: request.steps } : {}),
       ...(request.guidance !== undefined ? { guidance: request.guidance } : {}),
       ...(request.scheduler !== undefined ? { scheduler: request.scheduler } : {})
-    }, fetcher);
+    }, (url, init) => transport.fetch(profile, "image generation submission", String(url), init || {}));
     return { mode: "pending", ...submitted };
   },
-  async poll(profile, remoteJobId, fetcher) {
-    const result = await pollSogniGeneration(profile, remoteJobId, fetcher);
+  async poll(profile, remoteJobId, transport) {
+    const result = await pollSogniGeneration(
+      profile,
+      remoteJobId,
+      (url, init) => transport.fetch(profile, "image generation polling", String(url), init || {})
+    );
     if (result.status === "completed") return {
       ...result,
       reportedCost: reportedProviderCost(result.usage)
     };
     return result;
   },
-  cancel: cancelSogniGeneration
+  async cancel(profile, remoteJobId, transport) {
+    await cancelSogniGeneration(
+      profile,
+      remoteJobId,
+      (url, init) => transport.fetch(profile, "image generation cancellation", String(url), init || {})
+    );
+  }
 };
 
 const sogniSdkImageProviderAdapter: AsyncImageProviderAdapter = {
@@ -746,29 +820,32 @@ function imageProviderAdapter(profile: TextProviderProfile): AsyncImageProviderA
 export async function submitImageProvider(
   profile: TextProviderProfile,
   request: ImageProviderRequest,
-  fetcher: Fetch = fetch
+  transport: ProviderTransport = defaultProviderTransport()
 ): Promise<ImageProviderSubmissionResult> {
-  return imageProviderAdapter(profile).submit(profile, request, fetcher);
+  if (profile.providerType === "sogni_sdk") await transport.validateSdkEndpoint(profile);
+  return imageProviderAdapter(profile).submit(profile, request, transport);
 }
 
 export async function pollImageProvider(
   profile: TextProviderProfile,
   request: { remoteJobId: string },
-  fetcher: Fetch = fetch
+  transport: ProviderTransport = defaultProviderTransport()
 ): Promise<ImageProviderPollResult> {
+  if (profile.providerType === "sogni_sdk") await transport.validateSdkEndpoint(profile);
   const adapter = imageProviderAdapter(profile);
   if (!adapter.poll) throw new Error(`Image provider '${profile.providerType}' does not use asynchronous polling.`);
-  return adapter.poll(profile, request.remoteJobId, fetcher);
+  return adapter.poll(profile, request.remoteJobId, transport);
 }
 
 export async function cancelImageProvider(
   profile: TextProviderProfile,
   request: { remoteJobId: string },
-  fetcher: Fetch = fetch
+  transport: ProviderTransport = defaultProviderTransport()
 ): Promise<void> {
+  if (profile.providerType === "sogni_sdk") await transport.validateSdkEndpoint(profile);
   const adapter = imageProviderAdapter(profile);
   if (!adapter.cancel) throw new Error(`Image provider '${profile.providerType}' does not support cancellation.`);
-  await adapter.cancel(profile, request.remoteJobId, fetcher);
+  await adapter.cancel(profile, request.remoteJobId, transport);
 }
 
 function inventoryRows(data: Record<string, any> | any[]): any[] {
@@ -881,11 +958,14 @@ function imageInventoryRows(models: any[]): any[] {
   return assessed.filter(({ capability, nameMatch }) => capability === true || (capability === null && nameMatch)).map(({ model }) => model);
 }
 
-export async function discoverModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
+export async function discoverModels(
+  profile: TextProviderProfile,
+  transport: ProviderTransport = defaultProviderTransport()
+): Promise<ModelInventoryItem[]> {
   const url = profile.providerType === "lmstudio"
     ? `${lmStudioRoot(profile.baseUrl)}/api/v1/models`
     : `${openAiRoot(profile.baseUrl)}/models`;
-  const data = await checkedJson(await providerFetch(profile, "model discovery", url, { headers: headers(profile) }, fetcher), profile, "model discovery", url);
+  const data = await checkedJson(await providerFetch(profile, "model discovery", url, { headers: headers(profile, url) }, transport), profile, "model discovery", url);
   const rows = inventoryRows(data);
   const items = inventoryItems(rows);
   if (profile.providerType !== "openrouter") return items;
@@ -896,10 +976,13 @@ export async function discoverModels(profile: TextProviderProfile, fetcher: Fetc
   });
 }
 
-export async function discoverEmbeddingModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
-  if (profile.providerType !== "openrouter") return discoverModels(profile, fetcher);
+export async function discoverEmbeddingModels(
+  profile: TextProviderProfile,
+  transport: ProviderTransport = defaultProviderTransport()
+): Promise<ModelInventoryItem[]> {
+  if (profile.providerType !== "openrouter") return discoverModels(profile, transport);
   const url = `${rootUrl(profile.baseUrl)}/embeddings/models`;
-  const data = await checkedJson(await providerFetch(profile, "embedding model discovery", url, { headers: headers(profile) }, fetcher), profile, "embedding model discovery", url);
+  const data = await checkedJson(await providerFetch(profile, "embedding model discovery", url, { headers: headers(profile, url) }, transport), profile, "embedding model discovery", url);
   return inventoryRows(data).map((model: any) => ({
     id: String(model.id || model.canonical_slug || model.key || ""),
     displayName: String(model.name || model.display_name || model.id || model.canonical_slug || model.key || ""),
@@ -909,26 +992,30 @@ export async function discoverEmbeddingModels(profile: TextProviderProfile, fetc
   })).filter((model: ModelInventoryItem) => model.id);
 }
 
-export async function discoverImageModels(profile: TextProviderProfile, fetcher: Fetch = fetch): Promise<ModelInventoryItem[]> {
+export async function discoverImageModels(
+  profile: TextProviderProfile,
+  transport: ProviderTransport = defaultProviderTransport()
+): Promise<ModelInventoryItem[]> {
   if (profile.providerType === "sogni_sdk") {
     if (profile.configuration?.modelDiscoveryEnabled === false) return [];
+    await transport.validateSdkEndpoint(profile);
     return discoverSogniSdkModels(profile);
   }
   if (profile.providerType === "sogni") {
     if (profile.configuration?.modelDiscoveryEnabled === false) return [];
     const url = "https://socket.sogni.ai/api/v1/models/list";
-    const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile) }, fetcher), profile, "image model discovery", url);
+    const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile, url) }, transport), profile, "image model discovery", url);
     return inventoryItems(inventoryRows(data).filter((model: any) => String(model?.media || "").toLowerCase() === "image"));
   }
   if (profile.providerType !== "openrouter") {
     const url = profile.providerType === "lmstudio"
       ? `${lmStudioRoot(profile.baseUrl)}/api/v1/models`
       : `${openAiRoot(profile.baseUrl)}/models`;
-    const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile) }, fetcher), profile, "image model discovery", url);
+    const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile, url) }, transport), profile, "image model discovery", url);
     return inventoryItems(imageInventoryRows(inventoryRows(data)));
   }
   const url = `${rootUrl(profile.baseUrl)}/images/models`;
-  const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile) }, fetcher), profile, "image model discovery", url);
+  const data = await checkedJson(await providerFetch(profile, "image model discovery", url, { headers: headers(profile, url) }, transport), profile, "image model discovery", url);
   const rows = imageInventoryRows(inventoryRows(data)).filter((model: any) => explicitImageCapability(model) !== false);
   return Promise.all(rows.map(async (model: any): Promise<ModelInventoryItem> => {
     const id = String(model.id || model.key || "");
@@ -937,7 +1024,7 @@ export async function discoverImageModels(profile: TextProviderProfile, fetcher:
     if (!entries.length && endpointPath) {
       try {
         const endpointUrl = new URL(endpointPath, `${rootUrl(profile.baseUrl)}/`).toString();
-        const endpointData = await checkedJson(await providerFetch(profile, "image model pricing discovery", endpointUrl, { headers: headers(profile) }, fetcher), profile, "image model pricing discovery", endpointUrl);
+        const endpointData = await checkedJson(await providerFetch(profile, "image model pricing discovery", endpointUrl, { headers: headers(profile, endpointUrl) }, transport), profile, "image model pricing discovery", endpointUrl);
         entries = (Array.isArray(endpointData.endpoints) ? endpointData.endpoints : []).flatMap((endpoint: any) =>
           pricingEntries(endpoint.pricing, String(endpoint.provider_name || endpoint.provider_slug || ""))
         );

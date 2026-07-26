@@ -1,11 +1,16 @@
-import { createDatabasePool, loadRuntimeConfig } from "../../../packages/database/src/index.js";
+import { createDatabasePool, loadRuntimeConfig, type DatabasePool, type RuntimeConfig } from "../../../packages/database/src/index.js";
 import { migrateDatabase, waitForDatabaseMigrations } from "../../../packages/database/src/migrate.js";
 import { buildServer } from "../../api/src/server.js";
 import { runWorker } from "../../worker/src/worker.js";
 import { logger } from "../../../packages/logger/src/index.js";
+import { createProviderNetworkPolicy } from "../../../packages/security/src/provider-network-policy.js";
+import {
+  configureDefaultProviderTransport,
+  createProviderTransport
+} from "../../../packages/story-engine/src/provider-transport.js";
+import { runRuntimeLifecycle } from "./lifecycle.js";
 
 const config = loadRuntimeConfig();
-const pool = createDatabasePool(config.databaseUrl, config.databaseMaxConnections);
 const abortController = new AbortController();
 
 async function shutdown(signal: string): Promise<void> {
@@ -16,35 +21,48 @@ async function shutdown(signal: string): Promise<void> {
 process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
-try {
-  if (config.role === "migrate") {
-    const applied = await migrateDatabase(pool, config.migrationDirectory, { allowMaintenanceMigrations: true });
+async function dispatchRuntimeRole(
+  roleConfig: RuntimeConfig,
+  pool: DatabasePool,
+  signal: AbortSignal
+): Promise<void> {
+  if (roleConfig.role === "migrate") {
+    const applied = await migrateDatabase(pool, roleConfig.migrationDirectory, { allowMaintenanceMigrations: true });
     logger.info({ event: "migrations_complete", applied });
   } else {
-    if (config.role === "worker") {
-      await waitForDatabaseMigrations(pool, config.migrationDirectory, config.migrationWaitSeconds * 1000);
-      logger.info({ event: "migrations_verified", role: config.role });
+    if (roleConfig.role === "worker") {
+      await waitForDatabaseMigrations(pool, roleConfig.migrationDirectory, roleConfig.migrationWaitSeconds * 1000);
+      logger.info({ event: "migrations_verified", role: roleConfig.role });
     } else {
-      const applied = await migrateDatabase(pool, config.migrationDirectory, {
-        allowMaintenanceMigrations: config.allowMaintenanceMigrations
+      const applied = await migrateDatabase(pool, roleConfig.migrationDirectory, {
+        allowMaintenanceMigrations: roleConfig.allowMaintenanceMigrations
       });
-      logger.info({ event: "migrations_complete", role: config.role, applied });
+      logger.info({ event: "migrations_complete", role: roleConfig.role, applied });
     }
   }
 
-  if (config.role === "api") {
-    const server = await buildServer({ config, pool });
-    await server.listen({ host: config.host, port: config.port });
-    await new Promise<void>((resolve) => abortController.signal.addEventListener("abort", () => resolve(), { once: true }));
+  if (roleConfig.role === "api") {
+    const server = await buildServer({ config: roleConfig, pool });
+    await server.listen({ host: roleConfig.host, port: roleConfig.port });
+    await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
     await server.close();
-  } else if (config.role === "worker") {
-    await runWorker(pool, config, abortController.signal);
-  } else if (config.role === "all") {
-    const server = await buildServer({ config, pool });
-    await server.listen({ host: config.host, port: config.port });
-    await runWorker(pool, config, abortController.signal);
+  } else if (roleConfig.role === "worker") {
+    await runWorker(pool, roleConfig, signal);
+  } else if (roleConfig.role === "all") {
+    const server = await buildServer({ config: roleConfig, pool });
+    await server.listen({ host: roleConfig.host, port: roleConfig.port });
+    await runWorker(pool, roleConfig, signal);
     await server.close();
   }
-} finally {
-  await pool.end();
 }
+
+await runRuntimeLifecycle(config, abortController, {
+  createPool: (roleConfig) => createDatabasePool(roleConfig.databaseUrl, roleConfig.databaseMaxConnections),
+  createTransport: (roleConfig) => createProviderTransport({
+    policy: createProviderNetworkPolicy({
+      allowlist: roleConfig.security.providerNetworkAllowlist
+    })
+  }),
+  configureTransport: configureDefaultProviderTransport,
+  dispatchRole: dispatchRuntimeRole
+});

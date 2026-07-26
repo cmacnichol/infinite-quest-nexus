@@ -155,7 +155,7 @@ function showBusy(msg) {
   if (text) text.textContent = msg || "Working…";
   if (el) el.classList.add("show");
   const pill = $("busyPill");
-  if (pill) { pill.textContent = "Busy"; pill.style.color = "var(--gold)"; }
+  if (pill) { pill.textContent = "Busy"; pill.classList.add("busy"); }
   syncInputState();
 }
 
@@ -164,7 +164,7 @@ function hideBusy() {
   const el = $("llmWaitIndicator");
   if (el) el.classList.remove("show");
   const pill = $("busyPill");
-  if (pill) { pill.textContent = "Ready"; pill.style.color = ""; }
+  if (pill) { pill.textContent = "Ready"; pill.classList.remove("busy"); }
   syncInputState();
 }
 
@@ -416,7 +416,7 @@ function renderScene(turn, index) {
   // Before-event trigger text
   if (turn.mechanics?.beforeEvents?.length) {
     turn.mechanics.beforeEvents.forEach(evt => {
-      narrationHtml += `<div class="action-tag" style="border-color:rgba(116,228,255,.3);color:var(--accent2);">⚡ ${escapeHtml(evt.name || evt.label || "Event")} — ${escapeHtml(evt.text || evt.effect || "")}</div>`;
+      narrationHtml += `<div class="action-tag action-tag-event">⚡ ${escapeHtml(evt.name || evt.label || "Event")} — ${escapeHtml(evt.text || evt.effect || "")}</div>`;
     });
   }
 
@@ -449,7 +449,7 @@ function renderScene(turn, index) {
   // After-event trigger text
   if (turn.mechanics?.afterEvents?.length) {
     turn.mechanics.afterEvents.forEach(evt => {
-      narrationHtml += `<div class="action-tag" style="border-color:rgba(116,228,255,.3);color:var(--accent2);">⚡ ${escapeHtml(evt.name || evt.label || "Event")} — ${escapeHtml(evt.text || evt.effect || "")}</div>`;
+      narrationHtml += `<div class="action-tag action-tag-event">⚡ ${escapeHtml(evt.name || evt.label || "Event")} — ${escapeHtml(evt.text || evt.effect || "")}</div>`;
     });
   }
 
@@ -595,11 +595,11 @@ function renderAllScenes(options = {}) {
     const premise = state.world?.premise || state.campaign?.premise || "";
     container.innerHTML = `<div class="empty">
       <div>
-        <div style="font-size:3rem;margin-bottom:10px;">🗝️</div>
-        <h2 style="margin:0 0 8px;color:#fff;">${worldName ? escapeHtml(worldName) : "Create a world, then begin."}</h2>
-        ${character ? `<p style="max-width:620px;margin:4px auto;line-height:1.55;"><strong style="color:var(--gold);">Character:</strong> ${escapeHtml(character)}</p>` : ""}
-        ${premise ? `<p style="max-width:620px;margin:4px auto;line-height:1.55;">${escapeHtml(premise)}</p>` : ""}
-        <p style="max-width:620px;margin:8px auto 0;line-height:1.55;color:var(--dim);">Type an action or choose from generated options to begin your adventure.</p>
+        <div class="story-empty-icon">🗝️</div>
+        <h2 class="story-empty-title">${worldName ? escapeHtml(worldName) : "Create a world, then begin."}</h2>
+        ${character ? `<p class="story-empty-character"><strong>Character:</strong> ${escapeHtml(character)}</p>` : ""}
+        ${premise ? `<p class="story-empty-character">${escapeHtml(premise)}</p>` : ""}
+        <p class="story-empty-guidance">Type an action or choose from generated options to begin your adventure.</p>
       </div>
     </div>`;
     renderStoryIllustration();
@@ -647,9 +647,9 @@ function campaignTurnControlStyle() {
 }
 
 function defaultTurnInputMode() {
-  const style = campaignTurnControlStyle();
-  if (style === "flexible_auto") return "auto";
-  if (style === "flexible_scene") return "scene";
+  const turnControlStyle = campaignTurnControlStyle();
+  if (turnControlStyle === "flexible_auto") return "auto";
+  if (turnControlStyle === "flexible_scene") return "scene";
   return "action";
 }
 
@@ -1340,9 +1340,7 @@ function updateGenerationProgress(job) {
         <strong>${escapeHtml(currentStep.label)}</strong>
         <span class="turn-progress-step">Step ${currentIndex + 1} of ${steps.length}</span>
       </div>
-      <div class="turn-progress-track" aria-hidden="true">
-        <div class="turn-progress-fill" style="width:${percent}%"></div>
-      </div>
+      <progress class="turn-progress-meter" max="100" value="${percent}" aria-label="${escapeHtml(currentStep.label)}">${percent}%</progress>
       <div class="turn-progress-detail">${escapeHtml(detailText)}</div>
     `;
   }
@@ -2274,9 +2272,9 @@ function openWorldSetup() {
     } else {
       statsContainer.innerHTML = `<div class="stat-grid">` + stats.map(s => `
         <div class="stat-row">
-          <span style="font-weight: 600; color: var(--text-heading);">${escapeHtml(s.name)}:</span>
+          <span class="setup-stat-label">${escapeHtml(s.name)}:</span>
           <span>${s.value} d%</span>
-          ${s.note ? `<span class="dim mini" style="grid-column: span 2;">${escapeHtml(s.note)}</span>` : ""}
+          ${s.note ? `<span class="dim mini setup-stat-note">${escapeHtml(s.note)}</span>` : ""}
         </div>`).join("") + `</div>`;
     }
   }
@@ -2346,7 +2344,7 @@ async function exportPdfWithImages() {
           : ""}`;
       return `<section class="turn"><h2>Turn ${index + 1}${action}</h2>${content}</section>`;
     }).join("");
-    const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>@page{margin:.7in}*{box-sizing:border-box}body{max-width:8.2in;margin:0 auto;color:#17131f;font:12pt/1.58 Georgia,serif}h1{margin:0 0 28px;color:#3f286b;font-size:28pt}h2{margin:0 0 14px;color:#543482;font-size:17pt}.turn{break-inside:avoid;border-top:1px solid #cfc7dc;padding:24px 0}.turn p{orphans:3;widows:3}figure{margin:22px 0 0;break-inside:avoid}img{display:block;max-width:100%;max-height:7.2in;margin:auto;border-radius:10px;object-fit:contain}figcaption{margin-top:7px;color:#70687d;font:9pt/1.3 system-ui,sans-serif;text-align:center}@media print{body{max-width:none}.turn{break-inside:auto}figure{break-inside:avoid}}</style></head><body><h1>${title}</h1>${turns || "<p>No accepted story turns are available yet.</p>"}</body></html>`;
+    const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><link rel="stylesheet" href="/nexus/story-print.css"></head><body><h1>${title}</h1>${turns || "<p>No accepted story turns are available yet.</p>"}</body></html>`;
 
     printWindow.document.open();
     printWindow.document.write(html);

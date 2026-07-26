@@ -1,10 +1,19 @@
+import type { Dispatcher } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { providerProfileInputSchema } from "../../packages/contracts/src/generation.js";
+import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
+import {
+  MAX_IMAGE_PROVIDER_RESPONSE_BYTES,
+  MAX_PROVIDER_JSON_RESPONSE_BYTES,
+  MAX_PROVIDER_SSE_RESPONSE_BYTES,
+  MAX_SOGNI_RESPONSE_BYTES
+} from "../../packages/story-engine/src/provider-response.js";
 import {
   callEmbeddingProvider,
   callImageProvider,
   callTextProvider,
   cancelImageProvider,
+  createProviderTransport,
   discoverEmbeddingModels,
   discoverImageModels,
   discoverModels,
@@ -12,6 +21,7 @@ import {
   providerTransportErrorDetails,
   reportedProviderCost,
   submitImageProvider,
+  type ProviderTransport,
   type TextProviderProfile
 } from "../../packages/story-engine/src/providers.js";
 import { logger } from "../../packages/logger/src/index.js";
@@ -24,6 +34,30 @@ const profile: TextProviderProfile = {
   maxOutputTokens: 4096,
   temperature: 0.8
 };
+
+function createTestProviderTransport(fetcher: typeof fetch): ProviderTransport {
+  const dispatcher = {
+    dispatch: vi.fn(),
+    close: vi.fn(async () => undefined),
+    destroy: vi.fn()
+  } as unknown as Dispatcher;
+  return createProviderTransport({
+    fetcher,
+    dispatcherFactory: () => dispatcher,
+    policy: {
+      async approve(url) {
+        return {
+          url,
+          origin: url.origin,
+          address: "127.0.0.1",
+          family: 4,
+          port: url.port ? Number(url.port) : url.protocol === "https:" ? 443 : 80,
+          servername: url.hostname
+        };
+      }
+    }
+  });
+}
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -47,7 +81,7 @@ describe("text provider adapters", () => {
     });
     let thrown: unknown;
     try {
-      await callTextProvider(timeoutProfile, { systemPrompt: "secret prompt", input: "private action" }, fetcher as typeof fetch);
+      await callTextProvider(timeoutProfile, { systemPrompt: "secret prompt", input: "private action" }, createTestProviderTransport(fetcher as typeof fetch));
     } catch (error) {
       thrown = error;
     }
@@ -73,7 +107,7 @@ describe("text provider adapters", () => {
       expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeDefined();
       return new Response(JSON.stringify({ output: [{ type: "message", content: "{}" }], stats: {} }), { status: 200 });
     });
-    await callTextProvider({ ...profile, requestTimeoutMs: 600_000 }, { systemPrompt: "system", input: "input" }, fetcher as typeof fetch);
+    await callTextProvider({ ...profile, requestTimeoutMs: 600_000 }, { systemPrompt: "system", input: "input" }, createTestProviderTransport(fetcher as typeof fetch));
   });
 
   it("normalizes only explicit valid provider-reported costs", () => {
@@ -104,7 +138,7 @@ describe("text provider adapters", () => {
         stats: { input_tokens: 100, total_output_tokens: 4 }
       }), { status: 200 });
     });
-    await callTextProvider(profile, { systemPrompt: "system", input: "input" }, fetcher as typeof fetch);
+    await callTextProvider(profile, { systemPrompt: "system", input: "input" }, createTestProviderTransport(fetcher as typeof fetch));
     expect(fetcher.mock.calls.find((call) => String(call[0]).endsWith("/api/v1/chat"))?.[0]).toBe("http://lmstudio.test/api/v1/chat");
   });
 
@@ -144,7 +178,7 @@ describe("text provider adapters", () => {
       }
       throw new Error(`Unexpected request: ${init?.method || "GET"} ${urlString}`);
     });
-    const result = await callTextProvider(unloadedProfile, { systemPrompt: "system", input: "input" }, fetcher as typeof fetch);
+    const result = await callTextProvider(unloadedProfile, { systemPrompt: "system", input: "input" }, createTestProviderTransport(fetcher as typeof fetch));
     expect(result.content).toBe('{"narration":"Successfully loaded and generated."}');
     expect(calls).toEqual([
       "GET http://lmstudio.test/api/v1/models",
@@ -157,7 +191,7 @@ describe("text provider adapters", () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
       models: [{ key: "model-key", display_name: "Model Name", loaded_instances: [{ id: "instance-7", config: { context_length: 196608 } }] }]
     }), { status: 200 }));
-    const models = await discoverModels(profile, fetcher as typeof fetch);
+    const models = await discoverModels(profile, createTestProviderTransport(fetcher as typeof fetch));
     expect(models).toEqual([{ id: "model-key", displayName: "Model Name", loaded: true, instanceId: "instance-7", contextLength: 196608 }]);
   });
 
@@ -168,7 +202,7 @@ describe("text provider adapters", () => {
         { key: "inactive-model", display_name: "Inactive Model", max_context_length: 32768 }
       ]
     }), { status: 200 }));
-    const models = await discoverModels(profile, fetcher as typeof fetch);
+    const models = await discoverModels(profile, createTestProviderTransport(fetcher as typeof fetch));
     expect(models).toEqual([
       { id: "active-model", displayName: "Active Model", loaded: true, instanceId: "active-instance", contextLength: 65536 },
       { id: "inactive-model", displayName: "Inactive Model", loaded: false, instanceId: "inactive-model", contextLength: 32768 }
@@ -181,7 +215,7 @@ describe("text provider adapters", () => {
       output: [{ type: "message", content: "{\"narration\":\"partial" }],
       stats: { input_tokens: 200, total_output_tokens: 4096 }
     }), { status: 200 }));
-    const result = await callTextProvider(profile, { systemPrompt: "system", input: "input" }, fetcher as typeof fetch);
+    const result = await callTextProvider(profile, { systemPrompt: "system", input: "input" }, createTestProviderTransport(fetcher as typeof fetch));
     expect(result.outputLimited).toBe(true);
     expect(result.responseId).toBe("partial");
     expect(result.reportedCost).toBeNull();
@@ -199,7 +233,7 @@ describe("text provider adapters", () => {
       systemPrompt: "system",
       input: "authoritative snapshot",
       recoveryInput: "return compact JSON"
-    }, fetcher as typeof fetch);
+    }, createTestProviderTransport(fetcher as typeof fetch));
   });
 
   it("includes the rejected response in stateless OpenRouter recovery", async () => {
@@ -227,7 +261,7 @@ describe("text provider adapters", () => {
       input: "authoritative snapshot",
       recoveryInput: "rewrite the rejected response",
       rejectedResponse: '{"narration":"She rolls a 17."}'
-    }, fetcher as typeof fetch);
+    }, createTestProviderTransport(fetcher as typeof fetch));
   });
 
   it("uses the OpenAI-compatible embeddings endpoint and preserves input order", async () => {
@@ -250,7 +284,7 @@ describe("text provider adapters", () => {
         usage: { prompt_tokens: 4, total_tokens: 4, cost: 0.000004 }
       }), { status: 200 });
     });
-    const result = await callEmbeddingProvider(profile, ["first", "second"], fetcher as typeof fetch);
+    const result = await callEmbeddingProvider(profile, ["first", "second"], createTestProviderTransport(fetcher as typeof fetch));
     expect(result.embeddings).toEqual([[1, 0, 0], [0, 1, 0]]);
     expect(result.model).toBe("embedding-model");
     expect(result.responseId).toBe("embedding-response-1");
@@ -261,7 +295,7 @@ describe("text provider adapters", () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
       data: [{ index: 0, embedding: [1, 0] }, { index: 1, embedding: [0, 1, 0] }]
     }), { status: 200 }));
-    await expect(callEmbeddingProvider(profile, ["first", "second"], fetcher as typeof fetch))
+    await expect(callEmbeddingProvider(profile, ["first", "second"], createTestProviderTransport(fetcher as typeof fetch)))
       .rejects.toThrow("inconsistent dimensions");
   });
 
@@ -286,7 +320,7 @@ describe("text provider adapters", () => {
       aspectRatio: "1:1",
       quality: "high",
       outputFormat: "png"
-    }, fetcher as typeof fetch);
+    }, createTestProviderTransport(fetcher as typeof fetch));
     expect(result).toMatchObject({ base64: "aW1hZ2U=", mimeType: "image/png", responseId: "image-1" });
     expect(result.reportedCost).toEqual({ amount: "0.04", currency: "USD" });
   });
@@ -307,9 +341,47 @@ describe("text provider adapters", () => {
       quality: "high",
       outputFormat: "png",
       imageCount: 2
-    }, fetcher as typeof fetch);
+    }, createTestProviderTransport(fetcher as typeof fetch));
     expect(result.artifacts).toHaveLength(2);
     expect(result.artifacts.map((artifact) => artifact.source === "base64" ? artifact.base64 : "")).toEqual(["Zmlyc3Q=", "c2Vjb25k"]);
+  });
+
+  it("accepts an image response whose decoded artifact exceeds the generic JSON ceiling", async () => {
+    const imageProfile = { ...profile, providerType: "openai_compatible" as const, baseUrl: "http://images.test" };
+    const base64 = Buffer.alloc(MAX_PROVIDER_JSON_RESPONSE_BYTES + 1).toString("base64");
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      id: "large-image",
+      data: [{ b64_json: base64 }]
+    }), { status: 200 }));
+
+    const result = await callImageProvider(imageProfile, {
+      prompt: "A large fictional panorama.",
+      size: "2048x2048",
+      aspectRatio: "1:1",
+      quality: "high",
+      outputFormat: "png"
+    }, createTestProviderTransport(fetcher as typeof fetch));
+
+    expect(result.base64).toHaveLength(base64.length);
+  });
+
+  it("rejects image provider responses beyond the image-specific ceiling", async () => {
+    const imageProfile = { ...profile, providerType: "openai_compatible" as const, baseUrl: "http://images.test" };
+    const fetcher = vi.fn(async () => new Response("{}", {
+      status: 200,
+      headers: { "content-length": String(MAX_IMAGE_PROVIDER_RESPONSE_BYTES + 1) }
+    }));
+
+    await expect(callImageProvider(imageProfile, {
+      prompt: "An oversized fictional panorama.",
+      size: "2048x2048",
+      aspectRatio: "1:1",
+      quality: "high",
+      outputFormat: "png"
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "provider_response_too_large",
+      limitBytes: MAX_IMAGE_PROVIDER_RESPONSE_BYTES
+    });
   });
 
   it("uses OpenRouter's dedicated image-model inventory", async () => {
@@ -332,7 +404,7 @@ describe("text provider adapters", () => {
         pricing: [{ billable: "output_image", unit: "image", cost_usd: 0.04 }]
       }] }), { status: 200 });
     });
-    expect(await discoverImageModels(imageProfile, fetcher as typeof fetch)).toEqual([{
+    expect(await discoverImageModels(imageProfile, createTestProviderTransport(fetcher as typeof fetch))).toEqual([{
       id: "synthetic/image-model",
       displayName: "Synthetic Image Model",
       loaded: true,
@@ -353,7 +425,7 @@ describe("text provider adapters", () => {
         { key: "embedding-model", display_name: "Embedding Model", capabilities: { outputs: ["embeddings"] } }
       ]
     }), { status: 200 }));
-    expect(await discoverImageModels(profile, fetcher as typeof fetch)).toEqual([{
+    expect(await discoverImageModels(profile, createTestProviderTransport(fetcher as typeof fetch))).toEqual([{
       id: "image-model",
       displayName: "Image Model",
       loaded: false,
@@ -371,7 +443,7 @@ describe("text provider adapters", () => {
         { id: "vendor/text-embedding-model" }
       ]
     }), { status: 200 }));
-    expect(await discoverImageModels(imageProfile, fetcher as typeof fetch)).toEqual([{
+    expect(await discoverImageModels(imageProfile, createTestProviderTransport(fetcher as typeof fetch))).toEqual([{
       id: "vendor/flux-image-v2",
       displayName: "vendor/flux-image-v2",
       loaded: false,
@@ -383,7 +455,7 @@ describe("text provider adapters", () => {
   it("preserves opaque compatible inventories when the endpoint exposes no capability signal", async () => {
     const imageProfile = { ...profile, providerType: "openai_compatible" as const, baseUrl: "http://images.test" };
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: "vendor/custom-renderer" }] }), { status: 200 }));
-    expect(await discoverImageModels(imageProfile, fetcher as typeof fetch)).toHaveLength(1);
+    expect(await discoverImageModels(imageProfile, createTestProviderTransport(fetcher as typeof fetch))).toHaveLength(1);
   });
 
   it("uses OpenRouter's dedicated embedding-model inventory", async () => {
@@ -399,7 +471,7 @@ describe("text provider adapters", () => {
         }]
       }), { status: 200 });
     });
-    expect(await discoverEmbeddingModels(embeddingProfile, fetcher as typeof fetch)).toEqual([{
+    expect(await discoverEmbeddingModels(embeddingProfile, createTestProviderTransport(fetcher as typeof fetch))).toEqual([{
       id: "openai/text-embedding-3-small",
       displayName: "Text Embedding 3 Small",
       loaded: true,
@@ -418,7 +490,7 @@ describe("text provider adapters", () => {
 
     let thrownError: unknown;
     try {
-      await callTextProvider(profile, { systemPrompt: "system", input: "input" }, fetcher as typeof fetch);
+      await callTextProvider(profile, { systemPrompt: "system", input: "input" }, createTestProviderTransport(fetcher as typeof fetch));
     } catch (error) {
       thrownError = error;
     }
@@ -426,6 +498,83 @@ describe("text provider adapters", () => {
     expect(thrownError).toBeInstanceOf(Error);
     expect((thrownError as Error).message).toContain("Internal Server Error - Invalid JSON [");
     expect((thrownError as any).statusCode).toBe(500);
+  });
+
+  it("rejects oversized generic JSON responses with a safe permanent error", async () => {
+    let cancellations = 0;
+    const fetcher = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{}"));
+      },
+      cancel() {
+        cancellations += 1;
+      }
+    }), {
+      status: 200,
+      headers: { "content-length": String(MAX_PROVIDER_JSON_RESPONSE_BYTES + 1) }
+    }));
+
+    await expect(callTextProvider(
+      profile,
+      { systemPrompt: "system", input: "input" },
+      createTestProviderTransport(fetcher as typeof fetch)
+    )).rejects.toMatchObject({
+      code: "provider_response_too_large",
+      permanent: true,
+      statusCode: 502
+    });
+    expect(cancellations).toBe(2);
+  });
+
+  it("bounds response-format fallback inspection and does not retry an oversized error response", async () => {
+    let cancelled = false;
+    const fetcher = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"error":"response_format is unsupported"}'));
+      },
+      cancel() {
+        cancelled = true;
+      }
+    }), {
+      status: 400,
+      headers: { "content-length": String(MAX_PROVIDER_JSON_RESPONSE_BYTES + 1) }
+    }));
+    const openAiProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "openai_compatible",
+      baseUrl: "https://api.openai.com/v1"
+    };
+
+    await expect(callTextProvider(openAiProfile, {
+      systemPrompt: "system",
+      input: "input"
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "provider_response_too_large",
+      limitBytes: MAX_PROVIDER_JSON_RESPONSE_BYTES
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(cancelled).toBe(true);
+  });
+
+  it("preserves provider destination denials through the public text adapter", async () => {
+    const transport = createProviderTransport({
+      policy: {
+        async approve() {
+          throw new ProviderDestinationNotAllowedError("address");
+        }
+      }
+    });
+
+    await expect(callTextProvider(
+      profile,
+      { systemPrompt: "system", input: "input" },
+      transport
+    )).rejects.toMatchObject({
+      code: "PROVIDER_DESTINATION_NOT_ALLOWED",
+      stage: "address",
+      permanent: true,
+      retryable: false
+    });
   });
 
   it("sets stream: true when onChunk callback is supplied to callTextProvider", async () => {
@@ -455,9 +604,81 @@ describe("text provider adapters", () => {
       systemPrompt: "system",
       input: "input",
       onChunk: (_delta, accumulated) => { streamChunks.push(accumulated); }
-    }, fetcher as typeof fetch);
+    }, createTestProviderTransport(fetcher as typeof fetch));
     expect(streamChunks).toEqual(["Hello", "Hello world"]);
     expect(result.content).toBe("Hello world");
+  });
+
+  it("cancels oversized SSE responses and returns a safe typed failure", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(MAX_PROVIDER_SSE_RESPONSE_BYTES + 1));
+      },
+      cancel() {
+        cancelled = true;
+      }
+    });
+    const fetcher = vi.fn(async () => new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" }
+    }));
+    const openAiProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "openai_compatible",
+      baseUrl: "https://api.openai.com/v1"
+    };
+
+    await expect(callTextProvider(openAiProfile, {
+      systemPrompt: "system",
+      input: "input",
+      onChunk: vi.fn()
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "provider_response_too_large",
+      permanent: true
+    });
+    expect(cancelled).toBe(true);
+  });
+
+  it("normalizes a post-header SSE body timeout as a provider transport failure", async () => {
+    const bodyTimeout = Object.assign(new Error("Body Timeout Error"), {
+      name: "AbortError",
+      code: "UND_ERR_BODY_TIMEOUT"
+    });
+    const fetcher = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      pull() {
+        throw bodyTimeout;
+      }
+    }), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" }
+    }));
+    const openAiProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "openai_compatible",
+      baseUrl: "https://api.openai.com/v1"
+    };
+
+    let thrownError: unknown;
+    try {
+      await callTextProvider(openAiProfile, {
+        systemPrompt: "system",
+        input: "input",
+        onChunk: vi.fn()
+      }, createTestProviderTransport(fetcher as typeof fetch));
+    } catch (error) {
+      thrownError = error;
+    }
+
+    expect(thrownError).toMatchObject({
+      code: "provider_request_timeout",
+      statusCode: 504
+    });
+    expect(providerTransportErrorDetails(thrownError)).toMatchObject({
+      timedOut: true,
+      transportCode: "UND_ERR_BODY_TIMEOUT",
+      operation: "story generation"
+    });
   });
 
   it("submits a durable Sogni workflow with bearer auth and an idempotency key", async () => {
@@ -495,7 +716,7 @@ describe("text provider adapters", () => {
       outputFormat: "png",
       imageCount: 2,
       idempotencyKey: "illustration-job-1:revision-1"
-    }, fetcher as typeof fetch)).resolves.toEqual({
+    }, createTestProviderTransport(fetcher as typeof fetch))).resolves.toEqual({
       mode: "pending",
       remoteJobId: "wf_test-1",
       pollAfterMs: 3_000,
@@ -528,12 +749,12 @@ describe("text provider adapters", () => {
         }
       }), { status: 200 });
     });
-    await expect(pollImageProvider(sogniProfile, { remoteJobId: "wf_test-1" }, fetcher as typeof fetch)).resolves.toMatchObject({
+    await expect(pollImageProvider(sogniProfile, { remoteJobId: "wf_test-1" }, createTestProviderTransport(fetcher as typeof fetch))).resolves.toMatchObject({
       status: "completed",
       artifacts: [{ source: "url", url: "https://artifacts.sogni.ai/signed/image.png", mimeType: "image/png" }],
       reportedCost: { amount: "0.25", currency: "USD" }
     });
-    await expect(cancelImageProvider(sogniProfile, { remoteJobId: "wf_test-1" }, fetcher as typeof fetch)).resolves.toBeUndefined();
+    await expect(cancelImageProvider(sogniProfile, { remoteJobId: "wf_test-1" }, createTestProviderTransport(fetcher as typeof fetch))).resolves.toBeUndefined();
   });
 
   it("normalizes Sogni rate limits and honors Retry-After", async () => {
@@ -555,8 +776,111 @@ describe("text provider adapters", () => {
       quality: "auto",
       outputFormat: "png",
       idempotencyKey: "illustration-job-2:revision-1"
-    }, fetcher as typeof fetch)).rejects.toMatchObject({
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
       normalized: { code: "rate_limited:209", retryable: true, statusCode: 429, retryAfterMs: 4_000 }
+    });
+  });
+
+  it("rejects oversized Sogni REST responses with a permanent safe failure", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni",
+      baseUrl: "https://api.sogni.ai",
+      model: "flux2",
+      apiKey: "sogni-secret"
+    };
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{}"));
+      },
+      cancel() {
+        cancelled = true;
+      }
+    });
+    const fetcher = vi.fn(async () => new Response(stream, {
+      status: 200,
+      headers: { "content-length": String(MAX_SOGNI_RESPONSE_BYTES + 1) }
+    }));
+
+    await expect(submitImageProvider(sogniProfile, {
+      prompt: "A fictional vista.",
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "auto",
+      outputFormat: "png",
+      idempotencyKey: "illustration-job-3:revision-1"
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "provider_response_too_large",
+      permanent: true,
+      normalized: { retryable: false }
+    });
+    expect(cancelled).toBe(true);
+  });
+
+  it("normalizes a post-header Sogni body abort as a retryable timeout", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni",
+      baseUrl: "https://api.sogni.ai",
+      model: "flux2",
+      apiKey: "sogni-secret"
+    };
+    const bodyTimeout = Object.assign(new Error("Body Timeout Error"), {
+      name: "AbortError",
+      code: "UND_ERR_BODY_TIMEOUT"
+    });
+    const fetcher = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      pull() {
+        throw bodyTimeout;
+      }
+    }), { status: 201 }));
+
+    await expect(submitImageProvider(sogniProfile, {
+      prompt: "A fictional vista.",
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "auto",
+      outputFormat: "png",
+      idempotencyKey: "illustration-job-4:revision-1"
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "provider_request_timeout",
+      permanent: false,
+      normalized: {
+        code: "provider_request_timeout",
+        retryable: true
+      }
+    });
+  });
+
+  it("preserves provider destination denials through Sogni submission as permanent", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni",
+      baseUrl: "https://api.sogni.ai",
+      model: "flux2",
+      apiKey: "sogni-secret"
+    };
+    const transport = createProviderTransport({
+      policy: {
+        async approve() {
+          throw new ProviderDestinationNotAllowedError("address");
+        }
+      }
+    });
+
+    await expect(submitImageProvider(sogniProfile, {
+      prompt: "A fictional vista.",
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "auto",
+      outputFormat: "png",
+      idempotencyKey: "illustration-job-4:revision-1"
+    }, transport)).rejects.toMatchObject({
+      code: "PROVIDER_DESTINATION_NOT_ALLOWED",
+      stage: "address",
+      permanent: true,
+      retryable: false
     });
   });
 
@@ -577,7 +901,7 @@ describe("text provider adapters", () => {
         { id: "unclassified", name: "Unclassified", SID: 4 }
       ]), { status: 200 });
     });
-    expect(await discoverImageModels(sogniProfile, fetcher as typeof fetch)).toEqual([
+    expect(await discoverImageModels(sogniProfile, createTestProviderTransport(fetcher as typeof fetch))).toEqual([
       { id: "flux2", displayName: "Flux 2", loaded: false, instanceId: "flux2", contextLength: 0 }
     ]);
   });
@@ -592,13 +916,13 @@ describe("text provider adapters", () => {
     };
     const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       expect(String(url)).toBe("https://socket.sogni.ai/api/v1/models/list");
-      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer sogni-secret");
+      expect(new Headers(init?.headers).get("authorization")).toBeNull();
       return new Response(JSON.stringify([
         { id: "z_image_turbo_bf16", name: "Z-Image Turbo", SID: 10, media: "image" },
         { id: "ace_step_1.5", name: "ACE-Step", SID: 11, media: "audio" }
       ]), { status: 200 });
     });
-    expect(await discoverImageModels(sogniProfile, fetcher as typeof fetch)).toEqual([{
+    expect(await discoverImageModels(sogniProfile, createTestProviderTransport(fetcher as typeof fetch))).toEqual([{
       id: "z_image_turbo_bf16",
       displayName: "Z-Image Turbo",
       loaded: false,

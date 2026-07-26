@@ -120,6 +120,7 @@ import { previewCampaignWorldTransfer, transferCampaignWorld } from "./campaign-
 import { applicationMetadata } from "./app-metadata.js";
 import { getDashboardStats } from "./dashboard-service.js";
 import { getTurnIllustrationResolution, rematchTurnIllustration } from "./illustration-resolution-service.js";
+import { installRequestSecurity } from "./request-security.js";
 import {
   enqueueIllustrationBackfill,
   generateTurnIllustrationSegments,
@@ -147,16 +148,18 @@ function statusCode(error: unknown): number {
   return 500;
 }
 
-function errorDetails(error: unknown): { name: string; message: string; issues?: unknown; details?: unknown } {
+function errorDetails(error: unknown): { name: string; message: string; code?: string; issues?: unknown; details?: unknown } {
   if (typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === "22P02") {
     return { name: "InvalidUuidError", message: "The provided ID is not a valid UUID." };
   }
   if (error instanceof Error) {
+    const code = "code" in error && typeof error.code === "string" ? error.code : undefined;
     const issues = "issues" in error ? (error as Error & { issues?: unknown }).issues : undefined;
     const details = "details" in error ? (error as Error & { details?: unknown }).details : undefined;
     return {
       name: error.name || "Error",
       message: error.message,
+      ...(code ? { code } : {}),
       ...(issues === undefined ? {} : { issues }),
       ...(details === undefined ? {} : { details })
     };
@@ -171,32 +174,30 @@ function exposeError(error: unknown, code: number): boolean {
 export async function buildServer({ config, pool }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: createLoggerOptions(),
-    bodyLimit: config.maxUploadSizeBytes,
+    bodyLimit: config.security.apiDefaultBodyLimitBytes,
+    trustProxy: config.security.trustProxyHops,
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
 
-  app.addHook("onRequest", async (request, reply) => {
-    reply.header("X-Content-Type-Options", "nosniff");
-    reply.header("X-Frame-Options", "DENY");
-    reply.header("Content-Security-Policy", "default-src 'self' 'unsafe-inline' data: blob:; img-src * data: blob:; connect-src *");
-    reply.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
-    if (request.url.startsWith("/api/v1/")) reply.header("Cache-Control", "no-store");
-
-    const origin = request.headers.origin;
-    if (origin) {
-      if (config.corsAllowedOrigins.includes("*") || config.corsAllowedOrigins.length === 0) {
-        reply.header("Access-Control-Allow-Origin", origin);
-        reply.header("Vary", "Origin");
-      } else if (config.corsAllowedOrigins.includes(origin)) {
-        reply.header("Access-Control-Allow-Origin", origin);
-        reply.header("Vary", "Origin");
-      }
-      reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-      reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-Id, X-Correlation-Id");
-      reply.header("Access-Control-Allow-Credentials", "true");
-    }
+  app.setErrorHandler((error, request, reply) => {
+    const code = statusCode(error);
+    const details = errorDetails(error);
+    const exposed = exposeError(error, code);
+    const transport = providerTransportErrorDetails(error);
+    request.log.error({ err: error, code }, "request_failed");
+    void reply.code(code).send({
+      error: exposed ? details.name || "Provider request failed" : "Internal server error",
+      message: exposed ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
+      correlationId: request.id,
+      ...(!exposed || details.code === undefined ? {} : { code: details.code }),
+      ...(!exposed || details.details === undefined ? {} : { details: details.details }),
+      ...(transport ? { details: { code: transport.timedOut ? "provider_request_timeout" : "provider_transport_error", transport } } : {}),
+      ...(details.issues === undefined ? {} : { issues: details.issues })
+    });
   });
+
+  installRequestSecurity(app, config);
 
   app.options("*", async (_request, reply) => {
     return reply.code(204).send();
@@ -206,8 +207,8 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   const assetStore: FilesystemAssetStore = { root: config.assetStorageRoot };
   await app.register(fastifyMultipart, {
     limits: {
-      fileSize: config.maxUploadSizeBytes,
-      fieldSize: config.maxUploadSizeBytes
+      fileSize: config.security.apiImportBodyLimitBytes,
+      fieldSize: config.security.apiImportBodyLimitBytes
     }
   });
   await app.register(fastifyStatic, {
@@ -222,22 +223,6 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     decorateReply: false,
     cacheControl: true,
     maxAge: "30d"
-  });
-
-  app.setErrorHandler((error, request, reply) => {
-    const code = statusCode(error);
-    const details = errorDetails(error);
-    const exposed = exposeError(error, code);
-    const transport = providerTransportErrorDetails(error);
-    request.log.error({ err: error, code }, "request_failed");
-    void reply.code(code).send({
-      error: exposed ? details.name || "Provider request failed" : "Internal server error",
-      message: exposed ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
-      correlationId: request.id,
-      ...(!exposed || details.details === undefined ? {} : { details: details.details }),
-      ...(transport ? { details: { code: transport.timedOut ? "provider_request_timeout" : "provider_transport_error", transport } } : {}),
-      ...(details.issues === undefined ? {} : { issues: details.issues })
-    });
   });
 
   app.get("/", async (_request, reply) => reply.redirect("/nexus/", 308));
@@ -335,7 +320,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     deleteProvider(pool, uuidSchema.parse(request.params.providerId))
   ));
 
-  app.post("/api/v1/imports/legacy-story", async (request, reply) => {
+  app.post("/api/v1/imports/legacy-story", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request, reply) => {
     let body;
     let assetBuffers = new Map<string, Buffer>();
 
@@ -375,24 +360,24 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     return reply.code(result.duplicate ? 200 : 201).send(result);
   });
 
-  app.post("/api/v1/imports/legacy-story/preview", async (request) => (
+  app.post("/api/v1/imports/legacy-story/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => (
     previewLegacyStoryImport(pool, storyImportPreviewRequestSchema.parse(request.body))
   ));
 
-  app.post("/api/v1/imports/world/preview", async (request) => (
+  app.post("/api/v1/imports/world/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => (
     previewWorldImport(pool, worldImportRequestSchema.parse(request.body))
   ));
 
-  app.post("/api/v1/imports/world", async (request, reply) => {
+  app.post("/api/v1/imports/world", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request, reply) => {
     const result = await importWorld(pool, worldImportRequestSchema.parse(request.body));
     return reply.code(result.duplicate ? 200 : 201).send(result);
   });
 
-  app.post("/api/v1/imports/infinite-worlds/preview", async (request) => (
+  app.post("/api/v1/imports/infinite-worlds/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => (
     previewInfiniteWorldsImport(pool, infiniteWorldsImportRequestSchema.parse(request.body))
   ));
 
-  app.post("/api/v1/imports/infinite-worlds", async (request, reply) => {
+  app.post("/api/v1/imports/infinite-worlds", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request, reply) => {
     const result = await importInfiniteWorlds(
       pool,
       infiniteWorldsImportRequestSchema.parse(request.body),

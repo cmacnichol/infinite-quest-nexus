@@ -80,9 +80,9 @@
         <div class="story-area" id="storyArea">
           <div class="empty">
             <div>
-              <div style="font-size:3rem;margin-bottom:10px;">🗝️</div>
-              <h2 style="margin:0 0 8px;color:#fff;">Create a world, then begin.</h2>
-              <p style="max-width:620px;margin:0 auto;line-height:1.55;">The engine will write a scene, produce an illustration prompt and image, offer four choices, keep a hidden scratchpad, and update your custom trackers.</p>
+              <div class="story-empty-icon">🗝️</div>
+              <h2 class="story-empty-title">Create a world, then begin.</h2>
+              <p class="story-empty-copy">The engine will write a scene, produce an illustration prompt and image, offer four choices, keep a hidden scratchpad, and update your custom trackers.</p>
             </div>
           </div>
         </div>
@@ -177,9 +177,9 @@
     <form method="dialog" class="world-gen-card">
       <div>
         <h3 id="messagePopupTitle">Notice</h3>
-        <p id="messagePopupBody" class="mini" style="white-space:pre-wrap;"></p>
+        <p id="messagePopupBody" class="mini preserve-whitespace"></p>
       </div>
-      <div class="row wrap" style="justify-content:flex-end;">
+      <div class="row wrap dialog-actions">
         <button id="btnMessagePopupClose" class="primary" type="submit">OK</button>
       </div>
     </form>
@@ -195,7 +195,7 @@
         <p><strong>Reset this campaign</strong> rewinds the authoritative campaign to the selected turn and removes its later accepted turns. This is the default.</p>
         <p><strong>Create a separate campaign</strong> keeps this campaign unchanged and starts an independent branch using the same immutable world version.</p>
       </div>
-      <div class="row wrap dialog-actions" style="justify-content:flex-end;">
+      <div class="row wrap dialog-actions">
         <button value="cancel" type="submit">Cancel</button>
         <button value="copy" class="accent" type="submit">Create separate campaign</button>
         <button value="reset" class="primary" type="submit" autofocus>Reset this campaign</button>
@@ -214,7 +214,7 @@
       <div class="world-gen-box stack">
         <p>Provider connections, credentials, models, context limits, and defaults are managed centrally in Infinite Quest Nexus.</p>
         <div class="row wrap">
-          <button id="btnGettingConfigureProviders" class="accent grow" type="button" onclick="window.location.href='/nexus/'">Open Provider Management in Nexus</button>
+          <a id="btnGettingConfigureProviders" class="buttonish accent grow" href="/nexus/">Open Provider Management in Nexus</a>
         </div>
       </div>
       <button id="btnSkipGettingStartedToStory" class="ghost hidden" type="button">Take Me to My Story (Skip Key Set Up For Now)</button>
@@ -253,26 +253,26 @@
         </div>
         <div>
           <span class="field-label-row"><span>Player Character</span></span>
-          <div id="setupCharacter" class="world-gen-box" style="white-space: pre-wrap;"></div>
+          <div id="setupCharacter" class="world-gen-box preserve-whitespace"></div>
         </div>
         <div>
           <span class="field-label-row"><span>Premise & Starting Situation</span></span>
-          <div id="setupPremise" class="world-gen-box" style="white-space: pre-wrap;"></div>
+          <div id="setupPremise" class="world-gen-box preserve-whitespace"></div>
         </div>
         <div>
           <span class="field-label-row"><span>Background Story</span></span>
-          <div id="setupBackgroundStory" class="world-gen-box" style="white-space: pre-wrap;"></div>
+          <div id="setupBackgroundStory" class="world-gen-box preserve-whitespace"></div>
         </div>
         <div>
           <span class="field-label-row"><span>Story Rules / Style Guide</span></span>
-          <div id="setupRules" class="world-gen-box" style="white-space: pre-wrap;"></div>
+          <div id="setupRules" class="world-gen-box preserve-whitespace"></div>
         </div>
         <div>
           <span class="field-label-row"><span>RPG Statistics & Trackers</span></span>
           <div id="setupRpgStats" class="world-gen-box"></div>
         </div>
       </div>
-      <div class="row wrap dialog-actions" style="justify-content: flex-end;">
+      <div class="row wrap dialog-actions">
         <button id="btnDoneWorldSetup" class="primary" type="button">Done</button>
       </div>
     </div>
@@ -359,7 +359,7 @@
       </div>
       <div class="dialog-scroll">
         <div id="turnHistoryModalList" class="stack"></div>
-        <div id="turnHistoryStatePanel" class="track-card hidden" style="margin-top:12px;"></div>
+        <div id="turnHistoryStatePanel" class="track-card turn-history-state-panel hidden"></div>
       </div>
       <div class="row wrap dialog-actions history-dialog-actions">
         <div class="row wrap history-selection-actions">
@@ -406,7 +406,7 @@
       <label>Image prompt
         <textarea id="imagePromptEditor" placeholder="Describe the scene you want the image model to render."></textarea>
       </label>
-      <div class="row wrap" style="justify-content:flex-end;">
+      <div class="row wrap dialog-actions">
         <button id="btnImagePromptCancel" type="button">Cancel</button>
         <button id="btnRegenerateImageConfirm" class="primary" type="button">🖼️ Regenerate image</button>
       </div>
@@ -442,7 +442,7 @@
         <button id="btnRetryPromptClose" class="small ghost" type="button" aria-label="Cancel retry">✕</button>
       </div>
       <label>Turn prompt
-        <textarea id="retryPromptEditor" placeholder="Edit the turn prompt text before retrying." style="min-height:140px;"></textarea>
+        <textarea id="retryPromptEditor" class="retry-prompt-editor" placeholder="Edit the turn prompt text before retrying."></textarea>
       </label>
       <div class="row wrap dialog-actions">
         <button id="btnRetryPromptCancel" type="button">Cancel</button>
@@ -493,7 +493,7 @@
           </label>
         </div>
       </div>
-      <div class="row wrap dialog-actions" style="justify-content: flex-end; margin-top: 6px;">
+      <div class="row wrap dialog-actions dialog-actions-spaced">
         <button id="btnCancelUserProfile" type="button">Cancel</button>
         <button id="btnSaveUserProfile" class="primary" type="button">Save Profile</button>
       </div>
@@ -506,7 +506,7 @@
         <h3 id="discardChangesTitle">Discard unsaved changes?</h3>
         <p class="mini">Your edits have not been saved. Keep editing or discard them and close this window.</p>
       </div>
-      <div class="row wrap dialog-actions" style="justify-content:flex-end;">
+      <div class="row wrap dialog-actions">
         <button type="submit" value="keep" autofocus>Keep editing</button>
         <button type="submit" value="discard" class="primary">Discard changes</button>
       </div>

@@ -8,6 +8,11 @@ const tokensCss = readFileSync("apps/web/public/tokens.css", "utf8");
 const navigationCss = readFileSync("apps/web/public/navigation.css", "utf8");
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
+  it("uses semantic progress and a served stylesheet for printable story documents", () => {
+    expect(storyScript).toContain('<progress class="turn-progress-meter" max="100" value="${percent}"');
+    expect(storyScript).toContain('href="/nexus/story-print.css"');
+  });
+
   it("dismisses player modals from their backdrop while protecting unsaved form edits", () => {
     expect(storyHtml).toContain('id="discardChangesDialog"');
     expect(storyHtml).toContain("Discard unsaved changes?");

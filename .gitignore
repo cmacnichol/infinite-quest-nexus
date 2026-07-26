@@ -19,3 +19,12 @@ docs/ENHANCEMENTS.local.md
 docs/*.local.md
 /.kangentic
 kangentic.json
+/.repowise
+.repowise/.update.queued
+.repowise/centrality_cache.pkl
+.repowise/duplication_cache.pkl
+.repowise/duplication_pairs.pkl
+.repowise/knowledge-graph.json
+.repowise/parse_cache.pkl
+.repowise/state.json
+.repowise/wiki.db
