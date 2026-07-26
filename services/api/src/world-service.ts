@@ -1,5 +1,3 @@
-import { ZipArchive } from "archiver";
-
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import {
@@ -19,7 +17,7 @@ import {
   type WorldVersionDeleteRequest,
   type WorldStatusUpdateRequest
 } from "../../../packages/contracts/src/world-library.js";
-import { removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
+import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import {
   assessWorldCampaignReadiness,
   campaignCharacterSeed,
@@ -29,9 +27,7 @@ import {
   resolvePlayableCharacters
 } from "../../../packages/domain/src/world-characters.js";
 import { resolveEffectiveProviderId } from "./provider-service.js";
-import { readAsset, type FilesystemAssetStore } from "./asset-service.js";
 import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
-import { turnReportedCosts } from "./cost-service.js";
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? null);
@@ -39,26 +35,6 @@ function json(value: unknown): string {
 
 function httpError(statusCode: number, message: string, details?: unknown): Error {
   return Object.assign(new Error(message), { statusCode, ...(details === undefined ? {} : { details }) });
-}
-
-function portableModelMetadata(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const source = value as Record<string, unknown>;
-  return Object.fromEntries(["providerType", "model", "promptProtocolVersion"].flatMap((key) => (
-    typeof source[key] === "string" && source[key] ? [[key, source[key]]] : []
-  )));
-}
-
-function portableCampaignSettings(value: Record<string, unknown> | undefined): Record<string, unknown> {
-  const settings = removeProviderSecrets(value);
-  for (const key of Object.keys(settings)) {
-    const normalized = key.replaceAll(/[^a-z]/gi, "").toLowerCase();
-    if (/(?:apikey|password|authorization|credential|secret)/.test(normalized)
-      || /^(?:token|accesstoken|refreshtoken)$/.test(normalized)
-      || /^(?:baseurl|endpoint|customendpoint|lmstudioendpoint|imageendpoint|providerurl)$/.test(normalized)
-      || /^nexus(?:provider|imageprovider|embeddingprovider)/.test(normalized)) delete settings[key];
-  }
-  return settings;
 }
 
 const SENSITIVE_WORLD_KEYS = new Set([
@@ -963,166 +939,4 @@ export async function migrateCampaignWorld(pool: DatabasePool, campaignId: strin
   });
 }
 
-export async function exportCampaign(pool: DatabasePool, campaignId: string, assetStore: FilesystemAssetStore): Promise<ZipArchive>;
-export async function exportCampaign(pool: DatabasePool, campaignId: string, assetStore?: null): Promise<Record<string, any>>;
-export async function exportCampaign(pool: DatabasePool, campaignId: string, assetStore: FilesystemAssetStore | null = null): Promise<ZipArchive | Record<string, any>> {
-  const ownerUserId = await initialOwnerId(pool);
-  const campaign = await pool.query<any>(
-    `SELECT c.title, c.status, c.active_turn_number, c.story_length_profile, c.turn_control_style, c.legacy_settings,
-            c.selected_character_id, c.character_snapshot, c.character_profile, c.character_profile_revision,
-            w.title AS world_title,
-            wv.id AS world_version_id, wv.version_number, wv.content, cs.*
-       FROM campaigns c
-       JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
-       JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
-       JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
-      WHERE c.id = $1 AND c.owner_user_id = $2`,
-    [campaignId, ownerUserId]
-  );
-  const row = campaign.rows[0];
-  if (!row) throw httpError(404, "Campaign not found.");
-  const turns = await pool.query<any>(
-    `SELECT id, turn_number, action, input_mode, input_mode_source, narration, choices, custom_action_suggestion,
-            image_prompt, image_url, mechanics_private, state_snapshot_private,
-            model_metadata, accepted_at
-       FROM turns WHERE campaign_id = $1 AND owner_user_id = $2 ORDER BY turn_number`,
-    [campaignId, ownerUserId]
-  );
-  const costs = await turnReportedCosts(pool, ownerUserId, turns.rows.map((turn: { id: string }) => turn.id));
-  const history = await pool.query<{ content: unknown; through_turn: number }>(
-    `SELECT content, through_turn
-       FROM summary_checkpoints
-      WHERE campaign_id = $1 AND owner_user_id = $2 AND summary_kind = 'legacy_full_history'
-      ORDER BY through_turn DESC, created_at DESC LIMIT 1`,
-    [campaignId, ownerUserId]
-  );
-  const importedHistory = history.rows[0];
-  const importProvenance = row.import_provenance && typeof row.import_provenance === "object" ? row.import_provenance : {};
-  const selectedCharacterText = characterLegacyText(row.character_profile, row.character_snapshot);
-  const sourceWorld = row.content.world && typeof row.content.world === "object" ? row.content.world : {};
-  const { character: _storedCharacter, ...worldWithoutStoredCharacter } = sourceWorld;
-  const payload = {
-    format: "infinite-quest-campaign",
-    formatVersion: 3,
-    exportedAt: new Date().toISOString(),
-    campaign: {
-      title: row.title,
-      sourceCampaignId: campaignId,
-      sourceWorldVersionId: row.world_version_id,
-      sourceWorldVersionNumber: row.version_number,
-      selectedCharacterId: row.selected_character_id ?? null,
-      characterSnapshot: row.character_snapshot ?? null,
-      characterProfile: row.character_profile ?? null,
-      characterProfileRevision: Number(row.character_profile_revision || 0),
-      stateRevision: Number(row.revision || 0)
-    },
-    world: { ...worldWithoutStoredCharacter, ...(selectedCharacterText !== null ? { character: selectedCharacterText } : {}) },
-    settings: { ...portableCampaignSettings(row.legacy_settings), storyLength: row.story_length_profile, turnControlStyle: row.turn_control_style },
-    turns: turns.rows.map((turn: any) => ({
-      id: turn.id,
-      turnNumber: turn.turn_number,
-      action: turn.action,
-      inputMode: turn.input_mode || "action",
-      inputModeSource: turn.input_mode_source || "explicit",
-      narration: turn.narration,
-      choices: turn.choices,
-      customActionSuggestion: turn.custom_action_suggestion,
-      imagePrompt: turn.image_prompt,
-      imageUrl: turn.image_url,
-      roll: turn.mechanics_private,
-      worldStateSnapshot: turn.state_snapshot_private,
-      llmModelInfo: portableModelMetadata(turn.model_metadata),
-      reportedCost: costs.get(turn.id) || null,
-      createdAt: turn.accepted_at
-    })),
-    rpgStats: row.rpg_stats,
-    defaultTriggers: row.default_triggers,
-    eventTriggers: row.event_triggers,
-    pendingEventTriggers: row.pending_event_triggers,
-    trackers: row.trackers,
-    baseTrackersAtStart: row.default_triggers,
-    scratchpad: row.scratchpad_private,
-    ...(importedHistory ? {
-      fullHistory: importedHistory.content,
-      fullHistoryCompressedThroughTurn: importedHistory.through_turn
-    } : {}),
-    worldImportProvenance: importProvenance.world ?? null,
-    storyImportProvenance: {
-      ...(importProvenance.story && typeof importProvenance.story === "object" ? importProvenance.story : {}),
-      sourceType: "nexus_campaign_export",
-      worldVersionId: row.world_version_id,
-      worldVersionNumber: row.version_number,
-      selectedCharacterId: row.selected_character_id ?? null,
-      selectedCharacterName: row.character_profile?.name ?? row.character_snapshot?.name ?? null
-    }
-  };
-
-  if (!assetStore) return payload;
-
-  const archive = new ZipArchive({ zlib: { level: 9 } });
-
-  archive.append(JSON.stringify(payload, null, 2), { name: 'campaign.json' });
-
-  const assetIdsResult = await pool.query<{ asset_id: string }>(
-    `SELECT DISTINCT asset_id FROM (
-       SELECT ar.asset_id FROM asset_references ar WHERE ar.campaign_id = $1 AND ar.owner_user_id = $2 AND ar.asset_id IS NOT NULL
-       UNION
-       SELECT tisa.asset_id FROM turn_illustration_segment_assets tisa
-         JOIN turn_illustration_segments tis ON tis.id = tisa.segment_id
-        WHERE tis.campaign_id = $1 AND tis.owner_user_id = $2 AND tisa.asset_id IS NOT NULL
-       UNION
-       SELECT ij.asset_id FROM image_jobs ij WHERE ij.campaign_id = $1 AND ij.owner_user_id = $2 AND ij.asset_id IS NOT NULL
-       UNION
-       SELECT w.cover_asset_id AS asset_id FROM worlds w
-         JOIN world_versions wv ON wv.world_id = w.id
-         JOIN campaigns c ON c.world_version_id = wv.id
-        WHERE c.id = $1 AND c.owner_user_id = $2 AND w.cover_asset_id IS NOT NULL
-     ) campaign_assets`,
-    [campaignId, ownerUserId]
-  );
-
-  const uuidRegex = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g;
-  const rawUrls: string[] = [
-    ...turns.rows.map((t: any) => t.image_url),
-    row.content?.world?.coverImageUrl,
-    row.content?.world?.character?.avatarUrl
-  ].filter(Boolean);
-
-  const seenIds = new Set<string>(assetIdsResult.rows.map((r) => r.asset_id));
-
-  for (const url of rawUrls) {
-    if (typeof url === 'string') {
-      const matches = url.match(uuidRegex);
-      if (matches) {
-        for (const match of matches) {
-          seenIds.add(match);
-        }
-      }
-    }
-  }
-
-  const assetPromises = [];
-
-  for (const id of seenIds) {
-    assetPromises.push(
-      (async () => {
-        try {
-          const asset = await readAsset(pool, assetStore, ownerUserId, id);
-          const ext = asset.mimeType === "image/png" ? ".png"
-                    : asset.mimeType === "image/jpeg" ? ".jpg"
-                    : asset.mimeType === "image/webp" ? ".webp"
-                    : asset.mimeType === "image/gif" ? ".gif" : "";
-          archive.append(asset.bytes, { name: `assets/${id}${ext}` });
-        } catch (err) {
-          /* ignored */
-        }
-      })()
-    );
-  }
-
-  await Promise.all(assetPromises);
-
-  void archive.finalize();
-
-  return archive;
-}
+export { exportCampaign } from "./campaign-archive-service.js";

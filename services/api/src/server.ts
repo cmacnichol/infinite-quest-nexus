@@ -530,14 +530,18 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/export", async (request, reply) => {
-    const archive = await exportCampaign(pool, uuidSchema.parse(request.params.campaignId), assetStore);
     if (!assetStore) {
-        return reply.header("content-disposition", 'attachment; filename="infinite-quest-campaign.json"').send(archive);
+      const payload = await exportCampaign(pool, uuidSchema.parse(request.params.campaignId), null);
+      return reply.header("content-disposition", 'attachment; filename="infinite-quest-campaign.json"').send(payload);
     }
+    const archive = await exportCampaign(pool, uuidSchema.parse(request.params.campaignId), {
+      assetStore,
+      archiveRoot: resolve(assetStore.root, "campaign-archives")
+    });
     return reply
       .header("content-disposition", 'attachment; filename="infinite-quest-campaign.zip"')
       .type("application/zip")
-      .send(archive);
+      .send(await readFile(archive.absolutePath));
   });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/turns", async (request) => {
