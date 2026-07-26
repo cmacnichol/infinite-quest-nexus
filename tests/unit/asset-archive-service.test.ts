@@ -218,7 +218,7 @@ describe("asset archive portability", () => {
     }
   });
 
-  it("rejects a replaced generated staging child before asset writes and cleanup", async () => {
+  it.runIf(process.platform === "linux")("rejects a replaced generated staging child before asset writes and cleanup", async () => {
     const archiveRoot = await mkdtemp(join(tmpdir(), "asset-archive-staging-race-"));
     try {
       const staging = await createArchiveStagingDirectory(archiveRoot, "campaign-export-");

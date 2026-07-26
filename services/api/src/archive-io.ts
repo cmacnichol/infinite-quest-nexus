@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   open,
+  readdir,
   realpath,
   rename,
   rm,
@@ -296,6 +297,22 @@ async function assertDirectoryStable(directory: StableDirectory): Promise<void> 
   }
 }
 
+async function removeStableDirectoryContents(directory: StableDirectory): Promise<void> {
+  if (!directory.anchor) {
+    throw archiveError(
+      "archive-entry-unsafe",
+      "This platform cannot safely clean generated archive staging."
+    );
+  }
+  const entries = await readdir(stableChildPath(directory, "."), { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === "." || entry.name === ".." || basename(entry.name) !== entry.name) {
+      throw archiveError("archive-entry-unsafe", "Archive staging contains an unsafe cleanup entry.");
+    }
+    await rm(stableChildPath(directory, entry.name), { recursive: true, force: true });
+  }
+}
+
 function stableChildPath(directory: StableDirectory, filename: string): string {
   if (directory.anchor) {
     return `/proc/self/fd/${directory.anchor.fd}/${filename}`;
@@ -331,6 +348,12 @@ export async function createArchiveStagingDirectory(
   let cleaned = false;
   try {
     await assertDirectoryStable(stable);
+    if (!stable.anchor) {
+      throw archiveError(
+        "archive-entry-unsafe",
+        "This platform cannot safely stage generated archive assets."
+      );
+    }
     const createdPath = await mkdtemp(stableChildPath(stable, prefix));
     directoryName = basename(createdPath);
     const absolutePath = resolve(directory, directoryName);
@@ -355,10 +378,12 @@ export async function createArchiveStagingDirectory(
           if (!current.isDirectory() || current.isSymbolicLink() || !sameDirectoryIdentity(stabilizedChild, current)) {
             throw archiveError("archive-entry-unsafe", "Archive staging changed during cleanup.");
           }
-          await closeHandle(stabilizedChild.anchor);
-          delete stabilizedChild.anchor;
-          await rm(operationPath, { recursive: true, force: true });
+          await removeStableDirectoryContents(stabilizedChild);
           await assertDirectoryStable(stable);
+          const linked = await lstat(operationPath, { bigint: true });
+          if (!linked.isDirectory() || linked.isSymbolicLink() || !sameDirectoryIdentity(stabilizedChild, linked)) {
+            throw archiveError("archive-entry-unsafe", "Archive staging changed during cleanup.");
+          }
           cleaned = true;
         } finally {
           await closeHandle(stabilizedChild.anchor);

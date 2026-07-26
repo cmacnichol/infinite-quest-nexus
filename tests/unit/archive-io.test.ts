@@ -37,6 +37,7 @@ import type { ArchiveEntry, ArchiveManifest } from "../../packages/contracts/src
 const filesystemRaceHooks = vi.hoisted(() => ({
   beforeOpen: undefined as undefined | ((path: unknown, flags: unknown) => Promise<boolean>),
   afterOpen: undefined as undefined | ((path: unknown, flags: unknown, handle: unknown) => Promise<boolean>),
+  afterLstat: undefined as undefined | ((path: unknown) => Promise<boolean>),
   beforeRename: undefined as undefined | ((source: unknown, target: unknown) => Promise<boolean>),
   beforeUnlink: undefined as undefined | ((path: unknown) => Promise<boolean>)
 }));
@@ -68,6 +69,11 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         throw error;
       }
     },
+    lstat: async (path: unknown, options?: unknown) => {
+      const value = await actual.lstat(path as string, options as never);
+      await runHook("afterLstat", [path]);
+      return value;
+    },
     rename: async (source: unknown, target: unknown) => {
       await runHook("beforeRename", [source, target]);
       return actual.rename(source as string, target as string);
@@ -95,6 +101,7 @@ afterEach(async () => {
   process.env = { ...originalEnvironment };
   filesystemRaceHooks.beforeOpen = undefined;
   filesystemRaceHooks.afterOpen = undefined;
+  filesystemRaceHooks.afterLstat = undefined;
   filesystemRaceHooks.beforeRename = undefined;
   filesystemRaceHooks.beforeUnlink = undefined;
   vi.restoreAllMocks();
@@ -344,6 +351,32 @@ describe("staged archive uploads", () => {
     await symlink(outside, join(root, "staging"), "junction");
 
     await expectArchiveError(createArchiveStagingDirectory(root, "campaign-export-"), "archive-entry-unsafe");
+  });
+
+  it.runIf(process.platform === "linux")("does not recursively delete a generated child replaced after cleanup validation", async () => {
+    const root = await temporaryRoot();
+    const staging = await createArchiveStagingDirectory(root, "campaign-export-");
+    const original = `${staging.absolutePath}.original`;
+    const replacementSentinel = join(staging.absolutePath, "replacement.txt");
+    await writeFile(join(staging.absolutePath, "original.txt"), "original");
+    filesystemRaceHooks.afterLstat = async (path) => {
+      if (basename(String(path)) !== basename(staging.absolutePath)) return false;
+      await rename(staging.absolutePath, original);
+      await mkdir(staging.absolutePath);
+      await writeFile(replacementSentinel, "preserve");
+      return true;
+    };
+
+    await expectArchiveError(staging.cleanup(), "archive-entry-unsafe");
+    expect(await readFile(replacementSentinel, "utf8")).toBe("preserve");
+  });
+
+  it("does not expose a mutable fallback path for generated archive asset writes", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    const root = await temporaryRoot();
+
+    await expectArchiveError(createArchiveStagingDirectory(root, "campaign-export-"), "archive-entry-unsafe");
+    expect(await readdir(join(root, "staging"))).toEqual([]);
   });
 
   it("enforces the compressed-byte limit and removes the partial staging file", async () => {
