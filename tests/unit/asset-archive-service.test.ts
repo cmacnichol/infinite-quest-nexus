@@ -12,6 +12,7 @@ import {
   verifyOriginalImage
 } from "../../services/api/src/asset-service.js";
 import {
+  ArchiveAssetPersistenceError,
   cleanupUnreferencedCreatedPaths,
   collectCampaignArchiveAssets,
   persistArchiveAssets,
@@ -142,7 +143,7 @@ describe("asset archive portability", () => {
     expect(validated.assets[0]?.createThumbnail).toBe(false);
   });
 
-  it("cleans only created paths that remain unreferenced and retains an actual outside-root file", async () => {
+  it("cleans only database-unreferenced created paths and retains an actual outside-root file", async () => {
     const root = await mkdtemp(join(tmpdir(), "asset-archive-test-"));
     const outside = join(root, "..", `outside-${process.pid}.png`);
     try {
@@ -154,7 +155,15 @@ describe("asset archive portability", () => {
       await writeFile(path, pngBytes);
       await writeFile(retainedPath, pngBytes);
       await writeFile(outside, pngBytes);
-      await cleanupUnreferencedCreatedPaths(store, ["aa/" + hash + ".png", "bb/" + hash + ".png", "../" + `outside-${process.pid}.png`], new Set([retainedPath]));
+      const database = {
+        query: async (text: string, values: unknown[]) => {
+          expect(text).toContain("SELECT storage_path");
+          expect(text).toContain("FROM assets");
+          expect(values).toEqual([ownerUserId, ["aa/" + hash + ".png", "bb/" + hash + ".png"]]);
+          return { rows: [{ storage_path: "bb/" + hash + ".png" }], rowCount: 1 };
+        }
+      } as never;
+      await cleanupUnreferencedCreatedPaths(database, store, ownerUserId, ["aa/" + hash + ".png", "bb/" + hash + ".png", "../" + `outside-${process.pid}.png`]);
       await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
       expect((await stat(retainedPath)).isFile()).toBe(true);
       expect((await stat(outside)).isFile()).toBe(true);
@@ -445,13 +454,13 @@ describe("asset archive portability", () => {
           : text.startsWith("UPDATE asset_library_entries") ? { rows: [], rowCount: 0 } : { rows: [], rowCount: 1 }
       } as never;
       await expect(persistArchiveAssets(client, { root }, ownerUserId, { assets: [{ ...record(assetA), bytes: pngBytes, createThumbnail: false }] }, new Map()))
-        .rejects.toThrow("library metadata row is missing");
+        .rejects.toMatchObject({ cause: { message: "Asset library metadata row is missing for 'dest-asset'." } });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  it("cleans newly created originals when a later persistence step fails", async () => {
+  it("does not clean a recreated pre-existing original before rollback", async () => {
     const secondBytes = await sharp({ create: { width: 2, height: 1, channels: 4, background: { r: 0, g: 255, b: 0, alpha: 1 } } }).png().toBuffer();
     const secondHash = createHash("sha256").update(secondBytes.toString("base64")).digest("hex");
     const first = record(assetA);
@@ -478,20 +487,28 @@ describe("asset archive portability", () => {
         }
       } as never;
 
-      await expect(persistArchiveAssets(client, { root }, ownerUserId, {
+      let caught: unknown;
+      try {
+        await persistArchiveAssets(client, { root }, ownerUserId, {
         assets: [
           { ...first, bytes: pngBytes, createThumbnail: false },
           { ...second, bytes: secondBytes, createThumbnail: false }
         ]
-      }, new Map())).rejects.toThrow("primary metadata failure");
-      await expect(stat(join(root, hash.slice(0, 2), `${hash}.png`))).rejects.toMatchObject({ code: "ENOENT" });
+        }, new Map());
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ArchiveAssetPersistenceError);
+      expect((caught as ArchiveAssetPersistenceError).createdPaths).toEqual([`${hash.slice(0, 2)}/${hash}.png`]);
+      expect((caught as ArchiveAssetPersistenceError).cause).toMatchObject({ message: "primary metadata failure" });
+      expect((await stat(join(root, hash.slice(0, 2), `${hash}.png`))).isFile()).toBe(true);
       expect((await stat(preexistingPath)).isFile()).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  it("keeps the primary persistence error first when cleanup also fails", async () => {
+  it("preserves the primary cause and exposes only safe relative cleanup candidates", async () => {
     const root = await mkdtemp(join(tmpdir(), "asset-archive-cleanup-error-"));
     try {
       const client = {
@@ -505,18 +522,76 @@ describe("asset archive portability", () => {
           return { rows: [], rowCount: 1 };
         }
       } as never;
+      const unsafe = "../outside.png";
       let caught: unknown;
       try {
         await persistArchiveAssets(client, { root }, ownerUserId, {
           assets: [{ ...record(assetA), bytes: pngBytes, createThumbnail: false }]
-        }, new Map(), async () => {
-          throw new Error("cleanup persistence failure");
-        });
+        }, new Map());
       } catch (error) {
         caught = error;
       }
-      expect(caught).toBeInstanceOf(AggregateError);
-      expect((caught as AggregateError).errors[0]).toMatchObject({ message: "primary persistence failure" });
+      expect(caught).toBeInstanceOf(ArchiveAssetPersistenceError);
+      expect((caught as ArchiveAssetPersistenceError).cause).toMatchObject({ message: "primary persistence failure" });
+      expect((caught as ArchiveAssetPersistenceError).createdPaths).toEqual([`${hash.slice(0, 2)}/${hash}.png`]);
+      expect((caught as ArchiveAssetPersistenceError).createdPaths).not.toContain(unsafe);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains a candidate with a surviving owner-scoped asset reference after rollback", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asset-archive-reference-retain-"));
+    const path = `${hash.slice(0, 2)}/${hash}.png`;
+    try {
+      await mkdir(join(root, hash.slice(0, 2)), { recursive: true });
+      await writeFile(join(root, path), pngBytes);
+      const database = {
+        query: async (text: string, values: unknown[]) => {
+          expect(text).toContain("FROM assets");
+          expect(values).toEqual([ownerUserId, [path]]);
+          return { rows: [{ storage_path: path }], rowCount: 1 };
+        }
+      } as never;
+      await cleanupUnreferencedCreatedPaths(database, { root }, ownerUserId, [path]);
+      expect((await stat(join(root, path))).isFile()).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("deletes a truly unreferenced candidate after rollback-aware cleanup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asset-archive-reference-delete-"));
+    const path = `${hash.slice(0, 2)}/${hash}.png`;
+    try {
+      await mkdir(join(root, hash.slice(0, 2)), { recursive: true });
+      await writeFile(join(root, path), pngBytes);
+      const database = { query: async () => ({ rows: [], rowCount: 0 }) } as never;
+      await cleanupUnreferencedCreatedPaths(database, { root }, ownerUserId, [path]);
+      await expect(stat(join(root, path))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not query or unlink during persistence failure before the caller rolls back", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asset-archive-no-pre-rollback-cleanup-"));
+    const path = `${hash.slice(0, 2)}/${hash}.png`;
+    const queries: string[] = [];
+    try {
+      const client = {
+        query: async (text: string) => {
+          queries.push(text);
+          if (text.startsWith("INSERT INTO assets")) return { rows: [{ id: "destination-asset" }], rowCount: 1 };
+          if (text.startsWith("UPDATE asset_library_entries")) throw new Error("primary persistence failure");
+          return { rows: [], rowCount: 1 };
+        }
+      } as never;
+      await expect(persistArchiveAssets(client, { root }, ownerUserId, {
+        assets: [{ ...record(assetA), bytes: pngBytes, createThumbnail: false }]
+      }, new Map())).rejects.toBeInstanceOf(ArchiveAssetPersistenceError);
+      expect(queries.some((query) => query.includes("storage_path") && query.includes("FROM assets"))).toBe(false);
+      expect((await stat(join(root, path))).isFile()).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -554,8 +629,14 @@ describe("asset archive portability", () => {
     try {
       const staleMap: ArchiveIdMap = new Map([["asset", new Map([[hash, "stale-destination"]])]]);
       const client = { query: async () => ({ rows: [{ id: "destination" }], rowCount: 1 }) } as never;
-      await expect(persistArchiveAssets(client, { root }, ownerUserId, { assets: [{ ...record(assetA), bytes: pngBytes, createThumbnail: false }] }, staleMap))
-        .rejects.toThrow(`Unknown archive asset mapping '${hash}'`);
+      let staleError: unknown;
+      try {
+        await persistArchiveAssets(client, { root }, ownerUserId, { assets: [{ ...record(assetA), bytes: pngBytes, createThumbnail: false }] }, staleMap);
+      } catch (error) {
+        staleError = error;
+      }
+      expect(staleError).toBeInstanceOf(ArchiveAssetPersistenceError);
+      expect(((staleError as ArchiveAssetPersistenceError).cause as Error).message).toBe(`Unknown archive asset mapping '${hash}'.`);
       await expect(restoreAssetBindings(client, ownerUserId, [record(assetA)], new Map([[hash, "destination"]]), new Map()))
         .rejects.toThrow(`Missing restored asset mapping for '${assetA}'`);
       await expect(restoreAssetBindings(client, ownerUserId, [record(assetB)], new Map([[assetA, "destination"]]), new Map()))

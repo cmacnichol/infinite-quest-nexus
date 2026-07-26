@@ -2,7 +2,7 @@ import { lstat, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 import { sha256 } from "../../../packages/domain/src/text.js";
-import type { DatabaseClient } from "../../../packages/database/src/pool.js";
+import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { archiveAssetRecordSchema, sanitizePortableMetadata, type ArchiveAssetBinding, type ArchiveAssetRecord, type ArchiveEntry, type ArchiveManifest } from "../../../packages/contracts/src/archives.js";
 import { imageExtensionForMimeType, persistOriginalImage, verifyOriginalImage, type FilesystemAssetStore } from "./asset-service.js";
 
@@ -28,10 +28,30 @@ export type ValidatedArchiveAssetSet = { assets: ValidatedArchiveAsset[] };
 export type ArchiveIdKind = "world" | "worldVersion" | "campaign" | "turn" | "memory" | "summary" | "profileEdit" | "stateEdit" | "migration" | "transfer" | "illustrationSet" | "illustrationSegment" | "asset" | "generationContext";
 export type ArchiveIdMap = Map<ArchiveIdKind, Map<string, string>>;
 
+export class ArchiveAssetPersistenceError extends Error {
+  readonly createdPaths: string[];
+
+  constructor(cause: unknown, createdPaths: readonly string[]) {
+    super("Archive asset persistence failed.", { cause });
+    this.name = "ArchiveAssetPersistenceError";
+    this.createdPaths = [...new Set(createdPaths)];
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 const iso = (value: Date | string) => value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 const archivePathFor = (hash: string, mime: string) => `assets/sha256/${hash.slice(0, 2)}/${hash}${imageExtensionForMimeType(mime)}`;
 const missing = (ids: readonly string[]) => Object.assign(new Error(`Required archive assets are missing: ${ids.join(", ")}`), { code: "archive-asset-missing", assetIds: [...ids] });
 const legacyAssetPointer = /^\/api\/v1\/assets\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+
+function safeRelativeCleanupPath(root: string, candidate: string): string | null {
+  const normalizedCandidate = candidate.replaceAll("\\", "/");
+  if (!normalizedCandidate || normalizedCandidate.startsWith("/") || /^[A-Za-z]:\//.test(normalizedCandidate)) return null;
+  const absolute = resolve(root, candidate);
+  const relativePath = relative(resolve(root), absolute);
+  if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`)) return null;
+  return relativePath.replaceAll("\\", "/");
+}
 
 function bindingKey(binding: ArchiveAssetBinding): string {
   const ids = ["campaignId", "worldId", "worldVersionId", "turnId", "segmentId", "variantIndex", "sourceContextId"].map((key) => `${key}=${String((binding as Record<string, unknown>)[key] ?? "")}`);
@@ -183,27 +203,35 @@ export async function validateArchiveAssets(manifestOrInput: Pick<ArchiveManifes
   return { assets };
 }
 
+/**
+ * Persist originals inside the caller's import transaction. If this throws an
+ * ArchiveAssetPersistenceError, the caller must roll back first, then pass
+ * error.createdPaths to cleanupUnreferencedCreatedPaths using a database
+ * client or pool so surviving owner-scoped rows win the race with cleanup.
+ */
 export async function persistArchiveAssets(
   client: DatabaseClient,
   store: FilesystemAssetStore,
   ownerUserId: string,
   validated: ValidatedArchiveAssetSet,
-  idMap: ArchiveIdMap = new Map(),
-  cleanup = cleanupUnreferencedCreatedPaths
+  idMap: ArchiveIdMap = new Map()
 ): Promise<{ assetIds: Map<string, string>; createdPaths: string[] }> {
-  const sourceAssetIds = new Set(validated.assets.map((asset) => asset.sourceAssetId));
-  for (const sourceAssetId of idMap.get("asset")?.keys() ?? []) {
-    if (!sourceAssetIds.has(sourceAssetId)) throw new Error(`Unknown archive asset mapping '${sourceAssetId}'.`);
-  }
   const assetIds = new Map<string, string>(); const createdPaths: string[] = []; const byHash = new Map<string, ValidatedArchiveAsset>();
   for (const asset of validated.assets) byHash.set(asset.contentHash, byHash.get(asset.contentHash) ?? asset);
   try {
+    const sourceAssetIds = new Set(validated.assets.map((asset) => asset.sourceAssetId));
+    for (const sourceAssetId of idMap.get("asset")?.keys() ?? []) {
+      if (!sourceAssetIds.has(sourceAssetId)) throw new Error(`Unknown archive asset mapping '${sourceAssetId}'.`);
+    }
     for (const asset of byHash.values()) {
       const stored = await persistOriginalImage(client, store, ownerUserId, {
         bytes: asset.bytes,
         mimeType: asset.mimeType,
         createThumbnail: false,
-        onOriginalCreated: (storagePath) => { createdPaths.push(storagePath); }
+        onOriginalCreated: (storagePath) => {
+          const safePath = safeRelativeCleanupPath(store.root, storagePath);
+          if (safePath) createdPaths.push(safePath);
+        }
       });
       assetIds.set(asset.sourceAssetId, stored.id);
       const updated = await client.query<{ asset_id: string }>(`UPDATE asset_library_entries SET title=$3,caption=$4,notes=$5,tags=$6,origin=$7,review_status=$8,reuse_scope=$9,automatic_reuse_enabled=$10,content_categories=$11,favorite=$12,archived_at=$13 WHERE asset_id=$1 AND owner_user_id=$2 RETURNING asset_id`, [stored.id, ownerUserId, asset.library.title, asset.library.caption, asset.library.notes, asset.library.tags, asset.library.origin, asset.library.reviewStatus, asset.library.reuseScope, asset.library.automaticReuseEnabled, asset.library.contentCategories, asset.library.favorite, asset.library.archivedAt]);
@@ -214,16 +242,7 @@ export async function persistArchiveAssets(
     }
     if (idMap) idMap.set("asset", assetIds); return { assetIds, createdPaths };
   } catch (primaryError) {
-    const cleanupErrors: unknown[] = [];
-    for (const createdPath of createdPaths) {
-      try {
-        await cleanup(store, [createdPath], new Set());
-      } catch (cleanupError) {
-        cleanupErrors.push(cleanupError);
-      }
-    }
-    if (cleanupErrors.length) throw new AggregateError([primaryError, ...cleanupErrors], "Archive asset persistence failed and cleanup was incomplete.");
-    throw primaryError;
+    throw new ArchiveAssetPersistenceError(primaryError, createdPaths);
   }
 }
 
@@ -248,6 +267,35 @@ export async function restoreAssetBindings(client: DatabaseClient, ownerUserId: 
   }
 }
 
-export async function cleanupUnreferencedCreatedPaths(store: FilesystemAssetStore, createdPaths: readonly string[], referencedAbsolutePaths: ReadonlySet<string>): Promise<void> {
-  const root = resolve(store.root); for (const path of createdPaths) { const absolute = resolve(root, path); const relativePath = relative(root, absolute); if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`) || referencedAbsolutePaths.has(absolute)) continue; const file = await lstat(absolute).catch((error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT" ? null : Promise.reject(error)); if (!file || !file.isFile() || file.isSymbolicLink()) continue; await unlink(absolute).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }); }
+/**
+ * Run only after the transaction that called persistArchiveAssets has rolled
+ * back. References are re-read from the authoritative database before any
+ * unlink so concurrent or surviving owner-scoped assets retain their bytes.
+ */
+export async function cleanupUnreferencedCreatedPaths(
+  database: DatabaseClient | DatabasePool,
+  store: FilesystemAssetStore,
+  ownerUserId: string,
+  createdPaths: readonly string[]
+): Promise<void> {
+  const candidates = [...new Set(createdPaths.map((path) => safeRelativeCleanupPath(store.root, path)).filter((path): path is string => path !== null))];
+  if (!candidates.length) return;
+  const references = await database.query<{ storage_path: string }>(
+    `SELECT storage_path
+       FROM assets
+      WHERE owner_user_id = $1
+        AND storage_path = ANY($2::text[])`,
+    [ownerUserId, candidates]
+  );
+  const referencedPaths = new Set(references.rows.map((row) => row.storage_path.replaceAll("\\", "/")));
+  const root = resolve(store.root);
+  for (const path of candidates) {
+    if (referencedPaths.has(path)) continue;
+    const absolute = resolve(root, path);
+    const file = await lstat(absolute).catch((error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT" ? null : Promise.reject(error));
+    if (!file || !file.isFile() || file.isSymbolicLink()) continue;
+    await unlink(absolute).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    });
+  }
 }

@@ -35,6 +35,7 @@ integration("asset archive portability", () => {
   let sourceContextId = "";
   let turnAssetId = "";
   let nullableTurnAssetId = "";
+  let nullableTurnIllustrationAssetId = "";
   let coverAssetId = "";
   let historicalCoverJobAssetId = "";
   let streamingJobAssetId = "";
@@ -122,6 +123,7 @@ integration("asset archive portability", () => {
 
     turnAssetId = await persistSourceImage(await image(200, 20, 20));
     nullableTurnAssetId = await persistSourceImage(await image(20, 200, 20));
+    nullableTurnIllustrationAssetId = await persistSourceImage(await image(200, 120, 20));
     coverAssetId = await persistSourceImage(await image(20, 20, 200));
     historicalCoverJobAssetId = await persistSourceImage(await image(200, 200, 20));
     streamingJobAssetId = await persistSourceImage(await image(200, 20, 200));
@@ -136,6 +138,10 @@ integration("asset archive portability", () => {
     await pool.query(
       "INSERT INTO asset_references (owner_user_id, asset_id, campaign_id, turn_id, asset_role) VALUES ($1, $2, $3, NULL, 'import_attachment')",
       [ownerUserId, nullableTurnAssetId, sourceCampaignId]
+    );
+    await pool.query(
+      "INSERT INTO asset_references (owner_user_id, asset_id, campaign_id, turn_id, asset_role) VALUES ($1, $2, $3, NULL, 'turn_illustration')",
+      [ownerUserId, nullableTurnIllustrationAssetId, sourceCampaignId]
     );
     await pool.query(
       "UPDATE worlds SET cover_asset_id = $3 WHERE id = $1 AND owner_user_id = $2",
@@ -232,6 +238,7 @@ integration("asset archive portability", () => {
     expect(ids).toEqual(new Set([
       turnAssetId,
       nullableTurnAssetId,
+      nullableTurnIllustrationAssetId,
       coverAssetId,
       streamingJobAssetId,
       contextAssetId,
@@ -262,6 +269,8 @@ integration("asset archive portability", () => {
         variantIndex: 0
       }
     ]));
+    expect(inventory.records.find((record) => record.sourceAssetId === nullableTurnIllustrationAssetId)?.bindings)
+      .toEqual([{ role: "campaign_asset", campaignId: sourceCampaignId }]);
     expect(bindings.some((binding) => "sourceContextId" in binding && binding.sourceContextId !== sourceContextId)).toBe(false);
   });
 
@@ -325,6 +334,10 @@ integration("asset archive portability", () => {
                  'Destination prompt', 'Destination prompt', 'direct', 'completed') RETURNING id`,
       [destinationOwnerId, destinationSetId, destinationCampaignId, destinationTurnId]
     )).rows[0]!.id;
+    const destinationTurnCountBeforeRestore = (await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM turns WHERE owner_user_id = $1 AND campaign_id = $2",
+      [destinationOwnerId, destinationCampaignId]
+    )).rows[0]!.count;
 
     const validated = await validateArchiveAssets(
       { records: inventory.records },
@@ -384,9 +397,24 @@ integration("asset archive portability", () => {
     expect(references.rows).toEqual(expect.arrayContaining([
       { asset_id: restored.assetIds.get(turnAssetId), turn_id: destinationTurnId, asset_role: "turn_illustration" },
       { asset_id: restored.assetIds.get(nullableTurnAssetId), turn_id: null, asset_role: "import_attachment" },
+      { asset_id: restored.assetIds.get(nullableTurnIllustrationAssetId), turn_id: null, asset_role: "world_asset" },
       { asset_id: restored.assetIds.get(streamingJobAssetId), turn_id: null, asset_role: "world_asset" }
     ]));
     expect(references.rows.some((row) => row.asset_id === turnAssetId || row.asset_id === nullableTurnAssetId)).toBe(false);
+
+    const nullableTurnIllustrationReferences = await pool.query<{ asset_id: string; turn_id: string | null; asset_role: string }>(
+      `SELECT asset_id, turn_id, asset_role FROM asset_references
+       WHERE owner_user_id = $1 AND campaign_id = $2 AND asset_id = $3`,
+      [destinationOwnerId, destinationCampaignId, restored.assetIds.get(nullableTurnIllustrationAssetId)]
+    );
+    expect(nullableTurnIllustrationReferences.rows).toEqual([
+      { asset_id: restored.assetIds.get(nullableTurnIllustrationAssetId), turn_id: null, asset_role: "world_asset" }
+    ]);
+    const destinationTurnCountAfterRestore = (await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM turns WHERE owner_user_id = $1 AND campaign_id = $2",
+      [destinationOwnerId, destinationCampaignId]
+    )).rows[0]!.count;
+    expect(destinationTurnCountAfterRestore).toBe(destinationTurnCountBeforeRestore);
 
     const segmentAsset = await pool.query<{ asset_id: string; variant_index: number }>(
       `SELECT asset_id, variant_index FROM turn_illustration_segment_assets
