@@ -2,7 +2,8 @@ import { z } from "zod";
 import { describe, expect, it } from "vitest";
 import {
   generatedWorldIssues,
-  parseCompleteGeneratedWorld
+  parseCompleteGeneratedWorld,
+  projectGeneratedWorldIssues
 } from "../../packages/domain/src/generated-world.js";
 import {
   applicationOwnedCharacterIds,
@@ -220,6 +221,38 @@ describe("generated world completion", () => {
       code: expect.any(String),
       message: expect.any(String)
     }));
+    expect(JSON.stringify(issues)).not.toContain(marker);
+  });
+
+  it("replaces arbitrary Zod messages even when a secret starts the message", () => {
+    const marker = "SECRET_AT_START_OF_ZOD_MESSAGE";
+    const issues = generatedWorldIssues(new z.ZodError([{
+      path: ["world", "genre"],
+      code: "custom",
+      message: `${marker} generated genre detail`
+    }]));
+
+    expect(issues).toEqual([{
+      path: "world.genre",
+      code: "custom",
+      message: "Generated genre is required."
+    }]);
+    expect(JSON.stringify(issues)).not.toContain(marker);
+  });
+
+  it("maps projected issue categories to controlled messages", () => {
+    const marker = "SECRET_AT_START_OF_PROJECTED_MESSAGE";
+    const issues = projectGeneratedWorldIssues([{
+      path: "playableCharacters.0.profile",
+      code: "invalid_type",
+      message: `${marker} private rejected profile`
+    }]);
+
+    expect(issues).toEqual([{
+      path: "playableCharacters.0.profile",
+      code: "invalid_type",
+      message: "Generated content has an invalid type."
+    }]);
     expect(JSON.stringify(issues)).not.toContain(marker);
   });
 

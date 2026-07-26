@@ -13,7 +13,53 @@ export type GeneratedWorldIssue = {
 const GENERATED_WORLD_ISSUE_LIMIT = 20;
 const GENERATED_WORLD_ISSUE_PATH_LIMIT = 500;
 const GENERATED_WORLD_ISSUE_CODE_LIMIT = 100;
-const GENERATED_WORLD_ISSUE_MESSAGE_LIMIT = 500;
+
+const GENERATED_WORLD_ISSUE_MESSAGES: Readonly<Record<string, string>> = {
+  invalid_json: "Generated world JSON is malformed.",
+  invalid_type: "Generated content has an invalid type.",
+  too_small: "Generated content is missing a required value.",
+  too_big: "Generated content exceeds an allowed limit.",
+  invalid_value: "Generated content contains an unsupported value.",
+  invalid_union: "Generated content does not match an allowed structure.",
+  invalid_format: "Generated content has an invalid format.",
+  unrecognized_keys: "Generated content contains unsupported fields.",
+  not_multiple_of: "Generated content contains an invalid numeric value."
+};
+
+const GENERATED_WORLD_CUSTOM_PATH_MESSAGES: Readonly<Record<string, string>> = {
+  title: "Generated title is required.",
+  "world.title": "Generated title is required.",
+  genre: "Generated genre is required.",
+  "world.genre": "Generated genre is required.",
+  tone: "Generated tone is required.",
+  "world.tone": "Generated tone is required.",
+  backgroundStory: "Generated background and canon are required.",
+  "world.backgroundStory": "Generated background and canon are required.",
+  premise: "Generated premise is required.",
+  "world.premise": "Generated premise is required.",
+  firstAction: "Generated opening action is required.",
+  "world.firstAction": "Generated opening action is required.",
+  story_rules: "Generated rules are required.",
+  "world.rules": "Generated rules are required.",
+  playableCharacters: "Generated worlds require three or four playable characters."
+};
+
+function controlledGeneratedWorldIssueMessage(path: string, code: string): string {
+  if (code !== "custom") {
+    return GENERATED_WORLD_ISSUE_MESSAGES[code] || "Generated content failed validation.";
+  }
+  const exact = GENERATED_WORLD_CUSTOM_PATH_MESSAGES[path];
+  if (exact) return exact;
+  if (/^playableCharacters\.\d+\.id$/.test(path)) return "Generated character IDs must be distinct.";
+  if (/^playableCharacters\.\d+\.name$/.test(path)) return "Generated character names must be distinct.";
+  if (/^(?:playableCharacters\.\d+\.characterText|playable_characters\.\d+\.character_text|character_text)$/.test(path)) {
+    return "Generated character guidance is required.";
+  }
+  if (/^(?:playableCharacters\.\d+\.profile|playable_characters\.\d+\.profile|profile)$/.test(path)) {
+    return "Generated structured character profile is required.";
+  }
+  return "Generated content failed validation.";
+}
 
 export function generatedCharacterNameKey(name: string): string {
   return name.trim().toLowerCase();
@@ -92,16 +138,16 @@ export function projectGeneratedWorldIssues(value: unknown): GeneratedWorldIssue
   return value.slice(0, GENERATED_WORLD_ISSUE_LIMIT).flatMap((issue) => {
     if (!issue || typeof issue !== "object") return [];
     const candidate = issue as Record<string, unknown>;
+    const path = typeof candidate.path === "string"
+      ? candidate.path.slice(0, GENERATED_WORLD_ISSUE_PATH_LIMIT)
+      : "";
+    const code = typeof candidate.code === "string"
+      ? candidate.code.slice(0, GENERATED_WORLD_ISSUE_CODE_LIMIT)
+      : "custom";
     return [{
-      path: typeof candidate.path === "string"
-        ? candidate.path.slice(0, GENERATED_WORLD_ISSUE_PATH_LIMIT)
-        : "",
-      code: typeof candidate.code === "string"
-        ? candidate.code.slice(0, GENERATED_WORLD_ISSUE_CODE_LIMIT)
-        : "custom",
-      message: typeof candidate.message === "string"
-        ? candidate.message.slice(0, GENERATED_WORLD_ISSUE_MESSAGE_LIMIT)
-        : "Generated content is incomplete."
+      path,
+      code,
+      message: controlledGeneratedWorldIssueMessage(path, code)
     }];
   });
 }

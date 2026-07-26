@@ -26,7 +26,12 @@ import {
   projectGeneratedWorldIssues
 } from "../../../packages/domain/src/generated-world.js";
 import { buildTemplateWorldPrompt, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
-import { callTextProvider, extractJsonObject } from "../../../packages/story-engine/src/index.js";
+import {
+  callTextProvider,
+  extractJsonObject,
+  providerTransportErrorDetails,
+  type ProviderResult
+} from "../../../packages/story-engine/src/index.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
 import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
@@ -76,7 +81,7 @@ const convertedWorldSchema = z.object({
   tone: flexibleShortText,
   backgroundStory: flexibleLongText,
   player_character: flexibleLongText,
-  playable_characters: z.array(convertedPlayableCharacterSchema).max(1000).default([]),
+  playable_characters: z.array(z.unknown()).max(1000).default([]),
   premise: flexibleLongText,
   firstAction: flexibleLongText,
   story_rules: flexibleLongText,
@@ -154,7 +159,7 @@ export function applicationOwnedEventTriggers(items: unknown[], worldScope: stri
 export type WorldGenProgress = WorldGenerationProgress;
 
 export function selectCompleteGeneratedCharacters(
-  candidates: z.infer<typeof convertedPlayableCharacterSchema>[]
+  candidates: unknown[]
 ) {
   const characters: z.infer<typeof completeConvertedPlayableCharacterSchema>[] = [];
   const characterNames = new Set<string>();
@@ -190,9 +195,70 @@ export function incompleteGeneratedWorldError(error?: unknown): Error {
 export type WorldGenerationFailureDiagnostic = {
   message: string;
   statusCode?: number;
-  code?: "incomplete_generated_world" | "provider_request_timeout" | "provider_transport_error";
+  code?: "incomplete_generated_world" | "provider_http_error" | "provider_request_timeout" | "provider_transport_error" | "provider_error";
   issues?: ReturnType<typeof generatedWorldIssues>;
 };
+
+type WorldGenerationProviderCategory = "http" | "timeout" | "transport" | "provider";
+
+export function generatedWorldProviderError(error: unknown): Error {
+  const failure = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  const transport = providerTransportErrorDetails(error);
+  const rawStatusCode = Number(failure.statusCode);
+  const providerStatus = Number.isInteger(rawStatusCode) && rawStatusCode >= 400 && rawStatusCode <= 599
+    ? rawStatusCode
+    : undefined;
+  let category: WorldGenerationProviderCategory;
+  let code: "provider_http_error" | "provider_request_timeout" | "provider_transport_error" | "provider_error";
+  let statusCode: number;
+  let message: string;
+
+  if (transport?.timedOut) {
+    category = "timeout";
+    code = "provider_request_timeout";
+    statusCode = 504;
+    message = "The text provider request timed out.";
+  } else if (transport) {
+    category = "transport";
+    code = "provider_transport_error";
+    statusCode = 502;
+    message = "The text provider connection failed.";
+  } else if (providerStatus && Object.hasOwn(failure, "providerMessage")) {
+    category = "http";
+    code = "provider_http_error";
+    statusCode = providerStatus;
+    message = `The text provider request failed with HTTP ${providerStatus}.`;
+  } else {
+    category = "provider";
+    code = "provider_error";
+    statusCode = providerStatus || 502;
+    message = providerStatus
+      ? `The text provider request failed with HTTP ${providerStatus}.`
+      : "The text provider request failed.";
+  }
+
+  return Object.assign(new Error(message), {
+    name: "WorldGenerationProviderError",
+    statusCode,
+    expose: true,
+    code,
+    details: {
+      code,
+      category,
+      ...(category === "http" ? { providerStatus: statusCode } : {})
+    }
+  });
+}
+
+async function callGeneratedWorldProvider(
+  request: () => Promise<ProviderResult>
+): Promise<ProviderResult> {
+  try {
+    return await request();
+  } catch (error) {
+    throw generatedWorldProviderError(error);
+  }
+}
 
 export function worldGenerationFailureDiagnostic(error: unknown): WorldGenerationFailureDiagnostic {
   const failure = error && typeof error === "object" ? error as Record<string, unknown> : {};
@@ -221,24 +287,34 @@ export function worldGenerationFailureDiagnostic(error: unknown): WorldGeneratio
       issues
     };
   }
-  if (failure.code === "provider_request_timeout") {
+  if (detailsCode === "provider_request_timeout" || failure.code === "provider_request_timeout") {
     return {
-      message: "The text provider request timed out. Check the provider endpoint and server logs.",
+      message: "The text provider request timed out.",
       ...(statusCode ? { statusCode } : {}),
       code: "provider_request_timeout"
     };
   }
-  if (failure.code === "provider_transport_error") {
+  if (detailsCode === "provider_transport_error" || failure.code === "provider_transport_error") {
     return {
-      message: "The text provider connection failed. Check the provider endpoint and server logs.",
+      message: "The text provider connection failed.",
       ...(statusCode ? { statusCode } : {}),
       code: "provider_transport_error"
     };
   }
-  if (Object.hasOwn(failure, "providerMessage") && statusCode) {
+  if (detailsCode === "provider_http_error" && statusCode) {
     return {
-      message: `The text provider request failed with HTTP ${statusCode}. Check the provider endpoint and server logs.`,
-      statusCode
+      message: `The text provider request failed with HTTP ${statusCode}.`,
+      statusCode,
+      code: "provider_http_error"
+    };
+  }
+  if (detailsCode === "provider_error") {
+    return {
+      message: statusCode
+        ? `The text provider request failed with HTTP ${statusCode}.`
+        : "The text provider request failed.",
+      ...(statusCode ? { statusCode } : {}),
+      code: "provider_error"
     };
   }
   return {
@@ -349,7 +425,8 @@ export async function generateTemplateWorld(
   await onProgress?.("generating_world", 30, "Synthesizing world overview and characters via LLM…");
   const promptSnapshot = await dependencies.resolvePromptSnapshot(pool, ownerUserId);
   const prompt = buildTemplateWorldPrompt(input, promptFromSnapshot(promptSnapshot, "world_generation"));
-  const result = await dependencies.callTextProvider(profile, prompt);
+  const result = await callGeneratedWorldProvider(() => dependencies.callTextProvider(profile, prompt));
+  let validationResult = result;
   logger.debug({ responseId: result.responseId, outputLimited: result.outputLimited }, "Received initial world generation LLM response");
 
   let converted: z.infer<typeof convertedWorldSchema>;
@@ -365,11 +442,11 @@ export async function generateTemplateWorld(
       issues: generatedWorldIssues(error)
     }, "Initial LLM world generation parse failed, attempting recovery");
     await onProgress?.("recovering_world", 50, result.outputLimited ? "Output limit reached. Recovering truncated JSON…" : "Generated world was incomplete. Requesting a complete replacement…");
-    const recovered = await dependencies.callTextProvider(profile, {
+    const recovered = await callGeneratedWorldProvider(() => dependencies.callTextProvider(profile, {
       ...prompt,
       ...(result.responseId ? { previousResponseId: result.responseId } : {}),
       recoveryInput: promptFromSnapshot(promptSnapshot, "world_generation_recovery")
-    });
+    }));
     try {
       converted = completeConvertedWorldSchema.parse(normalizeRawWorldJson(extractJsonObject(recovered.content)));
     } catch (recoveryError) {
@@ -382,6 +459,7 @@ export async function generateTemplateWorld(
       }, "Generated world recovery validation failed");
       throw incompleteGeneratedWorldError(recoveryError);
     }
+    validationResult = recovered;
     logger.info({ title: converted.title }, "Successfully recovered generated world JSON");
   }
 
@@ -402,7 +480,7 @@ export async function generateTemplateWorld(
     const needed = selected.needed;
     logger.info({ existingCount: rawCharacters.length, needed }, "Supplementing playable character roster");
     await onProgress?.("supplementing_characters", 70, `Generating ${needed} additional playable character${needed === 1 ? "" : "s"} to meet the 3-4 character target…`);
-    const supplementResult = await dependencies.callTextProvider(profile, {
+    const supplementResult = await callGeneratedWorldProvider(() => dependencies.callTextProvider(profile, {
       systemPrompt: promptFromSnapshot(promptSnapshot, "world_roster_supplement").replaceAll("{{needed}}", String(needed)),
       input: JSON.stringify({
         worldTitle: converted.title,
@@ -410,12 +488,13 @@ export async function generateTemplateWorld(
         premise: converted.premise,
         existingCharacters: rawCharacters.map((c) => ({ name: c.name, background: c.character_text }))
       })
-    });
+    }));
     try {
       const supplement = z.object({
         playable_characters: z.array(completeConvertedPlayableCharacterSchema).length(needed)
       }).parse(extractJsonObject(supplementResult.content));
       rawCharacters.push(...supplement.playable_characters);
+      validationResult = supplementResult;
       logger.debug({ added: supplement.playable_characters.length }, "Character roster successfully supplemented");
     } catch (supplementError) {
       if (!isGeneratedWorldValidationError(supplementError)) throw supplementError;
@@ -472,9 +551,9 @@ export async function generateTemplateWorld(
   } catch (error) {
     if (!isGeneratedWorldValidationError(error)) throw error;
     logger.error({
-      responseId: result.responseId,
-      finishReason: result.finishReason,
-      outputLimited: result.outputLimited,
+      responseId: validationResult.responseId,
+      finishReason: validationResult.finishReason,
+      outputLimited: validationResult.outputLimited,
       issues: generatedWorldIssues(error)
     }, "Generated world completion validation failed");
     throw incompleteGeneratedWorldError(error);

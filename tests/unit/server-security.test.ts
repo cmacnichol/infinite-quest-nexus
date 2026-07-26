@@ -6,7 +6,10 @@ import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { logger } from "../../packages/logger/src/index.js";
 import { parseCompleteGeneratedWorld } from "../../packages/domain/src/generated-world.js";
-import { incompleteGeneratedWorldError } from "../../services/api/src/world-generator-service.js";
+import {
+  generatedWorldProviderError,
+  incompleteGeneratedWorldError
+} from "../../services/api/src/world-generator-service.js";
 
 function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
   return {
@@ -279,6 +282,49 @@ describe("API server security and CORS headers", () => {
     expect(issue.code.length).toBeLessThanOrEqual(100);
     expect(issue.message.length).toBeLessThanOrEqual(500);
     expect(response.payload).not.toContain(marker);
+
+    await app.close();
+  });
+
+  it("exposes and logs only controlled generated-world provider 429 details", async () => {
+    const marker = "SECRET_AT_START_OF_PROVIDER_429_BODY";
+    const rawProviderError = Object.assign(
+      new Error(`Provider request failed (429): ${marker}`),
+      {
+        statusCode: 429,
+        providerMessage: `${marker}${"x".repeat(2_000)}`
+      }
+    );
+    const safeProviderError = generatedWorldProviderError(rawProviderError);
+    const errorLogs: unknown[] = [];
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-provider-error", async (request) => {
+      (request.log as unknown as { error: (...args: unknown[]) => void }).error = (...args) => {
+        errorLogs.push(args);
+      };
+      throw safeProviderError;
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-provider-error",
+      headers: { "x-correlation-id": "provider-429-test" }
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(response.json()).toMatchObject({
+      error: "WorldGenerationProviderError",
+      message: "The text provider request failed with HTTP 429. Correlation ID: provider-429-test.",
+      correlationId: "provider-429-test",
+      code: "provider_http_error",
+      details: {
+        code: "provider_http_error",
+        category: "http",
+        providerStatus: 429
+      }
+    });
+    expect(response.payload).not.toContain(marker);
+    expect(JSON.stringify(errorLogs)).not.toContain(marker);
 
     await app.close();
   });

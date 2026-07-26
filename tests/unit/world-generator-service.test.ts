@@ -7,6 +7,7 @@ import {
   type ProviderResult
 } from "../../packages/story-engine/src/providers.js";
 import {
+  generatedWorldProviderError,
   generateTemplateWorld,
   generateWorldPreview,
   incompleteGeneratedWorldError,
@@ -75,10 +76,10 @@ function worldResponse(playableCharacters: unknown[]): string {
   });
 }
 
-function providerResult(content: string): ProviderResult {
+function providerResult(content: string, responseId = "response-id"): ProviderResult {
   return {
     content,
-    responseId: "response-id",
+    responseId,
     finishReason: "stop",
     outputLimited: false,
     modelInstanceId: "model-instance",
@@ -148,6 +149,35 @@ describe("generateTemplateWorld orchestration", () => {
     expect(harness.requests).toHaveLength(2);
     expect(harness.requests[1]!.systemPrompt).toContain("exactly 2 complete replacement characters");
     expect(harness.requests[1]!.systemPrompt).not.toContain("{{needed}}");
+    expect(JSON.parse(harness.requests[1]!.input)).toMatchObject({
+      existingCharacters: [{ name: "Mira Vale" }]
+    });
+  });
+
+  it("discards malformed initial roster entries without requesting full-world recovery", async () => {
+    const retained = character("Mira Vale");
+    const harness = generationHarness([
+      providerResult(worldResponse([
+        "primitive roster entry",
+        { ...character("Null Profile"), profile: null },
+        { ...character("Malformed Profile"), profile: { identity: null } },
+        retained
+      ]), "initial-response"),
+      providerResult(JSON.stringify({
+        playable_characters: [character("Oren Pike"), character("Sela Moon")]
+      }), "supplement-response")
+    ]);
+
+    const generated = await harness.run();
+
+    expect(generated.content.playableCharacters.map((entry) => entry.name)).toEqual([
+      "Mira Vale",
+      "Oren Pike",
+      "Sela Moon"
+    ]);
+    expect(harness.requests).toHaveLength(2);
+    expect(harness.requests[1]).not.toHaveProperty("recoveryInput");
+    expect(harness.requests[1]!.systemPrompt).toContain("exactly 2 complete replacement characters");
     expect(JSON.parse(harness.requests[1]!.input)).toMatchObject({
       existingCharacters: [{ name: "Mira Vale" }]
     });
@@ -245,20 +275,43 @@ describe("generateTemplateWorld orchestration", () => {
     expect(harness.requests).toHaveLength(2);
   });
 
-  it("preserves provider error identity instead of converting it to an incomplete-world error", async () => {
-    const providerError = Object.assign(new Error("Provider request failed (503): unavailable"), {
-      statusCode: 503,
-      providerMessage: "unavailable"
+  it("replaces provider HTTP failures with a safe categorized error", async () => {
+    const marker = "SECRET_AT_START_OF_429_BODY";
+    const providerError = Object.assign(new Error(`Provider request failed (429): ${marker}`), {
+      statusCode: 429,
+      providerMessage: marker
     });
     const harness = generationHarness([providerError]);
 
-    await expect(harness.run()).rejects.toBe(providerError);
+    let thrown: unknown;
+    try {
+      await harness.run();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).not.toBe(providerError);
+    expect(thrown).toMatchObject({
+      name: "WorldGenerationProviderError",
+      message: "The text provider request failed with HTTP 429.",
+      statusCode: 429,
+      expose: true,
+      code: "provider_http_error",
+      details: {
+        code: "provider_http_error",
+        category: "http",
+        providerStatus: 429
+      }
+    });
+    expect(thrown).not.toHaveProperty("cause");
+    expect(JSON.stringify(thrown)).not.toContain(marker);
     expect(harness.requests).toHaveLength(1);
   });
 
-  it("preserves provider transport-error identity and semantics", async () => {
+  it("replaces provider transport failures with a safe distinct category", async () => {
+    const marker = "SECRET_AT_START_OF_TRANSPORT_CAUSE";
     const providerError = new ProviderTransportError(
-      "LM Studio story generation could not complete because the provider connection failed (ECONNRESET).",
+      marker,
       {
         providerType: "lmstudio",
         operation: "story generation",
@@ -269,18 +322,33 @@ describe("generateTemplateWorld orchestration", () => {
         timedOut: false,
         transportCode: "ECONNRESET",
         causeName: "TypeError",
-        causeMessage: "connection reset"
+        causeMessage: marker
       },
-      new Error("connection reset")
+      new Error(marker)
     );
     const harness = generationHarness([providerError]);
 
-    await expect(harness.run()).rejects.toBe(providerError);
-    expect(providerError).toMatchObject({
+    let thrown: unknown;
+    try {
+      await harness.run();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).not.toBe(providerError);
+    expect(thrown).toMatchObject({
+      name: "WorldGenerationProviderError",
+      message: "The text provider connection failed.",
       code: "provider_transport_error",
       statusCode: 502,
-      expose: true
+      expose: true,
+      details: {
+        code: "provider_transport_error",
+        category: "transport"
+      }
     });
+    expect(thrown).not.toHaveProperty("cause");
+    expect(JSON.stringify(thrown)).not.toContain(marker);
     expect(harness.requests).toHaveLength(1);
   });
 
@@ -326,6 +394,40 @@ describe("generateTemplateWorld orchestration", () => {
     expect(names).toEqual(["Mira Vale", "Oren Pike", "Sela Moon"]);
     expect(names.some((name) => name.startsWith("Character Option"))).toBe(false);
     expect(harness.requests).toHaveLength(2);
+  });
+
+  it("logs validation metadata from the response that produced each failing stage", async () => {
+    const malformedInitial = generationHarness([
+      providerResult("{", "initial-response"),
+      providerResult("{", "recovery-response")
+    ]);
+    const malformedSupplement = generationHarness([
+      providerResult(worldResponse([character("Mira Vale")]), "initial-response"),
+      providerResult("{", "supplement-response")
+    ]);
+    const failingCompletion = generationHarness([
+      providerResult(worldResponse([character("Mira Vale"), character("Oren Pike")]), "initial-response"),
+      providerResult(JSON.stringify({
+        playable_characters: [character("  MIRA VALE  ")]
+      }), "supplement-response")
+    ]);
+    const warnLog = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const errorLog = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+
+    try {
+      await expect(malformedInitial.run()).rejects.toMatchObject({ statusCode: 502 });
+      expect(warnLog.mock.calls.at(-1)?.[0]).toMatchObject({ responseId: "initial-response" });
+      expect(errorLog.mock.calls.at(-1)?.[0]).toMatchObject({ responseId: "recovery-response" });
+
+      await expect(malformedSupplement.run()).rejects.toMatchObject({ statusCode: 502 });
+      expect(errorLog.mock.calls.at(-1)?.[0]).toMatchObject({ responseId: "supplement-response" });
+
+      await expect(failingCompletion.run()).rejects.toMatchObject({ statusCode: 502 });
+      expect(errorLog.mock.calls.at(-1)?.[0]).toMatchObject({ responseId: "supplement-response" });
+    } finally {
+      warnLog.mockRestore();
+      errorLog.mockRestore();
+    }
   });
 });
 
@@ -395,14 +497,14 @@ describe("generateWorldPreview provider failures", () => {
     const diagnostic = worldGenerationFailureDiagnostic(error);
 
     expect(diagnostic).toEqual({
-      message: "The text provider connection failed. Check the provider endpoint and server logs.",
+      message: "The text provider connection failed.",
       statusCode: 502,
       code: "provider_transport_error"
     });
     expect(JSON.stringify(diagnostic)).not.toContain(privateMarker);
   });
 
-  it("logs and persists a bounded safe diagnostic while preserving the provider error", async () => {
+  it("logs and persists a bounded safe categorized provider diagnostic", async () => {
     const privateMarker = "PRIVATE_PROVIDER_BODY_AND_LORE";
     const providerError = Object.assign(
       new Error(`Provider request failed (500): ${privateMarker}${"x".repeat(2_000)}`),
@@ -411,6 +513,7 @@ describe("generateWorldPreview provider failures", () => {
         providerMessage: `${privateMarker}${"x".repeat(2_000)}`
       }
     );
+    const safeProviderError = generatedWorldProviderError(providerError);
     const progressUpdates: unknown[] = [];
     const dependencies = {
       initialOwnerId: async () => "owner-id",
@@ -425,7 +528,7 @@ describe("generateWorldPreview provider failures", () => {
         progressUpdates.push(progress);
       },
       generateTemplateWorld: async () => {
-        throw providerError;
+        throw safeProviderError;
       }
     } as unknown as WorldGenerationPreviewDependencies;
     const errorLog = vi.spyOn(logger, "error").mockImplementation(() => undefined);
@@ -450,12 +553,12 @@ describe("generateWorldPreview provider failures", () => {
       errorLog.mockRestore();
     }
 
-    expect(thrown).toBe(providerError);
+    expect(thrown).toBe(safeProviderError);
     const persisted = progressUpdates.at(-1) as { status: string; message: string; errorMessage: string };
     expect(persisted).toMatchObject({
       status: "failed",
-      message: "The text provider request failed with HTTP 500. Check the provider endpoint and server logs.",
-      errorMessage: "The text provider request failed with HTTP 500. Check the provider endpoint and server logs."
+      message: "The text provider request failed with HTTP 500.",
+      errorMessage: "The text provider request failed with HTTP 500."
     });
     expect(persisted.message.length).toBeLessThanOrEqual(500);
     expect(JSON.stringify({ progressUpdates, errorLogs: errorLogCalls })).not.toContain(privateMarker);
