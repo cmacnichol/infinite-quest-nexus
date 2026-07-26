@@ -3,7 +3,11 @@ import {
   generatedWorldIssues,
   parseCompleteGeneratedWorld
 } from "../../packages/domain/src/generated-world.js";
-import { applicationOwnedCharacterIds } from "../../services/api/src/world-generator-service.js";
+import {
+  applicationOwnedCharacterIds,
+  applicationOwnedDefaultTriggers,
+  applicationOwnedRpgStats
+} from "../../services/api/src/world-generator-service.js";
 
 function profile() {
   return {
@@ -101,6 +105,29 @@ describe("generated world completion", () => {
 
     expect(ids).not.toContain("provider-character");
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("replaces repeated provider stat and trigger IDs with application-owned child IDs", () => {
+    const characterId = "char-1-lantern-keeper";
+    const rpgStats = applicationOwnedRpgStats([
+      { id: "provider-child", name: "Navigation", value: 70 },
+      { id: "provider-child", name: "Survival", value: 60 }
+    ], characterId);
+    const defaultTriggers = applicationOwnedDefaultTriggers([
+      { id: "provider-child", name: "Storm danger", value: "Low" },
+      { id: "provider-child", name: "Road progress", value: "0" }
+    ], characterId);
+
+    expect(rpgStats.map((stat) => stat.id)).toEqual([
+      "char-1-lantern-keeper-stat-1",
+      "char-1-lantern-keeper-stat-2"
+    ]);
+    expect(defaultTriggers.map((trigger) => trigger.id)).toEqual([
+      "char-1-lantern-keeper-tracker-1",
+      "char-1-lantern-keeper-tracker-2"
+    ]);
+    expect(new Set(rpgStats.map((stat) => stat.id)).size).toBe(rpgStats.length);
+    expect(new Set(defaultTriggers.map((trigger) => trigger.id)).size).toBe(defaultTriggers.length);
   });
 
   it("rejects missing world fields and character counts outside three to four", () => {

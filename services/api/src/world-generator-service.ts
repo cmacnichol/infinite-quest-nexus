@@ -100,7 +100,7 @@ export function applicationOwnedCharacterIds(
   return characters.map((character, index) => convertedCharacterId(character.name, index));
 }
 
-function convertedRpgStats(items: unknown[], characterId: string) {
+export function applicationOwnedRpgStats(items: unknown[], characterId: string) {
   return items.flatMap((item, index) => {
     const row = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
     const name = String(row.name || row.skill || row.stat || "").trim();
@@ -108,7 +108,7 @@ function convertedRpgStats(items: unknown[], characterId: string) {
     const numeric = Math.round(Number(row.value ?? row.score ?? row.rating ?? 50));
     return [{
       ...row,
-      id: String(row.id || `${characterId}-stat-${index + 1}`).slice(0, 200),
+      id: `${characterId}-stat-${index + 1}`.slice(0, 200),
       name: name.slice(0, 200),
       value: Number.isFinite(numeric) ? Math.min(99, Math.max(1, numeric)) : 50,
       note: String(row.note || row.covers || "").slice(0, 2000)
@@ -116,14 +116,14 @@ function convertedRpgStats(items: unknown[], characterId: string) {
   });
 }
 
-function convertedDefaultTriggers(items: unknown[], characterId: string) {
+export function applicationOwnedDefaultTriggers(items: unknown[], characterId: string) {
   return items.flatMap((item, index) => {
     const row = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
     const name = String(row.name || row.label || row.title || "").trim();
     if (!name) return [];
     return [{
       ...row,
-      id: String(row.id || `${characterId}-tracker-${index + 1}`).slice(0, 200),
+      id: `${characterId}-tracker-${index + 1}`.slice(0, 200),
       name: name.slice(0, 300),
       rules: String(row.rules || row.updateRules || row.description || `Track ${name} whenever it changes.`).slice(0, 4000),
       value: String(row.value ?? row.initialValue ?? "Not yet established.").slice(0, 6000)
@@ -289,8 +289,8 @@ export async function generateTemplateWorld(
       name: character.name,
       characterText: character.character_text,
       ...(character.profile ? { profile: character.profile } : {}),
-      rpgStats: convertedRpgStats(character.rpg_statistics, id),
-      defaultTriggers: convertedDefaultTriggers(character.default_triggers, id),
+      rpgStats: applicationOwnedRpgStats(character.rpg_statistics, id),
+      defaultTriggers: applicationOwnedDefaultTriggers(character.default_triggers, id),
       source: { type: "template-world-generator", index }
     });
   });
@@ -309,8 +309,8 @@ export async function generateTemplateWorld(
     playableCharacters,
     entities: [],
     relationships: [],
-    rpgStats: convertedRpgStats(converted.rpg_statistics, "world-wide"),
-    defaultTriggers: convertedDefaultTriggers(converted.default_triggers, "world-wide"),
+    rpgStats: applicationOwnedRpgStats(converted.rpg_statistics, "world-wide"),
+    defaultTriggers: applicationOwnedDefaultTriggers(converted.default_triggers, "world-wide"),
     eventTriggers: converted.event_triggers || [],
     assets: [],
     defaults: {
