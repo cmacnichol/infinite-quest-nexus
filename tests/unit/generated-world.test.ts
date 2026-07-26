@@ -6,6 +6,7 @@ import {
 import {
   applicationOwnedCharacterIds,
   applicationOwnedDefaultTriggers,
+  applicationOwnedEventTriggers,
   applicationOwnedRpgStats
 } from "../../services/api/src/world-generator-service.js";
 
@@ -128,6 +129,23 @@ describe("generated world completion", () => {
     ]);
     expect(new Set(rpgStats.map((stat) => stat.id)).size).toBe(rpgStats.length);
     expect(new Set(defaultTriggers.map((trigger) => trigger.id)).size).toBe(defaultTriggers.length);
+  });
+
+  it("replaces repeated provider event-trigger IDs while preserving trigger fields", () => {
+    const eventTriggers = applicationOwnedEventTriggers([
+      { id: "provider-event", name: "Storm warning", condition: "Sky darkens", source: { kind: "provider" } },
+      { id: "provider-event", name: "Road shift", condition: "Moon rises", source: { kind: "provider" } }
+    ], "generated-world");
+
+    expect(eventTriggers.map((trigger) => (trigger as { id?: string }).id)).toEqual([
+      "generated-world-event-1",
+      "generated-world-event-2"
+    ]);
+    expect(new Set(eventTriggers.map((trigger) => (trigger as { id?: string }).id)).size).toBe(eventTriggers.length);
+    expect(eventTriggers).toMatchObject([
+      { name: "Storm warning", condition: "Sky darkens", source: { kind: "provider" } },
+      { name: "Road shift", condition: "Moon rises", source: { kind: "provider" } }
+    ]);
   });
 
   it("rejects missing world fields and character counts outside three to four", () => {

@@ -131,6 +131,16 @@ export function applicationOwnedDefaultTriggers(items: unknown[], characterId: s
   });
 }
 
+export function applicationOwnedEventTriggers(items: unknown[], worldScope: string): unknown[] {
+  return items.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    return {
+      ...(item as Record<string, unknown>),
+      id: `${worldScope}-event-${index + 1}`.slice(0, 200)
+    };
+  });
+}
+
 export type WorldGenProgress = WorldGenerationProgress;
 
 export function worldGenerationInputMetadata(input: TemplateWorldInput) {
@@ -311,7 +321,7 @@ export async function generateTemplateWorld(
     relationships: [],
     rpgStats: applicationOwnedRpgStats(converted.rpg_statistics, "world-wide"),
     defaultTriggers: applicationOwnedDefaultTriggers(converted.default_triggers, "world-wide"),
-    eventTriggers: converted.event_triggers || [],
+    eventTriggers: applicationOwnedEventTriggers(converted.event_triggers, "generated-world"),
     assets: [],
     defaults: {
       importedFrom: input.sourceKind,
