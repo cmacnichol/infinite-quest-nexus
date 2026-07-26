@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
@@ -84,9 +84,12 @@ function rewriteAssetPointers(value: unknown, assetIds: Map<string, string>): un
   if (Array.isArray(value)) return value.map((item) => rewriteAssetPointers(item, assetIds));
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [key, rewriteAssetPointers(child, assetIds)]));
   if (typeof value !== "string") return value;
-  return value.replaceAll(/\/api\/v1\/assets\/([0-9a-f-]{36})/gi, (whole, sourceId: string) => {
-    const destination = assetIds.get(sourceId);
-    return destination ? `/api/v1/assets/${destination}` : whole;
+  return value.replaceAll(/\/api\/v1\/assets\/([0-9a-f-]{36})/gi, (_whole, sourceId: string) => {
+    const destination = assetIds.get(sourceId) ?? assetIds.get(sourceId.toLowerCase());
+    if (!destination) {
+      throw new ArchiveError("archive-asset-missing", "A portable asset pointer is not declared by the validated archive.", 400, { sourceAssetId: sourceId });
+    }
+    return `/api/v1/assets/${destination}`;
   });
 }
 
@@ -99,9 +102,12 @@ function stagedFromPreview(config: RuntimeConfig, row: ArchivePreviewRow, compre
   if (!relativePath || relativePath.startsWith("/") || /^[A-Za-z]:/.test(relativePath) || relativePath.split("/").some((part) => !part || part === "." || part === "..")) {
     throw new ArchiveError("archive-entry-unsafe", "The staged archive path is invalid.");
   }
-  const absolutePath = resolve(config.archiveStorageRoot, relativePath);
-  const root = `${resolve(config.archiveStorageRoot)}\\`;
-  if (!absolutePath.startsWith(root)) throw new ArchiveError("archive-entry-unsafe", "The staged archive path escaped the archive root.");
+  const root = resolve(config.archiveStorageRoot);
+  const absolutePath = resolve(root, relativePath);
+  const pathFromRoot = relative(root, absolutePath);
+  if (!pathFromRoot || pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot)) {
+    throw new ArchiveError("archive-entry-unsafe", "The staged archive path escaped the archive root.");
+  }
   return { relativePath, absolutePath, compressedBytes };
 }
 
@@ -811,10 +817,14 @@ async function resolveImportedWorld(
   if (destination.kind === "existing_world_version" || operation === "attach_existing_world_version" || operation === "reuse_world_version") {
     worldId = String(destination.worldId || "");
     worldVersionId = String(destination.worldVersionId || "");
-    const selected = await client.query<{ world_id: string }>(
-      "SELECT world_id FROM world_versions WHERE id=$1 AND owner_user_id=$2", [worldVersionId, ownerUserId]
+    const selected = await client.query<{ world_id: string; content: WorldContent }>(
+      "SELECT world_id,content FROM world_versions WHERE id=$1 AND owner_user_id=$2", [worldVersionId, ownerUserId]
     );
     if (!selected.rowCount || selected.rows[0]!.world_id !== worldId) throw new ArchiveError("archive-destination-not-empty", "The destination world version is no longer available.");
+    const destinationHash = sha256(stableStringify(canonicalizeWorldContent(selected.rows[0]!.content)));
+    if (destinationHash !== archive.world.canonicalHash) {
+      throw new ArchiveError("archive-world-mismatch", "The destination world version no longer matches the archive world.");
+    }
   } else {
     const createdWorld = await client.query<{ id: string }>(
       "INSERT INTO worlds (owner_user_id,title) VALUES ($1,$2) RETURNING id", [ownerUserId, String(objectValue(archive.world.content).world && objectValue(objectValue(archive.world.content).world).title || "Imported world")]
@@ -1016,8 +1026,9 @@ export async function importCampaignArchive(
     }
     const expectedDestinationHash = sha256(`campaign-archive-destination-v1\0${canonicalArchiveJson(parsed.destination)}`);
     if (expectedDestinationHash !== preview.destination_hash) throw new ArchiveError("archive-preview-stale", "The destination changed after preview.");
-    const stagedStat = await stat(resolve(config.archiveStorageRoot, preview.staged_archive_path));
-    const staged = stagedFromPreview(config, preview, stagedStat.size);
+    const stagedPath = stagedFromPreview(config, preview, 0);
+    const stagedStat = await stat(stagedPath.absolutePath);
+    const staged = { ...stagedPath, compressedBytes: stagedStat.size };
     const archive = await decodeCampaignArchive(staged, config.campaignArchiveLimits);
     if (archive.contentFingerprint !== preview.content_fingerprint) throw new ArchiveError("archive-preview-stale", "The staged archive changed after preview.");
     const sourceHash = campaignArchiveSourceHash(archive.contentFingerprint, parsed.destination);

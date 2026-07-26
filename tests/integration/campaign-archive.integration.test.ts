@@ -1,7 +1,11 @@
+import { createReadStream, createWriteStream } from "node:fs";
 import { mkdtemp, readFile, rm, stat, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
+import { once } from "node:events";
+import { createHash, randomUUID } from "node:crypto";
+import { ZipArchive } from "archiver";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -36,6 +40,8 @@ integration("campaign archive export", () => {
   let segmentAssetIds: string[] = [];
   let turnId = "";
   let worldId = "";
+  let sourceWorldVersionId = "";
+  let mismatchedWorldVersionId = "";
   let segmentId = "";
 
   beforeAll(async () => {
@@ -58,6 +64,8 @@ integration("campaign archive export", () => {
        VALUES ($1,$2,2,$3::jsonb) RETURNING id`,
       [world.rows[0]!.id, ownerUserId, JSON.stringify({ schemaVersion: 4, world: { title: "Archive world v2", firstAction: "Ignore me." } })]
     );
+    sourceWorldVersionId = firstVersion.rows[0]!.id;
+    mismatchedWorldVersionId = secondVersion.rows[0]!.id;
     const campaign = await pool.query<{ id: string }>(
       `INSERT INTO campaigns (owner_user_id, world_version_id, title, active_turn_number, character_profile, character_profile_revision)
        VALUES ($1,$2,'Archive campaign',1,$3::jsonb,1) RETURNING id`,
@@ -175,6 +183,30 @@ integration("campaign archive export", () => {
     await pool?.end();
     if (root) await rm(root, { recursive: true, force: true });
   });
+
+  function runtimeConfig(ttlSeconds = 1_800): RuntimeConfig {
+    return {
+      assetStorageRoot: root,
+      archiveStorageRoot: root,
+      archivePreviewTtlSeconds: ttlSeconds,
+      campaignArchiveLimits: limits
+    } as RuntimeConfig;
+  }
+
+  async function stagedExport() {
+    const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
+    return stageArchiveUpload(Readable.from(await readFile(artifact.absolutePath)), root, limits);
+  }
+
+  async function createCompatibleDestination(title: string): Promise<{ worldId: string; worldVersionId: string }> {
+    const source = await pool.query<{ content: unknown }>("SELECT content FROM world_versions WHERE id=$1", [sourceWorldVersionId]);
+    const createdWorld = await pool.query<{ id: string }>("INSERT INTO worlds (owner_user_id,title) SELECT owner_user_id,$2 FROM worlds WHERE id=$1 RETURNING id", [worldId, title]);
+    const createdVersion = await pool.query<{ id: string }>(
+      "INSERT INTO world_versions (world_id,owner_user_id,version_number,content) SELECT $1,owner_user_id,1,$2::jsonb FROM worlds WHERE id=$1 RETURNING id",
+      [createdWorld.rows[0]!.id, JSON.stringify(source.rows[0]!.content)]
+    );
+    return { worldId: createdWorld.rows[0]!.id, worldVersionId: createdVersion.rows[0]!.id };
+  }
 
   it("exports only the selected campaign and pinned world version as a deterministic manifest archive", async () => {
     const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
@@ -316,5 +348,111 @@ integration("campaign archive export", () => {
     expect(importedTurn).toHaveLength(1);
     expect(importedTurn.rows[0]!.id).not.toBe(turnId);
     expect(imported.stats).toMatchObject({ turnCount: 1, memoryCount: 1 });
+  });
+
+  it("rejects an explicitly selected destination version whose canonical world content differs", async () => {
+    await expect(previewCampaignArchive(
+      pool,
+      runtimeConfig(),
+      await stagedExport(),
+      "mismatched-destination.zip",
+      { kind: "existing_world_version", worldVersionId: mismatchedWorldVersionId }
+    )).rejects.toMatchObject({ code: "archive-world-mismatch" });
+  });
+
+  it("attaches only exact world versions and scopes idempotency to the selected destination", async () => {
+    const firstDestination = await createCompatibleDestination("Exact destination one");
+    const secondDestination = await createCompatibleDestination("Exact destination two");
+    const firstPreview = await previewCampaignArchive(pool, runtimeConfig(), await stagedExport(), "exact-one.zip", {
+      kind: "existing_world_version", worldVersionId: firstDestination.worldVersionId
+    });
+    const firstImport = await importCampaignArchive(pool, runtimeConfig(), { root }, {
+      previewToken: firstPreview.previewToken,
+      destination: { kind: "existing_world_version", worldVersionId: firstDestination.worldVersionId }
+    });
+    const secondPreview = await previewCampaignArchive(pool, runtimeConfig(), await stagedExport(), "exact-two.zip", {
+      kind: "existing_world_version", worldVersionId: secondDestination.worldVersionId
+    });
+    const secondImport = await importCampaignArchive(pool, runtimeConfig(), { root }, {
+      previewToken: secondPreview.previewToken,
+      destination: { kind: "existing_world_version", worldVersionId: secondDestination.worldVersionId }
+    });
+
+    expect(firstImport).toMatchObject({ duplicate: false, worldId: firstDestination.worldId, worldVersionId: firstDestination.worldVersionId });
+    expect(secondImport).toMatchObject({ duplicate: false, worldId: secondDestination.worldId, worldVersionId: secondDestination.worldVersionId });
+    expect(secondImport.campaignId).not.toBe(firstImport.campaignId);
+  });
+
+  it("rejects expired, consumed, and application-stale preview tokens", async () => {
+    const expiredPreview = await previewCampaignArchive(pool, runtimeConfig(-1), await stagedExport(), "expired.zip", { kind: "embedded" });
+    await expect(importCampaignArchive(pool, runtimeConfig(-1), { root }, {
+      previewToken: expiredPreview.previewToken,
+      destination: { kind: "embedded" }
+    })).rejects.toMatchObject({ code: "archive-preview-stale" });
+
+    const destination = await createCompatibleDestination("Consumed token destination");
+    const consumedPreview = await previewCampaignArchive(pool, runtimeConfig(), await stagedExport(), "consumed.zip", {
+      kind: "existing_world_version", worldVersionId: destination.worldVersionId
+    });
+    await expect(importCampaignArchive(pool, runtimeConfig(), { root }, {
+      previewToken: consumedPreview.previewToken,
+      destination: { kind: "existing_world_version", worldVersionId: destination.worldVersionId }
+    })).resolves.toMatchObject({ duplicate: false });
+    await expect(importCampaignArchive(pool, runtimeConfig(), { root }, {
+      previewToken: consumedPreview.previewToken,
+      destination: { kind: "existing_world_version", worldVersionId: destination.worldVersionId }
+    })).rejects.toMatchObject({ code: "archive-preview-stale" });
+
+    const stalePreview = await previewCampaignArchive(pool, runtimeConfig(), await stagedExport(), "stale-version.zip", { kind: "embedded" });
+    const staleHash = createHash("sha256").update(stalePreview.previewToken, "utf8").digest("hex");
+    await pool.query("UPDATE archive_previews SET application_version='obsolete' WHERE token_hash=$1", [staleHash]);
+    await expect(importCampaignArchive(pool, runtimeConfig(), { root }, {
+      previewToken: stalePreview.previewToken,
+      destination: { kind: "embedded" }
+    })).rejects.toMatchObject({ code: "archive-preview-stale" });
+  });
+
+  it("previews manifest-less legacy ZIPs with compatibility warnings", async () => {
+    const archivePath = join(root, "manifest-less-legacy.zip");
+    const output = createWriteStream(archivePath, { flags: "wx" });
+    const archive = new ZipArchive({ zlib: { level: 9 } });
+    const completed = once(output, "close");
+    archive.pipe(output);
+    archive.append(Buffer.from(JSON.stringify({ world: { schemaVersion: 4, world: { title: "Manifest-less legacy" } }, turns: [] }), "utf8"), { name: "campaign.json" });
+    await archive.finalize();
+    await completed;
+    const preview = await previewCampaignArchive(pool, runtimeConfig(), await stageArchiveUpload(createReadStream(archivePath), root, limits), "manifest-less-legacy.zip", { kind: "embedded" });
+    expect(preview.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/no archive manifest/i)]));
+  });
+
+  it("rolls back database state and removes newly persisted archive originals after a forced binding failure", async () => {
+    const staged = await stagedExport();
+    const sourceAsset = await pool.query<{ storage_path: string }>("SELECT storage_path FROM assets WHERE id=$1", [requiredAssetId]);
+    const originalPath = resolve(root, sourceAsset.rows[0]!.storage_path);
+    await pool.query("DELETE FROM asset_references WHERE asset_id=$1", [requiredAssetId]);
+    await pool.query("DELETE FROM assets WHERE id=$1", [requiredAssetId]);
+    await unlink(originalPath);
+    const before = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM assets");
+    const triggerSuffix = randomUUID().replaceAll("-", "");
+    const functionName = `campaign_archive_force_failure_${triggerSuffix}`;
+    const triggerName = `campaign_archive_force_failure_trigger_${triggerSuffix}`;
+    await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced archive binding failure'; END; $$`);
+    await pool.query(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON asset_references FOR EACH ROW EXECUTE FUNCTION ${functionName}()`);
+    try {
+      const destination = await createCompatibleDestination("Rollback destination");
+      const preview = await previewCampaignArchive(pool, runtimeConfig(), staged, "rollback.zip", {
+        kind: "existing_world_version", worldVersionId: destination.worldVersionId
+      });
+      await expect(importCampaignArchive(pool, runtimeConfig(), { root }, {
+        previewToken: preview.previewToken,
+        destination: { kind: "existing_world_version", worldVersionId: destination.worldVersionId }
+      })).rejects.toThrow("forced archive binding failure");
+    } finally {
+      await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON asset_references`);
+      await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+    }
+    const after = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM assets");
+    expect(after.rows[0]!.count).toBe(before.rows[0]!.count);
+    await expect(stat(originalPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

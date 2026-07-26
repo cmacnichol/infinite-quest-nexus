@@ -89,6 +89,28 @@ type InternalInspectedArchive = InspectedArchive & {
   [INSPECTED_LIMITS]: ArchiveLimits;
 };
 
+/**
+ * A verified ZIP container without a manifest. This is deliberately limited
+ * to compatibility adapters: callers still need to define and validate their
+ * own payload contract before accepting its contents.
+ */
+export type InspectedArchiveContainerEntry = {
+  path: string;
+  compressedBytes: number;
+  uncompressedBytes: number;
+};
+
+export type InspectedArchiveContainer = {
+  staged: StagedArchive;
+  entries: ReadonlyMap<string, InspectedArchiveContainerEntry>;
+  uncompressedBytes: number;
+};
+
+type InternalInspectedArchiveContainer = InspectedArchiveContainer & {
+  [INSPECTED_IDENTITY]: FileIdentity;
+  [INSPECTED_LIMITS]: ArchiveLimits;
+};
+
 export type ArchiveArtifactEntry = {
   path: string;
   logicalType: string;
@@ -1047,6 +1069,41 @@ export async function inspectArchive(
   });
 }
 
+/**
+ * Inspect a manifest-less ZIP with the same structural checks as a portable
+ * archive. Compatibility importers must use this instead of opening ZIP files
+ * directly so legacy support cannot bypass archive safety limits.
+ */
+export async function inspectArchiveContainer(
+  staged: StagedArchive,
+  limits: ArchiveLimits
+): Promise<InspectedArchiveContainer> {
+  if (!safeInteger(staged.compressedBytes) || staged.compressedBytes > limits.maxCompressedBytes) {
+    throw archiveError("archive-limit-exceeded", "The compressed archive exceeds the configured byte limit.");
+  }
+
+  return withVerifiedStagedArchive(staged, limits, undefined, async (handle, identity, archiveSize) => {
+    const directory = await openArchiveFromHandle(handle, archiveSize, limits);
+    const central = inspectCentralDirectory(directory.files, limits);
+    await inspectLocalHeaders(handle, directory.files, archiveSize);
+    const entries = new Map<string, InspectedArchiveContainerEntry>();
+    for (const [path, file] of central.filesByPath) {
+      entries.set(path, {
+        path,
+        compressedBytes: file.compressedSize,
+        uncompressedBytes: file.uncompressedSize
+      });
+    }
+    return {
+      staged,
+      entries,
+      uncompressedBytes: central.uncompressedBytes,
+      [INSPECTED_IDENTITY]: identity,
+      [INSPECTED_LIMITS]: limits
+    } as InternalInspectedArchiveContainer;
+  });
+}
+
 export async function readVerifiedEntry(
   archive: InspectedArchive,
   path: string,
@@ -1088,6 +1145,56 @@ export async function readVerifiedEntry(
     const measurement = await measureEntry(file, streamMaximum, true);
     if (measurement.byteLength !== entry.byteLength || measurement.sha256 !== entry.sha256) {
       throw archiveError("archive-checksum-mismatch", "The requested archive entry no longer matches its manifest.", {
+        path: normalized.comparisonPath
+      });
+    }
+    return measurement.buffer!;
+  });
+}
+
+/**
+ * Read one entry from a structurally verified manifest-less ZIP with bounded
+ * decompression and a second identity/metadata verification pass.
+ */
+export async function readVerifiedContainerEntry(
+  archive: InspectedArchiveContainer,
+  path: string,
+  maximumBytes: number
+): Promise<Buffer> {
+  if (!safeInteger(maximumBytes)) {
+    throw archiveError("archive-limit-exceeded", "The requested archive read limit is invalid.");
+  }
+  const normalized = normalizeArchivePath(path);
+  const entry = archive.entries.get(normalized.comparisonPath);
+  const internal = archive as InternalInspectedArchiveContainer;
+  const identity = internal[INSPECTED_IDENTITY];
+  const limits = internal[INSPECTED_LIMITS];
+  if (!entry || !identity || !limits) {
+    throw archiveError("archive-entry-missing", "The requested archive entry does not exist.", {
+      path: normalized.comparisonPath
+    });
+  }
+  if (entry.uncompressedBytes > maximumBytes) {
+    throw archiveError("archive-limit-exceeded", "The requested archive entry exceeds the configured byte limit.", {
+      path: normalized.comparisonPath
+    });
+  }
+
+  return withVerifiedStagedArchive(archive.staged, limits, identity, async (handle, _identity, archiveSize) => {
+    const directory = await openArchiveFromHandle(handle, archiveSize, limits);
+    const central = inspectCentralDirectory(directory.files, limits);
+    await inspectLocalHeaders(handle, directory.files, archiveSize);
+    const file = central.filesByPath.get(normalized.comparisonPath);
+    if (!file
+      || file.compressedSize !== entry.compressedBytes
+      || file.uncompressedSize !== entry.uncompressedBytes) {
+      throw archiveError("archive-checksum-mismatch", "The requested archive entry metadata changed.", {
+        path: normalized.comparisonPath
+      });
+    }
+    const measurement = await measureEntry(file, Math.min(maximumBytes, entry.uncompressedBytes), true);
+    if (measurement.byteLength !== entry.uncompressedBytes) {
+      throw archiveError("archive-checksum-mismatch", "The requested archive entry could not be read completely.", {
         path: normalized.comparisonPath
       });
     }
