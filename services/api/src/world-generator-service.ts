@@ -178,6 +178,62 @@ export function incompleteGeneratedWorldError(error?: unknown): Error {
   );
 }
 
+export type WorldGenerationFailureDiagnostic = {
+  message: string;
+  statusCode?: number;
+  code?: "incomplete_generated_world" | "provider_request_timeout" | "provider_transport_error";
+  issues?: ReturnType<typeof generatedWorldIssues>;
+};
+
+export function worldGenerationFailureDiagnostic(error: unknown): WorldGenerationFailureDiagnostic {
+  const failure = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  const rawStatusCode = Number(failure.statusCode);
+  const statusCode = Number.isInteger(rawStatusCode) && rawStatusCode >= 400 && rawStatusCode <= 599
+    ? rawStatusCode
+    : undefined;
+  const details = failure.details && typeof failure.details === "object"
+    ? failure.details as Record<string, unknown>
+    : {};
+  const detailsCode = details.code;
+  if (detailsCode === "incomplete_generated_world") {
+    const issues = Array.isArray(details.issues)
+      ? details.issues.slice(0, 20) as ReturnType<typeof generatedWorldIssues>
+      : [];
+    return {
+      message: "The text provider did not return a complete world. Review the missing fields and try again.",
+      statusCode: 502,
+      code: "incomplete_generated_world",
+      issues
+    };
+  }
+  if (failure.code === "provider_request_timeout") {
+    return {
+      message: "The text provider request timed out. Check the provider endpoint and server logs.",
+      ...(statusCode ? { statusCode } : {}),
+      code: "provider_request_timeout"
+    };
+  }
+  if (failure.code === "provider_transport_error") {
+    return {
+      message: "The text provider connection failed. Check the provider endpoint and server logs.",
+      ...(statusCode ? { statusCode } : {}),
+      code: "provider_transport_error"
+    };
+  }
+  if (Object.hasOwn(failure, "providerMessage") && statusCode) {
+    return {
+      message: `The text provider request failed with HTTP ${statusCode}. Check the provider endpoint and server logs.`,
+      statusCode
+    };
+  }
+  return {
+    message: statusCode
+      ? `World generation failed with status ${statusCode}. Check the server logs and try again.`
+      : "World generation failed. Check the server logs and try again.",
+    ...(statusCode ? { statusCode } : {})
+  };
+}
+
 function isGeneratedWorldValidationError(error: unknown): error is z.ZodError | SyntaxError {
   return error instanceof z.ZodError || error instanceof SyntaxError;
 }
@@ -242,6 +298,18 @@ export function normalizeRawWorldJson(raw: unknown): Record<string, unknown> {
   };
 }
 
+export type TemplateWorldGenerationDependencies = {
+  loadTextProvider: typeof loadTextProvider;
+  resolvePromptSnapshot: typeof resolvePromptSnapshot;
+  callTextProvider: typeof callTextProvider;
+};
+
+const templateWorldGenerationDependencies: TemplateWorldGenerationDependencies = {
+  loadTextProvider,
+  resolvePromptSnapshot,
+  callTextProvider
+};
+
 export async function generateTemplateWorld(
   pool: DatabasePool,
   ownerUserId: string,
@@ -249,7 +317,8 @@ export async function generateTemplateWorld(
   credentialSecret: string,
   input: TemplateWorldInput,
   model?: string,
-  onProgress?: (phase: string, percent: number, message: string) => Promise<void> | void
+  onProgress?: (phase: string, percent: number, message: string) => Promise<void> | void,
+  dependencies: TemplateWorldGenerationDependencies = templateWorldGenerationDependencies
 ): Promise<{ title: string; content: WorldContent }> {
   if (!providerProfileId) {
     logger.error({ ownerUserId, sourceKind: input.sourceKind }, "World generation failed: missing provider profile ID");
@@ -260,12 +329,12 @@ export async function generateTemplateWorld(
   logger.debug(worldGenerationInputMetadata(input), "Template world generation input metadata");
 
   await onProgress?.("extracting", 10, "Loading text provider and preparing modular prompt…");
-  const profile = await loadTextProvider(pool, ownerUserId, providerProfileId, credentialSecret, model);
+  const profile = await dependencies.loadTextProvider(pool, ownerUserId, providerProfileId, credentialSecret, model);
 
   await onProgress?.("generating_world", 30, "Synthesizing world overview and characters via LLM…");
-  const promptSnapshot = await resolvePromptSnapshot(pool, ownerUserId);
+  const promptSnapshot = await dependencies.resolvePromptSnapshot(pool, ownerUserId);
   const prompt = buildTemplateWorldPrompt(input, promptFromSnapshot(promptSnapshot, "world_generation"));
-  const result = await callTextProvider(profile, prompt);
+  const result = await dependencies.callTextProvider(profile, prompt);
   logger.debug({ responseId: result.responseId, outputLimited: result.outputLimited }, "Received initial world generation LLM response");
 
   let converted: z.infer<typeof convertedWorldSchema>;
@@ -281,7 +350,7 @@ export async function generateTemplateWorld(
       issues: generatedWorldIssues(error)
     }, "Initial LLM world generation parse failed, attempting recovery");
     await onProgress?.("recovering_world", 50, result.outputLimited ? "Output limit reached. Recovering truncated JSON…" : "Generated world was incomplete. Requesting a complete replacement…");
-    const recovered = await callTextProvider(profile, {
+    const recovered = await dependencies.callTextProvider(profile, {
       ...prompt,
       ...(result.responseId ? { previousResponseId: result.responseId } : {}),
       recoveryInput: promptFromSnapshot(promptSnapshot, "world_generation_recovery")
@@ -318,7 +387,7 @@ export async function generateTemplateWorld(
     const needed = selected.needed;
     logger.info({ existingCount: rawCharacters.length, needed }, "Supplementing playable character roster");
     await onProgress?.("supplementing_characters", 70, `Generating ${needed} additional playable character${needed === 1 ? "" : "s"} to meet the 3-4 character target…`);
-    const supplementResult = await callTextProvider(profile, {
+    const supplementResult = await dependencies.callTextProvider(profile, {
       systemPrompt: promptFromSnapshot(promptSnapshot, "world_roster_supplement").replaceAll("{{needed}}", String(needed)),
       input: JSON.stringify({
         worldTitle: converted.title,
@@ -399,19 +468,36 @@ export async function generateTemplateWorld(
   };
 }
 
+export type WorldGenerationPreviewDependencies = {
+  initialOwnerId: typeof initialOwnerId;
+  resolveEffectiveProviderId: typeof resolveEffectiveProviderId;
+  createWorldGenerationProgress: typeof createWorldGenerationProgress;
+  updateWorldGenerationProgress: typeof updateWorldGenerationProgress;
+  generateTemplateWorld: typeof generateTemplateWorld;
+};
+
+const worldGenerationPreviewDependencies: WorldGenerationPreviewDependencies = {
+  initialOwnerId,
+  resolveEffectiveProviderId,
+  createWorldGenerationProgress,
+  updateWorldGenerationProgress,
+  generateTemplateWorld
+};
+
 export async function generateWorldPreview(
   pool: DatabasePool,
   request: WorldGenerationPreviewRequest,
-  credentialSecret: string
+  credentialSecret: string,
+  dependencies: WorldGenerationPreviewDependencies = worldGenerationPreviewDependencies
 ): Promise<{ title: string; content: WorldContent }> {
-  const ownerUserId = await initialOwnerId(pool);
-  const providerProfileId = await resolveEffectiveProviderId(pool, ownerUserId, "text");
+  const ownerUserId = await dependencies.initialOwnerId(pool);
+  const providerProfileId = await dependencies.resolveEffectiveProviderId(pool, ownerUserId, "text");
   const progressKey = request.progressKey;
-  if (progressKey) await createWorldGenerationProgress(pool, ownerUserId, progressKey);
+  if (progressKey) await dependencies.createWorldGenerationProgress(pool, ownerUserId, progressKey);
   if (!providerProfileId) {
     logger.warn({ ownerUserId, title: request.title }, "World preview generation failed: no default text provider configured");
     if (progressKey) {
-      await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+      await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
         status: "failed",
         phase: "failed",
         progressPercent: 100,
@@ -427,7 +513,7 @@ export async function generateWorldPreview(
   logger.info({ title: request.title, promptLength: request.prompt?.length, progressKey }, "Generating world preview from prompt");
 
   if (progressKey) {
-    await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+    await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
       status: "processing",
       phase: "extracting",
       progressPercent: 10,
@@ -437,7 +523,7 @@ export async function generateWorldPreview(
 
   let generated: { title: string; content: WorldContent };
   try {
-    generated = await generateTemplateWorld(
+    generated = await dependencies.generateTemplateWorld(
       pool,
       ownerUserId,
       providerProfileId,
@@ -454,7 +540,7 @@ export async function generateWorldPreview(
       undefined,
       async (phase, progressPercent, message) => {
         if (progressKey) {
-          await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+          await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
             status: "processing",
             phase,
             progressPercent,
@@ -464,20 +550,21 @@ export async function generateWorldPreview(
       }
     );
   } catch (error) {
-    logger.error({ error: error instanceof Error ? error.message : String(error), progressKey }, "World preview generation failed");
+    const failure = worldGenerationFailureDiagnostic(error);
+    logger.error({ failure, progressKey }, "World preview generation failed");
     if (progressKey) {
-      await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+      await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
         status: "failed",
         phase: "failed",
         progressPercent: 100,
-        message: error instanceof Error ? error.message : String(error),
-        errorMessage: error instanceof Error ? error.message : String(error)
+        message: failure.message,
+        errorMessage: failure.message
       });
     }
     throw error;
   }
   if (progressKey) {
-    await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+    await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
       status: "completed",
       phase: "completed",
       progressPercent: 100,
