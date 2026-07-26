@@ -170,6 +170,18 @@ function generationLogContext(job: Pick<ClaimedJob, "id" | "campaign_id" | "prov
   };
 }
 
+function errorCodeFrom(error: unknown): string | null {
+  return typeof error === "object" && error !== null && "code" in error && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : null;
+}
+
+function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): string {
+  if (typeof value !== "string") return fallback;
+  const normalized = value.trim().toLowerCase();
+  return /^[a-z][a-z0-9_]{0,63}$/.test(normalized) ? normalized : fallback;
+}
+
 export function safeTurnInput(value: string): string {
   const trimmed = value.trim();
   const matches = mechanicsLanguageMatches(trimmed);
@@ -279,8 +291,8 @@ async function callCampaignTextProvider(
       storyOperation: operation
     });
     const transportError = providerTransportErrorDetails(error);
-    const errorCode = transportError?.transportCode
-      || (typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : null);
+    const rawErrorCode = transportError?.transportCode || errorCodeFrom(error);
+    const errorCode = rawErrorCode ? safeLogErrorCode(rawErrorCode) : null;
     logger.warn({
       event: "turn_generation_provider_failed",
       ...generationLogContext(job),
@@ -1611,10 +1623,11 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
         lastPartialContent = accumulated;
         
         try {
-          await pool.query(
-            `UPDATE generation_jobs SET partial_output = $2, updated_at = now() WHERE id = $1 AND lease_owner = $3`,
+          const partialUpdate = await pool.query<{ id: string }>(
+            `UPDATE generation_jobs SET partial_output = $2, updated_at = now() WHERE id = $1 AND lease_owner = $3 RETURNING id`,
             [job.id, accumulated, workerId]
           );
+          if (!partialUpdate.rows[0]) return;
           if (lastStreamLogAt === 0 || now - lastStreamLogAt >= 5000 || accumulated.length - lastStreamLogChars >= 4096) {
             const narration = extractPartialNarration(accumulated);
             logger.info({
@@ -1630,9 +1643,8 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
           }
         } catch (error) {
           if (now - lastStreamPersistWarningAt >= 5000) {
-            const errorCode = typeof error === "object" && error !== null && "code" in error
-              ? String((error as { code: unknown }).code)
-              : null;
+            const rawErrorCode = errorCodeFrom(error);
+            const errorCode = rawErrorCode ? safeLogErrorCode(rawErrorCode) : null;
             logger.warn({
               event: "turn_generation_stream_persist_failed",
               ...generationLogContext(job, workerId),
@@ -1862,14 +1874,16 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
           const details = repairedCoverage
             ? [...repairedCoverage.missing_required_beats, ...repairedCoverage.contradictions]
             : ["The required scene beats could not be verified after one rewrite."];
-          await pool.query(
+          const recoverable = await pool.query<{ id: string }>(
             `UPDATE generation_jobs SET status = 'recoverable', provider_response_id = $3, provider_finish_reason = $4,
                error_code = 'scene_coverage', error_message = $5,
                recovery_metadata = recovery_metadata || $6::jsonb, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $7`,
+             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $7
+             RETURNING id`,
             [job.id, job.owner_user_id, result.responseId || null, result.finishReason || null,
               details.join(" ").slice(0, 4000), json({ retryable: true, sceneCoverageRewriteAttempted: true }), workerId]
           );
+          if (!recoverable.rows[0]) throw Object.assign(new Error("Generation lease was lost before scene recovery state could be saved."), { code: "lease_lost" });
           logger.warn({
             event: "turn_generation_recoverable",
             ...generationLogContext(job, workerId),
@@ -1940,24 +1954,28 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
     });
   } catch (error) {
     const transportError = providerTransportErrorDetails(error);
-    const code = transportError
+    const rawCode = transportError
       ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
-      : typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "generation_failed";
-    await pool.query(
+      : errorCodeFrom(error) || "generation_failed";
+    const code = safeLogErrorCode(rawCode, "generation_failed");
+    const failed = await pool.query<{ id: string }>(
       `UPDATE generation_jobs SET status = 'failed', error_code = $3, error_message = $4,
          recovery_metadata = recovery_metadata || $5::jsonb,
          lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-       WHERE id = $1 AND owner_user_id = $2 AND status <> 'completed' AND lease_owner = $6`,
+       WHERE id = $1 AND owner_user_id = $2 AND status <> 'completed' AND lease_owner = $6
+       RETURNING id`,
       [job.id, job.owner_user_id, code, (error instanceof Error ? error.message : String(error)).slice(0, 4000),
         json(transportError ? { transportError } : {}), workerId]
     );
-    logger.error({
-      event: "turn_generation_failed",
-      ...generationLogContext(job, workerId),
-      errorCode: code,
-      durationMs: Date.now() - generationStartedAt,
-      transportTimedOut: Boolean(transportError?.timedOut)
-    });
+    if (failed.rows[0]) {
+      logger.error({
+        event: "turn_generation_failed",
+        ...generationLogContext(job, workerId),
+        errorCode: code,
+        durationMs: Date.now() - generationStartedAt,
+        transportTimedOut: Boolean(transportError?.timedOut)
+      });
+    }
     if (job.streaming_segments_state && (job.streaming_segments_state as any).provisionalSetId) {
       try {
         await orphanProvisionalSet(pool, job.owner_user_id, job.id);
