@@ -549,6 +549,30 @@ integration("campaign archive export", () => {
     expect(imported.stats).toMatchObject({ turnCount: 1, memoryCount: 1 });
   });
 
+  it("commits a persisted staged archive from only the preview token and destination", async () => {
+    const config = runtimeConfig();
+    const preview = await (async () => {
+      const staged = await stagedExport();
+      return previewCampaignArchive(pool, config, staged, "persisted-staged.zip", { kind: "embedded" });
+    })();
+
+    const imported = await importCampaignArchive(pool, config, { root }, {
+      previewToken: preview.previewToken,
+      destination: { kind: "embedded" }
+    });
+
+    const inserted = await pool.query<{ campaign_id: string; world_id: string }>(
+      `SELECT c.id AS campaign_id,w.id AS world_id
+         FROM campaigns c
+         JOIN world_versions wv ON wv.id=c.world_version_id
+         JOIN worlds w ON w.id=wv.world_id
+        WHERE c.id=$1 AND w.id=$2`,
+      [imported.campaignId, imported.worldId]
+    );
+    expect(imported).toMatchObject({ duplicate: false, campaignId: expect.any(String), worldId: expect.any(String) });
+    expect(inserted.rows).toEqual([{ campaign_id: imported.campaignId, world_id: imported.worldId }]);
+  });
+
   it("rejects an explicitly selected destination version whose canonical world content differs", async () => {
     await expect(previewCampaignArchive(
       pool,

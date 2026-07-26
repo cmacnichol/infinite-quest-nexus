@@ -21,7 +21,7 @@ import {
 import { cleanupUnreferencedCreatedPaths, persistArchiveAssets, restoreAssetBindings, type ArchiveIdMap } from "./asset-archive-service.js";
 import { lockOriginalImages, parseDataImage, persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
 import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
-import { ArchiveError, type StagedArchive } from "./archive-io.js";
+import { ArchiveError, rehydratePersistedStagedArchive, type StagedArchive } from "./archive-io.js";
 import { campaignArchiveApplicationVersion, decodeCampaignArchive, portableWorldContentHash, type DecodedCampaignArchive } from "./campaign-archive-service.js";
 
 export type CampaignArchiveImportResult = {
@@ -1047,8 +1047,12 @@ export async function importCampaignArchive(
     const expectedDestinationHash = sha256(`campaign-archive-destination-v1\0${canonicalArchiveJson(parsed.destination)}`);
     if (expectedDestinationHash !== preview.destination_hash) throw new ArchiveError("archive-preview-stale", "The destination changed after preview.");
     const stagedPath = stagedFromPreview(config, preview, 0);
-    const stagedStat = await stat(stagedPath.absolutePath);
-    const staged = { ...stagedPath, compressedBytes: stagedStat.size };
+    const compressedBytes = (await stat(stagedPath.absolutePath)).size;
+    const staged = await rehydratePersistedStagedArchive({
+      archiveRoot: config.archiveStorageRoot,
+      relativePath: preview.staged_archive_path,
+      compressedBytes
+    });
     const archive = await decodeCampaignArchive(staged, config.campaignArchiveLimits);
     if (archive.contentFingerprint !== preview.content_fingerprint) throw new ArchiveError("archive-preview-stale", "The staged archive changed after preview.");
     const sourceHash = campaignArchiveSourceHash(archive.contentFingerprint, parsed.destination);

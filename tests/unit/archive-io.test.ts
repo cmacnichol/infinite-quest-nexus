@@ -24,6 +24,7 @@ import {
   createArchiveStagingDirectory,
   inspectArchive,
   readVerifiedEntry,
+  rehydratePersistedStagedArchive,
   removeArchivePath,
   stageArchiveUpload,
   writeArchiveArtifact,
@@ -182,6 +183,38 @@ async function writeManifestZip(
 
 async function stagedFixture(root: string, zipPath: string, limits = DEFAULT_LIMITS): Promise<StagedArchive> {
   return stageArchiveUpload(createReadStream(zipPath), root, limits);
+}
+
+async function campaignZipFixture(root: string): Promise<string> {
+  const files = [
+    { name: "campaign.json", content: Buffer.from("{}", "utf8"), kind: "campaign" as const },
+    { name: "world.json", content: Buffer.from("{}", "utf8"), kind: "world" as const },
+    { name: "chronicle.json", content: Buffer.from("{}", "utf8"), kind: "chronicle" as const },
+    { name: "assets/assets.json", content: Buffer.from("{}", "utf8"), kind: "assets" as const }
+  ];
+  const zipPath = join(root, "campaign-fixture.zip");
+  const manifest: ArchiveManifest = {
+    format: "infinite-quest-archive",
+    formatVersion: 1,
+    archiveType: "campaign",
+    createdAt: "2026-07-26T00:00:00.000Z",
+    contentFingerprint: "1".repeat(64),
+    campaignId: "00000000-0000-4000-8000-000000000001",
+    worldId: "00000000-0000-4000-8000-000000000002",
+    worldVersionId: "00000000-0000-4000-8000-000000000003",
+    entries: files.map((file) => archiveEntry(file.name, file.content)),
+    payloads: files.map((file) => ({
+      kind: file.kind,
+      path: file.name,
+      formatVersion: 1
+    })),
+    assets: []
+  };
+  await writeZip(zipPath, [
+    ...files,
+    { name: "manifest.json", content: Buffer.from(JSON.stringify(manifest), "utf8"), store: true }
+  ]);
+  return zipPath;
 }
 
 function centralDirectoryOffsets(buffer: Buffer): number[] {
@@ -563,6 +596,57 @@ describe("central-directory safety validation", () => {
 });
 
 describe("bounded manifest and entry verification", () => {
+  it("reopens a persisted staged archive with verified file identity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iq-archive-root-"));
+    temporaryRoots.push(root);
+    const staged = await stagedFixture(root, await campaignZipFixture(root));
+    const persisted = await rehydratePersistedStagedArchive({
+      archiveRoot: root,
+      relativePath: staged.relativePath,
+      compressedBytes: staged.compressedBytes
+    });
+
+    await expect(inspectArchive(persisted, DEFAULT_LIMITS, "campaign")).resolves.toMatchObject({
+      manifest: expect.objectContaining({ archiveType: "campaign" })
+    });
+  });
+
+  it("rejects unsafe persisted staged archive paths", async () => {
+    const root = await temporaryRoot();
+    const unsafePaths = [
+      "",
+      "/staging/archive.zip",
+      "C:/staging/archive.zip",
+      "staging//archive.zip",
+      "staging/./archive.zip",
+      "staging/../archive.zip",
+      "staging/archive\u0000.zip"
+    ];
+
+    for (const relativePath of unsafePaths) {
+      await expectArchiveError(
+        rehydratePersistedStagedArchive({ archiveRoot: root, relativePath, compressedBytes: 1 }),
+        "archive-entry-unsafe"
+      );
+    }
+  });
+
+  it("rejects persisted staged archives that are not regular files or changed size", async () => {
+    const root = await temporaryRoot();
+    await mkdir(join(root, "staging"), { recursive: true });
+    await expectArchiveError(
+      rehydratePersistedStagedArchive({ archiveRoot: root, relativePath: "staging", compressedBytes: 0 }),
+      "archive-entry-unsafe"
+    );
+
+    const stagedPath = join(root, "staging", "changed.zip");
+    await writeFile(stagedPath, Buffer.from("changed", "utf8"));
+    await expectArchiveError(
+      rehydratePersistedStagedArchive({ archiveRoot: root, relativePath: "staging/changed.zip", compressedBytes: 1 }),
+      "archive-checksum-mismatch"
+    );
+  });
+
   it("enforces the manifest byte limit before parsing JSON", async () => {
     const root = await temporaryRoot();
     const zipPath = join(root, "large-manifest.zip");

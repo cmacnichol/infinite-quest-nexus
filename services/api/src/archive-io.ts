@@ -53,6 +53,12 @@ export type StagedArchive = {
   compressedBytes: number;
 };
 
+export type PersistedStagedArchiveInput = {
+  archiveRoot: string;
+  relativePath: string;
+  compressedBytes: number;
+};
+
 export type ArchiveStagingDirectory = {
   absolutePath: string;
   operationPath: string;
@@ -513,6 +519,57 @@ export async function stageArchiveUpload(
   } finally {
     await closeHandle(stable.anchor);
   }
+}
+
+export async function rehydratePersistedStagedArchive(
+  input: PersistedStagedArchiveInput
+): Promise<StagedArchive> {
+  const relativePath = input.relativePath.replaceAll("\\", "/");
+  const pathSegments = relativePath.split("/");
+  if (!relativePath
+    || relativePath.includes("\0")
+    || relativePath.startsWith("/")
+    || /^[A-Za-z]:/.test(relativePath)
+    || isAbsolute(relativePath)
+    || pathSegments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw archiveError("archive-entry-unsafe", "The persisted staged archive path is invalid.");
+  }
+  if (!safeInteger(input.compressedBytes)) {
+    throw archiveError("archive-checksum-mismatch", "The persisted staged archive size is invalid.");
+  }
+
+  let root: string;
+  let absolutePath: string;
+  let value: BigIntStats;
+  try {
+    root = await realpath(resolve(input.archiveRoot));
+    absolutePath = resolve(root, ...pathSegments);
+    assertUnderRoot(root, absolutePath);
+    const resolvedPath = await realpath(absolutePath);
+    assertUnderRoot(root, resolvedPath);
+    if (resolvedPath !== absolutePath) {
+      throw archiveError("archive-entry-unsafe", "The persisted staged archive path uses filesystem indirection.");
+    }
+    value = await stat(absolutePath, { bigint: true });
+  } catch (error) {
+    if (error instanceof ArchiveError) throw error;
+    throw archiveError("archive-checksum-mismatch", "The persisted staged archive could not be reopened.");
+  }
+
+  if (!value.isFile()) {
+    throw archiveError("archive-entry-unsafe", "The persisted staged archive is not a regular file.");
+  }
+  if (value.size !== BigInt(input.compressedBytes)) {
+    throw archiveError("archive-checksum-mismatch", "The persisted staged archive compressed size changed.");
+  }
+
+  const staged: InternalStagedArchive = {
+    relativePath,
+    absolutePath,
+    compressedBytes: input.compressedBytes,
+    [STAGED_IDENTITY]: fileIdentity(value)
+  };
+  return staged;
 }
 
 function inspectUnixEntryType(file: ZipFile, directory: boolean, path: string): void {
