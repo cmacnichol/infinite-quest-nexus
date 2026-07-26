@@ -23,6 +23,7 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
     assetStorageRoot: resolve("local-data/assets"),
     credentialEncryptionKey: "",
     corsAllowedOrigins: ["*"],
+    maxUploadSizeBytes: 50 * 1024 * 1024,
     ...overrides
   };
 }

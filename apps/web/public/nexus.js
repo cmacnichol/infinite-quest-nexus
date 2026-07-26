@@ -1373,6 +1373,8 @@ function openWorldAuthor(mode) {
   elements.worldGenerator.classList.toggle("hidden", mode !== "create");
   elements.worldGenerator.open = false;
   elements.worldGeneratorPrompt.value = "";
+  elements.worldGeneratorProgressContainer.classList.add("hidden");
+  elements.generateWorldPreview.textContent = "Generate world";
   const textAvailable = Boolean(configuredDefaultTextProvider());
   elements.generateWorldPreview.disabled = !textAvailable;
   elements.worldGeneratorAvailability.innerHTML = textAvailable
@@ -1412,20 +1414,54 @@ async function generateWorldFromPrompt() {
   worldAuthorBusy = true;
   elements.generateWorldPreview.disabled = true;
   elements.saveWorldDraft.disabled = true;
+  const originalButtonText = elements.generateWorldPreview.textContent;
+  elements.generateWorldPreview.textContent = "Generating world…";
+
+  const progressKey = "world-gen:" + Date.now() + ":" + Math.random().toString(36).slice(2);
+  elements.worldGeneratorProgressContainer.classList.remove("hidden");
+  elements.worldGeneratorProgressBar.value = 5;
+  elements.worldGeneratorProgressPercent.textContent = "5%";
+  elements.worldGeneratorProgressLabel.textContent = "Synthesizing world overview and characters via LLM…";
   setWorldAuthorStatus("Generating a complete world and playable-character roster…");
+
+  let progressTimer = setInterval(async () => {
+    try {
+      const progress = await api(`/api/v1/worlds/generate-progress?key=${encodeURIComponent(progressKey)}`);
+      if (progress && progress.progressPercent) {
+        elements.worldGeneratorProgressBar.value = progress.progressPercent;
+        elements.worldGeneratorProgressPercent.textContent = `${progress.progressPercent}%`;
+        if (progress.message) {
+          elements.worldGeneratorProgressLabel.textContent = progress.message;
+          setWorldAuthorStatus(progress.message);
+        }
+      }
+    } catch { /* ignore polling errors */ }
+  }, 300);
+
   try {
     const generated = await api("/api/v1/worlds/generate-preview", {
       method: "POST",
-      body: JSON.stringify({ title: elements.worldTitle.value.trim(), prompt })
+      body: JSON.stringify({ title: elements.worldTitle.value.trim(), prompt, progressKey })
     });
+    if (progressTimer) clearInterval(progressTimer);
+    elements.worldGeneratorProgressBar.value = 100;
+    elements.worldGeneratorProgressPercent.textContent = "100%";
+    elements.worldGeneratorProgressLabel.textContent = "World and character generation completed.";
     populateWorldAuthorForm(generated.content);
     setWorldAuthorStatus("World generated. Review every field and character before creating the draft.", "success");
   } catch (error) {
+    if (progressTimer) clearInterval(progressTimer);
+    elements.worldGeneratorProgressContainer.classList.add("hidden");
     setWorldAuthorStatus(error.message || String(error), "error");
   } finally {
+    if (progressTimer) clearInterval(progressTimer);
     worldAuthorBusy = false;
+    elements.generateWorldPreview.textContent = originalButtonText;
     elements.generateWorldPreview.disabled = !configuredDefaultTextProvider();
     elements.saveWorldDraft.disabled = false;
+    setTimeout(() => {
+      elements.worldGeneratorProgressContainer.classList.add("hidden");
+    }, 4000);
   }
 }
 

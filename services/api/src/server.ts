@@ -107,6 +107,7 @@ import {
   updateWorldDraft
 } from "./world-service.js";
 import { generatePlayableCharacter, generatePlayableCharacterPreview, generateWorldPreview } from "./world-generator-service.js";
+import { deleteExpiredWorldGenerationProgress, getWorldGenerationProgress } from "./world-generation-progress-service.js";
 import {
   getCampaignCharacterProfile,
   organizeCampaignCharacterProfile,
@@ -134,6 +135,7 @@ type BuildServerOptions = {
 };
 
 const uuidSchema = z.uuid();
+let lastWorldGenerationProgressCleanupAt = 0;
 
 function statusCode(error: unknown): number {
   if (typeof error === "object" && error !== null && "statusCode" in error) {
@@ -169,7 +171,7 @@ function exposeError(error: unknown, code: number): boolean {
 export async function buildServer({ config, pool }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: createLoggerOptions(),
-    bodyLimit: 64 * 1024 * 1024,
+    bodyLimit: config.maxUploadSizeBytes,
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
@@ -203,7 +205,10 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   await mkdir(config.assetStorageRoot, { recursive: true });
   const assetStore: FilesystemAssetStore = { root: config.assetStorageRoot };
   await app.register(fastifyMultipart, {
-    limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
+    limits: {
+      fileSize: config.maxUploadSizeBytes,
+      fieldSize: config.maxUploadSizeBytes
+    }
   });
   await app.register(fastifyStatic, {
     root: config.webRoot,
@@ -345,11 +350,13 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
           body = JSON.parse(await campaignJsonFile.async("string"));
 
           for (const [filename, file] of Object.entries(zip.files)) {
-            if (!file.dir && filename.startsWith("assets/")) {
-                const imgBuffer = await file.async("nodebuffer");
-                const name = filename.split('/').pop()!;
-                const id = name.split('.')[0]!;
-                assetBuffers.set(id, imgBuffer);
+            if (!file.dir && (filename.startsWith("assets/") || filename.includes("/assets/"))) {
+              const imgBuffer = await file.async("nodebuffer");
+              const uuidMatch = filename.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
+              const name = filename.split('/').pop()!;
+              const id = uuidMatch ? uuidMatch[0] : name.split('.')[0]!;
+              if (id) assetBuffers.set(id, imgBuffer);
+              if (name) assetBuffers.set(name, imgBuffer);
             }
           }
         } else if (part.type === 'field' && part.fieldname === 'requestOverrides') {
@@ -415,6 +422,18 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       config.credentialEncryptionKey
     )
   ));
+
+  app.get<{ Querystring: { key?: string } }>("/api/v1/worlds/generate-progress", async (request) => {
+    const key = String(request.query.key || "").trim();
+    if (!key) return { status: "unknown", phase: "unknown", progressPercent: 0, message: "" };
+    const ownerUserId = await initialOwnerId(pool);
+    if (Date.now() - lastWorldGenerationProgressCleanupAt >= 60_000) {
+      lastWorldGenerationProgressCleanupAt = Date.now();
+      await deleteExpiredWorldGenerationProgress(pool);
+    }
+    const progress = await getWorldGenerationProgress(pool, ownerUserId, key);
+    return progress || { status: "unknown", phase: "unknown", progressPercent: 0, message: "" };
+  });
 
   app.post("/api/v1/worlds/playable-characters/generate-preview", async (request) => (
     generatePlayableCharacterPreview(

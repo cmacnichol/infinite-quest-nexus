@@ -30,7 +30,8 @@ function makeConfig(databaseUrl: string): RuntimeConfig {
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve("local-data/assets"),
     credentialEncryptionKey: credentialSecret,
-    corsAllowedOrigins: ["*"]
+    corsAllowedOrigins: ["*"],
+    maxUploadSizeBytes: 50 * 1024 * 1024
   };
 }
 

@@ -17,6 +17,7 @@ export type RuntimeConfig = {
   assetStorageRoot: string;
   credentialEncryptionKey: string;
   corsAllowedOrigins: string[];
+  maxUploadSizeBytes: number;
 };
 
 function secretSetting(name: string): string {
@@ -64,6 +65,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve(process.env.ASSET_STORAGE_ROOT?.trim() || "local-data/assets"),
     credentialEncryptionKey: secretSetting("CREDENTIAL_ENCRYPTION_KEY"),
-    corsAllowedOrigins: process.env.CORS_ALLOWED_ORIGINS?.split(",").map((o) => o.trim()).filter(Boolean) ?? ["*"]
+    corsAllowedOrigins: process.env.CORS_ALLOWED_ORIGINS?.split(",").map((o) => o.trim()).filter(Boolean) ?? ["*"],
+    maxUploadSizeBytes: integerSetting("MAX_UPLOAD_SIZE_MB", 500, 10, 2048) * 1024 * 1024
   };
 }

@@ -21,8 +21,14 @@ import {
 } from "../../../packages/domain/src/character-authoring.js";
 import { buildTemplateWorldPrompt, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
 import { callTextProvider, extractJsonObject } from "../../../packages/story-engine/src/index.js";
+import { logger } from "../../../packages/logger/src/index.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
 import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
+import {
+  createWorldGenerationProgress,
+  updateWorldGenerationProgress,
+  type WorldGenerationProgress
+} from "./world-generation-progress-service.js";
 
 const coerceText = (val: unknown): string => {
   if (val === null || val === undefined) return "";
@@ -147,6 +153,68 @@ function convertedDefaultTriggers(items: unknown[], characterId: string) {
   });
 }
 
+export type WorldGenProgress = WorldGenerationProgress;
+
+export function worldGenerationInputMetadata(input: TemplateWorldInput) {
+  return {
+    sourceKind: input.sourceKind,
+    title: input.title,
+    promptLength: input.prompt?.length ?? 0,
+    keywordCount: input.keywords.length,
+    excerptCount: input.excerpts.length
+  };
+}
+
+export function normalizeRawWorldJson(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const obj = raw as Record<string, unknown>;
+
+  const getStr = (...keys: string[]): string => {
+    for (const key of keys) {
+      const val = coerceText(obj[key]).trim();
+      if (val) return val;
+    }
+    return "";
+  };
+
+  const getArr = (...keys: string[]): unknown[] => {
+    for (const key of keys) {
+      const val = obj[key];
+      if (Array.isArray(val)) return val;
+    }
+    return [];
+  };
+
+  const normalizedChars = getArr("playable_characters", "playableCharacters", "playable_character_list", "characters").map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const char = item as Record<string, unknown>;
+    return {
+      ...char,
+      id: String(char.id || "").trim(),
+      name: coerceText(char.name || char.character_name || char.characterName || "").trim(),
+      character_text: coerceText(char.character_text || char.characterText || char.background || char.description || char.details).trim(),
+      rpg_statistics: Array.isArray(char.rpg_statistics) ? char.rpg_statistics : (Array.isArray(char.rpgStats) ? char.rpgStats : (Array.isArray(char.rpg_stats) ? char.rpg_stats : [])),
+      default_triggers: Array.isArray(char.default_triggers) ? char.default_triggers : (Array.isArray(char.defaultTriggers) ? char.defaultTriggers : [])
+    };
+  });
+
+  return {
+    ...obj,
+    title: getStr("title", "world_title", "worldTitle", "name"),
+    genre: getStr("genre", "world_genre", "worldGenre"),
+    tone: getStr("tone", "world_tone", "worldTone"),
+    backgroundStory: getStr("backgroundStory", "background_story", "backgroundCanon", "background_canon", "background", "canon"),
+    premise: getStr("premise", "world_premise", "worldPremise", "summary"),
+    firstAction: getStr("firstAction", "first_action", "openingAction", "opening_action", "startingAction", "starting_action"),
+    story_rules: getStr("story_rules", "storyRules", "rules", "world_rules", "worldRules"),
+    player_character: getStr("player_character", "playerCharacter", "leadCharacter", "lead_character"),
+    playable_characters: normalizedChars,
+    rpg_statistics: getArr("rpg_statistics", "rpgStats", "rpg_stats", "statistics"),
+    default_triggers: getArr("default_triggers", "defaultTriggers", "default_trigger_list"),
+    event_triggers: getArr("event_triggers", "eventTriggers", "event_trigger_list")
+  };
+}
+
 export async function generateTemplateWorld(
   pool: DatabasePool,
   ownerUserId: string,
@@ -157,8 +225,12 @@ export async function generateTemplateWorld(
   onProgress?: (phase: string, percent: number, message: string) => Promise<void> | void
 ): Promise<{ title: string; content: WorldContent }> {
   if (!providerProfileId) {
+    logger.error({ ownerUserId, sourceKind: input.sourceKind }, "World generation failed: missing provider profile ID");
     throw Object.assign(new Error("Select a text provider to convert or generate the Story World."), { statusCode: 400 });
   }
+
+  logger.info({ ownerUserId, providerProfileId, sourceKind: input.sourceKind, title: input.title }, "Starting template world generation");
+  logger.debug(worldGenerationInputMetadata(input), "Template world generation input metadata");
 
   await onProgress?.("extracting", 10, "Loading text provider and preparing modular prompt…");
   const profile = await loadTextProvider(pool, ownerUserId, providerProfileId, credentialSecret, model);
@@ -167,18 +239,22 @@ export async function generateTemplateWorld(
   const promptSnapshot = await resolvePromptSnapshot(pool, ownerUserId);
   const prompt = buildTemplateWorldPrompt(input, promptFromSnapshot(promptSnapshot, "world_generation"));
   let result = await callTextProvider(profile, prompt);
+  logger.debug({ responseId: result.responseId, outputLimited: result.outputLimited }, "Received initial world generation LLM response");
 
   let converted: z.infer<typeof convertedWorldSchema>;
   try {
-    converted = completeConvertedWorldSchema.parse(extractJsonObject(result.content));
+    converted = completeConvertedWorldSchema.parse(normalizeRawWorldJson(extractJsonObject(result.content)));
+    logger.debug({ title: converted.title }, "Successfully parsed initial generated world JSON");
   } catch (error) {
+    logger.warn({ error: error instanceof Error ? error.message : String(error), outputLimited: result.outputLimited }, "Initial LLM world generation parse failed, attempting recovery");
     await onProgress?.("recovering_world", 50, result.outputLimited ? "Output limit reached. Recovering truncated JSON…" : "Generated world was incomplete. Requesting a complete replacement…");
     const recovered = await callTextProvider(profile, {
       ...prompt,
       ...(result.responseId ? { previousResponseId: result.responseId } : {}),
       recoveryInput: promptFromSnapshot(promptSnapshot, "world_generation_recovery")
     });
-    converted = completeConvertedWorldSchema.parse(extractJsonObject(recovered.content));
+    converted = completeConvertedWorldSchema.parse(normalizeRawWorldJson(extractJsonObject(recovered.content)));
+    logger.info({ title: converted.title }, "Successfully recovered generated world JSON");
   }
 
   let rawCharacters = [...(converted.playable_characters || [])];
@@ -194,6 +270,7 @@ export async function generateTemplateWorld(
 
   if (rawCharacters.length < 3) {
     const needed = 3 - rawCharacters.length;
+    logger.info({ existingCount: rawCharacters.length, needed }, "Supplementing playable character roster");
     await onProgress?.("supplementing_characters", 70, `Generating ${needed} additional playable character${needed === 1 ? "" : "s"} to meet the 3-4 character target…`);
     const supplementResult = await callTextProvider(profile, {
       systemPrompt: promptFromSnapshot(promptSnapshot, "world_roster_supplement").replaceAll("{{needed}}", String(needed)),
@@ -207,8 +284,9 @@ export async function generateTemplateWorld(
     try {
       const supplement = supplementCharactersSchema.parse(extractJsonObject(supplementResult.content));
       rawCharacters.push(...supplement.playable_characters);
-    } catch {
-      // If supplement fails or is truncated, continue with available characters or fallback
+      logger.debug({ added: supplement.playable_characters.length }, "Character roster successfully supplemented");
+    } catch (suppErr) {
+      logger.warn({ error: suppErr instanceof Error ? suppErr.message : String(suppErr) }, "Playable character roster supplement failed, falling back to default options");
     }
   }
 
@@ -263,6 +341,7 @@ export async function generateTemplateWorld(
   });
 
   await onProgress?.("completed", 100, "World and character generation completed.");
+  logger.info({ title: converted.title, characterCount: playableCharacters.length }, "Completed template world generation successfully");
   return {
     title: converted.title || input.title,
     content
@@ -276,7 +355,19 @@ export async function generateWorldPreview(
 ): Promise<{ title: string; content: WorldContent }> {
   const ownerUserId = await initialOwnerId(pool);
   const providerProfileId = await resolveEffectiveProviderId(pool, ownerUserId, "text");
+  const progressKey = request.progressKey;
+  if (progressKey) await createWorldGenerationProgress(pool, ownerUserId, progressKey);
   if (!providerProfileId) {
+    logger.warn({ ownerUserId, title: request.title }, "World preview generation failed: no default text provider configured");
+    if (progressKey) {
+      await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+        status: "failed",
+        phase: "failed",
+        progressPercent: 100,
+        message: "Add a text provider or mark one as default in Provider Management before generating a world.",
+        errorMessage: "Add a text provider or mark one as default in Provider Management before generating a world."
+      });
+    }
     throw Object.assign(new Error("Add a text provider or mark one as default in Provider Management before generating a world."), {
       statusCode: 409,
       details: { code: "default_text_provider_unavailable" }
@@ -286,6 +377,18 @@ export async function generateWorldPreview(
     new Error("The text provider did not return a complete world. Revise the prompt and try again."),
     { statusCode: 502, details: { code: "incomplete_generated_world" } }
   );
+
+  logger.info({ title: request.title, promptLength: request.prompt?.length, progressKey }, "Generating world preview from prompt");
+
+  if (progressKey) {
+    await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+      status: "processing",
+      phase: "extracting",
+      progressPercent: 10,
+      message: "Loading text provider and preparing modular prompt…"
+    });
+  }
+
   let generated: { title: string; content: WorldContent };
   try {
     generated = await generateTemplateWorld(
@@ -301,16 +404,56 @@ export async function generateWorldPreview(
         keywords: [],
         excerpts: [],
         prompt: request.prompt
+      },
+      undefined,
+      async (phase, progressPercent, message) => {
+        if (progressKey) {
+          await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+            status: "processing",
+            phase,
+            progressPercent,
+            message
+          });
+        }
       }
     );
   } catch (error) {
+    logger.error({ error: error instanceof Error ? error.message : String(error), progressKey }, "World preview generation failed");
+    if (progressKey) {
+      await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+        status: "failed",
+        phase: "failed",
+        progressPercent: 100,
+        message: error instanceof Error ? error.message : String(error),
+        errorMessage: error instanceof Error ? error.message : String(error)
+      });
+    }
     if (error instanceof z.ZodError || error instanceof SyntaxError) throw incompleteWorldError();
     throw error;
   }
   try {
     const content = completeGeneratedWorldSchema.parse(generated.content);
+    if (progressKey) {
+      await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+        status: "completed",
+        phase: "completed",
+        progressPercent: 100,
+        message: "World and character generation completed."
+      });
+    }
+    logger.info({ title: content.world.title, progressKey }, "World preview generation succeeded");
     return { title: content.world.title, content };
-  } catch {
+  } catch (error) {
+    logger.error({ error: error instanceof Error ? error.message : String(error), progressKey }, "Generated world preview schema validation failed");
+    if (progressKey) {
+      await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+        status: "failed",
+        phase: "failed",
+        progressPercent: 100,
+        message: "The text provider did not return a complete world.",
+        errorMessage: "The text provider did not return a complete world."
+      });
+    }
     throw incompleteWorldError();
   }
 }
@@ -326,15 +469,19 @@ async function generatePlayableCharacterCandidate(
   request: { prompt: string; characterId?: string | undefined },
   credentialSecret: string
 ): Promise<{ character: ReturnType<typeof normalizeGeneratedPlayableCharacter> }> {
+  logger.info({ ownerUserId, characterId: request.characterId, promptLength: request.prompt?.length }, "Generating playable character candidate");
+
   const currentCharacter = request.characterId
     ? content.playableCharacters.find((character) => character.id === request.characterId)
     : undefined;
   if (request.characterId && !currentCharacter) {
+    logger.warn({ ownerUserId, characterId: request.characterId }, "Playable character generation failed: target character not found in world draft");
     throw characterGenerationError("The selected playable character does not belong to this world draft.", 404, "playable_character_not_found");
   }
 
   const providerProfileId = await resolveEffectiveProviderId(pool, ownerUserId, "text");
   if (!providerProfileId) {
+    logger.warn({ ownerUserId }, "Playable character generation failed: no default text provider configured");
     throw characterGenerationError(
       "Add a text provider or mark one as default in Provider Management before generating a character.",
       409,
@@ -349,17 +496,19 @@ async function generatePlayableCharacterCandidate(
     generatedId = randomUUID();
   }
   const providerResult = await callTextProvider(profile, prompt);
+  logger.debug({ responseId: providerResult.responseId, outputLimited: providerResult.outputLimited }, "Received character generation LLM response");
 
   try {
-    return {
-      character: normalizeGeneratedPlayableCharacter(
-        extractJsonObject(providerResult.content),
-        generatedId,
-        currentCharacter
-      )
-    };
+    const character = normalizeGeneratedPlayableCharacter(
+      extractJsonObject(providerResult.content),
+      generatedId,
+      currentCharacter
+    );
+    logger.info({ characterId: generatedId, name: character.name }, "Playable character candidate generated successfully");
+    return { character };
   } catch (error) {
     if (!providerResult.outputLimited) {
+      logger.error({ error: error instanceof Error ? error.message : String(error) }, "Character generation output was invalid and output limit was not reached");
       throw characterGenerationError(
         "The text provider returned an invalid character. Revise the prompt and try again.",
         502,
@@ -367,6 +516,7 @@ async function generatePlayableCharacterCandidate(
       );
     }
 
+    logger.warn({ error: error instanceof Error ? error.message : String(error) }, "Initial character output reached output limit, attempting recovery");
     const recovered = await callTextProvider(profile, {
       ...prompt,
       ...(providerResult.responseId ? { previousResponseId: providerResult.responseId } : {}),
@@ -374,14 +524,15 @@ async function generatePlayableCharacterCandidate(
       recoveryInput: playableCharacterRecoveryInput()
     });
     try {
-      return {
-        character: normalizeGeneratedPlayableCharacter(
-          extractJsonObject(recovered.content),
-          generatedId,
-          currentCharacter
-        )
-      };
-    } catch {
+      const character = normalizeGeneratedPlayableCharacter(
+        extractJsonObject(recovered.content),
+        generatedId,
+        currentCharacter
+      );
+      logger.info({ characterId: generatedId, name: character.name }, "Playable character candidate recovered successfully");
+      return { character };
+    } catch (recoveryErr) {
+      logger.error({ error: recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr), outputLimited: recovered.outputLimited }, "Character generation recovery attempt failed");
       throw characterGenerationError(
         "The text provider could not return a complete character after one recovery attempt.",
         502,

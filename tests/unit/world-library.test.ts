@@ -23,6 +23,7 @@ import {
   normalizeGeneratedPlayableCharacter,
   playableCharacterRecoveryInput
 } from "../../packages/domain/src/character-authoring.js";
+import { normalizeRawWorldJson, worldGenerationInputMetadata } from "../../services/api/src/world-generator-service.js";
 
 describe("World Library contracts", () => {
   it("normalizes new, incomplete drafts without requiring a playable character", () => {
@@ -347,5 +348,67 @@ describe("playable character selection", () => {
       defaultTriggers: [],
       source: { type: "campaign-import" }
     });
+  });
+
+  it("normalizes key name variations from LLM outputs into standard world schema fields", () => {
+    const rawLlmOutput = {
+      world_title: "Aetheria",
+      world_genre: "Dark Fantasy",
+      world_tone: "Grim",
+      background_story: "A broken sky realm...",
+      first_action: "You wake near the edge of the floating island...",
+      story_rules: "Magic degrades with altitude.",
+      world_premise: "Rebuild the crystal spire.",
+      characters: [
+        {
+          character_name: "Valerius",
+          background: "A rogue wind-knight.",
+          rpg_stats: [{ name: "Agility", value: 80 }],
+          defaultTriggers: [{ name: "Wind Cloak", value: "Active" }]
+        }
+      ]
+    };
+
+    const normalized = normalizeRawWorldJson(rawLlmOutput);
+
+    expect(normalized).toMatchObject({
+      title: "Aetheria",
+      genre: "Dark Fantasy",
+      tone: "Grim",
+      backgroundStory: "A broken sky realm...",
+      firstAction: "You wake near the edge of the floating island...",
+      story_rules: "Magic degrades with altitude.",
+      premise: "Rebuild the crystal spire.",
+      playable_characters: [
+        {
+          name: "Valerius",
+          character_text: "A rogue wind-knight.",
+          rpg_statistics: [{ name: "Agility", value: 80 }],
+          default_triggers: [{ name: "Wind Cloak", value: "Active" }]
+        }
+      ]
+    });
+  });
+
+  it("exposes generation metadata without retaining prompt or lore bodies", () => {
+    const metadata = worldGenerationInputMetadata({
+      sourceName: "test",
+      sourceKind: "prompt",
+      title: "Safe title",
+      summary: "Private lore marker",
+      keywords: ["one"],
+      excerpts: [{ chapterId: "1", title: "Private excerpt marker", content: "Private excerpt marker", choices: [] }],
+      prompt: "Private prompt marker"
+    });
+
+    expect(metadata).toEqual({
+      sourceKind: "prompt",
+      title: "Safe title",
+      promptLength: "Private prompt marker".length,
+      keywordCount: 1,
+      excerptCount: 1
+    });
+    expect(JSON.stringify(metadata)).not.toContain("Private prompt marker");
+    expect(JSON.stringify(metadata)).not.toContain("Private lore marker");
   });
 });

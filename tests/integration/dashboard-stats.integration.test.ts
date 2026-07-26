@@ -31,7 +31,8 @@ integration("dashboard statistics integration", () => {
       assetStorageDriver: "filesystem",
       assetStorageRoot: resolve("local-data/assets"),
       credentialEncryptionKey: "dashboard-integration-test-key",
-      corsAllowedOrigins: ["*"]
+      corsAllowedOrigins: ["*"],
+      maxUploadSizeBytes: 50 * 1024 * 1024
     };
     app = await buildServer({ config, pool });
   });
