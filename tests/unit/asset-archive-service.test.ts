@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
@@ -29,6 +29,7 @@ import {
 import { sanitizePortableMetadata, type ArchiveAssetBinding, type ArchiveAssetRecord } from "../../packages/contracts/src/archives.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { importLegacyStory, legacyWorldContent } from "../../services/api/src/import-service.js";
+import { ArchiveError, createArchiveStagingDirectory } from "../../services/api/src/archive-io.js";
 
 const pngBytes = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -214,6 +215,30 @@ describe("asset archive portability", () => {
       expect((await readFile(join(root, entries[0]!.path))).equals(pngBytes)).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a replaced generated staging child before asset writes and cleanup", async () => {
+    const archiveRoot = await mkdtemp(join(tmpdir(), "asset-archive-staging-race-"));
+    try {
+      const staging = await createArchiveStagingDirectory(archiveRoot, "campaign-export-");
+      const original = `${staging.absolutePath}.original`;
+      await rename(staging.absolutePath, original);
+      await mkdir(staging.absolutePath);
+      const replacementSentinel = join(staging.absolutePath, "replacement.txt");
+      await writeFile(replacementSentinel, "preserve");
+
+      await expect(verifyAndWriteArchiveAssets({
+        records: [record(assetA)],
+        readOriginal: async () => pngBytes,
+        outputRoot: staging.absolutePath,
+        assertOutputRoot: () => staging.assertStable()
+      })).rejects.toMatchObject({ code: "archive-entry-unsafe" } satisfies Partial<ArchiveError>);
+      await expect(stat(join(staging.absolutePath, "assets"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(staging.cleanup()).rejects.toMatchObject({ code: "archive-entry-unsafe" } satisfies Partial<ArchiveError>);
+      expect((await readFile(replacementSentinel)).toString("utf8")).toBe("preserve");
+    } finally {
+      await rm(archiveRoot, { recursive: true, force: true });
     }
   });
 

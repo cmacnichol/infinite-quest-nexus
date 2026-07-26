@@ -213,9 +213,11 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string, opt
   try {
     const assetEntries = await verifyAndWriteArchiveAssets({
       records: snapshot.assets.records,
-      outputRoot: staging.absolutePath,
+      outputRoot: staging.operationPath,
+      assertOutputRoot: () => staging.assertStable(),
       readOriginal: async (assetId) => (await readAsset(pool, options.assetStore, snapshot.ownerUserId, assetId)).bytes
     });
+    await staging.assertStable();
     const jsonEntries = [
       ["campaign.json", "campaign", projected.campaign],
       ["world.json", "world", projected.world],
@@ -224,7 +226,7 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string, opt
     ] as const;
     return await writeArchiveArtifact(options.archiveRoot, [
       ...jsonEntries.map(([path, logicalType, value]) => ({ path, logicalType, mediaType: "application/json", source: Readable.from(Buffer.from(canonicalArchiveJson(value), "utf8")) })),
-      ...assetEntries.map((entry) => ({ path: entry.path, logicalType: entry.logicalType, mediaType: entry.mediaType, source: createReadStream(resolve(staging.absolutePath, entry.path)) }))
+      ...assetEntries.map((entry) => ({ path: entry.path, logicalType: entry.logicalType, mediaType: entry.mediaType, source: createReadStream(resolve(staging.operationPath, entry.path)) }))
     ], (entries) => {
       const payloadHashes = entries.filter((entry) => entry.mediaType === "application/json").map((entry) => entry.sha256);
       return {

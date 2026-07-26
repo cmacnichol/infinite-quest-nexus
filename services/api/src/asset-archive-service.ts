@@ -164,7 +164,7 @@ export async function collectCampaignArchiveAssets(client: DatabaseClient, owner
   return projectCampaignArchiveAssets(assets.rows.map((asset) => ({ ...asset, bindings: bindingMap.get(asset.id) ?? [] })));
 }
 
-export async function verifyAndWriteArchiveAssets(input: { records: readonly ArchiveAssetRecord[]; readOriginal: (sourceAssetId: string) => Promise<Buffer>; outputRoot: string }): Promise<ArchiveEntry[]> {
+export async function verifyAndWriteArchiveAssets(input: { records: readonly ArchiveAssetRecord[]; readOriginal: (sourceAssetId: string) => Promise<Buffer>; outputRoot: string; assertOutputRoot?: () => Promise<void> }): Promise<ArchiveEntry[]> {
   const groups = new Map<string, ArchiveAssetRecord[]>();
   for (const record of input.records) { const group = groups.get(record.contentHash) ?? []; group.push(record); groups.set(record.contentHash, group); }
   const failures: string[] = []; const entries: ArchiveEntry[] = []; const staged: Array<{ record: ArchiveAssetRecord; bytes: Buffer }> = [];
@@ -179,7 +179,9 @@ export async function verifyAndWriteArchiveAssets(input: { records: readonly Arc
   }
   if (failures.length) throw missing([...new Set(failures)].sort());
   for (const { record, bytes } of staged) {
+    await input.assertOutputRoot?.();
     const target = resolve(input.outputRoot, record.archivePath); const root = `${resolve(input.outputRoot)}${sep}`; if (!target.startsWith(root)) throw new Error("Archive asset path escaped the output root."); await mkdir(dirname(target), { recursive: true }); await writeFile(target, bytes, { flag: "wx" }).catch(async (error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; if (!(await readFile(target)).equals(bytes)) throw new Error(`Archive asset path collision at '${record.archivePath}'.`); });
+    await input.assertOutputRoot?.();
     entries.push({ path: record.archivePath, logicalType: "asset-original", mediaType: record.mimeType, byteLength: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
   }
   return entries.sort((a, b) => a.path.localeCompare(b.path));

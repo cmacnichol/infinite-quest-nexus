@@ -54,6 +54,8 @@ export type StagedArchive = {
 
 export type ArchiveStagingDirectory = {
   absolutePath: string;
+  operationPath: string;
+  assertStable(): Promise<void>;
   cleanup(): Promise<void>;
 };
 
@@ -325,6 +327,7 @@ export async function createArchiveStagingDirectory(
   }
   const { root, directory, stable } = await prepareRootDirectory(archiveRoot, "staging");
   let directoryName: string | undefined;
+  let childStable: StableDirectory | undefined;
   let cleaned = false;
   try {
     await assertDirectoryStable(stable);
@@ -332,31 +335,39 @@ export async function createArchiveStagingDirectory(
     directoryName = basename(createdPath);
     const absolutePath = resolve(directory, directoryName);
     assertUnderRoot(root, absolutePath);
-    const created = await lstat(stableChildPath(stable, directoryName), { bigint: true });
-    if (!created.isDirectory() || created.isSymbolicLink()) {
-      throw archiveError("archive-entry-unsafe", "Archive staging must create a regular directory.");
-    }
-    await assertDirectoryStable(stable);
+    const stabilizedChild = await stabilizeDirectory(root, absolutePath);
+    childStable = stabilizedChild;
+    const assertStable = async () => {
+      await assertDirectoryStable(stable);
+      await assertDirectoryStable(stabilizedChild);
+    };
+    await assertStable();
     return {
       absolutePath,
+      operationPath: stableChildPath(stabilizedChild, "."),
+      assertStable,
       cleanup: async () => {
         if (cleaned) return;
         try {
-          await assertDirectoryStable(stable);
+          await assertStable();
           const operationPath = stableChildPath(stable, directoryName!);
           const current = await lstat(operationPath, { bigint: true });
-          if (!current.isDirectory() || current.isSymbolicLink()) {
+          if (!current.isDirectory() || current.isSymbolicLink() || !sameDirectoryIdentity(stabilizedChild, current)) {
             throw archiveError("archive-entry-unsafe", "Archive staging changed during cleanup.");
           }
+          await closeHandle(stabilizedChild.anchor);
+          delete stabilizedChild.anchor;
           await rm(operationPath, { recursive: true, force: true });
           await assertDirectoryStable(stable);
           cleaned = true;
         } finally {
+          await closeHandle(stabilizedChild.anchor);
           await closeHandle(stable.anchor);
         }
       }
     };
   } catch (error) {
+    await closeHandle(childStable?.anchor);
     await closeHandle(stable.anchor);
     throw error;
   }
