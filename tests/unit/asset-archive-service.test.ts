@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
@@ -107,6 +107,29 @@ function sourceRow(sourceAssetId: string, bindings: ArchiveAssetBinding[] = []):
   };
 }
 
+function poolForQuery(query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number }>) {
+  return {
+    connect: async () => ({
+      query: async (text: string, values?: unknown[]) => {
+        if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rows: [], rowCount: 0 };
+        if (text.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [], rowCount: 1 };
+        return query(text, values);
+      },
+      release: () => undefined
+    })
+  } as never;
+}
+
+function poolForDatabase(database: unknown) {
+  return poolForQuery((database as { query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number }> }).query);
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((nextResolve) => { resolve = nextResolve; });
+  return { promise, resolve };
+}
+
 function projectedBinding(text: string, assetId: string, binding: ArchiveAssetBinding) {
   if (!/\bAS\s+binding\b/i.test(text)) return { asset_id: assetId };
   return { asset_id: assetId, binding };
@@ -147,11 +170,12 @@ describe("asset archive portability", () => {
     const root = await mkdtemp(join(tmpdir(), "asset-archive-test-"));
     const outside = join(root, "..", `outside-${process.pid}.png`);
     try {
-      const path = join(root, "aa", `${hash}.png`);
-      const retainedPath = join(root, "bb", `${hash}.png`);
+      const retainedHash = createHash("sha256").update("retained").digest("hex");
+      const path = join(root, hash.slice(0, 2), `${hash}.png`);
+      const retainedPath = join(root, retainedHash.slice(0, 2), `${retainedHash}.png`);
       const store: FilesystemAssetStore = { root };
-      await mkdir(join(root, "aa"), { recursive: true });
-      await mkdir(join(root, "bb"), { recursive: true });
+      await mkdir(join(root, hash.slice(0, 2)), { recursive: true });
+      await mkdir(join(root, retainedHash.slice(0, 2)), { recursive: true });
       await writeFile(path, pngBytes);
       await writeFile(retainedPath, pngBytes);
       await writeFile(outside, pngBytes);
@@ -159,11 +183,11 @@ describe("asset archive portability", () => {
         query: async (text: string, values: unknown[]) => {
           expect(text).toContain("SELECT storage_path");
           expect(text).toContain("FROM assets");
-          expect(values).toEqual([ownerUserId, ["aa/" + hash + ".png", "bb/" + hash + ".png"]]);
-          return { rows: [{ storage_path: "bb/" + hash + ".png" }], rowCount: 1 };
+          expect(values).toEqual([ownerUserId, [hash.slice(0, 2) + "/" + hash + ".png", retainedHash.slice(0, 2) + "/" + retainedHash + ".png"]]);
+          return { rows: [{ storage_path: retainedHash.slice(0, 2) + "/" + retainedHash + ".png" }], rowCount: 1 };
         }
       } as never;
-      await cleanupUnreferencedCreatedPaths(database, store, ownerUserId, ["aa/" + hash + ".png", "bb/" + hash + ".png", "../" + `outside-${process.pid}.png`]);
+      await cleanupUnreferencedCreatedPaths(poolForDatabase(database), store, ownerUserId, [hash.slice(0, 2) + "/" + hash + ".png", retainedHash.slice(0, 2) + "/" + retainedHash + ".png", "../" + `outside-${process.pid}.png`]);
       await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
       expect((await stat(retainedPath)).isFile()).toBe(true);
       expect((await stat(outside)).isFile()).toBe(true);
@@ -525,7 +549,7 @@ describe("asset archive portability", () => {
           return { rows: [{ storage_path: preexistingPath }], rowCount: 1 };
         }
       } as never;
-      await cleanupUnreferencedCreatedPaths(rollbackDatabase, { root }, ownerUserId, (caught as ArchiveAssetPersistenceError).createdPaths);
+      await cleanupUnreferencedCreatedPaths(poolForDatabase(rollbackDatabase), { root }, ownerUserId, (caught as ArchiveAssetPersistenceError).createdPaths);
       expect((await stat(join(root, preexistingPath))).isFile()).toBe(true);
       await expect(stat(join(root, laterCreatedPath))).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
@@ -578,7 +602,7 @@ describe("asset archive portability", () => {
           return { rows: [{ storage_path: path }], rowCount: 1 };
         }
       } as never;
-      await cleanupUnreferencedCreatedPaths(database, { root }, ownerUserId, [path]);
+      await cleanupUnreferencedCreatedPaths(poolForDatabase(database), { root }, ownerUserId, [path]);
       expect((await stat(join(root, path))).isFile()).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -601,7 +625,7 @@ describe("asset archive portability", () => {
           return { rows: [], rowCount: 0 };
         }
       } as never;
-      await cleanupUnreferencedCreatedPaths(database, { root }, ownerUserId, [path]);
+      await cleanupUnreferencedCreatedPaths(poolForDatabase(database), { root }, ownerUserId, [path]);
       expect(queries).toHaveLength(1);
       await expect(stat(join(root, path))).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
@@ -619,7 +643,7 @@ describe("asset archive portability", () => {
           return { rows: [], rowCount: 0 };
         }
       } as never;
-      await cleanupUnreferencedCreatedPaths(database, { root }, ownerUserId, ["C:foo.png"]);
+      await cleanupUnreferencedCreatedPaths(poolForDatabase(database), { root }, ownerUserId, ["C:foo.png"]);
       expect(queryCount).toBe(0);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -646,6 +670,187 @@ describe("asset archive portability", () => {
       expect((await stat(join(root, path))).isFile()).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("makes writer-first cleanup wait for the committed original row", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asset-archive-lock-writer-first-"));
+    const path = `${hash.slice(0, 2)}/${hash}.png`;
+    const cleanupWaiting = deferred<void>();
+    const writerCommitted = deferred<void>();
+    let lockOwner: "writer" | "cleanup" | null = null;
+    let committed = false;
+    try {
+      const writerClient = {
+        query: async (text: string, values?: unknown[]) => {
+          if (text.startsWith("SELECT pg_advisory_xact_lock")) {
+            expect(lockOwner).toBeNull();
+            lockOwner = "writer";
+            return { rows: [], rowCount: 1 };
+          }
+          if (text === "COMMIT") {
+            committed = true;
+            lockOwner = null;
+            writerCommitted.resolve();
+            return { rows: [], rowCount: 1 };
+          }
+          if (text.startsWith("INSERT INTO assets")) return { rows: [{ id: "writer-asset" }], rowCount: 1 };
+          return { rows: [], rowCount: 1 };
+        }
+      };
+      const cleanupClient = {
+        query: async (text: string, values?: unknown[]) => {
+          if (text === "BEGIN") return { rows: [], rowCount: 0 };
+          if (text.startsWith("SELECT pg_advisory_xact_lock")) {
+            cleanupWaiting.resolve();
+            await writerCommitted.promise;
+            expect(lockOwner).toBeNull();
+            lockOwner = "cleanup";
+            expect(values?.[0]).toBeDefined();
+            return { rows: [], rowCount: 1 };
+          }
+          if (text.startsWith("SELECT storage_path")) {
+            expect(committed).toBe(true);
+            expect(values).toEqual([ownerUserId, [path]]);
+            return { rows: [{ storage_path: path }], rowCount: 1 };
+          }
+          if (text === "COMMIT") {
+            lockOwner = null;
+            return { rows: [], rowCount: 0 };
+          }
+          return { rows: [], rowCount: 1 };
+        }
+      };
+      const pool = { connect: async () => ({ ...cleanupClient, release: () => undefined }) } as never;
+      await writerClient.query("BEGIN");
+      await persistOriginalImage(writerClient as never, { root }, ownerUserId, { bytes: pngBytes, mimeType: "image/png", createThumbnail: false });
+      const cleanupPromise = cleanupUnreferencedCreatedPaths(pool, { root }, ownerUserId, [path]);
+      const observed = await Promise.race([
+        cleanupWaiting.promise.then(() => "waiting"),
+        cleanupPromise.then(() => "done", () => "error"),
+        new Promise<string>((resolve) => setTimeout(() => resolve("timeout"), 250))
+      ]);
+      expect(observed).toBe("waiting");
+      await writerClient.query("COMMIT");
+      await cleanupPromise;
+      expect((await stat(join(root, path))).isFile()).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("lets a cleanup-first transaction delete then lets the writer republish", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asset-archive-lock-cleanup-first-"));
+    const path = `${hash.slice(0, 2)}/${hash}.png`;
+    const cleanupQueryEntered = deferred<void>();
+    const allowCleanupQuery = deferred<void>();
+    const writerWaiting = deferred<void>();
+    const cleanupCommitted = deferred<void>();
+    let lockOwner: "writer" | "cleanup" | null = null;
+    try {
+      await mkdir(join(root, hash.slice(0, 2)), { recursive: true });
+      await writeFile(join(root, path), pngBytes);
+      const cleanupClient = {
+        query: async (text: string, values?: unknown[]) => {
+          if (text === "BEGIN") return { rows: [], rowCount: 0 };
+          if (text.startsWith("SELECT pg_advisory_xact_lock")) {
+            expect(lockOwner).toBeNull();
+            lockOwner = "cleanup";
+            return { rows: [], rowCount: 1 };
+          }
+          if (text.startsWith("SELECT storage_path")) {
+            cleanupQueryEntered.resolve();
+            await allowCleanupQuery.promise;
+            expect(values).toEqual([ownerUserId, [path]]);
+            return { rows: [], rowCount: 0 };
+          }
+          if (text === "COMMIT") {
+            lockOwner = null;
+            cleanupCommitted.resolve();
+            return { rows: [], rowCount: 0 };
+          }
+          return { rows: [], rowCount: 1 };
+        }
+      };
+      const pool = { connect: async () => ({ ...cleanupClient, release: () => undefined }) } as never;
+      const cleanupPromise = cleanupUnreferencedCreatedPaths(pool, { root }, ownerUserId, [path]);
+      await cleanupQueryEntered.promise;
+      const writerClient = {
+        query: async (text: string, values?: unknown[]) => {
+          if (text === "BEGIN") return { rows: [], rowCount: 0 };
+          if (text.startsWith("SELECT pg_advisory_xact_lock")) {
+            expect(lockOwner).toBe("cleanup");
+            writerWaiting.resolve();
+            await cleanupCommitted.promise;
+            lockOwner = "writer";
+            expect(values?.[0]).toBeDefined();
+            return { rows: [], rowCount: 1 };
+          }
+          if (text.startsWith("INSERT INTO assets")) return { rows: [{ id: "republished-asset" }], rowCount: 1 };
+          if (text === "COMMIT") {
+            lockOwner = null;
+            return { rows: [], rowCount: 0 };
+          }
+          return { rows: [], rowCount: 1 };
+        }
+      };
+      const writerPromise = (async () => {
+        await writerClient.query("BEGIN");
+        const result = await persistOriginalImage(writerClient as never, { root }, ownerUserId, { bytes: pngBytes, mimeType: "image/png", createThumbnail: false });
+        await writerClient.query("COMMIT");
+        return result;
+      })();
+      await writerWaiting.promise;
+      allowCleanupQuery.resolve();
+      await cleanupPromise;
+      await writerPromise;
+      expect((await stat(join(root, path))).isFile()).toBe(true);
+    } finally {
+      allowCleanupQuery.resolve();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects non-canonical original candidates before any cleanup query", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asset-archive-canonical-path-"));
+    let queryCount = 0;
+    try {
+      const database = {
+        query: async () => {
+          queryCount += 1;
+          return { rows: [], rowCount: 0 };
+        }
+      };
+      await cleanupUnreferencedCreatedPaths(poolForDatabase(database), { root }, ownerUserId, [
+        `${hash.slice(0, 2).toUpperCase()}/${hash}.png`,
+        `${hash.slice(0, 2)}/${hash.toUpperCase()}.png`,
+        `${hash.slice(0, 2)}/${hash}.jpeg`,
+        `wrong/${hash}.png`,
+        `${hash.slice(0, 2)}/${hash.slice(0, 63)}.png`
+      ]);
+      expect(queryCount).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("fails closed when a cleanup candidate has a symlinked ancestor", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asset-archive-symlink-root-"));
+    const outside = await mkdtemp(join(tmpdir(), "asset-archive-symlink-outside-"));
+    const path = `${hash.slice(0, 2)}/${hash}.png`;
+    try {
+      await writeFile(join(outside, `${hash}.png`), pngBytes);
+      await symlink(outside, join(root, hash.slice(0, 2)), "dir");
+      const database = { query: async (text: string) => {
+        if (text.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [], rowCount: 1 };
+        if (text.startsWith("SELECT storage_path")) return { rows: [], rowCount: 0 };
+        return { rows: [], rowCount: 1 };
+      } };
+      await expect(cleanupUnreferencedCreatedPaths(poolForDatabase(database), { root }, ownerUserId, [path])).rejects.toThrow();
+      expect((await stat(join(outside, `${hash}.png`))).isFile()).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
     }
   });
 

@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import sharp from "sharp";
@@ -7,6 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import {
+  ArchiveAssetPersistenceError,
+  cleanupUnreferencedCreatedPaths,
   collectCampaignArchiveAssets,
   persistArchiveAssets,
   restoreAssetBindings,
@@ -429,4 +431,82 @@ integration("asset archive portability", () => {
     );
     expect(context.rows[0]!.asset_id).toBe(restored.assetIds.get(contextAssetId));
   });
+
+  it("holds original locks through rollback cleanup and retains only surviving rows", async () => {
+    const owner = (await pool.query<{ id: string }>(
+      "INSERT INTO users (system_key, display_name) VALUES ($1, 'Rollback Cleanup Owner') RETURNING id",
+      [`archive-rollback-owner-${randomUUID()}`]
+    )).rows[0]!.id;
+    const firstBytes = await image(17, 31, 47);
+    const secondBytes = await image(47, 31, 17);
+    const makeRecord = (sourceAssetId: string, bytes: Buffer) => {
+      const contentHash = requireHash(bytes);
+      return {
+        ...inventory.records[0]!,
+        sourceAssetId,
+        contentHash,
+        archivePath: `assets/sha256/${contentHash.slice(0, 2)}/${contentHash}.png`,
+        byteLength: bytes.length,
+        pixelWidth: 2,
+        pixelHeight: 2,
+        bindings: []
+      };
+    };
+    const firstRecord = makeRecord(randomUUID(), firstBytes);
+    const secondRecord = makeRecord(randomUUID(), secondBytes);
+    await mkdir(resolve(archiveRoot, "assets/sha256", firstRecord.contentHash.slice(0, 2)), { recursive: true });
+    await mkdir(resolve(archiveRoot, "assets/sha256", secondRecord.contentHash.slice(0, 2)), { recursive: true });
+    await writeFile(resolve(archiveRoot, firstRecord.archivePath), firstBytes, { flag: "w" });
+    await writeFile(resolve(archiveRoot, secondRecord.archivePath), secondBytes, { flag: "w" });
+    const validated = await validateArchiveAssets(
+      { records: [firstRecord, secondRecord] },
+      (path) => readFile(resolve(archiveRoot, path))
+    );
+    const preexisting = await withTransaction(pool, (client) => persistOriginalImage(
+      client,
+      { root: assetRoot },
+      owner,
+      { bytes: firstBytes, mimeType: "image/png", createThumbnail: false }
+    ));
+    const preexistingRow = await pool.query<{ storage_path: string }>(
+      "SELECT storage_path FROM assets WHERE id = $1 AND owner_user_id = $2",
+      [preexisting.id, owner]
+    );
+    const recreatedPath = preexistingRow.rows[0]!.storage_path;
+    await unlink(resolve(assetRoot, recreatedPath));
+
+    const transactionClient = await pool.connect();
+    await transactionClient.query("BEGIN");
+    let metadataUpdates = 0;
+    const importClient = {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.startsWith("UPDATE asset_library_entries") && ++metadataUpdates === 2) {
+          throw new Error("injected later archive persistence failure");
+        }
+        return transactionClient.query(text, values);
+      }
+    };
+    let caught: unknown;
+    try {
+      await persistArchiveAssets(importClient as never, { root: assetRoot }, owner, validated, new Map());
+    } catch (error) {
+      caught = error;
+      await transactionClient.query("ROLLBACK");
+    } finally {
+      transactionClient.release();
+    }
+    expect(caught).toBeInstanceOf(ArchiveAssetPersistenceError);
+    const createdPaths = (caught as ArchiveAssetPersistenceError).createdPaths;
+    expect(createdPaths).toContain(recreatedPath);
+    expect(createdPaths).toHaveLength(2);
+
+    await cleanupUnreferencedCreatedPaths(pool, { root: assetRoot }, owner, createdPaths);
+    expect((await readFile(resolve(assetRoot, recreatedPath))).equals(firstBytes)).toBe(true);
+    const unreferencedPath = createdPaths.find((path) => path !== recreatedPath)!;
+    await expect(readFile(resolve(assetRoot, unreferencedPath))).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });
+
+function requireHash(bytes: Buffer): string {
+  return createHash("sha256").update(bytes.toString("base64")).digest("hex");
+}

@@ -1,10 +1,11 @@
-import { lstat, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 import { sha256 } from "../../../packages/domain/src/text.js";
-import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
+import { withTransaction, type DatabaseClient, type DatabasePool } from "../../../packages/database/src/pool.js";
 import { archiveAssetRecordSchema, sanitizePortableMetadata, type ArchiveAssetBinding, type ArchiveAssetRecord, type ArchiveEntry, type ArchiveManifest } from "../../../packages/contracts/src/archives.js";
-import { imageExtensionForMimeType, persistOriginalImage, verifyOriginalImage, type FilesystemAssetStore } from "./asset-service.js";
+import { imageExtensionForMimeType, lockOriginalAsset, persistOriginalImage, verifyOriginalImage, type FilesystemAssetStore } from "./asset-service.js";
+import { removeArchivePath } from "./archive-io.js";
 
 export type ArchiveAssetSourceRow = {
   id: string; owner_user_id: string; content_hash: string; mime_type: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
@@ -47,7 +48,9 @@ const legacyAssetPointer = /^\/api\/v1\/assets\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0
 function safeRelativeCleanupPath(root: string, candidate: string): string | null {
   const normalizedCandidate = candidate.replaceAll("\\", "/");
   if (!normalizedCandidate || normalizedCandidate.startsWith("/") || /^[A-Za-z]:/.test(normalizedCandidate)) return null;
-  const absolute = resolve(root, candidate);
+  const canonical = /^([0-9a-f]{2})\/([0-9a-f]{64})\.(?:png|jpg|webp|gif)$/.exec(normalizedCandidate);
+  if (!canonical || canonical[1] !== canonical[2]?.slice(0, 2)) return null;
+  const absolute = resolve(root, normalizedCandidate);
   const relativePath = relative(resolve(root), absolute);
   if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`)) return null;
   return relativePath.replaceAll("\\", "/");
@@ -223,7 +226,7 @@ export async function persistArchiveAssets(
     for (const sourceAssetId of idMap.get("asset")?.keys() ?? []) {
       if (!sourceAssetIds.has(sourceAssetId)) throw new Error(`Unknown archive asset mapping '${sourceAssetId}'.`);
     }
-    for (const asset of byHash.values()) {
+    for (const asset of [...byHash.values()].sort((a, b) => a.archivePath.localeCompare(b.archivePath))) {
       const stored = await persistOriginalImage(client, store, ownerUserId, {
         bytes: asset.bytes,
         mimeType: asset.mimeType,
@@ -273,29 +276,25 @@ export async function restoreAssetBindings(client: DatabaseClient, ownerUserId: 
  * unlink so concurrent or surviving owner-scoped assets retain their bytes.
  */
 export async function cleanupUnreferencedCreatedPaths(
-  database: DatabaseClient | DatabasePool,
+  database: DatabasePool,
   store: FilesystemAssetStore,
   ownerUserId: string,
   createdPaths: readonly string[]
 ): Promise<void> {
-  const candidates = [...new Set(createdPaths.map((path) => safeRelativeCleanupPath(store.root, path)).filter((path): path is string => path !== null))];
+  const candidates = [...new Set(createdPaths.map((path) => safeRelativeCleanupPath(store.root, path)).filter((path): path is string => path !== null))].sort();
   if (!candidates.length) return;
-  const references = await database.query<{ storage_path: string }>(
-    `SELECT storage_path
-       FROM assets
-      WHERE owner_user_id = $1
-        AND storage_path = ANY($2::text[])`,
-    [ownerUserId, candidates]
-  );
-  const referencedPaths = new Set(references.rows.map((row) => row.storage_path.replaceAll("\\", "/")));
-  const root = resolve(store.root);
-  for (const path of candidates) {
-    if (referencedPaths.has(path)) continue;
-    const absolute = resolve(root, path);
-    const file = await lstat(absolute).catch((error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT" ? null : Promise.reject(error));
-    if (!file || !file.isFile() || file.isSymbolicLink()) continue;
-    await unlink(absolute).catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    });
-  }
+  await withTransaction(database, async (client) => {
+    for (const path of candidates) await lockOriginalAsset(client, ownerUserId, path);
+    const references = await client.query<{ storage_path: string }>(
+      `SELECT storage_path
+         FROM assets
+        WHERE owner_user_id = $1
+          AND storage_path = ANY($2::text[])`,
+      [ownerUserId, candidates]
+    );
+    const referencedPaths = new Set(references.rows.map((row) => row.storage_path.replaceAll("\\", "/")));
+    for (const path of candidates) {
+      if (!referencedPaths.has(path)) await removeArchivePath(store.root, path);
+    }
+  });
 }

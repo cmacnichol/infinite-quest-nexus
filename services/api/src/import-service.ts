@@ -13,7 +13,7 @@ import {
   WORLD_CONTENT_SCHEMA_VERSION,
   type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
-import { persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
+import { lockOriginalImages, parseDataImage, persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
 import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
 
 type ImportRow = {
@@ -442,6 +442,19 @@ export async function importLegacyStory(
     }
 
 
+
+    if (assetStore && !existingTarget) {
+      const imagesToLock: Array<{ bytes: Buffer; mimeType: string }> = [
+        ...(assetBuffers ? [...assetBuffers.values()].map((bytes) => ({ bytes, mimeType: "image/png" })) : [])
+      ];
+      for (const turn of request.story.turns) {
+        if (turn.imageUrl?.startsWith("data:image/")) {
+          const parsed = parseDataImage(turn.imageUrl);
+          if (parsed) imagesToLock.push({ bytes: parsed.bytes, mimeType: parsed.mimeType });
+        }
+      }
+      await lockOriginalImages(client, ownerUserId, imagesToLock);
+    }
 
     if (assetStore && assetBuffers && !existingTarget) {
       const coverUrl = typeof request.story.world.coverImageUrl === 'string' ? request.story.world.coverImageUrl : '';

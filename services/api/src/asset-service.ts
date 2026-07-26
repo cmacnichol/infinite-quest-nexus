@@ -31,6 +31,33 @@ export type StoredAsset = {
   contentHash: string;
 };
 
+export function originalStoragePath(contentHash: string, extension: string): string {
+  return `${contentHash.slice(0, 2)}/${contentHash}${extension}`;
+}
+
+export function originalAssetAdvisoryLockKey(ownerUserId: string, storagePath: string): string {
+  return `infinitequest:asset-original:${ownerUserId}:${storagePath}`;
+}
+
+export async function lockOriginalAsset(client: DatabaseClient, ownerUserId: string, storagePath: string): Promise<void> {
+  await client.query(
+    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+    [originalAssetAdvisoryLockKey(ownerUserId, storagePath)]
+  );
+}
+
+export async function lockOriginalImages(
+  client: DatabaseClient,
+  ownerUserId: string,
+  images: readonly { bytes: Buffer; mimeType: string }[]
+): Promise<void> {
+  const paths = [...new Set(images.map((image) => originalStoragePath(
+    sha256(image.bytes.toString("base64")),
+    imageExtensionForMimeType(image.mimeType)
+  )))].sort();
+  for (const storagePath of paths) await lockOriginalAsset(client, ownerUserId, storagePath);
+}
+
 export type AssetLibraryItem = {
   id: string;
   url: string;
@@ -218,7 +245,7 @@ async function withAssetBackfillTransaction<T>(pool: DatabasePool, work: (client
   }
 }
 
-function parseDataImage(value: string): { mimeType: string; bytes: Buffer; extension: string } | null {
+export function parseDataImage(value: string): { mimeType: string; bytes: Buffer; extension: string } | null {
   const match = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\r\n]+)$/i.exec(value.trim());
   if (!match?.[1] || !match[2]) return null;
   const mimeType = match[1].toLowerCase();
@@ -236,7 +263,7 @@ async function writeContentAddressed(
   extension: string,
   bytes: Buffer
 ): Promise<{ relativePath: string; created: boolean }> {
-  const relativePath = `${contentHash.slice(0, 2)}/${contentHash}${extension}`;
+  const relativePath = originalStoragePath(contentHash, extension);
   const finalPath = resolve(store.root, relativePath);
   const rootPrefix = `${resolve(store.root)}${sep}`;
   if (!finalPath.startsWith(rootPrefix)) throw new Error("Refusing to write an asset outside the configured storage root.");
@@ -344,9 +371,11 @@ async function persistImage(
   const extension = imageExtensionForMimeType(mimeType);
   const verified = await verifyOriginalImage(bytes, mimeType);
   const contentHash = sha256(bytes.toString("base64"));
+  const storagePath = originalStoragePath(contentHash, extension);
+  await lockOriginalAsset(client, ownerUserId, storagePath);
   const original = await writeContentAddressed(store, contentHash, extension, bytes);
-  const storagePath = original.relativePath;
-  if (original.created) await options?.onOriginalCreated?.(storagePath);
+  const publishedStoragePath = original.relativePath;
+  if (original.created) await options?.onOriginalCreated?.(publishedStoragePath);
   const assetResult = await client.query<{ id: string }>(
     `INSERT INTO assets (
        owner_user_id, campaign_id, turn_id, content_hash, storage_driver, storage_path, mime_type, byte_length,
@@ -357,7 +386,7 @@ async function persistImage(
                    pixel_height = COALESCE(assets.pixel_height, EXCLUDED.pixel_height),
                    technical_metadata = CASE WHEN assets.technical_metadata = '{}'::jsonb THEN EXCLUDED.technical_metadata ELSE assets.technical_metadata END
      RETURNING id`,
-    [ownerUserId, provenance?.campaignId ?? null, provenance?.turnId ?? null, contentHash, storagePath, mimeType, bytes.length,
+     [ownerUserId, provenance?.campaignId ?? null, provenance?.turnId ?? null, contentHash, publishedStoragePath, mimeType, bytes.length,
       verified.width, verified.height, JSON.stringify({ format: verified.format, pages: verified.pages, orientation: verified.orientation })]
   );
   const assetId = assetResult.rows[0]?.id;
