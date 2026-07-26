@@ -19,6 +19,7 @@ import {
   normalizeGeneratedPlayableCharacter,
   playableCharacterRecoveryInput
 } from "../../../packages/domain/src/character-authoring.js";
+import { parseCompleteGeneratedWorld } from "../../../packages/domain/src/generated-world.js";
 import { buildTemplateWorldPrompt, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
 import { callTextProvider, extractJsonObject } from "../../../packages/story-engine/src/index.js";
 import { logger } from "../../../packages/logger/src/index.js";
@@ -86,34 +87,6 @@ const completeConvertedWorldSchema = convertedWorldSchema.superRefine((world, co
 
 const supplementCharactersSchema = z.object({
   playable_characters: z.array(convertedPlayableCharacterSchema).max(10).default([])
-});
-
-const completeGeneratedWorldSchema = worldContentSchema.superRefine((content, context) => {
-  const requiredFields: Array<[keyof typeof content.world, string]> = [
-    ["title", "title"],
-    ["genre", "genre"],
-    ["tone", "tone"],
-    ["premise", "premise"],
-    ["backgroundStory", "background and canon"],
-    ["firstAction", "opening action"],
-    ["rules", "rules"]
-  ];
-  for (const [key, label] of requiredFields) {
-    if (!String(content.world[key] || "").trim()) {
-      context.addIssue({ code: "custom", path: ["world", key], message: `Generated ${label} is required.` });
-    }
-  }
-  if (content.playableCharacters.length < 3 || content.playableCharacters.length > 4) {
-    context.addIssue({ code: "custom", path: ["playableCharacters"], message: "Generated worlds require 3 or 4 playable characters." });
-  }
-  content.playableCharacters.forEach((character, index) => {
-    if (!character.characterText.trim()) {
-      context.addIssue({ code: "custom", path: ["playableCharacters", index, "characterText"], message: "Generated character guidance is required." });
-    }
-    if (!character.profile) {
-      context.addIssue({ code: "custom", path: ["playableCharacters", index, "profile"], message: "Generated character profile is required." });
-    }
-  });
 });
 
 function convertedCharacterId(name: string, index: number, supplied = ""): string {
@@ -432,7 +405,7 @@ export async function generateWorldPreview(
     throw error;
   }
   try {
-    const content = completeGeneratedWorldSchema.parse(generated.content);
+    const content = parseCompleteGeneratedWorld(generated.content);
     if (progressKey) {
       await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
         status: "completed",
