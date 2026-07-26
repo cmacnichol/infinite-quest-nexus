@@ -72,7 +72,17 @@ function character(name: string, includeProfile: boolean, privateMarker = "") {
   };
 }
 
-function worldResponse(includeProfiles: boolean, privateMarker = ""): string {
+function characterSeed(index: number) {
+  return {
+    id: `seed-${index}`,
+    name: `Explorer ${index}`,
+    role: `Explorer role ${index}`,
+    concept: `Explorer concept ${index}`,
+    narrative_hook: `Explorer hook ${index}`
+  };
+}
+
+function worldResponse(seedCount = 3): string {
   return JSON.stringify({
     title: "The Sunken Citadel",
     genre: "Fantasy exploration",
@@ -81,25 +91,18 @@ function worldResponse(includeProfiles: boolean, privateMarker = ""): string {
     premise: "Three explorers descend to recover its lost archive.",
     firstAction: "Examine the glowing runes on the bronze archway.",
     story_rules: "Ancient enchantments distort sound and light underwater.",
-    playable_characters: [
-      character("Elara the Diver", includeProfiles, privateMarker),
-      character("Thalor the Scholar", includeProfiles, privateMarker),
-      character("Kael the Guard", includeProfiles, privateMarker)
-    ],
+    character_seeds: Array.from(
+      { length: seedCount },
+      (_, index) => characterSeed(index + 1)
+    ),
     rpg_statistics: [],
     default_triggers: [],
     event_triggers: []
   });
 }
 
-function supplementResponse(includeProfiles: boolean, privateMarker = ""): string {
-  return JSON.stringify({
-    playable_characters: [
-      character("Elara the Diver", includeProfiles, privateMarker),
-      character("Thalor the Scholar", includeProfiles, privateMarker),
-      character("Kael the Guard", includeProfiles, privateMarker)
-    ]
-  });
+function characterResponse(index: number, includeProfile = true, privateMarker = ""): string {
+  return JSON.stringify(character(`Explorer ${index}`, includeProfile, privateMarker));
 }
 
 function providerEnvelope(content: string, responseId: string) {
@@ -254,31 +257,23 @@ integration("generated CYOA world persistence", () => {
     return row;
   }
 
-  function expectThreeCharacterSupplementRequest() {
-    expect(providerRequestBodies).toHaveLength(2);
+  function expectCharacterGenerationRequests(expectedNames: string[]) {
+    expect(providerRequestBodies).toHaveLength(expectedNames.length + 1);
     expect(replies).toHaveLength(0);
-    expect(providerRequestBodies[1]?.messages?.[0]).toEqual({
-      role: "system",
-      content: `You are repairing a generated Story World character roster. Incomplete existing entries are not part of the retained roster. Return JSON only with one object containing a playable_characters array with exactly 3 complete replacement characters. Each replacement must be distinct from retained characters.
-Every playable character must include:
-- id
-- name
-- character_text; character_text must be non-empty narrative guidance
-- profile with identity, story, appearance, and unclassifiedNotes
-- rpg_statistics
-- default_triggers
-Every character must follow this JSON shape; keep every listed key even when its value is empty:
-{"id":"character-id","name":"Character name","character_text":"non-empty narrative guidance","profile":{"identity":{"aliases":[],"pronouns":""},"story":{"role":"","background":"","personality":"","motivations":"","goals":"","fearsAndConflicts":"","keyRelationships":"","narrativeHooks":"","voiceAndMannerisms":"","otherGuidance":""},"appearance":{"ancestryOrSpecies":"","apparentAge":"","genderPresentation":"","build":"","skinOrComplexion":"","face":"","eyes":"","hair":"","distinguishingFeatures":[],"clothing":"","equipmentAndAccessories":"","otherVisualDetails":""},"unclassifiedNotes":""},"rpg_statistics":[],"default_triggers":[]}
-Type rules are mandatory: profile, identity, story, and appearance must be JSON objects, never strings, arrays, or null. identity.aliases, appearance.distinguishingFeatures, rpg_statistics, and default_triggers must be JSON arrays, never strings, objects, or null. All profile text values must be JSON strings, and array items must use their required object or string shape. rpg_statistics items use {"name":"stat name","value":50,"note":"what it represents"}; value is an integer from 1 through 99. default_triggers items use {"name":"tracker name","value":"initial fictional value","rules":"when and how it changes"}. Use an empty string or empty array when a value is unknown; never omit a required key, use null, or replace an object or array with prose.
-Keep prose compact enough to close the JSON object.`
-    });
+    expect(providerRequestBodies[0]?.messages?.[0]?.content).toContain("character_seeds");
+    for (const [index, body] of providerRequestBodies.slice(1).entries()) {
+      const userMessage = body.messages?.find((message) => message.role === "user");
+      expect(userMessage?.content).toContain(expectedNames[index]);
+    }
   }
 
-  it("repairs a manual preview without persisting world or import records", async () => {
+  it("generates a manual preview with separate world and character calls without persisting records", async () => {
     const progressKey = `manual-preview-success-${crypto.randomUUID()}`;
     replies.push(
-      { content: worldResponse(false) },
-      { content: supplementResponse(true) }
+      { content: worldResponse(3) },
+      { content: characterResponse(1) },
+      { content: characterResponse(2) },
+      { content: characterResponse(3) }
     );
     const before = await persistenceCounts();
 
@@ -298,16 +293,18 @@ Keep prose compact enough to close the JSON object.`
       progressPercent: 100,
       message: "World and character generation completed."
     });
-    expectThreeCharacterSupplementRequest();
+    expectCharacterGenerationRequests(["Explorer 1", "Explorer 2", "Explorer 3"]);
     expect(await persistenceCounts()).toEqual(before);
   });
 
-  it("fails an incomplete manual preview safely without persisting records", async () => {
+  it("fails a character and its recovery safely without persisting records", async () => {
     const progressKey = `manual-preview-failure-${crypto.randomUUID()}`;
     const privateMarker = `PRIVATE_MANUAL_PREVIEW_${crypto.randomUUID()}`;
     replies.push(
-      { content: worldResponse(false, privateMarker) },
-      { content: supplementResponse(false, privateMarker) }
+      { content: worldResponse(3) },
+      { content: characterResponse(1) },
+      { content: characterResponse(2, false, privateMarker) },
+      { content: characterResponse(2, false, privateMarker) }
     );
     const before = await persistenceCounts();
 
@@ -318,7 +315,11 @@ Keep prose compact enough to close the JSON object.`
     }, credentialSecret)).rejects.toMatchObject({
       statusCode: 502,
       expose: true,
-      details: { code: "incomplete_generated_world" }
+      details: {
+        code: "incomplete_generated_character",
+        characterIndex: 1,
+        seedName: "Explorer 2"
+      }
     });
 
     const progress = await getWorldGenerationProgress(pool, ownerUserId, progressKey);
@@ -327,25 +328,22 @@ Keep prose compact enough to close the JSON object.`
       phase: "failed",
       progressPercent: 100
     });
-    expect(progress?.message).toContain(
-      "The text provider did not return a complete world. Review the missing fields and try again."
-    );
-    expect(progress?.message).toContain(
-      "playable_characters.0.profile: Generated structured character profile is required."
-    );
+    expect(progress?.message).toContain("The text provider did not return a complete character profile. Review the missing fields and try again.");
     expect(progress?.errorMessage).toBe(progress?.message);
     expect(JSON.stringify(progress)).not.toContain(privateMarker);
     expect(progress?.message.length).toBeLessThanOrEqual(500);
-    expectThreeCharacterSupplementRequest();
+    expectCharacterGenerationRequests(["Explorer 1", "Explorer 2", "Explorer 2"]);
     expect(await persistenceCounts()).toEqual(before);
   });
 
-  it("does not persist a world or import when supplementation remains incomplete", async () => {
+  it("does not persist a world or import when a character recovery remains incomplete", async () => {
     const sourceName = `incomplete-generated-cyoa-${crypto.randomUUID()}.json`;
     const generatedRequest = request(sourceName);
     replies.push(
-      { content: worldResponse(false) },
-      { content: supplementResponse(false) }
+      { content: worldResponse(3) },
+      { content: characterResponse(1) },
+      { content: characterResponse(2, false) },
+      { content: characterResponse(2, false) }
     );
     const worldsBeforeResult = await pool.query<{ count: number }>(
       "SELECT count(*)::int AS count FROM worlds WHERE owner_user_id = $1",
@@ -359,7 +357,11 @@ Keep prose compact enough to close the JSON object.`
       credentialSecret
     )).rejects.toMatchObject({
       statusCode: 502,
-      details: { code: "incomplete_generated_world" }
+      details: {
+        code: "incomplete_generated_character",
+        characterIndex: 1,
+        seedName: "Explorer 2"
+      }
     });
 
     const worldsAfter = await pool.query<{ count: number }>(
@@ -372,6 +374,7 @@ Keep prose compact enough to close the JSON object.`
     );
     expect(worldsAfter.rows[0]?.count).toBe(worldsBefore);
     expect(importsAfter.rows[0]?.count).toBe(0);
+    expectCharacterGenerationRequests(["Explorer 1", "Explorer 2", "Explorer 2"]);
     expect(getImportProgress(generatedRequest.progressKey)).toMatchObject({
       status: "failed",
       phase: "failed"
@@ -418,12 +421,14 @@ Keep prose compact enough to close the JSON object.`
     expect(JSON.stringify({ progress: getImportProgress(progressKey), errorLogCalls })).not.toContain(marker);
   });
 
-  it("persists exactly three complete profiles after one successful supplement", async () => {
+  it("persists exactly three complete profiles after separate character generation", async () => {
     const sourceName = `repaired-generated-cyoa-${crypto.randomUUID()}.json`;
     const generatedRequest = request(sourceName);
     replies.push(
-      { content: worldResponse(false) },
-      { content: supplementResponse(true) }
+      { content: worldResponse(3) },
+      { content: characterResponse(1) },
+      { content: characterResponse(2) },
+      { content: characterResponse(3) }
     );
 
     const result = await importInfiniteWorlds(
