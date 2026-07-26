@@ -77,16 +77,23 @@ const completeConvertedPlayableCharacterSchema = convertedPlayableCharacterSchem
   }
 });
 
+const generatedCharacterSeedSchema = z.object({
+  id: z.string().trim().min(1).max(200),
+  name: z.string().trim().min(1).max(200),
+  role: z.string().trim().min(1).max(2000),
+  concept: z.string().trim().min(1).max(10_000),
+  narrative_hook: z.string().trim().min(1).max(10_000)
+}).passthrough();
+
 const convertedWorldSchema = z.object({
   title: z.preprocess((v) => (typeof v === "string" ? v : coerceText(v)), z.string().trim().min(1).max(200)),
   genre: flexibleShortText,
   tone: flexibleShortText,
   backgroundStory: flexibleLongText,
-  player_character: flexibleLongText,
-  playable_characters: z.array(z.unknown()).max(1000).default([]),
   premise: flexibleLongText,
   firstAction: flexibleLongText,
   story_rules: flexibleLongText,
+  character_seeds: z.array(generatedCharacterSeedSchema).min(3).max(4),
   default_triggers: z.array(z.unknown()).max(10_000).default([]),
   event_triggers: z.array(z.unknown()).max(10_000).default([]),
   rpg_statistics: z.array(z.unknown()).max(10_000).default([])
@@ -102,6 +109,16 @@ const completeConvertedWorldSchema = convertedWorldSchema.superRefine((world, co
     ["story_rules", "story_rules"]
   ] as const) {
     if (!world[key].trim()) context.addIssue({ code: "custom", path: [key], message: `Generated ${label} is required.` });
+  }
+  const seedIds = new Set<string>();
+  const seedNames = new Set<string>();
+  for (const [index, seed] of world.character_seeds.entries()) {
+    const id = seed.id.trim().toLocaleLowerCase();
+    const name = seed.name.trim().toLocaleLowerCase();
+    if (seedIds.has(id)) context.addIssue({ code: "custom", path: ["character_seeds", index, "id"], message: "Generated character seed IDs must be unique." });
+    if (seedNames.has(name)) context.addIssue({ code: "custom", path: ["character_seeds", index, "name"], message: "Generated character seed names must be unique." });
+    seedIds.add(id);
+    seedNames.add(name);
   }
 });
 
@@ -188,6 +205,26 @@ export function incompleteGeneratedWorldError(error?: unknown): Error {
       expose: true,
       details: {
         code: "incomplete_generated_world",
+        issues: generatedWorldIssues(error)
+      }
+    }
+  );
+}
+
+export function incompleteGeneratedCharacterError(
+  characterIndex: number,
+  seedName: string,
+  error?: unknown
+): Error {
+  return Object.assign(
+    new Error(`The text provider did not return a complete profile for character ${characterIndex + 1}.`),
+    {
+      statusCode: 502,
+      expose: true,
+      details: {
+        code: "incomplete_generated_character",
+        characterIndex,
+        seedName: seedName.slice(0, 200),
         issues: generatedWorldIssues(error)
       }
     }
@@ -432,16 +469,41 @@ export function normalizeRawWorldJson(raw: unknown): Record<string, unknown> {
     return [];
   };
 
-  const normalizedChars = getArr("playable_characters", "playableCharacters", "playable_character_list", "characters").map((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
-    const char = item as Record<string, unknown>;
+  const normalizeGeneratedSeed = (item: unknown, index: number) => {
+    const character = item && typeof item === "object" && !Array.isArray(item)
+      ? item as Record<string, unknown>
+      : {};
+    const profile = character.profile && typeof character.profile === "object" && !Array.isArray(character.profile)
+      ? character.profile as Record<string, unknown>
+      : {};
+    const story = profile.story && typeof profile.story === "object" && !Array.isArray(profile.story)
+      ? profile.story as Record<string, unknown>
+      : {};
+    const concept = coerceText(
+      character.concept ?? character.character_text ?? character.characterText ?? character.background ?? character.description
+    ).trim();
     return {
-      ...char,
-      id: String(char.id || "").trim(),
-      name: coerceText(char.name || char.character_name || char.characterName || "").trim(),
-      character_text: coerceText(char.character_text || char.characterText || char.background || char.description || char.details).trim(),
-      rpg_statistics: Array.isArray(char.rpg_statistics) ? char.rpg_statistics : (Array.isArray(char.rpgStats) ? char.rpgStats : (Array.isArray(char.rpg_stats) ? char.rpg_stats : [])),
-      default_triggers: Array.isArray(char.default_triggers) ? char.default_triggers : (Array.isArray(char.defaultTriggers) ? char.defaultTriggers : [])
+      id: coerceText(character.id).trim() || `seed-${index + 1}`,
+      name: coerceText(character.name ?? character.character_name ?? character.characterName).trim(),
+      role: coerceText(character.role ?? story.role).trim(),
+      concept,
+      narrative_hook: coerceText(character.narrative_hook ?? character.narrativeHook ?? story.narrativeHooks).trim() || concept
+    };
+  };
+  const seedSource = getArr("character_seeds", "characterSeeds");
+  const legacyCharacters = getArr("playable_characters", "playableCharacters", "playable_character_list", "characters");
+  const normalizedSeeds = (seedSource.length ? seedSource : legacyCharacters)
+    .map((item, index) => normalizeGeneratedSeed(item, index));
+  const normalizedChars = legacyCharacters.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const character = item as Record<string, unknown>;
+    return {
+      ...character,
+      id: String(character.id || "").trim(),
+      name: coerceText(character.name || character.character_name || character.characterName || "").trim(),
+      character_text: coerceText(character.character_text || character.characterText || character.background || character.description || character.details).trim(),
+      rpg_statistics: Array.isArray(character.rpg_statistics) ? character.rpg_statistics : (Array.isArray(character.rpgStats) ? character.rpgStats : (Array.isArray(character.rpg_stats) ? character.rpg_stats : [])),
+      default_triggers: Array.isArray(character.default_triggers) ? character.default_triggers : (Array.isArray(character.defaultTriggers) ? character.defaultTriggers : [])
     };
   });
 
@@ -454,7 +516,7 @@ export function normalizeRawWorldJson(raw: unknown): Record<string, unknown> {
     premise: getStr("premise", "world_premise", "worldPremise", "summary"),
     firstAction: getStr("firstAction", "first_action", "openingAction", "opening_action", "startingAction", "starting_action"),
     story_rules: getStr("story_rules", "storyRules", "rules", "world_rules", "worldRules"),
-    player_character: getStr("player_character", "playerCharacter", "leadCharacter", "lead_character"),
+    character_seeds: normalizedSeeds,
     playable_characters: normalizedChars,
     rpg_statistics: getArr("rpg_statistics", "rpgStats", "rpg_stats", "statistics"),
     default_triggers: getArr("default_triggers", "defaultTriggers", "default_trigger_list"),
@@ -495,7 +557,7 @@ export async function generateTemplateWorld(
   await onProgress?.("extracting", 10, "Loading text provider and preparing modular prompt…");
   const profile = await dependencies.loadTextProvider(pool, ownerUserId, providerProfileId, credentialSecret, model);
 
-  await onProgress?.("generating_world", 30, "Synthesizing world overview and characters via LLM…");
+  await onProgress?.("generating_world", 30, "Synthesizing world structure and character seeds via LLM…");
   const promptSnapshot = await dependencies.resolvePromptSnapshot(pool, ownerUserId);
   const prompt = buildTemplateWorldPrompt(input, promptFromSnapshot(promptSnapshot, "world_generation"));
   const result = await callGeneratedWorldProvider(() => dependencies.callTextProvider(profile, prompt));
@@ -507,7 +569,7 @@ export async function generateTemplateWorld(
     converted = completeConvertedWorldSchema.parse(normalizeRawWorldJson(extractJsonObject(result.content)));
     logger.debug({
       responseId: result.responseId,
-      characterCandidateCount: converted.playable_characters.length
+      characterSeedCount: converted.character_seeds.length
     }, "Successfully parsed initial generated world JSON");
   } catch (error) {
     if (!isGeneratedWorldValidationError(error)) throw error;
@@ -521,6 +583,7 @@ export async function generateTemplateWorld(
     const recovered = await callGeneratedWorldProvider(() => dependencies.callTextProvider(profile, {
       ...prompt,
       ...(result.responseId ? { previousResponseId: result.responseId } : {}),
+      rejectedResponse: result.content,
       recoveryInput: promptFromSnapshot(promptSnapshot, "world_generation_recovery")
     }));
     try {
@@ -538,52 +601,78 @@ export async function generateTemplateWorld(
     validationResult = recovered;
     logger.info({
       responseId: recovered.responseId,
-      characterCandidateCount: converted.playable_characters.length
+      characterSeedCount: converted.character_seeds.length
     }, "Successfully recovered generated world JSON");
   }
 
-  const characterCandidates = [...(converted.playable_characters || [])];
-  if (characterCandidates.length === 0 && converted.player_character.trim()) {
-    characterCandidates.push({
-      id: "char-1",
-      name: converted.player_character.split(/\r?\n/).find((line) => line.trim())?.trim() || "Lead Character",
-      character_text: converted.player_character,
-      rpg_statistics: converted.rpg_statistics || [],
-      default_triggers: converted.default_triggers || []
-    });
-  }
-
-  const selected = selectCompleteGeneratedCharacters(characterCandidates);
-  const rawCharacters = [...selected.characters];
-  if (selected.needed > 0) {
-    const needed = selected.needed;
-    logger.info({ existingCount: rawCharacters.length, needed }, "Supplementing playable character roster");
-    await onProgress?.("supplementing_characters", 70, `Generating ${needed} additional playable character${needed === 1 ? "" : "s"} to meet the 3-4 character target…`);
-    const supplementResult = await callGeneratedWorldProvider(() => dependencies.callTextProvider(profile, {
-      systemPrompt: promptFromSnapshot(promptSnapshot, "world_roster_supplement").replaceAll("{{needed}}", String(needed)),
+  const rawCharacters: z.infer<typeof completeConvertedPlayableCharacterSchema>[] = [];
+  for (const [characterIndex, seed] of converted.character_seeds.entries()) {
+    const safeSeedName = seed.name.slice(0, 200);
+    const percent = 40 + Math.round((characterIndex / converted.character_seeds.length) * 45);
+    await onProgress?.(
+      "generating_character",
+      percent,
+      `Generating character ${characterIndex + 1} of ${converted.character_seeds.length}: ${safeSeedName}…`
+    );
+    const characterRequest = {
+      systemPrompt: promptFromSnapshot(promptSnapshot, "world_character_generation"),
       input: JSON.stringify({
-        worldTitle: converted.title,
-        genre: converted.genre,
-        premise: converted.premise,
-        existingCharacters: rawCharacters.map((c) => ({ name: c.name, background: c.character_text }))
+        world: {
+          title: converted.title,
+          genre: converted.genre,
+          tone: converted.tone,
+          backgroundStory: converted.backgroundStory,
+          premise: converted.premise,
+          firstAction: converted.firstAction,
+          storyRules: converted.story_rules
+        },
+        seed,
+        otherSeeds: converted.character_seeds
+          .filter((candidate) => candidate.id !== seed.id)
+          .map(({ id, name, role }) => ({ id, name, role })),
+        acceptedCharacterNames: rawCharacters.map((character) => character.name)
       })
-    }));
+    };
+    const characterResult = await callGeneratedWorldProvider(() => dependencies.callTextProvider(profile, characterRequest));
     try {
-      const supplement = z.object({
-        playable_characters: z.array(completeConvertedPlayableCharacterSchema).length(needed)
-      }).parse(extractJsonObject(supplementResult.content));
-      rawCharacters.push(...supplement.playable_characters);
-      validationResult = supplementResult;
-      logger.debug({ added: supplement.playable_characters.length }, "Character roster successfully supplemented");
-    } catch (supplementError) {
-      if (!isGeneratedWorldValidationError(supplementError)) throw supplementError;
-      logger.error({
-        responseId: supplementResult.responseId,
-        finishReason: supplementResult.finishReason,
-        outputLimited: supplementResult.outputLimited,
-        issues: generatedWorldIssues(supplementError)
-      }, "Generated world roster supplement validation failed");
-      throw incompleteGeneratedWorldError(supplementError);
+      rawCharacters.push(completeConvertedPlayableCharacterSchema.parse(extractJsonObject(characterResult.content)));
+      validationResult = characterResult;
+    } catch (error) {
+      if (!isGeneratedWorldValidationError(error)) throw error;
+      logger.warn({
+        responseId: characterResult.responseId,
+        finishReason: characterResult.finishReason,
+        outputLimited: characterResult.outputLimited,
+        characterIndex,
+        issues: generatedWorldIssues(error)
+      }, "Generated character profile parse failed, attempting recovery");
+      await onProgress?.(
+        "recovering_character",
+        percent,
+        characterResult.outputLimited
+          ? `Output limit reached while generating character ${characterIndex + 1}. Recovering truncated JSON…`
+          : `Character ${characterIndex + 1} was incomplete. Requesting a complete replacement…`
+      );
+      const recovered = await callGeneratedWorldProvider(() => dependencies.callTextProvider(profile, {
+        ...characterRequest,
+        ...(characterResult.responseId ? { previousResponseId: characterResult.responseId } : {}),
+        rejectedResponse: characterResult.content,
+        recoveryInput: promptFromSnapshot(promptSnapshot, "world_character_generation_recovery")
+      }));
+      try {
+        rawCharacters.push(completeConvertedPlayableCharacterSchema.parse(extractJsonObject(recovered.content)));
+        validationResult = recovered;
+      } catch (recoveryError) {
+        if (!isGeneratedWorldValidationError(recoveryError)) throw recoveryError;
+        logger.error({
+          responseId: recovered.responseId,
+          finishReason: recovered.finishReason,
+          outputLimited: recovered.outputLimited,
+          characterIndex,
+          issues: generatedWorldIssues(recoveryError)
+        }, "Generated character recovery validation failed");
+        throw incompleteGeneratedCharacterError(characterIndex, safeSeedName, recoveryError);
+      }
     }
   }
 

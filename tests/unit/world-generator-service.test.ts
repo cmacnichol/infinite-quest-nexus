@@ -62,7 +62,17 @@ function character(name: string) {
   };
 }
 
-function worldResponse(playableCharacters: unknown[]): string {
+function seed(index: number) {
+  return {
+    id: `seed-${index}`,
+    name: `Character ${index}`,
+    role: `Role ${index}`,
+    concept: `Concept ${index}`,
+    narrative_hook: `Hook ${index}`
+  };
+}
+
+function worldDraftResponse(seedCount = 3): string {
   return JSON.stringify({
     title: "The Moving Roads",
     genre: "Weird fantasy",
@@ -71,20 +81,24 @@ function worldResponse(playableCharacters: unknown[]): string {
     premise: "Roads rearrange beneath moonlight.",
     firstAction: "A forbidden road appears outside the city.",
     story_rules: "Every road remembers its maker.",
-    playable_characters: playableCharacters,
+    character_seeds: Array.from({ length: seedCount }, (_, index) => seed(index + 1)),
     rpg_statistics: [],
     default_triggers: [],
     event_triggers: []
   });
 }
 
-function worldResponseWithTitle(title: string, playableCharacters: unknown[]): string {
-  const world = JSON.parse(worldResponse(playableCharacters)) as Record<string, unknown>;
+function worldDraftResponseWithTitle(title: string, seedCount = 3): string {
+  const world = JSON.parse(worldDraftResponse(seedCount)) as Record<string, unknown>;
   world.title = title;
   return JSON.stringify(world);
 }
 
-function providerResult(content: string, responseId = "response-id"): ProviderResult {
+function providerResult(
+  content: string,
+  responseId = "response-id",
+  override: Partial<ProviderResult> = {}
+): ProviderResult {
   return {
     content,
     responseId,
@@ -93,12 +107,14 @@ function providerResult(content: string, responseId = "response-id"): ProviderRe
     modelInstanceId: "model-instance",
     usage: { inputTokens: 100, outputTokens: 200, totalTokens: 300 },
     reportedCost: null,
-    rawMetadata: {}
+    rawMetadata: {},
+    ...override
   };
 }
 
 function generationHarness(outcomes: Array<ProviderResult | Error>) {
   const requests: ProviderRequest[] = [];
+  const progressUpdates: Array<{ phase: string; percent: number; message: string }> = [];
   const dependencies = {
     loadTextProvider: async () => ({
       id: "provider-id",
@@ -122,6 +138,7 @@ function generationHarness(outcomes: Array<ProviderResult | Error>) {
 
   return {
     requests,
+    progressUpdates,
     run: () => generateTemplateWorld(
       {} as never,
       "owner-id",
@@ -136,30 +153,54 @@ function generationHarness(outcomes: Array<ProviderResult | Error>) {
         excerpts: []
       },
       undefined,
-      undefined,
+      async (phase, percent, message) => {
+        progressUpdates.push({ phase, percent, message });
+      },
       dependencies
     )
   };
 }
 
 describe("generateTemplateWorld orchestration", () => {
-  it("makes exactly one supplement call for the exact missing roster count", async () => {
+  it("generates one world and one sequential profile for each seed", async () => {
     const harness = generationHarness([
-      providerResult(worldResponse([character("Mira Vale")])),
-      providerResult(JSON.stringify({
-        playable_characters: [character("Oren Pike"), character("Sela Moon")]
-      }))
+      providerResult(worldDraftResponse(3), "world-response"),
+      providerResult(JSON.stringify(character("Character 1")), "character-1"),
+      providerResult(JSON.stringify(character("Character 2")), "character-2"),
+      providerResult(JSON.stringify(character("Character 3")), "character-3")
     ]);
 
     const generated = await harness.run();
 
     expect(generated.content.playableCharacters).toHaveLength(3);
-    expect(harness.requests).toHaveLength(2);
-    expect(harness.requests[1]!.systemPrompt).toContain("exactly 2 complete replacement characters");
-    expect(harness.requests[1]!.systemPrompt).not.toContain("{{needed}}");
-    expect(JSON.parse(harness.requests[1]!.input)).toMatchObject({
-      existingCharacters: [{ name: "Mira Vale" }]
+    expect(harness.requests).toHaveLength(4);
+    expect(harness.requests[0]?.systemPrompt).toContain("character_seeds");
+    for (const [index, request] of harness.requests.slice(1).entries()) {
+      const input = JSON.parse(request.input);
+      expect(input.seed.name).toBe(`Character ${index + 1}`);
+      expect(input.world).toMatchObject({
+        title: "The Moving Roads",
+        premise: "Roads rearrange beneath moonlight."
+      });
+      expect(input.otherSeeds).toHaveLength(2);
+      expect(input.acceptedCharacterNames).toEqual(
+        Array.from({ length: index }, (_, accepted) => `Character ${accepted + 1}`)
+      );
+    }
+  });
+
+  it("generates four profiles when the world returns four seeds", async () => {
+    const harness = generationHarness([
+      providerResult(worldDraftResponse(4)),
+      ...[1, 2, 3, 4].map((index) => providerResult(JSON.stringify(character(`Character ${index}`))))
+    ]);
+
+    await expect(harness.run()).resolves.toMatchObject({
+      content: { playableCharacters: expect.arrayContaining([
+        expect.objectContaining({ name: "Character 4" })
+      ]) }
     });
+    expect(harness.requests).toHaveLength(5);
   });
 
   it("does not log provider-controlled generated titles", async () => {
@@ -168,11 +209,8 @@ describe("generateTemplateWorld orchestration", () => {
     const infoLog = vi.spyOn(logger, "info").mockImplementation(() => undefined);
     let logCalls: unknown[][] = [];
     const harness = generationHarness([
-      providerResult(worldResponseWithTitle(marker, [
-        character("Mira Vale"),
-        character("Oren Pike"),
-        character("Sela Moon")
-      ]))
+      providerResult(worldDraftResponseWithTitle(marker)),
+      ...[1, 2, 3].map((index) => providerResult(JSON.stringify(character(`Character ${index}`))))
     ]);
 
     try {
@@ -187,125 +225,103 @@ describe("generateTemplateWorld orchestration", () => {
     expect(JSON.stringify(logCalls)).not.toContain(marker);
   });
 
-  it("discards malformed initial roster entries without requesting full-world recovery", async () => {
-    const retained = character("Mira Vale");
+  it("recovers an invalid world before starting character generation", async () => {
     const harness = generationHarness([
-      providerResult(worldResponse([
-        "primitive roster entry",
-        { ...character("Null Profile"), profile: null },
-        { ...character("Malformed Profile"), profile: { identity: null } },
-        retained
-      ]), "initial-response"),
-      providerResult(JSON.stringify({
-        playable_characters: [character("Oren Pike"), character("Sela Moon")]
-      }), "supplement-response")
+      providerResult('{"title":"partial"', "partial-world", { finishReason: "length", outputLimited: true }),
+      providerResult(worldDraftResponse(3), "recovered-world"),
+      ...[1, 2, 3].map((index) => providerResult(JSON.stringify(character(`Character ${index}`))))
+    ]);
+
+    await harness.run();
+
+    expect(harness.requests[1]).toMatchObject({
+      previousResponseId: "partial-world",
+      rejectedResponse: '{"title":"partial"',
+      recoveryInput: expect.stringContaining("complete replacement")
+    });
+  });
+
+  it("recovers only the failed character seed", async () => {
+    const harness = generationHarness([
+      providerResult(worldDraftResponse(3)),
+      providerResult(JSON.stringify(character("Character 1"))),
+      providerResult('{"id":"seed-2","name":"Character 2"', "partial-character", {
+        finishReason: "length",
+        outputLimited: true
+      }),
+      providerResult(JSON.stringify(character("Character 2")), "recovered-character"),
+      providerResult(JSON.stringify(character("Character 3")))
     ]);
 
     const generated = await harness.run();
 
     expect(generated.content.playableCharacters.map((entry) => entry.name)).toEqual([
-      "Mira Vale",
-      "Oren Pike",
-      "Sela Moon"
+      "Character 1",
+      "Character 2",
+      "Character 3"
     ]);
-    expect(harness.requests).toHaveLength(2);
-    expect(harness.requests[1]).not.toHaveProperty("recoveryInput");
-    expect(harness.requests[1]!.systemPrompt).toContain("exactly 2 complete replacement characters");
-    expect(JSON.parse(harness.requests[1]!.input)).toMatchObject({
-      existingCharacters: [{ name: "Mira Vale" }]
+    expect(harness.requests[3]).toMatchObject({
+      previousResponseId: "partial-character",
+      rejectedResponse: '{"id":"seed-2","name":"Character 2"',
+      recoveryInput: expect.stringContaining("complete replacement")
     });
+    expect(harness.requests).toHaveLength(5);
   });
 
-  it("deduplicates initial names and supplements the exact semantic shortfall", async () => {
+  it("recovers duplicate seeds before character generation", async () => {
     const harness = generationHarness([
-      providerResult(worldResponse([
-        character("Mira Vale"),
-        character("  mira vale  "),
-        character("Oren Pike")
-      ])),
       providerResult(JSON.stringify({
-        playable_characters: [character("Sela Moon")]
-      }))
+        ...JSON.parse(worldDraftResponse(3)),
+        character_seeds: [seed(1), seed(1), seed(3)]
+      })),
+      providerResult(worldDraftResponse(3)),
+      ...[1, 2, 3].map((index) => providerResult(JSON.stringify(character(`Character ${index}`))))
     ]);
 
-    const generated = await harness.run();
-
-    expect(generated.content.playableCharacters.map((entry) => entry.name)).toEqual([
-      "Mira Vale",
-      "Oren Pike",
-      "Sela Moon"
-    ]);
-    expect(harness.requests).toHaveLength(2);
-    expect(harness.requests[1]!.systemPrompt).toContain("exactly 1 complete replacement character");
-    expect(JSON.parse(harness.requests[1]!.input)).toMatchObject({
-      existingCharacters: [{ name: "Mira Vale" }, { name: "Oren Pike" }]
-    });
+    await expect(harness.run()).resolves.toBeDefined();
+    expect(harness.requests).toHaveLength(5);
   });
 
-  it("rejects a supplement character that duplicates a retained name", async () => {
+  it("returns a typed safe 502 when a character remains incomplete after recovery", async () => {
     const harness = generationHarness([
-      providerResult(worldResponse([character("Mira Vale"), character("Oren Pike")])),
-      providerResult(JSON.stringify({
-        playable_characters: [character("  MIRA VALE  ")]
-      }))
+      providerResult(worldDraftResponse(3)),
+      providerResult(JSON.stringify(character("Character 1"))),
+      providerResult('{"name":"Character 2"}', "invalid-2"),
+      providerResult('{"name":"Character 2"}', "invalid-2-recovery")
     ]);
 
     await expect(harness.run()).rejects.toMatchObject({
       statusCode: 502,
       expose: true,
       details: {
-        code: "incomplete_generated_world",
-        issues: [expect.objectContaining({ path: "playableCharacters.2.name" })]
+        code: "incomplete_generated_character",
+        characterIndex: 1,
+        seedName: "Character 2"
       }
     });
-    expect(harness.requests).toHaveLength(2);
+    expect(harness.requests).toHaveLength(4);
   });
 
-  it("rejects supplement characters that duplicate each other", async () => {
+  it("reports sequential character and recovery progress", async () => {
     const harness = generationHarness([
-      providerResult(worldResponse([character("Mira Vale")])),
-      providerResult(JSON.stringify({
-        playable_characters: [character("Oren Pike"), character("  oren pike  ")]
-      }))
+      providerResult(worldDraftResponse(3)),
+      providerResult(JSON.stringify(character("Character 1"))),
+      providerResult('{"name":"Character 2"}', "invalid-2"),
+      providerResult(JSON.stringify(character("Character 2"))),
+      providerResult(JSON.stringify(character("Character 3")))
     ]);
 
-    await expect(harness.run()).rejects.toMatchObject({
-      statusCode: 502,
-      expose: true,
-      details: {
-        code: "incomplete_generated_world",
-        issues: [expect.objectContaining({ path: "playableCharacters.2.name" })]
-      }
-    });
-    expect(harness.requests).toHaveLength(2);
-  });
+    await harness.run();
 
-  it("returns a typed safe 502 when the supplement is malformed", async () => {
-    const harness = generationHarness([
-      providerResult(worldResponse([character("Mira Vale")])),
-      providerResult("{\"playable_characters\":[")
-    ]);
-
-    await expect(harness.run()).rejects.toMatchObject({
-      statusCode: 502,
-      expose: true,
-      details: { code: "incomplete_generated_world" }
-    });
-    expect(harness.requests).toHaveLength(2);
-  });
-
-  it("returns a typed safe 502 when the supplement count does not match needed", async () => {
-    const harness = generationHarness([
-      providerResult(worldResponse([character("Mira Vale")])),
-      providerResult(JSON.stringify({ playable_characters: [] }))
-    ]);
-
-    await expect(harness.run()).rejects.toMatchObject({
-      statusCode: 502,
-      expose: true,
-      details: { code: "incomplete_generated_world" }
-    });
-    expect(harness.requests).toHaveLength(2);
+    expect(harness.progressUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ phase: "generating_world" }),
+      expect.objectContaining({ phase: "generating_character", message: expect.stringContaining("1 of 3") }),
+      expect.objectContaining({ phase: "generating_character", message: expect.stringContaining("2 of 3") }),
+      expect.objectContaining({ phase: "generating_character", message: expect.stringContaining("3 of 3") }),
+      expect.objectContaining({ phase: "recovering_character" }),
+      expect.objectContaining({ phase: "formatting" }),
+      expect.objectContaining({ phase: "completed", percent: 100 })
+    ]));
   });
 
   it("replaces provider HTTP failures with a safe categorized error", async () => {
@@ -446,64 +462,16 @@ describe("generateTemplateWorld orchestration", () => {
     expect(harness.requests).toHaveLength(1);
   });
 
-  it("caps a provider roster at four complete characters", async () => {
-    const harness = generationHarness([
-      providerResult(worldResponse([
-        character("Mira Vale"),
-        character("Oren Pike"),
-        character("Sela Moon"),
-        character("Tarin Reed"),
-        character("Veya North")
-      ]))
-    ]);
-
-    const generated = await harness.run();
-
-    expect(generated.content.playableCharacters.map((entry) => entry.name)).toEqual([
-      "Mira Vale",
-      "Oren Pike",
-      "Sela Moon",
-      "Tarin Reed"
-    ]);
-    expect(harness.requests).toHaveLength(1);
-  });
-
-  it("uses complete provider replacements without fabricating fallback characters", async () => {
-    const harness = generationHarness([
-      providerResult(worldResponse([
-        { id: "empty-guidance", name: "Incomplete", character_text: "", profile: profile() }
-      ])),
-      providerResult(JSON.stringify({
-        playable_characters: [
-          character("Mira Vale"),
-          character("Oren Pike"),
-          character("Sela Moon")
-        ]
-      }))
-    ]);
-
-    const generated = await harness.run();
-    const names = generated.content.playableCharacters.map((entry) => entry.name);
-
-    expect(names).toEqual(["Mira Vale", "Oren Pike", "Sela Moon"]);
-    expect(names.some((name) => name.startsWith("Character Option"))).toBe(false);
-    expect(harness.requests).toHaveLength(2);
-  });
-
   it("logs validation metadata from the response that produced each failing stage", async () => {
     const malformedInitial = generationHarness([
       providerResult("{", "initial-response"),
       providerResult("{", "recovery-response")
     ]);
-    const malformedSupplement = generationHarness([
-      providerResult(worldResponse([character("Mira Vale")]), "initial-response"),
-      providerResult("{", "supplement-response")
-    ]);
-    const failingCompletion = generationHarness([
-      providerResult(worldResponse([character("Mira Vale"), character("Oren Pike")]), "initial-response"),
-      providerResult(JSON.stringify({
-        playable_characters: [character("  MIRA VALE  ")]
-      }), "supplement-response")
+    const malformedCharacter = generationHarness([
+      providerResult(worldDraftResponse(3), "initial-response"),
+      providerResult(JSON.stringify(character("Character 1"))),
+      providerResult("{", "character-response"),
+      providerResult("{", "character-recovery-response")
     ]);
     const warnLog = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
     const errorLog = vi.spyOn(logger, "error").mockImplementation(() => undefined);
@@ -513,11 +481,8 @@ describe("generateTemplateWorld orchestration", () => {
       expect(warnLog.mock.calls.at(-1)?.[0]).toMatchObject({ responseId: "initial-response" });
       expect(errorLog.mock.calls.at(-1)?.[0]).toMatchObject({ responseId: "recovery-response" });
 
-      await expect(malformedSupplement.run()).rejects.toMatchObject({ statusCode: 502 });
-      expect(errorLog.mock.calls.at(-1)?.[0]).toMatchObject({ responseId: "supplement-response" });
-
-      await expect(failingCompletion.run()).rejects.toMatchObject({ statusCode: 502 });
-      expect(errorLog.mock.calls.at(-1)?.[0]).toMatchObject({ responseId: "supplement-response" });
+      await expect(malformedCharacter.run()).rejects.toMatchObject({ statusCode: 502 });
+      expect(errorLog.mock.calls.at(-1)?.[0]).toMatchObject({ responseId: "character-recovery-response" });
     } finally {
       warnLog.mockRestore();
       errorLog.mockRestore();
