@@ -580,7 +580,7 @@ export async function previewCampaignArchive(
   const tokenHash = createHash("sha256").update(rawToken, "utf8").digest("hex");
   const expiresAt = new Date(Date.now() + config.archivePreviewTtlSeconds * 1000);
   const preview = { ...responseBase, previewToken: rawToken, expiresAt: expiresAt.toISOString() };
-  const storedPreview = { ...preview, previewToken: undefined };
+  const storedPreview = { ...preview, previewToken: undefined, stagedCompressedBytes: staged.compressedBytes };
   const stagedPath = rootRelativeStagedPath(staged);
   await pool.query(
     `INSERT INTO archive_previews (

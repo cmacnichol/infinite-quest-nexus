@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
@@ -21,7 +19,7 @@ import {
 import { cleanupUnreferencedCreatedPaths, persistArchiveAssets, restoreAssetBindings, type ArchiveIdMap } from "./asset-archive-service.js";
 import { lockOriginalImages, parseDataImage, persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
 import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
-import { ArchiveError, rehydratePersistedStagedArchive, type StagedArchive } from "./archive-io.js";
+import { ArchiveError, rehydratePersistedStagedArchive } from "./archive-io.js";
 import { campaignArchiveApplicationVersion, decodeCampaignArchive, portableWorldContentHash, type DecodedCampaignArchive } from "./campaign-archive-service.js";
 
 export type CampaignArchiveImportResult = {
@@ -110,20 +108,6 @@ function rewriteAssetPointers(value: unknown, assetIds: Map<string, string>): un
 
 function campaignArchiveSourceHash(fingerprint: string, destination: CampaignArchiveDestination): string {
   return sha256(`campaign-archive-v1\0${fingerprint}\0${sha256(canonicalArchiveJson(campaignArchiveDestinationSchema.parse(destination)))}`);
-}
-
-function stagedFromPreview(config: RuntimeConfig, row: ArchivePreviewRow, compressedBytes: number): StagedArchive {
-  const relativePath = row.staged_archive_path.replaceAll("\\", "/");
-  if (!relativePath || relativePath.startsWith("/") || /^[A-Za-z]:/.test(relativePath) || relativePath.split("/").some((part) => !part || part === "." || part === "..")) {
-    throw new ArchiveError("archive-entry-unsafe", "The staged archive path is invalid.");
-  }
-  const root = resolve(config.archiveStorageRoot);
-  const absolutePath = resolve(root, relativePath);
-  const pathFromRoot = relative(root, absolutePath);
-  if (!pathFromRoot || pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot)) {
-    throw new ArchiveError("archive-entry-unsafe", "The staged archive path escaped the archive root.");
-  }
-  return { relativePath, absolutePath, compressedBytes };
 }
 
 async function markArchivePreviewFailed(pool: DatabasePool, previewId: string, error: unknown): Promise<void> {
@@ -1046,8 +1030,10 @@ export async function importCampaignArchive(
     }
     const expectedDestinationHash = sha256(`campaign-archive-destination-v1\0${canonicalArchiveJson(parsed.destination)}`);
     if (expectedDestinationHash !== preview.destination_hash) throw new ArchiveError("archive-preview-stale", "The destination changed after preview.");
-    const stagedPath = stagedFromPreview(config, preview, 0);
-    const compressedBytes = (await stat(stagedPath.absolutePath)).size;
+    const compressedBytes = preview.preview.stagedCompressedBytes;
+    if (typeof compressedBytes !== "number" || !Number.isSafeInteger(compressedBytes) || compressedBytes < 0) {
+      throw new ArchiveError("archive-preview-stale", "The archive preview is missing its staged compressed size.");
+    }
     const staged = await rehydratePersistedStagedArchive({
       archiveRoot: config.archiveStorageRoot,
       relativePath: preview.staged_archive_path,

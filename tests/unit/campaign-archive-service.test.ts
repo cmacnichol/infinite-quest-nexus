@@ -5,8 +5,10 @@ import { dirname, join } from "node:path";
 import { once } from "node:events";
 import { ZipArchive } from "archiver";
 import { afterEach, describe, expect, it } from "vitest";
+import type { RuntimeConfig } from "../../packages/database/src/config.js";
+import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { stageArchiveUpload, type ArchiveLimits } from "../../services/api/src/archive-io.js";
-import { adaptLegacyCampaignZip, decodeCampaignArchive, portableWorldContentHash } from "../../services/api/src/campaign-archive-service.js";
+import { adaptLegacyCampaignZip, decodeCampaignArchive, portableWorldContentHash, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
 
 const temporaryRoots: string[] = [];
 const limits: ArchiveLimits = {
@@ -41,6 +43,38 @@ async function writeLegacyZip(path: string, entries: readonly { name: string; co
 }
 
 describe("legacy campaign ZIP adaptation", () => {
+  it("persists the preview-time staged compressed size for commit rehydration", async () => {
+    const root = await temporaryRoot();
+    const path = join(root, "persisted-size.zip");
+    await writeLegacyZip(path, [{
+      name: "campaign.json",
+      content: JSON.stringify({ world: { schemaVersion: 4, world: { title: "Persisted size" } }, turns: [] })
+    }]);
+    const staged = await stageArchiveUpload(createReadStream(path), root, limits);
+    const queries: Array<{ text: string; values: readonly unknown[] }> = [];
+    const pool = {
+      query: async (text: string, values: readonly unknown[] = []) => {
+        queries.push({ text, values });
+        if (text.includes("FROM users")) {
+          return { rows: [{ id: "00000000-0000-4000-8000-000000000001" }] };
+        }
+        return { rows: [] };
+      }
+    } as unknown as DatabasePool;
+    const config = {
+      archiveStorageRoot: root,
+      archivePreviewTtlSeconds: 1_800,
+      campaignArchiveLimits: limits
+    } as RuntimeConfig;
+
+    await previewCampaignArchive(pool, config, staged, "persisted-size.zip", { kind: "embedded" });
+
+    const insert = queries.find((query) => query.text.includes("INSERT INTO archive_previews"));
+    expect(JSON.parse(String(insert?.values[7]))).toMatchObject({
+      stagedCompressedBytes: staged.compressedBytes
+    });
+  });
+
   it("hashes destination world content through the export-compatible secret sanitization path", () => {
     const portableWorld = {
       schemaVersion: 4,

@@ -631,6 +631,23 @@ describe("bounded manifest and entry verification", () => {
     }
   });
 
+  it("rejects a persisted staged path that escapes the archive root through a junction", async () => {
+    const root = await temporaryRoot();
+    const outside = await temporaryRoot();
+    const outsidePath = join(outside, "escaped.zip");
+    await writeFile(outsidePath, Buffer.from("outside", "utf8"));
+    await symlink(outside, join(root, "staging"), "junction");
+
+    await expectArchiveError(
+      rehydratePersistedStagedArchive({
+        archiveRoot: root,
+        relativePath: "staging/escaped.zip",
+        compressedBytes: 7
+      }),
+      "archive-entry-unsafe"
+    );
+  });
+
   it("rejects persisted staged archives that are not regular files or changed size", async () => {
     const root = await temporaryRoot();
     await mkdir(join(root, "staging"), { recursive: true });
