@@ -259,7 +259,18 @@ integration("generated CYOA world persistence", () => {
     expect(replies).toHaveLength(0);
     expect(providerRequestBodies[1]?.messages?.[0]).toEqual({
       role: "system",
-      content: "You are repairing a generated Story World character roster. Incomplete existing entries are not part of the retained roster. Return JSON only with one object containing a playable_characters array with exactly 3 complete replacement characters. Each replacement must be distinct from retained characters and include id, name, non-empty character_text narrative guidance, profile with identity, story, appearance, and unclassifiedNotes, rpg_statistics, and default_triggers. Leave unknown profile subfields empty, but include the profile object. Keep prose compact enough to close the JSON object."
+      content: `You are repairing a generated Story World character roster. Incomplete existing entries are not part of the retained roster. Return JSON only with one object containing a playable_characters array with exactly 3 complete replacement characters. Each replacement must be distinct from retained characters.
+Every playable character must include:
+- id
+- name
+- character_text; character_text must be non-empty narrative guidance
+- profile with identity, story, appearance, and unclassifiedNotes
+- rpg_statistics
+- default_triggers
+Every character must follow this JSON shape; keep every listed key even when its value is empty:
+{"id":"character-id","name":"Character name","character_text":"non-empty narrative guidance","profile":{"identity":{"aliases":[],"pronouns":""},"story":{"role":"","background":"","personality":"","motivations":"","goals":"","fearsAndConflicts":"","keyRelationships":"","narrativeHooks":"","voiceAndMannerisms":"","otherGuidance":""},"appearance":{"ancestryOrSpecies":"","apparentAge":"","genderPresentation":"","build":"","skinOrComplexion":"","face":"","eyes":"","hair":"","distinguishingFeatures":[],"clothing":"","equipmentAndAccessories":"","otherVisualDetails":""},"unclassifiedNotes":""},"rpg_statistics":[],"default_triggers":[]}
+Type rules are mandatory: profile, identity, story, and appearance must be JSON objects, never strings, arrays, or null. identity.aliases, appearance.distinguishingFeatures, rpg_statistics, and default_triggers must be JSON arrays, never strings, objects, or null. All profile text values must be JSON strings, and array items must use their required object or string shape. rpg_statistics items use {"name":"stat name","value":50,"note":"what it represents"}; value is an integer from 1 through 99. default_triggers items use {"name":"tracker name","value":"initial fictional value","rules":"when and how it changes"}. Use an empty string or empty array when a value is unknown; never omit a required key, use null, or replace an object or array with prose.
+Keep prose compact enough to close the JSON object.`
     });
   }
 
