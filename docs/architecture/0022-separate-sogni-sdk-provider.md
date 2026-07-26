@@ -11,6 +11,8 @@ Infinite Quest Nexus exposes two independent Sogni image-provider types:
 - `sogni` uses durable Creative Workflow REST endpoints, caller-controlled idempotency, and Sogni's mandatory content policy. It does not expose an NSFW-filter override.
 - `sogni_sdk` uses `@sogni-ai/sogni-client` Projects for model-aware controls, live progress, queue position, ETA, and the explicit `disableNSFWFilter` option.
 
+The SDK adapter derives a deterministic `appId` from the provider profile identity and reuses it whenever the SDK session is recreated. It must not generate a new app ID for idle-session expiry, worker restart, or durable-job polling: Sogni limits the number of app IDs accepted from one source address within a UTC day.
+
 Both providers persist the remote generation identifier before releasing the Nexus image-job lease. Once that identifier exists, workers reconcile or cancel the existing provider job and never resubmit it. SDK projects tracked by the submitting process provide live progress. After a worker or replica change, Nexus polls `GET /v1/projects/{id}`; the SDK's processing-time 404 is treated as pending until the durable deadline, after which its terminal record and artifact are recovered.
 
 ## Consequences

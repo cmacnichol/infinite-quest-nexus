@@ -1,5 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
-import { hostname } from "node:os";
+import { createHash } from "node:crypto";
 import { ApiError, SogniClient, type ImageProjectParams, type Project, type RawProject, type SogniClientConfig } from "@sogni-ai/sogni-client";
 import { ProviderDestinationNotAllowedError } from "../../../../../security/src/provider-network-policy.js";
 import type { ImageProviderPollResult, ImageProviderRequest, ImageProviderSubmissionResult, ModelInventoryItem, TextProviderProfile } from "../../../providers.js";
@@ -39,6 +38,12 @@ function sdkBaseUrl(profile: TextProviderProfile): string {
   return profile.baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/i, "");
 }
 
+function sdkAppId(profile: TextProviderProfile): string {
+  const profileIdentity = String((profile as TextProviderProfile & { id?: string }).id || profile.baseUrl).trim();
+  const stableIdentity = createHash("sha256").update(`infinitequest:${profileIdentity}`).digest("hex").slice(0, 32);
+  return `infinitequest-${stableIdentity}`;
+}
+
 async function session(profile: TextProviderProfile): Promise<Session> {
   if (new URL(profile.baseUrl).origin !== SOGNI_SDK_ORIGIN) {
     throw new ProviderDestinationNotAllowedError("url");
@@ -56,7 +61,7 @@ async function session(profile: TextProviderProfile): Promise<Session> {
   let cached = sessions.get(key);
   if (!cached) {
     const pending = createClient({
-      appId: `infinitequest-${hostname()}-${String((profile as TextProviderProfile & { id?: string }).id || "profile").slice(0, 12)}-${randomUUID()}`,
+      appId: sdkAppId(profile),
       appSource: "infinite-quest-nexus",
       apiKey: profile.apiKey.trim(),
       authType: "apiKey",
