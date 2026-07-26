@@ -10,6 +10,11 @@ export type GeneratedWorldIssue = {
   message: string;
 };
 
+const GENERATED_WORLD_ISSUE_LIMIT = 20;
+const GENERATED_WORLD_ISSUE_PATH_LIMIT = 500;
+const GENERATED_WORLD_ISSUE_CODE_LIMIT = 100;
+const GENERATED_WORLD_ISSUE_MESSAGE_LIMIT = 500;
+
 const generatedWorldBaseSchema = worldContentSchema.superRefine((content, context) => {
   const requiredWorldFields = [
     ["title", "Generated title is required."],
@@ -68,11 +73,37 @@ export function parseCompleteGeneratedWorld(content: unknown): WorldContent {
   return generatedWorldContentSchema.parse(content);
 }
 
+export function projectGeneratedWorldIssues(value: unknown): GeneratedWorldIssue[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, GENERATED_WORLD_ISSUE_LIMIT).flatMap((issue) => {
+    if (!issue || typeof issue !== "object") return [];
+    const candidate = issue as Record<string, unknown>;
+    return [{
+      path: typeof candidate.path === "string"
+        ? candidate.path.slice(0, GENERATED_WORLD_ISSUE_PATH_LIMIT)
+        : "",
+      code: typeof candidate.code === "string"
+        ? candidate.code.slice(0, GENERATED_WORLD_ISSUE_CODE_LIMIT)
+        : "custom",
+      message: typeof candidate.message === "string"
+        ? candidate.message.slice(0, GENERATED_WORLD_ISSUE_MESSAGE_LIMIT)
+        : "Generated content is incomplete."
+    }];
+  });
+}
+
 export function generatedWorldIssues(error: unknown): GeneratedWorldIssue[] {
+  if (error instanceof SyntaxError) {
+    return projectGeneratedWorldIssues([{
+      path: "generatedWorld",
+      code: "invalid_json",
+      message: "Generated world JSON is malformed."
+    }]);
+  }
   if (!(error instanceof z.ZodError)) return [];
-  return error.issues.slice(0, 20).map((issue) => ({
+  return projectGeneratedWorldIssues(error.issues.map((issue) => ({
     path: issue.path.map(String).join("."),
     code: issue.code,
     message: issue.message
-  }));
+  })));
 }

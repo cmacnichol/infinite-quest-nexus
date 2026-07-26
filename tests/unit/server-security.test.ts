@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
+import { z } from "zod";
 import { buildServer } from "../../services/api/src/server.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
@@ -218,6 +219,66 @@ describe("API server security and CORS headers", () => {
       }
     });
     expect(response.payload).not.toContain("PRIVATE_PROVIDER_WORLD");
+
+    await app.close();
+  });
+
+  it("exposes an actionable malformed-JSON issue without the parser body", async () => {
+    const marker = "PRIVATE_MALFORMED_PROVIDER_BODY";
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-json-error", async () => {
+      throw incompleteGeneratedWorldError(
+        new SyntaxError(`Unexpected token in ${marker}`)
+      );
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-json-error"
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toMatchObject({
+      details: {
+        code: "incomplete_generated_world",
+        issues: [{
+          path: "generatedWorld",
+          code: "invalid_json",
+          message: "Generated world JSON is malformed."
+        }]
+      }
+    });
+    expect(response.payload).not.toContain(marker);
+
+    await app.close();
+  });
+
+  it("bounds generated-world issue fields before exposing the API envelope", async () => {
+    const marker = "PRIVATE_OVERSIZED_API_ISSUE";
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-oversized-error", async () => {
+      throw incompleteGeneratedWorldError(new z.ZodError([{
+        path: [`world.${"p".repeat(500)}${marker}`],
+        code: `${"c".repeat(100)}${marker}` as "custom",
+        message: `${"m".repeat(500)}${marker}`
+      }]));
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-oversized-error"
+    });
+    const issue = response.json().details.issues[0] as {
+      path: string;
+      code: string;
+      message: string;
+    };
+
+    expect(response.statusCode).toBe(502);
+    expect(issue.path.length).toBeLessThanOrEqual(500);
+    expect(issue.code.length).toBeLessThanOrEqual(100);
+    expect(issue.message.length).toBeLessThanOrEqual(500);
+    expect(response.payload).not.toContain(marker);
 
     await app.close();
   });

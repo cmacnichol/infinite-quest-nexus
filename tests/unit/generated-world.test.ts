@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { describe, expect, it } from "vitest";
 import {
   generatedWorldIssues,
@@ -214,6 +215,48 @@ describe("generated world completion", () => {
     });
     expect(failure.details.issues.some((issue) => issue.path === "world.genre")).toBe(true);
     expect(JSON.stringify(failure.details)).not.toContain("PRIVATE_TITLE");
+  });
+
+  it("reports malformed JSON without exposing the syntax error body", () => {
+    const marker = "PRIVATE_MALFORMED_PROVIDER_BODY";
+    const failure = incompleteGeneratedWorldError(
+      new SyntaxError(`Unexpected token near ${marker}`)
+    ) as Error & {
+      details: {
+        code: string;
+        issues: Array<{ path: string; code: string; message: string }>;
+      };
+    };
+
+    expect(failure.details).toEqual({
+      code: "incomplete_generated_world",
+      issues: [{
+        path: "generatedWorld",
+        code: "invalid_json",
+        message: "Generated world JSON is malformed."
+      }]
+    });
+    expect(JSON.stringify(failure)).not.toContain(marker);
+  });
+
+  it("bounds every issue field before attaching public error details", () => {
+    const marker = "PRIVATE_OVERSIZED_ISSUE";
+    const validationError = new z.ZodError([{
+      path: [`world.${"p".repeat(500)}${marker}`],
+      code: `${"c".repeat(100)}${marker}` as "custom",
+      message: `${"m".repeat(500)}${marker}`
+    }]);
+    const failure = incompleteGeneratedWorldError(validationError) as Error & {
+      details: {
+        issues: Array<{ path: string; code: string; message: string }>;
+      };
+    };
+
+    const issue = failure.details.issues[0]!;
+    expect(issue.path.length).toBeLessThanOrEqual(500);
+    expect(issue.code.length).toBeLessThanOrEqual(100);
+    expect(issue.message.length).toBeLessThanOrEqual(500);
+    expect(JSON.stringify(failure.details)).not.toContain(marker);
   });
 
   it("formats at most four safe validation issues for durable progress", () => {

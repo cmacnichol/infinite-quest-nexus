@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 import { logger } from "../../packages/logger/src/index.js";
 import {
@@ -8,6 +9,7 @@ import {
 import {
   generateTemplateWorld,
   generateWorldPreview,
+  incompleteGeneratedWorldError,
   type TemplateWorldGenerationDependencies,
   type WorldGenerationPreviewDependencies,
   worldGenerationFailureDiagnostic
@@ -264,6 +266,49 @@ describe("generateTemplateWorld orchestration", () => {
 });
 
 describe("generateWorldPreview provider failures", () => {
+  it("logs only bounded projected generated-world issue fields", async () => {
+    const marker = "PRIVATE_OVERSIZED_LOG_ISSUE";
+    const generatedError = incompleteGeneratedWorldError(new z.ZodError([{
+      path: [`world.${"p".repeat(500)}${marker}`],
+      code: `${"c".repeat(100)}${marker}` as "custom",
+      message: `${"m".repeat(500)}${marker}`
+    }]));
+    const dependencies = {
+      initialOwnerId: async () => "owner-id",
+      resolveEffectiveProviderId: async () => "provider-id",
+      createWorldGenerationProgress: async () => undefined,
+      updateWorldGenerationProgress: async () => undefined,
+      generateTemplateWorld: async () => {
+        throw generatedError;
+      }
+    } as unknown as WorldGenerationPreviewDependencies;
+    const errorLog = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    let errorLogCalls: unknown[][] = [];
+
+    try {
+      await generateWorldPreview(
+        {} as never,
+        { title: "The Moving Roads", prompt: "Moving roads.", progressKey: "world-gen:test" },
+        "credential-secret",
+        dependencies
+      );
+    } catch {
+      // Expected failure.
+    } finally {
+      errorLogCalls = [...errorLog.mock.calls];
+      errorLog.mockRestore();
+    }
+
+    const logFields = errorLogCalls.at(-1)?.[0] as {
+      issues: Array<{ path: string; code: string; message: string }>;
+    };
+    const issue = logFields.issues[0]!;
+    expect(issue.path.length).toBeLessThanOrEqual(500);
+    expect(issue.code.length).toBeLessThanOrEqual(100);
+    expect(issue.message.length).toBeLessThanOrEqual(500);
+    expect(JSON.stringify(logFields)).not.toContain(marker);
+  });
+
   it("keeps transport diagnostics distinct without exposing transport causes", () => {
     const privateMarker = "PRIVATE_TRANSPORT_CAUSE";
     const error = new ProviderTransportError(

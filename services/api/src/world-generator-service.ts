@@ -21,7 +21,8 @@ import {
 } from "../../../packages/domain/src/character-authoring.js";
 import {
   generatedWorldIssues,
-  parseCompleteGeneratedWorld
+  parseCompleteGeneratedWorld,
+  projectGeneratedWorldIssues
 } from "../../../packages/domain/src/generated-world.js";
 import { buildTemplateWorldPrompt, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
 import { callTextProvider, extractJsonObject } from "../../../packages/story-engine/src/index.js";
@@ -185,21 +186,6 @@ export type WorldGenerationFailureDiagnostic = {
   issues?: ReturnType<typeof generatedWorldIssues>;
 };
 
-function projectedGeneratedWorldIssues(value: unknown): ReturnType<typeof generatedWorldIssues> {
-  if (!Array.isArray(value)) return [];
-  return value.slice(0, 20).flatMap((issue) => {
-    if (!issue || typeof issue !== "object") return [];
-    const candidate = issue as Record<string, unknown>;
-    return [{
-      path: typeof candidate.path === "string" ? candidate.path.slice(0, 500) : "",
-      code: typeof candidate.code === "string" ? candidate.code.slice(0, 100) : "custom",
-      message: typeof candidate.message === "string"
-        ? candidate.message.slice(0, 500)
-        : "Generated content is incomplete."
-    }];
-  });
-}
-
 export function worldGenerationFailureDiagnostic(error: unknown): WorldGenerationFailureDiagnostic {
   const failure = error && typeof error === "object" ? error as Record<string, unknown> : {};
   const rawStatusCode = Number(failure.statusCode);
@@ -211,7 +197,7 @@ export function worldGenerationFailureDiagnostic(error: unknown): WorldGeneratio
     : {};
   const detailsCode = details.code;
   if (detailsCode === "incomplete_generated_world") {
-    const issues = projectedGeneratedWorldIssues(details.issues);
+    const issues = projectGeneratedWorldIssues(details.issues);
     const issueSummary = issues
       .slice(0, 4)
       .map((issue) => `${issue.path || "generated world"}: ${issue.message}`)
