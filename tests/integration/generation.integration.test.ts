@@ -12,12 +12,18 @@ import { branchCampaign, enqueueGeneration, enqueueLatestReplacement, getGenerat
 import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/api/src/memory-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
+import { createProviderNetworkPolicy } from "../../packages/security/src/provider-network-policy.js";
+import { configureDefaultProviderTransport, createProviderTransport } from "../../packages/story-engine/src/provider-transport.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "integration-test-credential-secret";
 
-type MockReply = { content: string; finishReason?: string };
+type MockReply = {
+  content: string;
+  finishReason?: string;
+  streamChunks?: string[];
+};
 
 function validStory(narration = "Location Gamma opens and Marker Three becomes visible."): string {
   return JSON.stringify({
@@ -37,6 +43,7 @@ function validStory(narration = "Location Gamma opens and Marker Three becomes v
 integration("durable Story Engine integration", () => {
   let pool: DatabasePool;
   let server: Server;
+  let providerTransport: ReturnType<typeof createProviderTransport>;
   let baseUrl = "";
   let providerId = "";
   const replies: MockReply[] = [];
@@ -45,13 +52,36 @@ integration("durable Story Engine integration", () => {
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
     await migrateDatabase(pool, resolve("database/migrations"));
+    providerTransport = createProviderTransport({
+      policy: createProviderNetworkPolicy({ allowlist: ["127.0.0.0/8"] })
+    });
+    configureDefaultProviderTransport(providerTransport);
     server = createServer((request, response) => {
       let body = "";
       request.setEncoding("utf8");
       request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
-        requests.push(JSON.parse(body || "{}"));
+        const providerRequest = JSON.parse(body || "{}");
+        requests.push(providerRequest);
         const reply = replies.shift() || { content: validStory() };
+        if (providerRequest.stream === true && reply.streamChunks) {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          for (const chunk of reply.streamChunks) {
+            response.write(`data: ${JSON.stringify({
+              id: crypto.randomUUID(),
+              model: "deterministic-mock",
+              choices: [{ delta: { content: chunk }, finish_reason: null }]
+            })}\n\n`);
+          }
+          response.write(`data: ${JSON.stringify({
+            id: crypto.randomUUID(),
+            model: "deterministic-mock",
+            choices: [{ delta: {}, finish_reason: reply.finishReason || "stop" }],
+            usage: { prompt_tokens: 700, completion_tokens: 220, total_tokens: 920 }
+          })}\n\n`);
+          response.end("data: [DONE]\n\n");
+          return;
+        }
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({
           id: crypto.randomUUID(),
@@ -82,6 +112,7 @@ integration("durable Story Engine integration", () => {
 
   afterAll(async () => {
     if (server) await new Promise<void>((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
+    await providerTransport?.close();
     await pool.end();
   });
 
@@ -881,6 +912,33 @@ integration("durable Story Engine integration", () => {
     expect(recoveryMessages.at(-1)?.content).toContain('"rolls a 17"');
   });
 
+  it("streams only the initial story request when validation starts an internal recovery", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaign_memory_configs SET embedding_enabled = false WHERE campaign_id = $1", [imported.campaignId]);
+    const streamedDraft = validStory("Private streamed marker: she rolls a 17 and opens Location Gamma.");
+    const acceptedStory = validStory("Her practiced touch opens Location Gamma.");
+    const requestOffset = requests.length;
+    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+    try {
+      replies.push(
+        { content: streamedDraft, streamChunks: [streamedDraft] },
+        { content: acceptedStory }
+      );
+      const job = await queue(imported.campaignId);
+      await runGenerationJob(pool, "story-worker-streamed-recovery", 30, credentialSecret);
+
+      const turnRequests = requests.slice(requestOffset).filter((request) => Array.isArray(request.messages));
+      expect(turnRequests).toHaveLength(2);
+      expect(turnRequests[0]?.stream).toBe(true);
+      expect(turnRequests[1]?.stream).not.toBe(true);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+      const turn = await pool.query<{ narration: string }>("SELECT narration FROM turns WHERE campaign_id = $1 AND turn_number = 3", [imported.campaignId]);
+      expect(turn.rows[0]?.narration).toBe("Her practiced touch opens Location Gamma.");
+    } finally {
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+    }
+  });
+
   it("accepts ordinary loading-dock language without invoking recovery", async () => {
     const imported = await campaign();
     const requestCount = requests.length;
@@ -902,6 +960,42 @@ integration("durable Story Engine integration", () => {
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "recoverable", errorCode: "output_limit" });
     const campaignRow = await pool.query<{ active_turn_number: number }>("SELECT active_turn_number FROM campaigns WHERE id = $1", [imported.campaignId]);
     expect(campaignRow.rows[0]?.active_turn_number).toBe(2);
+  });
+
+  it("retains the first streamed preview and buffers later durable attempts", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaign_memory_configs SET embedding_enabled = false WHERE campaign_id = $1", [imported.campaignId]);
+    const streamedDraft = validStory("First visible streamed draft: she rolls a 17 and opens Location Gamma.");
+    const hiddenRepairDraft = '{"narration":"Hidden repair draft';
+    const acceptedStory = validStory("The third response becomes the accepted story.");
+    const requestOffset = requests.length;
+    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+    try {
+      replies.push(
+        { content: streamedDraft, streamChunks: [streamedDraft] },
+        { content: hiddenRepairDraft }
+      );
+      const job = await queue(imported.campaignId);
+      await runGenerationJob(pool, "story-worker-preview-a", 30, credentialSecret);
+
+      const recoverable = await getGenerationJob(pool, job.id);
+      expect(recoverable).toMatchObject({ status: "recoverable" });
+      expect(recoverable.partialOutput).toContain("First visible streamed draft");
+      expect(recoverable.partialOutput).not.toContain("Hidden repair draft");
+
+      await retryGeneration(pool, job.id);
+      replies.push({ content: acceptedStory });
+      await runGenerationJob(pool, "story-worker-preview-b", 30, credentialSecret);
+
+      const turnRequests = requests.slice(requestOffset).filter((request) => Array.isArray(request.messages));
+      expect(turnRequests).toHaveLength(3);
+      expect(turnRequests[2]?.stream).not.toBe(true);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+      const turn = await pool.query<{ narration: string }>("SELECT narration FROM turns WHERE campaign_id = $1 AND turn_number = 3", [imported.campaignId]);
+      expect(turn.rows[0]?.narration).toBe("The third response becomes the accepted story.");
+    } finally {
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+    }
   });
 
   it("reuses the persisted private roll when a recoverable story job is retried", async () => {

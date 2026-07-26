@@ -1595,9 +1595,18 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
         }
       }
     };
-    const supportsStreaming = Boolean(provider.configuration && (provider.configuration.streaming === true || provider.configuration.streamingSupport === true));
-    const baseRequest = { systemPrompt: storySystemPrompt, input: storyInput, ...(supportsStreaming ? { onChunk } : {}) };
-    let result = await callCampaignTextProvider(pool, provider, job, "story_generation", baseRequest);
+    const supportsStreaming = Boolean(
+      provider.configuration
+      && (provider.configuration.streaming === true || provider.configuration.streamingSupport === true)
+    );
+    const baseRequest = {
+      systemPrompt: storySystemPrompt,
+      input: storyInput
+    };
+    const primaryRequest = supportsStreaming && job.attempts === 1
+      ? { ...baseRequest, onChunk }
+      : baseRequest;
+    let result = await callCampaignTextProvider(pool, provider, job, "story_generation", primaryRequest);
     let parsed = parseStoryOutput(result.content, storyMemoryDefaults);
     const firstReason = result.outputLimited ? "output_limit" : (!parsed.ok ? parsed.code : null);
     const initialValidationErrors = parsed.ok ? [] : parsed.errors;
@@ -1639,11 +1648,11 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
       const messages = result.outputLimited ? ["The provider stopped before a complete story object was available."] : validationFailure?.errors || ["Story validation failed."];
       const recoverable = await pool.query(
         `UPDATE generation_jobs SET status = 'recoverable', provider_response_id = $3, provider_finish_reason = $4,
-           partial_output = $5, error_code = $6, error_message = $7, recovery_metadata = recovery_metadata || $8::jsonb,
+           error_code = $5, error_message = $6, recovery_metadata = recovery_metadata || $7::jsonb,
            lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-         WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $9
+         WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $8
          RETURNING id`,
-        [job.id, job.owner_user_id, result.responseId || null, result.finishReason || null, result.content || null, code,
+        [job.id, job.owner_user_id, result.responseId || null, result.finishReason || null, code,
           messages.join(" ").slice(0, 4000), json({ retryable: true, attemptCount: firstReason ? 2 : 1 }), workerId]
       );
       if (!recoverable.rows[0]) throw Object.assign(new Error("Generation lease was lost before recovery state could be saved."), { code: "lease_lost" });
@@ -1688,10 +1697,10 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
             : ["The required scene beats could not be verified after one rewrite."];
           await pool.query(
             `UPDATE generation_jobs SET status = 'recoverable', provider_response_id = $3, provider_finish_reason = $4,
-               partial_output = $5, error_code = 'scene_coverage', error_message = $6,
-               recovery_metadata = recovery_metadata || $7::jsonb, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $8`,
-            [job.id, job.owner_user_id, result.responseId || null, result.finishReason || null, result.content || null,
+               error_code = 'scene_coverage', error_message = $5,
+               recovery_metadata = recovery_metadata || $6::jsonb, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $7`,
+            [job.id, job.owner_user_id, result.responseId || null, result.finishReason || null,
               details.join(" ").slice(0, 4000), json({ retryable: true, sceneCoverageRewriteAttempted: true }), workerId]
           );
           return true;
