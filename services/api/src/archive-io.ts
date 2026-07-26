@@ -1092,7 +1092,6 @@ export async function writeArchiveArtifact(
   let handle: FileHandle | undefined;
   let identity: FileIdentity | undefined;
   let output: Writable | undefined;
-  let compressed: CompressedByteCounter | undefined;
   let outputCompleted: Promise<void> | undefined;
   let archive: Archiver | undefined;
   let published = false;
@@ -1107,13 +1106,7 @@ export async function writeArchiveArtifact(
     archive = new ZipArchive({ forceLocalTime: false, zlib: { level: 9 } });
     archive.on("warning", (error) => output?.destroy(error));
     archive.on("error", (error) => output?.destroy(error));
-    if (limits) {
-      compressed = new CompressedByteCounter(limits.maxCompressedBytes);
-      compressed.on("error", (error) => output?.destroy(error));
-      archive.pipe(compressed).pipe(output);
-    } else {
-      archive.pipe(output);
-    }
+    archive.pipe(output);
 
     const measuredEntries: ArchiveEntry[] = [];
     let uncompressedBytes = 0;
@@ -1164,6 +1157,9 @@ export async function writeArchiveArtifact(
     await outputCompleted;
     await handle.sync();
     identity = fileIdentity(await handle.stat({ bigint: true }));
+    if (limits && identity.size > BigInt(limits.maxCompressedBytes)) {
+      throw archiveError("archive-limit-exceeded", "The compressed archive exceeds the configured byte limit.");
+    }
     if (limits) {
       const directory = await openArchiveFromHandle(handle, Number(identity.size), limits);
       inspectCentralDirectory(directory.files, limits);
@@ -1204,7 +1200,7 @@ export async function writeArchiveArtifact(
       ).catch(() => undefined);
     }
     await closeHandle(handle);
-    if (error instanceof ArchiveError) throw error;
+    if (error instanceof ArchiveError && error.code === "archive-limit-exceeded") throw error;
     throw archiveError("archive-export-inconsistent", "The archive artifact could not be completed.");
   } finally {
     await closeHandle(stable.anchor);
