@@ -1,14 +1,15 @@
 import { createReadStream } from "node:fs";
 import { basename } from "node:path";
+import type { Readable } from "node:stream";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { campaignArchiveCommitRequestSchema, campaignArchiveDestinationSchema, type CampaignArchiveDestination } from "../../../packages/contracts/src/archives.js";
 import { storyImportRequestSchema } from "../../../packages/contracts/src/imports.js";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import { adaptLegacyCampaignZip, exportCampaign, previewCampaignArchive } from "./campaign-archive-service.js";
+import { exportCampaign, previewCampaignArchive } from "./campaign-archive-service.js";
 import { ArchiveError, inspectArchiveContainer, readVerifiedContainerEntry, removeArchivePath, stageArchiveUpload, type ArchiveLimits, type StagedArchive } from "./archive-io.js";
 import { type FilesystemAssetStore } from "./asset-service.js";
-import { importCampaignArchive, importLegacyStory } from "./import-service.js";
+import { importCampaignArchive, importLegacyStory, type LegacyAssetSource } from "./import-service.js";
 
 export type ArchiveRouteOptions = {
   pool: DatabasePool;
@@ -21,6 +22,17 @@ type CampaignArchiveUpload = {
   sourceName: string;
   destination: CampaignArchiveDestination;
 };
+
+type CloseEmitter = {
+  once(event: "close", listener: () => void): unknown;
+};
+
+type CleanupLogger = {
+  warn(bindings: Record<string, unknown>, message: string): void;
+};
+
+const EXPORT_CLEANUP_ATTEMPTS = 3;
+const EXPORT_CLEANUP_RETRY_MS = 25;
 
 function archiveUploadError(message: string): ArchiveError {
   return new ArchiveError("archive-format-unrecognized", message);
@@ -51,6 +63,63 @@ function legacyArchiveLimits(config: RuntimeConfig): ArchiveLimits {
     maxCompressedBytes: Math.min(config.campaignArchiveLimits.maxCompressedBytes, config.security.apiImportBodyLimitBytes),
     maxOriginalImageBytes: Math.min(config.campaignArchiveLimits.maxOriginalImageBytes, config.security.apiAssetBodyLimitBytes)
   };
+}
+
+export function createLegacyArchiveAssetSource(
+  entryPaths: Iterable<string>,
+  readAsset: (entryPath: string) => Promise<Buffer>
+): LegacyAssetSource {
+  const entryPathByAssetId = new Map<string, string>();
+  for (const entryPath of entryPaths) {
+    const assetId = basename(entryPath).split(".")[0];
+    if (assetId) entryPathByAssetId.set(assetId, entryPath);
+  }
+  return {
+    assetIds: () => entryPathByAssetId.keys(),
+    read: async (assetId) => {
+      const entryPath = entryPathByAssetId.get(assetId);
+      return entryPath ? readAsset(entryPath) : undefined;
+    }
+  };
+}
+
+function cleanupErrorCode(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code.length <= 80 ? code : "cleanup-failed";
+}
+
+async function cleanupExportArtifact(cleanup: () => Promise<void>, logger?: CleanupLogger): Promise<void> {
+  for (let attempt = 1; attempt <= EXPORT_CLEANUP_ATTEMPTS; attempt += 1) {
+    try {
+      await cleanup();
+      return;
+    } catch (error) {
+      logger?.warn(
+        { attempt, maxAttempts: EXPORT_CLEANUP_ATTEMPTS, errorCode: cleanupErrorCode(error) },
+        "campaign export artifact cleanup failed"
+      );
+      if (attempt < EXPORT_CLEANUP_ATTEMPTS) {
+        await new Promise<void>((resolve) => setTimeout(resolve, attempt * EXPORT_CLEANUP_RETRY_MS));
+      }
+    }
+  }
+}
+
+export function bindExportArtifactCleanup(
+  stream: Readable,
+  response: CloseEmitter,
+  cleanup: () => Promise<void>,
+  logger?: CleanupLogger
+): void {
+  let cleanupStarted = false;
+  stream.once("close", () => {
+    if (cleanupStarted) return;
+    cleanupStarted = true;
+    void cleanupExportArtifact(cleanup, logger);
+  });
+  response.once("close", () => {
+    if (!stream.destroyed) stream.destroy();
+  });
 }
 
 async function receiveCampaignArchive(request: FastifyRequest, config: RuntimeConfig): Promise<CampaignArchiveUpload> {
@@ -94,7 +163,7 @@ async function legacyMultipartImport(request: FastifyRequest, options: ArchiveRo
   const limits = legacyArchiveLimits(options.config);
   let body: unknown;
   let staged: StagedArchive | undefined;
-  let assetBuffers = new Map<string, Buffer>();
+  let legacyAssets: LegacyAssetSource | undefined;
   let fileCount = 0;
   let overridesCount = 0;
   try {
@@ -119,11 +188,12 @@ async function legacyMultipartImport(request: FastifyRequest, options: ArchiveRo
         const campaignEntry = campaignEntries[0];
         if (campaignEntries.length !== 1 || !campaignEntry) throw archiveUploadError("The legacy ZIP does not contain a campaign JSON payload.");
         body = parseJsonField((await readVerifiedContainerEntry(container, campaignEntry.path, limits.maxJsonEntryBytes)).toString("utf8"), "campaign JSON");
-        assetBuffers = new Map(await Promise.all(
+        legacyAssets = createLegacyArchiveAssetSource(
           [...container.entries.values()]
             .filter((entry) => entry.path.startsWith("assets/") && !entry.path.endsWith("/"))
-            .map(async (entry) => [basename(entry.path).split(".")[0]!, await readVerifiedContainerEntry(container, entry.path, limits.maxOriginalImageBytes)] as const)
-        ));
+            .map((entry) => entry.path),
+          (entryPath) => readVerifiedContainerEntry(container, entryPath, limits.maxOriginalImageBytes)
+        );
         continue;
       }
       overridesCount += 1;
@@ -135,7 +205,7 @@ async function legacyMultipartImport(request: FastifyRequest, options: ArchiveRo
       body = body && typeof body === "object" && !Array.isArray(body) ? { ...(body as Record<string, unknown>), ...(overrides as Record<string, unknown>) } : overrides;
     }
     if (!body) throw archiveUploadError("Multipart request missing required file or requestOverrides.");
-    return importLegacyStory(options.pool, storyImportRequestSchema.parse(body), options.assetStore, assetBuffers);
+    return importLegacyStory(options.pool, storyImportRequestSchema.parse(body), options.assetStore, legacyAssets);
   } finally {
     if (staged) await removeArchivePath(options.config.archiveStorageRoot, staged.relativePath).catch(() => undefined);
   }
@@ -148,20 +218,19 @@ export async function registerArchiveRoutes(app: FastifyInstance, options: Archi
       archiveRoot: options.config.archiveStorageRoot,
       limits: options.config.campaignArchiveLimits
     });
-    let cleaned = false;
-    const cleanup = () => {
-      if (cleaned) return;
-      cleaned = true;
-      void removeArchivePath(options.config.archiveStorageRoot, archive.relativePath).catch(() => undefined);
-    };
-    reply.raw.once("finish", cleanup);
-    reply.raw.once("close", cleanup);
+    const stream = createReadStream(archive.absolutePath);
+    bindExportArtifactCleanup(
+      stream,
+      reply.raw,
+      () => removeArchivePath(options.config.archiveStorageRoot, archive.relativePath),
+      app.log
+    );
     return reply
       .header("Content-Type", "application/zip")
       .header("Content-Disposition", 'attachment; filename="infinite-quest-campaign.zip"')
       .header("Cache-Control", "no-store")
       .header("X-Content-Type-Options", "nosniff")
-      .send(createReadStream(archive.absolutePath));
+      .send(stream);
   });
 
   app.post("/api/v1/imports/campaign-archive/preview", async (request) => {

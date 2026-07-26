@@ -33,6 +33,21 @@ export type CampaignArchiveImportResult = {
   stats: { turnCount: number; memoryCount: number; summaryCount: number; assetCount: number; assetBytes: number };
 };
 
+export type LegacyAssetSource = {
+  assetIds(): Iterable<string>;
+  read(assetId: string): Promise<Buffer | undefined>;
+};
+
+type LegacyAssets = Map<string, Buffer> | LegacyAssetSource;
+
+function legacyAssetIds(assets: LegacyAssets): Iterable<string> {
+  return assets instanceof Map ? assets.keys() : assets.assetIds();
+}
+
+async function readLegacyAsset(assets: LegacyAssets, assetId: string): Promise<Buffer | undefined> {
+  return assets instanceof Map ? assets.get(assetId) : assets.read(assetId);
+}
+
 type ArchivePreviewRow = {
   id: string;
   owner_user_id: string;
@@ -415,7 +430,7 @@ export async function importLegacyStory(
   pool: DatabasePool,
   request: StoryImportRequest,
   assetStore?: FilesystemAssetStore,
-  assetBuffers?: Map<string, Buffer>
+  legacyAssets?: LegacyAssets
 ): Promise<StoryImportResult> {
   const sourceHash = importSourceHash(request);
 
@@ -543,26 +558,31 @@ export async function importLegacyStory(
 
 
     if (assetStore) {
-      const imagesToLock: Array<{ bytes: Buffer; mimeType: string }> = [
-        ...(assetBuffers ? [...assetBuffers.values()].map((bytes) => ({ bytes, mimeType: "image/png" })) : [])
-      ];
-      for (const turn of request.story.turns) {
-        if (turn.imageUrl?.startsWith("data:image/")) {
+      async function* originalImages() {
+        if (legacyAssets) {
+          for (const assetId of legacyAssetIds(legacyAssets)) {
+            const bytes = await readLegacyAsset(legacyAssets, assetId);
+            if (bytes) yield { bytes, mimeType: "image/png" };
+          }
+        }
+        for (const turn of request.story.turns) {
+          if (!turn.imageUrl?.startsWith("data:image/")) continue;
           const parsed = parseDataImage(turn.imageUrl);
-          if (parsed) imagesToLock.push({ bytes: parsed.bytes, mimeType: parsed.mimeType });
+          if (parsed) yield { bytes: parsed.bytes, mimeType: parsed.mimeType };
         }
       }
-      await lockOriginalImages(client, ownerUserId, imagesToLock);
+      await lockOriginalImages(client, ownerUserId, originalImages());
     }
 
-    if (assetStore && assetBuffers && !existingTarget) {
+    if (assetStore && legacyAssets && !existingTarget) {
       const coverUrl = typeof request.story.world.coverImageUrl === 'string' ? request.story.world.coverImageUrl : '';
       if (coverUrl.startsWith("/api/v1/assets/")) {
         const match = coverUrl.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
         const id = match ? match[0] : null;
-        if (id && assetBuffers.has(id)) {
+        const bytes = id ? await readLegacyAsset(legacyAssets, id) : undefined;
+        if (bytes) {
             try {
-                const asset = await persistWorldCover(client, assetStore, ownerUserId, assetBuffers.get(id)!, "image/png");
+                const asset = await persistWorldCover(client, assetStore, ownerUserId, bytes, "image/png");
                 await client.query("UPDATE worlds SET cover_asset_id = $2 WHERE id = $1", [worldId, asset.id]);
             } catch (err) {
                 /* ignored */
@@ -657,13 +677,13 @@ export async function importLegacyStory(
       if (assetStore && turn.imageUrl?.startsWith("data:image/")) {
         const asset = await importTurnImage(client, assetStore, ownerUserId, campaignId, turnId, turn.imageUrl);
         if (asset) await client.query("UPDATE turns SET image_url = $2 WHERE id = $1", [turnId, asset.publicUrl]);
-      } else if (assetStore && assetBuffers && turn.imageUrl?.startsWith("/api/v1/assets/")) {
+      } else if (assetStore && legacyAssets && turn.imageUrl?.startsWith("/api/v1/assets/")) {
         const match = turn.imageUrl.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
         const id = match ? match[0] : null;
-        if (id && assetBuffers.has(id)) {
-            const buffer = assetBuffers.get(id)!;
+        const bytes = id ? await readLegacyAsset(legacyAssets, id) : undefined;
+        if (bytes) {
             try {
-                const asset = await persistTurnImage(client, assetStore, ownerUserId, campaignId, turnId, buffer, "image/png");
+                const asset = await persistTurnImage(client, assetStore, ownerUserId, campaignId, turnId, bytes, "image/png");
                 if (asset) await client.query("UPDATE turns SET image_url = $2 WHERE id = $1", [turnId, asset.publicUrl]);
             } catch (err) {
                 /* ignored */

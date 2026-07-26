@@ -49,10 +49,10 @@ export async function lockOriginalAsset(client: DatabaseClient, ownerUserId: str
 export async function lockOriginalImages(
   client: DatabaseClient,
   ownerUserId: string,
-  images: readonly { bytes: Buffer; mimeType: string }[]
+  images: Iterable<{ bytes: Buffer; mimeType: string }> | AsyncIterable<{ bytes: Buffer; mimeType: string }>
 ): Promise<void> {
   const paths = new Set<string>();
-  for (const image of images) {
+  for await (const image of images) {
     paths.add(originalStoragePath(
       sha256(image.bytes.toString("base64")),
       imageExtensionForMimeType(image.mimeType)
