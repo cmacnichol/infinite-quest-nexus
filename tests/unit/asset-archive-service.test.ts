@@ -220,8 +220,8 @@ describe("asset archive portability", () => {
         if (text.includes("FROM image_jobs j") && text.includes("j.campaign_id=$2")) {
           track("campaignImageJobs", values);
           return { rows: [
-            { asset_id: assetC, binding: { role: "turn_illustration", campaignId, turnId } },
-            { asset_id: assetD, binding: { role: "campaign_asset", campaignId } }
+            { asset_id: assetC, target_type: "turn_illustration", campaign_id: campaignId, turn_id: turnId },
+            { asset_id: assetD, target_type: "streaming_illustration", campaign_id: campaignId, turn_id: null }
           ], rowCount: 2 };
         }
         if (text.includes("FROM image_jobs j") && text.includes("j.world_id=$2")) {

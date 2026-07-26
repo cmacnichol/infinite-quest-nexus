@@ -15,6 +15,12 @@ export type ArchiveAssetSourceRow = {
   content_categories: string[]; favorite: boolean; archived_at: Date | string | null; bindings: ArchiveAssetBinding[];
 };
 type ArchiveAssetBindingRow = { asset_id: string; binding: ArchiveAssetBinding };
+type ArchiveCampaignImageJobRow = {
+  asset_id: string;
+  target_type: "turn_illustration" | "streaming_illustration";
+  campaign_id: string;
+  turn_id: string | null;
+};
 type ArchiveAssetDetailRow = Omit<ArchiveAssetSourceRow, "bindings">;
 export type CampaignAssetInventory = { records: ArchiveAssetRecord[]; uniqueOriginals: Array<{ contentHash: string; archivePath: string; sourceAssetIds: string[]; mimeType: ArchiveAssetSourceRow["mime_type"]; byteLength: number }> };
 export type ValidatedArchiveAsset = ArchiveAssetRecord & { bytes: Buffer; createThumbnail: false };
@@ -64,11 +70,7 @@ export async function collectCampaignArchiveAssets(client: DatabaseClient, owner
       JOIN turn_illustration_segments seg ON seg.id=s.segment_id AND seg.owner_user_id=s.owner_user_id
       JOIN turns t ON t.id=seg.turn_id AND t.campaign_id=seg.campaign_id AND t.owner_user_id=seg.owner_user_id
      WHERE s.owner_user_id=$1 AND seg.campaign_id=$2`, [ownerUserId, campaignId]),
-    client.query<ArchiveAssetBindingRow>(`SELECT j.asset_id,
-      CASE WHEN j.target_type='turn_illustration'
-        THEN jsonb_build_object('role','turn_illustration','campaignId',j.campaign_id,'turnId',j.turn_id)
-        ELSE jsonb_build_object('role','campaign_asset','campaignId',j.campaign_id)
-      END AS binding
+    client.query<ArchiveCampaignImageJobRow>(`SELECT j.asset_id, j.target_type, j.campaign_id, j.turn_id
       FROM image_jobs j
      WHERE j.owner_user_id=$1 AND j.status='completed' AND j.asset_id IS NOT NULL
        AND j.campaign_id=$2
@@ -108,7 +110,15 @@ export async function collectCampaignArchiveAssets(client: DatabaseClient, owner
     if (!current.some((existing) => bindingKey(existing) === bindingKey(binding))) current.push(binding);
     bindingMap.set(assetId, current);
   };
-  for (const relationships of relationshipResults) for (const row of relationships.rows) addBinding(row.asset_id, row.binding);
+  const [assetReferences, segmentAssets, campaignImageJobs, worldCoverImageJobs, worldCover, generationContexts] = relationshipResults;
+  for (const relationships of [assetReferences, segmentAssets, worldCoverImageJobs, worldCover, generationContexts]) {
+    for (const row of relationships.rows) addBinding(row.asset_id, row.binding);
+  }
+  for (const job of campaignImageJobs.rows) {
+    addBinding(job.asset_id, job.target_type === "turn_illustration"
+      ? { role: "turn_illustration", campaignId: job.campaign_id, turnId: job.turn_id! }
+      : { role: "campaign_asset", campaignId: job.campaign_id });
+  }
   const addLegacyPointer = (value: unknown, binding: ArchiveAssetBinding) => {
     if (typeof value !== "string") return;
     const assetId = legacyAssetPointer.exec(value)?.[1];
