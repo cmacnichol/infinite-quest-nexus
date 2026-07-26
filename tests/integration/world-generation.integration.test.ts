@@ -24,7 +24,11 @@ import {
   importInfiniteWorlds
 } from "../../services/api/src/infinite-worlds-import-service.js";
 import { generateWorldPreview } from "../../services/api/src/world-generator-service.js";
-import { getWorldGenerationProgress } from "../../services/api/src/world-generation-progress-service.js";
+import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
+import {
+  getWorldGenerationProgress,
+  type WorldGenerationProgress
+} from "../../services/api/src/world-generation-progress-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -42,6 +46,21 @@ type CompatibleProviderRequest = {
     role?: string;
     content?: string;
   }>;
+};
+
+type GeneratedCharacterRequestInput = {
+  world: {
+    title: string;
+    genre: string;
+    tone: string;
+    backgroundStory: string;
+    premise: string;
+    firstAction: string;
+    storyRules: string;
+  };
+  seed: ReturnType<typeof characterSeed>;
+  otherSeeds: Array<Pick<ReturnType<typeof characterSeed>, "id" | "name" | "role">>;
+  acceptedCharacterNames: string[];
 };
 
 function profile(role: string) {
@@ -129,7 +148,9 @@ integration("generated CYOA world persistence", () => {
   let ownerUserId = "";
   const replies: MockProviderReply[] = [];
   const providerRequestBodies: CompatibleProviderRequest[] = [];
+  const providerProgressSnapshots: WorldGenerationProgress[] = [];
   const progressKeys = new Set<string>();
+  let observedProgressKey = "";
 
   beforeAll(async () => {
     transport = createProviderTransport({
@@ -148,8 +169,12 @@ integration("generated CYOA world persistence", () => {
       request.on("data", (chunk) => {
         requestBody += chunk;
       });
-      request.on("end", () => {
+      request.on("end", async () => {
         providerRequestBodies.push(JSON.parse(requestBody) as CompatibleProviderRequest);
+        if (observedProgressKey) {
+          const progress = await getWorldGenerationProgress(pool, ownerUserId, observedProgressKey);
+          if (progress) providerProgressSnapshots.push(progress);
+        }
         const reply = replies.shift();
         if (!reply) {
           response.writeHead(500, { "Content-Type": "application/json" });
@@ -202,6 +227,8 @@ integration("generated CYOA world persistence", () => {
   afterEach(() => {
     replies.length = 0;
     providerRequestBodies.length = 0;
+    providerProgressSnapshots.length = 0;
+    observedProgressKey = "";
     for (const key of progressKeys) activeProgressMap.delete(key);
     progressKeys.clear();
   });
@@ -267,6 +294,54 @@ integration("generated CYOA world persistence", () => {
     }
   }
 
+  function expectSuccessfulCharacterGenerationRequests() {
+    const expectedNames = ["Explorer 1", "Explorer 2", "Explorer 3"];
+    expectCharacterGenerationRequests(expectedNames);
+
+    for (const [index, body] of providerRequestBodies.slice(1).entries()) {
+      expect(body.messages?.find((message) => message.role === "system")?.content)
+        .toBe(PROMPT_TEMPLATE_CATALOG.world_character_generation.defaultContent);
+      const userMessage = body.messages?.find((message) => message.role === "user");
+      const input = JSON.parse(userMessage?.content ?? "") as GeneratedCharacterRequestInput;
+      const characterIndex = index + 1;
+
+      expect(input.world).toEqual({
+        title: "The Sunken Citadel",
+        genre: "Fantasy exploration",
+        tone: "Mysterious and adventurous",
+        backgroundStory: "An ancient citadel sank beneath the waves.",
+        premise: "Three explorers descend to recover its lost archive.",
+        firstAction: "Examine the glowing runes on the bronze archway.",
+        storyRules: "Ancient enchantments distort sound and light underwater."
+      });
+      expect(input.seed).toEqual(characterSeed(characterIndex));
+      expect(input.otherSeeds).toEqual(
+        [1, 2, 3]
+          .filter((candidate) => candidate !== characterIndex)
+          .map((candidate) => {
+            const { id, name, role } = characterSeed(candidate);
+            return { id, name, role };
+          })
+      );
+      expect(input.acceptedCharacterNames).toEqual(expectedNames.slice(0, index));
+    }
+  }
+
+  function expectCharacterGenerationProgress(expectedPhases: Array<{ phase: string; message: string }>) {
+    expect(providerProgressSnapshots).toHaveLength(expectedPhases.length + 1);
+    expect(providerProgressSnapshots[0]).toMatchObject({
+      status: "processing",
+      phase: "generating_world"
+    });
+    for (const [index, expected] of expectedPhases.entries()) {
+      expect(providerProgressSnapshots[index + 1]).toMatchObject({
+        status: "processing",
+        phase: expected.phase,
+        message: expected.message
+      });
+    }
+  }
+
   it("generates a manual preview with separate world and character calls without persisting records", async () => {
     const progressKey = `manual-preview-success-${crypto.randomUUID()}`;
     replies.push(
@@ -276,6 +351,7 @@ integration("generated CYOA world persistence", () => {
       { content: characterResponse(3) }
     );
     const before = await persistenceCounts();
+    observedProgressKey = progressKey;
 
     const preview = await generateWorldPreview(pool, {
       title: "The Sunken Citadel",
@@ -293,7 +369,12 @@ integration("generated CYOA world persistence", () => {
       progressPercent: 100,
       message: "World and character generation completed."
     });
-    expectCharacterGenerationRequests(["Explorer 1", "Explorer 2", "Explorer 3"]);
+    expectSuccessfulCharacterGenerationRequests();
+    expectCharacterGenerationProgress([
+      { phase: "generating_character", message: "Generating character 1 of 3: Explorer 1…" },
+      { phase: "generating_character", message: "Generating character 2 of 3: Explorer 2…" },
+      { phase: "generating_character", message: "Generating character 3 of 3: Explorer 3…" }
+    ]);
     expect(await persistenceCounts()).toEqual(before);
   });
 
@@ -307,6 +388,7 @@ integration("generated CYOA world persistence", () => {
       { content: characterResponse(2, false, privateMarker) }
     );
     const before = await persistenceCounts();
+    observedProgressKey = progressKey;
 
     await expect(generateWorldPreview(pool, {
       title: "The Sunken Citadel",
@@ -333,6 +415,11 @@ integration("generated CYOA world persistence", () => {
     expect(JSON.stringify(progress)).not.toContain(privateMarker);
     expect(progress?.message.length).toBeLessThanOrEqual(500);
     expectCharacterGenerationRequests(["Explorer 1", "Explorer 2", "Explorer 2"]);
+    expectCharacterGenerationProgress([
+      { phase: "generating_character", message: "Generating character 1 of 3: Explorer 1…" },
+      { phase: "generating_character", message: "Generating character 2 of 3: Explorer 2…" },
+      { phase: "recovering_character", message: "Character 2 was incomplete. Requesting a complete replacement…" }
+    ]);
     expect(await persistenceCounts()).toEqual(before);
   });
 
