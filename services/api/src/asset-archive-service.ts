@@ -14,6 +14,8 @@ export type ArchiveAssetSourceRow = {
   reuse_scope: "private" | "campaign" | "world" | "owner_library" | "shared"; automatic_reuse_enabled: boolean;
   content_categories: string[]; favorite: boolean; archived_at: Date | string | null; bindings: ArchiveAssetBinding[];
 };
+type ArchiveAssetBindingRow = { asset_id: string; binding: ArchiveAssetBinding };
+type ArchiveAssetDetailRow = Omit<ArchiveAssetSourceRow, "bindings">;
 export type CampaignAssetInventory = { records: ArchiveAssetRecord[]; uniqueOriginals: Array<{ contentHash: string; archivePath: string; sourceAssetIds: string[]; mimeType: ArchiveAssetSourceRow["mime_type"]; byteLength: number }> };
 export type ValidatedArchiveAsset = ArchiveAssetRecord & { bytes: Buffer; createThumbnail: false };
 export type ValidatedArchiveAssetSet = { assets: ValidatedArchiveAsset[] };
@@ -23,6 +25,7 @@ export type ArchiveIdMap = Map<ArchiveIdKind, Map<string, string>>;
 const iso = (value: Date | string) => value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 const archivePathFor = (hash: string, mime: string) => `assets/sha256/${hash.slice(0, 2)}/${hash}${imageExtensionForMimeType(mime)}`;
 const missing = (ids: readonly string[]) => Object.assign(new Error(`Required archive assets are missing: ${ids.join(", ")}`), { code: "archive-asset-missing", assetIds: [...ids] });
+const legacyAssetPointer = /^\/api\/v1\/assets\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 
 function bindingKey(binding: ArchiveAssetBinding): string {
   const ids = ["campaignId", "worldId", "worldVersionId", "turnId", "segmentId", "variantIndex", "sourceContextId"].map((key) => `${key}=${String((binding as Record<string, unknown>)[key] ?? "")}`);
@@ -46,28 +49,89 @@ export function projectCampaignArchiveAssets(rows: readonly ArchiveAssetSourceRo
 }
 
 export async function collectCampaignArchiveAssets(client: DatabaseClient, ownerUserId: string, campaignId: string, worldVersionId: string, worldId: string): Promise<CampaignAssetInventory> {
-  const result = await client.query<ArchiveAssetSourceRow>(`WITH bindings AS (
-    SELECT r.asset_id, jsonb_build_object('role', CASE WHEN r.asset_role='turn_illustration' THEN 'turn_illustration' WHEN r.asset_role='import_attachment' THEN 'imported_attachment' ELSE 'campaign_asset' END, 'campaignId', r.campaign_id, 'turnId', r.turn_id) binding
-      FROM asset_references r WHERE r.owner_user_id=$1 AND r.campaign_id=$2
-    UNION ALL SELECT s.asset_id, jsonb_build_object('role','illustration_segment_variant','campaignId',$2::text,'turnId',s.turn_id,'segmentId',s.segment_id,'variantIndex',s.variant_index)
-      FROM turn_illustration_segment_assets s JOIN turn_illustration_segments seg ON seg.id=s.segment_id AND seg.owner_user_id=s.owner_user_id JOIN turns t ON t.id=seg.turn_id AND t.campaign_id=$2 AND t.owner_user_id=s.owner_user_id WHERE s.owner_user_id=$1
-    UNION ALL SELECT j.asset_id, jsonb_build_object('role','world_cover','worldId',j.world_id)
-      FROM image_jobs j WHERE j.owner_user_id=$1 AND j.status='completed' AND j.asset_id IS NOT NULL AND j.target_type='world_cover' AND j.world_id=$4
-    UNION ALL SELECT j.asset_id, jsonb_build_object('role','turn_illustration','campaignId',j.campaign_id,'turnId',j.turn_id)
-      FROM image_jobs j WHERE j.owner_user_id=$1 AND j.status='completed' AND j.asset_id IS NOT NULL AND j.target_type='turn_illustration' AND j.campaign_id=$2
-    UNION ALL SELECT w.cover_asset_id, jsonb_build_object('role','world_cover','worldId',w.id) FROM worlds w WHERE w.id=$4 AND w.owner_user_id=$1 AND w.cover_asset_id IS NOT NULL
-    UNION ALL SELECT c.asset_id, jsonb_build_object('role','generation_context','campaignId',c.campaign_id,'worldId',c.world_id,'worldVersionId',c.world_version_id,'turnId',c.turn_id,'sourceContextId',c.id)
-      FROM asset_generation_contexts c WHERE c.owner_user_id=$1 AND (c.campaign_id=$2 OR c.world_version_id=$3 OR c.world_id=$4)
-    UNION ALL SELECT a.id, jsonb_build_object('role','turn_illustration','campaignId',t.campaign_id,'turnId',t.id)
-      FROM assets a JOIN turns t ON t.owner_user_id=$1 AND t.campaign_id=$2 AND (t.image_url LIKE '%/assets/'||a.id::text OR t.image_url LIKE '%'||a.id::text) WHERE a.owner_user_id=$1
-    UNION ALL SELECT a.id, jsonb_build_object('role','world_cover','worldId',w.id)
-      FROM assets a JOIN worlds w ON w.owner_user_id=$1 AND w.id=$4 AND (w.image_url LIKE '%/assets/'||a.id::text OR w.image_url LIKE '%'||a.id::text) WHERE a.owner_user_id=$1
-  ), selected AS (SELECT DISTINCT asset_id FROM bindings WHERE asset_id IS NOT NULL)
-  SELECT a.id,a.owner_user_id,a.content_hash,a.mime_type,a.byte_length,a.pixel_width,a.pixel_height,a.storage_driver,a.storage_path,a.technical_metadata,a.created_at,
-    l.title,l.caption,l.notes,l.tags,l.origin,l.review_status,l.reuse_scope,l.automatic_reuse_enabled,l.content_categories,l.favorite,l.archived_at,
-    COALESCE((SELECT jsonb_agg(DISTINCT b.binding) FROM bindings b WHERE b.asset_id=a.id),'[]'::jsonb) bindings
-  FROM assets a JOIN selected s ON s.asset_id=a.id JOIN asset_library_entries l ON l.asset_id=a.id AND l.owner_user_id=$1 WHERE a.owner_user_id=$1 ORDER BY a.id`, [ownerUserId, campaignId, worldVersionId, worldId]);
-  return projectCampaignArchiveAssets(result.rows);
+  const relationships = await client.query<ArchiveAssetBindingRow>(`WITH bindings AS (
+    SELECT r.asset_id,
+      CASE
+        WHEN r.asset_role = 'turn_illustration' THEN jsonb_build_object('role','turn_illustration','campaignId',r.campaign_id,'turnId',r.turn_id)
+        WHEN r.asset_role = 'import_attachment' THEN jsonb_build_object('role','imported_attachment','campaignId',r.campaign_id,'turnId',r.turn_id)
+        ELSE jsonb_build_object('role','campaign_asset','campaignId',r.campaign_id)
+      END AS binding
+      FROM asset_references r
+     WHERE r.owner_user_id=$1 AND r.campaign_id=$2
+       AND (r.asset_role <> 'turn_illustration' OR r.turn_id IS NOT NULL)
+    UNION ALL
+    SELECT s.asset_id, jsonb_build_object('role','illustration_segment_variant','campaignId',seg.campaign_id,'turnId',seg.turn_id,'segmentId',seg.id,'variantIndex',s.variant_index)
+      FROM turn_illustration_segment_assets s
+      JOIN turn_illustration_segments seg ON seg.id=s.segment_id AND seg.owner_user_id=s.owner_user_id
+      JOIN turns t ON t.id=seg.turn_id AND t.campaign_id=seg.campaign_id AND t.owner_user_id=seg.owner_user_id
+     WHERE s.owner_user_id=$1 AND seg.campaign_id=$2
+    UNION ALL
+    SELECT j.asset_id, jsonb_build_object('role','world_cover','worldId',j.world_id)
+      FROM image_jobs j
+     WHERE j.owner_user_id=$1 AND j.status='completed' AND j.asset_id IS NOT NULL
+       AND j.target_type='world_cover' AND j.world_id=$4
+    UNION ALL
+    SELECT j.asset_id, jsonb_build_object('role','turn_illustration','campaignId',j.campaign_id,'turnId',j.turn_id)
+      FROM image_jobs j
+     WHERE j.owner_user_id=$1 AND j.status='completed' AND j.asset_id IS NOT NULL
+       AND j.target_type='turn_illustration' AND j.campaign_id=$2 AND j.turn_id IS NOT NULL
+    UNION ALL
+    SELECT w.cover_asset_id, jsonb_build_object('role','world_cover','worldId',w.id)
+      FROM worlds w
+     WHERE w.id=$4 AND w.owner_user_id=$1 AND w.cover_asset_id IS NOT NULL
+    UNION ALL
+    SELECT c.asset_id, jsonb_build_object('role','generation_context','campaignId',c.campaign_id,'worldId',c.world_id,'worldVersionId',c.world_version_id,'turnId',c.turn_id,'sourceContextId',c.id)
+      FROM asset_generation_contexts c
+      LEFT JOIN campaigns cp ON cp.id=c.campaign_id AND cp.owner_user_id=c.owner_user_id
+      LEFT JOIN worlds w ON w.id=c.world_id AND w.owner_user_id=c.owner_user_id
+      LEFT JOIN world_versions v ON v.id=c.world_version_id AND v.owner_user_id=c.owner_user_id
+      LEFT JOIN turns t ON t.id=c.turn_id AND t.owner_user_id=c.owner_user_id AND t.campaign_id=c.campaign_id
+     WHERE c.owner_user_id=$1
+       AND ((c.campaign_id=$2 AND cp.id IS NOT NULL) OR (c.world_version_id=$3 AND v.world_id=$4) OR (c.world_id=$4 AND w.id IS NOT NULL))
+       AND (c.campaign_id IS NULL OR cp.id IS NOT NULL)
+       AND (c.world_id IS NULL OR w.id IS NOT NULL)
+       AND (c.world_version_id IS NULL OR v.id IS NOT NULL)
+       AND (c.turn_id IS NULL OR t.id IS NOT NULL)
+  )
+  SELECT asset_id, binding FROM bindings WHERE asset_id IS NOT NULL`, [ownerUserId, campaignId, worldVersionId, worldId]);
+  const turnPointers = await client.query<{ id: string; image_url: string }>(
+    `SELECT id, image_url FROM turns WHERE owner_user_id=$1 AND campaign_id=$2 AND image_url <> '' ORDER BY id`,
+    [ownerUserId, campaignId]
+  );
+  const pinnedVersion = await client.query<{ content: unknown }>(
+    `SELECT content FROM world_versions WHERE id=$1 AND world_id=$2 AND owner_user_id=$3`,
+    [worldVersionId, worldId, ownerUserId]
+  );
+  const bindingMap = new Map<string, ArchiveAssetBinding[]>();
+  const addBinding = (assetId: string, binding: ArchiveAssetBinding) => {
+    const current = bindingMap.get(assetId) ?? [];
+    if (!current.some((existing) => bindingKey(existing) === bindingKey(binding))) current.push(binding);
+    bindingMap.set(assetId, current);
+  };
+  for (const row of relationships.rows) addBinding(row.asset_id, row.binding);
+  const addLegacyPointer = (value: unknown, binding: ArchiveAssetBinding) => {
+    if (typeof value !== "string") return;
+    const assetId = legacyAssetPointer.exec(value)?.[1];
+    if (!assetId) return;
+    addBinding(assetId, binding);
+  };
+  for (const turn of turnPointers.rows) addLegacyPointer(turn.image_url, { role: "turn_illustration", campaignId, turnId: turn.id });
+  const visit = (value: unknown) => {
+    if (Array.isArray(value)) { for (const child of value) visit(child); return; }
+    if (value && typeof value === "object") { for (const child of Object.values(value)) visit(child); return; }
+    addLegacyPointer(value, { role: "world_version_asset", worldId, worldVersionId });
+  };
+  visit(pinnedVersion.rows[0]?.content);
+  const selectedAssetIds = [...bindingMap.keys()];
+  if (!selectedAssetIds.length) return { records: [], uniqueOriginals: [] };
+  const assets = await client.query<ArchiveAssetDetailRow>(`SELECT a.id,a.owner_user_id,a.content_hash,a.mime_type,a.byte_length,a.pixel_width,a.pixel_height,a.storage_driver,a.storage_path,a.technical_metadata,a.created_at,
+    l.title,l.caption,l.notes,l.tags,l.origin,l.review_status,l.reuse_scope,l.automatic_reuse_enabled,l.content_categories,l.favorite,l.archived_at
+  FROM assets a JOIN asset_library_entries l ON l.asset_id=a.id AND l.owner_user_id=a.owner_user_id
+ WHERE a.owner_user_id=$1 AND a.id = ANY($2::uuid[]) ORDER BY a.id`, [ownerUserId, selectedAssetIds]);
+  const foundIds = new Set(assets.rows.map((asset) => asset.id));
+  const missingIds = selectedAssetIds.filter((assetId) => !foundIds.has(assetId));
+  if (missingIds.length) throw missing([...new Set(missingIds)].sort());
+  return projectCampaignArchiveAssets(assets.rows.map((asset) => ({ ...asset, bindings: bindingMap.get(asset.id) ?? [] })));
 }
 
 export async function verifyAndWriteArchiveAssets(input: { records: readonly ArchiveAssetRecord[]; readOriginal: (sourceAssetId: string) => Promise<Buffer>; outputRoot: string }): Promise<ArchiveEntry[]> {
@@ -106,8 +170,13 @@ export async function persistArchiveAssets(client: DatabaseClient, store: Filesy
   const assetIds = new Map(idMap.get("asset") ?? []); const createdPaths: string[] = []; const byHash = new Map<string, ValidatedArchiveAsset>();
   for (const asset of validated.assets) byHash.set(asset.contentHash, byHash.get(asset.contentHash) ?? asset);
   for (const asset of byHash.values()) {
+    const originalPath = `${asset.contentHash.slice(0, 2)}/${asset.contentHash}${imageExtensionForMimeType(asset.mimeType)}`;
+    const existed = await lstat(resolve(store.root, originalPath)).then(() => true).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    });
     const stored = await persistOriginalImage(client, store, ownerUserId, { bytes: asset.bytes, mimeType: asset.mimeType, createThumbnail: false });
-    assetIds.set(asset.sourceAssetId, stored.id); assetIds.set(asset.contentHash, stored.id); createdPaths.push(`${asset.contentHash.slice(0, 2)}/${asset.contentHash}${imageExtensionForMimeType(asset.mimeType)}`);
+    assetIds.set(asset.sourceAssetId, stored.id); assetIds.set(asset.contentHash, stored.id); if (!existed) createdPaths.push(originalPath);
     const updated = await client.query<{ asset_id: string }>(`UPDATE asset_library_entries SET title=$3,caption=$4,notes=$5,tags=$6,origin=$7,review_status=$8,reuse_scope=$9,automatic_reuse_enabled=$10,content_categories=$11,favorite=$12,archived_at=$13 WHERE asset_id=$1 AND owner_user_id=$2 RETURNING asset_id`, [stored.id, ownerUserId, asset.library.title, asset.library.caption, asset.library.notes, asset.library.tags, asset.library.origin, asset.library.reviewStatus, asset.library.reuseScope, asset.library.automaticReuseEnabled, asset.library.contentCategories, asset.library.favorite, asset.library.archivedAt]);
     if (!updated.rowCount) throw new Error(`Asset library metadata row is missing for '${stored.id}'.`);
   }
@@ -130,10 +199,10 @@ export async function restoreAssetBindings(client: DatabaseClient, ownerUserId: 
     await requireScope(client, ownerUserId, "assets", assetId);
     for (const binding of [...record.bindings].sort((a, b) => bindingKey(a).localeCompare(bindingKey(b)))) {
       if (binding.role === "world_cover") { const worldId = mapped(idMap, "world", binding.worldId); await requireScope(client, ownerUserId, "worlds", worldId); await client.query("UPDATE worlds SET cover_asset_id=$3 WHERE id=$1 AND owner_user_id=$2", [worldId, ownerUserId, assetId]); }
-      else if (binding.role === "world_version_asset") { const worldId = mapped(idMap, "world", binding.worldId); const versionId = mapped(idMap, "worldVersion", binding.worldVersionId); await requireScope(client, ownerUserId, "world_versions", versionId, "AND world_id=$3", [worldId]); await client.query("INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role) SELECT $1,$2,c.id,NULL,'world_asset' FROM campaigns c WHERE c.owner_user_id=$1 AND c.world_version_id=$3 ON CONFLICT DO NOTHING", [ownerUserId, assetId, versionId]); }
-      else if (binding.role === "campaign_asset" || binding.role === "turn_illustration" || binding.role === "imported_attachment") { const campaignId = mapped(idMap, "campaign", binding.campaignId); await requireScope(client, ownerUserId, "campaigns", campaignId); const turnId = "turnId" in binding && binding.turnId ? mapped(idMap, "turn", binding.turnId) : null; if (turnId) await requireScope(client, ownerUserId, "turns", turnId, "AND campaign_id=$3", [campaignId]); await client.query("INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [ownerUserId, assetId, campaignId, turnId, binding.role === "imported_attachment" ? "import_attachment" : binding.role === "campaign_asset" ? "world_asset" : "turn_illustration"]); }
-      else if (binding.role === "illustration_segment_variant") { const campaignId = mapped(idMap, "campaign", binding.campaignId); const turnId = mapped(idMap, "turn", binding.turnId); const segmentId = mapped(idMap, "illustrationSegment", binding.segmentId); await requireScope(client, ownerUserId, "campaigns", campaignId); await requireScope(client, ownerUserId, "turns", turnId, "AND campaign_id=$3", [campaignId]); await requireScope(client, ownerUserId, "turn_illustration_segments", segmentId); await client.query("INSERT INTO turn_illustration_segment_assets (segment_id,owner_user_id,asset_id,variant_index) VALUES ($1,$2,$3,$4) ON CONFLICT (segment_id,variant_index) DO UPDATE SET asset_id=EXCLUDED.asset_id", [segmentId, ownerUserId, assetId, binding.variantIndex]); }
-      else { const campaignId = binding.campaignId ? mapped(idMap, "campaign", binding.campaignId) : null; const turnId = binding.turnId ? mapped(idMap, "turn", binding.turnId) : null; const contextId = mapped(idMap, "generationContext", binding.sourceContextId); if (campaignId) await requireScope(client, ownerUserId, "campaigns", campaignId); if (turnId) await requireScope(client, ownerUserId, "turns", turnId, campaignId ? "AND campaign_id=$3" : "", campaignId ? [campaignId] : []); await requireScope(client, ownerUserId, "asset_generation_contexts", contextId); await client.query("UPDATE asset_generation_contexts SET asset_id=$3 WHERE id=$1 AND owner_user_id=$2", [contextId, ownerUserId, assetId]); }
+      else if (binding.role === "world_version_asset") { const worldId = mapped(idMap, "world", binding.worldId); const versionId = mapped(idMap, "worldVersion", binding.worldVersionId); await requireScope(client, ownerUserId, "world_versions", versionId, "AND world_id=$3", [worldId]); }
+      else if (binding.role === "campaign_asset" || binding.role === "turn_illustration" || binding.role === "imported_attachment") { const campaignId = mapped(idMap, "campaign", binding.campaignId); await requireScope(client, ownerUserId, "campaigns", campaignId); const turnSourceId = "turnId" in binding ? binding.turnId : null; const turnId = turnSourceId ? mapped(idMap, "turn", turnSourceId) : null; if (turnId) await requireScope(client, ownerUserId, "turns", turnId, "AND campaign_id=$3", [campaignId]); await client.query("INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [ownerUserId, assetId, campaignId, turnId, binding.role === "imported_attachment" ? "import_attachment" : binding.role === "campaign_asset" ? "world_asset" : "turn_illustration"]); }
+      else if (binding.role === "illustration_segment_variant") { const campaignId = mapped(idMap, "campaign", binding.campaignId); const turnId = mapped(idMap, "turn", binding.turnId); const segmentId = mapped(idMap, "illustrationSegment", binding.segmentId); await requireScope(client, ownerUserId, "campaigns", campaignId); await requireScope(client, ownerUserId, "turns", turnId, "AND campaign_id=$3", [campaignId]); await requireScope(client, ownerUserId, "turn_illustration_segments", segmentId, "AND campaign_id=$3 AND turn_id=$4", [campaignId, turnId]); await client.query("INSERT INTO turn_illustration_segment_assets (segment_id,owner_user_id,asset_id,variant_index) VALUES ($1,$2,$3,$4) ON CONFLICT (segment_id,variant_index) DO UPDATE SET asset_id=EXCLUDED.asset_id", [segmentId, ownerUserId, assetId, binding.variantIndex]); }
+      else { const campaignId = binding.campaignId === null ? null : mapped(idMap, "campaign", binding.campaignId); const worldId = binding.worldId === null ? null : mapped(idMap, "world", binding.worldId); const versionId = binding.worldVersionId === null ? null : mapped(idMap, "worldVersion", binding.worldVersionId); const turnId = binding.turnId === null ? null : mapped(idMap, "turn", binding.turnId); const contextId = mapped(idMap, "generationContext", binding.sourceContextId); const context = await client.query<{ campaign_id: string | null; world_id: string | null; world_version_id: string | null; turn_id: string | null }>("SELECT campaign_id,world_id,world_version_id,turn_id FROM asset_generation_contexts WHERE id=$1 AND owner_user_id=$2", [contextId, ownerUserId]); const target = context.rows[0]; if (!target || target.campaign_id !== campaignId || target.world_id !== worldId || target.world_version_id !== versionId || target.turn_id !== turnId) throw new Error(`Archive destination context '${contextId}' does not match its binding relationships.`); await client.query("UPDATE asset_generation_contexts SET asset_id=$3 WHERE id=$1 AND owner_user_id=$2", [contextId, ownerUserId, assetId]); }
     }
   }
 }
