@@ -19,6 +19,15 @@ export type RuntimeSecurityConfig = {
   trustProxyHops: number;
 };
 
+export type ArchiveLimits = {
+  maxCompressedBytes: number;
+  maxUncompressedBytes: number;
+  maxEntries: number;
+  maxExpansionRatio: number;
+  maxManifestBytes: number;
+  maxJsonEntryBytes: number;
+};
+
 export type RuntimeConfig = {
   role: "all" | "api" | "worker" | "migrate";
   host: string;
@@ -33,6 +42,11 @@ export type RuntimeConfig = {
   webRoot: string;
   assetStorageDriver: "filesystem";
   assetStorageRoot: string;
+  archiveStorageRoot: string;
+  archivePreviewTtlSeconds: number;
+  systemArchiveArtifactTtlSeconds: number;
+  campaignArchiveLimits: ArchiveLimits;
+  systemArchiveLimits: ArchiveLimits;
   credentialEncryptionKey: string;
   security: RuntimeSecurityConfig;
 };
@@ -49,6 +63,21 @@ function integerSetting(name: string, fallback: number, minimum: number, maximum
   const parsed = Number.parseInt(process.env[name] ?? "", 10);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(minimum, Math.min(maximum, parsed));
+}
+
+function archiveLimitsSetting(
+  scope: "CAMPAIGN" | "SYSTEM",
+  approved: Pick<ArchiveLimits, "maxCompressedBytes" | "maxUncompressedBytes" | "maxEntries">
+): ArchiveLimits {
+  const prefix = `${scope}_ARCHIVE`;
+  return {
+    maxCompressedBytes: integerSetting(`${prefix}_MAX_COMPRESSED_BYTES`, approved.maxCompressedBytes, 1, approved.maxCompressedBytes),
+    maxUncompressedBytes: integerSetting(`${prefix}_MAX_UNCOMPRESSED_BYTES`, approved.maxUncompressedBytes, 1, approved.maxUncompressedBytes),
+    maxEntries: integerSetting(`${prefix}_MAX_ENTRIES`, approved.maxEntries, 1, approved.maxEntries),
+    maxExpansionRatio: integerSetting(`${prefix}_MAX_EXPANSION_RATIO`, 100, 1, 100),
+    maxManifestBytes: integerSetting(`${prefix}_MAX_MANIFEST_BYTES`, 5_242_880, 1, 5_242_880),
+    maxJsonEntryBytes: integerSetting(`${prefix}_MAX_JSON_ENTRY_BYTES`, 1_073_741_824, 1, 1_073_741_824)
+  };
 }
 
 function requiredIntegerSetting(name: string, fallback: number, minimum: number, maximum: number): number {
@@ -122,6 +151,19 @@ export function loadRuntimeConfig(): RuntimeConfig {
     webRoot: resolve(process.env.WEB_ROOT?.trim() || "apps/web/public"),
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve(process.env.ASSET_STORAGE_ROOT?.trim() || "local-data/assets"),
+    archiveStorageRoot: resolve(process.env.ARCHIVE_STORAGE_ROOT?.trim() || "local-data/archives"),
+    archivePreviewTtlSeconds: integerSetting("ARCHIVE_PREVIEW_TTL_SECONDS", 1800, 60, 86400),
+    systemArchiveArtifactTtlSeconds: integerSetting("SYSTEM_ARCHIVE_ARTIFACT_TTL_SECONDS", 86400, 300, 604800),
+    campaignArchiveLimits: archiveLimitsSetting("CAMPAIGN", {
+      maxCompressedBytes: 2_147_483_648,
+      maxUncompressedBytes: 21_474_836_480,
+      maxEntries: 100_000
+    }),
+    systemArchiveLimits: archiveLimitsSetting("SYSTEM", {
+      maxCompressedBytes: 53_687_091_200,
+      maxUncompressedBytes: 214_748_364_800,
+      maxEntries: 1_000_000
+    }),
     credentialEncryptionKey: secretSetting("CREDENTIAL_ENCRYPTION_KEY"),
     security: {
       corsAllowedOrigins: parseExactOriginList(process.env.CORS_ALLOWED_ORIGINS, "CORS_ALLOWED_ORIGINS"),
