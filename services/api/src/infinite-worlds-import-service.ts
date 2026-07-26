@@ -25,7 +25,10 @@ import { importWorld, previewWorldImport } from "./world-service.js";
 import type { FilesystemAssetStore } from "./asset-service.js";
 import { resolvePlayableCharacters } from "../../../packages/domain/src/world-characters.js";
 import { extractCyoaLayers, parseCyoaExport } from "../../../packages/domain/src/world-template.js";
-import { generateTemplateWorld } from "./world-generator-service.js";
+import {
+  generateTemplateWorld,
+  worldGenerationFailureDiagnostic
+} from "./world-generator-service.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import {
   promptFromSnapshot,
@@ -501,12 +504,13 @@ export async function importInfiniteWorlds(
       });
       return { kind: "world" as const, ...result };
     } catch (error) {
+      const failure = worldGenerationFailureDiagnostic(error);
       activeProgressMap.set(progressKey, {
         status: "failed",
         phase: "failed",
         progressPercent: 100,
-        message: error instanceof Error ? error.message : String(error),
-        errorMessage: error instanceof Error ? error.message : String(error)
+        message: failure.message,
+        errorMessage: failure.message
       });
       throw error;
     }
