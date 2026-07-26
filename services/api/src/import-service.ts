@@ -443,7 +443,7 @@ export async function importLegacyStory(
 
 
 
-    if (assetStore && !existingTarget) {
+    if (assetStore) {
       const imagesToLock: Array<{ bytes: Buffer; mimeType: string }> = [
         ...(assetBuffers ? [...assetBuffers.values()].map((bytes) => ({ bytes, mimeType: "image/png" })) : [])
       ];

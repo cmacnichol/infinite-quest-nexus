@@ -35,8 +35,8 @@ export function originalStoragePath(contentHash: string, extension: string): str
   return `${contentHash.slice(0, 2)}/${contentHash}${extension}`;
 }
 
-export function originalAssetAdvisoryLockKey(ownerUserId: string, storagePath: string): string {
-  return `infinitequest:asset-original:${ownerUserId}:${storagePath}`;
+export function originalAssetAdvisoryLockKey(_ownerUserId: string, storagePath: string): string {
+  return `infinitequest:asset-original:${storagePath}`;
 }
 
 export async function lockOriginalAsset(client: DatabaseClient, ownerUserId: string, storagePath: string): Promise<void> {
@@ -206,7 +206,9 @@ export async function runAssetMetadataBackfill(
             JSON.stringify({ format: verified.format, pages: verified.pages, orientation: verified.orientation, backfilledAt: new Date().toISOString() })]
         );
         if (verified.thumbnail) {
-          const path = (await writeContentAddressed(store, verified.thumbnail.contentHash, ".webp", verified.thumbnail.bytes)).relativePath;
+          const path = originalStoragePath(verified.thumbnail.contentHash, ".webp");
+          await lockOriginalAsset(client, asset.owner_user_id, path);
+          const written = await writeContentAddressed(store, verified.thumbnail.contentHash, ".webp", verified.thumbnail.bytes);
           await client.query(
             `INSERT INTO asset_derivatives (
                owner_user_id, source_asset_id, derivative_kind, transform_version, pixel_width, pixel_height,
@@ -214,8 +216,8 @@ export async function runAssetMetadataBackfill(
              ) VALUES ($1,$2,'thumbnail',1,$3,$4,'filesystem',$5,'image/webp',$6,$7)
              ON CONFLICT (owner_user_id, source_asset_id, derivative_kind, transform_version, pixel_width, pixel_height)
              DO NOTHING`,
-            [asset.owner_user_id, asset.id, verified.thumbnail.width, verified.thumbnail.height,
-              path, verified.thumbnail.bytes.length, verified.thumbnail.contentHash]
+             [asset.owner_user_id, asset.id, verified.thumbnail.width, verified.thumbnail.height,
+               written.relativePath, verified.thumbnail.bytes.length, verified.thumbnail.contentHash]
           );
         }
       });
@@ -392,7 +394,9 @@ async function persistImage(
   const assetId = assetResult.rows[0]?.id;
   if (!assetId) throw new Error("Could not persist imported image metadata.");
   if (options?.createThumbnail !== false && verified.thumbnail) {
-    const thumbnailPath = (await writeContentAddressed(store, verified.thumbnail.contentHash, ".webp", verified.thumbnail.bytes)).relativePath;
+    const thumbnailPath = originalStoragePath(verified.thumbnail.contentHash, ".webp");
+    await lockOriginalAsset(client, ownerUserId, thumbnailPath);
+    const writtenThumbnail = await writeContentAddressed(store, verified.thumbnail.contentHash, ".webp", verified.thumbnail.bytes);
     await client.query(
       `INSERT INTO asset_derivatives (
          owner_user_id, source_asset_id, derivative_kind, transform_version, pixel_width, pixel_height,
@@ -400,7 +404,7 @@ async function persistImage(
        ) VALUES ($1,$2,'thumbnail',1,$3,$4,'filesystem',$5,'image/webp',$6,$7)
        ON CONFLICT (owner_user_id, source_asset_id, derivative_kind, transform_version, pixel_width, pixel_height)
        DO UPDATE SET storage_path = EXCLUDED.storage_path, byte_length = EXCLUDED.byte_length, content_hash = EXCLUDED.content_hash`,
-      [ownerUserId, assetId, verified.thumbnail.width, verified.thumbnail.height, thumbnailPath,
+      [ownerUserId, assetId, verified.thumbnail.width, verified.thumbnail.height, writtenThumbnail.relativePath,
         verified.thumbnail.bytes.length, verified.thumbnail.contentHash]
     );
   }

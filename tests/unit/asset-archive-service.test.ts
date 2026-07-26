@@ -9,6 +9,7 @@ import {
   imageExtensionForMimeType,
   lockOriginalImages,
   persistOriginalImage,
+  runAssetMetadataBackfill,
   type FilesystemAssetStore,
   verifyOriginalImage
 } from "../../services/api/src/asset-service.js";
@@ -25,6 +26,8 @@ import {
   type ArchiveIdMap
 } from "../../services/api/src/asset-archive-service.js";
 import { sanitizePortableMetadata, type ArchiveAssetBinding, type ArchiveAssetRecord } from "../../packages/contracts/src/archives.js";
+import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
+import { importLegacyStory, legacyWorldContent } from "../../services/api/src/import-service.js";
 
 const pngBytes = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -184,7 +187,7 @@ describe("asset archive portability", () => {
         query: async (text: string, values: unknown[]) => {
           expect(text).toContain("SELECT storage_path");
           expect(text).toContain("FROM assets");
-          expect(values).toEqual([ownerUserId, [hash.slice(0, 2) + "/" + hash + ".png", retainedHash.slice(0, 2) + "/" + retainedHash + ".png"]]);
+          expect(values).toEqual([[hash.slice(0, 2) + "/" + hash + ".png", retainedHash.slice(0, 2) + "/" + retainedHash + ".png"]]);
           return { rows: [{ storage_path: retainedHash.slice(0, 2) + "/" + retainedHash + ".png" }], rowCount: 1 };
         }
       } as never;
@@ -470,6 +473,130 @@ describe("asset archive portability", () => {
     }
   });
 
+  it("uses one global physical lock identity for writers from different owners", async () => {
+    const observed: string[] = [];
+    const client = {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.startsWith("SELECT pg_advisory_xact_lock")) observed.push(String(values?.[0]));
+        return { rows: [], rowCount: 1 };
+      }
+    } as never;
+
+    await lockOriginalImages(client, ownerUserId, [{ bytes: pngBytes, mimeType: "image/png" }]);
+    await lockOriginalImages(client, "22222222-2222-4222-8222-222222222222", [{ bytes: pngBytes, mimeType: "image/png" }]);
+
+    expect(observed).toEqual([
+      `infinitequest:asset-original:${hash.slice(0, 2)}/${hash}.png`,
+      `infinitequest:asset-original:${hash.slice(0, 2)}/${hash}.png`
+    ]);
+  });
+
+  it("locks normal thumbnail publication through the same global physical lock", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asset-thumbnail-lock-"));
+    const observed: string[] = [];
+    try {
+      const client = {
+        query: async (text: string, values?: unknown[]) => {
+          if (text.startsWith("SELECT pg_advisory_xact_lock")) observed.push(String(values?.[0]));
+          if (text.startsWith("INSERT INTO assets")) return { rows: [{ id: "thumbnail-source" }], rowCount: 1 };
+          return { rows: [], rowCount: 1 };
+        }
+      } as never;
+      await persistOriginalImage(client, { root }, ownerUserId, { bytes: pngBytes, mimeType: "image/png" });
+
+      expect(observed).toHaveLength(2);
+      expect(observed.every((key) => key.startsWith("infinitequest:asset-original:"))).toBe(true);
+      expect(observed.some((key) => key.endsWith(".webp"))).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("locks thumbnail backfill publication through the global physical lock", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asset-thumbnail-backfill-lock-"));
+    const originalPath = `${hash.slice(0, 2)}/${hash}.png`;
+    const observed: string[] = [];
+    try {
+      await mkdir(join(root, hash.slice(0, 2)), { recursive: true });
+      await writeFile(join(root, originalPath), pngBytes);
+      const client = {
+        query: async (text: string, values?: unknown[]) => {
+          if (text.startsWith("SELECT pg_advisory_xact_lock")) observed.push(String(values?.[0]));
+          return { rows: [], rowCount: 1 };
+        },
+        release: () => undefined
+      };
+      const pool = {
+        query: async (text: string) => text.startsWith("SELECT id, owner_user_id")
+          ? { rows: [{ id: assetA, owner_user_id: ownerUserId, storage_driver: "filesystem", storage_path: originalPath }], rowCount: 1 }
+          : { rows: [], rowCount: 1 },
+        connect: async () => client
+      } as never;
+
+      await expect(runAssetMetadataBackfill(pool, { root }, 1)).resolves.toBe(true);
+      expect(observed).toHaveLength(1);
+      expect(observed[0]).toMatch(/^infinitequest:asset-original:[0-9a-f]{2}\/[0-9a-f]{64}\.webp$/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("prelocks targeted imports in canonical order even when each request receives images oppositely", async () => {
+    const secondBytes = await sharp({
+      create: { width: 2, height: 1, channels: 4, background: { r: 17, g: 31, b: 47, alpha: 1 } }
+    }).png().toBuffer();
+    const request = storyImportRequestSchema.parse({
+      sourceName: `targeted-lock-order-${crypto.randomUUID()}.story`,
+      story: {
+        format: "infinite-quest-campaign",
+        formatVersion: 2,
+        world: { title: "Targeted lock order", character: "Portable character." },
+        campaign: { title: "Targeted lock order" },
+        turns: [],
+        settings: {}
+      },
+      targetWorldVersionId: worldVersionId
+    });
+    const targetContent = legacyWorldContent(request.story);
+    const observedByImport: string[][] = [[], []];
+    const makePool = (observed: string[]) => {
+      const client = {
+        query: async (text: string, values?: unknown[]) => {
+          if (text === "SELECT id FROM users WHERE system_key = 'initial-owner' AND status = 'active'") {
+            return { rows: [{ id: ownerUserId }], rowCount: 1 };
+          }
+          if (text.startsWith("SELECT pg_advisory_xact_lock") && String(values?.[0]).startsWith("infinitequest:asset-original:")) {
+            observed.push(String(values?.[0]));
+          }
+          if (text.startsWith("SELECT world_id, id AS world_version_id")) {
+            return { rows: [{ world_id: worldId, world_version_id: worldVersionId }], rowCount: 1 };
+          }
+          if (text.startsWith("SELECT content FROM world_versions")) {
+            return { rows: [{ content: targetContent }], rowCount: 1 };
+          }
+          if (text.startsWith("INSERT INTO imports") && text.includes("RETURNING id")) {
+            return { rows: [{ id: crypto.randomUUID() }], rowCount: 1 };
+          }
+          if (text.startsWith("INSERT INTO campaigns")) return { rows: [{ id: campaignId }], rowCount: 1 };
+          return { rows: [], rowCount: 1 };
+        },
+        release: () => undefined
+      };
+      return { connect: async () => client } as never;
+    };
+
+    await Promise.all([
+      importLegacyStory(makePool(observedByImport[0]!), request, { root: "C:\\portable-assets" }, new Map([[assetA, pngBytes], [assetB, secondBytes]])),
+      importLegacyStory(makePool(observedByImport[1]!), request, { root: "C:\\portable-assets" }, new Map([[assetB, secondBytes], [assetA, pngBytes]]))
+    ]);
+
+    expect(observedByImport[0]).toHaveLength(2);
+    expect(observedByImport[1]).toHaveLength(2);
+    expect(observedByImport[0]).toEqual([...observedByImport[0]!].sort());
+    expect(observedByImport[1]).toEqual([...observedByImport[1]!].sort());
+    expect(observedByImport[0]).toEqual(observedByImport[1]);
+  });
+
   it("fails when the destination library metadata row is absent", async () => {
     const root = await mkdtemp(join(tmpdir(), "asset-archive-metadata-"));
     try {
@@ -546,7 +673,7 @@ describe("asset archive portability", () => {
       const rollbackDatabase = {
         query: async (text: string, values: unknown[]) => {
           expect(text).toContain("FROM assets");
-          expect(values).toEqual([ownerUserId, [preexistingPath, laterCreatedPath]]);
+          expect(values).toEqual([[preexistingPath, laterCreatedPath]]);
           return { rows: [{ storage_path: preexistingPath }], rowCount: 1 };
         }
       } as never;
@@ -590,7 +717,7 @@ describe("asset archive portability", () => {
     }
   });
 
-  it("retains a candidate with a surviving owner-scoped asset reference after rollback", async () => {
+  it("retains a candidate with a surviving asset reference from another owner after rollback", async () => {
     const root = await mkdtemp(join(tmpdir(), "asset-archive-reference-retain-"));
     const path = `${hash.slice(0, 2)}/${hash}.png`;
     try {
@@ -599,10 +726,33 @@ describe("asset archive portability", () => {
       const database = {
         query: async (text: string, values: unknown[]) => {
           expect(text).toContain("FROM assets");
-          expect(values).toEqual([ownerUserId, [path]]);
+          expect(values).toEqual([[path]]);
           return { rows: [{ storage_path: path }], rowCount: 1 };
         }
       } as never;
+      await cleanupUnreferencedCreatedPaths(poolForDatabase(database), { root }, ownerUserId, [path]);
+      expect((await stat(join(root, path))).isFile()).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains a webp original when another owner has a derivative at the same physical path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asset-archive-derivative-reference-"));
+    const webpHash = "a".repeat(64);
+    const path = `${webpHash.slice(0, 2)}/${webpHash}.webp`;
+    try {
+      await mkdir(join(root, webpHash.slice(0, 2)), { recursive: true });
+      await writeFile(join(root, path), pngBytes);
+      const database = {
+        query: async (text: string, values: unknown[]) => {
+          expect(text).toContain("FROM assets");
+          expect(text).toContain("FROM asset_derivatives");
+          expect(values).toEqual([[path]]);
+          return { rows: [{ storage_path: path }], rowCount: 1 };
+        }
+      } as never;
+
       await cleanupUnreferencedCreatedPaths(poolForDatabase(database), { root }, ownerUserId, [path]);
       expect((await stat(join(root, path))).isFile()).toBe(true);
     } finally {
@@ -622,7 +772,7 @@ describe("asset archive portability", () => {
           queries.push({ text, values });
           expect(text).toContain("SELECT storage_path");
           expect(text).toContain("FROM assets");
-          expect(values).toEqual([ownerUserId, [path]]);
+          expect(values).toEqual([[path]]);
           return { rows: [], rowCount: 0 };
         }
       } as never;
@@ -674,12 +824,14 @@ describe("asset archive portability", () => {
     }
   });
 
-  it("makes writer-first cleanup wait for the committed original row", async () => {
+  it("makes cross-owner writer-first cleanup wait for the committed original row", async () => {
     const root = await mkdtemp(join(tmpdir(), "asset-archive-lock-writer-first-"));
     const path = `${hash.slice(0, 2)}/${hash}.png`;
     const cleanupWaiting = deferred<void>();
     const writerCommitted = deferred<void>();
+    const writerOwnerUserId = "22222222-2222-4222-8222-222222222222";
     let lockOwner: "writer" | "cleanup" | null = null;
+    let writerLockKey = "";
     let committed = false;
     try {
       const writerClient = {
@@ -687,6 +839,7 @@ describe("asset archive portability", () => {
           if (text.startsWith("SELECT pg_advisory_xact_lock")) {
             expect(lockOwner).toBeNull();
             lockOwner = "writer";
+            writerLockKey = String(values?.[0]);
             return { rows: [], rowCount: 1 };
           }
           if (text === "COMMIT") {
@@ -707,12 +860,12 @@ describe("asset archive portability", () => {
             await writerCommitted.promise;
             expect(lockOwner).toBeNull();
             lockOwner = "cleanup";
-            expect(values?.[0]).toBeDefined();
+            expect(values?.[0]).toBe(writerLockKey);
             return { rows: [], rowCount: 1 };
           }
           if (text.startsWith("SELECT storage_path")) {
             expect(committed).toBe(true);
-            expect(values).toEqual([ownerUserId, [path]]);
+            expect(values).toEqual([[path]]);
             return { rows: [{ storage_path: path }], rowCount: 1 };
           }
           if (text === "COMMIT") {
@@ -724,7 +877,7 @@ describe("asset archive portability", () => {
       };
       const pool = { connect: async () => ({ ...cleanupClient, release: () => undefined }) } as never;
       await writerClient.query("BEGIN");
-      await persistOriginalImage(writerClient as never, { root }, ownerUserId, { bytes: pngBytes, mimeType: "image/png", createThumbnail: false });
+      await persistOriginalImage(writerClient as never, { root }, writerOwnerUserId, { bytes: pngBytes, mimeType: "image/png", createThumbnail: false });
       const cleanupPromise = cleanupUnreferencedCreatedPaths(pool, { root }, ownerUserId, [path]);
       const observed = await Promise.race([
         cleanupWaiting.promise.then(() => "waiting"),
@@ -762,7 +915,7 @@ describe("asset archive portability", () => {
           if (text.startsWith("SELECT storage_path")) {
             cleanupQueryEntered.resolve();
             await allowCleanupQuery.promise;
-            expect(values).toEqual([ownerUserId, [path]]);
+            expect(values).toEqual([[path]]);
             return { rows: [], rowCount: 0 };
           }
           if (text === "COMMIT") {
@@ -885,8 +1038,8 @@ describe("asset archive portability", () => {
     ]);
 
     expect(observed).toEqual([
-      `infinitequest:asset-original:${ownerUserId}:${firstPath}`,
-      `infinitequest:asset-original:${ownerUserId}:${secondPath}`
+      `infinitequest:asset-original:${firstPath}`,
+      `infinitequest:asset-original:${secondPath}`
     ].sort());
   });
 

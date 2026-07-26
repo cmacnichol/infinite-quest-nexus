@@ -279,7 +279,7 @@ export async function restoreAssetBindings(client: DatabaseClient, ownerUserId: 
 export async function cleanupUnreferencedCreatedPaths(
   database: DatabasePool,
   store: FilesystemAssetStore,
-  ownerUserId: string,
+  _ownerUserId: string,
   createdPaths: readonly string[]
 ): Promise<void> {
   const candidates = [...new Set(createdPaths.map((path) => safeRelativeCleanupPath(store.root, path)).filter((path): path is string => path !== null))].sort();
@@ -289,13 +289,16 @@ export async function cleanupUnreferencedCreatedPaths(
   }
   if (!preflightedCandidates.length) return;
   await withTransaction(database, async (client) => {
-    for (const path of preflightedCandidates) await lockOriginalAsset(client, ownerUserId, path);
+    for (const path of preflightedCandidates) await lockOriginalAsset(client, _ownerUserId, path);
     const references = await client.query<{ storage_path: string }>(
       `SELECT storage_path
          FROM assets
-        WHERE owner_user_id = $1
-          AND storage_path = ANY($2::text[])`,
-      [ownerUserId, preflightedCandidates]
+        WHERE storage_path = ANY($1::text[])
+        UNION
+       SELECT storage_path
+         FROM asset_derivatives
+        WHERE storage_path = ANY($1::text[])`,
+      [preflightedCandidates]
     );
     const referencedPaths = new Set(references.rows.map((row) => row.storage_path.replaceAll("\\", "/")));
     for (const path of preflightedCandidates) {
