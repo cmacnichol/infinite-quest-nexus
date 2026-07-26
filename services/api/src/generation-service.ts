@@ -61,6 +61,7 @@ import {
 import {
   StreamingSegmentTracker,
   characterVisualReference,
+  isIllustrationSegmentEligible,
   sha256,
   stableStringify,
   estimateTokens
@@ -1566,6 +1567,7 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
               
               if (!singleSectionDetected && isNarrationFieldComplete(accumulated) && segmentTracker.emittedSegmentCount === 0 && segmentTracker.accumulatedWordCount > 0) {
                 singleSectionDetected = true;
+                if (!isIllustrationSegmentEligible({ wordCount: segmentTracker.accumulatedWordCount }, illustrationConfig.segment_word_count)) return;
                 if (!provisionalSetId) {
                   provisionalSetId = await createProvisionalSet(
                     pool, job.owner_user_id, job.campaign_id, job.id,

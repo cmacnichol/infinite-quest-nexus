@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { directIllustrationPrompt, segmentIllustrationText } from "../../packages/domain/src/illustrations.js";
+import { directIllustrationPrompt, isIllustrationSegmentEligible, segmentIllustrationText } from "../../packages/domain/src/illustrations.js";
 import {
   buildBriefIllustrationStoryContext,
   buildIllustrationRefinementInput,
@@ -23,6 +23,14 @@ describe("illustration segmentation", () => {
     const segments = segmentIllustrationText(text, 3);
     expect(segments.map((segment) => segment.wordCount)).toEqual([3, 3, 2]);
     expect(segments.map((segment) => segment.text).join("")).toBe(text);
+  });
+
+  it("skips a final section shorter than half the configured section length", () => {
+    const segments = segmentIllustrationText("one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty one two three four five six seven eight nine", 20);
+
+    expect(segments).toHaveLength(2);
+    expect(isIllustrationSegmentEligible(segments[1]!, 20)).toBe(false);
+    expect(isIllustrationSegmentEligible({ ...segments[1]!, wordCount: 10 }, 20)).toBe(true);
   });
 
   it("handles Unicode words and creates one segment when the maximum exceeds the turn", () => {
