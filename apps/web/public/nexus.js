@@ -4013,7 +4013,8 @@ function sameCampaignArchiveDestination(left, right) {
 
 function campaignArchiveFileSelected() {
   return elements.importSourceType.value === "campaign_archive"
-    || (elements.importSourceType.value === "auto" && (selectedFile?.name.toLowerCase().endsWith(".zip") || selectedFile?.name.toLowerCase().endsWith(".story")));
+    || selectedImportSource?.sourceKind === "campaign_archive"
+    || (elements.importSourceType.value === "auto" && selectedFile?.name.toLowerCase().endsWith(".zip"));
 }
 
 function clearCampaignArchivePreview() {

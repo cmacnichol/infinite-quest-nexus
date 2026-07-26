@@ -642,12 +642,22 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("Your file is still selected; preview it again before importing.");
   });
 
-  it("retains auto-mode .story Campaign Archives for refresh and preview retry", () => {
+  it("routes auto-mode .story archive rejection to portable refresh while retrying recognized archives", () => {
+    const filePreviewStart = managementScript.indexOf("async function previewImportFile(file)");
+    const filePreviewEnd = managementScript.indexOf("\nfunction clipboardGuidance", filePreviewStart);
+    const filePreview = managementScript.slice(filePreviewStart, filePreviewEnd);
+    expect(filePreview).toContain('campaignArchiveErrorCode(error) === "archive-format-unrecognized"');
+    expect(filePreview).toContain('await previewImportSource(file.name, sourceText, elements.infiniteWorldsKind.value, "file");');
     const archiveFileStart = managementScript.indexOf("function campaignArchiveFileSelected()");
     const archiveFileEnd = managementScript.indexOf("\nfunction clearCampaignArchivePreview()", archiveFileStart);
     const archiveFilePredicate = managementScript.slice(archiveFileStart, archiveFileEnd);
-    expect(archiveFilePredicate).toContain('elements.importSourceType.value === "auto"');
-    expect(archiveFilePredicate).toContain('selectedFile?.name.toLowerCase().endsWith(".story")');
+    expect(archiveFilePredicate).toContain('selectedImportSource?.sourceKind === "campaign_archive"');
+    expect(archiveFilePredicate).not.toContain('endsWith(".story")');
+    const importRefreshStart = managementScript.indexOf("async function refreshCampaignImportPreview()");
+    const importRefreshEnd = managementScript.indexOf("\nfunction campaignImportRequest", importRefreshStart);
+    const importRefresh = managementScript.slice(importRefreshStart, importRefreshEnd);
+    expect(importRefresh).toContain("if (campaignArchiveImportActive())");
+    expect(importRefresh).toContain("await refreshPortableCampaignPreview();");
     const retryStart = managementScript.indexOf('elements.previewCampaignArchiveAgain.addEventListener("click"');
     const retryEnd = managementScript.indexOf("\nelements.worldSearch", retryStart);
     const retryHandler = managementScript.slice(retryStart, retryEnd);
