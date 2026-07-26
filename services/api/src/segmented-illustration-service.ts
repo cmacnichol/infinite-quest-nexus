@@ -12,6 +12,7 @@ import {
   characterVisualReference,
   composeIllustrationProviderPrompt,
   directIllustrationPrompt,
+  isIllustrationSegmentEligible,
   segmentIllustrationText,
   sha256,
   stripMechanicsLeakage,
@@ -336,6 +337,7 @@ export async function promoteProvisionalSet(
   const existingOrdinals = new Set(existingSegments.rows.map(r => r.ordinal));
 
   for (const piece of pieces) {
+    if (!isIllustrationSegmentEligible(piece, config.segment_word_count)) continue;
     if (!existingOrdinals.has(piece.ordinal)) {
       await createProvisionalSegment(client, ownerUserId, campaignId, generationJobId, setId, piece, config, visualReference || dbVisualReference);
     }
@@ -404,7 +406,8 @@ async function createTurnSet(
       config.segment_prompt_mode === "ai_refined" ? "refining" : "queued", visualReference]
   );
   const setId = setResult.rows[0]!.id;
-  for (const piece of pieces) {
+  const eligiblePieces = pieces.filter((piece) => isIllustrationSegmentEligible(piece, config.segment_word_count));
+  for (const piece of eligiblePieces) {
     const sanitizedSegment = stripMechanicsLeakage(piece.text).text;
     if (!sanitizedSegment) {
       throw Object.assign(new Error("A segment contains no fiction-only text suitable for illustration."), { statusCode: 409 });
@@ -462,7 +465,7 @@ async function createTurnSet(
         provider.rows[0]?.default_model || "", config.max_attempts, JSON.stringify(promptSnapshot)]
     );
   }
-  return { setId, duplicate: false, segmentCount: pieces.length };
+  return { setId, duplicate: false, segmentCount: eligiblePieces.length };
 }
 
 export async function generateTurnIllustrationSegments(
@@ -509,7 +512,8 @@ export async function previewIllustrationBackfill(
   );
   const affected = turns.rows.filter((turn) => mode === "rebuild" || !turn.has_set);
   const segmentCount = affected.reduce(
-    (count, turn) => count + segmentIllustrationText(turn.narration, config.segment_word_count).length,
+    (count, turn) => count + segmentIllustrationText(turn.narration, config.segment_word_count)
+      .filter((piece) => isIllustrationSegmentEligible(piece, config.segment_word_count)).length,
     0
   );
   return {
