@@ -37,6 +37,22 @@ function safeDate(value: unknown): Date {
   return new Date();
 }
 
+async function withOptionalImportStep<T>(
+  client: DatabaseClient,
+  callback: () => Promise<T>
+): Promise<T | null> {
+  await client.query("SAVEPOINT optional_import_step");
+  try {
+    const result = await callback();
+    await client.query("RELEASE SAVEPOINT optional_import_step");
+    return result;
+  } catch {
+    await client.query("ROLLBACK TO SAVEPOINT optional_import_step");
+    await client.query("RELEASE SAVEPOINT optional_import_step");
+    return null;
+  }
+}
+
 function choices(turn: LegacyTurn): string[] {
   return Array.isArray(turn.choices)
     ? turn.choices.map((choice) => String(choice ?? "").trim()).filter(Boolean).slice(0, 4)
@@ -131,10 +147,14 @@ async function linkImportedTurnIllustration(
   imagePrompt: string,
   assetId: string
 ) {
+  const sourceText = narration || "Imported turn illustration";
+  const sourceTextHash = sha256(sourceText);
+  const prompt = (imagePrompt || narration || "Turn illustration").slice(0, 2000);
+  const wordCount = sourceText.trim() ? sourceText.trim().split(/\s+/).length : 0;
   await client.query(
     `INSERT INTO campaign_illustration_configs (
        campaign_id, owner_user_id, source_policy, matching_scope, confidence_profile,
-       repetition_window, word_count_per_segment, images_per_segment, enabled
+       repetition_window, segment_word_count, images_per_segment, enabled
      ) VALUES ($1, $2, 'library_only', 'campaign', 'balanced', 3, 150, 1, true)
      ON CONFLICT (owner_user_id, campaign_id)
      DO UPDATE SET enabled = true,
@@ -145,22 +165,22 @@ async function linkImportedTurnIllustration(
 
   const setRes = await client.query<{ id: string }>(
     `INSERT INTO turn_illustration_sets (
-       owner_user_id, campaign_id, turn_id, is_active, status, prompt_mode, images_per_segment, segment_word_count, completed_at
-     ) VALUES ($1, $2, $3, true, 'completed', 'diegetic', 1, 150, now())
+       owner_user_id, campaign_id, turn_id, source_text_hash, is_active, status, prompt_mode,
+       images_per_segment, segment_word_count, completed_at
+     ) VALUES ($1, $2, $3, $4, true, 'completed', 'legacy', 1, 150, now())
      RETURNING id`,
-    [ownerUserId, campaignId, turnId]
+    [ownerUserId, campaignId, turnId, sourceTextHash]
   );
   const setId = setRes.rows[0]?.id;
   if (!setId) return;
 
-  const prompt = (imagePrompt || narration || "Turn illustration").slice(0, 2000);
   const segRes = await client.query<{ id: string }>(
     `INSERT INTO turn_illustration_segments (
-       owner_user_id, campaign_id, turn_id, illustration_set_id, ordinal, start_word, end_word,
-       source_text, direct_prompt, resolved_prompt, prompt_source, status
-     ) VALUES ($1, $2, $3, $4, 0, 0, 150, $5, $6, $6, 'accepted_segment', 'completed')
+       owner_user_id, campaign_id, turn_id, illustration_set_id, ordinal, start_offset, end_offset,
+       start_word, end_word, source_text, source_text_hash, direct_prompt, resolved_prompt, prompt_source, status
+     ) VALUES ($1, $2, $3, $4, 0, 0, $5, 0, $6, $7, $8, $9, $9, 'legacy', 'completed')
      RETURNING id`,
-    [ownerUserId, campaignId, turnId, setId, narration.slice(0, 1000), prompt]
+    [ownerUserId, campaignId, turnId, setId, sourceText.length, wordCount, sourceText, sourceTextHash, prompt]
   );
   const segmentId = segRes.rows[0]?.id;
   if (!segmentId) return;
@@ -501,14 +521,12 @@ export async function importLegacyStory(
       const match = coverUrl.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
       const id = match ? match[0] : coverUrl.split('/').pop()?.split('.')[0];
       if (id && assetBuffers.has(id)) {
-        try {
+        await withOptionalImportStep(client, async () => {
           const buffer = assetBuffers.get(id)!;
           const mimeType = detectMimeType(buffer);
           const asset = await persistWorldCover(client, assetStore, ownerUserId, buffer, mimeType);
           await client.query("UPDATE worlds SET cover_asset_id = $2 WHERE id = $1", [worldId, asset.id]);
-        } catch (err) {
-          /* ignored */
-        }
+        });
       }
     }
 
@@ -604,26 +622,23 @@ export async function importLegacyStory(
         const id = match ? match[0] : (name?.split('.')[0] || null);
         const key = (id && assetBuffers.has(id)) ? id : (name && assetBuffers.has(name)) ? name : null;
         if (key) {
-          const buffer = assetBuffers.get(key)!;
-          try {
+          const persisted = await withOptionalImportStep(client, async () => {
+            const buffer = assetBuffers.get(key)!;
             const mimeType = detectMimeType(buffer);
             const asset = await persistTurnImage(client, assetStore, ownerUserId, campaignId, turnId, buffer, mimeType);
             if (asset) {
-              importedAssetId = asset.id;
               await client.query("UPDATE turns SET image_url = $2 WHERE id = $1", [turnId, asset.publicUrl]);
             }
-          } catch (err) {
-            /* ignored */
-          }
+            return asset;
+          });
+          importedAssetId = persisted?.id ?? null;
         }
       }
 
       if (importedAssetId && campaignId) {
-        try {
+        await withOptionalImportStep(client, async () => {
           await linkImportedTurnIllustration(client, ownerUserId, campaignId, turnId, narration, turn.imagePrompt || "", importedAssetId);
-        } catch (err) {
-          /* ignored */
-        }
+        });
       }
 
       const memory = buildTurnFictionMemory(turn, ordinal);

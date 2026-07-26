@@ -12,9 +12,8 @@ import { branchCampaign, enqueueGeneration, enqueueLatestReplacement, getGenerat
 import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/api/src/memory-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
-import { createProviderNetworkPolicy } from "../../packages/security/src/provider-network-policy.js";
-import { configureDefaultProviderTransport, createProviderTransport } from "../../packages/story-engine/src/provider-transport.js";
 import { logger } from "../../packages/logger/src/index.js";
+import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -45,7 +44,7 @@ function validStory(narration = "Location Gamma opens and Marker Three becomes v
 integration("durable Story Engine integration", () => {
   let pool: DatabasePool;
   let server: Server;
-  let providerTransport: ReturnType<typeof createProviderTransport>;
+  let providerTransport: ReturnType<typeof installIntegrationProviderTransport>;
   let baseUrl = "";
   let providerId = "";
   const replies: MockReply[] = [];
@@ -55,10 +54,7 @@ integration("durable Story Engine integration", () => {
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
     await migrateDatabase(pool, resolve("database/migrations"));
-    providerTransport = createProviderTransport({
-      policy: createProviderNetworkPolicy({ allowlist: ["127.0.0.0/8"] })
-    });
-    configureDefaultProviderTransport(providerTransport);
+    providerTransport = installIntegrationProviderTransport();
     server = createServer((request, response) => {
       let body = "";
       request.setEncoding("utf8");
