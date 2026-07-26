@@ -1,16 +1,20 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Readable } from "node:stream";
+import { z } from "zod";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
+import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import { canonicalizeWorldContent, type WorldContent } from "../../../packages/contracts/src/world-library.js";
 import { characterLegacyText } from "../../../packages/domain/src/world-characters.js";
-import { calculateContentFingerprint, canonicalArchiveJson, sanitizePortableMetadata, type ArchiveManifest } from "../../../packages/contracts/src/archives.js";
-import { removeProviderSecrets, stableStringify } from "../../../packages/domain/src/text.js";
-import { collectCampaignArchiveAssets, verifyAndWriteArchiveAssets, type CampaignAssetInventory } from "./asset-archive-service.js";
-import { ArchiveError, createArchiveStagingDirectory, writeArchiveArtifact, type ArchiveLimits, type CompletedArchiveArtifact } from "./archive-io.js";
-import { readAsset, type FilesystemAssetStore } from "./asset-service.js";
+import { archiveAssetRecordSchema, calculateContentFingerprint, canonicalArchiveJson, campaignArchiveDestinationSchema, campaignArchivePreviewResponseSchema, sanitizePortableMetadata, type ArchiveEntry, type ArchiveManifest, type CampaignArchiveDestination as ContractCampaignArchiveDestination, type CampaignArchivePreviewResponse } from "../../../packages/contracts/src/archives.js";
+import { removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
+import { collectCampaignArchiveAssets, validateArchiveAssets, verifyAndWriteArchiveAssets, type CampaignAssetInventory, type ValidatedArchiveAssetSet } from "./asset-archive-service.js";
+import { ArchiveError, createArchiveStagingDirectory, inspectArchive, readVerifiedEntry, removeArchivePath, writeArchiveArtifact, type ArchiveLimits, type CompletedArchiveArtifact, type InspectedArchive, type StagedArchive } from "./archive-io.js";
+import { imageExtensionForMimeType, readAsset, verifyOriginalImage, type FilesystemAssetStore } from "./asset-service.js";
+import unzipper from "unzipper";
 
 export type PortableWorldPayload = { canonicalHash: string; sourceWorldId: string; sourceWorldVersionId: string; versionNumber: number; content: unknown };
 export type PortableCampaignChronicleV1 = { formatVersion: 1; memories: unknown[]; summaries: unknown[] };
@@ -31,6 +35,21 @@ export type CampaignArchivePayloads = {
   chronicle: PortableCampaignChronicleV1;
 };
 export type CampaignArchiveExportOptions = { assetStore: FilesystemAssetStore; archiveRoot: string; limits: ArchiveLimits };
+export type CampaignArchiveDestination = ContractCampaignArchiveDestination;
+export type CampaignArchivePreview = CampaignArchivePreviewResponse;
+export type DecodedCampaignArchive = {
+  inspected: InspectedArchive;
+  campaign: PortableCampaignV3 & { archiveRecords: CampaignArchiveRecordsV1 };
+  world: PortableWorldPayload;
+  chronicle: PortableCampaignChronicleV1;
+  assets: ValidatedAssetArchive;
+  contentFingerprint: string;
+  warnings: string[];
+};
+export type ValidatedAssetArchive = ValidatedArchiveAssetSet;
+
+const APPLICATION_VERSION = process.env.APP_VERSION?.trim() || process.env.npm_package_version?.trim() || "0.1.0";
+const campaignPayloadSchema = z.object({ world: z.unknown(), turns: z.array(z.unknown()) }).passthrough();
 
 type SnapshotCampaign = Record<string, any> & { id: string; world_id: string; world_version_id: string; version_number: number; content: WorldContent; revision: number };
 export type CampaignArchiveSnapshot = {
@@ -241,4 +260,288 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string, opt
   } finally {
     await staging.cleanup();
   }
+}
+
+function archiveJson(value: Buffer, name: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(value.toString("utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    return parsed as Record<string, unknown>;
+  } catch {
+    throw new ArchiveError("archive-json-invalid", `The ${name} payload is not valid JSON.`);
+  }
+}
+
+function archiveFingerprint(inspected: InspectedArchive): string {
+  return calculateContentFingerprint({
+    payloadHashes: inspected.manifest.entries.filter((entry) => entry.mediaType === "application/json").map((entry) => entry.sha256),
+    originalAssetHashes: inspected.manifest.assets.map((asset) => asset.contentHash)
+  });
+}
+
+function previewAppVersion(): string {
+  return APPLICATION_VERSION;
+}
+
+function destinationHash(destination: ContractCampaignArchiveDestination): string {
+  return sha256(`campaign-archive-destination-v1\0${canonicalArchiveJson(campaignArchiveDestinationSchema.parse(destination))}`);
+}
+
+function rootRelativeStagedPath(staged: StagedArchive): string {
+  const path = staged.relativePath.replaceAll("\\", "/");
+  if (!path || path.startsWith("/") || /^[A-Za-z]:/.test(path) || path.split("/").some((part) => !part || part === "." || part === "..")) {
+    throw new ArchiveError("archive-entry-unsafe", "The staged archive path is not a safe relative path.");
+  }
+  return path;
+}
+
+function selectedCharacter(campaign: Record<string, unknown>): { id: string; name: string } | null {
+  const metadata = campaign.campaign && typeof campaign.campaign === "object" ? campaign.campaign as Record<string, unknown> : {};
+  const snapshot = metadata.characterSnapshot && typeof metadata.characterSnapshot === "object" ? metadata.characterSnapshot as Record<string, unknown> : null;
+  const profile = metadata.characterProfile && typeof metadata.characterProfile === "object" ? metadata.characterProfile as Record<string, unknown> : null;
+  const name = typeof snapshot?.name === "string" ? snapshot.name.trim() : typeof profile?.name === "string" ? profile.name.trim() : "";
+  const id = typeof metadata.selectedCharacterId === "string" && metadata.selectedCharacterId.trim() ? metadata.selectedCharacterId.trim() : name ? "legacy-default" : "";
+  return id && name ? { id, name } : null;
+}
+
+function archiveObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function worldTitle(content: unknown): string {
+  if (!content || typeof content !== "object") return "Imported world";
+  const world = (content as Record<string, unknown>).world;
+  if (world && typeof world === "object" && typeof (world as Record<string, unknown>).title === "string") return String((world as Record<string, unknown>).title);
+  return typeof (content as Record<string, unknown>).title === "string" ? String((content as Record<string, unknown>).title) : "Imported world";
+}
+
+async function readCampaignArchive(staged: StagedArchive, limits: ArchiveLimits): Promise<DecodedCampaignArchive> {
+  let inspected: InspectedArchive;
+  try {
+    inspected = await inspectArchive(staged, limits, "campaign");
+  } catch (error) {
+    if (error instanceof ArchiveError && error.code !== "archive-format-unrecognized") throw error;
+    return adaptLegacyCampaignZip(staged, limits);
+  }
+  const actualFingerprint = archiveFingerprint(inspected);
+  if (actualFingerprint !== inspected.manifest.contentFingerprint) {
+    throw new ArchiveError("archive-checksum-mismatch", "The archive content fingerprint does not match its manifest.");
+  }
+  const campaign = archiveJson(await readVerifiedEntry(inspected, "campaign.json", limits.maxJsonEntryBytes), "campaign");
+  const world = archiveJson(await readVerifiedEntry(inspected, "world.json", limits.maxJsonEntryBytes), "world");
+  const chronicle = archiveJson(await readVerifiedEntry(inspected, "chronicle.json", limits.maxJsonEntryBytes), "Chronicle");
+  const campaignParsed = campaignPayloadSchema.safeParse(campaign);
+  if (!campaignParsed.success) throw new ArchiveError("archive-json-invalid", "The campaign payload is invalid.", 400, { payload: "campaign" });
+  const worldPayload = world as Partial<PortableWorldPayload>;
+  if (typeof worldPayload.canonicalHash !== "string" || typeof worldPayload.sourceWorldId !== "string" || typeof worldPayload.sourceWorldVersionId !== "string" || !worldPayload.content) {
+    throw new ArchiveError("archive-json-invalid", "The world payload is invalid.", 400, { payload: "world" });
+  }
+  const canonicalContent = canonicalizeWorldContent(sanitizeWorldValue(worldPayload.content) as WorldContent);
+  const computedWorldHash = sha256(stableStringify(canonicalContent));
+  if (computedWorldHash !== worldPayload.canonicalHash || (campaign.world as Record<string, unknown> | undefined)?.canonicalHash !== worldPayload.canonicalHash) {
+    throw new ArchiveError("archive-world-mismatch", "The campaign and world payloads do not describe the same world version.");
+  }
+  if (worldPayload.versionNumber === undefined || !Number.isInteger(worldPayload.versionNumber) || Number(worldPayload.versionNumber) < 1) {
+    throw new ArchiveError("archive-json-invalid", "The world version number is invalid.");
+  }
+  if (chronicle.formatVersion !== 1 || !Array.isArray(chronicle.memories) || !Array.isArray(chronicle.summaries)) {
+    throw new ArchiveError("archive-json-invalid", "The Chronicle payload is invalid.", 400, { payload: "chronicle" });
+  }
+  const records = campaign.archiveRecords;
+  if (!records || typeof records !== "object" || (records as Record<string, unknown>).formatVersion !== 1) {
+    throw new ArchiveError("archive-json-invalid", "The campaign archive records are invalid.", 400, { payload: "campaign" });
+  }
+  const assets = await validateArchiveAssets(inspected.manifest, (path) => readVerifiedEntry(inspected, path, limits.maxOriginalImageBytes));
+  return {
+    inspected,
+    campaign: campaign as PortableCampaignV3 & { archiveRecords: CampaignArchiveRecordsV1 },
+    world: { ...worldPayload, content: canonicalContent } as PortableWorldPayload,
+    chronicle: chronicle as PortableCampaignChronicleV1,
+    assets,
+    contentFingerprint: actualFingerprint,
+    warnings: []
+  };
+}
+
+function legacyAssetMime(path: string): "image/png" | "image/jpeg" | "image/webp" | "image/gif" {
+  const extension = path.toLocaleLowerCase("en-US").split(".").pop();
+  if (extension === "png") return "image/png";
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "webp") return "image/webp";
+  if (extension === "gif") return "image/gif";
+  throw new ArchiveError("archive-asset-invalid", "Legacy campaign archive assets must be PNG, JPEG, WebP, or GIF images.");
+}
+
+export async function adaptLegacyCampaignZip(staged: StagedArchive, limits: ArchiveLimits): Promise<DecodedCampaignArchive> {
+  const archiveStat = await stat(staged.absolutePath).catch(() => null);
+  if (!archiveStat || archiveStat.size > limits.maxCompressedBytes) throw new ArchiveError("archive-limit-exceeded", "The legacy campaign archive exceeds the configured compressed byte limit.");
+  let files: unzipper.CentralDirectory;
+  try {
+    files = await unzipper.Open.file(staged.absolutePath);
+  } catch {
+    throw new ArchiveError("archive-format-unrecognized", "The uploaded file is not a Campaign Archive or supported legacy campaign ZIP.");
+  }
+  if (files.files.length > limits.maxEntries) throw new ArchiveError("archive-limit-exceeded", "The legacy campaign archive contains too many entries.");
+  const campaignEntry = files.files.find((file) => file.path === "campaign.json" || file.path === "infinite-quest-campaign.json");
+  if (!campaignEntry || files.files.some((file) => file.path !== campaignEntry.path && !/^assets\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:png|jpe?g|webp|gif)$/i.test(file.path))) {
+    throw new ArchiveError("archive-format-unrecognized", "Legacy campaign ZIPs may contain only campaign.json and assets/<uuid>.<extension>.");
+  }
+  let legacyCampaign: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse((await campaignEntry.buffer()).toString("utf8"));
+    const result = campaignPayloadSchema.safeParse(parsed);
+    if (!result.success) throw new Error("invalid");
+    legacyCampaign = result.data as unknown as Record<string, unknown>;
+  } catch {
+    throw new ArchiveError("archive-json-invalid", "The legacy campaign JSON payload is invalid.");
+  }
+  const campaignMetadata = archiveObject(legacyCampaign.campaign);
+  const sourceCampaignId = typeof campaignMetadata.sourceCampaignId === "string" ? campaignMetadata.sourceCampaignId : randomUUID();
+  const sourceWorldVersionId = typeof campaignMetadata.sourceWorldVersionId === "string" ? campaignMetadata.sourceWorldVersionId : randomUUID();
+  const sourceWorldId = randomUUID();
+  const content = canonicalizeWorldContent(sanitizeWorldValue(legacyCampaign.world) as WorldContent);
+  const worldHash = sha256(stableStringify(content));
+  const normalizedTurns = (Array.isArray(legacyCampaign.turns) ? legacyCampaign.turns : []).map((turnValue) => {
+    const turn = archiveObject(turnValue);
+    return { ...turn, id: typeof turn.id === "string" && turn.id ? turn.id : randomUUID() };
+  });
+  const campaign = {
+    ...legacyCampaign,
+    campaign: { ...campaignMetadata, sourceCampaignId, sourceWorldVersionId },
+    turns: normalizedTurns,
+    world: { canonicalHash: worldHash, sourceWorldId, sourceWorldVersionId },
+    archiveRecords: { formatVersion: 1, characterProfileEdits: [], stateEdits: [], worldMigrations: [], illustrationConfig: null, illustrationSets: [], illustrationSegments: [], costs: [] }
+  } as PortableCampaignV3 & { archiveRecords: CampaignArchiveRecordsV1 };
+  const chronicle: PortableCampaignChronicleV1 = { formatVersion: 1, memories: [], summaries: [] };
+  const entries: ArchiveEntry[] = [];
+  const entryBytes = new Map<string, Buffer>();
+  const assets = [];
+  const legacyTurnBindings = new Map<string, { role: "turn_illustration"; campaignId: string; turnId: string }>();
+  for (const turnValue of normalizedTurns) {
+    const turn = archiveObject(turnValue);
+    const pointer = typeof turn.imageUrl === "string" ? /^\/api\/v1\/assets\/([0-9a-f-]{36})$/i.exec(turn.imageUrl) : null;
+    if (pointer && typeof turn.id === "string") legacyTurnBindings.set(pointer[1]!, { role: "turn_illustration", campaignId: sourceCampaignId, turnId: turn.id });
+  }
+  for (const file of files.files.filter((entry) => entry !== campaignEntry)) {
+    const bytes = await file.buffer();
+    if (bytes.byteLength > limits.maxOriginalImageBytes) throw new ArchiveError("archive-limit-exceeded", "A legacy campaign image exceeds the configured byte limit.");
+    const mimeType = legacyAssetMime(file.path);
+    const verified = await verifyOriginalImage(bytes, mimeType).catch(() => null);
+    if (!verified) throw new ArchiveError("archive-asset-invalid", `Legacy campaign asset '${file.path}' is not a valid image.`);
+    const sourceAssetId = file.path.split("/").pop()!.split(".")[0]!;
+    const contentHash = sha256(bytes.toString("base64"));
+    const archivePath = `assets/sha256/${contentHash.slice(0, 2)}/${contentHash}${imageExtensionForMimeType(mimeType)}`;
+    entryBytes.set(archivePath, bytes);
+    assets.push(archiveAssetRecordSchema.parse({
+      sourceAssetId, contentHash, archivePath, mimeType, byteLength: bytes.byteLength, pixelWidth: verified.width, pixelHeight: verified.height,
+      technicalMetadata: {}, library: { title: "", caption: "", notes: "", tags: [], origin: "imported", reviewStatus: "unreviewed", reuseScope: "campaign", automaticReuseEnabled: false, contentCategories: [], favorite: false, archivedAt: null },
+      createdAt: new Date().toISOString(), bindings: [legacyTurnBindings.get(sourceAssetId) ?? { role: "imported_attachment", campaignId: sourceCampaignId, turnId: null }]
+    }));
+  }
+  const jsonEntries: Array<[string, unknown]> = [["campaign.json", campaign], ["world.json", { canonicalHash: worldHash, sourceWorldId, sourceWorldVersionId, versionNumber: Number(campaignMetadata.sourceWorldVersionNumber || 1), content }], ["chronicle.json", chronicle]];
+  for (const [path, value] of jsonEntries) {
+    const bytes = Buffer.from(canonicalArchiveJson(value), "utf8");
+    entries.push({ path, logicalType: path.slice(0, -5), mediaType: "application/json", byteLength: bytes.byteLength, sha256: sha256(bytes.toString()) });
+  }
+  for (const asset of assets) entries.push({ path: asset.archivePath, logicalType: "asset-original", mediaType: asset.mimeType, byteLength: asset.byteLength, sha256: asset.contentHash });
+  const manifest = {
+    format: "infinite-quest-archive", formatVersion: 1, archiveType: "campaign", createdAt: new Date().toISOString(),
+    contentFingerprint: calculateContentFingerprint({ payloadHashes: entries.filter((entry) => entry.mediaType === "application/json").map((entry) => entry.sha256), originalAssetHashes: assets.map((asset) => asset.contentHash) }),
+    campaignId: sourceCampaignId, worldId: sourceWorldId, worldVersionId: sourceWorldVersionId,
+    entries, payloads: jsonEntries.map(([path]) => ({ kind: path === "campaign.json" ? "campaign" : path === "world.json" ? "world" : "chronicle", path, formatVersion: 1 })), assets
+  } satisfies ArchiveManifest;
+  const inspected: InspectedArchive = { manifest, staged, entries: new Map(entries.map((entry) => [entry.path, { ...entry, compressedBytes: entry.byteLength, uncompressedBytes: entry.byteLength }])), uncompressedBytes: entries.reduce((sum, entry) => sum + entry.byteLength, 0) };
+  const validated = await validateArchiveAssets(manifest, async (path) => {
+    const bytes = entryBytes.get(path);
+    if (!bytes) throw new ArchiveError("archive-entry-missing", `Legacy campaign asset '${path}' is missing.`);
+    return bytes;
+  });
+  return { inspected, campaign, world: { canonicalHash: worldHash, sourceWorldId, sourceWorldVersionId, versionNumber: Number(campaignMetadata.sourceWorldVersionNumber || 1), content }, chronicle, assets: validated, contentFingerprint: manifest.contentFingerprint, warnings: ["This legacy ZIP had no archive manifest or source checksums; the payload was adapted for compatibility.", "Legacy ZIP image bindings were inferred as campaign attachments; explicit binding guarantees were absent."] };
+}
+
+async function findDestination(pool: DatabasePool, ownerUserId: string, archive: DecodedCampaignArchive, destination: ContractCampaignArchiveDestination): Promise<CampaignArchivePreviewResponse["destination"]> {
+  const embedded = destination.kind === "embedded";
+  if (destination.kind === "existing_world_version") {
+    const selected = await pool.query<{ world_id: string; id: string; content: WorldContent }>(
+      `SELECT wv.id,wv.world_id,wv.content FROM world_versions wv
+         JOIN worlds w ON w.id=wv.world_id AND w.owner_user_id=wv.owner_user_id
+        WHERE wv.id=$1 AND wv.owner_user_id=$2`, [destination.worldVersionId, ownerUserId]
+    );
+    if (!selected.rowCount) throw new ArchiveError("archive-destination-not-empty", "The selected destination world version was not found.", 404);
+    return { kind: "existing_world_version", operation: "attach_existing_world_version", worldId: selected.rows[0]!.world_id, worldVersionId: selected.rows[0]!.id };
+  }
+  const candidates = await pool.query<{ world_id: string; world_version_id: string; content: WorldContent }>(
+    `SELECT wv.world_id,wv.id AS world_version_id,wv.content FROM world_versions wv
+       JOIN worlds w ON w.id=wv.world_id AND w.owner_user_id=wv.owner_user_id
+      WHERE wv.owner_user_id=$1 ORDER BY wv.created_at DESC`, [ownerUserId]
+  );
+  const exact = candidates.rows.find((row) => sha256(stableStringify(canonicalizeWorldContent(row.content))) === archive.world.canonicalHash);
+  return exact
+    ? { kind: "embedded", operation: "reuse_world_version", worldId: exact.world_id, worldVersionId: exact.world_version_id }
+    : { kind: "embedded", operation: "create_world", worldId: null, worldVersionId: null };
+}
+
+export async function previewCampaignArchive(
+  pool: DatabasePool,
+  config: RuntimeConfig,
+  staged: StagedArchive,
+  sourceName: string,
+  destination: ContractCampaignArchiveDestination
+): Promise<CampaignArchivePreviewResponse> {
+  const parsedDestination = campaignArchiveDestinationSchema.parse(destination);
+  const archive = await readCampaignArchive(staged, config.campaignArchiveLimits);
+  const ownerUserId = await initialOwnerId(pool);
+  const boundDestinationHash = destinationHash(parsedDestination);
+  const destinationPreview = await findDestination(pool, ownerUserId, archive, parsedDestination);
+  const campaignData = archive.campaign.campaign as Record<string, unknown> | undefined;
+  const responseBase = {
+    valid: true as const,
+    archiveType: "campaign" as const,
+    formatVersion: 1 as const,
+    contentFingerprint: archive.contentFingerprint,
+    campaign: {
+      title: typeof campaignData?.title === "string" ? campaignData.title : "Imported campaign",
+      sourceCampaignId: typeof campaignData?.sourceCampaignId === "string" ? campaignData.sourceCampaignId : archive.inspected.manifest.campaignId!,
+      acceptedTurnCount: Array.isArray(archive.campaign.turns) ? archive.campaign.turns.length : 0,
+      activeTurnNumber: Array.isArray(archive.campaign.turns) ? Math.max(0, ...archive.campaign.turns.map((turn) => Number((turn as Record<string, unknown>).turnNumber ?? 0))) : 0,
+      selectedCharacter: selectedCharacter(archive.campaign)
+    },
+    world: {
+      title: worldTitle(archive.world.content),
+      sourceWorldId: archive.world.sourceWorldId,
+      sourceWorldVersionId: archive.world.sourceWorldVersionId,
+      versionNumber: archive.world.versionNumber
+    },
+    chronicle: { memoryCount: archive.chronicle.memories.length, summaryCount: archive.chronicle.summaries.length },
+    assets: { originalCount: archive.assets.assets.length, totalBytes: archive.assets.assets.reduce((sum, asset) => sum + asset.byteLength, 0) },
+    destination: destinationPreview,
+    providerDataIncluded: false as const,
+    warnings: archive.warnings
+  };
+  const rawToken = randomBytes(32).toString("base64url");
+  const tokenHash = createHash("sha256").update(rawToken, "utf8").digest("hex");
+  const expiresAt = new Date(Date.now() + config.archivePreviewTtlSeconds * 1000);
+  const preview = { ...responseBase, previewToken: rawToken, expiresAt: expiresAt.toISOString() };
+  const storedPreview = { ...preview, previewToken: undefined };
+  const stagedPath = rootRelativeStagedPath(staged);
+  await pool.query(
+    `INSERT INTO archive_previews (
+       owner_user_id,archive_type,token_hash,content_fingerprint,destination_hash,application_version,
+       staged_archive_path,source_name,preview,status,expires_at
+     ) VALUES ($1,'campaign',$2,$3,$4,$5,$6,$7,$8::jsonb,'previewed',$9)
+     ON CONFLICT (owner_user_id,archive_type,content_fingerprint,destination_hash) WHERE status='previewed'
+     DO UPDATE SET token_hash=EXCLUDED.token_hash,application_version=EXCLUDED.application_version,
+       staged_archive_path=EXCLUDED.staged_archive_path,source_name=EXCLUDED.source_name,
+       preview=EXCLUDED.preview,status='previewed',expires_at=EXCLUDED.expires_at,consumed_at=NULL,result=NULL,updated_at=now()`,
+    [ownerUserId, tokenHash, archive.contentFingerprint, boundDestinationHash, previewAppVersion(), stagedPath, sourceName, JSON.stringify(storedPreview), expiresAt]
+  );
+  return campaignArchivePreviewResponseSchema.parse(preview);
+}
+
+export function campaignArchiveApplicationVersion(): string {
+  return previewAppVersion();
+}
+
+export async function decodeCampaignArchive(staged: StagedArchive, limits: ArchiveLimits): Promise<DecodedCampaignArchive> {
+  return readCampaignArchive(staged, limits);
 }

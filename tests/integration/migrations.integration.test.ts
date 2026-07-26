@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { copyFile, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -71,6 +72,61 @@ integration("standard database migration runner", () => {
       "api_admission_buckets_expiry_idx",
       "api_admission_leases_scope_expiry_idx"
     ]);
+  });
+
+  it("creates owner-scoped staged archive previews without storing raw tokens or absolute paths", async () => {
+    const owner = await pool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'");
+    const columns = await pool.query<{ column_name: string; data_type: string; is_nullable: string }>(
+      `SELECT column_name, data_type, is_nullable
+         FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'archive_previews'
+        ORDER BY ordinal_position`
+    );
+    expect(columns.rows.map((row) => row.column_name)).toEqual([
+      "id", "owner_user_id", "archive_type", "token_hash", "content_fingerprint",
+      "destination_hash", "application_version", "staged_archive_path", "source_name",
+      "preview", "status", "expires_at", "consumed_at", "result", "created_at", "updated_at"
+    ]);
+    expect(columns.rows.find((row) => row.column_name === "id")).toMatchObject({ data_type: "uuid", is_nullable: "NO" });
+    expect(columns.rows.find((row) => row.column_name === "owner_user_id")).toMatchObject({ data_type: "uuid", is_nullable: "NO" });
+
+    const constraints = await pool.query<{ constraint_name: string; constraint_definition: string }>(
+      `SELECT tc.constraint_name, pg_get_constraintdef(c.oid) AS constraint_definition
+         FROM information_schema.table_constraints tc
+         JOIN pg_constraint c ON c.conname = tc.constraint_name
+        WHERE tc.table_schema = 'public' AND tc.table_name = 'archive_previews'
+        ORDER BY tc.constraint_name`
+    );
+    expect(constraints.rows.map((row) => row.constraint_definition).join("\n")).toMatch(/archive_type.*campaign.*system/i);
+    expect(constraints.rows.map((row) => row.constraint_definition).join("\n")).toMatch(/status.*previewed.*consumed.*expired.*failed/i);
+    expect(constraints.rows.map((row) => row.constraint_definition).join("\n")).toMatch(/UNIQUE.*token_hash/i);
+
+    const indexes = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'archive_previews' ORDER BY indexname`
+    );
+    expect(indexes.rows.map((row) => row.indexname)).toEqual(expect.arrayContaining([
+      "archive_previews_token_hash_key",
+      "archive_previews_owner_fingerprint_destination_live_idx",
+      "archive_previews_expiry_idx"
+    ]));
+
+    const rawToken = "raw-preview-token-must-not-be-stored";
+    const rawTokenHash = createHash("sha256").update(rawToken, "utf8").digest("hex");
+    const stagedPath = "staging/preview.zip";
+    const inserted = await pool.query<{ token_hash: string; staged_archive_path: string }>(
+      `INSERT INTO archive_previews (
+         owner_user_id, archive_type, token_hash, content_fingerprint, destination_hash,
+         application_version, staged_archive_path, source_name, preview, status, expires_at
+       ) VALUES ($1,'campaign',$2,repeat('a',64),repeat('b',64),'test', $3, 'fixture.zip', '{}'::jsonb, 'previewed', now() + interval '30 minutes')
+       RETURNING token_hash, staged_archive_path`,
+      [owner.rows[0]!.id, rawTokenHash, stagedPath]
+    );
+    expect(inserted.rows[0]).toEqual({
+      token_hash: expect.not.stringContaining(rawToken),
+      staged_archive_path: stagedPath
+    });
+    expect(inserted.rows[0]!.staged_archive_path).not.toMatch(/^[A-Za-z]:[\\/]|^\\\\|^\//);
+    await pool.query("DELETE FROM archive_previews WHERE token_hash = $1", [inserted.rows[0]!.token_hash]);
   });
 
   it("adds scoped entity identity columns and indexes to Chronicle records", async () => {

@@ -1,13 +1,17 @@
 import { mkdtemp, readFile, rm, stat, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { Readable } from "node:stream";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { inspectArchive, readVerifiedEntry, type ArchiveLimits } from "../../services/api/src/archive-io.js";
+import { stageArchiveUpload } from "../../services/api/src/archive-io.js";
 import { persistOriginalImage } from "../../services/api/src/asset-service.js";
-import { exportCampaign } from "../../services/api/src/campaign-archive-service.js";
+import { exportCampaign, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
+import { importCampaignArchive } from "../../services/api/src/import-service.js";
+import type { RuntimeConfig } from "../../packages/database/src/config.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -261,5 +265,56 @@ integration("campaign archive export", () => {
     await unlink(resolve(root, source.rows[0]!.storage_path));
     await expect(exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits }))
       .rejects.toMatchObject({ code: "archive-asset-missing", assetIds: [requiredAssetId] });
+  });
+
+  it("previews without writes and imports a campaign with fresh campaign-owned identities", async () => {
+    const config = {
+      assetStorageRoot: root,
+      archiveStorageRoot: root,
+      archivePreviewTtlSeconds: 1_800,
+      campaignArchiveLimits: limits
+    } as RuntimeConfig;
+    const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
+    const staged = await stageArchiveUpload(Readable.from(await readFile(artifact.absolutePath)), root, limits);
+    const before = await pool.query<{ worlds: string; campaigns: string; assets: string }>(
+      `SELECT (SELECT count(*)::text FROM worlds) AS worlds,
+              (SELECT count(*)::text FROM campaigns) AS campaigns,
+              (SELECT count(*)::text FROM assets) AS assets`
+    );
+
+    const preview = await previewCampaignArchive(pool, config, staged, "fixture-campaign.zip", { kind: "embedded" });
+
+    expect(preview).toMatchObject({
+      valid: true,
+      archiveType: "campaign",
+      campaign: { title: "Archive campaign", acceptedTurnCount: 1, activeTurnNumber: 1, selectedCharacter: { name: "Avery" } },
+      chronicle: { memoryCount: 1, summaryCount: 1 },
+      assets: { originalCount: 4 },
+      providerDataIncluded: false,
+      previewToken: expect.any(String),
+      destination: { kind: "embedded", operation: "reuse_world_version" }
+    });
+    const afterPreview = await pool.query<{ worlds: string; campaigns: string; assets: string }>(
+      `SELECT (SELECT count(*)::text FROM worlds) AS worlds,
+              (SELECT count(*)::text FROM campaigns) AS campaigns,
+              (SELECT count(*)::text FROM assets) AS assets`
+    );
+    expect(afterPreview.rows[0]).toEqual(before.rows[0]);
+
+    const imported = await importCampaignArchive(pool, config, { root }, {
+      previewToken: preview.previewToken,
+      destination: { kind: "embedded" }
+    });
+    expect(imported).toMatchObject({ duplicate: false, worldId, worldVersionId: expect.any(String), campaignId: expect.any(String) });
+    expect(imported.campaignId).not.toBe(campaignId);
+    expect(imported.worldVersionId).toBe((await pool.query<{ id: string }>(
+      "SELECT world_version_id AS id FROM campaigns WHERE id=$1", [campaignId]
+    )).rows[0]!.id);
+    const importedTurn = await pool.query<{ id: string; image_url: string }>(
+      "SELECT id,image_url FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [imported.campaignId]
+    );
+    expect(importedTurn).toHaveLength(1);
+    expect(importedTurn.rows[0]!.id).not.toBe(turnId);
+    expect(imported.stats).toMatchObject({ turnCount: 1, memoryCount: 1 });
   });
 });
