@@ -22,7 +22,7 @@ import { cleanupUnreferencedCreatedPaths, persistArchiveAssets, restoreAssetBind
 import { lockOriginalImages, parseDataImage, persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
 import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
 import { ArchiveError, type StagedArchive } from "./archive-io.js";
-import { campaignArchiveApplicationVersion, decodeCampaignArchive, type DecodedCampaignArchive } from "./campaign-archive-service.js";
+import { campaignArchiveApplicationVersion, decodeCampaignArchive, portableWorldContentHash, type DecodedCampaignArchive } from "./campaign-archive-service.js";
 
 export type CampaignArchiveImportResult = {
   importId: string;
@@ -821,7 +821,7 @@ async function resolveImportedWorld(
       "SELECT world_id,content FROM world_versions WHERE id=$1 AND owner_user_id=$2", [worldVersionId, ownerUserId]
     );
     if (!selected.rowCount || selected.rows[0]!.world_id !== worldId) throw new ArchiveError("archive-destination-not-empty", "The destination world version is no longer available.");
-    const destinationHash = sha256(stableStringify(canonicalizeWorldContent(selected.rows[0]!.content)));
+    const destinationHash = portableWorldContentHash(selected.rows[0]!.content);
     if (destinationHash !== archive.world.canonicalHash) {
       throw new ArchiveError("archive-world-mismatch", "The destination world version no longer matches the archive world.");
     }

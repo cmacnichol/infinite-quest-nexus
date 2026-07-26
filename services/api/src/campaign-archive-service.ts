@@ -107,6 +107,15 @@ function sanitizeWorldValue(value: unknown): unknown {
   return sanitizePortableValue(value);
 }
 
+function portableWorldContent(value: unknown): WorldContent {
+  return canonicalizeWorldContent(sanitizeWorldValue(value) as WorldContent);
+}
+
+/** Matches the canonical world representation written to Campaign Archives. */
+export function portableWorldContentHash(value: unknown): string {
+  return sha256(stableStringify(portableWorldContent(value)));
+}
+
 function iso(value: unknown): unknown {
   return value instanceof Date ? value.toISOString() : value;
 }
@@ -180,7 +189,7 @@ export async function captureCampaignArchiveSnapshot(pool: DatabasePool, campaig
 
 function legacyPayload(snapshot: CampaignArchiveSnapshot, exportedAt = new Date().toISOString()): Record<string, unknown> {
   const row = snapshot.campaign;
-  const content = canonicalizeWorldContent(sanitizeWorldValue(row.content) as WorldContent);
+  const content = portableWorldContent(row.content);
   const sourceWorld = content.world && typeof content.world === "object" ? content.world : {};
   const { character: _storedCharacter, ...worldWithoutStoredCharacter } = sourceWorld as Record<string, unknown>;
   const profile = row.character_profile as Record<string, unknown> | null;
@@ -200,8 +209,8 @@ function legacyPayload(snapshot: CampaignArchiveSnapshot, exportedAt = new Date(
 
 function payloads(snapshot: CampaignArchiveSnapshot): CampaignArchivePayloads {
   const legacy = legacyPayload(snapshot, String(iso(snapshot.campaign.updated_at)));
-  const content = canonicalizeWorldContent(sanitizeWorldValue(snapshot.campaign.content) as WorldContent);
-  const canonicalHash = createHash("sha256").update(stableStringify(content)).digest("hex");
+  const content = portableWorldContent(snapshot.campaign.content);
+  const canonicalHash = portableWorldContentHash(snapshot.campaign.content);
   const world: PortableWorldPayload = { canonicalHash, sourceWorldId: snapshot.campaign.world_id, sourceWorldVersionId: snapshot.campaign.world_version_id, versionNumber: Number(snapshot.campaign.version_number), content };
   const records: CampaignArchiveRecordsV1 = { formatVersion: 1, characterProfileEdits: snapshot.profileEdits, stateEdits: snapshot.stateEdits, worldMigrations: snapshot.migrations, illustrationConfig: snapshot.illustrationConfig, illustrationSets: snapshot.illustrationSets, illustrationSegments: snapshot.illustrationSegments, costs: snapshot.costs };
   const campaign = { ...legacy, world: { canonicalHash, sourceWorldId: world.sourceWorldId, sourceWorldVersionId: world.sourceWorldVersionId }, archiveRecords: records };
@@ -277,10 +286,6 @@ function archiveFingerprint(inspected: InspectedArchive): string {
   });
 }
 
-function canonicalWorldHash(content: WorldContent): string {
-  return sha256(stableStringify(canonicalizeWorldContent(content)));
-}
-
 function previewAppVersion(): string {
   return APPLICATION_VERSION;
 }
@@ -338,8 +343,8 @@ async function readCampaignArchive(staged: StagedArchive, limits: ArchiveLimits)
   if (typeof worldPayload.canonicalHash !== "string" || typeof worldPayload.sourceWorldId !== "string" || typeof worldPayload.sourceWorldVersionId !== "string" || !worldPayload.content) {
     throw new ArchiveError("archive-json-invalid", "The world payload is invalid.", 400, { payload: "world" });
   }
-  const canonicalContent = canonicalizeWorldContent(sanitizeWorldValue(worldPayload.content) as WorldContent);
-  const computedWorldHash = sha256(stableStringify(canonicalContent));
+  const canonicalContent = portableWorldContent(worldPayload.content);
+  const computedWorldHash = portableWorldContentHash(worldPayload.content);
   if (computedWorldHash !== worldPayload.canonicalHash || (campaign.world as Record<string, unknown> | undefined)?.canonicalHash !== worldPayload.canonicalHash) {
     throw new ArchiveError("archive-world-mismatch", "The campaign and world payloads do not describe the same world version.");
   }
@@ -448,8 +453,8 @@ export async function adaptLegacyCampaignZip(staged: StagedArchive, limits: Arch
   const sourceCampaignId = typeof campaignMetadata.sourceCampaignId === "string" ? campaignMetadata.sourceCampaignId : randomUUID();
   const sourceWorldVersionId = typeof campaignMetadata.sourceWorldVersionId === "string" ? campaignMetadata.sourceWorldVersionId : randomUUID();
   const sourceWorldId = randomUUID();
-  const content = canonicalizeWorldContent(sanitizeWorldValue(legacyCampaign.world) as WorldContent);
-  const worldHash = sha256(stableStringify(content));
+  const content = portableWorldContent(legacyCampaign.world);
+  const worldHash = portableWorldContentHash(legacyCampaign.world);
   const normalizedTurns = (Array.isArray(legacyCampaign.turns) ? legacyCampaign.turns : []).map((turnValue) => {
     const turn = archiveObject(turnValue);
     return { ...turn, id: typeof turn.id === "string" && turn.id ? turn.id : randomUUID() };
@@ -518,7 +523,7 @@ async function findDestination(pool: DatabasePool, ownerUserId: string, archive:
         WHERE wv.id=$1 AND wv.owner_user_id=$2`, [destination.worldVersionId, ownerUserId]
     );
     if (!selected.rowCount) throw new ArchiveError("archive-destination-not-empty", "The selected destination world version was not found.", 404);
-    if (canonicalWorldHash(selected.rows[0]!.content) !== archive.world.canonicalHash) {
+    if (portableWorldContentHash(selected.rows[0]!.content) !== archive.world.canonicalHash) {
       throw new ArchiveError("archive-world-mismatch", "The selected destination world version does not match the archive world.");
     }
     return { kind: "existing_world_version", operation: "attach_existing_world_version", worldId: selected.rows[0]!.world_id, worldVersionId: selected.rows[0]!.id };
@@ -528,7 +533,7 @@ async function findDestination(pool: DatabasePool, ownerUserId: string, archive:
        JOIN worlds w ON w.id=wv.world_id AND w.owner_user_id=wv.owner_user_id
       WHERE wv.owner_user_id=$1 ORDER BY wv.created_at DESC`, [ownerUserId]
   );
-  const exact = candidates.rows.find((row) => canonicalWorldHash(row.content) === archive.world.canonicalHash);
+  const exact = candidates.rows.find((row) => portableWorldContentHash(row.content) === archive.world.canonicalHash);
   return exact
     ? { kind: "embedded", operation: "reuse_world_version", worldId: exact.world_id, worldVersionId: exact.world_version_id }
     : { kind: "embedded", operation: "create_world", worldId: null, worldVersionId: null };

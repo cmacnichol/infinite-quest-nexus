@@ -360,6 +360,41 @@ integration("campaign archive export", () => {
     )).rejects.toMatchObject({ code: "archive-world-mismatch" });
   });
 
+  it("attaches an explicitly selected world version when only export-removed provider secrets differ", async () => {
+    const destination = await createCompatibleDestination("Secret-compatible destination");
+    await pool.query(
+      "UPDATE world_versions SET content=jsonb_set(content,'{world,provider,apiKey}','\"destination-only-secret\"'::jsonb,true) WHERE id=$1",
+      [destination.worldVersionId]
+    );
+    const preview = await previewCampaignArchive(pool, runtimeConfig(), await stagedExport(), "secret-compatible.zip", {
+      kind: "existing_world_version", worldVersionId: destination.worldVersionId
+    });
+    const imported = await importCampaignArchive(pool, runtimeConfig(), { root }, {
+      previewToken: preview.previewToken,
+      destination: { kind: "existing_world_version", worldVersionId: destination.worldVersionId }
+    });
+
+    expect(preview.destination).toMatchObject({ operation: "attach_existing_world_version", worldVersionId: destination.worldVersionId });
+    expect(imported).toMatchObject({ duplicate: false, worldId: destination.worldId, worldVersionId: destination.worldVersionId });
+  });
+
+  it("revalidates explicit attachment through export-compatible sanitization after a secret changes post-preview", async () => {
+    const destination = await createCompatibleDestination("Post-preview secret destination");
+    await pool.query("UPDATE world_versions SET content=content #- '{world,provider,apiKey}' WHERE id=$1", [destination.worldVersionId]);
+    const preview = await previewCampaignArchive(pool, runtimeConfig(), await stagedExport(), "post-preview-secret.zip", {
+      kind: "existing_world_version", worldVersionId: destination.worldVersionId
+    });
+    await pool.query(
+      "UPDATE world_versions SET content=jsonb_set(content,'{world,provider,apiKey}','\"post-preview-secret\"'::jsonb,true) WHERE id=$1",
+      [destination.worldVersionId]
+    );
+
+    await expect(importCampaignArchive(pool, runtimeConfig(), { root }, {
+      previewToken: preview.previewToken,
+      destination: { kind: "existing_world_version", worldVersionId: destination.worldVersionId }
+    })).resolves.toMatchObject({ duplicate: false, worldId: destination.worldId, worldVersionId: destination.worldVersionId });
+  });
+
   it("attaches only exact world versions and scopes idempotency to the selected destination", async () => {
     const firstDestination = await createCompatibleDestination("Exact destination one");
     const secondDestination = await createCompatibleDestination("Exact destination two");
@@ -381,6 +416,20 @@ integration("campaign archive export", () => {
     expect(firstImport).toMatchObject({ duplicate: false, worldId: firstDestination.worldId, worldVersionId: firstDestination.worldVersionId });
     expect(secondImport).toMatchObject({ duplicate: false, worldId: secondDestination.worldId, worldVersionId: secondDestination.worldVersionId });
     expect(secondImport.campaignId).not.toBe(firstImport.campaignId);
+
+    const duplicatePreview = await previewCampaignArchive(pool, runtimeConfig(), await stagedExport(), "exact-one-repeat.zip", {
+      kind: "existing_world_version", worldVersionId: firstDestination.worldVersionId
+    });
+    await expect(importCampaignArchive(pool, runtimeConfig(), { root }, {
+      previewToken: duplicatePreview.previewToken,
+      destination: { kind: "existing_world_version", worldVersionId: firstDestination.worldVersionId }
+    })).resolves.toMatchObject({
+      duplicate: true,
+      importId: firstImport.importId,
+      worldId: firstImport.worldId,
+      worldVersionId: firstImport.worldVersionId,
+      campaignId: firstImport.campaignId
+    });
   });
 
   it("rejects expired, consumed, and application-stale preview tokens", async () => {
@@ -432,14 +481,19 @@ integration("campaign archive export", () => {
     await pool.query("DELETE FROM asset_references WHERE asset_id=$1", [requiredAssetId]);
     await pool.query("DELETE FROM assets WHERE id=$1", [requiredAssetId]);
     await unlink(originalPath);
-    const before = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM assets");
+    const destination = await createCompatibleDestination("Rollback destination");
+    const before = await pool.query<{ assets: string; worlds: string; campaigns: string; imports: string }>(
+      `SELECT (SELECT count(*)::text FROM assets) AS assets,
+              (SELECT count(*)::text FROM worlds) AS worlds,
+              (SELECT count(*)::text FROM campaigns) AS campaigns,
+              (SELECT count(*)::text FROM imports) AS imports`
+    );
     const triggerSuffix = randomUUID().replaceAll("-", "");
     const functionName = `campaign_archive_force_failure_${triggerSuffix}`;
     const triggerName = `campaign_archive_force_failure_trigger_${triggerSuffix}`;
     await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced archive binding failure'; END; $$`);
     await pool.query(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON asset_references FOR EACH ROW EXECUTE FUNCTION ${functionName}()`);
     try {
-      const destination = await createCompatibleDestination("Rollback destination");
       const preview = await previewCampaignArchive(pool, runtimeConfig(), staged, "rollback.zip", {
         kind: "existing_world_version", worldVersionId: destination.worldVersionId
       });
@@ -451,8 +505,13 @@ integration("campaign archive export", () => {
       await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON asset_references`);
       await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
     }
-    const after = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM assets");
-    expect(after.rows[0]!.count).toBe(before.rows[0]!.count);
+    const after = await pool.query<{ assets: string; worlds: string; campaigns: string; imports: string }>(
+      `SELECT (SELECT count(*)::text FROM assets) AS assets,
+              (SELECT count(*)::text FROM worlds) AS worlds,
+              (SELECT count(*)::text FROM campaigns) AS campaigns,
+              (SELECT count(*)::text FROM imports) AS imports`
+    );
+    expect(after.rows[0]).toEqual(before.rows[0]);
     await expect(stat(originalPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

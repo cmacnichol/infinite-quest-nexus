@@ -6,7 +6,7 @@ import { once } from "node:events";
 import { ZipArchive } from "archiver";
 import { afterEach, describe, expect, it } from "vitest";
 import { stageArchiveUpload, type ArchiveLimits } from "../../services/api/src/archive-io.js";
-import { adaptLegacyCampaignZip, decodeCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
+import { adaptLegacyCampaignZip, decodeCampaignArchive, portableWorldContentHash } from "../../services/api/src/campaign-archive-service.js";
 
 const temporaryRoots: string[] = [];
 const limits: ArchiveLimits = {
@@ -41,6 +41,19 @@ async function writeLegacyZip(path: string, entries: readonly { name: string; co
 }
 
 describe("legacy campaign ZIP adaptation", () => {
+  it("hashes destination world content through the export-compatible secret sanitization path", () => {
+    const portableWorld = {
+      schemaVersion: 4,
+      world: { title: "Compatible destination", provider: { model: "local-model" } }
+    };
+    const destinationWorld = {
+      ...portableWorld,
+      world: { ...portableWorld.world, provider: { ...portableWorld.world.provider, apiKey: "destination-only-secret" } }
+    };
+
+    expect(portableWorldContentHash(destinationWorld)).toBe(portableWorldContentHash(portableWorld));
+  });
+
   it("rejects duplicate legacy entries through the shared strict archive validation", async () => {
     const root = await temporaryRoot();
     const path = join(root, "duplicate-campaign.zip");
