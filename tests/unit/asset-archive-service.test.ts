@@ -460,7 +460,7 @@ describe("asset archive portability", () => {
     }
   });
 
-  it("does not clean a recreated pre-existing original before rollback", async () => {
+  it("retains a recreated original for a surviving pre-existing asset row after rollback", async () => {
     const secondBytes = await sharp({ create: { width: 2, height: 1, channels: 4, background: { r: 0, g: 255, b: 0, alpha: 1 } } }).png().toBuffer();
     const secondHash = createHash("sha256").update(secondBytes.toString("base64")).digest("hex");
     const first = record(assetA);
@@ -471,38 +471,63 @@ describe("asset archive portability", () => {
       pixelWidth: 2
     });
     const root = await mkdtemp(join(tmpdir(), "asset-archive-rollback-"));
-    const preexistingPath = join(root, secondHash.slice(0, 2), `${secondHash}.png`);
+    const preexistingPath = `${hash.slice(0, 2)}/${hash}.png`;
+    const laterCreatedPath = `${secondHash.slice(0, 2)}/${secondHash}.png`;
+    const preexistingAssetId = "pre-existing-asset";
+    const updatedAssetIds: string[] = [];
+    const queries: Array<{ text: string; values?: unknown[] }> = [];
     try {
-      await mkdir(join(root, secondHash.slice(0, 2)), { recursive: true });
-      await writeFile(preexistingPath, secondBytes);
+      const assetRows = new Map([[hash, { ownerUserId, id: preexistingAssetId, storagePath: preexistingPath }]]);
       let insertNumber = 0;
       const client = {
-        query: async (text: string) => {
-          if (text.startsWith("INSERT INTO assets")) return { rows: [{ id: `dest-${++insertNumber}` }], rowCount: 1 };
+        query: async (text: string, values?: unknown[]) => {
+          queries.push({ text, values });
+          if (text.startsWith("INSERT INTO assets")) {
+            expect(values?.[0]).toBe(ownerUserId);
+            const contentHash = values?.[3];
+            const preexisting = values?.[0] === ownerUserId && typeof contentHash === "string" ? assetRows.get(contentHash) : undefined;
+            return { rows: [{ id: preexisting?.id ?? `dest-${++insertNumber}` }], rowCount: 1 };
+          }
           if (text.startsWith("UPDATE asset_library_entries")) {
-            if (insertNumber === 2) throw new Error("primary metadata failure");
-            return { rows: [{ asset_id: "dest-1" }], rowCount: 1 };
+            const assetId = values?.[0];
+            if (typeof assetId === "string") updatedAssetIds.push(assetId);
+            if (updatedAssetIds.length === 2) throw new Error("primary metadata failure");
+            return { rows: [{ asset_id: assetId }], rowCount: 1 };
           }
           return { rows: [], rowCount: 1 };
         }
       } as never;
 
+      await expect(stat(join(root, preexistingPath))).rejects.toMatchObject({ code: "ENOENT" });
       let caught: unknown;
       try {
         await persistArchiveAssets(client, { root }, ownerUserId, {
-        assets: [
-          { ...first, bytes: pngBytes, createThumbnail: false },
-          { ...second, bytes: secondBytes, createThumbnail: false }
-        ]
+          assets: [
+            { ...first, bytes: pngBytes, createThumbnail: false },
+            { ...second, bytes: secondBytes, createThumbnail: false }
+          ]
         }, new Map());
       } catch (error) {
         caught = error;
       }
       expect(caught).toBeInstanceOf(ArchiveAssetPersistenceError);
-      expect((caught as ArchiveAssetPersistenceError).createdPaths).toEqual([`${hash.slice(0, 2)}/${hash}.png`]);
+      expect(updatedAssetIds[0]).toBe(preexistingAssetId);
+      expect((caught as ArchiveAssetPersistenceError).createdPaths).toEqual([preexistingPath, laterCreatedPath]);
       expect((caught as ArchiveAssetPersistenceError).cause).toMatchObject({ message: "primary metadata failure" });
-      expect((await stat(join(root, hash.slice(0, 2), `${hash}.png`))).isFile()).toBe(true);
-      expect((await stat(preexistingPath)).isFile()).toBe(true);
+      expect(queries.some((query) => query.text.includes("SELECT storage_path") && query.text.includes("FROM assets"))).toBe(false);
+      expect((await stat(join(root, preexistingPath))).isFile()).toBe(true);
+      expect((await stat(join(root, laterCreatedPath))).isFile()).toBe(true);
+
+      const rollbackDatabase = {
+        query: async (text: string, values: unknown[]) => {
+          expect(text).toContain("FROM assets");
+          expect(values).toEqual([ownerUserId, [preexistingPath, laterCreatedPath]]);
+          return { rows: [{ storage_path: preexistingPath }], rowCount: 1 };
+        }
+      } as never;
+      await cleanupUnreferencedCreatedPaths(rollbackDatabase, { root }, ownerUserId, (caught as ArchiveAssetPersistenceError).createdPaths);
+      expect((await stat(join(root, preexistingPath))).isFile()).toBe(true);
+      await expect(stat(join(root, laterCreatedPath))).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -566,9 +591,36 @@ describe("asset archive portability", () => {
     try {
       await mkdir(join(root, hash.slice(0, 2)), { recursive: true });
       await writeFile(join(root, path), pngBytes);
-      const database = { query: async () => ({ rows: [], rowCount: 0 }) } as never;
+      const queries: Array<{ text: string; values: unknown[] }> = [];
+      const database = {
+        query: async (text: string, values: unknown[]) => {
+          queries.push({ text, values });
+          expect(text).toContain("SELECT storage_path");
+          expect(text).toContain("FROM assets");
+          expect(values).toEqual([ownerUserId, [path]]);
+          return { rows: [], rowCount: 0 };
+        }
+      } as never;
       await cleanupUnreferencedCreatedPaths(database, { root }, ownerUserId, [path]);
+      expect(queries).toHaveLength(1);
       await expect(stat(join(root, path))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects Windows drive-relative cleanup candidates before database lookup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asset-archive-drive-relative-"));
+    let queryCount = 0;
+    try {
+      const database = {
+        query: async () => {
+          queryCount += 1;
+          return { rows: [], rowCount: 0 };
+        }
+      } as never;
+      await cleanupUnreferencedCreatedPaths(database, { root }, ownerUserId, ["C:foo.png"]);
+      expect(queryCount).toBe(0);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

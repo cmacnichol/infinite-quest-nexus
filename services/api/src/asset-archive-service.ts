@@ -46,7 +46,7 @@ const legacyAssetPointer = /^\/api\/v1\/assets\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0
 
 function safeRelativeCleanupPath(root: string, candidate: string): string | null {
   const normalizedCandidate = candidate.replaceAll("\\", "/");
-  if (!normalizedCandidate || normalizedCandidate.startsWith("/") || /^[A-Za-z]:\//.test(normalizedCandidate)) return null;
+  if (!normalizedCandidate || normalizedCandidate.startsWith("/") || /^[A-Za-z]:/.test(normalizedCandidate)) return null;
   const absolute = resolve(root, candidate);
   const relativePath = relative(resolve(root), absolute);
   if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`)) return null;
