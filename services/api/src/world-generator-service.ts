@@ -20,6 +20,7 @@ import {
   playableCharacterRecoveryInput
 } from "../../../packages/domain/src/character-authoring.js";
 import {
+  generatedCharacterNameKey,
   generatedWorldIssues,
   parseCompleteGeneratedWorld,
   projectGeneratedWorldIssues
@@ -155,10 +156,17 @@ export type WorldGenProgress = WorldGenerationProgress;
 export function selectCompleteGeneratedCharacters(
   candidates: z.infer<typeof convertedPlayableCharacterSchema>[]
 ) {
-  const characters = candidates.flatMap((candidate) => {
+  const characters: z.infer<typeof completeConvertedPlayableCharacterSchema>[] = [];
+  const characterNames = new Set<string>();
+  for (const candidate of candidates) {
     const parsed = completeConvertedPlayableCharacterSchema.safeParse(candidate);
-    return parsed.success ? [parsed.data] : [];
-  }).slice(0, 4);
+    if (!parsed.success) continue;
+    const nameKey = generatedCharacterNameKey(parsed.data.name);
+    if (characterNames.has(nameKey)) continue;
+    characterNames.add(nameKey);
+    characters.push(parsed.data);
+    if (characters.length === 4) break;
+  }
   return {
     characters,
     needed: Math.max(0, 3 - characters.length)

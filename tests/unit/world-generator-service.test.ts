@@ -153,6 +153,70 @@ describe("generateTemplateWorld orchestration", () => {
     });
   });
 
+  it("deduplicates initial names and supplements the exact semantic shortfall", async () => {
+    const harness = generationHarness([
+      providerResult(worldResponse([
+        character("Mira Vale"),
+        character("  mira vale  "),
+        character("Oren Pike")
+      ])),
+      providerResult(JSON.stringify({
+        playable_characters: [character("Sela Moon")]
+      }))
+    ]);
+
+    const generated = await harness.run();
+
+    expect(generated.content.playableCharacters.map((entry) => entry.name)).toEqual([
+      "Mira Vale",
+      "Oren Pike",
+      "Sela Moon"
+    ]);
+    expect(harness.requests).toHaveLength(2);
+    expect(harness.requests[1]!.systemPrompt).toContain("exactly 1 complete replacement character");
+    expect(JSON.parse(harness.requests[1]!.input)).toMatchObject({
+      existingCharacters: [{ name: "Mira Vale" }, { name: "Oren Pike" }]
+    });
+  });
+
+  it("rejects a supplement character that duplicates a retained name", async () => {
+    const harness = generationHarness([
+      providerResult(worldResponse([character("Mira Vale"), character("Oren Pike")])),
+      providerResult(JSON.stringify({
+        playable_characters: [character("  MIRA VALE  ")]
+      }))
+    ]);
+
+    await expect(harness.run()).rejects.toMatchObject({
+      statusCode: 502,
+      expose: true,
+      details: {
+        code: "incomplete_generated_world",
+        issues: [expect.objectContaining({ path: "playableCharacters.2.name" })]
+      }
+    });
+    expect(harness.requests).toHaveLength(2);
+  });
+
+  it("rejects supplement characters that duplicate each other", async () => {
+    const harness = generationHarness([
+      providerResult(worldResponse([character("Mira Vale")])),
+      providerResult(JSON.stringify({
+        playable_characters: [character("Oren Pike"), character("  oren pike  ")]
+      }))
+    ]);
+
+    await expect(harness.run()).rejects.toMatchObject({
+      statusCode: 502,
+      expose: true,
+      details: {
+        code: "incomplete_generated_world",
+        issues: [expect.objectContaining({ path: "playableCharacters.2.name" })]
+      }
+    });
+    expect(harness.requests).toHaveLength(2);
+  });
+
   it("returns a typed safe 502 when the supplement is malformed", async () => {
     const harness = generationHarness([
       providerResult(worldResponse([character("Mira Vale")])),

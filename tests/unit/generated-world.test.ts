@@ -84,6 +84,20 @@ describe("generated world completion", () => {
     expect(selected.needed).toBe(2);
   });
 
+  it("deduplicates complete candidates by normalized name in provider order", () => {
+    const candidates = [
+      { id: "first", name: "Mira Vale", character_text: "Guidance", profile: profile(), rpg_statistics: [], default_triggers: [] },
+      { id: "duplicate", name: "  mira vale  ", character_text: "Other guidance", profile: profile(), rpg_statistics: [], default_triggers: [] },
+      { id: "unique", name: "Oren Pike", character_text: "Guidance", profile: profile(), rpg_statistics: [], default_triggers: [] }
+    ];
+
+    const selected = selectCompleteGeneratedCharacters(candidates);
+
+    expect(selected.characters.map((character) => character.id)).toEqual(["first", "unique"]);
+    expect(selected.characters.map((character) => character.name)).toEqual(["Mira Vale", "Oren Pike"]);
+    expect(selected.needed).toBe(1);
+  });
+
   it("accepts a complete world with three structured characters", () => {
     expect(parseCompleteGeneratedWorld(completeWorld()).playableCharacters).toHaveLength(3);
   });
@@ -112,6 +126,23 @@ describe("generated world completion", () => {
     const content = completeWorld();
     content.playableCharacters[1]!.id = content.playableCharacters[0]!.id;
     expect(() => parseCompleteGeneratedWorld(content)).toThrow();
+  });
+
+  it("rejects duplicate normalized character names with a safe name path", () => {
+    const content = completeWorld();
+    content.playableCharacters[1]!.name = "  character 1  ";
+    let validationError: unknown;
+    try {
+      parseCompleteGeneratedWorld(content);
+    } catch (error) {
+      validationError = error;
+    }
+
+    expect(generatedWorldIssues(validationError)).toContainEqual({
+      path: "playableCharacters.1.name",
+      code: "custom",
+      message: "Generated character names must be distinct."
+    });
   });
 
   it("replaces provider character IDs with unique application-owned IDs", () => {

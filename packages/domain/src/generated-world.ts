@@ -15,6 +15,10 @@ const GENERATED_WORLD_ISSUE_PATH_LIMIT = 500;
 const GENERATED_WORLD_ISSUE_CODE_LIMIT = 100;
 const GENERATED_WORLD_ISSUE_MESSAGE_LIMIT = 500;
 
+export function generatedCharacterNameKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
 const generatedWorldBaseSchema = worldContentSchema.superRefine((content, context) => {
   const requiredWorldFields = [
     ["title", "Generated title is required."],
@@ -41,6 +45,7 @@ const generatedWorldBaseSchema = worldContentSchema.superRefine((content, contex
   }
 
   const characterIds = new Set<string>();
+  const characterNames = new Set<string>();
   content.playableCharacters.forEach((character, index) => {
     if (characterIds.has(character.id)) {
       context.addIssue({
@@ -50,6 +55,15 @@ const generatedWorldBaseSchema = worldContentSchema.superRefine((content, contex
       });
     }
     characterIds.add(character.id);
+    const nameKey = generatedCharacterNameKey(character.name);
+    if (characterNames.has(nameKey)) {
+      context.addIssue({
+        code: "custom",
+        path: ["playableCharacters", index, "name"],
+        message: "Generated character names must be distinct."
+      });
+    }
+    characterNames.add(nameKey);
     if (!character.characterText.trim()) {
       context.addIssue({
         code: "custom",
