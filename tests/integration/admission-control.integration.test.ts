@@ -282,6 +282,34 @@ integration("PostgreSQL API admission control", () => {
       .resolves.toMatchObject({ rows: [{ count: 0 }] });
   });
 
+  it("cleans expired buckets using the supplied timestamp without failing admission", async () => {
+    const ownerUserId = await initialOwnerId(pool);
+    await pool.query(
+      `INSERT INTO api_admission_buckets (
+         owner_user_id, operation, window_started_at, window_expires_at, accepted_count
+       ) VALUES ($1,'provider',$2,$3,1)`,
+      [
+        ownerUserId,
+        new Date("2026-07-23T09:00:00Z"),
+        new Date("2026-07-23T09:01:00Z")
+      ]
+    );
+
+    const decision = await acquireAdmission(pool, ownerUserId, "cleanup-request", {
+      key: "provider",
+      windowSeconds: 60,
+      maxRequests: 2,
+      maxConcurrent: 1,
+      leaseSeconds: 30
+    }, new Date("2026-07-23T12:00:00Z"));
+
+    expect(decision).toMatchObject({ allowed: true, remaining: 1 });
+    await expect(pool.query(
+      "SELECT count(*)::int AS count FROM api_admission_buckets WHERE window_expires_at < $1::timestamptz - interval '1 hour'",
+      [new Date("2026-07-23T12:00:00Z")]
+    )).resolves.toMatchObject({ rows: [{ count: 0 }] });
+  });
+
   it("fails closed with a safe typed error when admission storage is unavailable", async () => {
     const ownerUserId = await initialOwnerId(pool);
     const unavailablePool = createDatabasePool(databaseUrl!, 1);

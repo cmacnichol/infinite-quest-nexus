@@ -15,6 +15,22 @@
 - Confirm model availability and request deadline.
 - Verify shared asset writability for image jobs.
 
+## Streaming story appears to restart
+
+1. Filter logs by `generationJobId`.
+2. Order the matching events by timestamp.
+3. Confirm that only one `turn_generation_provider_started` event has `streaming: true`.
+4. Check whether `turn_generation_recovery_started` follows primary validation.
+5. Check whether `turn_generation_requeued` is followed by a new claim with an incremented `jobAttempt`.
+6. Compare `turn_generation_stream_connected` and `turn_generation_stream_closed` counts to identify browser or network reconnects.
+7. Confirm the sequence terminates in exactly one of `turn_generation_completed`, `turn_generation_recoverable`, or `turn_generation_failed`.
+
+A recovery provider call is expected after invalid output. It reports
+`streaming: false` and must not replace the browser preview. A durable retry is
+different: it creates another worker attempt for the same job. An SSE reconnect
+is different again: it creates another connected/closed pair for the same job
+without starting another provider call.
+
 ## Embeddings fail
 
 Story generation should continue with lexical fallback. Confirm the embedding profile, model capability, prefixes, and batch size, then reindex.

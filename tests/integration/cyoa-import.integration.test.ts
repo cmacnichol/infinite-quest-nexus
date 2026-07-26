@@ -7,6 +7,7 @@ import { createDatabasePool, type DatabasePool } from "../../packages/database/s
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { getImportProgress, importInfiniteWorlds, previewInfiniteWorldsImport } from "../../services/api/src/infinite-worlds-import-service.js";
+import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -53,12 +54,14 @@ function validConvertedWorldJson(): string {
 integration("CYOA import service integration", () => {
   let pool: DatabasePool;
   let server: Server;
+  let providerTransport: ReturnType<typeof installIntegrationProviderTransport>;
   let baseUrl = "";
   let providerId = "";
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
     await migrateDatabase(pool, resolve("database/migrations"));
+    providerTransport = installIntegrationProviderTransport();
     server = createServer((request, response) => {
       let body = "";
       request.setEncoding("utf8");
@@ -98,6 +101,7 @@ integration("CYOA import service integration", () => {
 
   afterAll(async () => {
     if (server) await new Promise<void>((done) => server.close(() => done()));
+    if (providerTransport) await providerTransport.close();
     if (pool) await pool.end();
   });
 

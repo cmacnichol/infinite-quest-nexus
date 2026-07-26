@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { sha256 } from "../../packages/domain/src/text.js";
@@ -18,17 +19,20 @@ import {
   runChronicleJob,
   setCampaignEmbeddingConfig
 } from "../../services/api/src/memory-service.js";
+import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 
 integration("legacy import and Chronicle integration", () => {
   let pool: DatabasePool;
+  let providerTransport: ReturnType<typeof installIntegrationProviderTransport>;
   let campaignId = "";
   let assetRoot = "";
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
+    providerTransport = installIntegrationProviderTransport(["127.0.0.0/8", "embedding.test"]);
     assetRoot = await mkdtemp(resolve(tmpdir(), "infinitequest-assets-"));
     await migrateDatabase(pool, resolve("database/migrations"));
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
@@ -38,6 +42,7 @@ integration("legacy import and Chronicle integration", () => {
   });
 
   afterAll(async () => {
+    if (providerTransport) await providerTransport.close();
     if (pool) await pool.end();
     if (assetRoot) await rm(assetRoot, { recursive: true, force: true });
   });
@@ -584,7 +589,14 @@ integration("legacy import and Chronicle integration", () => {
     fixture.world.title = `Zip asset import fixture ${crypto.randomUUID()}`;
     fixture.turns[0].imageUrl = `/api/v1/assets/${assetId}`;
 
-    const jpegBuffer = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01, 0x00, 0x48, 0x00, 0x48, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xff, 0xc4, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0xbf, 0x00, 0xff, 0xd9]);
+    const jpegBuffer = await sharp({
+      create: {
+        width: 1,
+        height: 1,
+        channels: 3,
+        background: { r: 255, g: 255, b: 255 }
+      }
+    }).jpeg().toBuffer();
 
     const assetBuffers = new Map<string, Buffer>();
     assetBuffers.set(assetId, jpegBuffer);

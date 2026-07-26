@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
@@ -12,12 +12,19 @@ import { branchCampaign, enqueueGeneration, enqueueLatestReplacement, getGenerat
 import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/api/src/memory-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
+import { logger } from "../../packages/logger/src/index.js";
+import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "integration-test-credential-secret";
 
-type MockReply = { content: string; finishReason?: string };
+type MockReply = {
+  content: string;
+  finishReason?: string;
+  streamChunks?: string[];
+  streamChunkDelayMs?: number;
+};
 
 function validStory(narration = "Location Gamma opens and Marker Three becomes visible."): string {
   return JSON.stringify({
@@ -37,21 +44,50 @@ function validStory(narration = "Location Gamma opens and Marker Three becomes v
 integration("durable Story Engine integration", () => {
   let pool: DatabasePool;
   let server: Server;
+  let providerTransport: ReturnType<typeof installIntegrationProviderTransport>;
   let baseUrl = "";
   let providerId = "";
   const replies: MockReply[] = [];
+  const servedReplies: MockReply[] = [];
   const requests: Array<Record<string, any>> = [];
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
     await migrateDatabase(pool, resolve("database/migrations"));
+    providerTransport = installIntegrationProviderTransport();
     server = createServer((request, response) => {
       let body = "";
       request.setEncoding("utf8");
       request.on("data", (chunk) => { body += chunk; });
-      request.on("end", () => {
-        requests.push(JSON.parse(body || "{}"));
-        const reply = replies.shift() || { content: validStory() };
+      request.on("end", async () => {
+        const providerRequest = JSON.parse(body || "{}");
+        requests.push(providerRequest);
+        const isTextGeneration = request.method === "POST" && request.url?.endsWith("/chat/completions");
+        const reply = isTextGeneration
+          ? replies.shift() || { content: validStory() }
+          : { content: JSON.stringify({ data: [] }) };
+        if (isTextGeneration) servedReplies.push(reply);
+        if (providerRequest.stream === true && reply.streamChunks) {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          for (const [index, chunk] of reply.streamChunks.entries()) {
+            if (index > 0 && reply.streamChunkDelayMs) {
+              await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, reply.streamChunkDelayMs));
+            }
+            response.write(`data: ${JSON.stringify({
+              id: crypto.randomUUID(),
+              model: "deterministic-mock",
+              choices: [{ delta: { content: chunk }, finish_reason: null }]
+            })}\n\n`);
+          }
+          response.write(`data: ${JSON.stringify({
+            id: crypto.randomUUID(),
+            model: "deterministic-mock",
+            choices: [{ delta: {}, finish_reason: reply.finishReason || "stop" }],
+            usage: { prompt_tokens: 700, completion_tokens: 220, total_tokens: 920 }
+          })}\n\n`);
+          response.end("data: [DONE]\n\n");
+          return;
+        }
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({
           id: crypto.randomUUID(),
@@ -82,6 +118,7 @@ integration("durable Story Engine integration", () => {
 
   afterAll(async () => {
     if (server) await new Promise<void>((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
+    await providerTransport?.close();
     await pool.end();
   });
 
@@ -239,6 +276,8 @@ integration("durable Story Engine integration", () => {
 
   it("preserves the accepted latest turn when replacement generation has a provider transport failure", async () => {
     const imported = await campaign();
+    const warnSpy = vi.spyOn(logger, "warn");
+    const errorSpy = vi.spyOn(logger, "error");
     const unavailableProvider = await createProvider(pool, {
       name: `Unavailable replacement provider ${crypto.randomUUID()}`,
       providerType: "openai_compatible",
@@ -263,14 +302,40 @@ integration("durable Story Engine integration", () => {
       replacementRequest("Try a replacement that cannot reach its provider.", 2, unavailableProvider.id)
     );
 
-    expect(await runGenerationJob(pool, "story-worker-replacement-transport", 30, credentialSecret)).toBe(true);
-    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "failed", errorCode: "provider_transport_error" });
-    expect(await pool.query(
-      `SELECT t.id, t.narration, c.active_turn_number
-         FROM turns t JOIN campaigns c ON c.id = t.campaign_id
-        WHERE t.campaign_id = $1 AND t.turn_number = 2`,
-      [imported.campaignId]
-    )).toMatchObject({ rows: [before.rows[0]] });
+    try {
+      expect(await runGenerationJob(pool, "story-worker-replacement-transport", 30, credentialSecret)).toBe(true);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "failed", errorCode: "provider_transport_error" });
+      const events = [...warnSpy.mock.calls, ...errorSpy.mock.calls]
+        .map(([event]) => event)
+        .filter((event): event is Record<string, unknown> => {
+          if (typeof event !== "object" || event === null) return false;
+          const record = event as Record<string, unknown>;
+          return record.generationJobId === job.id
+            && (record.event === "turn_generation_provider_failed" || record.event === "turn_generation_failed");
+        });
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: "turn_generation_provider_failed", errorCode: "transport_failure" }),
+        expect.objectContaining({ event: "turn_generation_failed", errorCode: "provider_transport_error" })
+      ]));
+      for (const event of events) {
+        expect(event).toMatchObject({
+          campaignId: imported.campaignId,
+          providerProfileId: unavailableProvider.id,
+          expectedTurnNumber: 2,
+          operationKind: "replace_latest",
+          jobAttempt: 1
+        });
+      }
+      expect(await pool.query(
+        `SELECT t.id, t.narration, c.active_turn_number
+           FROM turns t JOIN campaigns c ON c.id = t.campaign_id
+          WHERE t.campaign_id = $1 AND t.turn_number = 2`,
+        [imported.campaignId]
+      )).toMatchObject({ rows: [before.rows[0]] });
+    } finally {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
   });
 
   it("replaces turn one from the initial campaign snapshot", async () => {
@@ -881,6 +946,316 @@ integration("durable Story Engine integration", () => {
     expect(recoveryMessages.at(-1)?.content).toContain('"rolls a 17"');
   });
 
+  it("streams only the initial story request when validation starts an internal recovery", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaign_memory_configs SET embedding_enabled = false WHERE campaign_id = $1", [imported.campaignId]);
+    const streamedDraft = validStory("Private streamed marker: she rolls a 17 and opens Location Gamma.");
+    const acceptedStory = validStory("Her practiced touch opens Location Gamma.");
+    const requestOffset = requests.length;
+    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+    try {
+      replies.push(
+        {
+          content: streamedDraft,
+          streamChunks: [streamedDraft.slice(0, 220), streamedDraft.slice(220, 440), streamedDraft.slice(440)],
+          streamChunkDelayMs: 400
+        },
+        { content: acceptedStory }
+      );
+      const job = await queue(imported.campaignId);
+      await runGenerationJob(pool, "story-worker-streamed-recovery", 30, credentialSecret);
+
+      const turnRequests = requests.slice(requestOffset).filter((request) => Array.isArray(request.messages));
+      expect(turnRequests).toHaveLength(2);
+      expect(turnRequests[0]?.stream).toBe(true);
+      expect(turnRequests[1]?.stream).not.toBe(true);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+      const turn = await pool.query<{ narration: string }>("SELECT narration FROM turns WHERE campaign_id = $1 AND turn_number = 3", [imported.campaignId]);
+      expect(turn.rows[0]?.narration).toBe("Her practiced touch opens Location Gamma.");
+    } finally {
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+    }
+  });
+
+  it("logs correlated generation lifecycle and recovery metadata without private story content", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaign_memory_configs SET embedding_enabled = false WHERE campaign_id = $1", [imported.campaignId]);
+    const streamedDraft = validStory("Private streamed marker: she rolls a 17 and opens Location Gamma.");
+    const acceptedStory = validStory("Her practiced touch opens Location Gamma.");
+    const infoSpy = vi.spyOn(logger, "info");
+    const warnSpy = vi.spyOn(logger, "warn");
+    const errorSpy = vi.spyOn(logger, "error");
+    try {
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+      replies.push(
+        { content: streamedDraft, streamChunks: [streamedDraft] },
+        { content: acceptedStory }
+      );
+      const job = await queue(imported.campaignId);
+      await runGenerationJob(pool, "story-worker-lifecycle-logs", 30, credentialSecret);
+
+      const events = [
+        ...infoSpy.mock.calls.map(([event], index) => ({ event, order: infoSpy.mock.invocationCallOrder[index] ?? 0 })),
+        ...warnSpy.mock.calls.map(([event], index) => ({ event, order: warnSpy.mock.invocationCallOrder[index] ?? 0 })),
+        ...errorSpy.mock.calls.map(([event], index) => ({ event, order: errorSpy.mock.invocationCallOrder[index] ?? 0 }))
+      ]
+        .sort((left, right) => left.order - right.order)
+        .map(({ event }) => event)
+        .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null && "event" in event);
+      expect(events.map((event) => event.event)).toEqual([
+        "turn_generation_claimed",
+        "turn_generation_started",
+        "turn_generation_provider_started",
+        "turn_generation_stream_progress",
+        "turn_generation_provider_completed",
+        "turn_generation_validation_completed",
+        "turn_generation_recovery_started",
+        "turn_generation_provider_started",
+        "turn_generation_provider_completed",
+        "turn_generation_validation_completed",
+        "turn_generation_completed"
+      ]);
+      expect(events.filter((event) => event.event === "turn_generation_stream_progress")).toHaveLength(1);
+      for (const event of events) {
+        expect(event).toMatchObject({
+          generationJobId: job.id,
+          campaignId: imported.campaignId,
+          providerProfileId: providerId,
+          expectedTurnNumber: 3,
+          operationKind: "append",
+          jobAttempt: 1
+        });
+      }
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: "turn_generation_provider_started", storyOperation: "story_generation", streaming: true }),
+        expect.objectContaining({ event: "turn_generation_recovery_started", recoveryKind: "mechanics_cleanup" }),
+        expect.objectContaining({ event: "turn_generation_provider_started", storyOperation: "story_recovery", streaming: false }),
+        expect.objectContaining({ event: "turn_generation_completed", resultTurnId: expect.any(String) })
+      ]));
+
+      const serializedLogs = JSON.stringify(events);
+      expect(serializedLogs).not.toContain("Private streamed marker");
+      expect(serializedLogs).not.toContain("Private synthetic continuity marker");
+      expect(serializedLogs).not.toContain(credentialSecret);
+      expect(serializedLogs).not.toContain(streamedDraft);
+      expect(serializedLogs).not.toContain(acceptedStory);
+    } finally {
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+      infoSpy.mockRestore();
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("sanitizes provider and terminal error codes and skips an unmatched failed transition log", async () => {
+    const imported = await campaign();
+    const unsafeCode = "https://credential.example/private-token";
+    const infoSpy = vi.spyOn(logger, "info");
+    const warnSpy = vi.spyOn(logger, "warn");
+    const errorSpy = vi.spyOn(logger, "error");
+    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+    const querySpy = vi.spyOn(pool, "query");
+    querySpy.mockImplementation((async (...args: any[]) => {
+      const statement = String(args[0]);
+      if (statement.includes("INSERT INTO provider_cost_events")) {
+        throw Object.assign(new Error("Synthetic provider cost failure."), { code: unsafeCode });
+      }
+      if (statement.includes("UPDATE generation_jobs SET status = 'failed'")) {
+        return { rows: [], rowCount: 0 };
+      }
+      return originalQuery(...args);
+    }) as any);
+    try {
+      replies.push({ content: validStory("The provider cost write fails after a valid response.") });
+      const job = await queue(imported.campaignId);
+      await runGenerationJob(pool, "story-worker-safe-error-codes", 30, credentialSecret);
+
+      const events = [...infoSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls]
+        .map(([event]) => event)
+        .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null && "event" in event);
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: "turn_generation_provider_failed", errorCode: "unclassified_error" })
+      ]));
+      expect(events).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: "turn_generation_failed" })
+      ]));
+      expect(JSON.stringify(events)).not.toContain(unsafeCode);
+      expect(job.id).toEqual(expect.any(String));
+    } finally {
+      querySpy.mockRestore();
+      infoSpy.mockRestore();
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("samples stream progress and persistence warnings without logging unsafe persistence codes", async () => {
+    const imported = await campaign();
+    await syncPlayerCampaignConfig(pool, imported.campaignId, {
+      expectedTurnNumber: 2,
+      useRpgStats: false,
+      suppressEventTriggers: true,
+      rpgStats: [],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    });
+    const unsafeCode = "https://credential.example/stream-token";
+    const streamedStory = validStory("A measured stream reaches Location Gamma safely.");
+    const streamChunks = [streamedStory.slice(0, 220), streamedStory.slice(220, 440), streamedStory.slice(440)];
+    const infoSpy = vi.spyOn(logger, "info");
+    const warnSpy = vi.spyOn(logger, "warn");
+    const errorSpy = vi.spyOn(logger, "error");
+    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+    const querySpy = vi.spyOn(pool, "query");
+    querySpy.mockImplementation((async (...args: any[]) => {
+      if (String(args[0]).includes("UPDATE generation_jobs SET partial_output")) {
+        throw Object.assign(new Error("Synthetic stream persistence failure."), { code: unsafeCode });
+      }
+      return originalQuery(...args);
+    }) as any);
+    try {
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+      replies.push({ content: streamedStory, streamChunks, streamChunkDelayMs: 400 });
+      const job = await queue(imported.campaignId);
+      await runGenerationJob(pool, "story-worker-stream-sampling", 30, credentialSecret);
+
+      expect(requests.at(-1)?.stream).toBe(true);
+      expect(servedReplies.at(-1)?.streamChunks).toEqual(streamChunks);
+      const events = [...infoSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls]
+        .map(([event]) => event)
+        .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null && "event" in event);
+      expect(events.filter((event) => event.event === "turn_generation_stream_progress")).toHaveLength(0);
+      expect(events.filter((event) => event.event === "turn_generation_stream_persist_failed")).toEqual([
+        expect.objectContaining({ generationJobId: job.id, errorCode: "unclassified_error" })
+      ]);
+      expect(JSON.stringify(events)).not.toContain(unsafeCode);
+    } finally {
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+      querySpy.mockRestore();
+      infoSpy.mockRestore();
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("does not log scene recovery after a lost-lease transition", async () => {
+    const imported = await campaign();
+    const infoSpy = vi.spyOn(logger, "info");
+    const warnSpy = vi.spyOn(logger, "warn");
+    const errorSpy = vi.spyOn(logger, "error");
+    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+    const querySpy = vi.spyOn(pool, "query");
+    let jobId = "";
+    querySpy.mockImplementation((async (...args: any[]) => {
+      const statement = String(args[0]);
+      if (statement.includes("error_code = 'scene_coverage'")) {
+        await originalQuery("UPDATE generation_jobs SET lease_owner = 'lost-lease' WHERE id = $1", [jobId]);
+        return { rows: [], rowCount: 0 };
+      }
+      return originalQuery(...args);
+    }) as any);
+    try {
+      replies.push(
+        { content: validStory("The scene begins at Location Gamma.") },
+        { content: JSON.stringify({ covered: false, missing_required_beats: ["Private required beat"], contradictions: [] }) },
+        { content: validStory("The rewrite remains incomplete.") },
+        { content: JSON.stringify({ covered: false, missing_required_beats: ["Private rewrite beat"], contradictions: [] }) }
+      );
+      const job = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+        action: "Write a scene where the party reaches Location Gamma.",
+        requestedInputMode: "scene",
+        resolvedInputMode: "scene",
+        inputModeSource: "explicit",
+        providerProfileId: providerId,
+        idempotencyKey: crypto.randomUUID(),
+        context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+      }));
+      jobId = job.id;
+      await runGenerationJob(pool, "story-worker-lost-scene-lease", 30, credentialSecret);
+
+      const events = [...infoSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls]
+        .map(([event]) => event)
+        .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null && "event" in event);
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: "turn_generation_scene_coverage_completed", generationJobId: job.id }),
+        expect.objectContaining({ event: "turn_generation_recovery_started", recoveryKind: "scene_coverage_rewrite" })
+      ]));
+      expect(events).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: "turn_generation_recoverable" })
+      ]));
+      expect(events).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: "turn_generation_failed" })
+      ]));
+    } finally {
+      querySpy.mockRestore();
+      infoSpy.mockRestore();
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("logs recoverable retry lifecycle in chronological attempt order", async () => {
+    const imported = await campaign();
+    await syncPlayerCampaignConfig(pool, imported.campaignId, {
+      expectedTurnNumber: 2,
+      useRpgStats: false,
+      suppressEventTriggers: true,
+      rpgStats: [],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    });
+    const infoSpy = vi.spyOn(logger, "info");
+    const warnSpy = vi.spyOn(logger, "warn");
+    const errorSpy = vi.spyOn(logger, "error");
+    try {
+      replies.push(
+        { content: '{"narration":"First partial', finishReason: "length" },
+        { content: '{"narration":"Second partial', finishReason: "length" }
+      );
+      const job = await queue(imported.campaignId);
+      await runGenerationJob(pool, "story-worker-requeued-a", 30, credentialSecret);
+      await retryGeneration(pool, job.id);
+      replies.push({ content: validStory("The retry reaches Location Gamma safely.") });
+      await runGenerationJob(pool, "story-worker-requeued-b", 30, credentialSecret);
+
+      const events = [
+        ...infoSpy.mock.calls.map(([event], index) => ({ event, order: infoSpy.mock.invocationCallOrder[index] ?? 0 })),
+        ...warnSpy.mock.calls.map(([event], index) => ({ event, order: warnSpy.mock.invocationCallOrder[index] ?? 0 })),
+        ...errorSpy.mock.calls.map(([event], index) => ({ event, order: errorSpy.mock.invocationCallOrder[index] ?? 0 }))
+      ]
+        .sort((left, right) => left.order - right.order)
+        .map(({ event }) => event)
+        .filter((event): event is Record<string, unknown> => {
+          if (typeof event !== "object" || event === null) return false;
+          const record = event as Record<string, unknown>;
+          return record.generationJobId === job.id
+            && typeof record.event === "string"
+            && record.event.startsWith("turn_generation_");
+        });
+      const eventNames = events.map((event) => event.event);
+      expect(eventNames.indexOf("turn_generation_recoverable")).toBeLessThan(eventNames.indexOf("turn_generation_requeued"));
+      expect(eventNames.indexOf("turn_generation_requeued")).toBeLessThan(eventNames.lastIndexOf("turn_generation_claimed"));
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: "turn_generation_recoverable", jobAttempt: 1, errorCode: "output_limit" }),
+        expect.objectContaining({ event: "turn_generation_requeued", jobAttempt: 1 }),
+        expect.objectContaining({ event: "turn_generation_claimed", jobAttempt: 2, workerId: "story-worker-requeued-b" }),
+        expect.objectContaining({ event: "turn_generation_completed", jobAttempt: 2 })
+      ]));
+      for (const event of events) {
+        expect(event).toMatchObject({
+          campaignId: imported.campaignId,
+          providerProfileId: providerId,
+          expectedTurnNumber: 3,
+          operationKind: "append"
+        });
+      }
+    } finally {
+      infoSpy.mockRestore();
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
   it("accepts ordinary loading-dock language without invoking recovery", async () => {
     const imported = await campaign();
     const requestCount = requests.length;
@@ -902,6 +1277,100 @@ integration("durable Story Engine integration", () => {
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "recoverable", errorCode: "output_limit" });
     const campaignRow = await pool.query<{ active_turn_number: number }>("SELECT active_turn_number FROM campaigns WHERE id = $1", [imported.campaignId]);
     expect(campaignRow.rows[0]?.active_turn_number).toBe(2);
+  });
+
+  it("retains the first streamed preview and buffers later durable attempts", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaign_memory_configs SET embedding_enabled = false WHERE campaign_id = $1", [imported.campaignId]);
+    const streamedDraft = validStory("First visible streamed draft: she rolls a 17 and opens Location Gamma.");
+    const hiddenRepairDraft = '{"narration":"Hidden repair draft';
+    const acceptedStory = validStory("The third response becomes the accepted story.");
+    const requestOffset = requests.length;
+    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+    try {
+      replies.push(
+        { content: streamedDraft, streamChunks: [streamedDraft] },
+        { content: hiddenRepairDraft }
+      );
+      const job = await queue(imported.campaignId);
+      await runGenerationJob(pool, "story-worker-preview-a", 30, credentialSecret);
+
+      const recoverable = await getGenerationJob(pool, job.id);
+      expect(recoverable).toMatchObject({ status: "recoverable" });
+      expect(recoverable.partialOutput).toContain("First visible streamed draft");
+      expect(recoverable.partialOutput).not.toContain("Hidden repair draft");
+
+      await retryGeneration(pool, job.id);
+      replies.push({ content: acceptedStory });
+      await runGenerationJob(pool, "story-worker-preview-b", 30, credentialSecret);
+
+      const turnRequests = requests.slice(requestOffset).filter((request) => Array.isArray(request.messages));
+      expect(turnRequests).toHaveLength(3);
+      expect(turnRequests[2]?.stream).not.toBe(true);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+      const turn = await pool.query<{ narration: string }>("SELECT narration FROM turns WHERE campaign_id = $1 AND turn_number = 3", [imported.campaignId]);
+      expect(turn.rows[0]?.narration).toBe("The third response becomes the accepted story.");
+    } finally {
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+    }
+  });
+
+  it("streams only the initial scene request and preserves its preview through a scene recovery retry", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaign_memory_configs SET embedding_enabled = false WHERE campaign_id = $1", [imported.campaignId]);
+    const streamedDraft = validStory("First visible scene preview reaches Location Gamma.");
+    const hiddenSceneRewrite = '{"narration":"Hidden scene rewrite';
+    const acceptedStory = validStory("The accepted scene resolves at Location Gamma.");
+    const requestOffset = requests.length;
+    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+    try {
+      replies.push(
+        { content: streamedDraft, streamChunks: [streamedDraft] },
+        { content: JSON.stringify({ covered: false, missing_required_beats: ["Location Gamma must be reached."], contradictions: [] }) },
+        { content: hiddenSceneRewrite }
+      );
+      const job = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+        action: "Write a scene where the party reaches Location Gamma.",
+        requestedInputMode: "scene",
+        resolvedInputMode: "scene",
+        inputModeSource: "explicit",
+        providerProfileId: providerId,
+        idempotencyKey: crypto.randomUUID(),
+        context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+      }));
+      await runGenerationJob(pool, "story-worker-scene-preview-a", 30, credentialSecret);
+
+      const initialRequests = requests.slice(requestOffset);
+      expect(initialRequests).toHaveLength(3);
+      expect(initialRequests[0]?.stream).toBe(true);
+      expect(initialRequests.slice(1).every((request) => request.stream !== true)).toBe(true);
+      const recoverable = await getGenerationJob(pool, job.id);
+      expect(recoverable).toMatchObject({ status: "recoverable", errorCode: "scene_coverage" });
+      expect(recoverable.partialOutput).toContain("First visible scene preview");
+      expect(recoverable.partialOutput).not.toContain("Hidden scene rewrite");
+
+      await retryGeneration(pool, job.id);
+      const retried = await getGenerationJob(pool, job.id);
+      expect(retried).toMatchObject({ status: "queued" });
+      expect(retried.partialOutput).toContain("First visible scene preview");
+      expect(retried.partialOutput).not.toContain("Hidden scene rewrite");
+
+      replies.push(
+        { content: acceptedStory },
+        { content: JSON.stringify({ covered: true, missing_required_beats: [], contradictions: [] }) }
+      );
+      await runGenerationJob(pool, "story-worker-scene-preview-b", 30, credentialSecret);
+
+      const allRequests = requests.slice(requestOffset);
+      expect(allRequests).toHaveLength(5);
+      expect(allRequests.filter((request) => request.stream === true)).toHaveLength(1);
+      expect(allRequests.slice(1).every((request) => request.stream !== true)).toBe(true);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+      const turn = await pool.query<{ narration: string }>("SELECT narration FROM turns WHERE campaign_id = $1 AND turn_number = 3", [imported.campaignId]);
+      expect(turn.rows[0]?.narration).toBe("The accepted scene resolves at Location Gamma.");
+    } finally {
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+    }
   });
 
   it("reuses the persisted private roll when a recoverable story job is retried", async () => {

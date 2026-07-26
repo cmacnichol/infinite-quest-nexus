@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import { buildServer } from "../../services/api/src/server.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
+import { logger } from "../../packages/logger/src/index.js";
 
 function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
   return {
@@ -245,5 +246,226 @@ describe("API server security and CORS headers", () => {
     });
 
     await app.close();
+  });
+
+  it("logs one correlated lifecycle for a terminal generation stream", async () => {
+    const ownerUserId = "00000000-0000-0000-0000-000000000001";
+    const jobId = "11111111-1111-4111-8111-111111111111";
+    const fixtureAction = "fixture action that must not appear in lifecycle logs";
+    const fixturePartialNarration = "fixture partial narration that must not appear in lifecycle logs";
+    const fixturePartialOutput = `{"narration":"${fixturePartialNarration}","choices":[]}`;
+    const mockPool = {
+      query: async (query: string) => {
+        if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
+        if (query.startsWith("SELECT id, campaign_id AS \"campaignId\"")) {
+          return {
+            rows: [{
+              id: jobId,
+              campaignId: "22222222-2222-4222-8222-222222222222",
+              providerProfileId: null,
+              expectedTurnNumber: 1,
+              action: fixtureAction,
+              status: "completed",
+              attempts: 1,
+              requestedInputMode: "action",
+              resolvedInputMode: "action",
+              inputModeSource: "explicit",
+              operationKind: "append",
+              replacementTurnId: null,
+              baseTurnNumber: null,
+              requestedModel: "fixture-model",
+              providerResponseId: null,
+              providerFinishReason: null,
+              resultTurnId: null,
+              errorCode: null,
+              errorMessage: null,
+              recoveryMetadata: {},
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              completedAt: new Date(),
+              partialOutput: fixturePartialOutput
+            }]
+          };
+        }
+        throw new Error(`Unexpected query: ${query}`);
+      }
+    } as unknown as DatabasePool;
+    const loggerInfo = vi.spyOn(logger, "info").mockImplementation(() => logger);
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+
+    try {
+      const response = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${jobId}/stream` });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["content-type"]).toContain("text/event-stream");
+      expect(response.headers["cache-control"]).toBe("no-cache");
+
+      const lifecycleLogs = loggerInfo.mock.calls
+        .map(([fields]) => fields as Record<string, unknown>)
+        .filter((fields) => String(fields.event || "").startsWith("turn_generation_stream_"));
+
+      expect(lifecycleLogs).toEqual([
+        expect.objectContaining({
+          event: "turn_generation_stream_connected",
+          generationJobId: jobId,
+          correlationId: expect.any(String)
+        }),
+        expect.objectContaining({
+          event: "turn_generation_stream_closed",
+          generationJobId: jobId,
+          correlationId: lifecycleLogs[0]?.correlationId,
+          finalStatus: "completed",
+          snapshotsSent: 1
+        })
+      ]);
+
+      const serializedLogs = JSON.stringify(loggerInfo.mock.calls);
+      expect(serializedLogs).not.toContain(fixtureAction);
+      expect(serializedLogs).not.toContain(fixturePartialOutput);
+      expect(serializedLogs).not.toContain(fixturePartialNarration);
+    } finally {
+      loggerInfo.mockRestore();
+      await app.close();
+    }
+  });
+
+  it("logs one safe lifecycle when generation stream polling fails", async () => {
+    const ownerUserId = "00000000-0000-0000-0000-000000000001";
+    const jobId = "33333333-3333-4333-8333-333333333333";
+    const unsafeCode = "REMOTE FAILURE: sensitive detail";
+    const sensitiveMessage = "sensitive polling error must not appear in logs";
+    const mockPool = {
+      query: async (query: string) => {
+        if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
+        if (query.startsWith("SELECT id, campaign_id AS \"campaignId\"")) {
+          throw Object.assign(new Error(sensitiveMessage), { code: unsafeCode });
+        }
+        throw new Error(`Unexpected query: ${query}`);
+      }
+    } as unknown as DatabasePool;
+    const loggerInfo = vi.spyOn(logger, "info").mockImplementation(() => logger);
+    const loggerWarn = vi.spyOn(logger, "warn").mockImplementation(() => logger);
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+
+    try {
+      const response = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${jobId}/stream` });
+      const lifecycleLogs = loggerInfo.mock.calls
+        .map(([fields]) => fields as Record<string, unknown>)
+        .filter((fields) => String(fields.event || "").startsWith("turn_generation_stream_"));
+      const warningLogs = loggerWarn.mock.calls.map(([fields]) => fields as Record<string, unknown>);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["content-type"]).toContain("text/event-stream");
+      expect(response.headers["cache-control"]).toBe("no-cache");
+      expect(lifecycleLogs).toEqual([
+        expect.objectContaining({ event: "turn_generation_stream_connected", generationJobId: jobId, correlationId: expect.any(String) }),
+        expect.objectContaining({
+          event: "turn_generation_stream_closed",
+          generationJobId: jobId,
+          correlationId: lifecycleLogs[0]?.correlationId,
+          finalStatus: "stream_error",
+          snapshotsSent: 1
+        })
+      ]);
+      expect(warningLogs).toEqual([
+        expect.objectContaining({
+          correlationId: lifecycleLogs[0]?.correlationId,
+          generationJobId: jobId,
+          errorName: "Error",
+          errorCode: "unclassified_error"
+        })
+      ]);
+      const serializedLogs = JSON.stringify([...loggerInfo.mock.calls, ...loggerWarn.mock.calls]);
+      expect(serializedLogs).not.toContain(sensitiveMessage);
+      expect(serializedLogs).not.toContain(unsafeCode);
+    } finally {
+      loggerInfo.mockRestore();
+      loggerWarn.mockRestore();
+      await app.close();
+    }
+  });
+
+  it("closes a generation stream once without writing after client disconnect", async () => {
+    const ownerUserId = "00000000-0000-0000-0000-000000000001";
+    const jobId = "44444444-4444-4444-8444-444444444444";
+    let closeStream: (() => void) | undefined;
+    let endStream: (() => void) | undefined;
+    const writes: string[] = [];
+    const mockPool = {
+      query: async (query: string) => {
+        if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
+        if (query.startsWith("SELECT id, campaign_id AS \"campaignId\"")) {
+          closeStream?.();
+          return {
+            rows: [{
+              id: jobId,
+              campaignId: "55555555-5555-4555-8555-555555555555",
+              providerProfileId: null,
+              expectedTurnNumber: 1,
+              action: "action after close",
+              status: "completed",
+              attempts: 1,
+              requestedInputMode: "action",
+              resolvedInputMode: "action",
+              inputModeSource: "explicit",
+              operationKind: "append",
+              replacementTurnId: null,
+              baseTurnNumber: null,
+              requestedModel: "fixture-model",
+              providerResponseId: null,
+              providerFinishReason: null,
+              resultTurnId: null,
+              errorCode: null,
+              errorMessage: null,
+              recoveryMetadata: {},
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              completedAt: new Date(),
+              partialOutput: null
+            }]
+          };
+        }
+        throw new Error(`Unexpected query: ${query}`);
+      }
+    } as unknown as DatabasePool;
+    const loggerInfo = vi.spyOn(logger, "info").mockImplementation(() => logger);
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.addHook("onRequest", async (request, reply) => {
+      if (request.url.endsWith(`/generation-jobs/${jobId}/stream`)) {
+        closeStream = () => { request.raw.emit("close"); };
+        endStream = () => { reply.raw.end(); };
+        const originalWrite = reply.raw.write.bind(reply.raw);
+        reply.raw.write = ((chunk: string) => {
+          writes.push(chunk);
+          return originalWrite(chunk);
+        }) as typeof reply.raw.write;
+      }
+    });
+
+    try {
+      const responsePromise = app.inject({ method: "GET", url: `/api/v1/generation-jobs/${jobId}/stream` });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const lifecycleLogs = loggerInfo.mock.calls
+        .map(([fields]) => fields as Record<string, unknown>)
+        .filter((fields) => String(fields.event || "").startsWith("turn_generation_stream_"));
+
+      expect(writes).toEqual([]);
+      expect(lifecycleLogs).toEqual([
+        expect.objectContaining({ event: "turn_generation_stream_connected", generationJobId: jobId, correlationId: expect.any(String) }),
+        expect.objectContaining({
+          event: "turn_generation_stream_closed",
+          generationJobId: jobId,
+          correlationId: lifecycleLogs[0]?.correlationId,
+          finalStatus: "client_closed",
+          snapshotsSent: 0
+        })
+      ]);
+      endStream?.();
+      await responsePromise;
+    } finally {
+      endStream?.();
+      loggerInfo.mockRestore();
+      await app.close();
+    }
   });
 });

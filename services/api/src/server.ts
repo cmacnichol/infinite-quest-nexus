@@ -9,7 +9,7 @@ import { z } from "zod";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
-import { createLoggerOptions } from "../../../packages/logger/src/index.js";
+import { createLoggerOptions, logger } from "../../../packages/logger/src/index.js";
 import { characterLegacyText, effectiveCampaignCharacter } from "../../../packages/domain/src/world-characters.js";
 import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema, storyImportRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
@@ -169,6 +169,18 @@ function errorDetails(error: unknown): { name: string; message: string; code?: s
 
 function exposeError(error: unknown, code: number): boolean {
   return code < 500 || (typeof error === "object" && error !== null && "expose" in error && (error as { expose?: unknown }).expose === true);
+}
+
+function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): string {
+  if (typeof value !== "string") return fallback;
+  const normalized = value.trim().toLowerCase();
+  return /^[a-z][a-z0-9_]{0,63}$/.test(normalized) ? normalized : fallback;
+}
+
+function errorCodeFrom(error: unknown): string | null {
+  return typeof error === "object" && error !== null && "code" in error && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : null;
 }
 
 export async function buildServer({ config, pool }: BuildServerOptions): Promise<FastifyInstance> {
@@ -744,41 +756,72 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/stream", async (request, reply) => {
     const jobId = uuidSchema.parse(request.params.jobId);
-    reply.raw.setHeader("Content-Type", "text/event-stream");
-    reply.raw.setHeader("Cache-Control", "no-cache");
-    reply.raw.setHeader("Connection", "keep-alive");
-    if (typeof reply.raw.flushHeaders === "function") reply.raw.flushHeaders();
-
+    const streamStartedAt = Date.now();
+    let snapshotsSent = 0;
+    let finalStatus = "client_closed";
     let isClosed = false;
     request.raw.on("close", () => { isClosed = true; });
 
-    let lastSentJson = "";
-    while (!isClosed) {
-      try {
-        const job = await getGenerationJob(pool, jobId);
-        const currentJson = JSON.stringify({
-          id: job.id,
-          status: job.status,
-          action: job.action,
-          partialOutput: job.partialOutput || null,
-          partialNarration: job.partialNarration || null,
-          errorMessage: job.errorMessage || null,
-          errorCode: job.errorCode || null
-        });
-        if (currentJson !== lastSentJson) {
-          lastSentJson = currentJson;
-          reply.raw.write(`data: ${currentJson}\n\n`);
-        }
-        if (["completed", "failed", "recoverable", "discarded"].includes(job.status)) {
+    logger.info({
+      event: "turn_generation_stream_connected",
+      correlationId: request.id,
+      generationJobId: jobId
+    });
+    try {
+      reply.raw.setHeader("Content-Type", "text/event-stream");
+      reply.raw.setHeader("Cache-Control", "no-cache");
+      reply.raw.setHeader("Connection", "keep-alive");
+      if (typeof reply.raw.flushHeaders === "function") reply.raw.flushHeaders();
+
+      let lastSentJson = "";
+      while (!isClosed) {
+        try {
+          const job = await getGenerationJob(pool, jobId);
+          if (isClosed) break;
+          const currentJson = JSON.stringify({
+            id: job.id,
+            status: job.status,
+            action: job.action,
+            partialOutput: job.partialOutput || null,
+            partialNarration: job.partialNarration || null,
+            errorMessage: job.errorMessage || null,
+            errorCode: job.errorCode || null
+          });
+          if (currentJson !== lastSentJson) {
+            lastSentJson = currentJson;
+            reply.raw.write(`data: ${currentJson}\n\n`);
+            snapshotsSent += 1;
+          }
+          if (["completed", "failed", "recoverable", "discarded"].includes(job.status)) {
+            finalStatus = job.status;
+            break;
+          }
+        } catch (error) {
+          if (isClosed) break;
+          finalStatus = "stream_error";
+          logger.warn({
+            correlationId: request.id,
+            generationJobId: jobId,
+            errorName: error instanceof Error ? error.name : "Error",
+            errorCode: safeLogErrorCode(errorCodeFrom(error))
+          });
+          if (!isClosed) {
+            reply.raw.write(`data: ${JSON.stringify({ status: "failed", errorMessage: error instanceof Error ? error.message : String(error) })}\n\n`);
+            snapshotsSent += 1;
+          }
           break;
         }
-      } catch (error) {
-        if (!isClosed) {
-          reply.raw.write(`data: ${JSON.stringify({ status: "failed", errorMessage: error instanceof Error ? error.message : String(error) })}\n\n`);
-        }
-        break;
+        await new Promise((resolve) => setTimeout(resolve, 350));
       }
-      await new Promise((resolve) => setTimeout(resolve, 350));
+    } finally {
+      logger.info({
+        event: "turn_generation_stream_closed",
+        correlationId: request.id,
+        generationJobId: jobId,
+        finalStatus,
+        snapshotsSent,
+        durationMs: Date.now() - streamStartedAt
+      });
     }
     if (!isClosed) reply.raw.end();
   });
