@@ -10,6 +10,7 @@ import {
   rename,
   rm,
   symlink,
+  unlink,
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -34,6 +35,7 @@ import type { ArchiveEntry, ArchiveManifest } from "../../packages/contracts/src
 
 const filesystemRaceHooks = vi.hoisted(() => ({
   beforeOpen: undefined as undefined | ((path: unknown, flags: unknown) => Promise<boolean>),
+  afterOpen: undefined as undefined | ((path: unknown, flags: unknown, handle: unknown) => Promise<boolean>),
   beforeRename: undefined as undefined | ((source: unknown, target: unknown) => Promise<boolean>),
   beforeUnlink: undefined as undefined | ((path: unknown) => Promise<boolean>)
 }));
@@ -56,7 +58,14 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...actual,
     open: async (path: unknown, flags: unknown, mode?: unknown) => {
       await runHook("beforeOpen", [path, flags]);
-      return actual.open(path as string, flags as string, mode as number | undefined);
+      const handle = await actual.open(path as string, flags as string, mode as number | undefined);
+      try {
+        await runHook("afterOpen", [path, flags, handle]);
+        return handle;
+      } catch (error) {
+        await handle.close();
+        throw error;
+      }
     },
     rename: async (source: unknown, target: unknown) => {
       await runHook("beforeRename", [source, target]);
@@ -83,8 +92,10 @@ const DEFAULT_LIMITS: ArchiveLimits = {
 afterEach(async () => {
   process.env = { ...originalEnvironment };
   filesystemRaceHooks.beforeOpen = undefined;
+  filesystemRaceHooks.afterOpen = undefined;
   filesystemRaceHooks.beforeRename = undefined;
   filesystemRaceHooks.beforeUnlink = undefined;
+  vi.restoreAllMocks();
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -223,6 +234,11 @@ async function replaceDirectoryWithJunction(directory: string, outside: string):
   await mkdir(outside, { recursive: true });
   await symlink(outside, directory, "junction");
   return moved;
+}
+
+async function restoreDirectoryAfterJunction(directory: string, moved: string): Promise<void> {
+  await unlink(directory);
+  await rename(moved, directory);
 }
 
 async function unsafePathFixture(root: string, unsafePath: string): Promise<StagedArchive> {
@@ -365,6 +381,35 @@ describe("staged archive uploads", () => {
     );
 
     expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("does not write upload content through a handle opened during a Windows parent ABA swap", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    const root = await temporaryRoot();
+    const outside = await temporaryRoot();
+    const staging = join(root, "staging");
+    const supplied = Buffer.from("must-not-leave-the-archive-root");
+    let moved = "";
+    await mkdir(staging, { recursive: true });
+    filesystemRaceHooks.beforeOpen = async (path) => {
+      if (!String(path).endsWith(".zip")) return false;
+      moved = await replaceDirectoryWithJunction(staging, outside);
+      return true;
+    };
+    filesystemRaceHooks.afterOpen = async (path) => {
+      if (!String(path).endsWith(".zip")) return false;
+      await restoreDirectoryAfterJunction(staging, moved);
+      return true;
+    };
+
+    await expectArchiveError(
+      stageArchiveUpload(Readable.from(supplied), root, DEFAULT_LIMITS),
+      "archive-entry-unsafe"
+    );
+
+    const outsideFiles = await readdir(outside);
+    expect(outsideFiles).toHaveLength(1);
+    expect(await readFile(join(outside, outsideFiles[0]!))).toHaveLength(0);
   });
 });
 
@@ -525,6 +570,52 @@ describe("bounded manifest and entry verification", () => {
     );
   });
 
+  it("uses unzipper's first EOCD candidate when a low-count EOCD is embedded in its comment", async () => {
+    const root = await temporaryRoot();
+    const zipPath = join(root, "competing-classic-eocd.zip");
+    await writeZip(zipPath, [{ name: "one.txt", content: Buffer.from("1") }]);
+    await patchZip(zipPath, (buffer) => {
+      const eocdOffset = endOfCentralDirectoryOffset(buffer);
+      const lowCountEocd = Buffer.from(buffer.subarray(eocdOffset, eocdOffset + 22));
+      const oversizedEocd = Buffer.from(lowCountEocd);
+      oversizedEocd.writeUInt16LE(65_534, 8);
+      oversizedEocd.writeUInt16LE(65_534, 10);
+      oversizedEocd.writeUInt16LE(lowCountEocd.byteLength, 20);
+      return Buffer.concat([
+        buffer.subarray(0, eocdOffset),
+        oversizedEocd,
+        lowCountEocd
+      ]);
+    });
+
+    await expectArchiveError(
+      inspectArchive(await stagedFixture(root, zipPath), DEFAULT_LIMITS),
+      "archive-limit-exceeded"
+    );
+  });
+
+  it("fails closed when a valid low-count EOCD has a competing EOCD signature in its comment", async () => {
+    const root = await temporaryRoot();
+    const zipPath = join(root, "ambiguous-classic-eocd.zip");
+    await writeManifestZip(zipPath, []);
+    await patchZip(zipPath, (buffer) => {
+      const eocdOffset = endOfCentralDirectoryOffset(buffer);
+      const trailingEocd = Buffer.from(buffer.subarray(eocdOffset, eocdOffset + 22));
+      const firstEocd = Buffer.from(trailingEocd);
+      firstEocd.writeUInt16LE(trailingEocd.byteLength, 20);
+      return Buffer.concat([
+        buffer.subarray(0, eocdOffset),
+        firstEocd,
+        trailingEocd
+      ]);
+    });
+
+    await expectArchiveError(
+      inspectArchive(await stagedFixture(root, zipPath), DEFAULT_LIMITS),
+      "archive-format-unrecognized"
+    );
+  });
+
   it("preflights an oversized ZIP64 EOCD record count before ZIP parsing", async () => {
     const root = await temporaryRoot();
     const zipPath = join(root, "oversized-zip64-count.zip");
@@ -563,6 +654,95 @@ describe("bounded manifest and entry verification", () => {
     await expectArchiveError(
       inspectArchive(await stagedFixture(root, zipPath), DEFAULT_LIMITS),
       "archive-limit-exceeded"
+    );
+  });
+
+  it("uses unzipper's first ZIP64 EOCD candidate when a low-count EOCD follows in its comment", async () => {
+    const root = await temporaryRoot();
+    const zipPath = join(root, "competing-zip64-eocd.zip");
+    await writeZip(zipPath, [{ name: "one.txt", content: Buffer.from("1") }]);
+    await patchZip(zipPath, (buffer) => {
+      const eocdOffset = endOfCentralDirectoryOffset(buffer);
+      const lowCountEocd = Buffer.from(buffer.subarray(eocdOffset, eocdOffset + 22));
+      const oversizedEocd = Buffer.from(lowCountEocd);
+      const centralSize = lowCountEocd.readUInt32LE(12);
+      const centralOffset = lowCountEocd.readUInt32LE(16);
+      oversizedEocd.writeUInt16LE(0xffff, 8);
+      oversizedEocd.writeUInt16LE(0xffff, 10);
+      oversizedEocd.writeUInt16LE(lowCountEocd.byteLength, 20);
+
+      const zip64Record = Buffer.alloc(56);
+      zip64Record.writeUInt32LE(0x06064b50, 0);
+      zip64Record.writeBigUInt64LE(44n, 4);
+      zip64Record.writeUInt16LE(45, 12);
+      zip64Record.writeUInt16LE(45, 14);
+      zip64Record.writeBigUInt64LE(101n, 24);
+      zip64Record.writeBigUInt64LE(101n, 32);
+      zip64Record.writeBigUInt64LE(BigInt(centralSize), 40);
+      zip64Record.writeBigUInt64LE(BigInt(centralOffset), 48);
+
+      const locator = Buffer.alloc(20);
+      locator.writeUInt32LE(0x07064b50, 0);
+      locator.writeBigUInt64LE(BigInt(eocdOffset), 8);
+      locator.writeUInt32LE(1, 16);
+
+      return Buffer.concat([
+        buffer.subarray(0, eocdOffset),
+        zip64Record,
+        locator,
+        oversizedEocd,
+        lowCountEocd
+      ]);
+    });
+
+    await expectArchiveError(
+      inspectArchive(await stagedFixture(root, zipPath), DEFAULT_LIMITS),
+      "archive-limit-exceeded"
+    );
+  });
+
+  it("fails closed when a valid low-count ZIP64 EOCD has a competing signature in its comment", async () => {
+    const root = await temporaryRoot();
+    const zipPath = join(root, "ambiguous-zip64-eocd.zip");
+    await writeManifestZip(zipPath, []);
+    await patchZip(zipPath, (buffer) => {
+      const eocdOffset = endOfCentralDirectoryOffset(buffer);
+      const trailingEocd = Buffer.from(buffer.subarray(eocdOffset, eocdOffset + 22));
+      const firstEocd = Buffer.from(trailingEocd);
+      const centralSize = trailingEocd.readUInt32LE(12);
+      const centralOffset = trailingEocd.readUInt32LE(16);
+      const recordCount = trailingEocd.readUInt16LE(10);
+      firstEocd.writeUInt16LE(0xffff, 8);
+      firstEocd.writeUInt16LE(0xffff, 10);
+      firstEocd.writeUInt16LE(trailingEocd.byteLength, 20);
+
+      const zip64Record = Buffer.alloc(56);
+      zip64Record.writeUInt32LE(0x06064b50, 0);
+      zip64Record.writeBigUInt64LE(44n, 4);
+      zip64Record.writeUInt16LE(45, 12);
+      zip64Record.writeUInt16LE(45, 14);
+      zip64Record.writeBigUInt64LE(BigInt(recordCount), 24);
+      zip64Record.writeBigUInt64LE(BigInt(recordCount), 32);
+      zip64Record.writeBigUInt64LE(BigInt(centralSize), 40);
+      zip64Record.writeBigUInt64LE(BigInt(centralOffset), 48);
+
+      const locator = Buffer.alloc(20);
+      locator.writeUInt32LE(0x07064b50, 0);
+      locator.writeBigUInt64LE(BigInt(eocdOffset), 8);
+      locator.writeUInt32LE(1, 16);
+
+      return Buffer.concat([
+        buffer.subarray(0, eocdOffset),
+        zip64Record,
+        locator,
+        firstEocd,
+        trailingEocd
+      ]);
+    });
+
+    await expectArchiveError(
+      inspectArchive(await stagedFixture(root, zipPath), DEFAULT_LIMITS),
+      "archive-format-unrecognized"
     );
   });
 
@@ -836,6 +1016,42 @@ describe("archive artifact writing and cleanup", () => {
     if (completed) {
       expect(await readFile(completed.absolutePath)).not.toHaveLength(0);
     }
+  });
+
+  it("does not write artifact content through a temporary handle opened during a Windows parent ABA swap", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    const root = await temporaryRoot();
+    const outside = await temporaryRoot();
+    const artifacts = join(root, "artifacts");
+    let moved = "";
+    filesystemRaceHooks.beforeOpen = async (path) => {
+      if (!String(path).endsWith(".zip.tmp")) return false;
+      moved = await replaceDirectoryWithJunction(artifacts, outside);
+      return true;
+    };
+    filesystemRaceHooks.afterOpen = async (path) => {
+      if (!String(path).endsWith(".zip.tmp")) return false;
+      await restoreDirectoryAfterJunction(artifacts, moved);
+      return true;
+    };
+
+    await expectArchiveError(
+      writeArchiveArtifact(
+        root,
+        [{
+          path: "data.bin",
+          logicalType: "asset",
+          mediaType: "application/octet-stream",
+          source: Readable.from("must-not-leave-the-archive-root")
+        }],
+        (entries) => systemManifest(entries)
+      ),
+      "archive-export-inconsistent"
+    );
+
+    const outsideFiles = await readdir(outside);
+    expect(outsideFiles).toHaveLength(1);
+    expect(await readFile(join(outside, outsideFiles[0]!))).toHaveLength(0);
   });
 
   it("removes only a root-relative file beneath the configured archive root", async () => {

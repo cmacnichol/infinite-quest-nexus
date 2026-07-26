@@ -190,6 +190,30 @@ function sameFileObject(left: FileIdentity, right: FileIdentity): boolean {
     && left.modifiedNanoseconds === right.modifiedNanoseconds;
 }
 
+async function openedFileIdentityAtIntendedPath(
+  handle: FileHandle,
+  intendedPath: string,
+  expectedIdentity?: FileIdentity
+): Promise<FileIdentity> {
+  let opened: FileIdentity;
+  let linked: FileIdentity;
+  let linkedStat: BigIntStats;
+  try {
+    opened = fileIdentity(await handle.stat({ bigint: true }));
+    linkedStat = await lstat(intendedPath, { bigint: true });
+    linked = fileIdentity(linkedStat);
+  } catch {
+    throw archiveError("archive-entry-unsafe", "The opened archive file is not present at its intended storage path.");
+  }
+  if (!linkedStat.isFile()
+    || linkedStat.isSymbolicLink()
+    || !sameFileIdentity(opened, linked)
+    || (expectedIdentity !== undefined && !sameFileIdentity(opened, expectedIdentity))) {
+    throw archiveError("archive-entry-unsafe", "The opened archive file identity does not match its intended storage path.");
+  }
+  return opened;
+}
+
 function sameDirectoryIdentity(
   directory: Pick<StableDirectory, "device" | "inode">,
   value: BigIntStats
@@ -346,7 +370,7 @@ export async function stageArchiveUpload(
   try {
     await assertDirectoryStable(stable);
     handle = await open(operationPath, "wx", 0o640);
-    identity = fileIdentity(await handle.stat({ bigint: true }));
+    identity = await openedFileIdentityAtIntendedPath(handle, absolutePath);
     await assertDirectoryStable(stable);
     output = fileHandleWritable(handle);
     await pipeline(source as Readable, counter, output);
@@ -500,20 +524,18 @@ async function preflightZipMetadata(
   const tailLength = Math.min(archiveSize, EOCD_TAIL_BYTES);
   const tailStart = archiveSize - tailLength;
   const tail = await readExactRange(handle, tailStart, tailLength);
-  let relativeEocdOffset = -1;
-  for (let offset = tail.length - EOCD_MINIMUM_BYTES; offset >= 0; offset -= 1) {
-    if (tail.readUInt32LE(offset) !== EOCD_SIGNATURE) continue;
-    const commentLength = tail.readUInt16LE(offset + 20);
-    if (offset + EOCD_MINIMUM_BYTES + commentLength === tail.length) {
-      relativeEocdOffset = offset;
-      break;
-    }
-  }
-  if (relativeEocdOffset < 0) {
+  const eocdSignature = Buffer.allocUnsafe(4);
+  eocdSignature.writeUInt32LE(EOCD_SIGNATURE, 0);
+  const relativeEocdOffset = tail.indexOf(eocdSignature);
+  if (relativeEocdOffset < 0 || relativeEocdOffset + EOCD_MINIMUM_BYTES > tail.length) {
     throw archiveError("archive-format-unrecognized", "The ZIP end-of-central-directory record is missing or malformed.");
   }
 
   const eocd = tail.subarray(relativeEocdOffset, relativeEocdOffset + EOCD_MINIMUM_BYTES);
+  const commentLength = eocd.readUInt16LE(20);
+  if (relativeEocdOffset + EOCD_MINIMUM_BYTES + commentLength !== tail.length) {
+    throw archiveError("archive-format-unrecognized", "The first ZIP end-of-central-directory record is malformed.");
+  }
   const eocdOffset = tailStart + relativeEocdOffset;
   const diskNumber = eocd.readUInt16LE(4);
   const diskStart = eocd.readUInt16LE(6);
@@ -535,6 +557,9 @@ async function preflightZipMetadata(
     assertEncodedRecordCount(BigInt(records), limits);
     if (centralOffset + centralSize > eocdOffset) {
       throw archiveError("archive-format-unrecognized", "The ZIP central-directory bounds are invalid.");
+    }
+    if (tail.indexOf(eocdSignature, relativeEocdOffset + eocdSignature.byteLength) !== -1) {
+      throw archiveError("archive-format-unrecognized", "The ZIP tail contains competing end-of-central-directory signatures.");
     }
     return;
   }
@@ -574,6 +599,9 @@ async function preflightZipMetadata(
   const zip64CentralOffset = checkedZipNumber(zip64Record.readBigUInt64LE(48), archiveSize);
   if (zip64CentralOffset + zip64CentralSize > zip64Offset) {
     throw archiveError("archive-format-unrecognized", "The ZIP64 central-directory bounds are invalid.");
+  }
+  if (tail.indexOf(eocdSignature, relativeEocdOffset + eocdSignature.byteLength) !== -1) {
+    throw archiveError("archive-format-unrecognized", "The ZIP tail contains competing end-of-central-directory signatures.");
   }
 }
 
@@ -1067,7 +1095,7 @@ export async function writeArchiveArtifact(
   try {
     await assertDirectoryStable(stable);
     handle = await open(temporaryOperationPath, "wx", 0o640);
-    identity = fileIdentity(await handle.stat({ bigint: true }));
+    identity = await openedFileIdentityAtIntendedPath(handle, temporaryPath);
     await assertDirectoryStable(stable);
     output = fileHandleWritable(handle);
     outputCompleted = finished(output);
@@ -1111,25 +1139,26 @@ export async function writeArchiveArtifact(
     await handle.sync();
     identity = fileIdentity(await handle.stat({ bigint: true }));
     await assertDirectoryStable(stable);
+    // Keep the source handle open while checking both child names around rename:
+    // Windows prevents replacement of the opened file, while Linux uses the
+    // stable directory descriptor path. Root ACLs must prevent replacement after
+    // this handle closes; path identity checks cannot protect a later mutation.
+    await openedFileIdentityAtIntendedPath(handle, temporaryPath, identity);
     await rename(temporaryOperationPath, finalOperationPath);
     published = true;
     await assertDirectoryStable(stable);
-    const publishedIdentity = fileIdentity(await handle.stat({ bigint: true }));
+    const publishedIdentity = await openedFileIdentityAtIntendedPath(handle, absolutePath);
     if (!sameFileObject(identity, publishedIdentity)) {
       throw archiveError("archive-export-inconsistent", "The archive artifact changed during publication.");
     }
     identity = publishedIdentity;
-    const archiveStat = await stat(absolutePath, { bigint: true });
-    if (!sameFileIdentity(identity, fileIdentity(archiveStat))) {
-      throw archiveError("archive-export-inconsistent", "The published archive path does not match the completed artifact.");
-    }
     await closeHandle(handle);
     handle = undefined;
 
     return {
       relativePath: `artifacts/${id}.zip`,
       absolutePath,
-      byteLength: Number(archiveStat.size),
+      byteLength: Number(identity.size),
       contentFingerprint: manifest.contentFingerprint
     };
   } catch {
