@@ -19,3 +19,4 @@ docs/ENHANCEMENTS.local.md
 docs/*.local.md
 /.kangentic
 kangentic.json
+/.repowise
