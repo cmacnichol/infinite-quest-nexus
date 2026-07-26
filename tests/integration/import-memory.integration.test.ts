@@ -578,6 +578,49 @@ integration("legacy import and Chronicle integration", () => {
     expect(await readFile(resolve(assetRoot, result.rows[0]!.storage_path))).toBeInstanceOf(Buffer);
   });
 
+  it("persists and links zip archive asset buffers (JPEG/PNG/WebP) to imported campaign turns", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    const assetId = "9a3f2b1d-8e4c-4a31-b657-123456789abc";
+    fixture.world.title = `Zip asset import fixture ${crypto.randomUUID()}`;
+    fixture.turns[0].imageUrl = `/api/v1/assets/${assetId}`;
+
+    const jpegBuffer = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01, 0x00, 0x48, 0x00, 0x48, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xff, 0xc4, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0xbf, 0x00, 0xff, 0xd9]);
+
+    const assetBuffers = new Map<string, Buffer>();
+    assetBuffers.set(assetId, jpegBuffer);
+
+    const request = storyImportRequestSchema.parse({ sourceName: "zip-asset-import.story", story: fixture });
+    const imported = await importLegacyStory(pool, request, { root: assetRoot }, assetBuffers);
+
+    const result = await pool.query<{ image_url: string; mime_type: string; storage_path: string }>(
+      `SELECT t.image_url, a.mime_type, a.storage_path
+         FROM turns t
+         JOIN asset_references ar ON ar.turn_id = t.id AND ar.campaign_id = t.campaign_id
+         JOIN assets a ON a.id = ar.asset_id
+        WHERE t.campaign_id = $1 AND t.turn_number = 1`,
+      [imported.campaignId]
+    );
+
+    expect(result.rows[0]?.image_url).toMatch(/^\/api\/v1\/assets\//);
+    expect(result.rows[0]?.mime_type).toBe("image/jpeg");
+    expect(await readFile(resolve(assetRoot, result.rows[0]!.storage_path))).toEqual(jpegBuffer);
+
+    const configRes = await pool.query<{ enabled: boolean }>(
+      "SELECT enabled FROM campaign_illustration_configs WHERE campaign_id = $1",
+      [imported.campaignId]
+    );
+    expect(configRes.rows[0]?.enabled).toBe(true);
+
+    const segAssetRes = await pool.query<{ asset_id: string }>(
+      `SELECT tisa.asset_id
+         FROM turn_illustration_segment_assets tisa
+         JOIN turn_illustration_segments tis ON tis.id = tisa.segment_id
+        WHERE tis.campaign_id = $1`,
+      [imported.campaignId]
+    );
+    expect(segAssetRes.rows[0]?.asset_id).toBeDefined();
+  });
+
   it("deduplicates active reindex requests and lets worker replicas claim different campaigns", async () => {
     const firstJob = await enqueueChronicleReindex(pool, campaignId);
     const duplicateJob = await enqueueChronicleReindex(pool, campaignId);

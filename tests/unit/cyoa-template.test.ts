@@ -82,6 +82,18 @@ describe("CYOA and Modular Template World creation", () => {
       prompt: "Build a luminous mystery world."
     });
     expect(() => worldGenerationPreviewRequestSchema.parse({ prompt: " " })).toThrow();
+    expect(worldGenerationPreviewRequestSchema.parse({
+      prompt: "Build a luminous mystery world.",
+      progressKey: "world-gen:test"
+    })).toEqual({
+      title: "",
+      prompt: "Build a luminous mystery world.",
+      progressKey: "world-gen:test"
+    });
+    expect(() => worldGenerationPreviewRequestSchema.parse({
+      prompt: "Build a luminous mystery world.",
+      unexpected: true
+    })).toThrow();
     expect(playableCharacterGenerationPreviewRequestSchema.parse({
       content: {
         world: {

@@ -13,7 +13,7 @@ import {
   WORLD_CONTENT_SCHEMA_VERSION,
   type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
-import { persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
+import { persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, detectMimeType, type FilesystemAssetStore } from "./asset-service.js";
 import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
 
 type ImportRow = {
@@ -120,6 +120,59 @@ function requestedCharacterId(request: StoryImportRequest): string | undefined {
 
 function isPortableCampaign(request: StoryImportRequest): boolean {
   return request.story.format === "infinite-quest-campaign";
+}
+
+async function linkImportedTurnIllustration(
+  client: DatabaseClient,
+  ownerUserId: string,
+  campaignId: string,
+  turnId: string,
+  narration: string,
+  imagePrompt: string,
+  assetId: string
+) {
+  await client.query(
+    `INSERT INTO campaign_illustration_configs (
+       campaign_id, owner_user_id, source_policy, matching_scope, confidence_profile,
+       repetition_window, word_count_per_segment, images_per_segment, enabled
+     ) VALUES ($1, $2, 'library_only', 'campaign', 'balanced', 3, 150, 1, true)
+     ON CONFLICT (owner_user_id, campaign_id)
+     DO UPDATE SET enabled = true,
+                   source_policy = CASE WHEN campaign_illustration_configs.source_policy = 'off' THEN 'library_only' ELSE campaign_illustration_configs.source_policy END,
+                   updated_at = now()`,
+    [campaignId, ownerUserId]
+  );
+
+  const setRes = await client.query<{ id: string }>(
+    `INSERT INTO turn_illustration_sets (
+       owner_user_id, campaign_id, turn_id, is_active, status, prompt_mode, images_per_segment, segment_word_count, completed_at
+     ) VALUES ($1, $2, $3, true, 'completed', 'diegetic', 1, 150, now())
+     RETURNING id`,
+    [ownerUserId, campaignId, turnId]
+  );
+  const setId = setRes.rows[0]?.id;
+  if (!setId) return;
+
+  const prompt = (imagePrompt || narration || "Turn illustration").slice(0, 2000);
+  const segRes = await client.query<{ id: string }>(
+    `INSERT INTO turn_illustration_segments (
+       owner_user_id, campaign_id, turn_id, illustration_set_id, ordinal, start_word, end_word,
+       source_text, direct_prompt, resolved_prompt, prompt_source, status
+     ) VALUES ($1, $2, $3, $4, 0, 0, 150, $5, $6, $6, 'accepted_segment', 'completed')
+     RETURNING id`,
+    [ownerUserId, campaignId, turnId, setId, narration.slice(0, 1000), prompt]
+  );
+  const segmentId = segRes.rows[0]?.id;
+  if (!segmentId) return;
+
+  await client.query(
+    `INSERT INTO turn_illustration_segment_assets (
+       segment_id, owner_user_id, asset_id, variant_index
+     ) VALUES ($1, $2, $3, 0)
+     ON CONFLICT (segment_id, variant_index)
+     DO UPDATE SET asset_id = EXCLUDED.asset_id, created_at = now()`,
+    [segmentId, ownerUserId, assetId]
+  );
 }
 
 function importedCharacterSeed(
@@ -445,21 +498,18 @@ export async function importLegacyStory(
 
     if (assetStore && assetBuffers && !existingTarget) {
       const coverUrl = typeof request.story.world.coverImageUrl === 'string' ? request.story.world.coverImageUrl : '';
-      if (coverUrl.startsWith("/api/v1/assets/")) {
-        const match = coverUrl.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
-        const id = match ? match[0] : null;
-        if (id && assetBuffers.has(id)) {
-            try {
-                const asset = await persistWorldCover(client, assetStore, ownerUserId, assetBuffers.get(id)!, "image/png");
-                await client.query("UPDATE worlds SET cover_asset_id = $2 WHERE id = $1", [worldId, asset.id]);
-            } catch (err) {
-                /* ignored */
-            }
+      const match = coverUrl.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
+      const id = match ? match[0] : coverUrl.split('/').pop()?.split('.')[0];
+      if (id && assetBuffers.has(id)) {
+        try {
+          const buffer = assetBuffers.get(id)!;
+          const mimeType = detectMimeType(buffer);
+          const asset = await persistWorldCover(client, assetStore, ownerUserId, buffer, mimeType);
+          await client.query("UPDATE worlds SET cover_asset_id = $2 WHERE id = $1", [worldId, asset.id]);
+        } catch (err) {
+          /* ignored */
         }
       }
-      // Note: character is a string in legacyStorySchema payload, but if it is an object somehow...
-      // The issue is legacy text could have avatarUrl. Wait, legacy character doesn't have avatarUrl usually.
-      // We will skip character avatarUrl for now as legacy doesn't typically export that.
     }
 
     const initialTrackers = request.story.trackers ?? [];
@@ -539,23 +589,40 @@ export async function importLegacyStory(
           safeDate(turn.createdAt)
         ]
       );
-      const turnId = turnInsert.rows[0]?.id;
-      if (!turnId) throw new Error(`Could not create imported turn ${ordinal}.`);
+      const turnId = turnInsert.rows[0]!.id;
+      let importedAssetId: string | null = null;
 
       if (assetStore && turn.imageUrl?.startsWith("data:image/")) {
         const asset = await importTurnImage(client, assetStore, ownerUserId, campaignId, turnId, turn.imageUrl);
-        if (asset) await client.query("UPDATE turns SET image_url = $2 WHERE id = $1", [turnId, asset.publicUrl]);
-      } else if (assetStore && assetBuffers && turn.imageUrl?.startsWith("/api/v1/assets/")) {
+        if (asset) {
+          importedAssetId = asset.id;
+          await client.query("UPDATE turns SET image_url = $2 WHERE id = $1", [turnId, asset.publicUrl]);
+        }
+      } else if (assetStore && assetBuffers && turn.imageUrl) {
         const match = turn.imageUrl.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
-        const id = match ? match[0] : null;
-        if (id && assetBuffers.has(id)) {
-            const buffer = assetBuffers.get(id)!;
-            try {
-                const asset = await persistTurnImage(client, assetStore, ownerUserId, campaignId, turnId, buffer, "image/png");
-                if (asset) await client.query("UPDATE turns SET image_url = $2 WHERE id = $1", [turnId, asset.publicUrl]);
-            } catch (err) {
-                /* ignored */
+        const name = turn.imageUrl.split('/').pop()?.split('?')[0];
+        const id = match ? match[0] : (name?.split('.')[0] || null);
+        const key = (id && assetBuffers.has(id)) ? id : (name && assetBuffers.has(name)) ? name : null;
+        if (key) {
+          const buffer = assetBuffers.get(key)!;
+          try {
+            const mimeType = detectMimeType(buffer);
+            const asset = await persistTurnImage(client, assetStore, ownerUserId, campaignId, turnId, buffer, mimeType);
+            if (asset) {
+              importedAssetId = asset.id;
+              await client.query("UPDATE turns SET image_url = $2 WHERE id = $1", [turnId, asset.publicUrl]);
             }
+          } catch (err) {
+            /* ignored */
+          }
+        }
+      }
+
+      if (importedAssetId && campaignId) {
+        try {
+          await linkImportedTurnIllustration(client, ownerUserId, campaignId, turnId, narration, turn.imagePrompt || "", importedAssetId);
+        } catch (err) {
+          /* ignored */
         }
       }
 

@@ -183,4 +183,67 @@ describe("API server security and CORS headers", () => {
 
     await app.close();
   });
+
+  it("respects the import body limit for large request payloads", async () => {
+    const baseConfig = makeConfig();
+    const config = makeConfig({
+      security: { ...baseConfig.security, apiImportBodyLimitBytes: 10 * 1024 * 1024 }
+    });
+    const mockPool = {} as unknown as DatabasePool;
+    const app = await buildServer({ config, pool: mockPool });
+
+    // Payload larger than 10MB limit (11MB string)
+    const oversizedPayload = "a".repeat(11 * 1024 * 1024);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/imports/world",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({ sourceName: "test", worldExport: { title: oversizedPayload } })
+    });
+
+    expect(response.statusCode).toBe(413);
+    const body = JSON.parse(response.payload);
+    expect(body.correlationId).toBeDefined();
+    expect(body.message).toContain("Correlation ID");
+
+    await app.close();
+  });
+
+  it("reads world-generation progress through the owner-scoped database service", async () => {
+    const ownerUserId = "00000000-0000-0000-0000-000000000001";
+    const progressKey = "world-gen-test";
+    const mockPool = {
+      query: async (query: string) => {
+        if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
+        if (query.startsWith("DELETE FROM world_generation_progress")) return { rowCount: 0, rows: [] };
+        if (query.startsWith("SELECT status, phase, progress_percent")) {
+          return {
+            rows: [{
+              status: "processing",
+              phase: "generating_world",
+              progress_percent: 30,
+              message: "Synthesizing world overview and characters via LLM…",
+              error_message: null
+            }]
+          };
+        }
+        throw new Error(`Unexpected query: ${query}`);
+      }
+    } as unknown as DatabasePool;
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/v1/worlds/generate-progress?key=${progressKey}`
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: "processing",
+      phase: "generating_world",
+      progressPercent: 30
+    });
+
+    await app.close();
+  });
 });

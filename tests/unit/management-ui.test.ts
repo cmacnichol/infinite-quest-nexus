@@ -539,7 +539,10 @@ describe("Nexus management UI contracts", () => {
   it("generates complete create-mode previews without creating a world", () => {
     expect(managementHtml).toContain('id="worldGenerator" class="character-generator"');
     expect(managementHtml).toContain('id="worldGeneratorPrompt"');
+    expect(managementHtml).toContain('id="worldGeneratorProgressContainer"');
+    expect(managementHtml).toContain('id="worldGeneratorProgressBar"');
     expect(managementScript).toContain('elements.worldGenerator.classList.toggle("hidden", mode !== "create");');
+    expect(managementScript).toContain('elements.worldGeneratorProgressContainer.classList.remove("hidden");');
     expect(managementScript).toContain('api("/api/v1/worlds/generate-preview"');
     expect(managementScript).toContain("authoritativeCreateCompleted");
     const generator = managementScript.match(/async function generateWorldFromPrompt\(\) \{[\s\S]*?\n\}/)?.[0] || "";
