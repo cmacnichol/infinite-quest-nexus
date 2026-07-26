@@ -14,7 +14,9 @@ const worldId = "22222222-2222-4222-8222-222222222222";
 const worldVersionId = "33333333-3333-4333-8333-333333333333";
 const turnId = "44444444-4444-4444-8444-444444444444";
 const assetId = "55555555-5555-4555-8555-555555555555";
+const secondAssetId = "66666666-6666-4666-8666-666666666666";
 const hash = "a".repeat(64);
+const secondHash = "b".repeat(64);
 
 const validAsset = {
   sourceAssetId: assetId,
@@ -150,6 +152,69 @@ describe("portable archive contracts", () => {
       ...validManifest,
       assets: [{ ...validAsset, bindings: [] }]
     }).success).toBe(false);
+  });
+
+  describe("asset duplicates", () => {
+    it("rejects duplicate source asset IDs", () => {
+      expect(archiveManifestSchema.safeParse({
+        ...validManifest,
+        assets: [validAsset, { ...validAsset }]
+      }).success).toBe(false);
+    });
+
+    it.each([
+      ["content hash", { contentHash: secondHash }],
+      ["byte length", { byteLength: validAsset.byteLength + 1 }],
+      ["MIME type", { mimeType: "image/webp" }],
+      ["pixel width", { pixelWidth: validAsset.pixelWidth + 1 }],
+      ["pixel height", { pixelHeight: validAsset.pixelHeight + 1 }]
+    ])("rejects one normalized archive path with contradictory %s", (_field, override) => {
+      expect(archiveManifestSchema.safeParse({
+        ...validManifest,
+        assets: [
+          validAsset,
+          {
+            ...validAsset,
+            ...override,
+            sourceAssetId: secondAssetId,
+            archivePath: "Assets/Original.png"
+          }
+        ]
+      }).success).toBe(false);
+    });
+
+    it("rejects one content hash mapped to different archive paths", () => {
+      const alternatePath = "assets/alternate.png";
+      expect(archiveManifestSchema.safeParse({
+        ...validManifest,
+        entries: [
+          ...validManifest.entries,
+          { ...validManifest.entries[4], path: alternatePath }
+        ],
+        assets: [
+          validAsset,
+          {
+            ...validAsset,
+            sourceAssetId: secondAssetId,
+            archivePath: alternatePath
+          }
+        ]
+      }).success).toBe(false);
+    });
+
+    it("accepts equivalent original metadata for distinct source asset IDs", () => {
+      expect(archiveManifestSchema.safeParse({
+        ...validManifest,
+        assets: [
+          validAsset,
+          {
+            ...validAsset,
+            sourceAssetId: secondAssetId,
+            bindings: [{ role: "campaign_asset", campaignId }]
+          }
+        ]
+      }).success).toBe(true);
+    });
   });
 
   it("accepts an unbound owner-library asset from a System Archive", () => {

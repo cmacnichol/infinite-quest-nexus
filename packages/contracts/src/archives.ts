@@ -180,7 +180,38 @@ export const archiveManifestSchema = z.object({
     }
   }
 
+  const sourceAssetIds = new Set<string>();
+  const assetsByPath = new Map<string, { index: number; asset: ArchiveAssetRecord }>();
+  const archivePathsByHash = new Map<string, { index: number; path: string }>();
   for (const [index, asset] of manifest.assets.entries()) {
+    const sourceAssetId = asset.sourceAssetId.toLocaleLowerCase("en-US");
+    if (sourceAssetIds.has(sourceAssetId)) {
+      context.addIssue({ code: "custom", path: ["assets", index, "sourceAssetId"], message: "Archive asset source identifiers must be unique." });
+    }
+    sourceAssetIds.add(sourceAssetId);
+
+    const normalizedPath = normalizedArchivePath(asset.archivePath);
+    const existingAtPath = assetsByPath.get(normalizedPath);
+    if (existingAtPath && (
+      existingAtPath.asset.archivePath !== asset.archivePath
+      || existingAtPath.asset.contentHash !== asset.contentHash
+      || existingAtPath.asset.byteLength !== asset.byteLength
+      || existingAtPath.asset.mimeType !== asset.mimeType
+      || existingAtPath.asset.pixelWidth !== asset.pixelWidth
+      || existingAtPath.asset.pixelHeight !== asset.pixelHeight
+    )) {
+      context.addIssue({ code: "custom", path: ["assets", index, "archivePath"], message: "Archive assets sharing a normalized path must have identical original metadata." });
+    } else if (!existingAtPath) {
+      assetsByPath.set(normalizedPath, { index, asset });
+    }
+
+    const existingPathForHash = archivePathsByHash.get(asset.contentHash);
+    if (existingPathForHash && existingPathForHash.path !== asset.archivePath) {
+      context.addIssue({ code: "custom", path: ["assets", index, "contentHash"], message: "Each archive asset content hash must map to exactly one archive path." });
+    } else if (!existingPathForHash) {
+      archivePathsByHash.set(asset.contentHash, { index, path: asset.archivePath });
+    }
+
     if (!paths.has(normalizedArchivePath(asset.archivePath))) {
       context.addIssue({ code: "custom", path: ["assets", index, "archivePath"], message: "Every asset must be declared in entries." });
     }

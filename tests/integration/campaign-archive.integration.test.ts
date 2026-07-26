@@ -10,6 +10,7 @@ import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
+import { calculateContentFingerprint, canonicalArchiveJson } from "../../packages/contracts/src/archives.js";
 import { inspectArchive, readVerifiedEntry, type ArchiveLimits } from "../../services/api/src/archive-io.js";
 import { stageArchiveUpload } from "../../services/api/src/archive-io.js";
 import { persistOriginalImage } from "../../services/api/src/asset-service.js";
@@ -261,6 +262,54 @@ integration("campaign archive export", () => {
     return stageArchiveUpload(Readable.from(await readFile(artifact.absolutePath)), root, limits);
   }
 
+  async function stagedExportWithContradictoryAssetPayload() {
+    const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
+    const inspected = await inspectArchive({
+      relativePath: artifact.relativePath,
+      absolutePath: artifact.absolutePath,
+      compressedBytes: artifact.byteLength
+    }, limits, "campaign");
+    const entryBytes = new Map<string, Buffer>();
+    for (const entry of inspected.manifest.entries) {
+      entryBytes.set(entry.path, await readVerifiedEntry(
+        inspected,
+        entry.path,
+        entry.mediaType === "application/json" ? limits.maxJsonEntryBytes : limits.maxOriginalImageBytes
+      ));
+    }
+    const assetPayload = JSON.parse(entryBytes.get("assets/assets.json")!.toString("utf8"));
+    assetPayload.assets[0].library.title = "Contradictory payload title";
+    const contradictoryBytes = Buffer.from(canonicalArchiveJson(assetPayload), "utf8");
+    entryBytes.set("assets/assets.json", contradictoryBytes);
+    const entries = inspected.manifest.entries.map((entry) => entry.path === "assets/assets.json"
+      ? {
+          ...entry,
+          byteLength: contradictoryBytes.byteLength,
+          sha256: createHash("sha256").update(contradictoryBytes).digest("hex")
+        }
+      : entry);
+    const manifest = {
+      ...inspected.manifest,
+      entries,
+      contentFingerprint: calculateContentFingerprint({
+        payloadHashes: entries.filter((entry) => entry.mediaType === "application/json").map((entry) => entry.sha256),
+        originalAssetHashes: inspected.manifest.assets.map((asset) => asset.contentHash)
+      })
+    };
+    const archivePath = join(root, `contradictory-assets-${randomUUID()}.zip`);
+    const output = createWriteStream(archivePath, { flags: "wx" });
+    const archive = new ZipArchive({ zlib: { level: 9 } });
+    const completed = once(output, "close");
+    archive.pipe(output);
+    for (const entry of entries) archive.append(entryBytes.get(entry.path)!, { name: entry.path });
+    archive.append(Buffer.from(canonicalArchiveJson(manifest), "utf8"), { name: "manifest.json" });
+    await archive.finalize();
+    await completed;
+    const staged = await stageArchiveUpload(createReadStream(archivePath), root, limits);
+    await unlink(archivePath);
+    return staged;
+  }
+
   async function createCompatibleDestination(title: string): Promise<{ worldId: string; worldVersionId: string }> {
     const source = await pool.query<{ content: unknown }>("SELECT content FROM world_versions WHERE id=$1", [sourceWorldVersionId]);
     const createdWorld = await pool.query<{ id: string }>("INSERT INTO worlds (owner_user_id,title) SELECT owner_user_id,$2 FROM worlds WHERE id=$1 RETURNING id", [worldId, title]);
@@ -434,6 +483,16 @@ integration("campaign archive export", () => {
     } finally {
       await app.close();
     }
+  });
+
+  it("rejects an assets payload that contradicts manifest asset metadata", async () => {
+    await expect(previewCampaignArchive(
+      pool,
+      runtimeConfig(),
+      await stagedExportWithContradictoryAssetPayload(),
+      "contradictory-assets.zip",
+      { kind: "embedded" }
+    )).rejects.toMatchObject({ code: "archive-asset-invalid", details: { payload: "assets" } });
   });
 
   it("keeps legacy JSON imports and manifest-less ZIP previews available", async () => {

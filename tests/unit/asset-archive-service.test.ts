@@ -24,7 +24,8 @@ import {
   validateArchiveAssets,
   verifyAndWriteArchiveAssets,
   type ArchiveAssetSourceRow,
-  type ArchiveIdMap
+  type ArchiveIdMap,
+  type ValidatedArchiveAssetSet
 } from "../../services/api/src/asset-archive-service.js";
 import { sanitizePortableMetadata, type ArchiveAssetBinding, type ArchiveAssetRecord } from "../../packages/contracts/src/archives.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
@@ -113,6 +114,36 @@ function sourceRow(sourceAssetId: string, bindings: ArchiveAssetBinding[] = []):
   };
 }
 
+function validatedSet(
+  ...assets: Array<ArchiveAssetRecord & { bytes: Buffer; createThumbnail: false }>
+): ValidatedArchiveAssetSet {
+  const records: ArchiveAssetRecord[] = [];
+  const originals = new Map<string, ValidatedArchiveAssetSet["originals"][number]>();
+  for (const asset of assets) {
+    const { bytes, createThumbnail, ...record } = asset;
+    records.push(record);
+    const key = `${record.archivePath.normalize("NFC").toLocaleLowerCase("en-US")}\0${record.contentHash}`;
+    const existing = originals.get(key);
+    if (existing) {
+      existing.sourceAssetIds.push(record.sourceAssetId);
+    } else {
+      originals.set(key, {
+        key,
+        archivePath: record.archivePath,
+        contentHash: record.contentHash,
+        mimeType: record.mimeType,
+        byteLength: record.byteLength,
+        pixelWidth: record.pixelWidth,
+        pixelHeight: record.pixelHeight,
+        bytes,
+        createThumbnail,
+        sourceAssetIds: [record.sourceAssetId]
+      });
+    }
+  }
+  return { records, originals: [...originals.values()] };
+}
+
 function poolForQuery(query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number }>) {
   return {
     connect: async () => ({
@@ -169,7 +200,26 @@ describe("asset archive portability", () => {
 
   it("validates a portable original and keeps the derivative absent for restore", async () => {
     const validated = await validateArchiveAssets({ records: [record(assetA)] }, async () => pngBytes);
-    expect(validated.assets[0]?.createThumbnail).toBe(false);
+    expect(validated.originals[0]?.createThumbnail).toBe(false);
+  });
+
+  it("deduplicates repeated asset records before reading and retaining originals", async () => {
+    const records = Array.from({ length: 100 }, (_, index) => record(
+      `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`
+    ));
+    let reads = 0;
+
+    const validated = await validateArchiveAssets({ records }, async () => {
+      reads += 1;
+      return pngBytes;
+    });
+
+    expect(reads).toBe(1);
+    expect(validated.originals).toHaveLength(1);
+    expect(validated.originals[0]?.sourceAssetIds).toHaveLength(100);
+    expect(validated.records.map((asset) => asset.sourceAssetId)).toEqual(
+      records.map((asset) => asset.sourceAssetId)
+    );
   });
 
   it("cleans only database-unreferenced created paths and retains an actual outside-root file", async () => {
@@ -459,7 +509,10 @@ describe("asset archive portability", () => {
           return { rows: [], rowCount: 1 };
         }
       } as never;
-      const result = await persistArchiveAssets(client, { root }, ownerUserId, { assets: [{ ...first, bytes: pngBytes, createThumbnail: false }, { ...second, bytes: secondBytes, createThumbnail: false }] }, new Map());
+      const result = await persistArchiveAssets(client, { root }, ownerUserId, validatedSet(
+        { ...first, bytes: pngBytes, createThumbnail: false },
+        { ...second, bytes: secondBytes, createThumbnail: false }
+      ), new Map());
       expect(result.createdPaths).toEqual([`${secondHash.slice(0, 2)}/${secondHash}.png`]);
       expect(queries.some((query) => query.includes("asset_derivatives"))).toBe(false);
       expect((await stat(join(root, preexistingPath))).isFile()).toBe(true);
@@ -746,7 +799,9 @@ describe("asset archive portability", () => {
           ? { rows: [{ id: "dest-asset" }], rowCount: 1 }
           : text.startsWith("UPDATE asset_library_entries") ? { rows: [], rowCount: 0 } : { rows: [], rowCount: 1 }
       } as never;
-      await expect(persistArchiveAssets(client, { root }, ownerUserId, { assets: [{ ...record(assetA), bytes: pngBytes, createThumbnail: false }] }, new Map()))
+      await expect(persistArchiveAssets(client, { root }, ownerUserId, validatedSet(
+        { ...record(assetA), bytes: pngBytes, createThumbnail: false }
+      ), new Map()))
         .rejects.toMatchObject({ cause: { message: "Asset library metadata row is missing for 'dest-asset'." } });
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -794,12 +849,10 @@ describe("asset archive portability", () => {
       await expect(stat(join(root, preexistingPath))).rejects.toMatchObject({ code: "ENOENT" });
       let caught: unknown;
       try {
-        await persistArchiveAssets(client, { root }, ownerUserId, {
-          assets: [
-            { ...first, bytes: pngBytes, createThumbnail: false },
-            { ...second, bytes: secondBytes, createThumbnail: false }
-          ]
-        }, new Map());
+        await persistArchiveAssets(client, { root }, ownerUserId, validatedSet(
+          { ...first, bytes: pngBytes, createThumbnail: false },
+          { ...second, bytes: secondBytes, createThumbnail: false }
+        ), new Map());
       } catch (error) {
         caught = error;
       }
@@ -843,9 +896,9 @@ describe("asset archive portability", () => {
       const unsafe = "../outside.png";
       let caught: unknown;
       try {
-        await persistArchiveAssets(client, { root }, ownerUserId, {
-          assets: [{ ...record(assetA), bytes: pngBytes, createThumbnail: false }]
-        }, new Map());
+        await persistArchiveAssets(client, { root }, ownerUserId, validatedSet(
+          { ...record(assetA), bytes: pngBytes, createThumbnail: false }
+        ), new Map());
       } catch (error) {
         caught = error;
       }
@@ -955,9 +1008,9 @@ describe("asset archive portability", () => {
           return { rows: [], rowCount: 1 };
         }
       } as never;
-      await expect(persistArchiveAssets(client, { root }, ownerUserId, {
-        assets: [{ ...record(assetA), bytes: pngBytes, createThumbnail: false }]
-      }, new Map())).rejects.toBeInstanceOf(ArchiveAssetPersistenceError);
+      await expect(persistArchiveAssets(client, { root }, ownerUserId, validatedSet(
+        { ...record(assetA), bytes: pngBytes, createThumbnail: false }
+      ), new Map())).rejects.toBeInstanceOf(ArchiveAssetPersistenceError);
       expect(queries.some((query) => query.includes("storage_path") && query.includes("FROM assets"))).toBe(false);
       expect((await stat(join(root, path))).isFile()).toBe(true);
     } finally {
@@ -1199,12 +1252,10 @@ describe("asset archive portability", () => {
           : { rows: [{ asset_id: "destination-1" }], rowCount: 1 }
       } as never;
 
-      const result = await persistArchiveAssets(client, { root }, ownerUserId, {
-        assets: [
-          { ...record(assetA), bytes: pngBytes, createThumbnail: false },
-          { ...record(assetB), bytes: pngBytes, createThumbnail: false }
-        ]
-      }, idMap);
+      const result = await persistArchiveAssets(client, { root }, ownerUserId, validatedSet(
+        { ...record(assetA), bytes: pngBytes, createThumbnail: false },
+        { ...record(assetB), bytes: pngBytes, createThumbnail: false }
+      ), idMap);
 
       expect(inserts).toBe(1);
       expect(result.assetIds).toEqual(new Map([[assetA, "destination-1"], [assetB, "destination-1"]]));
@@ -1222,7 +1273,9 @@ describe("asset archive portability", () => {
       const client = { query: async () => ({ rows: [{ id: "destination" }], rowCount: 1 }) } as never;
       let staleError: unknown;
       try {
-        await persistArchiveAssets(client, { root }, ownerUserId, { assets: [{ ...record(assetA), bytes: pngBytes, createThumbnail: false }] }, staleMap);
+        await persistArchiveAssets(client, { root }, ownerUserId, validatedSet(
+          { ...record(assetA), bytes: pngBytes, createThumbnail: false }
+        ), staleMap);
       } catch (error) {
         staleError = error;
       }

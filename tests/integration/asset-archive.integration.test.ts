@@ -294,8 +294,9 @@ integration("asset archive portability", () => {
       { records: inventory.records },
       (path) => readFile(resolve(archiveRoot, path))
     );
-    expect(validated.assets).toHaveLength(inventory.records.length);
-    expect(validated.assets.every((asset) => asset.createThumbnail === false)).toBe(true);
+    expect(validated.records).toHaveLength(inventory.records.length);
+    expect(validated.originals).toHaveLength(inventory.uniqueOriginals.length);
+    expect(validated.originals.every((asset) => asset.createThumbnail === false)).toBe(true);
   });
 
   it("remaps archive IDs and restores legacy, nullable-turn, cover, segment, and context bindings", async () => {

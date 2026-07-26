@@ -24,8 +24,22 @@ type ArchiveCampaignImageJobRow = {
 };
 type ArchiveAssetDetailRow = Omit<ArchiveAssetSourceRow, "bindings">;
 export type CampaignAssetInventory = { records: ArchiveAssetRecord[]; uniqueOriginals: Array<{ contentHash: string; archivePath: string; sourceAssetIds: string[]; mimeType: ArchiveAssetSourceRow["mime_type"]; byteLength: number }> };
-export type ValidatedArchiveAsset = ArchiveAssetRecord & { bytes: Buffer; createThumbnail: false };
-export type ValidatedArchiveAssetSet = { assets: ValidatedArchiveAsset[] };
+export type ValidatedArchiveOriginal = {
+  key: string;
+  archivePath: string;
+  contentHash: string;
+  mimeType: ArchiveAssetRecord["mimeType"];
+  byteLength: number;
+  pixelWidth: number;
+  pixelHeight: number;
+  bytes: Buffer;
+  createThumbnail: false;
+  sourceAssetIds: string[];
+};
+export type ValidatedArchiveAssetSet = {
+  records: ArchiveAssetRecord[];
+  originals: ValidatedArchiveOriginal[];
+};
 export type ArchiveIdKind = "world" | "worldVersion" | "campaign" | "turn" | "memory" | "summary" | "profileEdit" | "stateEdit" | "migration" | "transfer" | "illustrationSet" | "illustrationSegment" | "asset" | "generationContext";
 export type ArchiveIdMap = Map<ArchiveIdKind, Map<string, string>>;
 
@@ -43,6 +57,7 @@ export class ArchiveAssetPersistenceError extends Error {
 const iso = (value: Date | string) => value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 const archivePathFor = (hash: string, mime: string) => `assets/sha256/${hash.slice(0, 2)}/${hash}${imageExtensionForMimeType(mime)}`;
 const missing = (ids: readonly string[]) => Object.assign(new Error(`Required archive assets are missing: ${ids.join(", ")}`), { code: "archive-asset-missing", assetIds: [...ids] });
+const invalid = (message: string) => Object.assign(new Error(message), { code: "archive-asset-invalid", statusCode: 400 });
 const legacyAssetPointer = /^\/api\/v1\/assets\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 
 function safeRelativeCleanupPath(root: string, candidate: string): string | null {
@@ -191,21 +206,85 @@ export async function validateArchiveAssets(manifestOrInput: Pick<ArchiveManifes
   const hasFullManifest = "entries" in manifestOrInput;
   const manifest = "assets" in manifestOrInput ? manifestOrInput : { assets: manifestOrInput.records };
   const entries = hasFullManifest ? new Map(manifestOrInput.entries.map((entry) => [entry.path, entry])) : undefined;
-  const assets: ValidatedArchiveAsset[] = [];
-  for (const record of manifest.assets) {
+  const records: ArchiveAssetRecord[] = [];
+  const grouped = new Map<string, { record: ArchiveAssetRecord; sourceAssetIds: string[] }>();
+  const sourceAssetIds = new Set<string>();
+  const normalizedPathsByHash = new Map<string, string>();
+  const keysByNormalizedPath = new Map<string, string>();
+  for (const candidate of manifest.assets) {
+    const parsed = archiveAssetRecordSchema.safeParse(candidate);
+    if (!parsed.success) throw invalid("Archive asset metadata does not satisfy the archive schema.");
+    const record = parsed.data;
+    const normalizedSourceAssetId = record.sourceAssetId.toLocaleLowerCase("en-US");
+    if (sourceAssetIds.has(normalizedSourceAssetId)) throw invalid(`Archive asset source identifier '${record.sourceAssetId}' is duplicated.`);
+    sourceAssetIds.add(normalizedSourceAssetId);
+    records.push(record);
+
     const expectedPath = archivePathFor(record.contentHash, record.mimeType);
-    if (record.archivePath !== expectedPath) throw new Error(`Archive asset '${record.sourceAssetId}' does not use the canonical path '${expectedPath}'.`);
+    if (record.archivePath !== expectedPath) throw invalid(`Archive asset '${record.sourceAssetId}' does not use the canonical path '${expectedPath}'.`);
     if (entries) {
       const entry = entries.get(record.archivePath);
       if (!entry || entry.logicalType !== "asset-original" || entry.mediaType !== record.mimeType) {
-        throw new Error(`Archive asset '${record.sourceAssetId}' is missing a matching asset-original entry.`);
+        throw invalid(`Archive asset '${record.sourceAssetId}' is missing a matching asset-original entry.`);
       }
     }
-    const bytes = await readEntry(record.archivePath); const verified = await verifyOriginalImage(bytes, record.mimeType);
-    if (sha256(bytes.toString("base64")) !== record.contentHash || bytes.length !== record.byteLength || verified.width !== record.pixelWidth || verified.height !== record.pixelHeight) throw missing([record.sourceAssetId]);
-    assets.push({ ...record, bytes, createThumbnail: false });
+
+    const normalizedPath = record.archivePath.normalize("NFC").toLocaleLowerCase("en-US");
+    const previousPath = normalizedPathsByHash.get(record.contentHash);
+    if (previousPath !== undefined && previousPath !== normalizedPath) {
+      throw invalid(`Archive asset content hash '${record.contentHash}' maps to multiple archive paths.`);
+    }
+    normalizedPathsByHash.set(record.contentHash, normalizedPath);
+    const key = `${normalizedPath}\0${record.contentHash}`;
+    const previousKey = keysByNormalizedPath.get(normalizedPath);
+    if (previousKey !== undefined && previousKey !== key) {
+      throw invalid(`Archive asset path '${record.archivePath}' maps to multiple content hashes.`);
+    }
+    keysByNormalizedPath.set(normalizedPath, key);
+    const existing = grouped.get(key);
+    if (existing) {
+      const original = existing.record;
+      if (
+        original.archivePath !== record.archivePath
+        || original.mimeType !== record.mimeType
+        || original.byteLength !== record.byteLength
+        || original.pixelWidth !== record.pixelWidth
+        || original.pixelHeight !== record.pixelHeight
+      ) {
+        throw invalid(`Archive asset path '${record.archivePath}' has contradictory original metadata.`);
+      }
+      existing.sourceAssetIds.push(record.sourceAssetId);
+    } else {
+      grouped.set(key, { record, sourceAssetIds: [record.sourceAssetId] });
+    }
   }
-  return { assets };
+
+  const originals: ValidatedArchiveOriginal[] = [];
+  for (const [key, group] of grouped) {
+    const bytes = await readEntry(group.record.archivePath);
+    const verified = await verifyOriginalImage(bytes, group.record.mimeType);
+    if (
+      sha256(bytes.toString("base64")) !== group.record.contentHash
+      || bytes.length !== group.record.byteLength
+      || verified.width !== group.record.pixelWidth
+      || verified.height !== group.record.pixelHeight
+    ) {
+      throw missing(group.sourceAssetIds);
+    }
+    originals.push({
+      key,
+      archivePath: group.record.archivePath,
+      contentHash: group.record.contentHash,
+      mimeType: group.record.mimeType,
+      byteLength: group.record.byteLength,
+      pixelWidth: group.record.pixelWidth,
+      pixelHeight: group.record.pixelHeight,
+      bytes,
+      createThumbnail: false,
+      sourceAssetIds: [...group.sourceAssetIds]
+    });
+  }
+  return { records, originals };
 }
 
 /**
@@ -221,29 +300,35 @@ export async function persistArchiveAssets(
   validated: ValidatedArchiveAssetSet,
   idMap: ArchiveIdMap = new Map()
 ): Promise<{ assetIds: Map<string, string>; createdPaths: string[] }> {
-  const assetIds = new Map<string, string>(); const createdPaths: string[] = []; const byHash = new Map<string, ValidatedArchiveAsset>();
-  for (const asset of validated.assets) byHash.set(asset.contentHash, byHash.get(asset.contentHash) ?? asset);
+  const assetIds = new Map<string, string>();
+  const createdPaths: string[] = [];
+  const recordsBySourceAssetId = new Map(validated.records.map((record) => [record.sourceAssetId, record]));
   try {
-    const sourceAssetIds = new Set(validated.assets.map((asset) => asset.sourceAssetId));
+    const sourceAssetIds = new Set(validated.records.map((asset) => asset.sourceAssetId));
     for (const sourceAssetId of idMap.get("asset")?.keys() ?? []) {
       if (!sourceAssetIds.has(sourceAssetId)) throw new Error(`Unknown archive asset mapping '${sourceAssetId}'.`);
     }
-    for (const asset of [...byHash.values()].sort((a, b) => a.archivePath.localeCompare(b.archivePath))) {
+    for (const original of [...validated.originals].sort((a, b) => a.archivePath.localeCompare(b.archivePath))) {
+      const representative = recordsBySourceAssetId.get(original.sourceAssetIds[0] ?? "");
+      if (!representative) throw new Error(`Missing archive asset metadata for original '${original.archivePath}'.`);
       const stored = await persistOriginalImage(client, store, ownerUserId, {
-        bytes: asset.bytes,
-        mimeType: asset.mimeType,
+        bytes: original.bytes,
+        mimeType: original.mimeType,
         createThumbnail: false,
         onOriginalCreated: (storagePath) => {
           const safePath = safeRelativeCleanupPath(store.root, storagePath);
           if (safePath) createdPaths.push(safePath);
         }
       });
-      assetIds.set(asset.sourceAssetId, stored.id);
-      const updated = await client.query<{ asset_id: string }>(`UPDATE asset_library_entries SET title=$3,caption=$4,notes=$5,tags=$6,origin=$7,review_status=$8,reuse_scope=$9,automatic_reuse_enabled=$10,content_categories=$11,favorite=$12,archived_at=$13 WHERE asset_id=$1 AND owner_user_id=$2 RETURNING asset_id`, [stored.id, ownerUserId, asset.library.title, asset.library.caption, asset.library.notes, asset.library.tags, asset.library.origin, asset.library.reviewStatus, asset.library.reuseScope, asset.library.automaticReuseEnabled, asset.library.contentCategories, asset.library.favorite, asset.library.archivedAt]);
+      for (const sourceAssetId of original.sourceAssetIds) {
+        if (!recordsBySourceAssetId.has(sourceAssetId)) throw new Error(`Missing archive asset metadata for '${sourceAssetId}'.`);
+        assetIds.set(sourceAssetId, stored.id);
+      }
+      const updated = await client.query<{ asset_id: string }>(`UPDATE asset_library_entries SET title=$3,caption=$4,notes=$5,tags=$6,origin=$7,review_status=$8,reuse_scope=$9,automatic_reuse_enabled=$10,content_categories=$11,favorite=$12,archived_at=$13 WHERE asset_id=$1 AND owner_user_id=$2 RETURNING asset_id`, [stored.id, ownerUserId, representative.library.title, representative.library.caption, representative.library.notes, representative.library.tags, representative.library.origin, representative.library.reviewStatus, representative.library.reuseScope, representative.library.automaticReuseEnabled, representative.library.contentCategories, representative.library.favorite, representative.library.archivedAt]);
       if (!updated.rowCount) throw new Error(`Asset library metadata row is missing for '${stored.id}'.`);
     }
-    for (const asset of validated.assets) {
-      const destination = assetIds.get(byHash.get(asset.contentHash)?.sourceAssetId ?? ""); if (!destination) throw new Error(`Missing restored asset mapping for '${asset.sourceAssetId}'.`); assetIds.set(asset.sourceAssetId, destination);
+    for (const record of validated.records) {
+      if (!assetIds.has(record.sourceAssetId)) throw new Error(`Missing restored asset mapping for '${record.sourceAssetId}'.`);
     }
     if (idMap) idMap.set("asset", assetIds); return { assetIds, createdPaths };
   } catch (primaryError) {

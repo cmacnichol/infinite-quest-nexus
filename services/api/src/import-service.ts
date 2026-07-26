@@ -1080,7 +1080,7 @@ export async function importCampaignArchive(
       await client.query("UPDATE world_versions SET content=$2::jsonb WHERE id=$1 AND owner_user_id=$3", [world.worldVersionId, JSON.stringify(rewriteAssetPointers(archive.world.content, persisted.assetIds)), ownerUserId]);
     }
     await restoreAssetBindings(client, ownerUserId, archive.inspected.manifest.assets, persisted.assetIds, idMap);
-    const stats: CampaignArchiveImportResult["stats"] = { turnCount: inserted.turnCount, memoryCount: inserted.memoryCount, summaryCount: inserted.summaryCount, assetCount: archive.assets.assets.length, assetBytes: archive.assets.assets.reduce((sum, asset) => sum + asset.byteLength, 0) };
+    const stats: CampaignArchiveImportResult["stats"] = { turnCount: inserted.turnCount, memoryCount: inserted.memoryCount, summaryCount: inserted.summaryCount, assetCount: archive.assets.originals.length, assetBytes: archive.assets.originals.reduce((sum, asset) => sum + asset.byteLength, 0) };
     await client.query("UPDATE imports SET status='completed',world_id=$2,world_version_id=$3,campaign_id=$4,stats=$5::jsonb,completed_at=now() WHERE id=$1", [importId, world.worldId, world.worldVersionId, inserted.campaignId, JSON.stringify(stats)]);
     await client.query("UPDATE archive_previews SET status='consumed',consumed_at=now(),result=$2::jsonb,updated_at=now() WHERE id=$1", [preview.id, JSON.stringify({ importId, worldId: world.worldId, worldVersionId: world.worldVersionId, campaignId: inserted.campaignId, stats })]);
     await client.query("COMMIT");

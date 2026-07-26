@@ -48,6 +48,10 @@ export type ValidatedAssetArchive = ValidatedArchiveAssetSet;
 
 const APPLICATION_VERSION = process.env.APP_VERSION?.trim() || process.env.npm_package_version?.trim() || "0.1.0";
 const campaignPayloadSchema = z.object({ world: z.unknown(), turns: z.array(z.unknown()) }).passthrough();
+const campaignAssetPayloadSchema = z.object({
+  formatVersion: z.literal(1),
+  assets: z.array(archiveAssetRecordSchema)
+}).strict();
 
 type SnapshotCampaign = Record<string, any> & { id: string; world_id: string; world_version_id: string; version_number: number; content: WorldContent; revision: number };
 export type CampaignArchiveSnapshot = {
@@ -337,6 +341,15 @@ async function readCampaignArchive(staged: StagedArchive, limits: ArchiveLimits)
   const campaign = archiveJson(await readVerifiedEntry(inspected, "campaign.json", limits.maxJsonEntryBytes), "campaign");
   const world = archiveJson(await readVerifiedEntry(inspected, "world.json", limits.maxJsonEntryBytes), "world");
   const chronicle = archiveJson(await readVerifiedEntry(inspected, "chronicle.json", limits.maxJsonEntryBytes), "Chronicle");
+  const assetPayload = campaignAssetPayloadSchema.safeParse(
+    archiveJson(await readVerifiedEntry(inspected, "assets/assets.json", limits.maxJsonEntryBytes), "assets")
+  );
+  if (!assetPayload.success) {
+    throw new ArchiveError("archive-asset-invalid", "The asset metadata payload is invalid.", 400, { payload: "assets" });
+  }
+  if (canonicalArchiveJson(assetPayload.data.assets) !== canonicalArchiveJson(inspected.manifest.assets)) {
+    throw new ArchiveError("archive-asset-invalid", "The asset metadata payload does not match the archive manifest.", 400, { payload: "assets" });
+  }
   const campaignParsed = campaignPayloadSchema.safeParse(campaign);
   if (!campaignParsed.success) throw new ArchiveError("archive-json-invalid", "The campaign payload is invalid.", 400, { payload: "campaign" });
   const worldPayload = world as Partial<PortableWorldPayload>;
@@ -571,7 +584,7 @@ export async function previewCampaignArchive(
       versionNumber: archive.world.versionNumber
     },
     chronicle: { memoryCount: archive.chronicle.memories.length, summaryCount: archive.chronicle.summaries.length },
-    assets: { originalCount: archive.assets.assets.length, totalBytes: archive.assets.assets.reduce((sum, asset) => sum + asset.byteLength, 0) },
+    assets: { originalCount: archive.assets.originals.length, totalBytes: archive.assets.originals.reduce((sum, asset) => sum + asset.byteLength, 0) },
     destination: destinationPreview,
     providerDataIncluded: false as const,
     warnings: archive.warnings
