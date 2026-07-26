@@ -289,21 +289,21 @@ export function worldGenerationFailureDiagnostic(error: unknown): WorldGeneratio
   }
   if (detailsCode === "provider_request_timeout" || failure.code === "provider_request_timeout") {
     return {
-      message: "The text provider request timed out.",
+      message: "The text provider request timed out. Check the provider endpoint and server logs.",
       ...(statusCode ? { statusCode } : {}),
       code: "provider_request_timeout"
     };
   }
   if (detailsCode === "provider_transport_error" || failure.code === "provider_transport_error") {
     return {
-      message: "The text provider connection failed.",
+      message: "The text provider connection failed. Check the provider endpoint and server logs.",
       ...(statusCode ? { statusCode } : {}),
       code: "provider_transport_error"
     };
   }
   if (detailsCode === "provider_http_error" && statusCode) {
     return {
-      message: `The text provider request failed with HTTP ${statusCode}.`,
+      message: `The text provider request failed with HTTP ${statusCode}. Check the provider endpoint and server logs.`,
       statusCode,
       code: "provider_http_error"
     };
@@ -311,8 +311,8 @@ export function worldGenerationFailureDiagnostic(error: unknown): WorldGeneratio
   if (detailsCode === "provider_error") {
     return {
       message: statusCode
-        ? `The text provider request failed with HTTP ${statusCode}.`
-        : "The text provider request failed.",
+        ? `The text provider request failed with HTTP ${statusCode}. Check the provider endpoint and server logs.`
+        : "The text provider request failed. Check the provider endpoint and server logs.",
       ...(statusCode ? { statusCode } : {}),
       code: "provider_error"
     };

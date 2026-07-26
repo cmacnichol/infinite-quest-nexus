@@ -321,10 +321,9 @@ describe("generateTemplateWorld orchestration", () => {
         durationMs: 75,
         timedOut: false,
         transportCode: "ECONNRESET",
-        causeName: "TypeError",
-        causeMessage: marker
-      },
-      new Error(marker)
+        causeCategory: "network",
+        causeMessage: "The provider connection failed."
+      }
     );
     const harness = generationHarness([providerError]);
 
@@ -488,16 +487,15 @@ describe("generateWorldPreview provider failures", () => {
         durationMs: 75,
         timedOut: false,
         transportCode: "ECONNRESET",
-        causeName: "TypeError",
-        causeMessage: privateMarker
-      },
-      new Error(privateMarker)
+        causeCategory: "network",
+        causeMessage: "The provider connection failed."
+      }
     );
 
     const diagnostic = worldGenerationFailureDiagnostic(error);
 
     expect(diagnostic).toEqual({
-      message: "The text provider connection failed.",
+      message: "The text provider connection failed. Check the provider endpoint and server logs.",
       statusCode: 502,
       code: "provider_transport_error"
     });
@@ -557,8 +555,8 @@ describe("generateWorldPreview provider failures", () => {
     const persisted = progressUpdates.at(-1) as { status: string; message: string; errorMessage: string };
     expect(persisted).toMatchObject({
       status: "failed",
-      message: "The text provider request failed with HTTP 500.",
-      errorMessage: "The text provider request failed with HTTP 500."
+      message: "The text provider request failed with HTTP 500. Check the provider endpoint and server logs.",
+      errorMessage: "The text provider request failed with HTTP 500. Check the provider endpoint and server logs."
     });
     expect(persisted.message.length).toBeLessThanOrEqual(500);
     expect(JSON.stringify({ progressUpdates, errorLogs: errorLogCalls })).not.toContain(privateMarker);

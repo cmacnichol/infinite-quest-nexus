@@ -91,13 +91,60 @@ describe("text provider adapters", () => {
       timedOut: true,
       timeoutMs: 420_000,
       transportCode: "UND_ERR_HEADERS_TIMEOUT",
+      causeCategory: "timeout",
+      causeMessage: "The provider request timed out.",
       endpoint: "http://lmstudio.test/api/v1/chat"
     });
     const logged = JSON.stringify(loggerError.mock.calls);
     expect(logged).toContain('"event":"provider_transport_error"');
+    expect(logged).not.toContain("Headers Timeout Error");
     expect(logged).not.toContain("secret prompt");
     expect(logged).not.toContain("private action");
     expect(logged).not.toContain("synthetic-secret-token");
+    loggerError.mockRestore();
+  });
+
+  it("keeps arbitrary transport causes out of provider logs and error surfaces", async () => {
+    const privateMarker = "SECRET_AT_START_OF_TRANSPORT_CAUSE";
+    const loggerError = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    const fetcher = vi.fn(async () => {
+      throw Object.assign(new TypeError(`${privateMarker}: upstream socket closed`), {
+        code: "ECONNRESET"
+      });
+    });
+    let thrown: unknown;
+    try {
+      await callTextProvider(
+        profile,
+        { systemPrompt: "private world prompt", input: "private lore" },
+        createTestProviderTransport(fetcher as typeof fetch)
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    const details = providerTransportErrorDetails(thrown);
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain("provider connection failed (ECONNRESET)");
+    expect(thrown).not.toHaveProperty("cause");
+    expect(details).toMatchObject({
+      timedOut: false,
+      transportCode: "ECONNRESET",
+      causeCategory: "network",
+      causeMessage: "The provider connection failed."
+    });
+    const exposed = JSON.stringify({
+      error: {
+        name: (thrown as Error).name,
+        message: (thrown as Error).message,
+        cause: (thrown as Error & { cause?: unknown }).cause
+      },
+      details,
+      loggerCalls: loggerError.mock.calls
+    });
+    expect(exposed).not.toContain(privateMarker);
+    expect(exposed).not.toContain("private world prompt");
+    expect(exposed).not.toContain("private lore");
     loggerError.mockRestore();
   });
 
@@ -677,6 +724,8 @@ describe("text provider adapters", () => {
     expect(providerTransportErrorDetails(thrownError)).toMatchObject({
       timedOut: true,
       transportCode: "UND_ERR_BODY_TIMEOUT",
+      causeCategory: "timeout",
+      causeMessage: "The provider request timed out.",
       operation: "story generation"
     });
   });
