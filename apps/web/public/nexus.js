@@ -1440,8 +1440,8 @@ async function generateWorldFromPrompt() {
   elements.worldGeneratorProgressContainer.classList.remove("hidden");
   elements.worldGeneratorProgressBar.value = 5;
   elements.worldGeneratorProgressPercent.textContent = "5%";
-  elements.worldGeneratorProgressLabel.textContent = "Synthesizing world overview and characters via LLM…";
-  setWorldAuthorStatus("Generating a complete world and playable-character roster…");
+  elements.worldGeneratorProgressLabel.textContent = "Generating world structure and character seeds…";
+  setWorldAuthorStatus("Generating the world, then building each playable character…");
 
   let progressTimer = setInterval(async () => {
     try {

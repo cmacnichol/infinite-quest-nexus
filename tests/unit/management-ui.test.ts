@@ -554,6 +554,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("authoritativeCreateCompleted");
     const generator = managementScript.match(/async function generateWorldFromPrompt\(\) \{[\s\S]*?\n\}/)?.[0] || "";
     expect(generator).not.toContain('api("/api/v1/worlds",');
+    expect(generator).toContain("Generating world structure and character seeds…");
+    expect(generator).toContain("Generating the world, then building each playable character…");
+    expect(generator).not.toContain("Generating a complete world and playable-character roster…");
   });
 
   it("renders bounded generated-world issue guidance and preserves the correlation ID", () => {

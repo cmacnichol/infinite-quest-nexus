@@ -13,52 +13,54 @@ import { promptProtocolVersion, type PromptSnapshot } from "../../services/api/s
 import { infiniteWorldsPromptSet } from "../../services/api/src/infinite-worlds-import-service.js";
 
 describe("Prompt Library catalog", () => {
-  it("requires both narrative guidance and a structured profile for generated characters", () => {
+  it("separates world seeds from complete generated character profiles", () => {
     const generation = PROMPT_TEMPLATE_CATALOG.world_generation.defaultContent;
     const recovery = PROMPT_TEMPLATE_CATALOG.world_generation_recovery.defaultContent;
-    const supplement = PROMPT_TEMPLATE_CATALOG.world_roster_supplement.defaultContent;
+    const character = PROMPT_TEMPLATE_CATALOG.world_character_generation.defaultContent;
+    const characterRecovery = PROMPT_TEMPLATE_CATALOG.world_character_generation_recovery.defaultContent;
 
-    for (const prompt of [generation, recovery, supplement]) {
+    for (const prompt of [generation, recovery]) {
+      expect(prompt).toContain("character_seeds");
+      expect(prompt).toContain("role");
+      expect(prompt).toContain("concept");
+      expect(prompt).toContain("narrative_hook");
+      expect(prompt).not.toContain('"profile":{"identity"');
+    }
+
+    for (const prompt of [character, characterRecovery]) {
+      expect(prompt).toContain("one complete playable character");
       expect(prompt).toContain("character_text");
-      expect(prompt).toContain("profile");
+      expect(prompt).toContain('"profile":{"identity"');
+      expect(prompt).toContain("rpg_statistics");
+      expect(prompt).toContain("default_triggers");
     }
-    expect(generation).toContain("character_text must be non-empty");
-    expect(generation).not.toContain("may be empty when profile is complete");
+
     expect(recovery).toContain("complete replacement");
+    expect(characterRecovery).toContain("complete replacement");
+    expect(PROMPT_TEMPLATE_CATALOG.world_roster_supplement).toBeDefined();
   });
 
-  it("spells out the JSON types for every generated character section", () => {
-    const prompts = [
-      PROMPT_TEMPLATE_CATALOG.world_generation.defaultContent,
-      PROMPT_TEMPLATE_CATALOG.world_generation_recovery.defaultContent,
-      PROMPT_TEMPLATE_CATALOG.world_roster_supplement.defaultContent
-    ];
-
-    for (const prompt of prompts) {
-      expect(prompt).toContain('"profile":{"identity":{"aliases":[],"pronouns":""}');
-      expect(prompt).toContain('"appearance":{"ancestryOrSpecies":""');
-      expect(prompt).toContain('"unclassifiedNotes":""');
-      expect(prompt).toContain('"rpg_statistics":[]');
-      expect(prompt).toContain('"default_triggers":[]');
-      expect(prompt).toContain("must be JSON objects, never strings, arrays, or null");
-      expect(prompt).toContain("must be JSON arrays, never strings, objects, or null");
-      expect(prompt).toContain("Use an empty string or empty array when a value is unknown");
-    }
-  });
-
-  it("uses the same complete-character requirements in the fallback world prompt", () => {
-    const prompt = buildTemplateWorldPrompt({
-      sourceName: "test",
+  it("builds seed-oriented input for prompt and CYOA sources", () => {
+    const promptInput = JSON.parse(buildTemplateWorldPrompt({
+      sourceName: "prompt",
       sourceKind: "prompt",
       title: "The Moving Roads",
       summary: "Roads move beneath moonlight.",
       keywords: [],
+      excerpts: [],
+      prompt: "Build a moving-road mystery."
+    }).input);
+    const cyoaInput = JSON.parse(buildTemplateWorldPrompt({
+      sourceName: "cyoa.json",
+      sourceKind: "cyoa_json",
+      title: "The Moving Roads",
+      summary: "Roads move beneath moonlight.",
+      keywords: [],
       excerpts: []
-    }).systemPrompt;
+    }).input);
 
-    expect(prompt).toContain("character_text must be non-empty");
-    expect(prompt).toContain("profile with identity");
-    expect(prompt).not.toContain("may be empty when profile is complete");
+    expect(promptInput.task).toContain("character seeds");
+    expect(cyoaInput.task).toContain("character seeds");
   });
 
   it("enforces campaign ownership with a composite database relationship", () => {

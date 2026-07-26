@@ -105,12 +105,12 @@ export function buildTemplateWorldPrompt(input: TemplateWorldInput, systemPrompt
 
   const payload = input.sourceKind === "prompt"
     ? {
-      task: "Create a new Story World with 3-4 playable characters from this concept prompt.",
+      task: "Create a new Story World and 3-4 compact character seeds from this concept prompt.",
       title: input.title,
       prompt: input.prompt || input.summary
     }
     : {
-      task: "Convert this Choose Your Own Adventure (CYOA) story and top-level branch choices into a new Story World with 3-4 identified or generated playable characters.",
+      task: "Convert this Choose Your Own Adventure (CYOA) story and top-level branch choices into a new Story World and 3-4 compact identified or generated character seeds.",
       title: input.title,
       summary: input.summary,
       keywords: input.keywords,
