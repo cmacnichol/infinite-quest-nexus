@@ -236,7 +236,7 @@ export async function registerArchiveRoutes(app: FastifyInstance, options: Archi
   app.post("/api/v1/imports/campaign-archive/preview", async (request) => {
     const upload = await receiveCampaignArchive(request, options.config);
     try {
-      return await previewCampaignArchive(options.pool, options.config, upload.staged, upload.sourceName, upload.destination);
+      return await previewCampaignArchive(options.pool, options.config, upload.staged, upload.sourceName, upload.destination, app.log);
     } catch (error) {
       await removeArchivePath(options.config.archiveStorageRoot, upload.staged.relativePath).catch(() => undefined);
       throw error;
@@ -245,7 +245,7 @@ export async function registerArchiveRoutes(app: FastifyInstance, options: Archi
 
   app.post("/api/v1/imports/campaign-archive", async (request, reply) => {
     if (request.isMultipart()) throw new ArchiveError("archive-json-invalid", "Campaign Archive commit accepts a JSON preview token and destination.");
-    const result = await importCampaignArchive(options.pool, options.config, options.assetStore, campaignArchiveCommitRequestSchema.parse(request.body));
+    const result = await importCampaignArchive(options.pool, options.config, options.assetStore, campaignArchiveCommitRequestSchema.parse(request.body), app.log);
     return reply.code(result.duplicate ? 200 : 201).send(result);
   });
 

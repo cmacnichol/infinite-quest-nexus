@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { Readable } from "node:stream";
 import { z } from "zod";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
-import { initialOwnerId } from "../../../packages/database/src/pool.js";
+import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import { canonicalizeWorldContent, type WorldContent } from "../../../packages/contracts/src/world-library.js";
 import { characterLegacyText } from "../../../packages/domain/src/world-characters.js";
@@ -45,6 +45,13 @@ export type DecodedCampaignArchive = {
   warnings: string[];
 };
 export type ValidatedAssetArchive = ValidatedArchiveAssetSet;
+export type ArchiveCleanupLogger = {
+  warn(bindings: Record<string, unknown>, message: string): void;
+};
+export type ArchivePreviewCleanupResult = {
+  expiredCount: number;
+  cleanupFailureCount: number;
+};
 
 const APPLICATION_VERSION = process.env.APP_VERSION?.trim() || process.env.npm_package_version?.trim() || "0.1.0";
 const campaignPayloadSchema = z.object({ world: z.unknown(), turns: z.array(z.unknown()) }).passthrough();
@@ -292,6 +299,55 @@ function archiveFingerprint(inspected: InspectedArchive): string {
 
 function previewAppVersion(): string {
   return APPLICATION_VERSION;
+}
+
+function cleanupErrorCode(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code.length <= 80 ? code : "cleanup-failed";
+}
+
+function safeCleanupWarning(logger: ArchiveCleanupLogger | undefined, error: unknown, message: string): void {
+  try {
+    logger?.warn({ errorCode: cleanupErrorCode(error) }, message);
+  } catch {
+    // Cleanup reporting must never change an already committed lifecycle result.
+  }
+}
+
+async function removeStagedPreviewPath(
+  config: RuntimeConfig,
+  stagedPath: string,
+  logger?: ArchiveCleanupLogger,
+  message = "campaign archive preview staging cleanup failed"
+): Promise<boolean> {
+  try {
+    await removeArchivePath(config.archiveStorageRoot, stagedPath);
+    return true;
+  } catch (error) {
+    safeCleanupWarning(logger, error, message);
+    return false;
+  }
+}
+
+export async function cleanupExpiredArchivePreviews(
+  pool: DatabasePool,
+  config: RuntimeConfig,
+  now = new Date(),
+  logger?: ArchiveCleanupLogger
+): Promise<ArchivePreviewCleanupResult> {
+  const ownerUserId = await initialOwnerId(pool);
+  const expiredPaths = (await pool.query<{ staged_archive_path: string }>(
+    `UPDATE archive_previews
+        SET status='expired',updated_at=now()
+      WHERE owner_user_id=$1 AND archive_type='campaign' AND status='previewed' AND expires_at <= $2
+    RETURNING staged_archive_path`,
+    [ownerUserId, now]
+  )).rows.map((row) => row.staged_archive_path);
+  let cleanupFailureCount = 0;
+  for (const stagedPath of expiredPaths) {
+    if (!(await removeStagedPreviewPath(config, stagedPath, logger))) cleanupFailureCount += 1;
+  }
+  return { expiredCount: expiredPaths.length, cleanupFailureCount };
 }
 
 function destinationHash(destination: ContractCampaignArchiveDestination): string {
@@ -557,10 +613,12 @@ export async function previewCampaignArchive(
   config: RuntimeConfig,
   staged: StagedArchive,
   sourceName: string,
-  destination: ContractCampaignArchiveDestination
+  destination: ContractCampaignArchiveDestination,
+  logger?: ArchiveCleanupLogger
 ): Promise<CampaignArchivePreviewResponse> {
   const parsedDestination = campaignArchiveDestinationSchema.parse(destination);
   const archive = await readCampaignArchive(staged, config.campaignArchiveLimits);
+  await cleanupExpiredArchivePreviews(pool, config, new Date(), logger);
   const ownerUserId = await initialOwnerId(pool);
   const boundDestinationHash = destinationHash(parsedDestination);
   const destinationPreview = await findDestination(pool, ownerUserId, archive, parsedDestination);
@@ -595,17 +653,33 @@ export async function previewCampaignArchive(
   const preview = { ...responseBase, previewToken: rawToken, expiresAt: expiresAt.toISOString() };
   const storedPreview = { ...preview, previewToken: undefined, stagedCompressedBytes: staged.compressedBytes };
   const stagedPath = rootRelativeStagedPath(staged);
-  await pool.query(
-    `INSERT INTO archive_previews (
-       owner_user_id,archive_type,token_hash,content_fingerprint,destination_hash,application_version,
-       staged_archive_path,source_name,preview,status,expires_at
-     ) VALUES ($1,'campaign',$2,$3,$4,$5,$6,$7,$8::jsonb,'previewed',$9)
-     ON CONFLICT (owner_user_id,archive_type,content_fingerprint,destination_hash) WHERE status='previewed'
-     DO UPDATE SET token_hash=EXCLUDED.token_hash,application_version=EXCLUDED.application_version,
-       staged_archive_path=EXCLUDED.staged_archive_path,source_name=EXCLUDED.source_name,
-       preview=EXCLUDED.preview,status='previewed',expires_at=EXCLUDED.expires_at,consumed_at=NULL,result=NULL,updated_at=now()`,
-    [ownerUserId, tokenHash, archive.contentFingerprint, boundDestinationHash, previewAppVersion(), stagedPath, sourceName, JSON.stringify(storedPreview), expiresAt]
-  );
+  const supersededStagedPath = await withTransaction(pool, async (client) => {
+    const previewScope = `${ownerUserId}:campaign:${archive.contentFingerprint}:${boundDestinationHash}`;
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [previewScope]);
+    const existing = await client.query<{ staged_archive_path: string }>(
+      `SELECT staged_archive_path
+         FROM archive_previews
+        WHERE owner_user_id=$1 AND archive_type='campaign' AND content_fingerprint=$2
+          AND destination_hash=$3 AND status='previewed'
+        FOR UPDATE`,
+      [ownerUserId, archive.contentFingerprint, boundDestinationHash]
+    );
+    await client.query(
+      `INSERT INTO archive_previews (
+         owner_user_id,archive_type,token_hash,content_fingerprint,destination_hash,application_version,
+         staged_archive_path,source_name,preview,status,expires_at
+       ) VALUES ($1,'campaign',$2,$3,$4,$5,$6,$7,$8::jsonb,'previewed',$9)
+       ON CONFLICT (owner_user_id,archive_type,content_fingerprint,destination_hash) WHERE status='previewed'
+       DO UPDATE SET token_hash=EXCLUDED.token_hash,application_version=EXCLUDED.application_version,
+         staged_archive_path=EXCLUDED.staged_archive_path,source_name=EXCLUDED.source_name,
+         preview=EXCLUDED.preview,status='previewed',expires_at=EXCLUDED.expires_at,consumed_at=NULL,result=NULL,updated_at=now()`,
+      [ownerUserId, tokenHash, archive.contentFingerprint, boundDestinationHash, previewAppVersion(), stagedPath, sourceName, JSON.stringify(storedPreview), expiresAt]
+    );
+    return existing.rows[0]?.staged_archive_path ?? null;
+  });
+  if (supersededStagedPath && supersededStagedPath !== stagedPath) {
+    await removeStagedPreviewPath(config, supersededStagedPath, logger, "superseded campaign archive preview staging cleanup failed");
+  }
   return campaignArchivePreviewResponseSchema.parse(preview);
 }
 

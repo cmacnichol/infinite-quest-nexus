@@ -19,8 +19,8 @@ import {
 import { cleanupUnreferencedCreatedPaths, persistArchiveAssets, restoreAssetBindings, type ArchiveIdMap } from "./asset-archive-service.js";
 import { lockOriginalImages, parseDataImage, persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
 import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
-import { ArchiveError, rehydratePersistedStagedArchive } from "./archive-io.js";
-import { campaignArchiveApplicationVersion, decodeCampaignArchive, portableWorldContentHash, type DecodedCampaignArchive } from "./campaign-archive-service.js";
+import { ArchiveError, rehydratePersistedStagedArchive, removeArchivePath } from "./archive-io.js";
+import { campaignArchiveApplicationVersion, cleanupExpiredArchivePreviews, decodeCampaignArchive, portableWorldContentHash, type ArchiveCleanupLogger, type DecodedCampaignArchive } from "./campaign-archive-service.js";
 
 export type CampaignArchiveImportResult = {
   importId: string;
@@ -110,8 +110,74 @@ function campaignArchiveSourceHash(fingerprint: string, destination: CampaignArc
   return sha256(`campaign-archive-v1\0${fingerprint}\0${sha256(canonicalArchiveJson(campaignArchiveDestinationSchema.parse(destination)))}`);
 }
 
-async function markArchivePreviewFailed(pool: DatabasePool, previewId: string, error: unknown): Promise<void> {
-  await pool.query("UPDATE archive_previews SET status='failed', result=$2::jsonb, updated_at=now() WHERE id=$1", [previewId, JSON.stringify({ error: error instanceof ArchiveError ? error.code : "archive-import-failed" })]).catch(() => undefined);
+function cleanupErrorCode(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code.length <= 80 ? code : "cleanup-failed";
+}
+
+function safeCleanupWarning(logger: ArchiveCleanupLogger | undefined, error: unknown, message: string): void {
+  try {
+    logger?.warn({ errorCode: cleanupErrorCode(error) }, message);
+  } catch {
+    // Cleanup reporting must never change an already committed lifecycle result.
+  }
+}
+
+async function removeConsumedPreviewPath(
+  config: RuntimeConfig,
+  stagedPath: string,
+  logger?: ArchiveCleanupLogger
+): Promise<void> {
+  try {
+    await removeArchivePath(config.archiveStorageRoot, stagedPath);
+  } catch (error) {
+    safeCleanupWarning(logger, error, "consumed campaign archive preview staging cleanup failed");
+  }
+}
+
+async function markArchivePreviewFailed(
+  pool: DatabasePool,
+  previewId: string,
+  tokenHash: string,
+  stagedPath: string,
+  error: unknown,
+  logger?: ArchiveCleanupLogger
+): Promise<string | null> {
+  try {
+    const updated = await pool.query<{ staged_archive_path: string }>(
+      `UPDATE archive_previews
+          SET status='failed',result=$2::jsonb,updated_at=now()
+        WHERE id=$1 AND token_hash=$3 AND staged_archive_path=$4 AND status='previewed'
+      RETURNING staged_archive_path`,
+      [previewId, JSON.stringify({ error: error instanceof ArchiveError ? error.code : "archive-import-failed" }), tokenHash, stagedPath]
+    );
+    return updated.rows[0]?.staged_archive_path ?? null;
+  } catch (updateError) {
+    safeCleanupWarning(logger, updateError, "campaign archive preview failure status update failed");
+    return null;
+  }
+}
+
+async function removeFailedPreviewPath(
+  pool: DatabasePool,
+  config: RuntimeConfig,
+  previewId: string,
+  stagedPath: string,
+  logger?: ArchiveCleanupLogger
+): Promise<void> {
+  const referenced = await pool.query(
+    `SELECT 1
+       FROM archive_previews
+      WHERE id <> $1 AND staged_archive_path=$2 AND status='previewed'
+      LIMIT 1`,
+    [previewId, stagedPath]
+  ).catch(() => ({ rowCount: 1 }));
+  if (referenced.rowCount) return;
+  try {
+    await removeArchivePath(config.archiveStorageRoot, stagedPath);
+  } catch (error) {
+    safeCleanupWarning(logger, error, "failed campaign archive preview staging cleanup failed");
+  }
 }
 
 type ImportRow = {
@@ -1007,13 +1073,16 @@ export async function importCampaignArchive(
   pool: DatabasePool,
   config: RuntimeConfig,
   assetStore: FilesystemAssetStore,
-  request: CampaignArchiveCommitRequest
+  request: CampaignArchiveCommitRequest,
+  logger?: ArchiveCleanupLogger
 ): Promise<CampaignArchiveImportResult> {
+  await cleanupExpiredArchivePreviews(pool, config, new Date(), logger);
   const parsed = campaignArchiveCommitRequestSchema.parse(request);
   const ownerUserId = await initialOwnerId(pool);
   const tokenHash = sha256(parsed.previewToken);
   const client = await pool.connect();
-  let previewId = "";
+  let failedPreviewId = "";
+  let failedPreviewPath = "";
   let createdPaths: string[] = [];
   try {
     await client.query("BEGIN");
@@ -1023,7 +1092,6 @@ export async function importCampaignArchive(
     );
     const preview = previewResult.rows[0];
     if (!preview) throw new ArchiveError("archive-preview-stale", "The archive preview token is invalid or expired.");
-    previewId = preview.id;
     if (preview.status !== "previewed" || new Date(preview.expires_at).getTime() <= Date.now() || preview.application_version !== campaignArchiveApplicationVersion()) {
       if (preview.status === "previewed" && new Date(preview.expires_at).getTime() <= Date.now()) await client.query("UPDATE archive_previews SET status='expired',updated_at=now() WHERE id=$1", [preview.id]);
       throw new ArchiveError("archive-preview-stale", "The archive preview is no longer valid.");
@@ -1034,6 +1102,8 @@ export async function importCampaignArchive(
     if (typeof compressedBytes !== "number" || !Number.isSafeInteger(compressedBytes) || compressedBytes < 0) {
       throw new ArchiveError("archive-preview-stale", "The archive preview is missing its staged compressed size.");
     }
+    failedPreviewId = preview.id;
+    failedPreviewPath = preview.staged_archive_path;
     const staged = await rehydratePersistedStagedArchive({
       archiveRoot: config.archiveStorageRoot,
       relativePath: preview.staged_archive_path,
@@ -1047,6 +1117,7 @@ export async function importCampaignArchive(
       const row = prior.rows[0];
       await client.query("UPDATE archive_previews SET status='consumed',consumed_at=now(),result=$2::jsonb,updated_at=now() WHERE id=$1", [preview.id, JSON.stringify({ importId: row.id, duplicate: true })]);
       await client.query("COMMIT");
+      await removeConsumedPreviewPath(config, preview.staged_archive_path, logger);
       return { importId: row.id, worldId: row.world_id!, worldVersionId: row.world_version_id!, campaignId: row.campaign_id!, duplicate: true, stats: row.stats as unknown as CampaignArchiveImportResult["stats"] };
     }
     if (prior.rows[0]) throw new ArchiveError("archive-import-conflict", "An import with this archive is already in progress.");
@@ -1084,6 +1155,7 @@ export async function importCampaignArchive(
     await client.query("UPDATE imports SET status='completed',world_id=$2,world_version_id=$3,campaign_id=$4,stats=$5::jsonb,completed_at=now() WHERE id=$1", [importId, world.worldId, world.worldVersionId, inserted.campaignId, JSON.stringify(stats)]);
     await client.query("UPDATE archive_previews SET status='consumed',consumed_at=now(),result=$2::jsonb,updated_at=now() WHERE id=$1", [preview.id, JSON.stringify({ importId, worldId: world.worldId, worldVersionId: world.worldVersionId, campaignId: inserted.campaignId, stats })]);
     await client.query("COMMIT");
+    await removeConsumedPreviewPath(config, preview.staged_archive_path, logger);
     return { importId, worldId: world.worldId, worldVersionId: world.worldVersionId, campaignId: inserted.campaignId, duplicate: false, stats };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
@@ -1091,8 +1163,14 @@ export async function importCampaignArchive(
       ? (error as { createdPaths?: unknown }).createdPaths
       : undefined;
     if (Array.isArray(persistedFailure)) createdPaths = [...new Set([...createdPaths, ...persistedFailure.filter((path): path is string => typeof path === "string")])];
-    if (createdPaths.length) await cleanupUnreferencedCreatedPaths(pool, assetStore, ownerUserId, createdPaths).catch(() => undefined);
-    if (previewId) await markArchivePreviewFailed(pool, previewId, error);
+    if (createdPaths.length) {
+      await cleanupUnreferencedCreatedPaths(pool, assetStore, ownerUserId, createdPaths)
+        .catch((cleanupError) => safeCleanupWarning(logger, cleanupError, "failed campaign archive asset cleanup failed"));
+    }
+    if (failedPreviewId) {
+      const failedStagedPath = await markArchivePreviewFailed(pool, failedPreviewId, tokenHash, failedPreviewPath, error, logger);
+      if (failedStagedPath) await removeFailedPreviewPath(pool, config, failedPreviewId, failedStagedPath, logger);
+    }
     throw error;
   } finally {
     client.release();

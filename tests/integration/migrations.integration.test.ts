@@ -101,14 +101,16 @@ integration("standard database migration runner", () => {
     expect(constraints.rows.map((row) => row.constraint_definition).join("\n")).toMatch(/status.*previewed.*consumed.*expired.*failed/i);
     expect(constraints.rows.map((row) => row.constraint_definition).join("\n")).toMatch(/UNIQUE.*token_hash/i);
 
-    const indexes = await pool.query<{ indexname: string }>(
-      `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'archive_previews' ORDER BY indexname`
+    const indexes = await pool.query<{ indexname: string; indexdef: string }>(
+      `SELECT indexname,indexdef FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'archive_previews' ORDER BY indexname`
     );
     expect(indexes.rows.map((row) => row.indexname)).toEqual(expect.arrayContaining([
       "archive_previews_token_hash_key",
       "archive_previews_owner_fingerprint_destination_live_idx",
       "archive_previews_expiry_idx"
     ]));
+    expect(indexes.rows.find((row) => row.indexname === "archive_previews_owner_fingerprint_destination_live_idx")?.indexdef)
+      .toMatch(/owner_user_id.*archive_type.*content_fingerprint.*destination_hash.*WHERE.*status.*previewed/i);
 
     const rawToken = "raw-preview-token-must-not-be-stored";
     const rawTokenHash = createHash("sha256").update(rawToken, "utf8").digest("hex");

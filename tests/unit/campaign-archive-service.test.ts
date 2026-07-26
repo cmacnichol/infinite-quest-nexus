@@ -135,14 +135,19 @@ describe("legacy campaign ZIP adaptation", () => {
     }]);
     const staged = await stageArchiveUpload(createReadStream(path), root, limits);
     const queries: Array<{ text: string; values: readonly unknown[] }> = [];
-    const pool = {
-      query: async (text: string, values: readonly unknown[] = []) => {
-        queries.push({ text, values });
-        if (text.includes("FROM users")) {
-          return { rows: [{ id: "00000000-0000-4000-8000-000000000001" }] };
-        }
-        return { rows: [] };
+    const query = async (text: string, values: readonly unknown[] = []) => {
+      queries.push({ text, values });
+      if (text.includes("FROM users")) {
+        return { rows: [{ id: "00000000-0000-4000-8000-000000000001" }] };
       }
+      return { rows: [] };
+    };
+    const pool = {
+      query,
+      connect: async () => ({
+        query,
+        release: () => undefined
+      })
     } as unknown as DatabasePool;
     const config = {
       archiveStorageRoot: root,

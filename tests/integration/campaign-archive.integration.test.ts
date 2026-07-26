@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -14,7 +14,7 @@ import { calculateContentFingerprint, canonicalArchiveJson } from "../../package
 import { inspectArchive, readVerifiedEntry, type ArchiveLimits } from "../../services/api/src/archive-io.js";
 import { stageArchiveUpload } from "../../services/api/src/archive-io.js";
 import { persistOriginalImage } from "../../services/api/src/asset-service.js";
-import { exportCampaign, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
+import { cleanupExpiredArchivePreviews, exportCampaign, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
 import { importCampaignArchive } from "../../services/api/src/import-service.js";
 import { buildServer } from "../../services/api/src/server.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
@@ -320,6 +320,14 @@ integration("campaign archive export", () => {
     return { worldId: createdWorld.rows[0]!.id, worldVersionId: createdVersion.rows[0]!.id };
   }
 
+  async function previewRow(previewToken: string) {
+    const tokenHash = createHash("sha256").update(previewToken, "utf8").digest("hex");
+    return (await pool.query<{ staged_archive_path: string; status: string }>(
+      "SELECT staged_archive_path,status FROM archive_previews WHERE token_hash=$1",
+      [tokenHash]
+    )).rows[0]!;
+  }
+
   it("exports only the selected campaign and pinned world version as a deterministic manifest archive", async () => {
     const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
     const repeated = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
@@ -552,12 +560,18 @@ integration("campaign archive export", () => {
 
   it("fails closed when a required original is absent", async () => {
     const source = await pool.query<{ storage_path: string }>("SELECT storage_path FROM assets WHERE id=$1", [requiredAssetId]);
-    await unlink(resolve(root, source.rows[0]!.storage_path));
-    await expect(exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits }))
-      .rejects.toMatchObject({ code: "archive-asset-missing", assetIds: [requiredAssetId] });
+    const originalPath = resolve(root, source.rows[0]!.storage_path);
+    const originalBytes = await readFile(originalPath);
+    await unlink(originalPath);
+    try {
+      await expect(exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits }))
+        .rejects.toMatchObject({ code: "archive-asset-missing", assetIds: [requiredAssetId] });
+    } finally {
+      await writeFile(originalPath, originalBytes, { flag: "wx" });
+    }
   });
 
-  it("previews without writes and imports a campaign with fresh campaign-owned identities", async () => {
+  it("preview cleanup removes a successful new import upload after commit", async () => {
     const config = {
       assetStorageRoot: root,
       archiveStorageRoot: root,
@@ -573,6 +587,7 @@ integration("campaign archive export", () => {
     );
 
     const preview = await previewCampaignArchive(pool, config, staged, "fixture-campaign.zip", { kind: "embedded" });
+    const stagedPath = (await previewRow(preview.previewToken)).staged_archive_path;
 
     expect(preview).toMatchObject({
       valid: true,
@@ -606,18 +621,38 @@ integration("campaign archive export", () => {
     expect(importedTurn).toHaveLength(1);
     expect(importedTurn.rows[0]!.id).not.toBe(turnId);
     expect(imported.stats).toMatchObject({ turnCount: 1, memoryCount: 1 });
+    await expect(stat(resolve(root, stagedPath))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(previewRow(preview.previewToken)).resolves.toMatchObject({ status: "consumed" });
+  });
+
+  it("preview cleanup removes a superseded upload only after the replacement is stored", async () => {
+    const config = runtimeConfig();
+    const firstStaged = await stagedExport();
+    const firstPreview = await previewCampaignArchive(pool, config, firstStaged, "superseded-first.zip", { kind: "embedded" });
+    const firstPath = (await previewRow(firstPreview.previewToken)).staged_archive_path;
+    const secondStaged = await stagedExport();
+    const secondPreview = await previewCampaignArchive(pool, config, secondStaged, "superseded-second.zip", { kind: "embedded" });
+    const secondRow = await previewRow(secondPreview.previewToken);
+
+    await expect(stat(resolve(root, firstPath))).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await stat(resolve(root, secondRow.staged_archive_path))).isFile()).toBe(true);
+    expect(secondRow).toMatchObject({ staged_archive_path: secondStaged.relativePath, status: "previewed" });
   });
 
   it("commits a persisted staged archive from only the preview token and destination", async () => {
     const config = runtimeConfig();
+    const destination = await createCompatibleDestination("Persisted staged destination");
     const preview = await (async () => {
       const staged = await stagedExport();
-      return previewCampaignArchive(pool, config, staged, "persisted-staged.zip", { kind: "embedded" });
+      return previewCampaignArchive(pool, config, staged, "persisted-staged.zip", {
+        kind: "existing_world_version",
+        worldVersionId: destination.worldVersionId
+      });
     })();
 
     const imported = await importCampaignArchive(pool, config, { root }, {
       previewToken: preview.previewToken,
-      destination: { kind: "embedded" }
+      destination: { kind: "existing_world_version", worldVersionId: destination.worldVersionId }
     });
 
     const inserted = await pool.query<{ campaign_id: string; world_id: string }>(
@@ -677,7 +712,7 @@ integration("campaign archive export", () => {
     })).resolves.toMatchObject({ duplicate: false, worldId: destination.worldId, worldVersionId: destination.worldVersionId });
   });
 
-  it("attaches only exact world versions and scopes idempotency to the selected destination", async () => {
+  it("preview cleanup removes an idempotent duplicate import upload after commit", async () => {
     const firstDestination = await createCompatibleDestination("Exact destination one");
     const secondDestination = await createCompatibleDestination("Exact destination two");
     const firstPreview = await previewCampaignArchive(pool, runtimeConfig(), await stagedExport(), "exact-one.zip", {
@@ -699,7 +734,8 @@ integration("campaign archive export", () => {
     expect(secondImport).toMatchObject({ duplicate: false, worldId: secondDestination.worldId, worldVersionId: secondDestination.worldVersionId });
     expect(secondImport.campaignId).not.toBe(firstImport.campaignId);
 
-    const duplicatePreview = await previewCampaignArchive(pool, runtimeConfig(), await stagedExport(), "exact-one-repeat.zip", {
+    const duplicateStaged = await stagedExport();
+    const duplicatePreview = await previewCampaignArchive(pool, runtimeConfig(), duplicateStaged, "exact-one-repeat.zip", {
       kind: "existing_world_version", worldVersionId: firstDestination.worldVersionId
     });
     await expect(importCampaignArchive(pool, runtimeConfig(), { root }, {
@@ -712,6 +748,24 @@ integration("campaign archive export", () => {
       worldVersionId: firstImport.worldVersionId,
       campaignId: firstImport.campaignId
     });
+    await expect(stat(duplicateStaged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(previewRow(duplicatePreview.previewToken)).resolves.toMatchObject({ status: "consumed" });
+  });
+
+  it("preview cleanup expires previews and removes their staged uploads", async () => {
+    const config = runtimeConfig();
+    const staged = await stagedExport();
+    const preview = await previewCampaignArchive(pool, config, staged, "cleanup-expired.zip", { kind: "embedded" });
+    await pool.query("UPDATE archive_previews SET expires_at=now() - interval '1 second' WHERE token_hash=$1", [
+      createHash("sha256").update(preview.previewToken, "utf8").digest("hex")
+    ]);
+
+    await expect(cleanupExpiredArchivePreviews(pool, config, new Date())).resolves.toMatchObject({
+      expiredCount: 1,
+      cleanupFailureCount: 0
+    });
+    await expect(previewRow(preview.previewToken)).resolves.toMatchObject({ status: "expired" });
+    await expect(stat(staged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("rejects expired, consumed, and application-stale preview tokens", async () => {
@@ -756,7 +810,7 @@ integration("campaign archive export", () => {
     expect(preview.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/no archive manifest/i)]));
   });
 
-  it("rolls back database state and removes newly persisted archive originals after a forced binding failure", async () => {
+  it("preview cleanup marks failed commits failed and removes staging plus newly persisted archive originals", async () => {
     const staged = await stagedExport();
     const sourceAsset = await pool.query<{ storage_path: string }>("SELECT storage_path FROM assets WHERE id=$1", [requiredAssetId]);
     const originalPath = resolve(root, sourceAsset.rows[0]!.storage_path);
@@ -775,10 +829,12 @@ integration("campaign archive export", () => {
     const triggerName = `campaign_archive_force_failure_trigger_${triggerSuffix}`;
     await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced archive binding failure'; END; $$`);
     await pool.query(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON asset_references FOR EACH ROW EXECUTE FUNCTION ${functionName}()`);
+    let failedPreviewToken = "";
     try {
       const preview = await previewCampaignArchive(pool, runtimeConfig(), staged, "rollback.zip", {
         kind: "existing_world_version", worldVersionId: destination.worldVersionId
       });
+      failedPreviewToken = preview.previewToken;
       await expect(importCampaignArchive(pool, runtimeConfig(), { root }, {
         previewToken: preview.previewToken,
         destination: { kind: "existing_world_version", worldVersionId: destination.worldVersionId }
@@ -795,5 +851,7 @@ integration("campaign archive export", () => {
     );
     expect(after.rows[0]).toEqual(before.rows[0]);
     await expect(stat(originalPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(staged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(previewRow(failedPreviewToken)).resolves.toMatchObject({ status: "failed" });
   });
 });
