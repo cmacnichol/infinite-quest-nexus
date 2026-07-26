@@ -580,7 +580,7 @@ export async function generateTemplateWorld(
       outputLimited: result.outputLimited,
       issues: generatedWorldIssues(error)
     }, "Initial LLM world generation parse failed, attempting recovery");
-    await onProgress?.("recovering_world", 50, result.outputLimited ? "Output limit reached. Recovering truncated JSON…" : "Generated world was incomplete. Requesting a complete replacement…");
+    await onProgress?.("recovering_world", 35, result.outputLimited ? "Output limit reached. Recovering truncated JSON…" : "Generated world was incomplete. Requesting a complete replacement…");
     const recovered = await callGeneratedWorldProvider(() => dependencies.callTextProvider(profile, {
       ...prompt,
       ...(result.responseId ? { previousResponseId: result.responseId } : {}),

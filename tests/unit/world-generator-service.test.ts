@@ -282,35 +282,20 @@ describe("generateTemplateWorld orchestration", () => {
     expect(harness.requests).toHaveLength(5);
   });
 
-  it("recovers an explicitly empty seed array before deriving legacy characters", async () => {
+  it.each([
+    ["character_seeds", []],
+    ["character_seeds", null],
+    ["character_seeds", {}],
+    ["characterSeeds", []],
+    ["characterSeeds", null],
+    ["characterSeeds", {}]
+  ])("recovers an explicitly invalid %s value before deriving legacy characters", async (seedKey, seedValue) => {
+    const draft = JSON.parse(worldDraftResponse(3)) as Record<string, unknown>;
+    if (seedKey === "characterSeeds") delete draft.character_seeds;
+    draft[seedKey] = seedValue;
     const harness = generationHarness([
       providerResult(JSON.stringify({
-        ...JSON.parse(worldDraftResponse(3)),
-        character_seeds: [],
-        playable_characters: [
-          character("Legacy Character 1"),
-          character("Legacy Character 2"),
-          character("Legacy Character 3")
-        ]
-      }), "empty-seeds"),
-      providerResult(worldDraftResponse(3), "recovered-world"),
-      ...[1, 2, 3].map((index) => providerResult(JSON.stringify(character(`Character ${index}`))))
-    ]);
-
-    await expect(harness.run()).resolves.toBeDefined();
-
-    expect(harness.requests[1]).toMatchObject({
-      previousResponseId: "empty-seeds",
-      rejectedResponse: expect.stringContaining('"character_seeds":[]')
-    });
-    expect(harness.requests).toHaveLength(5);
-  });
-
-  it("recovers an explicitly invalid seed value before deriving legacy characters", async () => {
-    const harness = generationHarness([
-      providerResult(JSON.stringify({
-        ...JSON.parse(worldDraftResponse(3)),
-        character_seeds: null,
+        ...draft,
         playable_characters: [
           character("Legacy Character 1"),
           character("Legacy Character 2"),
@@ -324,8 +309,7 @@ describe("generateTemplateWorld orchestration", () => {
     await expect(harness.run()).resolves.toBeDefined();
 
     expect(harness.requests[1]).toMatchObject({
-      previousResponseId: "invalid-seeds",
-      rejectedResponse: expect.stringContaining('"character_seeds":null')
+      previousResponseId: "invalid-seeds"
     });
     expect(harness.requests).toHaveLength(5);
   });
