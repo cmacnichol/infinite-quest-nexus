@@ -5,7 +5,7 @@ import { sha256 } from "../../../packages/domain/src/text.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "../../../packages/database/src/pool.js";
 import { archiveAssetRecordSchema, sanitizePortableMetadata, type ArchiveAssetBinding, type ArchiveAssetRecord, type ArchiveEntry, type ArchiveManifest } from "../../../packages/contracts/src/archives.js";
 import { imageExtensionForMimeType, lockOriginalAsset, persistOriginalImage, verifyOriginalImage, type FilesystemAssetStore } from "./asset-service.js";
-import { removeArchivePath } from "./archive-io.js";
+import { preflightArchivePath, removeArchivePath } from "./archive-io.js";
 
 export type ArchiveAssetSourceRow = {
   id: string; owner_user_id: string; content_hash: string; mime_type: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
@@ -209,8 +209,8 @@ export async function validateArchiveAssets(manifestOrInput: Pick<ArchiveManifes
 /**
  * Persist originals inside the caller's import transaction. If this throws an
  * ArchiveAssetPersistenceError, the caller must roll back first, then pass
- * error.createdPaths to cleanupUnreferencedCreatedPaths using a database
- * client or pool so surviving owner-scoped rows win the race with cleanup.
+ * error.createdPaths to cleanupUnreferencedCreatedPaths using the database
+ * pool so surviving owner-scoped rows win the race with cleanup.
  */
 export async function persistArchiveAssets(
   client: DatabaseClient,
@@ -272,8 +272,9 @@ export async function restoreAssetBindings(client: DatabaseClient, ownerUserId: 
 
 /**
  * Run only after the transaction that called persistArchiveAssets has rolled
- * back. References are re-read from the authoritative database before any
- * unlink so concurrent or surviving owner-scoped assets retain their bytes.
+ * back. The pool-owned transaction acquires all candidate locks, re-reads
+ * references from the authoritative database, and deletes while those locks
+ * remain held so concurrent or surviving owner-scoped assets retain bytes.
  */
 export async function cleanupUnreferencedCreatedPaths(
   database: DatabasePool,
@@ -282,18 +283,22 @@ export async function cleanupUnreferencedCreatedPaths(
   createdPaths: readonly string[]
 ): Promise<void> {
   const candidates = [...new Set(createdPaths.map((path) => safeRelativeCleanupPath(store.root, path)).filter((path): path is string => path !== null))].sort();
-  if (!candidates.length) return;
+  const preflightedCandidates: string[] = [];
+  for (const path of candidates) {
+    if (await preflightArchivePath(store.root, path)) preflightedCandidates.push(path);
+  }
+  if (!preflightedCandidates.length) return;
   await withTransaction(database, async (client) => {
-    for (const path of candidates) await lockOriginalAsset(client, ownerUserId, path);
+    for (const path of preflightedCandidates) await lockOriginalAsset(client, ownerUserId, path);
     const references = await client.query<{ storage_path: string }>(
       `SELECT storage_path
          FROM assets
         WHERE owner_user_id = $1
           AND storage_path = ANY($2::text[])`,
-      [ownerUserId, candidates]
+      [ownerUserId, preflightedCandidates]
     );
     const referencedPaths = new Set(references.rows.map((row) => row.storage_path.replaceAll("\\", "/")));
-    for (const path of candidates) {
+    for (const path of preflightedCandidates) {
       if (!referencedPaths.has(path)) await removeArchivePath(store.root, path);
     }
   });

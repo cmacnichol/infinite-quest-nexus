@@ -1183,12 +1183,12 @@ export async function removeArchivePath(
   archiveRoot: string,
   relativePath: string
 ): Promise<void> {
+  if (!(await preflightArchivePath(archiveRoot, relativePath))) return;
   if (isAbsolute(relativePath)) {
     throw archiveError("archive-entry-unsafe", "Archive cleanup requires a root-relative path.");
   }
   const normalized = normalizeArchivePath(relativePath);
   const configuredRoot = resolve(archiveRoot);
-  await mkdir(configuredRoot, { recursive: true });
   const root = await realpath(configuredRoot);
   const pathSegments = normalized.logicalPath.split("/");
   const filename = pathSegments.pop()!;
@@ -1224,5 +1224,67 @@ export async function removeArchivePath(
   } finally {
     await closeHandle(handle);
     await closeHandle(stable.anchor);
+  }
+}
+
+/**
+ * Validate an archive-relative file without creating directories or mutating
+ * the target. A missing root, directory, or file is a safe no-op result;
+ * symlinks, junctions, identity changes, and non-regular files fail closed.
+ */
+export async function preflightArchivePath(
+  archiveRoot: string,
+  relativePath: string
+): Promise<boolean> {
+  if (isAbsolute(relativePath)) {
+    throw archiveError("archive-entry-unsafe", "Archive cleanup requires a root-relative path.");
+  }
+  const normalized = normalizeArchivePath(relativePath);
+  const configuredRoot = resolve(archiveRoot);
+  let root: string;
+  try {
+    root = await realpath(configuredRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  const pathSegments = normalized.logicalPath.split("/");
+  const filename = pathSegments.pop()!;
+  const parentPath = resolve(root, ...pathSegments);
+  assertUnderRoot(root, parentPath);
+
+  let stable: StableDirectory | undefined;
+  let handle: FileHandle | undefined;
+  try {
+    try {
+      stable = await stabilizeDirectory(root, parentPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+    const operationPath = stableChildPath(stable, filename);
+    await assertDirectoryStable(stable);
+    let beforeOpen: BigIntStats;
+    try {
+      beforeOpen = await lstat(operationPath, { bigint: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+    if (!beforeOpen.isFile() || beforeOpen.isSymbolicLink()) {
+      throw archiveError("archive-entry-unsafe", "Archive cleanup can remove only regular files.");
+    }
+    try {
+      handle = await open(operationPath, "r");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+    await openedFileIdentityAtIntendedPath(handle, operationPath, fileIdentity(beforeOpen));
+    await assertDirectoryStable(stable);
+    return true;
+  } finally {
+    await closeHandle(handle);
+    await closeHandle(stable?.anchor);
   }
 }

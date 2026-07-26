@@ -505,6 +505,50 @@ integration("asset archive portability", () => {
     const unreferencedPath = createdPaths.find((path) => path !== recreatedPath)!;
     await expect(readFile(resolve(assetRoot, unreferencedPath))).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("waits for a writer-first original commit before cleanup queries references", async () => {
+    const owner = (await pool.query<{ id: string }>(
+      "INSERT INTO users (system_key, display_name) VALUES ($1, 'Writer First Owner') RETURNING id",
+      [`archive-writer-first-${randomUUID()}`]
+    )).rows[0]!.id;
+    const bytes = await image(73, 41, 19);
+    const writer = await pool.connect();
+    let cleanupPromise: Promise<void> | undefined;
+    let committed = false;
+    try {
+      await writer.query("BEGIN");
+      const stored = await persistOriginalImage(writer, { root: assetRoot }, owner, {
+        bytes,
+        mimeType: "image/png",
+        createThumbnail: false
+      });
+      const storagePath = `${stored.contentHash.slice(0, 2)}/${stored.contentHash}.png`;
+      cleanupPromise = cleanupUnreferencedCreatedPaths(pool, { root: assetRoot }, owner, [storagePath]);
+
+      let cleanupBlocked = false;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const waiting = await pool.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM pg_locks WHERE locktype = 'advisory' AND granted = false"
+        );
+        if (Number(waiting.rows[0]?.count ?? 0) > 0) {
+          cleanupBlocked = true;
+          break;
+        }
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+      }
+      expect(cleanupBlocked).toBe(true);
+
+      await writer.query("COMMIT");
+      committed = true;
+      await cleanupPromise;
+      cleanupPromise = undefined;
+      expect((await readFile(resolve(assetRoot, storagePath))).equals(bytes)).toBe(true);
+    } finally {
+      if (!committed) await writer.query("ROLLBACK").catch(() => undefined);
+      await cleanupPromise?.catch(() => undefined);
+      writer.release();
+    }
+  });
 });
 
 function requireHash(bytes: Buffer): string {

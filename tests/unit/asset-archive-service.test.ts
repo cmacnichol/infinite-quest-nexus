@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_IMPORTED_IMAGE_BYTES,
   imageExtensionForMimeType,
+  lockOriginalImages,
   persistOriginalImage,
   type FilesystemAssetStore,
   verifyOriginalImage
@@ -834,24 +835,59 @@ describe("asset archive portability", () => {
     }
   });
 
-  it.skipIf(process.platform === "win32")("fails closed when a cleanup candidate has a symlinked ancestor", async () => {
+  it("preflights all candidates before querying or deleting when an ancestor is symlinked", async () => {
     const root = await mkdtemp(join(tmpdir(), "asset-archive-symlink-root-"));
     const outside = await mkdtemp(join(tmpdir(), "asset-archive-symlink-outside-"));
-    const path = `${hash.slice(0, 2)}/${hash}.png`;
+    const safeHash = `00${"0".repeat(62)}`;
+    const unsafeHash = `ff${"f".repeat(62)}`;
+    const safePath = `${safeHash.slice(0, 2)}/${safeHash}.png`;
+    const unsafePath = `${unsafeHash.slice(0, 2)}/${unsafeHash}.png`;
+    let queryCount = 0;
     try {
-      await writeFile(join(outside, `${hash}.png`), pngBytes);
-      await symlink(outside, join(root, hash.slice(0, 2)), "dir");
+      await mkdir(join(root, safeHash.slice(0, 2)), { recursive: true });
+      await writeFile(join(root, safePath), pngBytes);
+      await writeFile(join(outside, `${unsafeHash}.png`), pngBytes);
+      await symlink(outside, join(root, unsafeHash.slice(0, 2)), process.platform === "win32" ? "junction" : "dir");
       const database = { query: async (text: string) => {
+        queryCount += 1;
         if (text.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [], rowCount: 1 };
         if (text.startsWith("SELECT storage_path")) return { rows: [], rowCount: 0 };
         return { rows: [], rowCount: 1 };
       } };
-      await expect(cleanupUnreferencedCreatedPaths(poolForDatabase(database), { root }, ownerUserId, [path])).rejects.toThrow();
-      expect((await stat(join(outside, `${hash}.png`))).isFile()).toBe(true);
+      await expect(cleanupUnreferencedCreatedPaths(poolForDatabase(database), { root }, ownerUserId, [safePath, unsafePath])).rejects.toThrow();
+      expect(queryCount).toBe(0);
+      expect((await stat(join(root, safePath))).isFile()).toBe(true);
+      expect((await stat(join(outside, `${unsafeHash}.png`))).isFile()).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(outside, { recursive: true, force: true });
     }
+  });
+
+  it("acquires multiple original locks in canonical storage-path order", async () => {
+    const secondBytes = await sharp({
+      create: { width: 2, height: 1, channels: 4, background: { r: 17, g: 31, b: 47, alpha: 1 } }
+    }).png().toBuffer();
+    const firstPath = `${hash.slice(0, 2)}/${hash}.png`;
+    const secondHash = createHash("sha256").update(secondBytes.toString("base64")).digest("hex");
+    const secondPath = `${secondHash.slice(0, 2)}/${secondHash}.png`;
+    const observed: string[] = [];
+    const client = {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.startsWith("SELECT pg_advisory_xact_lock")) observed.push(String(values?.[0]));
+        return { rows: [], rowCount: 1 };
+      }
+    } as never;
+
+    await lockOriginalImages(client, ownerUserId, [
+      { bytes: secondBytes, mimeType: "image/png" },
+      { bytes: pngBytes, mimeType: "image/png" }
+    ]);
+
+    expect(observed).toEqual([
+      `infinitequest:asset-original:${ownerUserId}:${firstPath}`,
+      `infinitequest:asset-original:${ownerUserId}:${secondPath}`
+    ].sort());
   });
 
   it("maps duplicate source UUIDs to one restored asset without exposing the content hash", async () => {
