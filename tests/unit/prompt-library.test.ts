@@ -27,6 +27,25 @@ describe("Prompt Library catalog", () => {
     expect(recovery).toContain("complete replacement");
   });
 
+  it("spells out the JSON types for every generated character section", () => {
+    const prompts = [
+      PROMPT_TEMPLATE_CATALOG.world_generation.defaultContent,
+      PROMPT_TEMPLATE_CATALOG.world_generation_recovery.defaultContent,
+      PROMPT_TEMPLATE_CATALOG.world_roster_supplement.defaultContent
+    ];
+
+    for (const prompt of prompts) {
+      expect(prompt).toContain('"profile":{"identity":{"aliases":[],"pronouns":""}');
+      expect(prompt).toContain('"appearance":{"ancestryOrSpecies":""');
+      expect(prompt).toContain('"unclassifiedNotes":""');
+      expect(prompt).toContain('"rpg_statistics":[]');
+      expect(prompt).toContain('"default_triggers":[]');
+      expect(prompt).toContain("must be JSON objects, never strings, arrays, or null");
+      expect(prompt).toContain("must be JSON arrays, never strings, objects, or null");
+      expect(prompt).toContain("Use an empty string or empty array when a value is unknown");
+    }
+  });
+
   it("uses the same complete-character requirements in the fallback world prompt", () => {
     const prompt = buildTemplateWorldPrompt({
       sourceName: "test",
