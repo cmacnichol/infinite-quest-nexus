@@ -18,8 +18,13 @@ The application supports the following runtime settings, but a deployment manife
 | `ASSET_STORAGE_ROOT` | `local-data/assets` | Filesystem asset root |
 | `CREDENTIAL_ENCRYPTION_KEY` / `_FILE` | Empty | Provider-key encryption secret |
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated browser origins |
+| `API_DEFAULT_BODY_LIMIT_BYTES` | `1048576` | Default request-body limit in bytes |
+| `API_IMPORT_BODY_LIMIT_BYTES` | `16777216` | Import request and multipart field/file limit in bytes |
+| `API_ASSET_BODY_LIMIT_BYTES` | `33554432` | Asset request-body limit in bytes |
 
 Direct secret environment values take precedence over `_FILE` values.
+
+World-generation progress is stored as short-lived, owner-scoped PostgreSQL state so API replicas can serve polling requests interchangeably. Generation logs record operational metadata but omit prompt bodies, imported lore, raw model output, private reasoning, and credentials.
 
 ::: warning Compose-effective values
 The root `compose.yaml` currently passes fixed role, container port, constructed database URL, asset root, and credential-encryption key. Host `APP_PORT` changes only the published host port. Other values listed in `.env.example`, including log level, worker interval, migration wait, and maintenance opt-in, are not automatically injected into the Compose application container. Add an explicit reviewed Compose override before claiming those values are effective.

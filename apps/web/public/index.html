@@ -731,6 +731,13 @@
           <button id="generateWorldPreview" class="button secondary" type="button">Generate world</button>
         </div>
         <p class="field-note">Generation fills this form with complete world fields and 3–4 playable characters. Review everything before creating the draft.</p>
+        <div id="worldGeneratorProgressContainer" class="world-generator-progress hidden" role="status" aria-live="polite">
+          <div class="world-generator-progress-header">
+            <span id="worldGeneratorProgressLabel">Generating world and playable characters…</span>
+            <span id="worldGeneratorProgressPercent">0%</span>
+          </div>
+          <progress id="worldGeneratorProgressBar" max="100" value="0"></progress>
+        </div>
         <p id="worldGeneratorAvailability" class="field-note"></p>
       </details>
       <div class="world-tabs" data-tab-group="world-author">

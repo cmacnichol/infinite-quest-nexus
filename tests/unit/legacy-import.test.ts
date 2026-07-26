@@ -52,4 +52,21 @@ describe("legacy campaign world conversion", () => {
       source: { type: "nexus-campaign-export" }
     });
   });
+
+  it("preserves relative asset URLs in safeExternalImageUrl and detects image mime types from signatures", async () => {
+    const { safeExternalImageUrl, detectMimeType } = await import("../../services/api/src/asset-service.js");
+    expect(safeExternalImageUrl("/api/v1/assets/9a3f2b1d-8e4c-4a31-b657-123456789abc")).toBe("/api/v1/assets/9a3f2b1d-8e4c-4a31-b657-123456789abc");
+    expect(safeExternalImageUrl("assets/9a3f2b1d-8e4c-4a31-b657-123456789abc.png")).toBe("assets/9a3f2b1d-8e4c-4a31-b657-123456789abc.png");
+    expect(safeExternalImageUrl("https://example.com/photo.jpg")).toBe("https://example.com/photo.jpg");
+    expect(safeExternalImageUrl("javascript:alert(1)")).toBe("");
+    expect(safeExternalImageUrl("//example.com/photo.jpg")).toBe("");
+    expect(safeExternalImageUrl("/etc/passwd")).toBe("");
+
+    const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const jpegHeader = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+    const webpHeader = Buffer.from("RIFF1234WEBP", "ascii");
+    expect(detectMimeType(pngHeader)).toBe("image/png");
+    expect(detectMimeType(jpegHeader)).toBe("image/jpeg");
+    expect(detectMimeType(webpHeader)).toBe("image/webp");
+  });
 });
