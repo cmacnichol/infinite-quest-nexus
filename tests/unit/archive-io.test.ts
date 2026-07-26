@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Open } from "unzipper";
 import {
   ArchiveError,
+  createArchiveStagingDirectory,
   inspectArchive,
   readVerifiedEntry,
   removeArchivePath,
@@ -86,7 +87,8 @@ const DEFAULT_LIMITS: ArchiveLimits = {
   maxEntries: 100,
   maxExpansionRatio: 1_000,
   maxManifestBytes: 5 * 1024 * 1024,
-  maxJsonEntryBytes: 1024 * 1024
+  maxJsonEntryBytes: 1024 * 1024,
+  maxOriginalImageBytes: 25 * 1024 * 1024
 };
 
 afterEach(async () => {
@@ -287,7 +289,8 @@ describe("archive runtime configuration", () => {
       maxEntries: 100_000,
       maxExpansionRatio: 100,
       maxManifestBytes: 5_242_880,
-      maxJsonEntryBytes: 1_073_741_824
+      maxJsonEntryBytes: 1_073_741_824,
+      maxOriginalImageBytes: 26_214_400
     });
     expect(config.systemArchiveLimits).toEqual({
       maxCompressedBytes: 53_687_091_200,
@@ -295,21 +298,26 @@ describe("archive runtime configuration", () => {
       maxEntries: 1_000_000,
       maxExpansionRatio: 100,
       maxManifestBytes: 5_242_880,
-      maxJsonEntryBytes: 1_073_741_824
+      maxJsonEntryBytes: 1_073_741_824,
+      maxOriginalImageBytes: 26_214_400
     });
   });
 
   it("permits lower archive limits and caps higher operator values", () => {
     process.env.DATABASE_URL = "postgresql://test@localhost/test";
     process.env.CAMPAIGN_ARCHIVE_MAX_COMPRESSED_BYTES = "1048576";
+    process.env.CAMPAIGN_ARCHIVE_MAX_ORIGINAL_IMAGE_BYTES = "1048576";
     process.env.SYSTEM_ARCHIVE_MAX_ENTRIES = "999999999";
+    process.env.SYSTEM_ARCHIVE_MAX_ORIGINAL_IMAGE_BYTES = "999999999";
     process.env.ARCHIVE_PREVIEW_TTL_SECONDS = "1";
     process.env.SYSTEM_ARCHIVE_ARTIFACT_TTL_SECONDS = "999999999";
 
     const config = loadRuntimeConfig();
 
     expect(config.campaignArchiveLimits.maxCompressedBytes).toBe(1_048_576);
+    expect(config.campaignArchiveLimits.maxOriginalImageBytes).toBe(1_048_576);
     expect(config.systemArchiveLimits.maxEntries).toBe(1_000_000);
+    expect(config.systemArchiveLimits.maxOriginalImageBytes).toBe(26_214_400);
     expect(config.archivePreviewTtlSeconds).toBe(60);
     expect(config.systemArchiveArtifactTtlSeconds).toBe(604_800);
   });
@@ -330,6 +338,14 @@ describe("archive runtime configuration", () => {
 });
 
 describe("staged archive uploads", () => {
+  it("rejects a substituted staging directory before creating generated archive assets", async () => {
+    const root = await temporaryRoot();
+    const outside = await temporaryRoot();
+    await symlink(outside, join(root, "staging"), "junction");
+
+    await expectArchiveError(createArchiveStagingDirectory(root, "campaign-export-"), "archive-entry-unsafe");
+  });
+
   it("enforces the compressed-byte limit and removes the partial staging file", async () => {
     const root = await temporaryRoot();
 

@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { Readable } from "node:stream";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
@@ -10,7 +9,7 @@ import { characterLegacyText } from "../../../packages/domain/src/world-characte
 import { calculateContentFingerprint, canonicalArchiveJson, sanitizePortableMetadata, type ArchiveManifest } from "../../../packages/contracts/src/archives.js";
 import { removeProviderSecrets, stableStringify } from "../../../packages/domain/src/text.js";
 import { collectCampaignArchiveAssets, verifyAndWriteArchiveAssets, type CampaignAssetInventory } from "./asset-archive-service.js";
-import { writeArchiveArtifact, type ArchiveLimits, type CompletedArchiveArtifact } from "./archive-io.js";
+import { ArchiveError, createArchiveStagingDirectory, writeArchiveArtifact, type ArchiveLimits, type CompletedArchiveArtifact } from "./archive-io.js";
 import { readAsset, type FilesystemAssetStore } from "./asset-service.js";
 
 export type PortableWorldPayload = { canonicalHash: string; sourceWorldId: string; sourceWorldVersionId: string; versionNumber: number; content: unknown };
@@ -198,13 +197,23 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string, opt
   const snapshot = await captureCampaignArchiveSnapshot(pool, campaignId);
   if (!options) return legacyPayload(snapshot);
   const projected = payloads(snapshot);
-  const stagingParent = resolve(options.archiveRoot, "staging");
-  await mkdir(stagingParent, { recursive: true });
-  const assetStagingRoot = await mkdtemp(join(stagingParent, "campaign-export-"));
+  const oversizedAssetIds = snapshot.assets.records
+    .filter((asset) => asset.byteLength > options.limits.maxOriginalImageBytes)
+    .map((asset) => asset.sourceAssetId)
+    .sort();
+  if (oversizedAssetIds.length) {
+    throw new ArchiveError(
+      "archive-limit-exceeded",
+      "A required original image exceeds the configured export byte limit.",
+      400,
+      { assetIds: oversizedAssetIds }
+    );
+  }
+  const staging = await createArchiveStagingDirectory(options.archiveRoot, "campaign-export-");
   try {
     const assetEntries = await verifyAndWriteArchiveAssets({
       records: snapshot.assets.records,
-      outputRoot: assetStagingRoot,
+      outputRoot: staging.absolutePath,
       readOriginal: async (assetId) => (await readAsset(pool, options.assetStore, snapshot.ownerUserId, assetId)).bytes
     });
     const jsonEntries = [
@@ -215,7 +224,7 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string, opt
     ] as const;
     return await writeArchiveArtifact(options.archiveRoot, [
       ...jsonEntries.map(([path, logicalType, value]) => ({ path, logicalType, mediaType: "application/json", source: Readable.from(Buffer.from(canonicalArchiveJson(value), "utf8")) })),
-      ...assetEntries.map((entry) => ({ path: entry.path, logicalType: entry.logicalType, mediaType: entry.mediaType, source: createReadStream(resolve(assetStagingRoot, entry.path)) }))
+      ...assetEntries.map((entry) => ({ path: entry.path, logicalType: entry.logicalType, mediaType: entry.mediaType, source: createReadStream(resolve(staging.absolutePath, entry.path)) }))
     ], (entries) => {
       const payloadHashes = entries.filter((entry) => entry.mediaType === "application/json").map((entry) => entry.sha256);
       return {
@@ -228,6 +237,6 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string, opt
       } satisfies ArchiveManifest;
     }, options.limits);
   } finally {
-    await rm(assetStagingRoot, { recursive: true, force: true });
+    await staging.cleanup();
   }
 }

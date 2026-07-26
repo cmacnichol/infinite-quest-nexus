@@ -26,6 +26,7 @@ export type ArchiveLimits = {
   maxExpansionRatio: number;
   maxManifestBytes: number;
   maxJsonEntryBytes: number;
+  maxOriginalImageBytes: number;
 };
 
 export type RuntimeConfig = {
@@ -95,7 +96,8 @@ function archiveLimitsSetting(
     maxEntries: boundedArchiveIntegerSetting(`${prefix}_MAX_ENTRIES`, approved.maxEntries, 1, approved.maxEntries),
     maxExpansionRatio: boundedArchiveIntegerSetting(`${prefix}_MAX_EXPANSION_RATIO`, 100, 1, 100),
     maxManifestBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_MANIFEST_BYTES`, 5_242_880, 1, 5_242_880),
-    maxJsonEntryBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_JSON_ENTRY_BYTES`, 1_073_741_824, 1, 1_073_741_824)
+    maxJsonEntryBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_JSON_ENTRY_BYTES`, 1_073_741_824, 1, 1_073_741_824),
+    maxOriginalImageBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_ORIGINAL_IMAGE_BYTES`, 26_214_400, 1, 26_214_400)
   };
 }
 

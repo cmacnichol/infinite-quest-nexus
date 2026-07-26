@@ -28,7 +28,8 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
       maxEntries: 100_000,
       maxExpansionRatio: 100,
       maxManifestBytes: 5_242_880,
-      maxJsonEntryBytes: 1_073_741_824
+      maxJsonEntryBytes: 1_073_741_824,
+      maxOriginalImageBytes: 26_214_400
     },
     systemArchiveLimits: {
       maxCompressedBytes: 53_687_091_200,
@@ -36,7 +37,8 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
       maxEntries: 1_000_000,
       maxExpansionRatio: 100,
       maxManifestBytes: 5_242_880,
-      maxJsonEntryBytes: 1_073_741_824
+      maxJsonEntryBytes: 1_073_741_824,
+      maxOriginalImageBytes: 26_214_400
     },
     credentialEncryptionKey: "",
     security: {

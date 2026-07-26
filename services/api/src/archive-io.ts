@@ -4,14 +4,16 @@ import type { BigIntStats } from "node:fs";
 import {
   lstat,
   mkdir,
+  mkdtemp,
   open,
   realpath,
   rename,
+  rm,
   stat,
   unlink,
   type FileHandle
 } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { Readable, Transform, Writable, type TransformCallback } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
 import unzipper, { type File as ZipFile } from "unzipper";
@@ -48,6 +50,11 @@ export type StagedArchive = {
   relativePath: string;
   absolutePath: string;
   compressedBytes: number;
+};
+
+export type ArchiveStagingDirectory = {
+  absolutePath: string;
+  cleanup(): Promise<void>;
 };
 
 type FileIdentity = {
@@ -307,6 +314,52 @@ async function prepareRootDirectory(archiveRoot: string, child: "staging" | "art
   await mkdir(childPath, { recursive: true });
   const stable = await stabilizeDirectory(root, childPath);
   return { root, directory: childPath, stable };
+}
+
+export async function createArchiveStagingDirectory(
+  archiveRoot: string,
+  prefix: string
+): Promise<ArchiveStagingDirectory> {
+  if (!/^[a-z0-9-]+$/i.test(prefix)) {
+    throw archiveError("archive-entry-unsafe", "Archive staging requires a safe directory prefix.");
+  }
+  const { root, directory, stable } = await prepareRootDirectory(archiveRoot, "staging");
+  let directoryName: string | undefined;
+  let cleaned = false;
+  try {
+    await assertDirectoryStable(stable);
+    const createdPath = await mkdtemp(stableChildPath(stable, prefix));
+    directoryName = basename(createdPath);
+    const absolutePath = resolve(directory, directoryName);
+    assertUnderRoot(root, absolutePath);
+    const created = await lstat(stableChildPath(stable, directoryName), { bigint: true });
+    if (!created.isDirectory() || created.isSymbolicLink()) {
+      throw archiveError("archive-entry-unsafe", "Archive staging must create a regular directory.");
+    }
+    await assertDirectoryStable(stable);
+    return {
+      absolutePath,
+      cleanup: async () => {
+        if (cleaned) return;
+        try {
+          await assertDirectoryStable(stable);
+          const operationPath = stableChildPath(stable, directoryName!);
+          const current = await lstat(operationPath, { bigint: true });
+          if (!current.isDirectory() || current.isSymbolicLink()) {
+            throw archiveError("archive-entry-unsafe", "Archive staging changed during cleanup.");
+          }
+          await rm(operationPath, { recursive: true, force: true });
+          await assertDirectoryStable(stable);
+          cleaned = true;
+        } finally {
+          await closeHandle(stable.anchor);
+        }
+      }
+    };
+  } catch (error) {
+    await closeHandle(stable.anchor);
+    throw error;
+  }
 }
 
 class CompressedByteCounter extends Transform {

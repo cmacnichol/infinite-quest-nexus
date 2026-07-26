@@ -18,7 +18,8 @@ const limits: ArchiveLimits = {
   maxEntries: 1000,
   maxManifestBytes: 1024 * 1024,
   maxJsonEntryBytes: 5 * 1024 * 1024,
-  maxExpansionRatio: 100
+  maxExpansionRatio: 100,
+  maxOriginalImageBytes: 25 * 1024 * 1024
 };
 
 integration("campaign archive export", () => {
@@ -30,6 +31,8 @@ integration("campaign archive export", () => {
   let worldCoverAssetId = "";
   let segmentAssetIds: string[] = [];
   let turnId = "";
+  let worldId = "";
+  let segmentId = "";
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
@@ -40,6 +43,7 @@ integration("campaign archive export", () => {
       "INSERT INTO worlds (owner_user_id, title) VALUES ($1,$2) RETURNING id",
       [ownerUserId, "Archive world"]
     );
+    worldId = world.rows[0]!.id;
     const firstVersion = await pool.query<{ id: string }>(
       `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
        VALUES ($1,$2,1,$3::jsonb) RETURNING id`,
@@ -150,6 +154,7 @@ integration("campaign archive export", () => {
        VALUES ($1,$2,$3,$4,0,0,10,0,2,'Archive door opens.','fixture-hash','An archive door.','An archive door.','direct','completed') RETURNING id`,
       [ownerUserId, set.rows[0]!.id, campaignId, turnId]
     );
+    segmentId = segment.rows[0]!.id;
     await pool.query(
       `INSERT INTO turn_illustration_segment_assets (segment_id,owner_user_id,asset_id,variant_index)
        VALUES ($1,$2,$3,0),($1,$2,$4,1)`,
@@ -188,6 +193,18 @@ integration("campaign archive export", () => {
       requiredAssetId, worldCoverAssetId, ...segmentAssetIds
     ]));
     expect(manifest.assets.map((asset) => asset.sourceAssetId)).not.toContain(unrelatedAssetId);
+    expect(manifest.assets.find((asset) => asset.sourceAssetId === requiredAssetId)?.bindings).toEqual([
+      { role: "imported_attachment", campaignId, turnId: null }
+    ]);
+    expect(manifest.assets.find((asset) => asset.sourceAssetId === worldCoverAssetId)?.bindings).toEqual([
+      { role: "world_cover", worldId }
+    ]);
+    expect(manifest.assets.find((asset) => asset.sourceAssetId === segmentAssetIds[0])?.bindings).toEqual([
+      { role: "illustration_segment_variant", campaignId, turnId, segmentId, variantIndex: 0 }
+    ]);
+    expect(manifest.assets.find((asset) => asset.sourceAssetId === segmentAssetIds[1])?.bindings).toEqual([
+      { role: "illustration_segment_variant", campaignId, turnId, segmentId, variantIndex: 1 }
+    ]);
     const serialized = await Promise.all(["campaign.json", "world.json", "chronicle.json", "assets/assets.json"].map(async (path) => (
       (await readVerifiedEntry(archive, path, limits.maxJsonEntryBytes)).toString("utf8")
     )));
@@ -195,15 +212,41 @@ integration("campaign archive export", () => {
     expect(combined).not.toContain("nested-secret");
     expect(combined).not.toMatch(/credential|thumbnail|embedding|providerProfile|responseChain|private reasoning/i);
     expect(campaign.archiveRecords.worldMigrations).toHaveLength(1);
-    expect(campaign.archiveRecords.illustrationSets).toHaveLength(1);
-    expect(campaign.archiveRecords.illustrationSegments).toHaveLength(1);
-    expect(campaign.archiveRecords.costs).toHaveLength(1);
-    expect(campaign.archiveRecords.illustrationConfig).toBeTruthy();
+    expect(campaign.archiveRecords.worldMigrations[0]).toMatchObject({ note: "Fixture migration provenance" });
+    expect(campaign.archiveRecords.characterProfileEdits).toEqual([
+      expect.objectContaining({ revision: 1, edit_source: "manual" })
+    ]);
+    expect(campaign.archiveRecords.stateEdits).toEqual([
+      expect.objectContaining({ effective_turn_number: 1, revision: 1, state_snapshot_private: { scratchpad: "State edit." } })
+    ]);
+    expect(campaign.archiveRecords.illustrationConfig).toMatchObject({ enabled: false, model: "", images_per_segment: 1 });
+    expect(campaign.archiveRecords.illustrationSets).toEqual([
+      expect.objectContaining({ turn_id: turnId, source_text_hash: "fixture-hash", images_per_segment: 2, prompt_mode: "direct" })
+    ]);
+    expect(campaign.archiveRecords.illustrationSegments).toEqual([
+      expect.objectContaining({ id: segmentId, turn_id: turnId, ordinal: 0, direct_prompt: "An archive door.", prompt_source: "direct" })
+    ]);
+    expect(campaign.archiveRecords.costs).toEqual([
+      expect.objectContaining({ turn_id: turnId, provider_type: "openai_compatible", category: "image", operation: "illustration", amount: "0.01", currency: "USD" })
+    ]);
+    const chronicle = JSON.parse((await readVerifiedEntry(archive, "chronicle.json", limits.maxJsonEntryBytes)).toString("utf8"));
+    expect(chronicle.memories).toEqual([
+      expect.objectContaining({ memory_kind: "legacy_summary", content: "Chronicle marker" })
+    ]);
+    expect(chronicle.summaries).toEqual([
+      expect.objectContaining({ summary_kind: "legacy_full_history", through_turn: 1, content: { history: "Checkpoint" } })
+    ]);
   });
 
   it("fails closed for an archive that exceeds configured limits", async () => {
     await expect(exportCampaign(pool, campaignId, {
       assetStore: { root }, archiveRoot: root, limits: { ...limits, maxEntries: 1 }
+    })).rejects.toMatchObject({ code: "archive-limit-exceeded" });
+  });
+
+  it("fails closed when a required original exceeds the configured export image limit", async () => {
+    await expect(exportCampaign(pool, campaignId, {
+      assetStore: { root }, archiveRoot: root, limits: { ...limits, maxOriginalImageBytes: 1 }
     })).rejects.toMatchObject({ code: "archive-limit-exceeded" });
   });
 
