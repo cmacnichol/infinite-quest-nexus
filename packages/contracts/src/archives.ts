@@ -183,6 +183,9 @@ export const archiveManifestSchema = z.object({
     if (!paths.has(normalizedArchivePath(asset.archivePath))) {
       context.addIssue({ code: "custom", path: ["assets", index, "archivePath"], message: "Every asset must be declared in entries." });
     }
+    if (manifest.archiveType === "system" && asset.bindings.length === 0 && asset.library.reuseScope !== "owner_library") {
+      context.addIssue({ code: "custom", path: ["assets", index, "library", "reuseScope"], message: "Unbound System Archive assets must be owner-library assets." });
+    }
   }
 
   if (manifest.archiveType === "campaign") {

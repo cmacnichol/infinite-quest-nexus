@@ -152,6 +152,32 @@ describe("portable archive contracts", () => {
     }).success).toBe(false);
   });
 
+  it("accepts an unbound owner-library asset from a System Archive", () => {
+    expect(archiveManifestSchema.safeParse({
+      format: "infinite-quest-archive",
+      formatVersion: 1,
+      archiveType: "system",
+      createdAt: "2026-07-26T12:00:00.000Z",
+      contentFingerprint: hash,
+      entries: [validManifest.entries[4]],
+      payloads: [],
+      assets: [{ ...validAsset, library: { ...validAsset.library, reuseScope: "owner_library" }, bindings: [] }]
+    }).success).toBe(true);
+  });
+
+  it("rejects an unbound non-owner-library asset from a System Archive", () => {
+    expect(archiveManifestSchema.safeParse({
+      format: "infinite-quest-archive",
+      formatVersion: 1,
+      archiveType: "system",
+      createdAt: "2026-07-26T12:00:00.000Z",
+      contentFingerprint: hash,
+      entries: [validManifest.entries[4]],
+      payloads: [],
+      assets: [{ ...validAsset, bindings: [] }]
+    }).success).toBe(false);
+  });
+
   it.each(["../turns.json", "/absolute.json", "C:/drive.json", "a\\b.json", "a/./b.json"])(
     "rejects unsafe archive path %s",
     (path) => expect(archivePathSchema.safeParse(path).success).toBe(false)
