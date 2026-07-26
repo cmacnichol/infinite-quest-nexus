@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, extname, resolve, sep } from "node:path";
 import sharp from "sharp";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
@@ -179,7 +179,7 @@ export async function runAssetMetadataBackfill(
             JSON.stringify({ format: verified.format, pages: verified.pages, orientation: verified.orientation, backfilledAt: new Date().toISOString() })]
         );
         if (verified.thumbnail) {
-          const path = await writeContentAddressed(store, verified.thumbnail.contentHash, ".webp", verified.thumbnail.bytes);
+          const path = (await writeContentAddressed(store, verified.thumbnail.contentHash, ".webp", verified.thumbnail.bytes)).relativePath;
           await client.query(
             `INSERT INTO asset_derivatives (
                owner_user_id, source_asset_id, derivative_kind, transform_version, pixel_width, pixel_height,
@@ -230,7 +230,12 @@ function parseDataImage(value: string): { mimeType: string; bytes: Buffer; exten
   return { mimeType, bytes, extension };
 }
 
-async function writeContentAddressed(store: FilesystemAssetStore, contentHash: string, extension: string, bytes: Buffer): Promise<string> {
+async function writeContentAddressed(
+  store: FilesystemAssetStore,
+  contentHash: string,
+  extension: string,
+  bytes: Buffer
+): Promise<{ relativePath: string; created: boolean }> {
   const relativePath = `${contentHash.slice(0, 2)}/${contentHash}${extension}`;
   const finalPath = resolve(store.root, relativePath);
   const rootPrefix = `${resolve(store.root)}${sep}`;
@@ -238,13 +243,20 @@ async function writeContentAddressed(store: FilesystemAssetStore, contentHash: s
   await mkdir(dirname(finalPath), { recursive: true });
   const temporaryPath = `${finalPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await writeFile(temporaryPath, bytes, { flag: "wx", mode: 0o640 });
+  let created = false;
   try {
-    await rename(temporaryPath, finalPath);
+    await link(temporaryPath, finalPath);
+    created = true;
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     const existing = await readFile(finalPath).catch(() => null);
     if (!existing || !existing.equals(bytes)) throw error;
+  } finally {
+    await unlink(temporaryPath).catch((cleanupError: unknown) => {
+      if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") throw cleanupError;
+    });
   }
-  return relativePath.replaceAll("\\", "/");
+  return { relativePath: relativePath.replaceAll("\\", "/"), created };
 }
 
 export function safeExternalImageUrl(value: string): string {
@@ -305,11 +317,13 @@ export async function persistOriginalImage(
     sourceAssetId?: string;
     provenance?: { campaignId: string | null; turnId: string | null };
     createThumbnail?: boolean;
+    onOriginalCreated?: (storagePath: string) => void | Promise<void>;
   }
 ): Promise<StoredAsset> {
   return persistImage(client, store, ownerUserId, input.bytes, input.mimeType, input.provenance, {
     createThumbnail: input.createThumbnail ?? true,
-    attachReference: false
+    attachReference: false,
+    ...(input.onOriginalCreated ? { onOriginalCreated: input.onOriginalCreated } : {})
   });
 }
 
@@ -320,12 +334,19 @@ async function persistImage(
   bytes: Buffer,
   mimeType: string,
   provenance?: { campaignId: string | null; turnId: string | null },
-  options?: { generationContext?: GenerationContext; attachReference?: boolean; createThumbnail?: boolean }
+  options?: {
+    generationContext?: GenerationContext;
+    attachReference?: boolean;
+    createThumbnail?: boolean;
+    onOriginalCreated?: (storagePath: string) => void | Promise<void>;
+  }
 ): Promise<StoredAsset> {
   const extension = imageExtensionForMimeType(mimeType);
   const verified = await verifyOriginalImage(bytes, mimeType);
   const contentHash = sha256(bytes.toString("base64"));
-  const storagePath = await writeContentAddressed(store, contentHash, extension, bytes);
+  const original = await writeContentAddressed(store, contentHash, extension, bytes);
+  const storagePath = original.relativePath;
+  if (original.created) await options?.onOriginalCreated?.(storagePath);
   const assetResult = await client.query<{ id: string }>(
     `INSERT INTO assets (
        owner_user_id, campaign_id, turn_id, content_hash, storage_driver, storage_path, mime_type, byte_length,
@@ -342,7 +363,7 @@ async function persistImage(
   const assetId = assetResult.rows[0]?.id;
   if (!assetId) throw new Error("Could not persist imported image metadata.");
   if (options?.createThumbnail !== false && verified.thumbnail) {
-    const thumbnailPath = await writeContentAddressed(store, verified.thumbnail.contentHash, ".webp", verified.thumbnail.bytes);
+    const thumbnailPath = (await writeContentAddressed(store, verified.thumbnail.contentHash, ".webp", verified.thumbnail.bytes)).relativePath;
     await client.query(
       `INSERT INTO asset_derivatives (
          owner_user_id, source_asset_id, derivative_kind, transform_version, pixel_width, pixel_height,

@@ -33,6 +33,7 @@ function isExcludedMetadataKey(key: string): boolean {
   const normalized = key.toLocaleLowerCase("en-US");
   return /(?:credential|secret|password|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|auth[_-]?header|cookie|private[_-]?key)/.test(normalized)
     || /(?:provider|temporary|temp|signed|presigned|upload|download).*(?:url|uri|endpoint)/.test(normalized)
+    || normalized === "artifacturl"
     || /(?:local|cache|storage|file|temp).*(?:path|dir|directory|location)/.test(normalized)
     || /(?:embedding|thumbnail|raw.*provider.*response|provider.*response|private.*reasoning|reasoning.*private)/.test(normalized)
     || /(?:response|chain|lease|job|remote)/.test(normalized);
