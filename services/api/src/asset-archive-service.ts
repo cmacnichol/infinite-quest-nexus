@@ -49,8 +49,8 @@ export function projectCampaignArchiveAssets(rows: readonly ArchiveAssetSourceRo
 }
 
 export async function collectCampaignArchiveAssets(client: DatabaseClient, ownerUserId: string, campaignId: string, worldVersionId: string, worldId: string): Promise<CampaignAssetInventory> {
-  const relationships = await client.query<ArchiveAssetBindingRow>(`WITH bindings AS (
-    SELECT r.asset_id,
+  const relationshipResults = await Promise.all([
+    client.query<ArchiveAssetBindingRow>(`SELECT r.asset_id,
       CASE
         WHEN r.asset_role = 'turn_illustration' THEN jsonb_build_object('role','turn_illustration','campaignId',r.campaign_id,'turnId',r.turn_id)
         WHEN r.asset_role = 'import_attachment' THEN jsonb_build_object('role','imported_attachment','campaignId',r.campaign_id,'turnId',r.turn_id)
@@ -58,29 +58,29 @@ export async function collectCampaignArchiveAssets(client: DatabaseClient, owner
       END AS binding
       FROM asset_references r
      WHERE r.owner_user_id=$1 AND r.campaign_id=$2
-       AND (r.asset_role <> 'turn_illustration' OR r.turn_id IS NOT NULL)
-    UNION ALL
-    SELECT s.asset_id, jsonb_build_object('role','illustration_segment_variant','campaignId',seg.campaign_id,'turnId',seg.turn_id,'segmentId',seg.id,'variantIndex',s.variant_index)
+       AND (r.asset_role <> 'turn_illustration' OR r.turn_id IS NOT NULL)`, [ownerUserId, campaignId]),
+    client.query<ArchiveAssetBindingRow>(`SELECT s.asset_id, jsonb_build_object('role','illustration_segment_variant','campaignId',seg.campaign_id,'turnId',seg.turn_id,'segmentId',seg.id,'variantIndex',s.variant_index)
       FROM turn_illustration_segment_assets s
       JOIN turn_illustration_segments seg ON seg.id=s.segment_id AND seg.owner_user_id=s.owner_user_id
       JOIN turns t ON t.id=seg.turn_id AND t.campaign_id=seg.campaign_id AND t.owner_user_id=seg.owner_user_id
-     WHERE s.owner_user_id=$1 AND seg.campaign_id=$2
-    UNION ALL
-    SELECT j.asset_id, jsonb_build_object('role','world_cover','worldId',j.world_id)
+     WHERE s.owner_user_id=$1 AND seg.campaign_id=$2`, [ownerUserId, campaignId]),
+    client.query<ArchiveAssetBindingRow>(`SELECT j.asset_id,
+      CASE WHEN j.target_type='turn_illustration'
+        THEN jsonb_build_object('role','turn_illustration','campaignId',j.campaign_id,'turnId',j.turn_id)
+        ELSE jsonb_build_object('role','campaign_asset','campaignId',j.campaign_id)
+      END AS binding
       FROM image_jobs j
      WHERE j.owner_user_id=$1 AND j.status='completed' AND j.asset_id IS NOT NULL
-       AND j.target_type='world_cover' AND j.world_id=$4
-    UNION ALL
-    SELECT j.asset_id, jsonb_build_object('role','turn_illustration','campaignId',j.campaign_id,'turnId',j.turn_id)
+       AND j.campaign_id=$2
+       AND (j.target_type='streaming_illustration' OR (j.target_type='turn_illustration' AND j.turn_id IS NOT NULL))`, [ownerUserId, campaignId]),
+    client.query<ArchiveAssetBindingRow>(`SELECT j.asset_id, jsonb_build_object('role','world_cover','worldId',j.world_id)
       FROM image_jobs j
      WHERE j.owner_user_id=$1 AND j.status='completed' AND j.asset_id IS NOT NULL
-       AND j.target_type='turn_illustration' AND j.campaign_id=$2 AND j.turn_id IS NOT NULL
-    UNION ALL
-    SELECT w.cover_asset_id, jsonb_build_object('role','world_cover','worldId',w.id)
+       AND j.target_type='world_cover' AND j.world_id=$2`, [ownerUserId, worldId]),
+    client.query<ArchiveAssetBindingRow>(`SELECT w.cover_asset_id AS asset_id, jsonb_build_object('role','world_cover','worldId',w.id) AS binding
       FROM worlds w
-     WHERE w.id=$4 AND w.owner_user_id=$1 AND w.cover_asset_id IS NOT NULL
-    UNION ALL
-    SELECT c.asset_id, jsonb_build_object('role','generation_context','campaignId',c.campaign_id,'worldId',c.world_id,'worldVersionId',c.world_version_id,'turnId',c.turn_id,'sourceContextId',c.id)
+     WHERE w.id=$2 AND w.owner_user_id=$1 AND w.cover_asset_id IS NOT NULL`, [ownerUserId, worldId]),
+    client.query<ArchiveAssetBindingRow>(`SELECT c.asset_id, jsonb_build_object('role','generation_context','campaignId',c.campaign_id,'worldId',c.world_id,'worldVersionId',c.world_version_id,'turnId',c.turn_id,'sourceContextId',c.id) AS binding
       FROM asset_generation_contexts c
       LEFT JOIN campaigns cp ON cp.id=c.campaign_id AND cp.owner_user_id=c.owner_user_id
       LEFT JOIN worlds w ON w.id=c.world_id AND w.owner_user_id=c.owner_user_id
@@ -92,8 +92,8 @@ export async function collectCampaignArchiveAssets(client: DatabaseClient, owner
        AND (c.world_id IS NULL OR w.id IS NOT NULL)
        AND (c.world_version_id IS NULL OR v.id IS NOT NULL)
        AND (c.turn_id IS NULL OR t.id IS NOT NULL)
-  )
-  SELECT asset_id, binding FROM bindings WHERE asset_id IS NOT NULL`, [ownerUserId, campaignId, worldVersionId, worldId]);
+       AND c.asset_id IS NOT NULL`, [ownerUserId, campaignId, worldVersionId, worldId])
+  ]);
   const turnPointers = await client.query<{ id: string; image_url: string }>(
     `SELECT id, image_url FROM turns WHERE owner_user_id=$1 AND campaign_id=$2 AND image_url <> '' ORDER BY id`,
     [ownerUserId, campaignId]
@@ -108,7 +108,7 @@ export async function collectCampaignArchiveAssets(client: DatabaseClient, owner
     if (!current.some((existing) => bindingKey(existing) === bindingKey(binding))) current.push(binding);
     bindingMap.set(assetId, current);
   };
-  for (const row of relationships.rows) addBinding(row.asset_id, row.binding);
+  for (const relationships of relationshipResults) for (const row of relationships.rows) addBinding(row.asset_id, row.binding);
   const addLegacyPointer = (value: unknown, binding: ArchiveAssetBinding) => {
     if (typeof value !== "string") return;
     const assetId = legacyAssetPointer.exec(value)?.[1];
@@ -167,7 +167,11 @@ export async function validateArchiveAssets(manifestOrInput: Pick<ArchiveManifes
 }
 
 export async function persistArchiveAssets(client: DatabaseClient, store: FilesystemAssetStore, ownerUserId: string, validated: ValidatedArchiveAssetSet, idMap: ArchiveIdMap = new Map()): Promise<{ assetIds: Map<string, string>; createdPaths: string[] }> {
-  const assetIds = new Map(idMap.get("asset") ?? []); const createdPaths: string[] = []; const byHash = new Map<string, ValidatedArchiveAsset>();
+  const sourceAssetIds = new Set(validated.assets.map((asset) => asset.sourceAssetId));
+  for (const sourceAssetId of idMap.get("asset")?.keys() ?? []) {
+    if (!sourceAssetIds.has(sourceAssetId)) throw new Error(`Unknown archive asset mapping '${sourceAssetId}'.`);
+  }
+  const assetIds = new Map<string, string>(); const createdPaths: string[] = []; const byHash = new Map<string, ValidatedArchiveAsset>();
   for (const asset of validated.assets) byHash.set(asset.contentHash, byHash.get(asset.contentHash) ?? asset);
   for (const asset of byHash.values()) {
     const originalPath = `${asset.contentHash.slice(0, 2)}/${asset.contentHash}${imageExtensionForMimeType(asset.mimeType)}`;
@@ -176,12 +180,12 @@ export async function persistArchiveAssets(client: DatabaseClient, store: Filesy
       throw error;
     });
     const stored = await persistOriginalImage(client, store, ownerUserId, { bytes: asset.bytes, mimeType: asset.mimeType, createThumbnail: false });
-    assetIds.set(asset.sourceAssetId, stored.id); assetIds.set(asset.contentHash, stored.id); if (!existed) createdPaths.push(originalPath);
+    assetIds.set(asset.sourceAssetId, stored.id); if (!existed) createdPaths.push(originalPath);
     const updated = await client.query<{ asset_id: string }>(`UPDATE asset_library_entries SET title=$3,caption=$4,notes=$5,tags=$6,origin=$7,review_status=$8,reuse_scope=$9,automatic_reuse_enabled=$10,content_categories=$11,favorite=$12,archived_at=$13 WHERE asset_id=$1 AND owner_user_id=$2 RETURNING asset_id`, [stored.id, ownerUserId, asset.library.title, asset.library.caption, asset.library.notes, asset.library.tags, asset.library.origin, asset.library.reviewStatus, asset.library.reuseScope, asset.library.automaticReuseEnabled, asset.library.contentCategories, asset.library.favorite, asset.library.archivedAt]);
     if (!updated.rowCount) throw new Error(`Asset library metadata row is missing for '${stored.id}'.`);
   }
   for (const asset of validated.assets) {
-    const destination = assetIds.get(asset.contentHash); if (!destination) throw new Error(`Missing restored asset mapping for '${asset.sourceAssetId}'.`); assetIds.set(asset.sourceAssetId, destination);
+    const destination = assetIds.get(byHash.get(asset.contentHash)?.sourceAssetId ?? ""); if (!destination) throw new Error(`Missing restored asset mapping for '${asset.sourceAssetId}'.`); assetIds.set(asset.sourceAssetId, destination);
   }
   if (idMap) idMap.set("asset", assetIds); return { assetIds, createdPaths };
 }
@@ -195,7 +199,7 @@ async function requireScope(client: DatabaseClient, owner: string, table: string
 
 export async function restoreAssetBindings(client: DatabaseClient, ownerUserId: string, records: readonly ArchiveAssetRecord[], assetIds: Map<string, string>, idMap: ArchiveIdMap): Promise<void> {
   for (const record of records) {
-    const assetId = assetIds.get(record.sourceAssetId) ?? assetIds.get(record.contentHash); if (!assetId) throw new Error(`Missing restored asset mapping for '${record.sourceAssetId}'.`);
+    const assetId = assetIds.get(record.sourceAssetId); if (!assetId) throw new Error(`Missing restored asset mapping for '${record.sourceAssetId}'.`);
     await requireScope(client, ownerUserId, "assets", assetId);
     for (const binding of [...record.bindings].sort((a, b) => bindingKey(a).localeCompare(bindingKey(b)))) {
       if (binding.role === "world_cover") { const worldId = mapped(idMap, "world", binding.worldId); await requireScope(client, ownerUserId, "worlds", worldId); await client.query("UPDATE worlds SET cover_asset_id=$3 WHERE id=$1 AND owner_user_id=$2", [worldId, ownerUserId, assetId]); }

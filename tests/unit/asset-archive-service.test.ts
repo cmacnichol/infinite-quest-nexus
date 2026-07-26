@@ -41,6 +41,8 @@ const assetD = "22222222-3333-4444-8555-666666666666";
 const assetE = "33333333-4444-4555-8666-777777777777";
 const assetF = "44444444-5555-4666-8777-888888888888";
 const assetG = "55555555-6666-4777-8888-999999999999";
+const assetH = "77777777-1111-4777-8777-999999999999";
+const assetI = "88888888-1111-4888-8888-999999999999";
 const fuzzyOnlyAsset = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 const hash = createHash("sha256").update(pngBytes.toString("base64")).digest("hex");
 
@@ -198,35 +200,81 @@ describe("asset archive portability", () => {
     }
   });
 
-  it("collects every inventory source and adapts only exact legacy asset pointers", async () => {
-    const bindings = [
-      { asset_id: assetA, binding: { role: "campaign_asset", campaignId } },
-      { asset_id: assetB, binding: { role: "illustration_segment_variant", campaignId, turnId, segmentId, variantIndex: 0 } },
-      { asset_id: assetC, binding: { role: "turn_illustration", campaignId, turnId } },
-      { asset_id: assetD, binding: { role: "world_cover", worldId } },
-      { asset_id: assetE, binding: { role: "generation_context", campaignId, worldId, worldVersionId, turnId, sourceContextId: contextId } }
-    ] satisfies Array<{ asset_id: string; binding: ArchiveAssetBinding }>;
+  it("collects each explicit source once with its scoped rows and keeps exact legacy pointers", async () => {
+    const sourceCalls = new Map<string, unknown[][]>();
+    const track = (source: string, values: readonly unknown[] | undefined) => {
+      const calls = sourceCalls.get(source) ?? [];
+      calls.push([...(values ?? [])]);
+      sourceCalls.set(source, calls);
+    };
     const client = {
-      query: async (text: string) => {
-        if (text.includes("FROM asset_references")) return { rows: bindings, rowCount: bindings.length };
-        if (text.includes("FROM turns") && text.includes("image_url")) return { rows: [{ id: turnId, image_url: `/api/v1/assets/${assetF}` }], rowCount: 1 };
+      query: async (text: string, values?: unknown[]) => {
+        if (text.includes("FROM asset_references r")) {
+          track("assetReferences", values);
+          return { rows: [{ asset_id: assetA, binding: { role: "campaign_asset", campaignId } }], rowCount: 1 };
+        }
+        if (text.includes("FROM turn_illustration_segment_assets s")) {
+          track("segmentAssets", values);
+          return { rows: [{ asset_id: assetB, binding: { role: "illustration_segment_variant", campaignId, turnId, segmentId, variantIndex: 0 } }], rowCount: 1 };
+        }
+        if (text.includes("FROM image_jobs j") && text.includes("j.campaign_id=$2")) {
+          track("campaignImageJobs", values);
+          return { rows: [
+            { asset_id: assetC, binding: { role: "turn_illustration", campaignId, turnId } },
+            { asset_id: assetD, binding: { role: "campaign_asset", campaignId } }
+          ], rowCount: 2 };
+        }
+        if (text.includes("FROM image_jobs j") && text.includes("j.world_id=$2")) {
+          track("worldCoverImageJobs", values);
+          return { rows: [{ asset_id: assetE, binding: { role: "world_cover", worldId } }], rowCount: 1 };
+        }
+        if (text.includes("FROM worlds w") && text.includes("cover_asset_id")) {
+          track("worldCover", values);
+          return { rows: [{ asset_id: assetF, binding: { role: "world_cover", worldId } }], rowCount: 1 };
+        }
+        if (text.includes("FROM asset_generation_contexts c")) {
+          track("generationContexts", values);
+          return { rows: [
+            { asset_id: assetG, binding: { role: "generation_context", campaignId, worldId: null, worldVersionId: null, turnId: null, sourceContextId: contextId } },
+            { asset_id: assetG, binding: { role: "generation_context", campaignId: null, worldId, worldVersionId, turnId: null, sourceContextId: "14141414-1414-4141-8141-141414141414" } },
+            { asset_id: assetG, binding: { role: "generation_context", campaignId: null, worldId, worldVersionId: null, turnId: null, sourceContextId: "15151515-1515-4151-8151-151515151515" } }
+          ], rowCount: 3 };
+        }
+        if (text.includes("FROM turns") && text.includes("image_url")) return { rows: [{ id: turnId, image_url: `/api/v1/assets/${assetH}` }], rowCount: 1 };
         if (text.includes("FROM world_versions") && text.includes("content")) return {
-          rows: [{ content: { nested: { exact: `/api/v1/assets/${assetG}` }, repeated: `/api/v1/assets/${assetG}`, fuzzy: `prefix-${fuzzyOnlyAsset}-suffix` } }],
+          rows: [{ content: { nested: { exact: `/api/v1/assets/${assetI}` }, repeated: `/api/v1/assets/${assetI}`, fuzzy: `prefix-${fuzzyOnlyAsset}-suffix` } }],
           rowCount: 1
         };
-        if (text.includes("FROM assets a")) return { rows: [assetA, assetB, assetC, assetD, assetE, assetF, assetG].map((id) => sourceRow(id)), rowCount: 7 };
+        if (text.includes("FROM assets a")) return { rows: [assetA, assetB, assetC, assetD, assetE, assetF, assetG, assetH, assetI].map((id) => sourceRow(id)), rowCount: 9 };
         throw new Error(`Unexpected archive query: ${text}`);
       }
     } as never;
 
     const result = await collectCampaignArchiveAssets(client, ownerUserId, campaignId, worldVersionId, worldId);
     const byAsset = new Map(result.records.map((item) => [item.sourceAssetId, item]));
-    expect([...byAsset.keys()].sort()).toEqual([assetA, assetB, assetC, assetD, assetE, assetF, assetG].sort());
+    expect([...byAsset.keys()].sort()).toEqual([assetA, assetB, assetC, assetD, assetE, assetF, assetG, assetH, assetI].sort());
     expect(byAsset.get(assetA)?.bindings).toEqual([{ role: "campaign_asset", campaignId }]);
     expect(byAsset.get(assetB)?.bindings).toEqual([{ role: "illustration_segment_variant", campaignId, turnId, segmentId, variantIndex: 0 }]);
-    expect(byAsset.get(assetF)?.bindings).toEqual([{ role: "turn_illustration", campaignId, turnId }]);
-    expect(byAsset.get(assetG)?.bindings).toEqual([{ role: "world_version_asset", worldId, worldVersionId }]);
+    expect(byAsset.get(assetC)?.bindings).toEqual([{ role: "turn_illustration", campaignId, turnId }]);
+    expect(byAsset.get(assetD)?.bindings).toEqual([{ role: "campaign_asset", campaignId }]);
+    expect(byAsset.get(assetE)?.bindings).toEqual([{ role: "world_cover", worldId }]);
+    expect(byAsset.get(assetF)?.bindings).toEqual([{ role: "world_cover", worldId }]);
+    expect(byAsset.get(assetG)?.bindings).toEqual([
+      { role: "generation_context", campaignId: null, worldId, worldVersionId: null, turnId: null, sourceContextId: "15151515-1515-4151-8151-151515151515" },
+      { role: "generation_context", campaignId: null, worldId, worldVersionId, turnId: null, sourceContextId: "14141414-1414-4141-8141-141414141414" },
+      { role: "generation_context", campaignId, worldId: null, worldVersionId: null, turnId: null, sourceContextId: contextId }
+    ]);
+    expect(byAsset.get(assetH)?.bindings).toEqual([{ role: "turn_illustration", campaignId, turnId }]);
+    expect(byAsset.get(assetI)?.bindings).toEqual([{ role: "world_version_asset", worldId, worldVersionId }]);
     expect(byAsset.has(fuzzyOnlyAsset)).toBe(false);
+    expect(sourceCalls).toEqual(new Map([
+      ["assetReferences", [[ownerUserId, campaignId]]],
+      ["segmentAssets", [[ownerUserId, campaignId]]],
+      ["campaignImageJobs", [[ownerUserId, campaignId]]],
+      ["worldCoverImageJobs", [[ownerUserId, worldId]]],
+      ["worldCover", [[ownerUserId, worldId]]],
+      ["generationContexts", [[ownerUserId, campaignId, worldVersionId, worldId]]]
+    ]));
   });
 
   it("rejects absent and foreign-owner legacy pointers together", async () => {
@@ -234,7 +282,13 @@ describe("asset archive portability", () => {
     const foreignId = "88888888-9999-4aaa-8bbb-cccccccccccc";
     const client = {
       query: async (text: string) => {
-        if (text.includes("FROM asset_references")) return { rows: [], rowCount: 0 };
+        if (
+          text.includes("FROM asset_references r") ||
+          text.includes("FROM turn_illustration_segment_assets s") ||
+          text.includes("FROM image_jobs j") ||
+          text.includes("FROM worlds w") ||
+          text.includes("FROM asset_generation_contexts c")
+        ) return { rows: [], rowCount: 0 };
         if (text.includes("FROM turns") && text.includes("image_url")) return {
           rows: [{ id: turnId, image_url: `/api/v1/assets/${missingId}` }, { id: "99999999-aaaa-4bbb-8ccc-dddddddddddd", image_url: `/api/v1/assets/${foreignId}` }],
           rowCount: 2
@@ -294,6 +348,49 @@ describe("asset archive portability", () => {
       } as never;
       await expect(persistArchiveAssets(client, { root }, ownerUserId, { assets: [{ ...record(assetA), bytes: pngBytes, createThumbnail: false }] }, new Map()))
         .rejects.toThrow("library metadata row is missing");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("maps duplicate source UUIDs to one restored asset without exposing the content hash", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asset-archive-id-map-"));
+    try {
+      let inserts = 0;
+      const idMap: ArchiveIdMap = new Map();
+      const client = {
+        query: async (text: string) => text.startsWith("INSERT INTO assets")
+          ? { rows: [{ id: `destination-${++inserts}` }], rowCount: 1 }
+          : { rows: [{ asset_id: "destination-1" }], rowCount: 1 }
+      } as never;
+
+      const result = await persistArchiveAssets(client, { root }, ownerUserId, {
+        assets: [
+          { ...record(assetA), bytes: pngBytes, createThumbnail: false },
+          { ...record(assetB), bytes: pngBytes, createThumbnail: false }
+        ]
+      }, idMap);
+
+      expect(inserts).toBe(1);
+      expect(result.assetIds).toEqual(new Map([[assetA, "destination-1"], [assetB, "destination-1"]]));
+      expect(idMap.get("asset")).toEqual(new Map([[assetA, "destination-1"], [assetB, "destination-1"]]));
+      expect(result.assetIds.has(hash)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects stale asset map keys and refuses hash-only binding resolution", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asset-archive-stale-map-"));
+    try {
+      const staleMap: ArchiveIdMap = new Map([["asset", new Map([[hash, "stale-destination"]])]]);
+      const client = { query: async () => ({ rows: [{ id: "destination" }], rowCount: 1 }) } as never;
+      await expect(persistArchiveAssets(client, { root }, ownerUserId, { assets: [{ ...record(assetA), bytes: pngBytes, createThumbnail: false }] }, staleMap))
+        .rejects.toThrow(`Unknown archive asset mapping '${hash}'`);
+      await expect(restoreAssetBindings(client, ownerUserId, [record(assetA)], new Map([[hash, "destination"]]), new Map()))
+        .rejects.toThrow(`Missing restored asset mapping for '${assetA}'`);
+      await expect(restoreAssetBindings(client, ownerUserId, [record(assetB)], new Map([[assetA, "destination"]]), new Map()))
+        .rejects.toThrow(`Missing restored asset mapping for '${assetB}'`);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
