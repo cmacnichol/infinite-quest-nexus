@@ -11,7 +11,7 @@ const ALLOWED_IMAGE_TYPES = new Map([
   ["image/webp", ".webp"],
   ["image/gif", ".gif"]
 ]);
-const MAX_IMPORTED_IMAGE_BYTES = 25 * 1024 * 1024;
+export const MAX_IMPORTED_IMAGE_BYTES = 25 * 1024 * 1024;
 
 function matchesImageSignature(bytes: Buffer, mimeType: string): boolean {
   if (mimeType === "image/png") return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
@@ -84,7 +84,7 @@ type GenerationContext = {
   generationParameters: Record<string, unknown>;
 };
 
-type VerifiedImage = {
+export type VerifiedImage = {
   width: number;
   height: number;
   format: string;
@@ -117,6 +117,23 @@ async function verifyImage(bytes: Buffer): Promise<VerifiedImage> {
   };
 }
 
+export function imageExtensionForMimeType(mimeType: string): string {
+  const extension = ALLOWED_IMAGE_TYPES.get(mimeType.toLowerCase());
+  if (!extension) throw new Error(`Image type '${mimeType}' is not supported.`);
+  return extension;
+}
+
+export async function verifyOriginalImage(bytes: Buffer, mimeType: string): Promise<VerifiedImage> {
+  const normalizedMimeType = mimeType.toLowerCase();
+  imageExtensionForMimeType(normalizedMimeType);
+  if (!bytes.length) throw new Error("Imported image data was empty.");
+  if (bytes.length > MAX_IMPORTED_IMAGE_BYTES) throw new Error("Imported image exceeded the 25 MB per-image limit.");
+  if (!matchesImageSignature(bytes, normalizedMimeType)) {
+    throw new Error(`Image bytes did not match declared type '${normalizedMimeType}'.`);
+  }
+  return verifyImage(bytes);
+}
+
 export async function runAssetMetadataBackfill(
   pool: DatabasePool,
   store: FilesystemAssetStore,
@@ -130,7 +147,17 @@ export async function runAssetMetadataBackfill(
   }>(
     `SELECT id, owner_user_id, storage_driver, storage_path
        FROM assets
-      WHERE (pixel_width IS NULL OR pixel_height IS NULL)
+      WHERE (
+        pixel_width IS NULL
+        OR pixel_height IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM asset_derivatives derivatives
+           WHERE derivatives.owner_user_id = assets.owner_user_id
+             AND derivatives.source_asset_id = assets.id
+             AND derivatives.derivative_kind = 'thumbnail'
+             AND derivatives.transform_version = 1
+        )
+      )
         AND NOT (technical_metadata ? 'backfillError')
       ORDER BY created_at ASC, id ASC LIMIT $1`,
     [Math.max(1, Math.min(50, limit))]
@@ -254,7 +281,7 @@ export async function persistTurnImage(
   mimeType: string,
   options?: { generationContext?: GenerationContext; attachReference?: boolean }
 ): Promise<StoredAsset> {
-  return persistImage(client, store, ownerUserId, bytes, mimeType, { campaignId, turnId }, options);
+  return persistImage(client, store, ownerUserId, bytes, mimeType, { campaignId, turnId }, { ...options, createThumbnail: true });
 }
 
 export async function persistWorldCover(
@@ -265,7 +292,25 @@ export async function persistWorldCover(
   mimeType: string,
   options?: { generationContext?: GenerationContext }
 ): Promise<StoredAsset> {
-  return persistImage(client, store, ownerUserId, bytes, mimeType, undefined, options);
+  return persistImage(client, store, ownerUserId, bytes, mimeType, undefined, { ...options, createThumbnail: true });
+}
+
+export async function persistOriginalImage(
+  client: DatabaseClient,
+  store: FilesystemAssetStore,
+  ownerUserId: string,
+  input: {
+    bytes: Buffer;
+    mimeType: string;
+    sourceAssetId?: string;
+    provenance?: { campaignId: string | null; turnId: string | null };
+    createThumbnail?: boolean;
+  }
+): Promise<StoredAsset> {
+  return persistImage(client, store, ownerUserId, input.bytes, input.mimeType, input.provenance, {
+    createThumbnail: input.createThumbnail ?? true,
+    attachReference: false
+  });
 }
 
 async function persistImage(
@@ -275,14 +320,10 @@ async function persistImage(
   bytes: Buffer,
   mimeType: string,
   provenance?: { campaignId: string | null; turnId: string | null },
-  options?: { generationContext?: GenerationContext; attachReference?: boolean }
+  options?: { generationContext?: GenerationContext; attachReference?: boolean; createThumbnail?: boolean }
 ): Promise<StoredAsset> {
-  const extension = ALLOWED_IMAGE_TYPES.get(mimeType);
-  if (!extension) throw new Error(`Generated image type '${mimeType}' is not supported.`);
-  if (!bytes.length) throw new Error("Generated image data was empty.");
-  if (bytes.length > MAX_IMPORTED_IMAGE_BYTES) throw new Error("Generated image exceeded the 25 MB per-image limit.");
-  if (!matchesImageSignature(bytes, mimeType)) throw new Error(`Image bytes did not match declared type '${mimeType}'.`);
-  const verified = await verifyImage(bytes);
+  const extension = imageExtensionForMimeType(mimeType);
+  const verified = await verifyOriginalImage(bytes, mimeType);
   const contentHash = sha256(bytes.toString("base64"));
   const storagePath = await writeContentAddressed(store, contentHash, extension, bytes);
   const assetResult = await client.query<{ id: string }>(
@@ -300,7 +341,7 @@ async function persistImage(
   );
   const assetId = assetResult.rows[0]?.id;
   if (!assetId) throw new Error("Could not persist imported image metadata.");
-  if (verified.thumbnail) {
+  if (options?.createThumbnail !== false && verified.thumbnail) {
     const thumbnailPath = await writeContentAddressed(store, verified.thumbnail.contentHash, ".webp", verified.thumbnail.bytes);
     await client.query(
       `INSERT INTO asset_derivatives (
