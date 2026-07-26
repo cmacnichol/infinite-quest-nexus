@@ -77,6 +77,24 @@ const completeConvertedPlayableCharacterSchema = convertedPlayableCharacterSchem
   }
 });
 
+function parseGeneratedCharacterForSeed(
+  content: string,
+  seed: z.infer<typeof generatedCharacterSeedSchema>
+) {
+  const character = completeConvertedPlayableCharacterSchema.parse(extractJsonObject(content));
+  const issues: z.ZodIssue[] = [];
+  if (!character.id.trim()) {
+    issues.push({ code: "custom", path: ["id"], message: "Generated character ID is required." });
+  } else if (character.id.trim() !== seed.id.trim()) {
+    issues.push({ code: "custom", path: ["id"], message: "Generated character ID must match its seed." });
+  }
+  if (generatedCharacterNameKey(character.name) !== generatedCharacterNameKey(seed.name)) {
+    issues.push({ code: "custom", path: ["name"], message: "Generated character name must match its seed." });
+  }
+  if (issues.length) throw new z.ZodError(issues);
+  return character;
+}
+
 const generatedCharacterSeedSchema = z.object({
   id: z.string().trim().min(1).max(200),
   name: z.string().trim().min(1).max(200),
@@ -235,6 +253,7 @@ export type WorldGenerationFailureDiagnostic = {
   message: string;
   statusCode?: number;
   code?: "incomplete_generated_world"
+    | "incomplete_generated_character"
     | "invalid_cyoa_json"
     | "PROVIDER_DESTINATION_NOT_ALLOWED"
     | "provider_response_too_large"
@@ -388,6 +407,13 @@ export function worldGenerationFailureDiagnostic(error: unknown): WorldGeneratio
       statusCode: 502,
       code: "incomplete_generated_world",
       issues
+    };
+  }
+  if (detailsCode === "incomplete_generated_character") {
+    return {
+      message: "The text provider did not return a complete character profile. Review the missing fields and try again.",
+      statusCode: 502,
+      code: "incomplete_generated_character"
     };
   }
   if (detailsCode === "invalid_cyoa_json") {
@@ -636,7 +662,7 @@ export async function generateTemplateWorld(
     };
     const characterResult = await callGeneratedWorldProvider(() => dependencies.callTextProvider(profile, characterRequest));
     try {
-      rawCharacters.push(completeConvertedPlayableCharacterSchema.parse(extractJsonObject(characterResult.content)));
+      rawCharacters.push(parseGeneratedCharacterForSeed(characterResult.content, seed));
       validationResult = characterResult;
     } catch (error) {
       if (!isGeneratedWorldValidationError(error)) throw error;
@@ -661,7 +687,7 @@ export async function generateTemplateWorld(
         recoveryInput: promptFromSnapshot(promptSnapshot, "world_character_generation_recovery")
       }));
       try {
-        rawCharacters.push(completeConvertedPlayableCharacterSchema.parse(extractJsonObject(recovered.content)));
+        rawCharacters.push(parseGeneratedCharacterForSeed(recovered.content, seed));
         validationResult = recovered;
       } catch (recoveryError) {
         if (!isGeneratedWorldValidationError(recoveryError)) throw recoveryError;

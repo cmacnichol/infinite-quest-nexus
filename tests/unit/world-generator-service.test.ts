@@ -12,6 +12,7 @@ import {
   generatedWorldProviderError,
   generateTemplateWorld,
   generateWorldPreview,
+  incompleteGeneratedCharacterError,
   incompleteGeneratedWorldError,
   type TemplateWorldGenerationDependencies,
   type WorldGenerationPreviewDependencies,
@@ -52,8 +53,9 @@ function profile() {
 }
 
 function character(name: string) {
+  const seedMatch = /^Character (\d+)$/.exec(name);
   return {
-    id: `provider-${name.toLocaleLowerCase().replaceAll(" ", "-")}`,
+    id: seedMatch ? `seed-${seedMatch[1]}` : `provider-${name.toLocaleLowerCase().replaceAll(" ", "-")}`,
     name,
     character_text: `${name} follows roads that move beneath moonlight.`,
     profile: profile(),
@@ -334,6 +336,33 @@ describe("generateTemplateWorld orchestration", () => {
     expect(harness.requests).toHaveLength(4);
   });
 
+  it.each([
+    ["missing ID", { ...character("Character 2"), id: "" }],
+    ["mismatched ID", { ...character("Character 2"), id: "other-seed" }],
+    ["mismatched name", { ...character("Different Character"), id: "seed-2" }]
+  ])("recovers and rejects a child profile with a $label", async (_label, invalidCharacter) => {
+    const harness = generationHarness([
+      providerResult(worldDraftResponse(3)),
+      providerResult(JSON.stringify(character("Character 1"))),
+      providerResult(JSON.stringify(invalidCharacter), "invalid-character"),
+      providerResult(JSON.stringify(invalidCharacter), "invalid-character-recovery")
+    ]);
+
+    await expect(harness.run()).rejects.toMatchObject({
+      statusCode: 502,
+      expose: true,
+      details: {
+        code: "incomplete_generated_character",
+        characterIndex: 1,
+        seedName: "Character 2"
+      }
+    });
+    expect(harness.requests[3]).toMatchObject({
+      previousResponseId: "invalid-character",
+      rejectedResponse: JSON.stringify(invalidCharacter)
+    });
+  });
+
   it("reports sequential character and recovery progress", async () => {
     const harness = generationHarness([
       providerResult(worldDraftResponse(3)),
@@ -523,6 +552,16 @@ describe("generateTemplateWorld orchestration", () => {
 });
 
 describe("generateWorldPreview provider failures", () => {
+  it("maps incomplete child profiles to a safe preview diagnostic", () => {
+    expect(worldGenerationFailureDiagnostic(
+      incompleteGeneratedCharacterError(1, "Character 2")
+    )).toEqual({
+      message: "The text provider did not return a complete character profile. Review the missing fields and try again.",
+      statusCode: 502,
+      code: "incomplete_generated_character"
+    });
+  });
+
   it("logs only bounded projected generated-world issue fields", async () => {
     const marker = "PRIVATE_OVERSIZED_LOG_ISSUE";
     const generatedError = incompleteGeneratedWorldError(new z.ZodError([{
