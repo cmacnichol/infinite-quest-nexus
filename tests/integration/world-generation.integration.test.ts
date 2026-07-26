@@ -177,6 +177,7 @@ integration("generated CYOA world persistence", () => {
       maxOutputTokens: 4096,
       temperature: 0,
       enabled: true,
+      isDefault: true,
       configuration: {}
     }, credentialSecret);
     providerId = provider.id;
