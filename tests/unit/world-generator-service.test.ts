@@ -306,6 +306,30 @@ describe("generateTemplateWorld orchestration", () => {
     expect(harness.requests).toHaveLength(5);
   });
 
+  it("recovers an explicitly invalid seed value before deriving legacy characters", async () => {
+    const harness = generationHarness([
+      providerResult(JSON.stringify({
+        ...JSON.parse(worldDraftResponse(3)),
+        character_seeds: null,
+        playable_characters: [
+          character("Legacy Character 1"),
+          character("Legacy Character 2"),
+          character("Legacy Character 3")
+        ]
+      }), "invalid-seeds"),
+      providerResult(worldDraftResponse(3), "recovered-world"),
+      ...[1, 2, 3].map((index) => providerResult(JSON.stringify(character(`Character ${index}`))))
+    ]);
+
+    await expect(harness.run()).resolves.toBeDefined();
+
+    expect(harness.requests[1]).toMatchObject({
+      previousResponseId: "invalid-seeds",
+      rejectedResponse: expect.stringContaining('"character_seeds":null')
+    });
+    expect(harness.requests).toHaveLength(5);
+  });
+
   it("returns a typed safe 502 when a character remains incomplete after recovery", async () => {
     const harness = generationHarness([
       providerResult(worldDraftResponse(3)),

@@ -490,10 +490,10 @@ export function normalizeRawWorldJson(raw: unknown): Record<string, unknown> {
       narrative_hook: coerceText(character.narrative_hook ?? character.narrativeHook ?? story.narrativeHooks).trim() || concept
     };
   };
-  const hasSeedArray = Array.isArray(obj.character_seeds) || Array.isArray(obj.characterSeeds);
-  const seedSource = getArr("character_seeds", "characterSeeds");
+  const hasSeedKey = Object.hasOwn(obj, "character_seeds") || Object.hasOwn(obj, "characterSeeds");
+  const seedSource = Object.hasOwn(obj, "character_seeds") ? obj.character_seeds : obj.characterSeeds;
   const legacyCharacters = getArr("playable_characters", "playableCharacters", "playable_character_list", "characters");
-  const normalizedSeeds = (hasSeedArray ? seedSource : legacyCharacters)
+  const normalizedSeeds = (Array.isArray(seedSource) ? seedSource : legacyCharacters)
     .map((item, index) => normalizeGeneratedSeed(item, index));
   const normalizedChars = legacyCharacters.map((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return item;
@@ -517,7 +517,7 @@ export function normalizeRawWorldJson(raw: unknown): Record<string, unknown> {
     premise: getStr("premise", "world_premise", "worldPremise", "summary"),
     firstAction: getStr("firstAction", "first_action", "openingAction", "opening_action", "startingAction", "starting_action"),
     story_rules: getStr("story_rules", "storyRules", "rules", "world_rules", "worldRules"),
-    character_seeds: normalizedSeeds,
+    character_seeds: hasSeedKey && !Array.isArray(seedSource) ? seedSource : normalizedSeeds,
     playable_characters: normalizedChars,
     rpg_statistics: getArr("rpg_statistics", "rpgStats", "rpg_stats", "statistics"),
     default_triggers: getArr("default_triggers", "defaultTriggers", "default_trigger_list"),
