@@ -965,6 +965,27 @@ describe("archive artifact writing and cleanup", () => {
     expect((await readdir(join(root, "artifacts"))).some((name) => name.endsWith(".tmp"))).toBe(false);
   });
 
+  it("enforces configured export entry, JSON, and compressed-byte limits", async () => {
+    const root = await temporaryRoot();
+    const oneEntry: ArchiveArtifactEntry[] = [
+      { path: "data.json", logicalType: "records", mediaType: "application/json", source: Readable.from('{"safe":true}') }
+    ];
+
+    await expectArchiveError(
+      writeArchiveArtifact(root, oneEntry, (entries) => systemManifest(entries), { ...DEFAULT_LIMITS, maxEntries: 1 }),
+      "archive-limit-exceeded"
+    );
+    await expectArchiveError(
+      writeArchiveArtifact(root, oneEntry, (entries) => systemManifest(entries), { ...DEFAULT_LIMITS, maxJsonEntryBytes: 1 }),
+      "archive-limit-exceeded"
+    );
+    await expectArchiveError(
+      writeArchiveArtifact(root, oneEntry, (entries) => systemManifest(entries), { ...DEFAULT_LIMITS, maxCompressedBytes: 1 }),
+      "archive-limit-exceeded"
+    );
+    expect(await readdir(join(root, "artifacts"))).toEqual([]);
+  });
+
   it("removes a failed writer temporary file and throws a typed error", async () => {
     const root = await temporaryRoot();
     const failingSource = new Readable({

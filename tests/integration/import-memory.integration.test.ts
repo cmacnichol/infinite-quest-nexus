@@ -274,6 +274,8 @@ integration("legacy import and Chronicle integration", () => {
   it("round-trips loadable story settings and history without credentials", async () => {
     const exported = await exportCampaign(pool, campaignId, null) as Record<string, any>;
     expect(exported.format).toBe("infinite-quest-campaign");
+    expect(exported.formatVersion).toBe(3);
+    expect(exported.exportedAt).toEqual(expect.any(String));
     expect(exported.settings.aiProvider).toBe("openrouter");
     expect(exported.settings).not.toHaveProperty("apiKey");
     expect(exported.settings.storyHistoryTokenLimit).toBe(128000);

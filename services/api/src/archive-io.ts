@@ -1073,9 +1073,13 @@ async function removePathWithIdentity(path: string, identity: FileIdentity): Pro
 export async function writeArchiveArtifact(
   archiveRoot: string,
   entries: readonly ArchiveArtifactEntry[],
-  buildManifest: (entries: readonly ArchiveEntry[]) => ArchiveManifest
+  buildManifest: (entries: readonly ArchiveEntry[]) => ArchiveManifest,
+  limits?: ArchiveLimits
 ): Promise<CompletedArchiveArtifact> {
   assertWriterEntries(entries);
+  if (limits && entries.length + 1 > limits.maxEntries) {
+    throw archiveError("archive-limit-exceeded", "The archive contains too many entries.");
+  }
   const { root, directory, stable } = await prepareRootDirectory(archiveRoot, "artifacts");
   const id = randomUUID();
   const temporaryPath = resolve(directory, `${id}.zip.tmp`);
@@ -1088,6 +1092,7 @@ export async function writeArchiveArtifact(
   let handle: FileHandle | undefined;
   let identity: FileIdentity | undefined;
   let output: Writable | undefined;
+  let compressed: CompressedByteCounter | undefined;
   let outputCompleted: Promise<void> | undefined;
   let archive: Archiver | undefined;
   let published = false;
@@ -1102,9 +1107,16 @@ export async function writeArchiveArtifact(
     archive = new ZipArchive({ forceLocalTime: false, zlib: { level: 9 } });
     archive.on("warning", (error) => output?.destroy(error));
     archive.on("error", (error) => output?.destroy(error));
-    archive.pipe(output);
+    if (limits) {
+      compressed = new CompressedByteCounter(limits.maxCompressedBytes);
+      compressed.on("error", (error) => output?.destroy(error));
+      archive.pipe(compressed).pipe(output);
+    } else {
+      archive.pipe(output);
+    }
 
     const measuredEntries: ArchiveEntry[] = [];
+    let uncompressedBytes = 0;
     for (const entry of entries) {
       const normalized = normalizeArchivePath(entry.path);
       const measured = measuringTransform();
@@ -1114,11 +1126,19 @@ export async function writeArchiveArtifact(
         mode: 0o100640
       });
       await pipeline(entry.source as Readable, measured.transform);
+      const measurement = measured.measurement();
+      if (limits && entry.mediaType === "application/json" && measurement.byteLength > limits.maxJsonEntryBytes) {
+        throw archiveError("archive-limit-exceeded", "A JSON archive entry exceeds the configured byte limit.", { path: normalized.logicalPath });
+      }
+      uncompressedBytes += measurement.byteLength;
+      if (limits && uncompressedBytes > limits.maxUncompressedBytes) {
+        throw archiveError("archive-limit-exceeded", "The archive exceeds the configured uncompressed byte limit.");
+      }
       measuredEntries.push({
         path: normalized.logicalPath,
         logicalType: entry.logicalType,
         mediaType: entry.mediaType,
-        ...measured.measurement()
+        ...measurement
       });
     }
 
@@ -1127,6 +1147,12 @@ export async function writeArchiveArtifact(
       throw archiveError("archive-export-inconsistent", "The archive manifest entries do not match the streamed artifact entries.");
     }
     const manifestBytes = Buffer.from(canonicalArchiveJson(manifest), "utf8");
+    if (limits && manifestBytes.byteLength > limits.maxManifestBytes) {
+      throw archiveError("archive-limit-exceeded", "manifest.json exceeds the configured byte limit.");
+    }
+    if (limits && uncompressedBytes + manifestBytes.byteLength > limits.maxUncompressedBytes) {
+      throw archiveError("archive-limit-exceeded", "The archive exceeds the configured uncompressed byte limit.");
+    }
     archive.append(manifestBytes, {
       name: "manifest.json",
       date: FIXED_ZIP_DATE,
@@ -1138,6 +1164,11 @@ export async function writeArchiveArtifact(
     await outputCompleted;
     await handle.sync();
     identity = fileIdentity(await handle.stat({ bigint: true }));
+    if (limits) {
+      const directory = await openArchiveFromHandle(handle, Number(identity.size), limits);
+      inspectCentralDirectory(directory.files, limits);
+      await inspectLocalHeaders(handle, directory.files, Number(identity.size));
+    }
     await assertDirectoryStable(stable);
     // Keep the source handle open while checking both child names around rename:
     // Windows prevents replacement of the opened file, while Linux uses the
@@ -1161,7 +1192,7 @@ export async function writeArchiveArtifact(
       byteLength: Number(identity.size),
       contentFingerprint: manifest.contentFingerprint
     };
-  } catch {
+  } catch (error) {
     archive?.unpipe(output);
     archive?.abort();
     output?.destroy();
@@ -1173,6 +1204,7 @@ export async function writeArchiveArtifact(
       ).catch(() => undefined);
     }
     await closeHandle(handle);
+    if (error instanceof ArchiveError) throw error;
     throw archiveError("archive-export-inconsistent", "The archive artifact could not be completed.");
   } finally {
     await closeHandle(stable.anchor);

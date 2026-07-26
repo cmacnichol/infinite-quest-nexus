@@ -530,13 +530,10 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/export", async (request, reply) => {
-    if (!assetStore) {
-      const payload = await exportCampaign(pool, uuidSchema.parse(request.params.campaignId), null);
-      return reply.header("content-disposition", 'attachment; filename="infinite-quest-campaign.json"').send(payload);
-    }
     const archive = await exportCampaign(pool, uuidSchema.parse(request.params.campaignId), {
       assetStore,
-      archiveRoot: resolve(assetStore.root, "campaign-archives")
+      archiveRoot: config.archiveStorageRoot,
+      limits: config.campaignArchiveLimits
     });
     return reply
       .header("content-disposition", 'attachment; filename="infinite-quest-campaign.zip"')

@@ -27,6 +27,9 @@ integration("campaign archive export", () => {
   let campaignId = "";
   let requiredAssetId = "";
   let unrelatedAssetId = "";
+  let worldCoverAssetId = "";
+  let segmentAssetIds: string[] = [];
+  let turnId = "";
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
@@ -40,7 +43,7 @@ integration("campaign archive export", () => {
     const firstVersion = await pool.query<{ id: string }>(
       `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
        VALUES ($1,$2,1,$3::jsonb) RETURNING id`,
-      [world.rows[0]!.id, ownerUserId, JSON.stringify({ schemaVersion: 4, world: { title: "Archive world", firstAction: "Begin." } })]
+      [world.rows[0]!.id, ownerUserId, JSON.stringify({ schemaVersion: 4, world: { title: "Archive world", firstAction: "Begin.", provider: { apiKey: "nested-secret" } } })]
     );
     const secondVersion = await pool.query<{ id: string }>(
       `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
@@ -61,11 +64,12 @@ integration("campaign archive export", () => {
       `INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1,$2,'Unrelated campaign')`,
       [ownerUserId, secondVersion.rows[0]!.id]
     );
-    await pool.query(
+    const turn = await pool.query<{ id: string }>(
       `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration, accepted_at)
-       VALUES ($1,$2,1,'Open the door.','The archive door opens.',now())`,
+       VALUES ($1,$2,1,'Open the door.','The archive door opens.',now()) RETURNING id`,
       [ownerUserId, campaignId]
     );
+    turnId = turn.rows[0]!.id;
     await pool.query(
       `INSERT INTO campaign_state_edits (owner_user_id, campaign_id, effective_turn_number, revision, state_snapshot_private, changed_fields)
        VALUES ($1,$2,1,1,$3::jsonb,'["scratchpad"]'::jsonb)`,
@@ -99,9 +103,62 @@ integration("campaign archive export", () => {
       ownerUserId,
       { bytes: await sharp({ create: { width: 2, height: 2, channels: 4, background: "#00ff00" } }).png().toBuffer(), mimeType: "image/png", createThumbnail: false }
     )).id);
+    worldCoverAssetId = await withTransaction(pool, async (client) => (await persistOriginalImage(
+      client,
+      { root },
+      ownerUserId,
+      { bytes: await sharp({ create: { width: 2, height: 2, channels: 4, background: "#0000ff" } }).png().toBuffer(), mimeType: "image/png", createThumbnail: false }
+    )).id);
+    segmentAssetIds = await Promise.all(["#ffff00", "#00ffff"].map(async (background) => withTransaction(pool, async (client) => {
+      const stored = await persistOriginalImage(client, { root }, ownerUserId, {
+        bytes: await sharp({ create: { width: 2, height: 2, channels: 4, background } }).png().toBuffer(),
+        mimeType: "image/png",
+        createThumbnail: false
+      });
+      return stored.id;
+    })));
     await pool.query(
       "INSERT INTO asset_references (owner_user_id, asset_id, campaign_id, turn_id, asset_role) SELECT owner_user_id,id,$2,NULL,'import_attachment' FROM assets WHERE id=$1",
       [requiredAssetId, campaignId]
+    );
+    await pool.query("UPDATE worlds SET cover_asset_id=$2 WHERE id=$1", [world.rows[0]!.id, worldCoverAssetId]);
+    await pool.query(
+      `UPDATE campaigns SET legacy_settings=$2::jsonb WHERE id=$1`,
+      [campaignId, JSON.stringify({ provider: { apiKey: "nested-secret", encryptionKey: "encrypted-secret" } })]
+    );
+    await pool.query(
+      `UPDATE campaign_state SET import_provenance=$2::jsonb WHERE campaign_id=$1`,
+      [campaignId, JSON.stringify({ world: { source: "fixture" }, story: { source: "fixture" } })]
+    );
+    await pool.query(
+      `INSERT INTO campaign_world_migrations (owner_user_id,campaign_id,from_world_version_id,to_world_version_id,note)
+       VALUES ($1,$2,$3,$4,'Fixture migration provenance')`,
+      [ownerUserId, campaignId, secondVersion.rows[0]!.id, firstVersion.rows[0]!.id]
+    );
+    await pool.query(
+      `INSERT INTO campaign_illustration_configs (campaign_id,owner_user_id,enabled,model)
+       VALUES ($1,$2,false,'')`,
+      [campaignId, ownerUserId]
+    );
+    const set = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_sets (owner_user_id,campaign_id,turn_id,source_text_hash,segment_word_count,images_per_segment,prompt_mode,status,is_active,character_visual_reference,completed_at)
+       VALUES ($1,$2,$3,'fixture-hash',100,2,'direct','completed',true,'Avery wears a blue coat.',now()) RETURNING id`,
+      [ownerUserId, campaignId, turnId]
+    );
+    const segment = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_segments (owner_user_id,illustration_set_id,campaign_id,turn_id,ordinal,start_offset,end_offset,start_word,end_word,source_text,source_text_hash,direct_prompt,resolved_prompt,prompt_source,status)
+       VALUES ($1,$2,$3,$4,0,0,10,0,2,'Archive door opens.','fixture-hash','An archive door.','An archive door.','direct','completed') RETURNING id`,
+      [ownerUserId, set.rows[0]!.id, campaignId, turnId]
+    );
+    await pool.query(
+      `INSERT INTO turn_illustration_segment_assets (segment_id,owner_user_id,asset_id,variant_index)
+       VALUES ($1,$2,$3,0),($1,$2,$4,1)`,
+      [segment.rows[0]!.id, ownerUserId, segmentAssetIds[0], segmentAssetIds[1]]
+    );
+    await pool.query(
+      `INSERT INTO provider_cost_events (owner_user_id,campaign_id,turn_id,provider_type,category,operation,requested_model,resolved_model,amount,currency,usage_metadata)
+       VALUES ($1,$2,$3,'openai_compatible','image','illustration','fixture-image','fixture-image',0.01,'USD','{}'::jsonb)`,
+      [ownerUserId, campaignId, turnId]
     );
   });
 
@@ -111,7 +168,9 @@ integration("campaign archive export", () => {
   });
 
   it("exports only the selected campaign and pinned world version as a deterministic manifest archive", async () => {
-    const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root });
+    const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
+    const repeated = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
+    expect(repeated.contentFingerprint).toBe(artifact.contentFingerprint);
     const archive = await inspectArchive({ relativePath: artifact.relativePath, absolutePath: artifact.absolutePath, compressedBytes: artifact.byteLength }, limits, "campaign");
     const paths = [...archive.entries.keys()].sort();
     expect(paths).toEqual([
@@ -125,18 +184,39 @@ integration("campaign archive export", () => {
     const manifest = archive.manifest;
     expect(manifest.archiveType).toBe("campaign");
     expect(manifest.campaignId).toBe(campaignId);
-    expect(manifest.assets.map((asset) => asset.sourceAssetId)).toContain(requiredAssetId);
+    expect(manifest.assets.map((asset) => asset.sourceAssetId)).toEqual(expect.arrayContaining([
+      requiredAssetId, worldCoverAssetId, ...segmentAssetIds
+    ]));
     expect(manifest.assets.map((asset) => asset.sourceAssetId)).not.toContain(unrelatedAssetId);
     const serialized = await Promise.all(["campaign.json", "world.json", "chronicle.json", "assets/assets.json"].map(async (path) => (
       (await readVerifiedEntry(archive, path, limits.maxJsonEntryBytes)).toString("utf8")
     )));
-    expect(serialized.join("\n")).not.toMatch(/credential|thumbnail|embedding|providerProfile|responseChain|private reasoning/i);
+    const combined = serialized.join("\n");
+    expect(combined).not.toContain("nested-secret");
+    expect(combined).not.toMatch(/credential|thumbnail|embedding|providerProfile|responseChain|private reasoning/i);
+    expect(campaign.archiveRecords.worldMigrations).toHaveLength(1);
+    expect(campaign.archiveRecords.illustrationSets).toHaveLength(1);
+    expect(campaign.archiveRecords.illustrationSegments).toHaveLength(1);
+    expect(campaign.archiveRecords.costs).toHaveLength(1);
+    expect(campaign.archiveRecords.illustrationConfig).toBeTruthy();
+  });
+
+  it("fails closed for an archive that exceeds configured limits", async () => {
+    await expect(exportCampaign(pool, campaignId, {
+      assetStore: { root }, archiveRoot: root, limits: { ...limits, maxEntries: 1 }
+    })).rejects.toMatchObject({ code: "archive-limit-exceeded" });
+  });
+
+  it("rejects a campaign state revision that does not match its edit ledger", async () => {
+    await pool.query("UPDATE campaign_state SET revision=2 WHERE campaign_id=$1", [campaignId]);
+    await expect(exportCampaign(pool, campaignId, null)).rejects.toMatchObject({ code: "archive-export-inconsistent" });
+    await pool.query("UPDATE campaign_state SET revision=1 WHERE campaign_id=$1", [campaignId]);
   });
 
   it("fails closed when a required original is absent", async () => {
     const source = await pool.query<{ storage_path: string }>("SELECT storage_path FROM assets WHERE id=$1", [requiredAssetId]);
     await unlink(resolve(root, source.rows[0]!.storage_path));
-    await expect(exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root }))
+    await expect(exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits }))
       .rejects.toMatchObject({ code: "archive-asset-missing", assetIds: [requiredAssetId] });
   });
 });

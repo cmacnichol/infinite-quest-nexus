@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
@@ -11,7 +10,7 @@ import { characterLegacyText } from "../../../packages/domain/src/world-characte
 import { calculateContentFingerprint, canonicalArchiveJson, sanitizePortableMetadata, type ArchiveManifest } from "../../../packages/contracts/src/archives.js";
 import { removeProviderSecrets, stableStringify } from "../../../packages/domain/src/text.js";
 import { collectCampaignArchiveAssets, verifyAndWriteArchiveAssets, type CampaignAssetInventory } from "./asset-archive-service.js";
-import { writeArchiveArtifact, type CompletedArchiveArtifact } from "./archive-io.js";
+import { writeArchiveArtifact, type ArchiveLimits, type CompletedArchiveArtifact } from "./archive-io.js";
 import { readAsset, type FilesystemAssetStore } from "./asset-service.js";
 
 export type PortableWorldPayload = { canonicalHash: string; sourceWorldId: string; sourceWorldVersionId: string; versionNumber: number; content: unknown };
@@ -32,7 +31,7 @@ export type CampaignArchivePayloads = {
   world: PortableWorldPayload;
   chronicle: PortableCampaignChronicleV1;
 };
-export type CampaignArchiveExportOptions = { assetStore: FilesystemAssetStore; archiveRoot: string };
+export type CampaignArchiveExportOptions = { assetStore: FilesystemAssetStore; archiveRoot: string; limits: ArchiveLimits };
 
 type SnapshotCampaign = Record<string, any> & { id: string; world_id: string; world_version_id: string; version_number: number; content: WorldContent; revision: number };
 export type CampaignArchiveSnapshot = {
@@ -56,14 +55,28 @@ function exportError(message: string, statusCode = 409): Error {
   return Object.assign(new Error(message), { code: "archive-export-inconsistent", statusCode });
 }
 
+function secretKey(key: string): boolean {
+  const normalized = key.replaceAll(/[^a-z0-9]/gi, "").toLowerCase();
+  return /(?:apikey|password|authorization|credential|secret|privatekey|encryptionkey|encrypted|accesstoken|refreshtoken|bearertoken|authtag|nonce)/.test(normalized)
+    || normalized === "token" || normalized.endsWith("token");
+}
+
+function excludedPortableKey(key: string): boolean {
+  const normalized = key.replaceAll(/[^a-z0-9]/gi, "").toLowerCase();
+  return secretKey(key)
+    || /(?:embedding|vector|thumbnail|providerprofile|responsechain|rawresponse)/.test(normalized);
+}
+
+function sanitizePortableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizePortableValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => !excludedPortableKey(key))
+    .map(([key, child]) => [key, sanitizePortableValue(child)]));
+}
+
 function portableSettings(value: Record<string, unknown> | undefined): Record<string, unknown> {
-  const settings = removeProviderSecrets(value);
-  for (const key of Object.keys(settings)) {
-    const normalized = key.replaceAll(/[^a-z]/gi, "").toLowerCase();
-    if (/(?:apikey|password|authorization|credential|secret)/.test(normalized)
-      || /^(?:token|accesstoken|refreshtoken|baseurl|endpoint|customendpoint|lmstudioendpoint|imageendpoint|providerurl)$/.test(normalized)) delete settings[key];
-  }
-  return settings;
+  return sanitizePortableValue(removeProviderSecrets(value)) as Record<string, unknown>;
 }
 
 function portableModelMetadata(value: unknown): Record<string, unknown> {
@@ -74,17 +87,8 @@ function portableModelMetadata(value: unknown): Record<string, unknown> {
   )));
 }
 
-const sensitiveWorldKeys = new Set([
-  "apikey", "customapikey", "lmstudioapikey", "imageapikey", "token", "accesstoken", "password", "authorization",
-  "encryptedapikey", "credentialnonce", "credentialauthtag"
-]);
-
 function sanitizeWorldValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sanitizeWorldValue);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
-    .filter(([key]) => !sensitiveWorldKeys.has(key.replaceAll(/[^a-z]/gi, "").toLowerCase()))
-    .map(([key, child]) => [key, sanitizeWorldValue(child)]));
+  return sanitizePortableValue(value);
 }
 
 function iso(value: unknown): unknown {
@@ -95,7 +99,7 @@ function portableRow(row: Record<string, unknown>, excluded: readonly string[] =
   const output: Record<string, unknown> = {};
   const excludedKeys = new Set([...excluded, "owner_user_id", "provider_profile_id", "embedding", "response_metadata", "provider_response_id", "response_id", "lease_owner", "lease_expires_at"]);
   for (const [key, value] of Object.entries(row)) {
-    if (!excludedKeys.has(key)) output[key] = sanitizePortableMetadata(iso(value));
+    if (!excludedKeys.has(key)) output[key] = sanitizePortableValue(sanitizePortableMetadata(iso(value)));
   }
   return output;
 }
@@ -110,7 +114,7 @@ export async function captureCampaignArchiveSnapshot(pool: DatabasePool, campaig
     await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
     const ownerUserId = await initialOwnerId(client);
     const campaignResult = await client.query<SnapshotCampaign>(
-      `SELECT c.*, w.id AS world_id, w.title AS world_title, wv.version_number, wv.content, cs.*
+      `SELECT c.*, w.id AS world_id, w.title AS world_title, wv.version_number, wv.content, cs.*, cs.revision AS state_revision
          FROM campaigns c
          JOIN world_versions wv ON wv.id=c.world_version_id AND wv.owner_user_id=c.owner_user_id
          JOIN worlds w ON w.id=wv.world_id AND w.owner_user_id=c.owner_user_id
@@ -143,6 +147,10 @@ export async function captureCampaignArchiveSnapshot(pool: DatabasePool, campaig
     const legacy = await client.query<{ content: unknown; through_turn: number }>(
       "SELECT content,through_turn FROM summary_checkpoints WHERE owner_user_id=$1 AND campaign_id=$2 AND summary_kind='legacy_full_history' ORDER BY through_turn DESC,created_at DESC LIMIT 1", values
     );
+    const latestStateRevision = Math.max(0, ...stateEdits.map((edit) => Number((edit as { revision?: unknown }).revision || 0)));
+    if (latestStateRevision !== Number(campaign.state_revision)) {
+      throw exportError("Campaign state revision does not match the captured state edit ledger.");
+    }
     const assets = await collectCampaignArchiveAssets(client, ownerUserId, campaignId, campaign.world_version_id, campaign.world_id);
     await client.query("COMMIT");
     return { ownerUserId, campaign, turns, profileEdits, stateEdits, migrations, illustrationConfig: illustrationConfigRows[0] ?? null, illustrationSets, illustrationSegments, costs, memories, summaries, legacyHistory: legacy.rows[0] ?? null, assets };
@@ -154,15 +162,15 @@ export async function captureCampaignArchiveSnapshot(pool: DatabasePool, campaig
   }
 }
 
-function legacyPayload(snapshot: CampaignArchiveSnapshot): Record<string, unknown> {
+function legacyPayload(snapshot: CampaignArchiveSnapshot, exportedAt = new Date().toISOString()): Record<string, unknown> {
   const row = snapshot.campaign;
   const content = canonicalizeWorldContent(sanitizeWorldValue(row.content) as WorldContent);
   const sourceWorld = content.world && typeof content.world === "object" ? content.world : {};
   const { character: _storedCharacter, ...worldWithoutStoredCharacter } = sourceWorld as Record<string, unknown>;
   const profile = row.character_profile as Record<string, unknown> | null;
   const selectedCharacterText = characterLegacyText(row.character_profile, row.character_snapshot);
-  return {
-    format: "infinite-quest-campaign", formatVersion: 3, exportedAt: new Date().toISOString(),
+  return sanitizePortableValue({
+    format: "infinite-quest-campaign", formatVersion: 3, exportedAt,
     campaign: { title: row.title, sourceCampaignId: row.id, sourceWorldVersionId: row.world_version_id, sourceWorldVersionNumber: row.version_number, selectedCharacterId: row.selected_character_id ?? null, characterSnapshot: row.character_snapshot ?? null, characterProfile: row.character_profile ?? null, characterProfileRevision: Number(row.character_profile_revision || 0), stateRevision: Number(row.revision || 0) },
     world: { ...worldWithoutStoredCharacter, ...(selectedCharacterText ? { character: selectedCharacterText } : {}) },
     settings: { ...portableSettings(row.legacy_settings), storyLength: row.story_length_profile, turnControlStyle: row.turn_control_style },
@@ -171,11 +179,11 @@ function legacyPayload(snapshot: CampaignArchiveSnapshot): Record<string, unknow
     ...(snapshot.legacyHistory ? { fullHistory: snapshot.legacyHistory.content, fullHistoryCompressedThroughTurn: snapshot.legacyHistory.through_turn } : {}),
     worldImportProvenance: row.import_provenance?.world ?? null,
     storyImportProvenance: { ...(row.import_provenance?.story ?? {}), sourceType: "nexus_campaign_export", worldVersionId: row.world_version_id, worldVersionNumber: row.version_number, selectedCharacterId: row.selected_character_id ?? null, selectedCharacterName: profile?.name ?? row.character_snapshot?.name ?? null }
-  };
+  }) as Record<string, unknown>;
 }
 
 function payloads(snapshot: CampaignArchiveSnapshot): CampaignArchivePayloads {
-  const legacy = legacyPayload(snapshot);
+  const legacy = legacyPayload(snapshot, String(iso(snapshot.campaign.updated_at)));
   const content = canonicalizeWorldContent(sanitizeWorldValue(snapshot.campaign.content) as WorldContent);
   const canonicalHash = createHash("sha256").update(stableStringify(content)).digest("hex");
   const world: PortableWorldPayload = { canonicalHash, sourceWorldId: snapshot.campaign.world_id, sourceWorldVersionId: snapshot.campaign.world_version_id, versionNumber: Number(snapshot.campaign.version_number), content };
@@ -190,7 +198,9 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string, opt
   const snapshot = await captureCampaignArchiveSnapshot(pool, campaignId);
   if (!options) return legacyPayload(snapshot);
   const projected = payloads(snapshot);
-  const assetStagingRoot = await mkdtemp(join(tmpdir(), "infinitequest-campaign-export-"));
+  const stagingParent = resolve(options.archiveRoot, "staging");
+  await mkdir(stagingParent, { recursive: true });
+  const assetStagingRoot = await mkdtemp(join(stagingParent, "campaign-export-"));
   try {
     const assetEntries = await verifyAndWriteArchiveAssets({
       records: snapshot.assets.records,
@@ -216,7 +226,7 @@ export async function exportCampaign(pool: DatabasePool, campaignId: string, opt
         payloads: jsonEntries.map(([path, kind]) => ({ kind, path, formatVersion: kind === "campaign" ? 3 : 1 })),
         assets: snapshot.assets.records
       } satisfies ArchiveManifest;
-    });
+    }, options.limits);
   } finally {
     await rm(assetStagingRoot, { recursive: true, force: true });
   }
