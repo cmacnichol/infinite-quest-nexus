@@ -984,7 +984,13 @@ function parseManifest(buffer: Buffer): ArchiveManifest {
 
   const parsed = archiveManifestSchema.safeParse(value);
   if (!parsed.success) {
-    throw archiveError("archive-json-invalid", "manifest.json does not satisfy the archive schema.");
+    const hasAssetIssue = parsed.error.issues.some((issue) => issue.path[0] === "assets");
+    throw archiveError(
+      hasAssetIssue ? "archive-asset-invalid" : "archive-json-invalid",
+      hasAssetIssue
+        ? "manifest.json contains invalid archive asset metadata."
+        : "manifest.json does not satisfy the archive schema."
+    );
   }
   return parsed.data;
 }

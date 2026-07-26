@@ -42,6 +42,89 @@ async function writeLegacyZip(path: string, entries: readonly { name: string; co
   await completed;
 }
 
+describe("campaign archive preview validation", () => {
+  it("returns archive-asset-invalid when duplicate manifest assets fail preview schema validation", async () => {
+    const root = await temporaryRoot();
+    const path = join(root, "duplicate-manifest-assets.zip");
+    const campaignId = "11111111-1111-4111-8111-111111111111";
+    const worldId = "22222222-2222-4222-8222-222222222222";
+    const worldVersionId = "33333333-3333-4333-8333-333333333333";
+    const sourceAssetId = "44444444-4444-4444-8444-444444444444";
+    const hash = "a".repeat(64);
+    const archivePath = `assets/sha256/${hash.slice(0, 2)}/${hash}.png`;
+    const asset = {
+      sourceAssetId,
+      contentHash: hash,
+      archivePath,
+      mimeType: "image/png",
+      byteLength: 1,
+      pixelWidth: 1,
+      pixelHeight: 1,
+      technicalMetadata: {},
+      library: {
+        title: "",
+        caption: "",
+        notes: "",
+        tags: [],
+        origin: "imported",
+        reviewStatus: "unreviewed",
+        reuseScope: "campaign",
+        automaticReuseEnabled: false,
+        contentCategories: [],
+        favorite: false,
+        archivedAt: null
+      },
+      createdAt: "2026-07-26T12:00:00.000Z",
+      bindings: [{ role: "campaign_asset", campaignId }]
+    };
+    const entries = [
+      { path: "campaign.json", logicalType: "campaign", mediaType: "application/json", byteLength: 1, sha256: hash },
+      { path: "world.json", logicalType: "world", mediaType: "application/json", byteLength: 1, sha256: hash },
+      { path: "chronicle.json", logicalType: "chronicle", mediaType: "application/json", byteLength: 1, sha256: hash },
+      { path: "assets/assets.json", logicalType: "assets", mediaType: "application/json", byteLength: 1, sha256: hash },
+      { path: archivePath, logicalType: "asset-original", mediaType: "image/png", byteLength: 1, sha256: hash }
+    ];
+    const manifest = {
+      format: "infinite-quest-archive",
+      formatVersion: 1,
+      archiveType: "campaign",
+      createdAt: "2026-07-26T12:00:00.000Z",
+      contentFingerprint: hash,
+      campaignId,
+      worldId,
+      worldVersionId,
+      entries,
+      payloads: [
+        { kind: "campaign", path: "campaign.json", formatVersion: 3 },
+        { kind: "world", path: "world.json", formatVersion: 1 },
+        { kind: "chronicle", path: "chronicle.json", formatVersion: 1 },
+        { kind: "assets", path: "assets/assets.json", formatVersion: 1 }
+      ],
+      assets: [asset, { ...asset }]
+    };
+    await writeLegacyZip(path, [{ name: "manifest.json", content: JSON.stringify(manifest) }]);
+    const staged = await stageArchiveUpload(createReadStream(path), root, limits);
+    const pool = {
+      query: async () => {
+        throw new Error("Preview must reject the manifest before database access.");
+      }
+    } as unknown as DatabasePool;
+    const config = {
+      archiveStorageRoot: root,
+      archivePreviewTtlSeconds: 1_800,
+      campaignArchiveLimits: limits
+    } as RuntimeConfig;
+
+    await expect(previewCampaignArchive(
+      pool,
+      config,
+      staged,
+      "duplicate-manifest-assets.zip",
+      { kind: "embedded" }
+    )).rejects.toMatchObject({ code: "archive-asset-invalid" });
+  });
+});
+
 describe("legacy campaign ZIP adaptation", () => {
   it("persists the preview-time staged compressed size for commit rehydration", async () => {
     const root = await temporaryRoot();
