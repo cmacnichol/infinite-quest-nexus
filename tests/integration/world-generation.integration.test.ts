@@ -34,6 +34,13 @@ type MockProviderReply = {
   error?: string;
 };
 
+type CompatibleProviderRequest = {
+  messages?: Array<{
+    role?: string;
+    content?: string;
+  }>;
+};
+
 function profile(role: string) {
   return {
     story: {
@@ -114,6 +121,7 @@ integration("generated CYOA world persistence", () => {
   let providerId = "";
   let ownerUserId = "";
   const replies: MockProviderReply[] = [];
+  const providerRequestBodies: CompatibleProviderRequest[] = [];
   const progressKeys = new Set<string>();
 
   beforeAll(async () => {
@@ -128,8 +136,13 @@ integration("generated CYOA world persistence", () => {
     ownerUserId = await initialOwnerId(pool);
 
     server = createServer((request, response) => {
-      request.resume();
+      let requestBody = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        requestBody += chunk;
+      });
       request.on("end", () => {
+        providerRequestBodies.push(JSON.parse(requestBody) as CompatibleProviderRequest);
         const reply = replies.shift();
         if (!reply) {
           response.writeHead(500, { "Content-Type": "application/json" });
@@ -164,6 +177,7 @@ integration("generated CYOA world persistence", () => {
 
   afterEach(() => {
     replies.length = 0;
+    providerRequestBodies.length = 0;
     for (const key of progressKeys) activeProgressMap.delete(key);
     progressKeys.clear();
   });
@@ -211,6 +225,15 @@ integration("generated CYOA world persistence", () => {
     return row;
   }
 
+  function expectThreeCharacterSupplementRequest() {
+    expect(providerRequestBodies).toHaveLength(2);
+    expect(replies).toHaveLength(0);
+    expect(providerRequestBodies[1]?.messages?.[0]).toEqual({
+      role: "system",
+      content: "You are repairing a generated Story World character roster. Incomplete existing entries are not part of the retained roster. Return JSON only with one object containing a playable_characters array with exactly 3 complete replacement characters. Each replacement must be distinct from retained characters and include id, name, non-empty character_text narrative guidance, profile with identity, story, appearance, and unclassifiedNotes, rpg_statistics, and default_triggers. Leave unknown profile subfields empty, but include the profile object. Keep prose compact enough to close the JSON object."
+    });
+  }
+
   it("repairs a manual preview without persisting world or import records", async () => {
     const progressKey = `manual-preview-success-${crypto.randomUUID()}`;
     replies.push(
@@ -235,6 +258,7 @@ integration("generated CYOA world persistence", () => {
       progressPercent: 100,
       message: "World and character generation completed."
     });
+    expectThreeCharacterSupplementRequest();
     expect(await persistenceCounts()).toEqual(before);
   });
 
@@ -272,6 +296,7 @@ integration("generated CYOA world persistence", () => {
     expect(progress?.errorMessage).toBe(progress?.message);
     expect(JSON.stringify(progress)).not.toContain(privateMarker);
     expect(progress?.message.length).toBeLessThanOrEqual(500);
+    expectThreeCharacterSupplementRequest();
     expect(await persistenceCounts()).toEqual(before);
   });
 
