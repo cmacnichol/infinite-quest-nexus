@@ -641,4 +641,17 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("elements.previewCampaignArchiveAgain.addEventListener");
     expect(managementScript).toContain("Your file is still selected; preview it again before importing.");
   });
+
+  it("retains auto-mode .story Campaign Archives for refresh and preview retry", () => {
+    const archiveFileStart = managementScript.indexOf("function campaignArchiveFileSelected()");
+    const archiveFileEnd = managementScript.indexOf("\nfunction clearCampaignArchivePreview()", archiveFileStart);
+    const archiveFilePredicate = managementScript.slice(archiveFileStart, archiveFileEnd);
+    expect(archiveFilePredicate).toContain('elements.importSourceType.value === "auto"');
+    expect(archiveFilePredicate).toContain('selectedFile?.name.toLowerCase().endsWith(".story")');
+    const retryStart = managementScript.indexOf('elements.previewCampaignArchiveAgain.addEventListener("click"');
+    const retryEnd = managementScript.indexOf("\nelements.worldSearch", retryStart);
+    const retryHandler = managementScript.slice(retryStart, retryEnd);
+    expect(retryHandler).toContain("campaignArchiveFileSelected()");
+    expect(retryHandler).toContain("previewCampaignArchive(selectedFile)");
+  });
 });
