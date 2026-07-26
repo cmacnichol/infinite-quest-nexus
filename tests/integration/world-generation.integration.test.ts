@@ -80,9 +80,9 @@ function profile(role: string) {
   };
 }
 
-function character(name: string, includeProfile: boolean, privateMarker = "") {
+function character(name: string, includeProfile: boolean, privateMarker = "", id?: string) {
   return {
-    id: `provider-${name.toLocaleLowerCase().replaceAll(" ", "-")}`,
+    id: id ?? `provider-${name.toLocaleLowerCase().replaceAll(" ", "-")}`,
     name,
     character_text: `${name} is prepared to explore the submerged citadel.${privateMarker}`,
     ...(includeProfile ? { profile: profile(name) } : {}),
@@ -121,7 +121,12 @@ function worldResponse(seedCount = 3): string {
 }
 
 function characterResponse(index: number, includeProfile = true, privateMarker = ""): string {
-  return JSON.stringify(character(`Explorer ${index}`, includeProfile, privateMarker));
+  return JSON.stringify(character(
+    `Explorer ${index}`,
+    includeProfile,
+    privateMarker,
+    includeProfile ? `seed-${index}` : undefined
+  ));
 }
 
 function providerEnvelope(content: string, responseId: string) {
