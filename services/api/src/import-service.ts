@@ -147,7 +147,7 @@ async function markArchivePreviewFailed(
     const updated = await pool.query<{ staged_archive_path: string }>(
       `UPDATE archive_previews
           SET status='failed',result=$2::jsonb,updated_at=now()
-        WHERE id=$1 AND token_hash=$3 AND staged_archive_path=$4 AND status='previewed'
+        WHERE id=$1 AND token_hash=$3 AND staged_archive_path=$4 AND status IN ('previewed','expired')
       RETURNING staged_archive_path`,
       [previewId, JSON.stringify({ error: error instanceof ArchiveError ? error.code : "archive-import-failed" }), tokenHash, stagedPath]
     );

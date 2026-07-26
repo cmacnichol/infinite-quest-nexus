@@ -336,18 +336,62 @@ export async function cleanupExpiredArchivePreviews(
   logger?: ArchiveCleanupLogger
 ): Promise<ArchivePreviewCleanupResult> {
   const ownerUserId = await initialOwnerId(pool);
-  const expiredPaths = (await pool.query<{ staged_archive_path: string }>(
+  const newlyExpired = await pool.query<{ id: string; staged_archive_path: string }>(
     `UPDATE archive_previews
-        SET status='expired',updated_at=now()
+        SET status='expired',
+            result=jsonb_set(
+              CASE WHEN jsonb_typeof(result)='object' THEN result ELSE '{}'::jsonb END,
+              '{stagingCleanupPending}',
+              'true'::jsonb,
+              true
+            ),
+            updated_at=now()
       WHERE owner_user_id=$1 AND archive_type='campaign' AND status='previewed' AND expires_at <= $2
-    RETURNING staged_archive_path`,
+    RETURNING id,staged_archive_path`,
     [ownerUserId, now]
-  )).rows.map((row) => row.staged_archive_path);
+  );
+  await pool.query(
+    `UPDATE archive_previews
+        SET result=jsonb_set(
+              CASE WHEN jsonb_typeof(result)='object' THEN result ELSE '{}'::jsonb END,
+              '{stagingCleanupPending}',
+              'true'::jsonb,
+              true
+            ),
+            updated_at=now()
+      WHERE owner_user_id=$1 AND archive_type='campaign' AND status='expired'
+        AND result->>'stagingCleanupPending' IS NULL`,
+    [ownerUserId]
+  );
+  const pending = await pool.query<{ id: string; staged_archive_path: string }>(
+    `SELECT id,staged_archive_path
+       FROM archive_previews
+      WHERE owner_user_id=$1 AND archive_type='campaign' AND status='expired'
+        AND result->>'stagingCleanupPending'='true'
+      ORDER BY updated_at,id`,
+    [ownerUserId]
+  );
   let cleanupFailureCount = 0;
-  for (const stagedPath of expiredPaths) {
-    if (!(await removeStagedPreviewPath(config, stagedPath, logger))) cleanupFailureCount += 1;
+  for (const row of pending.rows) {
+    if (!(await removeStagedPreviewPath(config, row.staged_archive_path, logger))) {
+      cleanupFailureCount += 1;
+      continue;
+    }
+    await pool.query(
+      `UPDATE archive_previews
+          SET result=jsonb_set(
+                CASE WHEN jsonb_typeof(result)='object' THEN result ELSE '{}'::jsonb END,
+                '{stagingCleanupPending}',
+                'false'::jsonb,
+                true
+              ),
+              updated_at=now()
+        WHERE id=$1 AND owner_user_id=$2 AND archive_type='campaign' AND status='expired'
+          AND staged_archive_path=$3`,
+      [row.id, ownerUserId, row.staged_archive_path]
+    );
   }
-  return { expiredCount: expiredPaths.length, cleanupFailureCount };
+  return { expiredCount: newlyExpired.rows.length, cleanupFailureCount };
 }
 
 function destinationHash(destination: ContractCampaignArchiveDestination): string {

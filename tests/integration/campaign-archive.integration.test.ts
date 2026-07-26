@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -322,8 +322,8 @@ integration("campaign archive export", () => {
 
   async function previewRow(previewToken: string) {
     const tokenHash = createHash("sha256").update(previewToken, "utf8").digest("hex");
-    return (await pool.query<{ staged_archive_path: string; status: string }>(
-      "SELECT staged_archive_path,status FROM archive_previews WHERE token_hash=$1",
+    return (await pool.query<{ staged_archive_path: string; status: string; result: Record<string, unknown> | null }>(
+      "SELECT staged_archive_path,status,result FROM archive_previews WHERE token_hash=$1",
       [tokenHash]
     )).rows[0]!;
   }
@@ -752,19 +752,36 @@ integration("campaign archive export", () => {
     await expect(previewRow(duplicatePreview.previewToken)).resolves.toMatchObject({ status: "consumed" });
   });
 
-  it("preview cleanup expires previews and removes their staged uploads", async () => {
+  it("preview cleanup retries expired staging after a transient deletion failure", async () => {
     const config = runtimeConfig();
     const staged = await stagedExport();
     const preview = await previewCampaignArchive(pool, config, staged, "cleanup-expired.zip", { kind: "embedded" });
+    const stagedBytes = await readFile(staged.absolutePath);
     await pool.query("UPDATE archive_previews SET expires_at=now() - interval '1 second' WHERE token_hash=$1", [
       createHash("sha256").update(preview.previewToken, "utf8").digest("hex")
     ]);
+    await unlink(staged.absolutePath);
+    await mkdir(staged.absolutePath);
 
     await expect(cleanupExpiredArchivePreviews(pool, config, new Date())).resolves.toMatchObject({
       expiredCount: 1,
+      cleanupFailureCount: 1
+    });
+    await expect(previewRow(preview.previewToken)).resolves.toMatchObject({
+      status: "expired",
+      result: { stagingCleanupPending: true }
+    });
+    await rmdir(staged.absolutePath);
+    await writeFile(staged.absolutePath, stagedBytes, { flag: "wx" });
+
+    await expect(cleanupExpiredArchivePreviews(pool, config, new Date())).resolves.toMatchObject({
+      expiredCount: 0,
       cleanupFailureCount: 0
     });
-    await expect(previewRow(preview.previewToken)).resolves.toMatchObject({ status: "expired" });
+    await expect(previewRow(preview.previewToken)).resolves.toMatchObject({
+      status: "expired",
+      result: { stagingCleanupPending: false }
+    });
     await expect(stat(staged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -808,6 +825,58 @@ integration("campaign archive export", () => {
     await completed;
     const preview = await previewCampaignArchive(pool, runtimeConfig(), await stageArchiveUpload(createReadStream(archivePath), root, limits), "manifest-less-legacy.zip", { kind: "embedded" });
     expect(preview.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/no archive manifest/i)]));
+  });
+
+  it("preview cleanup lets a failed commit supersede expiry after rollback", async () => {
+    const config = runtimeConfig();
+    const staged = await stagedExport();
+    const destination = await createCompatibleDestination("Expired rollback destination");
+    const preview = await previewCampaignArchive(pool, config, staged, "expired-rollback.zip", {
+      kind: "existing_world_version",
+      worldVersionId: destination.worldVersionId
+    });
+    const lockKey = Number.parseInt(randomUUID().slice(0, 7), 16);
+    const triggerSuffix = randomUUID().replaceAll("-", "");
+    const functionName = `campaign_archive_expired_failure_${triggerSuffix}`;
+    const triggerName = `campaign_archive_expired_failure_trigger_${triggerSuffix}`;
+    const blocker = await pool.connect();
+    let blockerReleased = false;
+    await blocker.query("SELECT pg_advisory_lock($1)", [lockKey]);
+    await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(${lockKey}); RAISE EXCEPTION 'forced expired archive failure'; END; $$`);
+    await pool.query(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON asset_references FOR EACH ROW EXECUTE FUNCTION ${functionName}()`);
+    const importResultPromise = importCampaignArchive(pool, config, { root }, {
+      previewToken: preview.previewToken,
+      destination: { kind: "existing_world_version", worldVersionId: destination.worldVersionId }
+    }).then(
+      () => ({ error: null }),
+      (error: unknown) => ({ error })
+    );
+    try {
+      await expect.poll(async () => Number((await pool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM pg_locks WHERE locktype='advisory' AND NOT granted"
+      )).rows[0]!.count), { interval: 10, timeout: 2_000 }).toBeGreaterThan(0);
+      const cleanupPromise = cleanupExpiredArchivePreviews(pool, config, new Date(Date.now() + 3_600_000));
+      await expect.poll(async () => Number((await pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM pg_stat_activity
+          WHERE datname=current_database() AND state='active' AND wait_event_type='Lock'
+            AND query ILIKE '%UPDATE archive_previews%'`
+      )).rows[0]!.count), { interval: 10, timeout: 2_000 }).toBeGreaterThan(0);
+      await blocker.query("SELECT pg_advisory_unlock($1)", [lockKey]);
+      blocker.release();
+      blockerReleased = true;
+      const [importResult] = await Promise.all([importResultPromise, cleanupPromise]);
+      expect(importResult.error).toMatchObject({ message: "forced expired archive failure" });
+    } finally {
+      if (!blockerReleased) {
+        await blocker.query("SELECT pg_advisory_unlock($1)", [lockKey]).catch(() => undefined);
+        blocker.release();
+      }
+      await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON asset_references`);
+      await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+    }
+    await expect(previewRow(preview.previewToken)).resolves.toMatchObject({ status: "failed" });
+    await expect(stat(staged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("preview cleanup marks failed commits failed and removes staging plus newly persisted archive originals", async () => {
