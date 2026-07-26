@@ -917,7 +917,6 @@ async function insertImportedRecords(
   ownerUserId: string,
   archive: DecodedCampaignArchive,
   idMap: ArchiveIdMap,
-  worldId: string,
   worldVersionId: string
 ): Promise<{ campaignId: string; turnCount: number; memoryCount: number; summaryCount: number }> {
   const sourceCampaign = objectValue(archive.campaign.campaign);
@@ -938,22 +937,6 @@ async function insertImportedRecords(
   for (const row of illustrationSegments) mapArchiveId(idMap, "illustrationSegment", objectValue(row).id);
   for (const memory of archive.chronicle.memories) mapArchiveId(idMap, "memory", objectValue(memory).id);
   for (const summary of archive.chronicle.summaries) mapArchiveId(idMap, "summary", objectValue(summary).id);
-
-  for (const migrationValue of migrations) {
-    const migration = objectValue(migrationValue);
-    for (const sourceVersion of [migration.from_world_version_id, migration.to_world_version_id]) {
-      if (typeof sourceVersion !== "string" || idMap.get("worldVersion")!.has(sourceVersion)) continue;
-      const versionNumber = await client.query<{ next_version: number }>(
-        "SELECT COALESCE(MAX(version_number),0)+1 AS next_version FROM world_versions WHERE world_id=$1 AND owner_user_id=$2", [worldId, ownerUserId]
-      );
-      const copied = await client.query<{ id: string }>(
-        `INSERT INTO world_versions (world_id,owner_user_id,version_number,content,source_hash)
-         VALUES ($1,$2,$3,$4::jsonb,$5) RETURNING id`,
-        [worldId, ownerUserId, versionNumber.rows[0]!.next_version, JSON.stringify(archive.world.content), archive.world.canonicalHash]
-      );
-      idMap.get("worldVersion")!.set(sourceVersion, copied.rows[0]!.id);
-    }
-  }
 
   const settings = objectValue(archive.campaign.settings);
   const title = String(sourceCampaign.title || "Imported campaign");
@@ -1007,8 +990,13 @@ async function insertImportedRecords(
   }
   for (const rowValue of migrations) {
     const row = objectValue(rowValue);
-    const fromVersion = requireMapped(idMap, "worldVersion", row.from_world_version_id);
-    const toVersion = requireMapped(idMap, "worldVersion", row.to_world_version_id);
+    const fromVersion = typeof row.from_world_version_id === "string"
+      ? idMap.get("worldVersion")!.get(row.from_world_version_id)
+      : undefined;
+    const toVersion = typeof row.to_world_version_id === "string"
+      ? idMap.get("worldVersion")!.get(row.to_world_version_id)
+      : undefined;
+    if (!fromVersion || !toVersion) continue;
     if (fromVersion === toVersion) continue;
     await client.query(
       `INSERT INTO campaign_world_migrations (id,owner_user_id,campaign_id,from_world_version_id,to_world_version_id,note,created_at)
@@ -1128,7 +1116,7 @@ export async function importCampaignArchive(
     const idMap = newArchiveIdMap();
     const destinationPreview = objectValue(preview.preview).destination;
     const world = await resolveImportedWorld(client, ownerUserId, archive, objectValue({ destination: destinationPreview }), idMap);
-    const inserted = await insertImportedRecords(client, ownerUserId, archive, idMap, world.worldId, world.worldVersionId);
+    const inserted = await insertImportedRecords(client, ownerUserId, archive, idMap, world.worldVersionId);
     const persisted = await persistArchiveAssets(client, assetStore, ownerUserId, archive.assets, idMap);
     createdPaths = persisted.createdPaths;
     const insertedGenerationContexts = new Set<string>();

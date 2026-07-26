@@ -625,6 +625,49 @@ integration("campaign archive export", () => {
     await expect(previewRow(preview.previewToken)).resolves.toMatchObject({ status: "consumed" });
   });
 
+  it("migration history omits audit rows whose world versions are not portable", async () => {
+    const destination = await createCompatibleDestination("Migration history destination");
+    const before = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM world_versions WHERE world_id=$1",
+      [destination.worldId]
+    );
+    const preview = await previewCampaignArchive(
+      pool,
+      runtimeConfig(),
+      await stagedExport(),
+      "migration-history.zip",
+      { kind: "existing_world_version", worldVersionId: destination.worldVersionId }
+    );
+
+    expect(preview.warnings).toContain(
+      "Migration history references source world versions not included in this Campaign Archive; those audit rows will not be recreated."
+    );
+
+    const imported = await importCampaignArchive(pool, runtimeConfig(), { root }, {
+      previewToken: preview.previewToken,
+      destination: { kind: "existing_world_version", worldVersionId: destination.worldVersionId }
+    });
+    const [after, importedCampaign, importedMigrations] = await Promise.all([
+      pool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM world_versions WHERE world_id=$1",
+        [destination.worldId]
+      ),
+      pool.query<{ world_version_id: string }>(
+        "SELECT world_version_id FROM campaigns WHERE id=$1",
+        [imported.campaignId]
+      ),
+      pool.query<{ from_world_version_id: string; to_world_version_id: string }>(
+        "SELECT from_world_version_id,to_world_version_id FROM campaign_world_migrations WHERE campaign_id=$1",
+        [imported.campaignId]
+      )
+    ]);
+
+    expect(after.rows[0]).toEqual(before.rows[0]);
+    expect(imported.worldVersionId).toBe(destination.worldVersionId);
+    expect(importedCampaign.rows).toEqual([{ world_version_id: destination.worldVersionId }]);
+    expect(importedMigrations.rows).toEqual([]);
+  });
+
   it("preview cleanup removes a superseded upload only after the replacement is stored", async () => {
     const config = runtimeConfig();
     const firstStaged = await stagedExport();

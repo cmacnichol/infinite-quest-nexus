@@ -53,6 +53,8 @@ export type ArchivePreviewCleanupResult = {
   cleanupFailureCount: number;
 };
 
+const migrationHistoryCompatibilityWarning = "Migration history references source world versions not included in this Campaign Archive; those audit rows will not be recreated.";
+
 const APPLICATION_VERSION = process.env.APP_VERSION?.trim() || process.env.npm_package_version?.trim() || "0.1.0";
 const campaignPayloadSchema = z.object({ world: z.unknown(), turns: z.array(z.unknown()) }).passthrough();
 const campaignAssetPayloadSchema = z.object({
@@ -471,6 +473,13 @@ async function readCampaignArchive(staged: StagedArchive, limits: ArchiveLimits)
   if (!records || typeof records !== "object" || (records as Record<string, unknown>).formatVersion !== 1) {
     throw new ArchiveError("archive-json-invalid", "The campaign archive records are invalid.", 400, { payload: "campaign" });
   }
+  const worldMigrations = (records as Record<string, unknown>).worldMigrations;
+  const migrationHistoryIsIncomplete = Array.isArray(worldMigrations) && worldMigrations.some((migrationValue) => {
+    const migration = archiveObject(migrationValue);
+    return [migration.from_world_version_id, migration.to_world_version_id].some(
+      (worldVersionId) => worldVersionId !== worldPayload.sourceWorldVersionId
+    );
+  });
   const assets = await validateArchiveAssets(inspected.manifest, (path) => readVerifiedEntry(inspected, path, limits.maxOriginalImageBytes));
   assertDeclaredPortableAssetPointers(
     campaign as PortableCampaignV3 & { archiveRecords: CampaignArchiveRecordsV1 },
@@ -484,7 +493,7 @@ async function readCampaignArchive(staged: StagedArchive, limits: ArchiveLimits)
     chronicle: chronicle as PortableCampaignChronicleV1,
     assets,
     contentFingerprint: actualFingerprint,
-    warnings: []
+    warnings: migrationHistoryIsIncomplete ? [migrationHistoryCompatibilityWarning] : []
   };
 }
 
