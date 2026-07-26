@@ -89,10 +89,15 @@ const supplementCharactersSchema = z.object({
   playable_characters: z.array(convertedPlayableCharacterSchema).max(10).default([])
 });
 
-function convertedCharacterId(name: string, index: number, supplied = ""): string {
-  if (supplied.trim()) return supplied.trim();
+function convertedCharacterId(name: string, index: number): string {
   const slug = name.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
   return `char-${index + 1}${slug ? `-${slug}` : ""}`;
+}
+
+export function applicationOwnedCharacterIds(
+  characters: ReadonlyArray<{ name: string; id?: string }>
+): string[] {
+  return characters.map((character, index) => convertedCharacterId(character.name, index));
 }
 
 function convertedRpgStats(items: unknown[], characterId: string) {
@@ -276,8 +281,9 @@ export async function generateTemplateWorld(
   }
 
   await onProgress?.("formatting", 85, "Formatting character roster and world attributes…");
+  const characterIds = applicationOwnedCharacterIds(rawCharacters);
   const playableCharacters = rawCharacters.map((character, index) => {
-    const id = convertedCharacterId(character.name, index, character.id);
+    const id = characterIds[index]!;
     return playableCharacterSchema.parse({
       id,
       name: character.name,

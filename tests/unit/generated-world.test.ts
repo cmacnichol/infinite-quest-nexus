@@ -3,6 +3,7 @@ import {
   generatedWorldIssues,
   parseCompleteGeneratedWorld
 } from "../../packages/domain/src/generated-world.js";
+import { applicationOwnedCharacterIds } from "../../services/api/src/world-generator-service.js";
 
 function profile() {
   return {
@@ -37,7 +38,7 @@ function profile() {
   };
 }
 
-function completeWorld() {
+function completeWorld(characterCount = 3) {
   return {
     world: {
       title: "The Moving Roads",
@@ -48,7 +49,7 @@ function completeWorld() {
       firstAction: "A forbidden road appears outside the city.",
       rules: "Every road remembers its maker."
     },
-    playableCharacters: [1, 2, 3].map((number) => ({
+    playableCharacters: Array.from({ length: characterCount }, (_, index) => index + 1).map((number) => ({
       id: `character-${number}`,
       name: `Character ${number}`,
       characterText: `Complete narrative guidance for character ${number}.`,
@@ -65,6 +66,14 @@ describe("generated world completion", () => {
     expect(parseCompleteGeneratedWorld(completeWorld()).playableCharacters).toHaveLength(3);
   });
 
+  it("accepts a complete world with four structured characters", () => {
+    expect(parseCompleteGeneratedWorld(completeWorld(4)).playableCharacters).toHaveLength(4);
+  });
+
+  it("rejects a world with five playable characters", () => {
+    expect(() => parseCompleteGeneratedWorld(completeWorld(5))).toThrow();
+  });
+
   it("rejects an empty characterText even when profile is complete", () => {
     const content = completeWorld();
     content.playableCharacters[1]!.characterText = "";
@@ -75,6 +84,23 @@ describe("generated world completion", () => {
     const content = completeWorld();
     delete (content.playableCharacters[1] as { profile?: unknown }).profile;
     expect(() => parseCompleteGeneratedWorld(content)).toThrow();
+  });
+
+  it("rejects duplicate canonical character IDs", () => {
+    const content = completeWorld();
+    content.playableCharacters[1]!.id = content.playableCharacters[0]!.id;
+    expect(() => parseCompleteGeneratedWorld(content)).toThrow();
+  });
+
+  it("replaces provider character IDs with unique application-owned IDs", () => {
+    const ids = applicationOwnedCharacterIds([
+      { id: "provider-character", name: "Lantern Keeper" },
+      { id: "provider-character", name: "Road Cartographer" },
+      { id: "provider-character", name: "Moon Courier" }
+    ]);
+
+    expect(ids).not.toContain("provider-character");
+    expect(new Set(ids).size).toBe(ids.length);
   });
 
   it("rejects missing world fields and character counts outside three to four", () => {

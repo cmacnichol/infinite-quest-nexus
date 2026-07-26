@@ -35,7 +35,16 @@ const generatedWorldBaseSchema = worldContentSchema.superRefine((content, contex
     });
   }
 
+  const characterIds = new Set<string>();
   content.playableCharacters.forEach((character, index) => {
+    if (characterIds.has(character.id)) {
+      context.addIssue({
+        code: "custom",
+        path: ["playableCharacters", index, "id"],
+        message: "Generated character IDs must be distinct."
+      });
+    }
+    characterIds.add(character.id);
     if (!character.characterText.trim()) {
       context.addIssue({
         code: "custom",
