@@ -3,10 +3,21 @@ import { migrateDatabase, waitForDatabaseMigrations } from "../../../packages/da
 import { buildServer } from "../../api/src/server.js";
 import { runWorker } from "../../worker/src/worker.js";
 import { logger } from "../../../packages/logger/src/index.js";
+import { createProviderNetworkPolicy } from "../../../packages/security/src/provider-network-policy.js";
+import {
+  configureDefaultProviderTransport,
+  createProviderTransport
+} from "../../../packages/story-engine/src/provider-transport.js";
 
 const config = loadRuntimeConfig();
 const pool = createDatabasePool(config.databaseUrl, config.databaseMaxConnections);
 const abortController = new AbortController();
+const providerTransport = createProviderTransport({
+  policy: createProviderNetworkPolicy({
+    allowlist: config.security.providerNetworkAllowlist
+  })
+});
+configureDefaultProviderTransport(providerTransport);
 
 async function shutdown(signal: string): Promise<void> {
   logger.info({ event: "shutdown_requested", signal });
@@ -46,5 +57,6 @@ try {
     await server.close();
   }
 } finally {
+  await providerTransport.close();
   await pool.end();
 }

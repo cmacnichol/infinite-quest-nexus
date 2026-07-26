@@ -1,12 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { ApiError, SogniClient, type ImageProjectParams, type Project, type RawProject, type SogniClientConfig } from "@sogni-ai/sogni-client";
+import { ProviderDestinationNotAllowedError } from "../../../../../security/src/provider-network-policy.js";
 import type { ImageProviderPollResult, ImageProviderRequest, ImageProviderSubmissionResult, ModelInventoryItem, TextProviderProfile } from "../../../providers.js";
 import { SogniProviderError, type NormalizedProviderError } from "../sogni/index.js";
 
 type Session = { client: SogniClient; key: string };
 type CachedSession = { pending: Promise<Session>; idleTimer?: NodeJS.Timeout };
 const sessions = new Map<string, CachedSession>();
+const SOGNI_SDK_ORIGIN = "https://api.sogni.ai";
 let createClient = (clientConfig: SogniClientConfig) => SogniClient.createInstance(clientConfig);
 
 function providerConfig(profile: TextProviderProfile): Record<string, unknown> {
@@ -38,6 +40,9 @@ function sdkBaseUrl(profile: TextProviderProfile): string {
 }
 
 async function session(profile: TextProviderProfile): Promise<Session> {
+  if (new URL(profile.baseUrl).origin !== SOGNI_SDK_ORIGIN) {
+    throw new ProviderDestinationNotAllowedError("url");
+  }
   if (!profile.apiKey?.trim()) throw new SogniProviderError({ code: "authentication_required", message: "Sogni SDK requires an API key.", retryable: false });
   const key = sessionKey(profile);
   const profilePrefix = `${String((profile as TextProviderProfile & { id?: string }).id || profile.baseUrl)}:`;

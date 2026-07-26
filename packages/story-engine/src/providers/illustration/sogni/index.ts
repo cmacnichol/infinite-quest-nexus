@@ -181,7 +181,7 @@ function workflowFrom(data: Record<string, any>): Record<string, any> {
 export async function submitSogniGeneration(
   profile: SogniProviderProfile,
   request: SogniGenerationRequest,
-  fetcher: Fetch = fetch
+  fetcher: Fetch
 ): Promise<SogniSubmissionResult> {
   if (!profile.model.trim()) {
     throw new SogniProviderError({ code: "model_required", message: "Select a Sogni image model before generating.", retryable: false });
@@ -255,7 +255,7 @@ function workflowFailure(workflow: Record<string, any>): NormalizedProviderError
 export async function pollSogniGeneration(
   profile: SogniProviderProfile,
   remoteJobId: string,
-  fetcher: Fetch = fetch
+  fetcher: Fetch
 ): Promise<SogniPollResult> {
   const id = remoteJobId.trim();
   if (!/^wf_[A-Za-z0-9._-]+$/.test(id)) {
@@ -293,7 +293,7 @@ export async function pollSogniGeneration(
 export async function cancelSogniGeneration(
   profile: SogniProviderProfile,
   remoteJobId: string,
-  fetcher: Fetch = fetch
+  fetcher: Fetch
 ): Promise<void> {
   const id = remoteJobId.trim();
   if (!/^wf_[A-Za-z0-9._-]+$/.test(id)) {

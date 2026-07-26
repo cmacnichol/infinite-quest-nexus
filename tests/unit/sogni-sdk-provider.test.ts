@@ -53,6 +53,23 @@ function fakeClient(overrides: Record<string, unknown> = {}) {
 afterEach(() => setSogniSdkClientFactoryForTests());
 
 describe("Sogni Supernet SDK provider", () => {
+  it("rejects non-official SDK origins before creating a client", async () => {
+    const createClient = vi.fn(async () => fakeClient());
+    setSogniSdkClientFactoryForTests(createClient);
+
+    await expect(submitSogniSdkGeneration({
+      ...profile,
+      baseUrl: "https://sogni-proxy.test"
+    }, {
+      prompt: "A moonlit fictional citadel.", size: "640x512", aspectRatio: "5:4", quality: "auto",
+      outputFormat: "png", imageCount: 1, idempotencyKey: "job-untrusted:0"
+    })).rejects.toMatchObject({
+      code: "PROVIDER_DESTINATION_NOT_ALLOWED",
+      stage: "url"
+    });
+    expect(createClient).not.toHaveBeenCalled();
+  });
+
   it("maps filter and advanced generation controls and reports live progress", async () => {
     const project = {
       id: "project-1", status: "processing", progress: 37, queuePosition: 2,
