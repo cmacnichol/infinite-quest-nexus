@@ -185,6 +185,21 @@ export type WorldGenerationFailureDiagnostic = {
   issues?: ReturnType<typeof generatedWorldIssues>;
 };
 
+function projectedGeneratedWorldIssues(value: unknown): ReturnType<typeof generatedWorldIssues> {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 20).flatMap((issue) => {
+    if (!issue || typeof issue !== "object") return [];
+    const candidate = issue as Record<string, unknown>;
+    return [{
+      path: typeof candidate.path === "string" ? candidate.path.slice(0, 500) : "",
+      code: typeof candidate.code === "string" ? candidate.code.slice(0, 100) : "custom",
+      message: typeof candidate.message === "string"
+        ? candidate.message.slice(0, 500)
+        : "Generated content is incomplete."
+    }];
+  });
+}
+
 export function worldGenerationFailureDiagnostic(error: unknown): WorldGenerationFailureDiagnostic {
   const failure = error && typeof error === "object" ? error as Record<string, unknown> : {};
   const rawStatusCode = Number(failure.statusCode);
@@ -196,11 +211,17 @@ export function worldGenerationFailureDiagnostic(error: unknown): WorldGeneratio
     : {};
   const detailsCode = details.code;
   if (detailsCode === "incomplete_generated_world") {
-    const issues = Array.isArray(details.issues)
-      ? details.issues.slice(0, 20) as ReturnType<typeof generatedWorldIssues>
-      : [];
+    const issues = projectedGeneratedWorldIssues(details.issues);
+    const issueSummary = issues
+      .slice(0, 4)
+      .map((issue) => `${issue.path || "generated world"}: ${issue.message}`)
+      .join(" ");
+    const message = [
+      "The text provider did not return a complete world. Review the missing fields and try again.",
+      issueSummary
+    ].filter(Boolean).join(" ").slice(0, 500);
     return {
-      message: "The text provider did not return a complete world. Review the missing fields and try again.",
+      message,
       statusCode: 502,
       code: "incomplete_generated_world",
       issues
@@ -456,7 +477,12 @@ export async function generateTemplateWorld(
     }));
   } catch (error) {
     if (!isGeneratedWorldValidationError(error)) throw error;
-    logger.error({ issues: generatedWorldIssues(error) }, "Generated world completion validation failed");
+    logger.error({
+      responseId: result.responseId,
+      finishReason: result.finishReason,
+      outputLimited: result.outputLimited,
+      issues: generatedWorldIssues(error)
+    }, "Generated world completion validation failed");
     throw incompleteGeneratedWorldError(error);
   }
 
@@ -551,7 +577,12 @@ export async function generateWorldPreview(
     );
   } catch (error) {
     const failure = worldGenerationFailureDiagnostic(error);
-    logger.error({ failure, progressKey }, "World preview generation failed");
+    logger.error({
+      progressKey,
+      statusCode: failure.statusCode,
+      code: failure.code,
+      issues: failure.issues
+    }, "World preview generation failed");
     if (progressKey) {
       await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
         status: "failed",

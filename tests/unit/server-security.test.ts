@@ -4,6 +4,8 @@ import { buildServer } from "../../services/api/src/server.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { logger } from "../../packages/logger/src/index.js";
+import { parseCompleteGeneratedWorld } from "../../packages/domain/src/generated-world.js";
+import { incompleteGeneratedWorldError } from "../../services/api/src/world-generator-service.js";
 
 function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
   return {
@@ -181,6 +183,41 @@ describe("API server security and CORS headers", () => {
     const body = JSON.parse(response.payload);
     expect(body.error).toBe("InvalidUuidError");
     expect(body.message).toContain("The provided ID is not a valid UUID.");
+
+    await app.close();
+  });
+
+  it("exposes only safe structured generated-world validation details", async () => {
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-error", async () => {
+      try {
+        parseCompleteGeneratedWorld({
+          world: { title: "PRIVATE_PROVIDER_WORLD" },
+          playableCharacters: []
+        });
+      } catch (error) {
+        throw incompleteGeneratedWorldError(error);
+      }
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-error",
+      headers: { "x-correlation-id": "generated-world-test" }
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toMatchObject({
+      message: expect.stringContaining("Correlation ID: generated-world-test."),
+      correlationId: "generated-world-test",
+      details: {
+        code: "incomplete_generated_world",
+        issues: expect.arrayContaining([
+          expect.objectContaining({ path: "world.genre" })
+        ])
+      }
+    });
+    expect(response.payload).not.toContain("PRIVATE_PROVIDER_WORLD");
 
     await app.close();
   });

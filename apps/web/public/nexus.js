@@ -281,6 +281,25 @@ async function api(path, options = {}) {
   return payload;
 }
 
+function worldGenerationFailureMessage(error) {
+  if (error?.details?.code !== "incomplete_generated_world") {
+    return error?.message || String(error);
+  }
+  const issues = Array.isArray(error.details?.issues) ? error.details.issues : [];
+  const missing = issues
+    .slice(0, 4)
+    .map((issue) => {
+      const path = typeof issue?.path === "string" && issue.path ? issue.path : "generated world";
+      const message = typeof issue?.message === "string" && issue.message
+        ? issue.message
+        : "Generated content is incomplete.";
+      return `${path}: ${message}`;
+    })
+    .join(" ");
+  const base = error?.message || "The text provider did not return a complete world.";
+  return missing ? `${base} ${missing}` : base;
+}
+
 function promptLibraryCampaignId() {
   return elements.promptLibraryScope?.value === "campaign" ? elements.promptLibraryCampaign?.value || "" : "";
 }
@@ -1452,7 +1471,7 @@ async function generateWorldFromPrompt() {
   } catch (error) {
     if (progressTimer) clearInterval(progressTimer);
     elements.worldGeneratorProgressContainer.classList.add("hidden");
-    setWorldAuthorStatus(error.message || String(error), "error");
+    setWorldAuthorStatus(worldGenerationFailureMessage(error), "error");
   } finally {
     if (progressTimer) clearInterval(progressTimer);
     worldAuthorBusy = false;
@@ -4339,7 +4358,7 @@ async function importStory() {
     }
   } catch (error) {
     if (progressTimer) clearInterval(progressTimer);
-    setStatus(error.message || String(error), "error");
+    setStatus(worldGenerationFailureMessage(error), "error");
   } finally {
     if (progressTimer) clearInterval(progressTimer);
     elements.importStory.disabled = !selectedImport;

@@ -9,7 +9,8 @@ import {
   applicationOwnedEventTriggers,
   applicationOwnedRpgStats,
   incompleteGeneratedWorldError,
-  selectCompleteGeneratedCharacters
+  selectCompleteGeneratedCharacters,
+  worldGenerationFailureDiagnostic
 } from "../../services/api/src/world-generator-service.js";
 
 function profile() {
@@ -213,5 +214,49 @@ describe("generated world completion", () => {
     });
     expect(failure.details.issues.some((issue) => issue.path === "world.genre")).toBe(true);
     expect(JSON.stringify(failure.details)).not.toContain("PRIVATE_TITLE");
+  });
+
+  it("formats at most four safe validation issues for durable progress", () => {
+    let validationError: unknown;
+    try {
+      parseCompleteGeneratedWorld({
+        world: { title: "PRIVATE_TITLE" },
+        playableCharacters: []
+      });
+    } catch (error) {
+      validationError = error;
+    }
+
+    const diagnostic = worldGenerationFailureDiagnostic(
+      incompleteGeneratedWorldError(validationError)
+    );
+
+    expect(diagnostic.message).toContain("world.genre: Generated genre is required.");
+    expect(diagnostic.message).toContain("world.backgroundStory: Generated background and canon are required.");
+    expect(diagnostic.message).not.toContain("world.firstAction");
+    expect(diagnostic.message).not.toContain("PRIVATE_TITLE");
+    expect(diagnostic.message.length).toBeLessThanOrEqual(500);
+  });
+
+  it("drops rejected values from diagnostic issue objects", () => {
+    const diagnostic = worldGenerationFailureDiagnostic({
+      statusCode: 502,
+      details: {
+        code: "incomplete_generated_world",
+        issues: [{
+          path: "world.genre",
+          code: "custom",
+          message: "Generated genre is required.",
+          value: "PRIVATE_REJECTED_VALUE"
+        }]
+      }
+    });
+
+    expect(diagnostic.issues).toEqual([{
+      path: "world.genre",
+      code: "custom",
+      message: "Generated genre is required."
+    }]);
+    expect(JSON.stringify(diagnostic)).not.toContain("PRIVATE_REJECTED_VALUE");
   });
 });

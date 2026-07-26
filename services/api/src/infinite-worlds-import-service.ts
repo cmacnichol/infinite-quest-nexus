@@ -29,6 +29,7 @@ import {
   generateTemplateWorld,
   worldGenerationFailureDiagnostic
 } from "./world-generator-service.js";
+import { logger } from "../../../packages/logger/src/index.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import {
   promptFromSnapshot,
@@ -505,6 +506,12 @@ export async function importInfiniteWorlds(
       return { kind: "world" as const, ...result };
     } catch (error) {
       const failure = worldGenerationFailureDiagnostic(error);
+      logger.error({
+        progressKey,
+        statusCode: failure.statusCode,
+        code: failure.code,
+        issues: failure.issues
+      }, "CYOA world generation failed");
       activeProgressMap.set(progressKey, {
         status: "failed",
         phase: "failed",
