@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { resolve } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createDatabasePool,
   initialOwnerId,
@@ -10,12 +10,14 @@ import {
 } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createProviderNetworkPolicy } from "../../packages/security/src/provider-network-policy.js";
+import { MAX_PROVIDER_JSON_RESPONSE_BYTES } from "../../packages/story-engine/src/provider-response.js";
 import {
   configureDefaultProviderTransport,
   createProviderTransport,
   type ProviderTransport
 } from "../../packages/story-engine/src/provider-transport.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
+import { logger } from "../../packages/logger/src/index.js";
 import {
   activeProgressMap,
   getImportProgress,
@@ -32,6 +34,7 @@ type MockProviderReply = {
   status?: number;
   content?: string;
   error?: string;
+  declaredLength?: number;
 };
 
 type CompatibleProviderRequest = {
@@ -119,6 +122,7 @@ integration("generated CYOA world persistence", () => {
   let server: Server;
   let transport: ProviderTransport;
   let providerId = "";
+  let blockedProviderId = "";
   let ownerUserId = "";
   const replies: MockProviderReply[] = [];
   const providerRequestBodies: CompatibleProviderRequest[] = [];
@@ -150,7 +154,10 @@ integration("generated CYOA world persistence", () => {
           return;
         }
         const status = reply.status ?? 200;
-        response.writeHead(status, { "Content-Type": "application/json" });
+        response.writeHead(status, {
+          "Content-Type": "application/json",
+          ...(reply.declaredLength ? { "Content-Length": String(reply.declaredLength) } : {})
+        });
         response.end(status >= 400
           ? JSON.stringify({ error: { message: reply.error ?? "Provider failed." } })
           : providerEnvelope(reply.content ?? "", crypto.randomUUID()));
@@ -173,6 +180,19 @@ integration("generated CYOA world persistence", () => {
       configuration: {}
     }, credentialSecret);
     providerId = provider.id;
+    const blockedProvider = await createProvider(pool, {
+      name: "Blocked Generated CYOA Integration Provider",
+      providerType: "openai_compatible",
+      providerRole: "text",
+      baseUrl: "http://192.0.2.1/v1",
+      defaultModel: "blocked-generated-cyoa-test-model",
+      contextWindowTokens: 32768,
+      maxOutputTokens: 4096,
+      temperature: 0,
+      enabled: true,
+      configuration: {}
+    }, credentialSecret);
+    blockedProviderId = blockedProvider.id;
   });
 
   afterEach(() => {
@@ -188,9 +208,17 @@ integration("generated CYOA world persistence", () => {
     if (pool) await pool.end();
   });
 
-  function request(sourceName: string) {
+  function request(
+    sourceName: string,
+    options: { providerProfileId?: string; privateMarker?: string } = {}
+  ) {
     const fixturePath = path.resolve(__dirname, "../fixtures/cyoa_writing_com_sample.json");
-    const sourceText = fs.readFileSync(fixturePath, "utf8");
+    let sourceText = fs.readFileSync(fixturePath, "utf8");
+    if (options.privateMarker) {
+      const source = JSON.parse(sourceText) as { info: { description: string } };
+      source.info.description = `${options.privateMarker}: private lore`;
+      sourceText = JSON.stringify(source);
+    }
     const progressKey = `${sourceName}:${sourceText.length}`;
     progressKeys.add(progressKey);
     return {
@@ -201,7 +229,7 @@ integration("generated CYOA world persistence", () => {
         sourceKind: "cyoa_json" as const,
         selectedCharacterIndex: 0,
         enrichFinalTurn: false,
-        providerProfileId: providerId
+        providerProfileId: options.providerProfileId ?? providerId
       }
     };
   }
@@ -394,5 +422,72 @@ integration("generated CYOA world persistence", () => {
       errorMessage: "The text provider request failed with HTTP 500. Check the provider endpoint and server logs."
     });
     expect(JSON.stringify(progress)).not.toContain(privateMarker);
+  });
+
+  it.each([
+    {
+      label: "destination policy",
+      prepare: (marker: string) => ({
+        providerProfileId: blockedProviderId,
+        expectedStatus: 422,
+        expectedCode: "PROVIDER_DESTINATION_NOT_ALLOWED",
+        expectedMessage: "The provider destination is not allowed by the server network policy."
+      })
+    },
+    {
+      label: "response size",
+      prepare: (marker: string) => {
+        replies.push({
+          content: marker,
+          declaredLength: MAX_PROVIDER_JSON_RESPONSE_BYTES + 1
+        });
+        return {
+          providerProfileId: providerId,
+          expectedStatus: 502,
+          expectedCode: "provider_response_too_large",
+          expectedMessage: "The provider response exceeded the server's safe size limit."
+        };
+      }
+    }
+  ])("keeps CYOA $label failures typed and private in logs and progress", async ({ prepare }) => {
+    const marker = `SECRET_AT_START_OF_CYOA_TYPED_FAILURE_${crypto.randomUUID()}`;
+    const expected = prepare(marker);
+    const generatedRequest = request(`typed-provider-failure-${crypto.randomUUID()}.json`, {
+      providerProfileId: expected.providerProfileId,
+      privateMarker: marker
+    });
+    const errorLog = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    let errorLogCalls: unknown[][] = [];
+    let thrown: unknown;
+
+    try {
+      await importInfiniteWorlds(pool, generatedRequest.value, credentialSecret);
+    } catch (error) {
+      thrown = error;
+    } finally {
+      errorLogCalls = [...errorLog.mock.calls];
+      errorLog.mockRestore();
+    }
+
+    expect(thrown).toMatchObject({
+      statusCode: expected.expectedStatus,
+      code: expected.expectedCode,
+      permanent: true,
+      retryable: false
+    });
+    expect(getImportProgress(generatedRequest.progressKey)).toMatchObject({
+      status: "failed",
+      phase: "failed",
+      message: expected.expectedMessage,
+      errorMessage: expected.expectedMessage
+    });
+    expect(errorLogCalls.at(-1)?.[0]).toMatchObject({
+      statusCode: expected.expectedStatus,
+      code: expected.expectedCode
+    });
+    expect(JSON.stringify({ thrown, progress: getImportProgress(generatedRequest.progressKey), errorLogCalls }))
+      .not.toContain(marker);
+    expect(JSON.stringify({ thrown, progress: getImportProgress(generatedRequest.progressKey), errorLogCalls }))
+      .not.toContain(credentialSecret);
   });
 });

@@ -6,6 +6,8 @@ import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { logger } from "../../packages/logger/src/index.js";
 import { parseCompleteGeneratedWorld } from "../../packages/domain/src/generated-world.js";
+import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
+import { ProviderResponseTooLargeError } from "../../packages/story-engine/src/provider-response.js";
 import {
   generatedWorldProviderError,
   incompleteGeneratedWorldError
@@ -321,6 +323,74 @@ describe("API server security and CORS headers", () => {
         code: "provider_http_error",
         category: "http",
         providerStatus: 429
+      }
+    });
+    expect(response.payload).not.toContain(marker);
+    expect(JSON.stringify(errorLogs)).not.toContain(marker);
+
+    await app.close();
+  });
+
+  it.each([
+    {
+      label: "destination policy",
+      rawError: () => new ProviderDestinationNotAllowedError("dns"),
+      expectedStatus: 422,
+      expectedName: "ProviderDestinationNotAllowedError",
+      expectedCode: "PROVIDER_DESTINATION_NOT_ALLOWED",
+      expectedCategory: "destination",
+      expectedMessage: "The provider destination is not allowed by the server network policy."
+    },
+    {
+      label: "response size",
+      rawError: () => new ProviderResponseTooLargeError(4 * 1024 * 1024),
+      expectedStatus: 502,
+      expectedName: "ProviderResponseTooLargeError",
+      expectedCode: "provider_response_too_large",
+      expectedCategory: "response_limit",
+      expectedMessage: "The provider response exceeded the server's safe size limit."
+    }
+  ])("exposes and logs only controlled generated-world $label details", async ({
+    rawError,
+    expectedStatus,
+    expectedName,
+    expectedCode,
+    expectedCategory,
+    expectedMessage
+  }) => {
+    const marker = "SECRET_AT_START_OF_TYPED_PROVIDER_API_FAILURE";
+    const safeProviderError = generatedWorldProviderError(Object.assign(rawError(), {
+      cause: new Error(`${marker}: private cause`),
+      providerMessage: `${marker}: private provider body`,
+      prompt: `${marker}: private lore`,
+      credentials: `${marker}: private credentials`
+    }));
+    const errorLogs: unknown[] = [];
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-typed-provider-error", async (request) => {
+      (request.log as unknown as { error: (...args: unknown[]) => void }).error = (...args) => {
+        errorLogs.push(args);
+      };
+      throw safeProviderError;
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-typed-provider-error",
+      headers: { "x-correlation-id": "typed-provider-test" }
+    });
+
+    expect(response.statusCode).toBe(expectedStatus);
+    expect(response.json()).toMatchObject({
+      error: expectedName,
+      message: `${expectedMessage} Correlation ID: typed-provider-test.`,
+      correlationId: "typed-provider-test",
+      code: expectedCode,
+      details: {
+        code: expectedCode,
+        category: expectedCategory,
+        permanent: true,
+        retryable: false
       }
     });
     expect(response.payload).not.toContain(marker);

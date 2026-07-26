@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 import { logger } from "../../packages/logger/src/index.js";
+import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
+import { ProviderResponseTooLargeError } from "../../packages/story-engine/src/provider-response.js";
 import {
   ProviderTransportError,
   type ProviderRequest,
@@ -351,6 +353,68 @@ describe("generateTemplateWorld orchestration", () => {
     expect(harness.requests).toHaveLength(1);
   });
 
+  it.each([
+    {
+      label: "destination policy",
+      rawError: () => new ProviderDestinationNotAllowedError("address"),
+      expected: {
+        name: "ProviderDestinationNotAllowedError",
+        message: "The provider destination is not allowed by the server network policy.",
+        statusCode: 422,
+        code: "PROVIDER_DESTINATION_NOT_ALLOWED",
+        details: {
+          code: "PROVIDER_DESTINATION_NOT_ALLOWED",
+          category: "destination",
+          permanent: true,
+          retryable: false
+        }
+      }
+    },
+    {
+      label: "response size",
+      rawError: () => new ProviderResponseTooLargeError(4 * 1024 * 1024),
+      expected: {
+        name: "ProviderResponseTooLargeError",
+        message: "The provider response exceeded the server's safe size limit.",
+        statusCode: 502,
+        code: "provider_response_too_large",
+        details: {
+          code: "provider_response_too_large",
+          category: "response_limit",
+          permanent: true,
+          retryable: false
+        }
+      }
+    }
+  ])("preserves the safe typed $label boundary without retaining private data", async ({ rawError, expected }) => {
+    const marker = "SECRET_AT_START_OF_TYPED_PROVIDER_FAILURE";
+    const providerError = Object.assign(rawError(), {
+      cause: new Error(`${marker}: private cause`),
+      providerMessage: `${marker}: private provider body`,
+      prompt: `${marker}: private prompt`,
+      credentials: `${marker}: private credentials`
+    });
+    const harness = generationHarness([providerError]);
+
+    let thrown: unknown;
+    try {
+      await harness.run();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).not.toBe(providerError);
+    expect(thrown).toMatchObject({
+      ...expected,
+      expose: true,
+      permanent: true,
+      retryable: false
+    });
+    expect(thrown).not.toHaveProperty("cause");
+    expect(JSON.stringify(thrown)).not.toContain(marker);
+    expect(harness.requests).toHaveLength(1);
+  });
+
   it("caps a provider roster at four complete characters", async () => {
     const harness = generationHarness([
       providerResult(worldResponse([
@@ -561,5 +625,92 @@ describe("generateWorldPreview provider failures", () => {
     expect(persisted.message.length).toBeLessThanOrEqual(500);
     expect(JSON.stringify({ progressUpdates, errorLogs: errorLogCalls })).not.toContain(privateMarker);
     expect(JSON.stringify({ progressUpdates, errorLogs: errorLogCalls })).not.toContain("PRIVATE_WORLD_PROMPT");
+  });
+
+  it.each([
+    {
+      label: "destination policy",
+      rawError: () => new ProviderDestinationNotAllowedError("redirect"),
+      expectedStatus: 422,
+      expectedCode: "PROVIDER_DESTINATION_NOT_ALLOWED",
+      expectedMessage: "The provider destination is not allowed by the server network policy."
+    },
+    {
+      label: "response size",
+      rawError: () => new ProviderResponseTooLargeError(4 * 1024 * 1024),
+      expectedStatus: 502,
+      expectedCode: "provider_response_too_large",
+      expectedMessage: "The provider response exceeded the server's safe size limit."
+    }
+  ])("keeps $label preview logs and progress typed, static, and private", async ({
+    rawError,
+    expectedStatus,
+    expectedCode,
+    expectedMessage
+  }) => {
+    const marker = "SECRET_AT_START_OF_PREVIEW_FAILURE";
+    const safeProviderError = generatedWorldProviderError(Object.assign(rawError(), {
+      cause: new Error(`${marker}: private cause`),
+      providerMessage: `${marker}: private provider body`,
+      prompt: `${marker}: private lore`,
+      credentials: `${marker}: private credentials`
+    }));
+    const progressUpdates: unknown[] = [];
+    const dependencies = {
+      initialOwnerId: async () => "owner-id",
+      resolveEffectiveProviderId: async () => "provider-id",
+      createWorldGenerationProgress: async () => undefined,
+      updateWorldGenerationProgress: async (
+        _pool: unknown,
+        _ownerUserId: string,
+        _progressKey: string,
+        progress: unknown
+      ) => {
+        progressUpdates.push(progress);
+      },
+      generateTemplateWorld: async () => {
+        throw safeProviderError;
+      }
+    } as unknown as WorldGenerationPreviewDependencies;
+    const errorLog = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    let errorLogCalls: unknown[][] = [];
+    let thrown: unknown;
+
+    try {
+      await generateWorldPreview(
+        {} as never,
+        {
+          title: "The Moving Roads",
+          prompt: `${marker}: PRIVATE_WORLD_PROMPT`,
+          progressKey: "world-gen:typed-provider-failure"
+        },
+        `${marker}: credential-secret`,
+        dependencies
+      );
+    } catch (error) {
+      thrown = error;
+    } finally {
+      errorLogCalls = [...errorLog.mock.calls];
+      errorLog.mockRestore();
+    }
+
+    expect(thrown).toBe(safeProviderError);
+    expect(thrown).toMatchObject({
+      statusCode: expectedStatus,
+      code: expectedCode,
+      permanent: true,
+      retryable: false
+    });
+    expect(progressUpdates.at(-1)).toMatchObject({
+      status: "failed",
+      phase: "failed",
+      message: expectedMessage,
+      errorMessage: expectedMessage
+    });
+    expect(errorLogCalls.at(-1)?.[0]).toMatchObject({
+      statusCode: expectedStatus,
+      code: expectedCode
+    });
+    expect(JSON.stringify({ thrown, progressUpdates, errorLogCalls })).not.toContain(marker);
   });
 });

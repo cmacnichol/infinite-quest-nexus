@@ -26,6 +26,8 @@ import {
   projectGeneratedWorldIssues
 } from "../../../packages/domain/src/generated-world.js";
 import { buildTemplateWorldPrompt, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
+import { ProviderDestinationNotAllowedError } from "../../../packages/security/src/provider-network-policy.js";
+import { ProviderResponseTooLargeError } from "../../../packages/story-engine/src/provider-response.js";
 import {
   callTextProvider,
   extractJsonObject,
@@ -195,13 +197,60 @@ export function incompleteGeneratedWorldError(error?: unknown): Error {
 export type WorldGenerationFailureDiagnostic = {
   message: string;
   statusCode?: number;
-  code?: "incomplete_generated_world" | "provider_http_error" | "provider_request_timeout" | "provider_transport_error" | "provider_error";
+  code?: "incomplete_generated_world"
+    | "PROVIDER_DESTINATION_NOT_ALLOWED"
+    | "provider_response_too_large"
+    | "provider_http_error"
+    | "provider_request_timeout"
+    | "provider_transport_error"
+    | "provider_error";
   issues?: ReturnType<typeof generatedWorldIssues>;
 };
 
 type WorldGenerationProviderCategory = "http" | "timeout" | "transport" | "provider";
 
+function permanentGeneratedWorldProviderError(input: {
+  name: "ProviderDestinationNotAllowedError" | "ProviderResponseTooLargeError";
+  message: string;
+  statusCode: 422 | 502;
+  code: "PROVIDER_DESTINATION_NOT_ALLOWED" | "provider_response_too_large";
+  category: "destination" | "response_limit";
+}): Error {
+  return Object.assign(new Error(input.message), {
+    name: input.name,
+    statusCode: input.statusCode,
+    expose: true,
+    code: input.code,
+    permanent: true,
+    retryable: false,
+    details: {
+      code: input.code,
+      category: input.category,
+      permanent: true,
+      retryable: false
+    }
+  });
+}
+
 export function generatedWorldProviderError(error: unknown): Error {
+  if (error instanceof ProviderDestinationNotAllowedError) {
+    return permanentGeneratedWorldProviderError({
+      name: "ProviderDestinationNotAllowedError",
+      message: "The provider destination is not allowed by the server network policy.",
+      statusCode: 422,
+      code: "PROVIDER_DESTINATION_NOT_ALLOWED",
+      category: "destination"
+    });
+  }
+  if (error instanceof ProviderResponseTooLargeError) {
+    return permanentGeneratedWorldProviderError({
+      name: "ProviderResponseTooLargeError",
+      message: "The provider response exceeded the server's safe size limit.",
+      statusCode: 502,
+      code: "provider_response_too_large",
+      category: "response_limit"
+    });
+  }
   const failure = error && typeof error === "object" ? error as Record<string, unknown> : {};
   const transport = providerTransportErrorDetails(error);
   const rawStatusCode = Number(failure.statusCode);
@@ -270,6 +319,22 @@ export function worldGenerationFailureDiagnostic(error: unknown): WorldGeneratio
     ? failure.details as Record<string, unknown>
     : {};
   const detailsCode = details.code;
+  if (detailsCode === "PROVIDER_DESTINATION_NOT_ALLOWED"
+    || failure.code === "PROVIDER_DESTINATION_NOT_ALLOWED") {
+    return {
+      message: "The provider destination is not allowed by the server network policy.",
+      statusCode: 422,
+      code: "PROVIDER_DESTINATION_NOT_ALLOWED"
+    };
+  }
+  if (detailsCode === "provider_response_too_large"
+    || failure.code === "provider_response_too_large") {
+    return {
+      message: "The provider response exceeded the server's safe size limit.",
+      statusCode: 502,
+      code: "provider_response_too_large"
+    };
+  }
   if (detailsCode === "incomplete_generated_world") {
     const issues = projectGeneratedWorldIssues(details.issues);
     const issueSummary = issues
