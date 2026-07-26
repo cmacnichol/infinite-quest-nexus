@@ -19,6 +19,7 @@ docs/ENHANCEMENTS.local.md
 docs/*.local.md
 /.kangentic
 kangentic.json
+/.worktrees/
 /.repowise
 .repowise/.update.queued
 .repowise/centrality_cache.pkl
