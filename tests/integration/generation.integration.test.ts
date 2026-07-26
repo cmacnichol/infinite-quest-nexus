@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
@@ -14,6 +14,7 @@ import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
 import { createProviderNetworkPolicy } from "../../packages/security/src/provider-network-policy.js";
 import { configureDefaultProviderTransport, createProviderTransport } from "../../packages/story-engine/src/provider-transport.js";
+import { logger } from "../../packages/logger/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -936,6 +937,68 @@ integration("durable Story Engine integration", () => {
       expect(turn.rows[0]?.narration).toBe("Her practiced touch opens Location Gamma.");
     } finally {
       await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+    }
+  });
+
+  it("logs correlated generation lifecycle and recovery metadata without private story content", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaign_memory_configs SET embedding_enabled = false WHERE campaign_id = $1", [imported.campaignId]);
+    const streamedDraft = validStory("Private streamed marker: she rolls a 17 and opens Location Gamma.");
+    const acceptedStory = validStory("Her practiced touch opens Location Gamma.");
+    const infoSpy = vi.spyOn(logger, "info");
+    const warnSpy = vi.spyOn(logger, "warn");
+    const errorSpy = vi.spyOn(logger, "error");
+    try {
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+      replies.push(
+        { content: streamedDraft, streamChunks: [streamedDraft] },
+        { content: acceptedStory }
+      );
+      const job = await queue(imported.campaignId);
+      await runGenerationJob(pool, "story-worker-lifecycle-logs", 30, credentialSecret);
+
+      const events = [...infoSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls]
+        .map(([event]) => event)
+        .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null && "event" in event);
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          event: "turn_generation_claimed",
+          generationJobId: job.id,
+          campaignId: imported.campaignId,
+          jobAttempt: 1
+        }),
+        expect.objectContaining({
+          event: "turn_generation_provider_started",
+          storyOperation: "story_generation",
+          streaming: true
+        }),
+        expect.objectContaining({
+          event: "turn_generation_recovery_started",
+          recoveryKind: "mechanics_cleanup"
+        }),
+        expect.objectContaining({
+          event: "turn_generation_provider_started",
+          storyOperation: "story_recovery",
+          streaming: false
+        }),
+        expect.objectContaining({
+          event: "turn_generation_completed",
+          generationJobId: job.id,
+          resultTurnId: expect.any(String)
+        })
+      ]));
+
+      const serializedLogs = JSON.stringify([...infoSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls]);
+      expect(serializedLogs).not.toContain("Private streamed marker");
+      expect(serializedLogs).not.toContain("Private synthetic continuity marker");
+      expect(serializedLogs).not.toContain(credentialSecret);
+      expect(serializedLogs).not.toContain(streamedDraft);
+      expect(serializedLogs).not.toContain(acceptedStory);
+    } finally {
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+      infoSpy.mockRestore();
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
     }
   });
 

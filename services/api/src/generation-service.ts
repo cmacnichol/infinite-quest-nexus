@@ -81,6 +81,7 @@ import {
 import { attributeGenerationCostsToTurn, recordProfileCost, turnReportedCosts } from "./cost-service.js";
 import { promptFromSnapshot, promptProtocolVersion, resolvePromptSnapshot, type PromptSnapshot } from "./prompt-library-service.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
+import { logger } from "../../../packages/logger/src/index.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
 
@@ -157,6 +158,18 @@ type ClaimedJob = {
   streaming_segments_state?: unknown;
 };
 
+function generationLogContext(job: Pick<ClaimedJob, "id" | "campaign_id" | "provider_profile_id" | "expected_turn_number" | "operation_kind" | "attempts">, workerId?: string) {
+  return {
+    generationJobId: job.id,
+    campaignId: job.campaign_id,
+    providerProfileId: job.provider_profile_id,
+    expectedTurnNumber: job.expected_turn_number,
+    operationKind: job.operation_kind,
+    jobAttempt: job.attempts,
+    ...(workerId ? { workerId } : {})
+  };
+}
+
 export function safeTurnInput(value: string): string {
   const trimmed = value.trim();
   const matches = mechanicsLanguageMatches(trimmed);
@@ -221,6 +234,16 @@ async function callCampaignTextProvider(
   operation: StoryCostOperation,
   request: Parameters<typeof callTextProvider>[1]
 ) {
+  const startedAt = Date.now();
+  logger.info({
+    event: "turn_generation_provider_started",
+    ...generationLogContext(job),
+    storyOperation: operation,
+    providerType: provider.providerType,
+    requestedModel: provider.model,
+    streaming: typeof request.onChunk === "function",
+    recovery: Boolean(request.recoveryInput)
+  });
   try {
     const result = await callTextProvider(provider, request);
     await recordProfileCost(pool, provider, {
@@ -230,6 +253,23 @@ async function callCampaignTextProvider(
       category: "story",
       operation
     }, result);
+    logger.info({
+      event: "turn_generation_provider_completed",
+      ...generationLogContext(job),
+      storyOperation: operation,
+      providerType: provider.providerType,
+      requestedModel: provider.model,
+      streaming: typeof request.onChunk === "function",
+      recovery: Boolean(request.recoveryInput),
+      providerResponseId: result.responseId || null,
+      finishReason: result.finishReason || null,
+      outputLimited: result.outputLimited,
+      modelInstanceId: result.modelInstanceId || null,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      totalTokens: result.usage.totalTokens,
+      durationMs: Date.now() - startedAt
+    });
     return result;
   } catch (error) {
     logProviderTransportError(error, {
@@ -237,6 +277,22 @@ async function callCampaignTextProvider(
       campaignId: job.campaign_id,
       providerProfileId: job.provider_profile_id,
       storyOperation: operation
+    });
+    const transportError = providerTransportErrorDetails(error);
+    const errorCode = transportError?.transportCode
+      || (typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : null);
+    logger.warn({
+      event: "turn_generation_provider_failed",
+      ...generationLogContext(job),
+      storyOperation: operation,
+      providerType: provider.providerType,
+      requestedModel: provider.model,
+      streaming: typeof request.onChunk === "function",
+      recovery: Boolean(request.recoveryInput),
+      errorName: error instanceof Error ? error.name : "Error",
+      ...(errorCode ? { errorCode } : {}),
+      transportTimedOut: Boolean(transportError?.timedOut),
+      durationMs: Date.now() - startedAt
     });
     throw error;
   }
@@ -560,10 +616,15 @@ export async function retryGeneration(pool: DatabasePool, jobId: string) {
             lease_owner = NULL, lease_expires_at = NULL,
             error_code = NULL, error_message = NULL, prompt_protocol_version = $3, updated_at = now()
       WHERE id = $1 AND owner_user_id = $2 AND status IN ('recoverable', 'failed')
-      RETURNING id, status`, [jobId, ownerUserId, STORY_PROMPT_PROTOCOL_VERSION]
+      RETURNING id, status, campaign_id, provider_profile_id, expected_turn_number, operation_kind, attempts`, [jobId, ownerUserId, STORY_PROMPT_PROTOCOL_VERSION]
   );
-  if (!result.rows[0]) throw Object.assign(new Error("Only recoverable or failed generation jobs can be retried."), { statusCode: 409 });
-  return result.rows[0];
+  const requeued = result.rows[0];
+  if (!requeued) throw Object.assign(new Error("Only recoverable or failed generation jobs can be retried."), { statusCode: 409 });
+  logger.info({
+    event: "turn_generation_requeued",
+    ...generationLogContext(requeued)
+  });
+  return { id: requeued.id, status: requeued.status };
 }
 
 export async function discardGeneration(pool: DatabasePool, jobId: string) {
@@ -1054,7 +1115,7 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
 }
 
 export async function claimGeneration(pool: DatabasePool, workerId: string, leaseSeconds: number): Promise<ClaimedJob | null> {
-  return withTransaction(pool, async (client) => {
+  const claimed = await withTransaction(pool, async (client) => {
     const result = await client.query<ClaimedJob>(
       `WITH candidate AS (
          SELECT id FROM generation_jobs
@@ -1074,6 +1135,14 @@ export async function claimGeneration(pool: DatabasePool, workerId: string, leas
     );
     return result.rows[0] ?? null;
   });
+  if (claimed) {
+    logger.info({
+      event: "turn_generation_claimed",
+      ...generationLogContext(claimed, workerId),
+      leaseSeconds
+    });
+  }
+  return claimed;
 }
 
 function mergedTrackers(current: unknown, updates: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
@@ -1384,6 +1453,11 @@ async function commitStory(
 }
 
 export async function executeGenerationJob(pool: DatabasePool, workerId: string, job: ClaimedJob, leaseSeconds: number, credentialSecret: string): Promise<boolean> {
+  const generationStartedAt = Date.now();
+  logger.info({
+    event: "turn_generation_started",
+    ...generationLogContext(job, workerId)
+  });
   const heartbeat = setInterval(() => {
     void pool.query(
       `UPDATE generation_jobs SET lease_expires_at = now() + ($3::text || ' seconds')::interval, updated_at = now()
@@ -1527,6 +1601,9 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
 
     let lastPartialUpdate = 0;
     let lastPartialContent = "";
+    let lastStreamLogAt = 0;
+    let lastStreamLogChars = 0;
+    let lastStreamPersistWarningAt = 0;
     const onChunk = async (_delta: string, accumulated: string) => {
       const now = Date.now();
       if (now - lastPartialUpdate >= 350 && accumulated !== lastPartialContent) {
@@ -1538,8 +1615,33 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
             `UPDATE generation_jobs SET partial_output = $2, updated_at = now() WHERE id = $1 AND lease_owner = $3`,
             [job.id, accumulated, workerId]
           );
-        } catch {
-          // ignore transient update errors during active streaming
+          if (lastStreamLogAt === 0 || now - lastStreamLogAt >= 5000 || accumulated.length - lastStreamLogChars >= 4096) {
+            const narration = extractPartialNarration(accumulated);
+            logger.info({
+              event: "turn_generation_stream_progress",
+              ...generationLogContext(job, workerId),
+              storyOperation: "story_generation",
+              accumulatedChars: accumulated.length,
+              narrationChars: narration.length,
+              streamDurationMs: now - generationStartedAt
+            });
+            lastStreamLogAt = now;
+            lastStreamLogChars = accumulated.length;
+          }
+        } catch (error) {
+          if (now - lastStreamPersistWarningAt >= 5000) {
+            const errorCode = typeof error === "object" && error !== null && "code" in error
+              ? String((error as { code: unknown }).code)
+              : null;
+            logger.warn({
+              event: "turn_generation_stream_persist_failed",
+              ...generationLogContext(job, workerId),
+              storyOperation: "story_generation",
+              errorName: error instanceof Error ? error.name : "Error",
+              ...(errorCode ? { errorCode } : {})
+            });
+            lastStreamPersistWarningAt = now;
+          }
         }
 
         if (segmentTracker && illustrationConfig) {
@@ -1611,6 +1713,16 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
     const firstReason = result.outputLimited ? "output_limit" : (!parsed.ok ? parsed.code : null);
     const initialValidationErrors = parsed.ok ? [] : parsed.errors;
     const initialAttemptNumber = job.attempts * 2 - 1;
+    logger.info({
+      event: "turn_generation_validation_completed",
+      ...generationLogContext(job, workerId),
+      storyOperation: "story_generation",
+      valid: parsed.ok && !result.outputLimited,
+      outputLimited: result.outputLimited,
+      validationCode: firstReason,
+      validationErrorCount: initialValidationErrors.length,
+      attemptNumber: initialAttemptNumber
+    });
     await pool.query(
       `INSERT INTO generation_attempts (owner_user_id, generation_job_id, attempt_number, recovery_kind, request_metadata,
          response_metadata, provider_response_id, finish_reason, raw_output, validation_errors, completed_at)
@@ -1625,6 +1737,14 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
     if (firstReason) {
       const recoveryKind = firstReason === "mechanics_leak" ? "mechanics_cleanup" : firstReason === "output_limit" ? "compact_completion" : "schema_repair";
       const rejectedResponse = result.content;
+      logger.warn({
+        event: "turn_generation_recovery_started",
+        ...generationLogContext(job, workerId),
+        firstReason,
+        recoveryKind,
+        initialAttemptNumber,
+        validationErrorCount: initialValidationErrors.length
+      });
       result = await callCampaignTextProvider(pool, provider, job, "story_recovery", {
         ...baseRequest,
         ...(provider.providerType === "lmstudio" && result.responseId && firstReason !== "mechanics_leak" ? { previousResponseId: result.responseId } : {}),
@@ -1632,6 +1752,16 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
         rejectedResponse
       });
       parsed = parseStoryOutput(result.content, storyMemoryDefaults);
+      logger.info({
+        event: "turn_generation_validation_completed",
+        ...generationLogContext(job, workerId),
+        storyOperation: "story_recovery",
+        valid: parsed.ok && !result.outputLimited,
+        outputLimited: result.outputLimited,
+        validationCode: result.outputLimited ? "output_limit" : (parsed.ok ? null : parsed.code),
+        validationErrorCount: parsed.ok ? 0 : parsed.errors.length,
+        attemptNumber: initialAttemptNumber + 1
+      });
       await pool.query(
         `INSERT INTO generation_attempts (owner_user_id, generation_job_id, attempt_number, recovery_kind, request_metadata,
            response_metadata, provider_response_id, finish_reason, raw_output, validation_errors, completed_at)
@@ -1656,23 +1786,49 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
           messages.join(" ").slice(0, 4000), json({ retryable: true, attemptCount: firstReason ? 2 : 1 }), workerId]
       );
       if (!recoverable.rows[0]) throw Object.assign(new Error("Generation lease was lost before recovery state could be saved."), { code: "lease_lost" });
+      logger.warn({
+        event: "turn_generation_recoverable",
+        ...generationLogContext(job, workerId),
+        errorCode: code,
+        attemptCount: firstReason ? 2 : 1,
+        durationMs: Date.now() - generationStartedAt
+      });
       return true;
     }
     if (!parsed.ok) throw new Error("Story validation invariant failed.");
     if (mechanicsLeakFields(parsed.story).length) throw new Error("Mechanics validation invariant failed.");
     if (job.resolved_input_mode === "scene") {
       let coverage;
+      let coverageOutputLimited = true;
       try {
         const coverageResponse = await callCampaignTextProvider(pool, provider, job, "scene_coverage_validation", {
           systemPrompt: promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
           input: buildSceneCoveragePrompt(safeAction, parsed.story.narration)
         });
+        coverageOutputLimited = coverageResponse.outputLimited;
         coverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
       } catch {
         coverage = null;
       }
+      logger.info({
+        event: "turn_generation_scene_coverage_completed",
+        ...generationLogContext(job, workerId),
+        covered: Boolean(coverage?.covered),
+        outputLimited: coverageOutputLimited,
+        validationCode: coverage?.covered ? null : "scene_coverage",
+        missingRequiredBeatCount: coverage?.missing_required_beats.length || 0,
+        contradictionCount: coverage?.contradictions.length || 0
+      });
       if (!coverage?.covered) {
         const rejectedResponse = result.content;
+        logger.warn({
+          event: "turn_generation_recovery_started",
+          ...generationLogContext(job, workerId),
+          firstReason: "scene_coverage",
+          recoveryKind: "scene_coverage_rewrite",
+          initialAttemptNumber,
+          validationErrorCount: (coverage?.missing_required_beats.length || 0) + (coverage?.contradictions.length || 0)
+        });
         result = await callCampaignTextProvider(pool, provider, job, "scene_coverage_rewrite", {
           ...baseRequest,
           recoveryInput: renderPromptTemplate(promptFromSnapshot(job.prompt_snapshot, "scene_coverage_rewrite"), { validation: stableStringify({ missing_required_beats: coverage?.missing_required_beats || ["Coverage could not be verified."], contradictions: coverage?.contradictions || [] }) }),
@@ -1680,17 +1836,28 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
         });
         parsed = parseStoryOutput(result.content, storyMemoryDefaults);
         let repairedCoverage = null;
+        let repairedCoverageOutputLimited = true;
         if (parsed.ok && !result.outputLimited) {
           try {
             const coverageResponse = await callCampaignTextProvider(pool, provider, job, "scene_coverage_validation", {
               systemPrompt: promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
               input: buildSceneCoveragePrompt(safeAction, parsed.story.narration)
             });
+            repairedCoverageOutputLimited = coverageResponse.outputLimited;
             repairedCoverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
           } catch {
             repairedCoverage = null;
           }
         }
+        logger.info({
+          event: "turn_generation_scene_coverage_completed",
+          ...generationLogContext(job, workerId),
+          covered: Boolean(repairedCoverage?.covered),
+          outputLimited: repairedCoverageOutputLimited,
+          validationCode: repairedCoverage?.covered ? null : "scene_coverage",
+          missingRequiredBeatCount: repairedCoverage?.missing_required_beats.length || 0,
+          contradictionCount: repairedCoverage?.contradictions.length || 0
+        });
         if (!parsed.ok || result.outputLimited || !repairedCoverage?.covered) {
           const details = repairedCoverage
             ? [...repairedCoverage.missing_required_beats, ...repairedCoverage.contradictions]
@@ -1703,6 +1870,13 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
             [job.id, job.owner_user_id, result.responseId || null, result.finishReason || null,
               details.join(" ").slice(0, 4000), json({ retryable: true, sceneCoverageRewriteAttempted: true }), workerId]
           );
+          logger.warn({
+            event: "turn_generation_recoverable",
+            ...generationLogContext(job, workerId),
+            errorCode: "scene_coverage",
+            attemptCount: job.attempts,
+            durationMs: Date.now() - generationStartedAt
+          });
           return true;
         }
       }
@@ -1754,8 +1928,16 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
     } : parsed.story;
     if (mechanicsLeakFields(committedStory).length) throw new Error("Mechanics validation invariant failed after event extension.");
     await pool.query(`UPDATE generation_jobs SET status = 'committing', updated_at = now() WHERE id = $1 AND lease_owner = $2`, [job.id, workerId]);
-    await withTransaction(pool, (client) => commitStory(client, job, committedStory, provider, result, contextFingerprint,
+    const turnId = await withTransaction(pool, (client) => commitStory(client, job, committedStory, provider, result, contextFingerprint,
       contextDiagnostics, inputs, orchestration, safeAction, workerId));
+    logger.info({
+      event: "turn_generation_completed",
+      ...generationLogContext(job, workerId),
+      resultTurnId: turnId,
+      providerResponseId: result.responseId || null,
+      finishReason: result.finishReason || null,
+      durationMs: Date.now() - generationStartedAt
+    });
   } catch (error) {
     const transportError = providerTransportErrorDetails(error);
     const code = transportError
@@ -1769,6 +1951,13 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
       [job.id, job.owner_user_id, code, (error instanceof Error ? error.message : String(error)).slice(0, 4000),
         json(transportError ? { transportError } : {}), workerId]
     );
+    logger.error({
+      event: "turn_generation_failed",
+      ...generationLogContext(job, workerId),
+      errorCode: code,
+      durationMs: Date.now() - generationStartedAt,
+      transportTimedOut: Boolean(transportError?.timedOut)
+    });
     if (job.streaming_segments_state && (job.streaming_segments_state as any).provisionalSetId) {
       try {
         await orphanProvisionalSet(pool, job.owner_user_id, job.id);
