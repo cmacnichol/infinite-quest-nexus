@@ -481,7 +481,7 @@ describe("asset archive portability", () => {
       let insertNumber = 0;
       const client = {
         query: async (text: string, values?: unknown[]) => {
-          queries.push({ text, values });
+          queries.push(values === undefined ? { text } : { text, values });
           if (text.startsWith("INSERT INTO assets")) {
             expect(values?.[0]).toBe(ownerUserId);
             const contentHash = values?.[3];
