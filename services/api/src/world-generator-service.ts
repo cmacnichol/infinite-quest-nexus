@@ -19,8 +19,21 @@ import {
   normalizeGeneratedPlayableCharacter,
   playableCharacterRecoveryInput
 } from "../../../packages/domain/src/character-authoring.js";
+import {
+  generatedCharacterNameKey,
+  generatedWorldIssues,
+  parseCompleteGeneratedWorld,
+  projectGeneratedWorldIssues
+} from "../../../packages/domain/src/generated-world.js";
 import { buildTemplateWorldPrompt, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
-import { callTextProvider, extractJsonObject } from "../../../packages/story-engine/src/index.js";
+import { ProviderDestinationNotAllowedError } from "../../../packages/security/src/provider-network-policy.js";
+import { ProviderResponseTooLargeError } from "../../../packages/story-engine/src/provider-response.js";
+import {
+  callTextProvider,
+  extractJsonObject,
+  providerTransportErrorDetails,
+  type ProviderResult
+} from "../../../packages/story-engine/src/index.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
 import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
@@ -55,13 +68,22 @@ const convertedPlayableCharacterSchema = z.object({
   default_triggers: z.array(z.unknown()).max(10_000).default([])
 }).passthrough();
 
+const completeConvertedPlayableCharacterSchema = convertedPlayableCharacterSchema.superRefine((character, context) => {
+  if (!character.character_text.trim()) {
+    context.addIssue({ code: "custom", path: ["character_text"], message: "Generated character guidance is required." });
+  }
+  if (!character.profile) {
+    context.addIssue({ code: "custom", path: ["profile"], message: "Generated structured character profile is required." });
+  }
+});
+
 const convertedWorldSchema = z.object({
   title: z.preprocess((v) => (typeof v === "string" ? v : coerceText(v)), z.string().trim().min(1).max(200)),
   genre: flexibleShortText,
   tone: flexibleShortText,
   backgroundStory: flexibleLongText,
   player_character: flexibleLongText,
-  playable_characters: z.array(convertedPlayableCharacterSchema).max(1000).default([]),
+  playable_characters: z.array(z.unknown()).max(1000).default([]),
   premise: flexibleLongText,
   firstAction: flexibleLongText,
   story_rules: flexibleLongText,
@@ -84,45 +106,18 @@ const completeConvertedWorldSchema = convertedWorldSchema.superRefine((world, co
 });
 
 
-const supplementCharactersSchema = z.object({
-  playable_characters: z.array(convertedPlayableCharacterSchema).max(10).default([])
-});
-
-const completeGeneratedWorldSchema = worldContentSchema.superRefine((content, context) => {
-  const requiredFields: Array<[keyof typeof content.world, string]> = [
-    ["title", "title"],
-    ["genre", "genre"],
-    ["tone", "tone"],
-    ["premise", "premise"],
-    ["backgroundStory", "background and canon"],
-    ["firstAction", "opening action"],
-    ["rules", "rules"]
-  ];
-  for (const [key, label] of requiredFields) {
-    if (!String(content.world[key] || "").trim()) {
-      context.addIssue({ code: "custom", path: ["world", key], message: `Generated ${label} is required.` });
-    }
-  }
-  if (content.playableCharacters.length < 3 || content.playableCharacters.length > 4) {
-    context.addIssue({ code: "custom", path: ["playableCharacters"], message: "Generated worlds require 3 or 4 playable characters." });
-  }
-  content.playableCharacters.forEach((character, index) => {
-    if (!character.characterText.trim()) {
-      context.addIssue({ code: "custom", path: ["playableCharacters", index, "characterText"], message: "Generated character guidance is required." });
-    }
-    if (!character.profile) {
-      context.addIssue({ code: "custom", path: ["playableCharacters", index, "profile"], message: "Generated character profile is required." });
-    }
-  });
-});
-
-function convertedCharacterId(name: string, index: number, supplied = ""): string {
-  if (supplied.trim()) return supplied.trim();
+function convertedCharacterId(name: string, index: number): string {
   const slug = name.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
   return `char-${index + 1}${slug ? `-${slug}` : ""}`;
 }
 
-function convertedRpgStats(items: unknown[], characterId: string) {
+export function applicationOwnedCharacterIds(
+  characters: ReadonlyArray<{ name: string; id?: string }>
+): string[] {
+  return characters.map((character, index) => convertedCharacterId(character.name, index));
+}
+
+export function applicationOwnedRpgStats(items: unknown[], characterId: string) {
   return items.flatMap((item, index) => {
     const row = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
     const name = String(row.name || row.skill || row.stat || "").trim();
@@ -130,7 +125,7 @@ function convertedRpgStats(items: unknown[], characterId: string) {
     const numeric = Math.round(Number(row.value ?? row.score ?? row.rating ?? 50));
     return [{
       ...row,
-      id: String(row.id || `${characterId}-stat-${index + 1}`).slice(0, 200),
+      id: `${characterId}-stat-${index + 1}`.slice(0, 200),
       name: name.slice(0, 200),
       value: Number.isFinite(numeric) ? Math.min(99, Math.max(1, numeric)) : 50,
       note: String(row.note || row.covers || "").slice(0, 2000)
@@ -138,14 +133,14 @@ function convertedRpgStats(items: unknown[], characterId: string) {
   });
 }
 
-function convertedDefaultTriggers(items: unknown[], characterId: string) {
+export function applicationOwnedDefaultTriggers(items: unknown[], characterId: string) {
   return items.flatMap((item, index) => {
     const row = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
     const name = String(row.name || row.label || row.title || "").trim();
     if (!name) return [];
     return [{
       ...row,
-      id: String(row.id || `${characterId}-tracker-${index + 1}`).slice(0, 200),
+      id: `${characterId}-tracker-${index + 1}`.slice(0, 200),
       name: name.slice(0, 300),
       rules: String(row.rules || row.updateRules || row.description || `Track ${name} whenever it changes.`).slice(0, 4000),
       value: String(row.value ?? row.initialValue ?? "Not yet established.").slice(0, 6000)
@@ -153,7 +148,259 @@ function convertedDefaultTriggers(items: unknown[], characterId: string) {
   });
 }
 
+export function applicationOwnedEventTriggers(items: unknown[], worldScope: string): unknown[] {
+  return items.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    return {
+      ...(item as Record<string, unknown>),
+      id: `${worldScope}-event-${index + 1}`.slice(0, 200)
+    };
+  });
+}
+
 export type WorldGenProgress = WorldGenerationProgress;
+
+export function selectCompleteGeneratedCharacters(
+  candidates: unknown[]
+) {
+  const characters: z.infer<typeof completeConvertedPlayableCharacterSchema>[] = [];
+  const characterNames = new Set<string>();
+  for (const candidate of candidates) {
+    const parsed = completeConvertedPlayableCharacterSchema.safeParse(candidate);
+    if (!parsed.success) continue;
+    const nameKey = generatedCharacterNameKey(parsed.data.name);
+    if (characterNames.has(nameKey)) continue;
+    characterNames.add(nameKey);
+    characters.push(parsed.data);
+    if (characters.length === 4) break;
+  }
+  return {
+    characters,
+    needed: Math.max(0, 3 - characters.length)
+  };
+}
+
+export function incompleteGeneratedWorldError(error?: unknown): Error {
+  return Object.assign(
+    new Error("The text provider did not return a complete world. Review the missing fields and try again."),
+    {
+      statusCode: 502,
+      expose: true,
+      details: {
+        code: "incomplete_generated_world",
+        issues: generatedWorldIssues(error)
+      }
+    }
+  );
+}
+
+export type WorldGenerationFailureDiagnostic = {
+  message: string;
+  statusCode?: number;
+  code?: "incomplete_generated_world"
+    | "invalid_cyoa_json"
+    | "PROVIDER_DESTINATION_NOT_ALLOWED"
+    | "provider_response_too_large"
+    | "provider_http_error"
+    | "provider_request_timeout"
+    | "provider_transport_error"
+    | "provider_error";
+  issues?: ReturnType<typeof generatedWorldIssues>;
+};
+
+type WorldGenerationProviderCategory = "http" | "timeout" | "transport" | "provider";
+
+function permanentGeneratedWorldProviderError(input: {
+  name: "ProviderDestinationNotAllowedError" | "ProviderResponseTooLargeError";
+  message: string;
+  statusCode: 422 | 502;
+  code: "PROVIDER_DESTINATION_NOT_ALLOWED" | "provider_response_too_large";
+  category: "destination" | "response_limit";
+}): Error {
+  return Object.assign(new Error(input.message), {
+    name: input.name,
+    statusCode: input.statusCode,
+    expose: true,
+    code: input.code,
+    permanent: true,
+    retryable: false,
+    details: {
+      code: input.code,
+      category: input.category,
+      permanent: true,
+      retryable: false
+    }
+  });
+}
+
+export function generatedWorldProviderError(error: unknown): Error {
+  if (error instanceof ProviderDestinationNotAllowedError) {
+    return permanentGeneratedWorldProviderError({
+      name: "ProviderDestinationNotAllowedError",
+      message: "The provider destination is not allowed by the server network policy.",
+      statusCode: 422,
+      code: "PROVIDER_DESTINATION_NOT_ALLOWED",
+      category: "destination"
+    });
+  }
+  if (error instanceof ProviderResponseTooLargeError) {
+    return permanentGeneratedWorldProviderError({
+      name: "ProviderResponseTooLargeError",
+      message: "The provider response exceeded the server's safe size limit.",
+      statusCode: 502,
+      code: "provider_response_too_large",
+      category: "response_limit"
+    });
+  }
+  const failure = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  const transport = providerTransportErrorDetails(error);
+  const rawStatusCode = Number(failure.statusCode);
+  const providerStatus = Number.isInteger(rawStatusCode) && rawStatusCode >= 400 && rawStatusCode <= 599
+    ? rawStatusCode
+    : undefined;
+  let category: WorldGenerationProviderCategory;
+  let code: "provider_http_error" | "provider_request_timeout" | "provider_transport_error" | "provider_error";
+  let statusCode: number;
+  let message: string;
+
+  if (transport?.timedOut) {
+    category = "timeout";
+    code = "provider_request_timeout";
+    statusCode = 504;
+    message = "The text provider request timed out.";
+  } else if (transport) {
+    category = "transport";
+    code = "provider_transport_error";
+    statusCode = 502;
+    message = "The text provider connection failed.";
+  } else if (providerStatus && Object.hasOwn(failure, "providerMessage")) {
+    category = "http";
+    code = "provider_http_error";
+    statusCode = providerStatus;
+    message = `The text provider request failed with HTTP ${providerStatus}.`;
+  } else {
+    category = "provider";
+    code = "provider_error";
+    statusCode = providerStatus || 502;
+    message = providerStatus
+      ? `The text provider request failed with HTTP ${providerStatus}.`
+      : "The text provider request failed.";
+  }
+
+  return Object.assign(new Error(message), {
+    name: "WorldGenerationProviderError",
+    statusCode,
+    expose: true,
+    code,
+    details: {
+      code,
+      category,
+      ...(category === "http" ? { providerStatus: statusCode } : {})
+    }
+  });
+}
+
+async function callGeneratedWorldProvider(
+  request: () => Promise<ProviderResult>
+): Promise<ProviderResult> {
+  try {
+    return await request();
+  } catch (error) {
+    throw generatedWorldProviderError(error);
+  }
+}
+
+export function worldGenerationFailureDiagnostic(error: unknown): WorldGenerationFailureDiagnostic {
+  const failure = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  const rawStatusCode = Number(failure.statusCode);
+  const statusCode = Number.isInteger(rawStatusCode) && rawStatusCode >= 400 && rawStatusCode <= 599
+    ? rawStatusCode
+    : undefined;
+  const details = failure.details && typeof failure.details === "object"
+    ? failure.details as Record<string, unknown>
+    : {};
+  const detailsCode = details.code;
+  if (detailsCode === "PROVIDER_DESTINATION_NOT_ALLOWED"
+    || failure.code === "PROVIDER_DESTINATION_NOT_ALLOWED") {
+    return {
+      message: "The provider destination is not allowed by the server network policy.",
+      statusCode: 422,
+      code: "PROVIDER_DESTINATION_NOT_ALLOWED"
+    };
+  }
+  if (detailsCode === "provider_response_too_large"
+    || failure.code === "provider_response_too_large") {
+    return {
+      message: "The provider response exceeded the server's safe size limit.",
+      statusCode: 502,
+      code: "provider_response_too_large"
+    };
+  }
+  if (detailsCode === "incomplete_generated_world") {
+    const issues = projectGeneratedWorldIssues(details.issues);
+    const issueSummary = issues
+      .slice(0, 4)
+      .map((issue) => `${issue.path || "generated world"}: ${issue.message}`)
+      .join(" ");
+    const message = [
+      "The text provider did not return a complete world. Review the missing fields and try again.",
+      issueSummary
+    ].filter(Boolean).join(" ").slice(0, 500);
+    return {
+      message,
+      statusCode: 502,
+      code: "incomplete_generated_world",
+      issues
+    };
+  }
+  if (detailsCode === "invalid_cyoa_json") {
+    return {
+      message: "Invalid Choose Your Own Adventure JSON structure.",
+      statusCode: 400,
+      code: "invalid_cyoa_json"
+    };
+  }
+  if (detailsCode === "provider_request_timeout" || failure.code === "provider_request_timeout") {
+    return {
+      message: "The text provider request timed out. Check the provider endpoint and server logs.",
+      ...(statusCode ? { statusCode } : {}),
+      code: "provider_request_timeout"
+    };
+  }
+  if (detailsCode === "provider_transport_error" || failure.code === "provider_transport_error") {
+    return {
+      message: "The text provider connection failed. Check the provider endpoint and server logs.",
+      ...(statusCode ? { statusCode } : {}),
+      code: "provider_transport_error"
+    };
+  }
+  if (detailsCode === "provider_http_error" && statusCode) {
+    return {
+      message: `The text provider request failed with HTTP ${statusCode}. Check the provider endpoint and server logs.`,
+      statusCode,
+      code: "provider_http_error"
+    };
+  }
+  if (detailsCode === "provider_error") {
+    return {
+      message: statusCode
+        ? `The text provider request failed with HTTP ${statusCode}. Check the provider endpoint and server logs.`
+        : "The text provider request failed. Check the provider endpoint and server logs.",
+      ...(statusCode ? { statusCode } : {}),
+      code: "provider_error"
+    };
+  }
+  return {
+    message: statusCode
+      ? `World generation failed with status ${statusCode}. Check the server logs and try again.`
+      : "World generation failed. Check the server logs and try again.",
+    ...(statusCode ? { statusCode } : {})
+  };
+}
+
+function isGeneratedWorldValidationError(error: unknown): error is z.ZodError | SyntaxError {
+  return error instanceof z.ZodError || error instanceof SyntaxError;
+}
 
 export function worldGenerationInputMetadata(input: TemplateWorldInput) {
   return {
@@ -215,6 +462,18 @@ export function normalizeRawWorldJson(raw: unknown): Record<string, unknown> {
   };
 }
 
+export type TemplateWorldGenerationDependencies = {
+  loadTextProvider: typeof loadTextProvider;
+  resolvePromptSnapshot: typeof resolvePromptSnapshot;
+  callTextProvider: typeof callTextProvider;
+};
+
+const templateWorldGenerationDependencies: TemplateWorldGenerationDependencies = {
+  loadTextProvider,
+  resolvePromptSnapshot,
+  callTextProvider
+};
+
 export async function generateTemplateWorld(
   pool: DatabasePool,
   ownerUserId: string,
@@ -222,7 +481,8 @@ export async function generateTemplateWorld(
   credentialSecret: string,
   input: TemplateWorldInput,
   model?: string,
-  onProgress?: (phase: string, percent: number, message: string) => Promise<void> | void
+  onProgress?: (phase: string, percent: number, message: string) => Promise<void> | void,
+  dependencies: TemplateWorldGenerationDependencies = templateWorldGenerationDependencies
 ): Promise<{ title: string; content: WorldContent }> {
   if (!providerProfileId) {
     logger.error({ ownerUserId, sourceKind: input.sourceKind }, "World generation failed: missing provider profile ID");
@@ -233,33 +493,58 @@ export async function generateTemplateWorld(
   logger.debug(worldGenerationInputMetadata(input), "Template world generation input metadata");
 
   await onProgress?.("extracting", 10, "Loading text provider and preparing modular prompt…");
-  const profile = await loadTextProvider(pool, ownerUserId, providerProfileId, credentialSecret, model);
+  const profile = await dependencies.loadTextProvider(pool, ownerUserId, providerProfileId, credentialSecret, model);
 
   await onProgress?.("generating_world", 30, "Synthesizing world overview and characters via LLM…");
-  const promptSnapshot = await resolvePromptSnapshot(pool, ownerUserId);
+  const promptSnapshot = await dependencies.resolvePromptSnapshot(pool, ownerUserId);
   const prompt = buildTemplateWorldPrompt(input, promptFromSnapshot(promptSnapshot, "world_generation"));
-  let result = await callTextProvider(profile, prompt);
+  const result = await callGeneratedWorldProvider(() => dependencies.callTextProvider(profile, prompt));
+  let validationResult = result;
   logger.debug({ responseId: result.responseId, outputLimited: result.outputLimited }, "Received initial world generation LLM response");
 
   let converted: z.infer<typeof convertedWorldSchema>;
   try {
     converted = completeConvertedWorldSchema.parse(normalizeRawWorldJson(extractJsonObject(result.content)));
-    logger.debug({ title: converted.title }, "Successfully parsed initial generated world JSON");
+    logger.debug({
+      responseId: result.responseId,
+      characterCandidateCount: converted.playable_characters.length
+    }, "Successfully parsed initial generated world JSON");
   } catch (error) {
-    logger.warn({ error: error instanceof Error ? error.message : String(error), outputLimited: result.outputLimited }, "Initial LLM world generation parse failed, attempting recovery");
+    if (!isGeneratedWorldValidationError(error)) throw error;
+    logger.warn({
+      responseId: result.responseId,
+      finishReason: result.finishReason,
+      outputLimited: result.outputLimited,
+      issues: generatedWorldIssues(error)
+    }, "Initial LLM world generation parse failed, attempting recovery");
     await onProgress?.("recovering_world", 50, result.outputLimited ? "Output limit reached. Recovering truncated JSON…" : "Generated world was incomplete. Requesting a complete replacement…");
-    const recovered = await callTextProvider(profile, {
+    const recovered = await callGeneratedWorldProvider(() => dependencies.callTextProvider(profile, {
       ...prompt,
       ...(result.responseId ? { previousResponseId: result.responseId } : {}),
       recoveryInput: promptFromSnapshot(promptSnapshot, "world_generation_recovery")
-    });
-    converted = completeConvertedWorldSchema.parse(normalizeRawWorldJson(extractJsonObject(recovered.content)));
-    logger.info({ title: converted.title }, "Successfully recovered generated world JSON");
+    }));
+    try {
+      converted = completeConvertedWorldSchema.parse(normalizeRawWorldJson(extractJsonObject(recovered.content)));
+    } catch (recoveryError) {
+      if (!isGeneratedWorldValidationError(recoveryError)) throw recoveryError;
+      logger.error({
+        responseId: recovered.responseId,
+        finishReason: recovered.finishReason,
+        outputLimited: recovered.outputLimited,
+        issues: generatedWorldIssues(recoveryError)
+      }, "Generated world recovery validation failed");
+      throw incompleteGeneratedWorldError(recoveryError);
+    }
+    validationResult = recovered;
+    logger.info({
+      responseId: recovered.responseId,
+      characterCandidateCount: converted.playable_characters.length
+    }, "Successfully recovered generated world JSON");
   }
 
-  let rawCharacters = [...(converted.playable_characters || [])];
-  if (rawCharacters.length === 0 && converted.player_character.trim()) {
-    rawCharacters.push({
+  const characterCandidates = [...(converted.playable_characters || [])];
+  if (characterCandidates.length === 0 && converted.player_character.trim()) {
+    characterCandidates.push({
       id: "char-1",
       name: converted.player_character.split(/\r?\n/).find((line) => line.trim())?.trim() || "Lead Character",
       character_text: converted.player_character,
@@ -268,11 +553,13 @@ export async function generateTemplateWorld(
     });
   }
 
-  if (rawCharacters.length < 3) {
-    const needed = 3 - rawCharacters.length;
+  const selected = selectCompleteGeneratedCharacters(characterCandidates);
+  const rawCharacters = [...selected.characters];
+  if (selected.needed > 0) {
+    const needed = selected.needed;
     logger.info({ existingCount: rawCharacters.length, needed }, "Supplementing playable character roster");
     await onProgress?.("supplementing_characters", 70, `Generating ${needed} additional playable character${needed === 1 ? "" : "s"} to meet the 3-4 character target…`);
-    const supplementResult = await callTextProvider(profile, {
+    const supplementResult = await callGeneratedWorldProvider(() => dependencies.callTextProvider(profile, {
       systemPrompt: promptFromSnapshot(promptSnapshot, "world_roster_supplement").replaceAll("{{needed}}", String(needed)),
       input: JSON.stringify({
         worldTitle: converted.title,
@@ -280,87 +567,115 @@ export async function generateTemplateWorld(
         premise: converted.premise,
         existingCharacters: rawCharacters.map((c) => ({ name: c.name, background: c.character_text }))
       })
-    });
+    }));
     try {
-      const supplement = supplementCharactersSchema.parse(extractJsonObject(supplementResult.content));
+      const supplement = z.object({
+        playable_characters: z.array(completeConvertedPlayableCharacterSchema).length(needed)
+      }).parse(extractJsonObject(supplementResult.content));
       rawCharacters.push(...supplement.playable_characters);
+      validationResult = supplementResult;
       logger.debug({ added: supplement.playable_characters.length }, "Character roster successfully supplemented");
-    } catch (suppErr) {
-      logger.warn({ error: suppErr instanceof Error ? suppErr.message : String(suppErr) }, "Playable character roster supplement failed, falling back to default options");
+    } catch (supplementError) {
+      if (!isGeneratedWorldValidationError(supplementError)) throw supplementError;
+      logger.error({
+        responseId: supplementResult.responseId,
+        finishReason: supplementResult.finishReason,
+        outputLimited: supplementResult.outputLimited,
+        issues: generatedWorldIssues(supplementError)
+      }, "Generated world roster supplement validation failed");
+      throw incompleteGeneratedWorldError(supplementError);
     }
-  }
-
-  rawCharacters = rawCharacters.slice(0, 4);
-  while (rawCharacters.length < 3) {
-    const idx = rawCharacters.length + 1;
-    rawCharacters.push({
-      id: `char-${idx}`,
-      name: `Character Option ${idx}`,
-      character_text: `An adventurous protagonist in ${converted.title || "this world"}.`,
-      rpg_statistics: [{ name: "Resourcefulness", value: 70, note: "Key survival attribute." }],
-      default_triggers: []
-    });
   }
 
   await onProgress?.("formatting", 85, "Formatting character roster and world attributes…");
-  const playableCharacters = rawCharacters.map((character, index) => {
-    const id = convertedCharacterId(character.name, index, character.id);
-    return playableCharacterSchema.parse({
-      id,
-      name: character.name,
-      characterText: character.character_text,
-      ...(character.profile ? { profile: character.profile } : {}),
-      rpgStats: convertedRpgStats(character.rpg_statistics, id),
-      defaultTriggers: convertedDefaultTriggers(character.default_triggers, id),
-      source: { type: "template-world-generator", index }
+  let content: WorldContent;
+  try {
+    const characterIds = applicationOwnedCharacterIds(rawCharacters);
+    const playableCharacters = rawCharacters.map((character, index) => {
+      const id = characterIds[index]!;
+      return playableCharacterSchema.parse({
+        id,
+        name: character.name,
+        characterText: character.character_text,
+        profile: character.profile,
+        rpgStats: applicationOwnedRpgStats(character.rpg_statistics, id),
+        defaultTriggers: applicationOwnedDefaultTriggers(character.default_triggers, id),
+        source: { type: "template-world-generator", index }
+      });
     });
-  });
 
-  const content = canonicalizeWorldContent({
-    schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
-    world: {
-      title: converted.title,
-      genre: converted.genre,
-      tone: converted.tone,
-      backgroundStory: converted.backgroundStory,
-      premise: converted.premise,
-      firstAction: converted.firstAction,
-      rules: converted.story_rules
-    },
-    playableCharacters,
-    entities: [],
-    relationships: [],
-    rpgStats: convertedRpgStats(converted.rpg_statistics, "world-wide"),
-    defaultTriggers: convertedDefaultTriggers(converted.default_triggers, "world-wide"),
-    eventTriggers: converted.event_triggers || [],
-    assets: [],
-    defaults: {
-      importedFrom: input.sourceKind,
-      defaultPlayableCharacterId: playableCharacters[0]?.id || ""
-    }
-  });
+    content = parseCompleteGeneratedWorld(canonicalizeWorldContent({
+      schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
+      world: {
+        title: converted.title,
+        genre: converted.genre,
+        tone: converted.tone,
+        backgroundStory: converted.backgroundStory,
+        premise: converted.premise,
+        firstAction: converted.firstAction,
+        rules: converted.story_rules
+      },
+      playableCharacters,
+      entities: [],
+      relationships: [],
+      rpgStats: applicationOwnedRpgStats(converted.rpg_statistics, "world-wide"),
+      defaultTriggers: applicationOwnedDefaultTriggers(converted.default_triggers, "world-wide"),
+      eventTriggers: applicationOwnedEventTriggers(converted.event_triggers, "generated-world"),
+      assets: [],
+      defaults: {
+        importedFrom: input.sourceKind,
+        defaultPlayableCharacterId: playableCharacters[0]?.id || ""
+      }
+    }));
+  } catch (error) {
+    if (!isGeneratedWorldValidationError(error)) throw error;
+    logger.error({
+      responseId: validationResult.responseId,
+      finishReason: validationResult.finishReason,
+      outputLimited: validationResult.outputLimited,
+      issues: generatedWorldIssues(error)
+    }, "Generated world completion validation failed");
+    throw incompleteGeneratedWorldError(error);
+  }
 
   await onProgress?.("completed", 100, "World and character generation completed.");
-  logger.info({ title: converted.title, characterCount: playableCharacters.length }, "Completed template world generation successfully");
+  logger.info({ characterCount: content.playableCharacters.length }, "Completed template world generation successfully");
   return {
-    title: converted.title || input.title,
+    title: content.world.title,
     content
   };
 }
 
+export type WorldGenerationPreviewDependencies = {
+  initialOwnerId: typeof initialOwnerId;
+  resolveEffectiveProviderId: typeof resolveEffectiveProviderId;
+  createWorldGenerationProgress: typeof createWorldGenerationProgress;
+  updateWorldGenerationProgress: typeof updateWorldGenerationProgress;
+  generateTemplateWorld: typeof generateTemplateWorld;
+};
+
+const worldGenerationPreviewDependencies: WorldGenerationPreviewDependencies = {
+  initialOwnerId,
+  resolveEffectiveProviderId,
+  createWorldGenerationProgress,
+  updateWorldGenerationProgress,
+  generateTemplateWorld
+};
+
 export async function generateWorldPreview(
   pool: DatabasePool,
   request: WorldGenerationPreviewRequest,
-  credentialSecret: string
+  credentialSecret: string,
+  dependencies: WorldGenerationPreviewDependencies = worldGenerationPreviewDependencies
 ): Promise<{ title: string; content: WorldContent }> {
-  const ownerUserId = await initialOwnerId(pool);
-  const providerProfileId = await resolveEffectiveProviderId(pool, ownerUserId, "text");
+  const ownerUserId = await dependencies.initialOwnerId(pool);
+  const providerProfileId = await dependencies.resolveEffectiveProviderId(pool, ownerUserId, "text");
   const progressKey = request.progressKey;
-  if (progressKey) await createWorldGenerationProgress(pool, ownerUserId, progressKey);
+  if (progressKey) await dependencies.createWorldGenerationProgress(pool, ownerUserId, progressKey);
   if (!providerProfileId) {
     logger.warn({ ownerUserId, title: request.title }, "World preview generation failed: no default text provider configured");
     if (progressKey) {
-      await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+      await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
         status: "failed",
         phase: "failed",
         progressPercent: 100,
@@ -373,15 +688,10 @@ export async function generateWorldPreview(
       details: { code: "default_text_provider_unavailable" }
     });
   }
-  const incompleteWorldError = () => Object.assign(
-    new Error("The text provider did not return a complete world. Revise the prompt and try again."),
-    { statusCode: 502, details: { code: "incomplete_generated_world" } }
-  );
-
   logger.info({ title: request.title, promptLength: request.prompt?.length, progressKey }, "Generating world preview from prompt");
 
   if (progressKey) {
-    await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+    await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
       status: "processing",
       phase: "extracting",
       progressPercent: 10,
@@ -391,7 +701,7 @@ export async function generateWorldPreview(
 
   let generated: { title: string; content: WorldContent };
   try {
-    generated = await generateTemplateWorld(
+    generated = await dependencies.generateTemplateWorld(
       pool,
       ownerUserId,
       providerProfileId,
@@ -408,7 +718,7 @@ export async function generateWorldPreview(
       undefined,
       async (phase, progressPercent, message) => {
         if (progressKey) {
-          await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+          await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
             status: "processing",
             phase,
             progressPercent,
@@ -418,44 +728,34 @@ export async function generateWorldPreview(
       }
     );
   } catch (error) {
-    logger.error({ error: error instanceof Error ? error.message : String(error), progressKey }, "World preview generation failed");
+    const failure = worldGenerationFailureDiagnostic(error);
+    logger.error({
+      progressKey,
+      statusCode: failure.statusCode,
+      code: failure.code,
+      issues: failure.issues
+    }, "World preview generation failed");
     if (progressKey) {
-      await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+      await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
         status: "failed",
         phase: "failed",
         progressPercent: 100,
-        message: error instanceof Error ? error.message : String(error),
-        errorMessage: error instanceof Error ? error.message : String(error)
+        message: failure.message,
+        errorMessage: failure.message
       });
     }
-    if (error instanceof z.ZodError || error instanceof SyntaxError) throw incompleteWorldError();
     throw error;
   }
-  try {
-    const content = completeGeneratedWorldSchema.parse(generated.content);
-    if (progressKey) {
-      await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
-        status: "completed",
-        phase: "completed",
-        progressPercent: 100,
-        message: "World and character generation completed."
-      });
-    }
-    logger.info({ title: content.world.title, progressKey }, "World preview generation succeeded");
-    return { title: content.world.title, content };
-  } catch (error) {
-    logger.error({ error: error instanceof Error ? error.message : String(error), progressKey }, "Generated world preview schema validation failed");
-    if (progressKey) {
-      await updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
-        status: "failed",
-        phase: "failed",
-        progressPercent: 100,
-        message: "The text provider did not return a complete world.",
-        errorMessage: "The text provider did not return a complete world."
-      });
-    }
-    throw incompleteWorldError();
+  if (progressKey) {
+    await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+      status: "completed",
+      phase: "completed",
+      progressPercent: 100,
+      message: "World and character generation completed."
+    });
   }
+  logger.info({ progressKey, characterCount: generated.content.playableCharacters.length }, "World preview generation succeeded");
+  return generated;
 }
 
 function characterGenerationError(message: string, statusCode: number, code: string): Error {

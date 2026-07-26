@@ -25,7 +25,11 @@ import { importWorld, previewWorldImport } from "./world-service.js";
 import type { FilesystemAssetStore } from "./asset-service.js";
 import { resolvePlayableCharacters } from "../../../packages/domain/src/world-characters.js";
 import { extractCyoaLayers, parseCyoaExport } from "../../../packages/domain/src/world-template.js";
-import { generateTemplateWorld } from "./world-generator-service.js";
+import {
+  generateTemplateWorld,
+  worldGenerationFailureDiagnostic
+} from "./world-generator-service.js";
+import { logger } from "../../../packages/logger/src/index.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import {
   promptFromSnapshot,
@@ -49,6 +53,16 @@ export const activeProgressMap = new Map<string, ImportProgressReport>();
 
 export function getImportProgress(key: string): ImportProgressReport | null {
   return activeProgressMap.get(key) || null;
+}
+
+const invalidCyoaJsonMessage = "Invalid Choose Your Own Adventure JSON structure.";
+
+function invalidCyoaJsonError(): Error {
+  return Object.assign(new Error(invalidCyoaJsonMessage), {
+    statusCode: 400,
+    expose: true,
+    details: { code: "invalid_cyoa_json" }
+  });
 }
 
 type ResolvedKind = "world_json" | "world_text" | "story_text" | "cyoa_json";
@@ -359,12 +373,12 @@ export async function previewInfiniteWorldsImport(pool: DatabasePool, request: I
     let parsed;
     try {
       parsed = parseCyoaExport(request.sourceText);
-    } catch (error) {
+    } catch {
       return {
         kind: "cyoa_json" as const,
         valid: false,
         requiresProvider: true,
-        warnings: [`Invalid Choose Your Own Adventure JSON structure: ${error instanceof Error ? error.message : String(error)}`],
+        warnings: [invalidCyoaJsonMessage],
         counts: { topLevelTitle: "Unknown", layer1ChaptersCount: 0, characterTarget: "3-4 playable characters" }
       };
     }
@@ -459,7 +473,12 @@ export async function importInfiniteWorlds(
         progressPercent: 5,
         message: "Parsing CYOA story description and branch choices…"
       });
-      const parsed = parseCyoaExport(request.sourceText);
+      let parsed;
+      try {
+        parsed = parseCyoaExport(request.sourceText);
+      } catch {
+        throw invalidCyoaJsonError();
+      }
       const extracted = extractCyoaLayers(parsed, request.sourceName);
       const generated = await generateTemplateWorld(
         pool,
@@ -501,12 +520,19 @@ export async function importInfiniteWorlds(
       });
       return { kind: "world" as const, ...result };
     } catch (error) {
+      const failure = worldGenerationFailureDiagnostic(error);
+      logger.error({
+        progressKey,
+        statusCode: failure.statusCode,
+        code: failure.code,
+        issues: failure.issues
+      }, "CYOA world generation failed");
       activeProgressMap.set(progressKey, {
         status: "failed",
         phase: "failed",
         progressPercent: 100,
-        message: error instanceof Error ? error.message : String(error),
-        errorMessage: error instanceof Error ? error.message : String(error)
+        message: failure.message,
+        errorMessage: failure.message
       });
       throw error;
     }

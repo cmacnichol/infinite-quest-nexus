@@ -13,6 +13,23 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "integration-test-credential-secret";
 
+function validProfile(role: string) {
+  return {
+    story: {
+      role,
+      background: `${role} trained for dangerous underwater expeditions.`,
+      personality: "Focused and dependable.",
+      motivations: "Protect the expedition and recover the lost archive.",
+      goals: "Return from the citadel with its history intact.",
+      fearsAndConflicts: "Fears that the ruins will claim another expedition.",
+      keyRelationships: "Trusts the other members of the expedition.",
+      narrativeHooks: "Carries a clue left by an earlier explorer.",
+      voiceAndMannerisms: "Speaks with deliberate precision.",
+      otherGuidance: ""
+    }
+  };
+}
+
 function validConvertedWorldJson(): string {
   return JSON.stringify({
     title: "Converted CYOA World",
@@ -27,6 +44,7 @@ function validConvertedWorldJson(): string {
         id: "char-1",
         name: "Elara the Diver",
         character_text: "A master underwater specialist.",
+        profile: validProfile("Diver"),
         rpg_statistics: [{ name: "Diving", value: 85, note: "Expert free diver." }],
         default_triggers: []
       },
@@ -34,6 +52,7 @@ function validConvertedWorldJson(): string {
         id: "char-2",
         name: "Thalor the Scholar",
         character_text: "An elven historian seeking lost lore.",
+        profile: validProfile("Scholar"),
         rpg_statistics: [{ name: "Arcana", value: 90, note: "Knows ancient runes." }],
         default_triggers: []
       },
@@ -41,6 +60,7 @@ function validConvertedWorldJson(): string {
         id: "char-3",
         name: "Kael the Guard",
         character_text: "A veteran sellsword protecting the expedition.",
+        profile: validProfile("Guard"),
         rpg_statistics: [{ name: "Combat", value: 80, note: "Spear specialist." }],
         default_triggers: []
       }
@@ -150,5 +170,21 @@ integration("CYOA import service integration", () => {
     expect(progress?.status).toBe("completed");
     expect(progress?.progressPercent).toBe(100);
     expect(progress?.worldId).toBe(result.worldId);
+
+    const stored = await pool.query<{
+      content: {
+        playableCharacters: Array<{
+          characterText: string;
+          profile?: unknown;
+        }>;
+      };
+    }>(
+      "SELECT content FROM world_versions WHERE id = $1",
+      [result.worldVersionId]
+    );
+    expect(stored.rows[0]?.content.playableCharacters).toHaveLength(3);
+    expect(stored.rows[0]?.content.playableCharacters.every(
+      (character) => Boolean(character.characterText.trim() && character.profile)
+    )).toBe(true);
   });
 });

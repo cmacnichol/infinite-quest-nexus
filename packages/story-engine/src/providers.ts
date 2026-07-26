@@ -181,7 +181,7 @@ export type ProviderTransportDetails = {
   durationMs: number;
   timedOut: boolean;
   transportCode: string;
-  causeName: string;
+  causeCategory: "timeout" | "network" | "transport";
   causeMessage: string;
 };
 
@@ -191,8 +191,8 @@ export class ProviderTransportError extends Error {
   readonly expose = true;
   readonly transport: ProviderTransportDetails;
 
-  constructor(message: string, details: ProviderTransportDetails, cause: unknown) {
-    super(message, { cause });
+  constructor(message: string, details: ProviderTransportDetails) {
+    super(message);
     this.name = details.timedOut ? "ProviderTimeoutError" : "ProviderTransportError";
     this.code = details.timedOut ? "provider_request_timeout" : "provider_transport_error";
     this.statusCode = details.timedOut ? 504 : 502;
@@ -217,13 +217,6 @@ function safeEndpoint(value: string): string {
   }
 }
 
-function safeCauseMessage(value: string): string {
-  return value
-    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/(https?:\/\/[^\s/:@]+):[^@\s/]+@/gi, "$1:[redacted]@")
-    .replace(/([?&](?:api[_-]?key|access[_-]?token|token|key)=)[^&\s]+/gi, "$1[redacted]");
-}
-
 function errorChain(error: unknown): Array<Record<string, unknown>> {
   const chain: Array<Record<string, unknown>> = [];
   let current = error;
@@ -232,6 +225,30 @@ function errorChain(error: unknown): Array<Record<string, unknown>> {
     current = (current as { cause?: unknown }).cause;
   }
   return chain;
+}
+
+const recognizedTransportCodes = new Set([
+  "ABORT_ERR",
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_ABORTED",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET"
+]);
+
+function controlledTransportCode(codes: string[], timedOut: boolean): string {
+  const recognized = codes
+    .map((code) => code.toUpperCase())
+    .find((code) => recognizedTransportCodes.has(code));
+  return recognized || (timedOut ? "REQUEST_TIMEOUT" : "TRANSPORT_FAILURE");
 }
 
 function transportFailure(
@@ -256,9 +273,15 @@ function transportFailure(
     : profile.providerType === "openrouter" ? "OpenRouter"
       : profile.providerType === "openai_compatible" ? "OpenAI-compatible provider"
         : profile.providerType === "sogni" ? "Sogni" : "Manifest provider";
-  const transportCode = codes[0] || (timedOut ? "REQUEST_TIMEOUT" : "TRANSPORT_FAILURE");
-  const causeName = names.find(Boolean) || "Error";
-  const causeMessage = messages.findLast(Boolean) || messages.find(Boolean) || String(cause || "Transport failure");
+  const transportCode = controlledTransportCode(codes, timedOut);
+  const causeCategory = timedOut
+    ? "timeout"
+    : transportCode === "TRANSPORT_FAILURE" ? "transport" : "network";
+  const causeMessage = timedOut
+    ? "The provider request timed out."
+    : causeCategory === "network"
+      ? "The provider connection failed."
+      : "The provider transport failed.";
   const durationMs = Math.max(0, Date.now() - startedAt);
   const details: ProviderTransportDetails = {
     providerType: profile.providerType,
@@ -269,13 +292,13 @@ function transportFailure(
     durationMs,
     timedOut,
     transportCode,
-    causeName,
-    causeMessage: safeCauseMessage(causeMessage).slice(0, 1000)
+    causeCategory,
+    causeMessage
   };
   const message = timedOut
     ? `${providerName} ${operation} timed out after ${Math.round(timeoutMs / 60_000 * 10) / 10} minutes before a complete response was received. Nexus closed the provider request; increase Request timeout in the provider's Advanced settings or reduce the request workload.`
     : `${providerName} ${operation} could not complete because the provider connection failed (${transportCode}). Check the endpoint and Docker host logs for transport diagnostics.`;
-  const error = new ProviderTransportError(message, details, cause);
+  const error = new ProviderTransportError(message, details);
   logger.error({ event: "provider_transport_error", ...details });
   return error;
 }

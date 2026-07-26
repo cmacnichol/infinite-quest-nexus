@@ -1,9 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
+import { z } from "zod";
 import { buildServer } from "../../services/api/src/server.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { logger } from "../../packages/logger/src/index.js";
+import { parseCompleteGeneratedWorld } from "../../packages/domain/src/generated-world.js";
+import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
+import { ProviderResponseTooLargeError } from "../../packages/story-engine/src/provider-response.js";
+import {
+  generatedWorldProviderError,
+  incompleteGeneratedWorldError
+} from "../../services/api/src/world-generator-service.js";
 
 function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
   return {
@@ -181,6 +189,212 @@ describe("API server security and CORS headers", () => {
     const body = JSON.parse(response.payload);
     expect(body.error).toBe("InvalidUuidError");
     expect(body.message).toContain("The provided ID is not a valid UUID.");
+
+    await app.close();
+  });
+
+  it("exposes only safe structured generated-world validation details", async () => {
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-error", async () => {
+      try {
+        parseCompleteGeneratedWorld({
+          world: { title: "PRIVATE_PROVIDER_WORLD" },
+          playableCharacters: []
+        });
+      } catch (error) {
+        throw incompleteGeneratedWorldError(error);
+      }
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-error",
+      headers: { "x-correlation-id": "generated-world-test" }
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toMatchObject({
+      message: expect.stringContaining("Correlation ID: generated-world-test."),
+      correlationId: "generated-world-test",
+      details: {
+        code: "incomplete_generated_world",
+        issues: expect.arrayContaining([
+          expect.objectContaining({ path: "world.genre" })
+        ])
+      }
+    });
+    expect(response.payload).not.toContain("PRIVATE_PROVIDER_WORLD");
+
+    await app.close();
+  });
+
+  it("exposes an actionable malformed-JSON issue without the parser body", async () => {
+    const marker = "PRIVATE_MALFORMED_PROVIDER_BODY";
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-json-error", async () => {
+      throw incompleteGeneratedWorldError(
+        new SyntaxError(`Unexpected token in ${marker}`)
+      );
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-json-error"
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toMatchObject({
+      details: {
+        code: "incomplete_generated_world",
+        issues: [{
+          path: "generatedWorld",
+          code: "invalid_json",
+          message: "Generated world JSON is malformed."
+        }]
+      }
+    });
+    expect(response.payload).not.toContain(marker);
+
+    await app.close();
+  });
+
+  it("bounds generated-world issue fields before exposing the API envelope", async () => {
+    const marker = "PRIVATE_OVERSIZED_API_ISSUE";
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-oversized-error", async () => {
+      throw incompleteGeneratedWorldError(new z.ZodError([{
+        path: [`world.${"p".repeat(500)}${marker}`],
+        code: `${"c".repeat(100)}${marker}` as "custom",
+        message: `${"m".repeat(500)}${marker}`
+      }]));
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-oversized-error"
+    });
+    const issue = response.json().details.issues[0] as {
+      path: string;
+      code: string;
+      message: string;
+    };
+
+    expect(response.statusCode).toBe(502);
+    expect(issue.path.length).toBeLessThanOrEqual(500);
+    expect(issue.code.length).toBeLessThanOrEqual(100);
+    expect(issue.message.length).toBeLessThanOrEqual(500);
+    expect(response.payload).not.toContain(marker);
+
+    await app.close();
+  });
+
+  it("exposes and logs only controlled generated-world provider 429 details", async () => {
+    const marker = "SECRET_AT_START_OF_PROVIDER_429_BODY";
+    const rawProviderError = Object.assign(
+      new Error(`Provider request failed (429): ${marker}`),
+      {
+        statusCode: 429,
+        providerMessage: `${marker}${"x".repeat(2_000)}`
+      }
+    );
+    const safeProviderError = generatedWorldProviderError(rawProviderError);
+    const errorLogs: unknown[] = [];
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-provider-error", async (request) => {
+      (request.log as unknown as { error: (...args: unknown[]) => void }).error = (...args) => {
+        errorLogs.push(args);
+      };
+      throw safeProviderError;
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-provider-error",
+      headers: { "x-correlation-id": "provider-429-test" }
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(response.json()).toMatchObject({
+      error: "WorldGenerationProviderError",
+      message: "The text provider request failed with HTTP 429. Correlation ID: provider-429-test.",
+      correlationId: "provider-429-test",
+      code: "provider_http_error",
+      details: {
+        code: "provider_http_error",
+        category: "http",
+        providerStatus: 429
+      }
+    });
+    expect(response.payload).not.toContain(marker);
+    expect(JSON.stringify(errorLogs)).not.toContain(marker);
+
+    await app.close();
+  });
+
+  it.each([
+    {
+      label: "destination policy",
+      rawError: () => new ProviderDestinationNotAllowedError("dns"),
+      expectedStatus: 422,
+      expectedName: "ProviderDestinationNotAllowedError",
+      expectedCode: "PROVIDER_DESTINATION_NOT_ALLOWED",
+      expectedCategory: "destination",
+      expectedMessage: "The provider destination is not allowed by the server network policy."
+    },
+    {
+      label: "response size",
+      rawError: () => new ProviderResponseTooLargeError(4 * 1024 * 1024),
+      expectedStatus: 502,
+      expectedName: "ProviderResponseTooLargeError",
+      expectedCode: "provider_response_too_large",
+      expectedCategory: "response_limit",
+      expectedMessage: "The provider response exceeded the server's safe size limit."
+    }
+  ])("exposes and logs only controlled generated-world $label details", async ({
+    rawError,
+    expectedStatus,
+    expectedName,
+    expectedCode,
+    expectedCategory,
+    expectedMessage
+  }) => {
+    const marker = "SECRET_AT_START_OF_TYPED_PROVIDER_API_FAILURE";
+    const safeProviderError = generatedWorldProviderError(Object.assign(rawError(), {
+      cause: new Error(`${marker}: private cause`),
+      providerMessage: `${marker}: private provider body`,
+      prompt: `${marker}: private lore`,
+      credentials: `${marker}: private credentials`
+    }));
+    const errorLogs: unknown[] = [];
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-typed-provider-error", async (request) => {
+      (request.log as unknown as { error: (...args: unknown[]) => void }).error = (...args) => {
+        errorLogs.push(args);
+      };
+      throw safeProviderError;
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-typed-provider-error",
+      headers: { "x-correlation-id": "typed-provider-test" }
+    });
+
+    expect(response.statusCode).toBe(expectedStatus);
+    expect(response.json()).toMatchObject({
+      error: expectedName,
+      message: `${expectedMessage} Correlation ID: typed-provider-test.`,
+      correlationId: "typed-provider-test",
+      code: expectedCode,
+      details: {
+        code: expectedCode,
+        category: expectedCategory,
+        permanent: true,
+        retryable: false
+      }
+    });
+    expect(response.payload).not.toContain(marker);
+    expect(JSON.stringify(errorLogs)).not.toContain(marker);
 
     await app.close();
   });
