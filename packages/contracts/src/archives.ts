@@ -34,7 +34,15 @@ function isExcludedMetadataKey(key: string): boolean {
   return /(?:credential|secret|password|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|auth[_-]?header|cookie|private[_-]?key)/.test(normalized)
     || /(?:provider|temporary|temp|signed|presigned|upload|download).*(?:url|uri|endpoint)/.test(normalized)
     || /(?:local|cache|storage|file|temp).*(?:path|dir|directory|location)/.test(normalized)
-    || /remote.*(?:artifact|job|image|url|path|id)/.test(normalized);
+    || /(?:embedding|thumbnail|raw.*provider.*response|provider.*response|private.*reasoning|reasoning.*private)/.test(normalized)
+    || /(?:response|chain|lease|job|remote)/.test(normalized);
+}
+
+function isPortableMetadataValue(value: unknown): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isPortableMetadataValue);
+  return isPlainRecord(value) && Object.values(value).every(isPortableMetadataValue);
 }
 
 function canonicalizeArchiveValue(value: unknown, parentKey?: string): unknown {
@@ -104,8 +112,14 @@ export const archiveAssetBindingSchema = z.discriminatedUnion("role", [
 ]);
 
 const portableTechnicalMetadataSchema = z.preprocess(
-  sanitizePortableMetadata,
-  z.record(z.string(), z.unknown()).refine(isPlainRecord, "Technical metadata must be a plain record.")
+  (value) => {
+    const sanitized = sanitizePortableMetadata(value);
+    return isPlainRecord(sanitized) ? sanitized : undefined;
+  },
+  z.record(z.string(), z.unknown()).refine(
+    (value) => isPlainRecord(value) && Object.values(value).every(isPortableMetadataValue),
+    "Technical metadata must be a plain JSON record."
+  )
 );
 
 export const archiveAssetRecordSchema = z.object({
@@ -165,6 +179,12 @@ export const archiveManifestSchema = z.object({
     }
   }
 
+  for (const [index, asset] of manifest.assets.entries()) {
+    if (!paths.has(normalizedArchivePath(asset.archivePath))) {
+      context.addIssue({ code: "custom", path: ["assets", index, "archivePath"], message: "Every asset must be declared in entries." });
+    }
+  }
+
   if (manifest.archiveType === "campaign") {
     if (!manifest.campaignId || !manifest.worldId || !manifest.worldVersionId) {
       context.addIssue({ code: "custom", message: "Campaign manifests require campaign, world, and world version identifiers." });
@@ -177,6 +197,9 @@ export const archiveManifestSchema = z.object({
     }
 
     for (const [assetIndex, asset] of manifest.assets.entries()) {
+      if (asset.bindings.length === 0) {
+        context.addIssue({ code: "custom", path: ["assets", assetIndex, "bindings"], message: "Campaign archive assets require at least one binding." });
+      }
       for (const [bindingIndex, binding] of asset.bindings.entries()) {
         const path = ["assets", assetIndex, "bindings", bindingIndex];
         if ("campaignId" in binding && binding.campaignId !== null && binding.campaignId !== manifest.campaignId) {

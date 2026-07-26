@@ -138,6 +138,20 @@ describe("portable archive contracts", () => {
     }).success).toBe(false);
   });
 
+  it("requires every asset archive path to be declared as an entry", () => {
+    expect(archiveManifestSchema.safeParse({
+      ...validManifest,
+      assets: [{ ...validAsset, archivePath: "assets/missing.png" }]
+    }).success).toBe(false);
+  });
+
+  it("rejects unbound assets from campaign manifests", () => {
+    expect(archiveManifestSchema.safeParse({
+      ...validManifest,
+      assets: [{ ...validAsset, bindings: [] }]
+    }).success).toBe(false);
+  });
+
   it.each(["../turns.json", "/absolute.json", "C:/drive.json", "a\\b.json", "a/./b.json"])(
     "rejects unsafe archive path %s",
     (path) => expect(archivePathSchema.safeParse(path).success).toBe(false)
@@ -152,6 +166,32 @@ describe("portable archive contracts", () => {
       ...validAsset,
       technicalMetadata: { providerUrl: "https://temporary.example/image", visible: "safe" }
     }).technicalMetadata).toEqual({ visible: "safe" });
+  });
+
+  it("removes prohibited derived, provider, and remote-state metadata recursively", () => {
+    const technicalMetadata = {
+      embedding: [0.1, 0.2],
+      thumbnail: "assets/thumb.png",
+      rawProviderResponse: { text: "private" },
+      privateReasoning: "hidden chain of thought",
+      previousResponseId: "response-1",
+      responseChainId: "chain-1",
+      leaseId: "lease-1",
+      generationJobId: "job-1",
+      remoteState: { status: "running" },
+      nested: [{ remoteJobId: "remote-job-1", safe: "retained" }],
+      safe: "portable"
+    };
+
+    expect(sanitizePortableMetadata(technicalMetadata)).toEqual({
+      nested: [{ safe: "retained" }],
+      safe: "portable"
+    });
+    expect(archiveAssetRecordSchema.parse({ ...validAsset, technicalMetadata }).technicalMetadata).toEqual({
+      nested: [{ safe: "retained" }],
+      safe: "portable"
+    });
+    expect(archiveAssetRecordSchema.safeParse({ ...validAsset, technicalMetadata: "not-a-record" }).success).toBe(false);
   });
 
   it("canonicalizes object keys and fingerprints sorted unique content hashes", () => {
