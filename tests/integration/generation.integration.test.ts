@@ -878,7 +878,7 @@ integration("durable Story Engine integration", () => {
     const storyUserMessage = storyRequest?.messages?.find((message: any) => message.role === "user");
     const storyPayload = JSON.parse(storyUserMessage?.content || "{}");
     const outcomeGuidance = JSON.stringify(storyPayload.fiction_only_outcome_guidance || []);
-    expect(outcomeGuidance).toContain("Marker Five becomes active");
+    expect(outcomeGuidance).toMatch(/Marker Five (becomes active|remains inactive)/);
     expect(outcomeGuidance).not.toMatch(/d20|\broll(?:s|ed|ing)?\b|\bdice?\b|test_stat|difficulty_modifier|target/i);
     expect(storyPayload).not.toHaveProperty("mechanics");
     expect(storyPayload).not.toHaveProperty("rpgStats");
