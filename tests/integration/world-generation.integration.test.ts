@@ -367,6 +367,46 @@ integration("generated CYOA world persistence", () => {
     });
   });
 
+  it("keeps malformed CYOA parser details out of logs and progress", async () => {
+    const marker = `PRIVATE_CYOA_PARSE_${crypto.randomUUID()}`;
+    const sourceName = `malformed-cyoa-${crypto.randomUUID()}.json`;
+    const sourceText = `${marker}{`;
+    const progressKey = `${sourceName}:${sourceText.length}`;
+    progressKeys.add(progressKey);
+    const errorLog = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    let errorLogCalls: unknown[][] = [];
+    let thrown: unknown;
+
+    try {
+      await importInfiniteWorlds(pool, {
+        sourceName,
+        sourceText,
+        sourceKind: "cyoa_json",
+        selectedCharacterIndex: 0,
+        enrichFinalTurn: false,
+        providerProfileId: providerId
+      }, credentialSecret);
+    } catch (error) {
+      thrown = error;
+    } finally {
+      errorLogCalls = [...errorLog.mock.calls];
+      errorLog.mockRestore();
+    }
+
+    expect(thrown).toMatchObject({
+      statusCode: 400,
+      expose: true,
+      details: { code: "invalid_cyoa_json" }
+    });
+    expect(getImportProgress(progressKey)).toMatchObject({
+      status: "failed",
+      phase: "failed",
+      message: "Invalid Choose Your Own Adventure JSON structure.",
+      errorMessage: "Invalid Choose Your Own Adventure JSON structure."
+    });
+    expect(JSON.stringify({ progress: getImportProgress(progressKey), errorLogCalls })).not.toContain(marker);
+  });
+
   it("persists exactly three complete profiles after one successful supplement", async () => {
     const sourceName = `repaired-generated-cyoa-${crypto.randomUUID()}.json`;
     const generatedRequest = request(sourceName);

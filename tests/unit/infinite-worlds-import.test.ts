@@ -61,6 +61,24 @@ describe("Infinite Worlds import conversion", () => {
     });
   });
 
+  it("reports invalid CYOA preview JSON without echoing source text", async () => {
+    const marker = "PRIVATE_CYOA_PARSE_MARKER";
+    const request = infiniteWorldsImportRequestSchema.parse({
+      sourceName: "broken-cyoa.json",
+      sourceKind: "cyoa_json",
+      sourceText: `${marker}{`
+    });
+
+    const preview = await previewInfiniteWorldsImport({} as never, request);
+
+    expect(preview).toMatchObject({
+      kind: "cyoa_json",
+      valid: false,
+      warnings: ["Invalid Choose Your Own Adventure JSON structure."]
+    });
+    expect(JSON.stringify(preview)).not.toContain(marker);
+  });
+
   it("parses story turns, reuses the next selected action, and removes mechanic leakage", () => {
     const parsed = parseInfiniteWorldsStory(`-- Story Background --
 A sanitized test history.

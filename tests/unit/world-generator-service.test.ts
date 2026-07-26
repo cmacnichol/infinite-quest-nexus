@@ -78,6 +78,12 @@ function worldResponse(playableCharacters: unknown[]): string {
   });
 }
 
+function worldResponseWithTitle(title: string, playableCharacters: unknown[]): string {
+  const world = JSON.parse(worldResponse(playableCharacters)) as Record<string, unknown>;
+  world.title = title;
+  return JSON.stringify(world);
+}
+
 function providerResult(content: string, responseId = "response-id"): ProviderResult {
   return {
     content,
@@ -154,6 +160,31 @@ describe("generateTemplateWorld orchestration", () => {
     expect(JSON.parse(harness.requests[1]!.input)).toMatchObject({
       existingCharacters: [{ name: "Mira Vale" }]
     });
+  });
+
+  it("does not log provider-controlled generated titles", async () => {
+    const marker = "PRIVATE_GENERATED_TITLE_MARKER";
+    const debugLog = vi.spyOn(logger, "debug").mockImplementation(() => undefined);
+    const infoLog = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+    let logCalls: unknown[][] = [];
+    const harness = generationHarness([
+      providerResult(worldResponseWithTitle(marker, [
+        character("Mira Vale"),
+        character("Oren Pike"),
+        character("Sela Moon")
+      ]))
+    ]);
+
+    try {
+      const generated = await harness.run();
+      expect(generated.title).toBe(marker);
+    } finally {
+      logCalls = [...debugLog.mock.calls, ...infoLog.mock.calls];
+      debugLog.mockRestore();
+      infoLog.mockRestore();
+    }
+
+    expect(JSON.stringify(logCalls)).not.toContain(marker);
   });
 
   it("discards malformed initial roster entries without requesting full-world recovery", async () => {

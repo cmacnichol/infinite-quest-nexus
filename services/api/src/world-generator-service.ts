@@ -198,6 +198,7 @@ export type WorldGenerationFailureDiagnostic = {
   message: string;
   statusCode?: number;
   code?: "incomplete_generated_world"
+    | "invalid_cyoa_json"
     | "PROVIDER_DESTINATION_NOT_ALLOWED"
     | "provider_response_too_large"
     | "provider_http_error"
@@ -352,6 +353,13 @@ export function worldGenerationFailureDiagnostic(error: unknown): WorldGeneratio
       issues
     };
   }
+  if (detailsCode === "invalid_cyoa_json") {
+    return {
+      message: "Invalid Choose Your Own Adventure JSON structure.",
+      statusCode: 400,
+      code: "invalid_cyoa_json"
+    };
+  }
   if (detailsCode === "provider_request_timeout" || failure.code === "provider_request_timeout") {
     return {
       message: "The text provider request timed out. Check the provider endpoint and server logs.",
@@ -497,7 +505,10 @@ export async function generateTemplateWorld(
   let converted: z.infer<typeof convertedWorldSchema>;
   try {
     converted = completeConvertedWorldSchema.parse(normalizeRawWorldJson(extractJsonObject(result.content)));
-    logger.debug({ title: converted.title }, "Successfully parsed initial generated world JSON");
+    logger.debug({
+      responseId: result.responseId,
+      characterCandidateCount: converted.playable_characters.length
+    }, "Successfully parsed initial generated world JSON");
   } catch (error) {
     if (!isGeneratedWorldValidationError(error)) throw error;
     logger.warn({
@@ -525,7 +536,10 @@ export async function generateTemplateWorld(
       throw incompleteGeneratedWorldError(recoveryError);
     }
     validationResult = recovered;
-    logger.info({ title: converted.title }, "Successfully recovered generated world JSON");
+    logger.info({
+      responseId: recovered.responseId,
+      characterCandidateCount: converted.playable_characters.length
+    }, "Successfully recovered generated world JSON");
   }
 
   const characterCandidates = [...(converted.playable_characters || [])];
@@ -625,7 +639,7 @@ export async function generateTemplateWorld(
   }
 
   await onProgress?.("completed", 100, "World and character generation completed.");
-  logger.info({ title: content.world.title, characterCount: content.playableCharacters.length }, "Completed template world generation successfully");
+  logger.info({ characterCount: content.playableCharacters.length }, "Completed template world generation successfully");
   return {
     title: content.world.title,
     content
@@ -740,7 +754,7 @@ export async function generateWorldPreview(
       message: "World and character generation completed."
     });
   }
-  logger.info({ title: generated.content.world.title, progressKey }, "World preview generation succeeded");
+  logger.info({ progressKey, characterCount: generated.content.playableCharacters.length }, "World preview generation succeeded");
   return generated;
 }
 

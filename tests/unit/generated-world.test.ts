@@ -366,4 +366,22 @@ describe("generated world completion", () => {
     }]);
     expect(JSON.stringify(diagnostic)).not.toContain("PRIVATE_REJECTED_VALUE");
   });
+
+  it("keeps invalid CYOA parser diagnostics static", () => {
+    const diagnostic = worldGenerationFailureDiagnostic({
+      statusCode: 400,
+      expose: true,
+      details: {
+        code: "invalid_cyoa_json",
+        sourceText: "PRIVATE_CYOA_PARSE_SOURCE"
+      }
+    });
+
+    expect(diagnostic).toEqual({
+      message: "Invalid Choose Your Own Adventure JSON structure.",
+      statusCode: 400,
+      code: "invalid_cyoa_json"
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("PRIVATE_CYOA_PARSE_SOURCE");
+  });
 });
