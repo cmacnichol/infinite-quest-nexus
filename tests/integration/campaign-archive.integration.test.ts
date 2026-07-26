@@ -7,7 +7,7 @@ import { once } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { ZipArchive } from "archiver";
 import sharp from "sharp";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { calculateContentFingerprint, canonicalArchiveJson } from "../../packages/contracts/src/archives.js";
@@ -18,6 +18,23 @@ import { cleanupExpiredArchivePreviews, exportCampaign, previewCampaignArchive }
 import { importCampaignArchive } from "../../services/api/src/import-service.js";
 import { buildServer } from "../../services/api/src/server.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
+
+const archiveCleanupTestState = vi.hoisted(() => ({
+  failOncePaths: new Set<string>()
+}));
+
+vi.mock("../../services/api/src/archive-io.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/api/src/archive-io.js")>();
+  return {
+    ...actual,
+    removeArchivePath: async (archiveRoot: string, relativePath: string) => {
+      if (archiveCleanupTestState.failOncePaths.delete(relativePath)) {
+        throw Object.assign(new Error("forced transient archive cleanup failure"), { code: "EBUSY" });
+      }
+      return actual.removeArchivePath(archiveRoot, relativePath);
+    }
+  };
+});
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -31,6 +48,10 @@ const limits: ArchiveLimits = {
   maxExpansionRatio: 100,
   maxOriginalImageBytes: 25 * 1024 * 1024
 };
+
+afterEach(() => {
+  archiveCleanupTestState.failOncePaths.clear();
+});
 
 function multipartBody(parts: Array<{ name: string; value: string | Buffer; filename?: string; contentType?: string }>) {
   const boundary = `----infinitequest-${randomUUID()}`;
@@ -668,16 +689,31 @@ integration("campaign archive export", () => {
     expect(importedMigrations.rows).toEqual([]);
   });
 
-  it("preview cleanup removes a superseded upload only after the replacement is stored", async () => {
+  it("preview cleanup retries a superseded upload without deleting the replacement", async () => {
     const config = runtimeConfig();
     const firstStaged = await stagedExport();
     const firstPreview = await previewCampaignArchive(pool, config, firstStaged, "superseded-first.zip", { kind: "embedded" });
     const firstPath = (await previewRow(firstPreview.previewToken)).staged_archive_path;
+    archiveCleanupTestState.failOncePaths.add(firstPath);
     const secondStaged = await stagedExport();
     const secondPreview = await previewCampaignArchive(pool, config, secondStaged, "superseded-second.zip", { kind: "embedded" });
     const secondRow = await previewRow(secondPreview.previewToken);
 
+    expect((await stat(resolve(root, firstPath))).isFile()).toBe(true);
+    await expect(previewRow(firstPreview.previewToken)).resolves.toMatchObject({
+      staged_archive_path: firstPath,
+      status: "superseded",
+      result: { stagingCleanupPending: true }
+    });
+    await expect(cleanupExpiredArchivePreviews(pool, config, new Date())).resolves.toMatchObject({
+      expiredCount: 0,
+      cleanupFailureCount: 0
+    });
     await expect(stat(resolve(root, firstPath))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(previewRow(firstPreview.previewToken)).resolves.toMatchObject({
+      status: "superseded",
+      result: { stagingCleanupPending: false }
+    });
     expect((await stat(resolve(root, secondRow.staged_archive_path))).isFile()).toBe(true);
     expect(secondRow).toMatchObject({ staged_archive_path: secondStaged.relativePath, status: "previewed" });
   });
@@ -781,6 +817,7 @@ integration("campaign archive export", () => {
     const duplicatePreview = await previewCampaignArchive(pool, runtimeConfig(), duplicateStaged, "exact-one-repeat.zip", {
       kind: "existing_world_version", worldVersionId: firstDestination.worldVersionId
     });
+    archiveCleanupTestState.failOncePaths.add(duplicateStaged.relativePath);
     await expect(importCampaignArchive(pool, runtimeConfig(), { root }, {
       previewToken: duplicatePreview.previewToken,
       destination: { kind: "existing_world_version", worldVersionId: firstDestination.worldVersionId }
@@ -791,8 +828,55 @@ integration("campaign archive export", () => {
       worldVersionId: firstImport.worldVersionId,
       campaignId: firstImport.campaignId
     });
+    expect((await stat(duplicateStaged.absolutePath)).isFile()).toBe(true);
+    await expect(previewRow(duplicatePreview.previewToken)).resolves.toMatchObject({
+      status: "consumed",
+      result: { stagingCleanupPending: true }
+    });
+    await expect(cleanupExpiredArchivePreviews(pool, runtimeConfig(), new Date())).resolves.toMatchObject({
+      expiredCount: 0,
+      cleanupFailureCount: 0
+    });
     await expect(stat(duplicateStaged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(previewRow(duplicatePreview.previewToken)).resolves.toMatchObject({ status: "consumed" });
+    await expect(previewRow(duplicatePreview.previewToken)).resolves.toMatchObject({
+      status: "consumed",
+      result: { stagingCleanupPending: false }
+    });
+  });
+
+  it("preview cleanup retries a consumed upload without rolling back the committed import", async () => {
+    const config = runtimeConfig();
+    const destination = await createCompatibleDestination("Consumed cleanup retry destination");
+    const staged = await stagedExport();
+    const preview = await previewCampaignArchive(pool, config, staged, "consumed-cleanup-retry.zip", {
+      kind: "existing_world_version",
+      worldVersionId: destination.worldVersionId
+    });
+    archiveCleanupTestState.failOncePaths.add(staged.relativePath);
+
+    const imported = await importCampaignArchive(pool, config, { root }, {
+      previewToken: preview.previewToken,
+      destination: { kind: "existing_world_version", worldVersionId: destination.worldVersionId }
+    });
+
+    await expect(previewRow(preview.previewToken)).resolves.toMatchObject({
+      status: "consumed",
+      result: { stagingCleanupPending: true }
+    });
+    expect((await stat(staged.absolutePath)).isFile()).toBe(true);
+    await expect(pool.query("SELECT id FROM campaigns WHERE id=$1", [imported.campaignId])).resolves.toMatchObject({
+      rows: [{ id: imported.campaignId }]
+    });
+
+    await expect(cleanupExpiredArchivePreviews(pool, config, new Date())).resolves.toMatchObject({
+      expiredCount: 0,
+      cleanupFailureCount: 0
+    });
+    await expect(previewRow(preview.previewToken)).resolves.toMatchObject({
+      status: "consumed",
+      result: { stagingCleanupPending: false }
+    });
+    await expect(stat(staged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("preview cleanup retries expired staging after a transient deletion failure", async () => {
@@ -947,6 +1031,7 @@ integration("campaign archive export", () => {
         kind: "existing_world_version", worldVersionId: destination.worldVersionId
       });
       failedPreviewToken = preview.previewToken;
+      archiveCleanupTestState.failOncePaths.add(staged.relativePath);
       await expect(importCampaignArchive(pool, runtimeConfig(), { root }, {
         previewToken: preview.previewToken,
         destination: { kind: "existing_world_version", worldVersionId: destination.worldVersionId }
@@ -963,7 +1048,19 @@ integration("campaign archive export", () => {
     );
     expect(after.rows[0]).toEqual(before.rows[0]);
     await expect(stat(originalPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await stat(staged.absolutePath)).isFile()).toBe(true);
+    await expect(previewRow(failedPreviewToken)).resolves.toMatchObject({
+      status: "failed",
+      result: { stagingCleanupPending: true }
+    });
+    await expect(cleanupExpiredArchivePreviews(pool, runtimeConfig(), new Date())).resolves.toMatchObject({
+      expiredCount: 0,
+      cleanupFailureCount: 0
+    });
     await expect(stat(staged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(previewRow(failedPreviewToken)).resolves.toMatchObject({ status: "failed" });
+    await expect(previewRow(failedPreviewToken)).resolves.toMatchObject({
+      status: "failed",
+      result: { stagingCleanupPending: false }
+    });
   });
 });

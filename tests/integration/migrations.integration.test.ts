@@ -98,7 +98,7 @@ integration("standard database migration runner", () => {
         ORDER BY tc.constraint_name`
     );
     expect(constraints.rows.map((row) => row.constraint_definition).join("\n")).toMatch(/archive_type.*campaign.*system/i);
-    expect(constraints.rows.map((row) => row.constraint_definition).join("\n")).toMatch(/status.*previewed.*consumed.*expired.*failed/i);
+    expect(constraints.rows.map((row) => row.constraint_definition).join("\n")).toMatch(/status.*previewed.*superseded.*consumed.*expired.*failed/i);
     expect(constraints.rows.map((row) => row.constraint_definition).join("\n")).toMatch(/UNIQUE.*token_hash/i);
 
     const indexes = await pool.query<{ indexname: string; indexdef: string }>(

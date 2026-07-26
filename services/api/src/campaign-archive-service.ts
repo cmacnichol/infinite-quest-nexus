@@ -331,6 +331,67 @@ async function removeStagedPreviewPath(
   }
 }
 
+async function cleanupPendingArchivePreviewPaths(
+  pool: DatabasePool,
+  config: RuntimeConfig,
+  ownerUserId: string,
+  logger?: ArchiveCleanupLogger,
+  previewId?: string
+): Promise<number> {
+  const pending = await pool.query<{ id: string; staged_archive_path: string; status: string }>(
+    `SELECT id,staged_archive_path,status
+       FROM archive_previews
+      WHERE owner_user_id=$1 AND archive_type='campaign'
+        AND status IN ('superseded','consumed','expired','failed')
+        AND result->>'stagingCleanupPending'='true'
+        AND ($2::uuid IS NULL OR id=$2)
+      ORDER BY updated_at,id`,
+    [ownerUserId, previewId ?? null]
+  );
+  let cleanupFailureCount = 0;
+  for (const row of pending.rows) {
+    const activeReference = await pool.query(
+      `SELECT 1
+         FROM archive_previews
+        WHERE owner_user_id=$1 AND archive_type='campaign'
+          AND staged_archive_path=$2 AND status='previewed'
+        LIMIT 1`,
+      [ownerUserId, row.staged_archive_path]
+    );
+    if (activeReference.rows.length) continue;
+    if (!(await removeStagedPreviewPath(config, row.staged_archive_path, logger))) {
+      cleanupFailureCount += 1;
+      continue;
+    }
+    await pool.query(
+      `UPDATE archive_previews
+          SET result=jsonb_set(
+                CASE WHEN jsonb_typeof(result)='object' THEN result ELSE '{}'::jsonb END,
+                '{stagingCleanupPending}',
+                'false'::jsonb,
+                true
+              ),
+              updated_at=now()
+        WHERE id=$1 AND owner_user_id=$2 AND archive_type='campaign'
+          AND staged_archive_path=$3
+          AND status IN ('superseded','consumed','expired','failed')
+          AND result->>'stagingCleanupPending'='true'`,
+      [row.id, ownerUserId, row.staged_archive_path]
+    );
+  }
+  return cleanupFailureCount;
+}
+
+export async function cleanupArchivePreviewStaging(
+  pool: DatabasePool,
+  config: RuntimeConfig,
+  previewId: string,
+  logger?: ArchiveCleanupLogger
+): Promise<number> {
+  const ownerUserId = await initialOwnerId(pool);
+  return cleanupPendingArchivePreviewPaths(pool, config, ownerUserId, logger, previewId);
+}
+
 export async function cleanupExpiredArchivePreviews(
   pool: DatabasePool,
   config: RuntimeConfig,
@@ -365,34 +426,7 @@ export async function cleanupExpiredArchivePreviews(
         AND result->>'stagingCleanupPending' IS NULL`,
     [ownerUserId]
   );
-  const pending = await pool.query<{ id: string; staged_archive_path: string }>(
-    `SELECT id,staged_archive_path
-       FROM archive_previews
-      WHERE owner_user_id=$1 AND archive_type='campaign' AND status='expired'
-        AND result->>'stagingCleanupPending'='true'
-      ORDER BY updated_at,id`,
-    [ownerUserId]
-  );
-  let cleanupFailureCount = 0;
-  for (const row of pending.rows) {
-    if (!(await removeStagedPreviewPath(config, row.staged_archive_path, logger))) {
-      cleanupFailureCount += 1;
-      continue;
-    }
-    await pool.query(
-      `UPDATE archive_previews
-          SET result=jsonb_set(
-                CASE WHEN jsonb_typeof(result)='object' THEN result ELSE '{}'::jsonb END,
-                '{stagingCleanupPending}',
-                'false'::jsonb,
-                true
-              ),
-              updated_at=now()
-        WHERE id=$1 AND owner_user_id=$2 AND archive_type='campaign' AND status='expired'
-          AND staged_archive_path=$3`,
-      [row.id, ownerUserId, row.staged_archive_path]
-    );
-  }
+  const cleanupFailureCount = await cleanupPendingArchivePreviewPaths(pool, config, ownerUserId, logger);
   return { expiredCount: newlyExpired.rows.length, cleanupFailureCount };
 }
 
@@ -706,32 +740,36 @@ export async function previewCampaignArchive(
   const preview = { ...responseBase, previewToken: rawToken, expiresAt: expiresAt.toISOString() };
   const storedPreview = { ...preview, previewToken: undefined, stagedCompressedBytes: staged.compressedBytes };
   const stagedPath = rootRelativeStagedPath(staged);
-  const supersededStagedPath = await withTransaction(pool, async (client) => {
+  const supersededPreviewId = await withTransaction(pool, async (client) => {
     const previewScope = `${ownerUserId}:campaign:${archive.contentFingerprint}:${boundDestinationHash}`;
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [previewScope]);
-    const existing = await client.query<{ staged_archive_path: string }>(
-      `SELECT staged_archive_path
-         FROM archive_previews
+    const superseded = await client.query<{ id: string }>(
+      `UPDATE archive_previews
+          SET status='superseded',
+              result=jsonb_set(
+                CASE WHEN jsonb_typeof(result)='object' THEN result ELSE '{}'::jsonb END,
+                '{stagingCleanupPending}',
+                'true'::jsonb,
+                true
+              ),
+              updated_at=now()
         WHERE owner_user_id=$1 AND archive_type='campaign' AND content_fingerprint=$2
           AND destination_hash=$3 AND status='previewed'
-        FOR UPDATE`,
+      RETURNING id`,
       [ownerUserId, archive.contentFingerprint, boundDestinationHash]
     );
     await client.query(
       `INSERT INTO archive_previews (
          owner_user_id,archive_type,token_hash,content_fingerprint,destination_hash,application_version,
          staged_archive_path,source_name,preview,status,expires_at
-       ) VALUES ($1,'campaign',$2,$3,$4,$5,$6,$7,$8::jsonb,'previewed',$9)
-       ON CONFLICT (owner_user_id,archive_type,content_fingerprint,destination_hash) WHERE status='previewed'
-       DO UPDATE SET token_hash=EXCLUDED.token_hash,application_version=EXCLUDED.application_version,
-         staged_archive_path=EXCLUDED.staged_archive_path,source_name=EXCLUDED.source_name,
-         preview=EXCLUDED.preview,status='previewed',expires_at=EXCLUDED.expires_at,consumed_at=NULL,result=NULL,updated_at=now()`,
+       ) VALUES ($1,'campaign',$2,$3,$4,$5,$6,$7,$8::jsonb,'previewed',$9)`,
       [ownerUserId, tokenHash, archive.contentFingerprint, boundDestinationHash, previewAppVersion(), stagedPath, sourceName, JSON.stringify(storedPreview), expiresAt]
     );
-    return existing.rows[0]?.staged_archive_path ?? null;
+    return superseded.rows[0]?.id ?? null;
   });
-  if (supersededStagedPath && supersededStagedPath !== stagedPath) {
-    await removeStagedPreviewPath(config, supersededStagedPath, logger, "superseded campaign archive preview staging cleanup failed");
+  if (supersededPreviewId) {
+    await cleanupPendingArchivePreviewPaths(pool, config, ownerUserId, logger, supersededPreviewId)
+      .catch((error) => safeCleanupWarning(logger, error, "superseded campaign archive preview staging cleanup failed"));
   }
   return campaignArchivePreviewResponseSchema.parse(preview);
 }

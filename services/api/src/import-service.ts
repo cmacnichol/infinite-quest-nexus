@@ -19,8 +19,8 @@ import {
 import { cleanupUnreferencedCreatedPaths, persistArchiveAssets, restoreAssetBindings, type ArchiveIdMap } from "./asset-archive-service.js";
 import { lockOriginalImages, parseDataImage, persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
 import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
-import { ArchiveError, rehydratePersistedStagedArchive, removeArchivePath } from "./archive-io.js";
-import { campaignArchiveApplicationVersion, cleanupExpiredArchivePreviews, decodeCampaignArchive, portableWorldContentHash, type ArchiveCleanupLogger, type DecodedCampaignArchive } from "./campaign-archive-service.js";
+import { ArchiveError, rehydratePersistedStagedArchive } from "./archive-io.js";
+import { campaignArchiveApplicationVersion, cleanupArchivePreviewStaging, cleanupExpiredArchivePreviews, decodeCampaignArchive, portableWorldContentHash, type ArchiveCleanupLogger, type DecodedCampaignArchive } from "./campaign-archive-service.js";
 
 export type CampaignArchiveImportResult = {
   importId: string;
@@ -55,7 +55,7 @@ type ArchivePreviewRow = {
   staged_archive_path: string;
   source_name: string;
   preview: Record<string, unknown>;
-  status: "previewed" | "consumed" | "expired" | "failed";
+  status: "previewed" | "superseded" | "consumed" | "expired" | "failed";
   expires_at: Date | string;
 };
 
@@ -123,18 +123,6 @@ function safeCleanupWarning(logger: ArchiveCleanupLogger | undefined, error: unk
   }
 }
 
-async function removeConsumedPreviewPath(
-  config: RuntimeConfig,
-  stagedPath: string,
-  logger?: ArchiveCleanupLogger
-): Promise<void> {
-  try {
-    await removeArchivePath(config.archiveStorageRoot, stagedPath);
-  } catch (error) {
-    safeCleanupWarning(logger, error, "consumed campaign archive preview staging cleanup failed");
-  }
-}
-
 async function markArchivePreviewFailed(
   pool: DatabasePool,
   previewId: string,
@@ -144,39 +132,20 @@ async function markArchivePreviewFailed(
   logger?: ArchiveCleanupLogger
 ): Promise<string | null> {
   try {
-    const updated = await pool.query<{ staged_archive_path: string }>(
+    const updated = await pool.query<{ id: string }>(
       `UPDATE archive_previews
           SET status='failed',result=$2::jsonb,updated_at=now()
         WHERE id=$1 AND token_hash=$3 AND staged_archive_path=$4 AND status IN ('previewed','expired')
-      RETURNING staged_archive_path`,
-      [previewId, JSON.stringify({ error: error instanceof ArchiveError ? error.code : "archive-import-failed" }), tokenHash, stagedPath]
+      RETURNING id`,
+      [previewId, JSON.stringify({
+        error: error instanceof ArchiveError ? error.code : "archive-import-failed",
+        stagingCleanupPending: true
+      }), tokenHash, stagedPath]
     );
-    return updated.rows[0]?.staged_archive_path ?? null;
+    return updated.rows[0]?.id ?? null;
   } catch (updateError) {
     safeCleanupWarning(logger, updateError, "campaign archive preview failure status update failed");
     return null;
-  }
-}
-
-async function removeFailedPreviewPath(
-  pool: DatabasePool,
-  config: RuntimeConfig,
-  previewId: string,
-  stagedPath: string,
-  logger?: ArchiveCleanupLogger
-): Promise<void> {
-  const referenced = await pool.query(
-    `SELECT 1
-       FROM archive_previews
-      WHERE id <> $1 AND staged_archive_path=$2 AND status='previewed'
-      LIMIT 1`,
-    [previewId, stagedPath]
-  ).catch(() => ({ rowCount: 1 }));
-  if (referenced.rowCount) return;
-  try {
-    await removeArchivePath(config.archiveStorageRoot, stagedPath);
-  } catch (error) {
-    safeCleanupWarning(logger, error, "failed campaign archive preview staging cleanup failed");
   }
 }
 
@@ -1103,9 +1072,15 @@ export async function importCampaignArchive(
     const prior = await client.query<ImportRow>("SELECT id,world_id,world_version_id,campaign_id,status,stats FROM imports WHERE owner_user_id=$1 AND source_hash=$2 FOR UPDATE", [ownerUserId, sourceHash]);
     if (prior.rows[0]?.status === "completed") {
       const row = prior.rows[0];
-      await client.query("UPDATE archive_previews SET status='consumed',consumed_at=now(),result=$2::jsonb,updated_at=now() WHERE id=$1", [preview.id, JSON.stringify({ importId: row.id, duplicate: true })]);
+      await client.query(
+        `UPDATE archive_previews
+            SET status='consumed',consumed_at=now(),result=$2::jsonb,updated_at=now()
+          WHERE id=$1 AND token_hash=$3 AND staged_archive_path=$4 AND status='previewed'`,
+        [preview.id, JSON.stringify({ importId: row.id, duplicate: true, stagingCleanupPending: true }), tokenHash, preview.staged_archive_path]
+      );
       await client.query("COMMIT");
-      await removeConsumedPreviewPath(config, preview.staged_archive_path, logger);
+      await cleanupArchivePreviewStaging(pool, config, preview.id, logger)
+        .catch((error) => safeCleanupWarning(logger, error, "consumed campaign archive preview staging cleanup failed"));
       return { importId: row.id, worldId: row.world_id!, worldVersionId: row.world_version_id!, campaignId: row.campaign_id!, duplicate: true, stats: row.stats as unknown as CampaignArchiveImportResult["stats"] };
     }
     if (prior.rows[0]) throw new ArchiveError("archive-import-conflict", "An import with this archive is already in progress.");
@@ -1141,9 +1116,22 @@ export async function importCampaignArchive(
     await restoreAssetBindings(client, ownerUserId, archive.inspected.manifest.assets, persisted.assetIds, idMap);
     const stats: CampaignArchiveImportResult["stats"] = { turnCount: inserted.turnCount, memoryCount: inserted.memoryCount, summaryCount: inserted.summaryCount, assetCount: archive.assets.originals.length, assetBytes: archive.assets.originals.reduce((sum, asset) => sum + asset.byteLength, 0) };
     await client.query("UPDATE imports SET status='completed',world_id=$2,world_version_id=$3,campaign_id=$4,stats=$5::jsonb,completed_at=now() WHERE id=$1", [importId, world.worldId, world.worldVersionId, inserted.campaignId, JSON.stringify(stats)]);
-    await client.query("UPDATE archive_previews SET status='consumed',consumed_at=now(),result=$2::jsonb,updated_at=now() WHERE id=$1", [preview.id, JSON.stringify({ importId, worldId: world.worldId, worldVersionId: world.worldVersionId, campaignId: inserted.campaignId, stats })]);
+    await client.query(
+      `UPDATE archive_previews
+          SET status='consumed',consumed_at=now(),result=$2::jsonb,updated_at=now()
+        WHERE id=$1 AND token_hash=$3 AND staged_archive_path=$4 AND status='previewed'`,
+      [preview.id, JSON.stringify({
+        importId,
+        worldId: world.worldId,
+        worldVersionId: world.worldVersionId,
+        campaignId: inserted.campaignId,
+        stats,
+        stagingCleanupPending: true
+      }), tokenHash, preview.staged_archive_path]
+    );
     await client.query("COMMIT");
-    await removeConsumedPreviewPath(config, preview.staged_archive_path, logger);
+    await cleanupArchivePreviewStaging(pool, config, preview.id, logger)
+      .catch((error) => safeCleanupWarning(logger, error, "consumed campaign archive preview staging cleanup failed"));
     return { importId, worldId: world.worldId, worldVersionId: world.worldVersionId, campaignId: inserted.campaignId, duplicate: false, stats };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
@@ -1156,8 +1144,11 @@ export async function importCampaignArchive(
         .catch((cleanupError) => safeCleanupWarning(logger, cleanupError, "failed campaign archive asset cleanup failed"));
     }
     if (failedPreviewId) {
-      const failedStagedPath = await markArchivePreviewFailed(pool, failedPreviewId, tokenHash, failedPreviewPath, error, logger);
-      if (failedStagedPath) await removeFailedPreviewPath(pool, config, failedPreviewId, failedStagedPath, logger);
+      const failedId = await markArchivePreviewFailed(pool, failedPreviewId, tokenHash, failedPreviewPath, error, logger);
+      if (failedId) {
+        await cleanupArchivePreviewStaging(pool, config, failedId, logger)
+          .catch((cleanupError) => safeCleanupWarning(logger, cleanupError, "failed campaign archive preview staging cleanup failed"));
+      }
     }
     throw error;
   } finally {
