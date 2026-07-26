@@ -998,6 +998,64 @@ integration("durable Story Engine integration", () => {
     }
   });
 
+  it("streams only the initial scene request and preserves its preview through a scene recovery retry", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaign_memory_configs SET embedding_enabled = false WHERE campaign_id = $1", [imported.campaignId]);
+    const streamedDraft = validStory("First visible scene preview reaches Location Gamma.");
+    const hiddenSceneRewrite = '{"narration":"Hidden scene rewrite';
+    const acceptedStory = validStory("The accepted scene resolves at Location Gamma.");
+    const requestOffset = requests.length;
+    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+    try {
+      replies.push(
+        { content: streamedDraft, streamChunks: [streamedDraft] },
+        { content: JSON.stringify({ covered: false, missing_required_beats: ["Location Gamma must be reached."], contradictions: [] }) },
+        { content: hiddenSceneRewrite }
+      );
+      const job = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+        action: "Write a scene where the party reaches Location Gamma.",
+        requestedInputMode: "scene",
+        resolvedInputMode: "scene",
+        inputModeSource: "explicit",
+        providerProfileId: providerId,
+        idempotencyKey: crypto.randomUUID(),
+        context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+      }));
+      await runGenerationJob(pool, "story-worker-scene-preview-a", 30, credentialSecret);
+
+      const initialRequests = requests.slice(requestOffset);
+      expect(initialRequests).toHaveLength(3);
+      expect(initialRequests[0]?.stream).toBe(true);
+      expect(initialRequests.slice(1).every((request) => request.stream !== true)).toBe(true);
+      const recoverable = await getGenerationJob(pool, job.id);
+      expect(recoverable).toMatchObject({ status: "recoverable", errorCode: "scene_coverage" });
+      expect(recoverable.partialOutput).toContain("First visible scene preview");
+      expect(recoverable.partialOutput).not.toContain("Hidden scene rewrite");
+
+      await retryGeneration(pool, job.id);
+      const retried = await getGenerationJob(pool, job.id);
+      expect(retried).toMatchObject({ status: "queued" });
+      expect(retried.partialOutput).toContain("First visible scene preview");
+      expect(retried.partialOutput).not.toContain("Hidden scene rewrite");
+
+      replies.push(
+        { content: acceptedStory },
+        { content: JSON.stringify({ covered: true, missing_required_beats: [], contradictions: [] }) }
+      );
+      await runGenerationJob(pool, "story-worker-scene-preview-b", 30, credentialSecret);
+
+      const allRequests = requests.slice(requestOffset);
+      expect(allRequests).toHaveLength(5);
+      expect(allRequests.filter((request) => request.stream === true)).toHaveLength(1);
+      expect(allRequests.slice(1).every((request) => request.stream !== true)).toBe(true);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+      const turn = await pool.query<{ narration: string }>("SELECT narration FROM turns WHERE campaign_id = $1 AND turn_number = 3", [imported.campaignId]);
+      expect(turn.rows[0]?.narration).toBe("The accepted scene resolves at Location Gamma.");
+    } finally {
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+    }
+  });
+
   it("reuses the persisted private roll when a recoverable story job is retried", async () => {
     const imported = await campaign();
     await syncPlayerCampaignConfig(pool, imported.campaignId, {
