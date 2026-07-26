@@ -8,6 +8,7 @@ import {
   MAX_IMPORTED_IMAGE_BYTES,
   imageExtensionForMimeType,
   lockOriginalImages,
+  originalStoragePath,
   persistOriginalImage,
   runAssetMetadataBackfill,
   type FilesystemAssetStore,
@@ -485,9 +486,12 @@ describe("asset archive portability", () => {
     await lockOriginalImages(client, ownerUserId, [{ bytes: pngBytes, mimeType: "image/png" }]);
     await lockOriginalImages(client, "22222222-2222-4222-8222-222222222222", [{ bytes: pngBytes, mimeType: "image/png" }]);
 
+    const thumbnailHash = (await verifyOriginalImage(pngBytes, "image/png")).thumbnail!.contentHash;
     expect(observed).toEqual([
       `infinitequest:asset-original:${hash.slice(0, 2)}/${hash}.png`,
-      `infinitequest:asset-original:${hash.slice(0, 2)}/${hash}.png`
+      `infinitequest:asset-original:${thumbnailHash.slice(0, 2)}/${thumbnailHash}.webp`,
+      `infinitequest:asset-original:${hash.slice(0, 2)}/${hash}.png`,
+      `infinitequest:asset-original:${thumbnailHash.slice(0, 2)}/${thumbnailHash}.webp`
     ]);
   });
 
@@ -508,6 +512,118 @@ describe("asset archive portability", () => {
       expect(observed.every((key) => key.startsWith("infinitequest:asset-original:"))).toBe(true);
       expect(observed.some((key) => key.endsWith(".webp"))).toBe(true);
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("prelocks colliding multi-image originals and thumbnails in one canonical order", async () => {
+    const firstBytes = await sharp({
+      create: { width: 2, height: 2, channels: 3, background: { r: 17, g: 31, b: 47 } }
+    }).png().toBuffer();
+    const secondBytes = await sharp({
+      create: { width: 2, height: 2, channels: 3, background: { r: 17, g: 31, b: 47 } }
+    }).webp({ lossless: true }).toBuffer();
+    const firstVerified = await verifyOriginalImage(firstBytes, "image/png");
+    const secondVerified = await verifyOriginalImage(secondBytes, "image/webp");
+    expect(firstVerified.thumbnail?.contentHash).toBe(secondVerified.thumbnail?.contentHash);
+
+    const inputs = [
+      { bytes: firstBytes, mimeType: "image/png" },
+      { bytes: secondBytes, mimeType: "image/webp" }
+    ] as const;
+    const expected = [...new Set([
+      ...inputs.map((image) => originalStoragePath(
+        createHash("sha256").update(image.bytes.toString("base64")).digest("hex"),
+        image.mimeType === "image/png" ? ".png" : ".webp"
+      )),
+      originalStoragePath(firstVerified.thumbnail!.contentHash, ".webp")
+    ])].sort().map((path) => `infinitequest:asset-original:${path}`);
+    const observedByOrder: string[][] = [[], []];
+    const makeClient = (observed: string[]) => ({
+      query: async (text: string, values?: unknown[]) => {
+        if (text.startsWith("SELECT pg_advisory_xact_lock")) observed.push(String(values?.[0]));
+        return { rows: [], rowCount: 1 };
+      }
+    });
+
+    await lockOriginalImages(makeClient(observedByOrder[0]!) as never, ownerUserId, inputs);
+    await lockOriginalImages(makeClient(observedByOrder[1]!) as never, ownerUserId, [...inputs].reverse());
+
+    expect(observedByOrder[0]).toEqual(expected);
+    expect(observedByOrder[1]).toEqual(expected);
+  });
+
+  it("serializes a real competing original writer with a colliding thumbnail writer", async () => {
+    const firstBytes = await sharp({
+      create: { width: 2, height: 2, channels: 3, background: { r: 67, g: 83, b: 101 } }
+    }).png().toBuffer();
+    const secondBytes = await sharp({
+      create: { width: 2, height: 2, channels: 3, background: { r: 67, g: 83, b: 101 } }
+    }).webp({ lossless: true }).toBuffer();
+    const verified = await verifyOriginalImage(firstBytes, "image/png");
+    const thumbnail = verified.thumbnail!;
+    const collisionPath = originalStoragePath(thumbnail.contentHash, ".webp");
+    const owners = new Map<string, string>();
+    const heldByClient = new Map<string, Set<string>>([["a", new Set()], ["b", new Set()]]);
+    const waiters = new Map<string, Array<() => void>>();
+    const bWaiting = deferred<void>();
+    let releasedA = false;
+
+    const acquire = async (clientId: string, key: string) => {
+      if (owners.get(key) === clientId) return;
+      if (owners.has(key)) {
+        if (clientId === "b" && key === `infinitequest:asset-original:${collisionPath}`) bWaiting.resolve();
+        await new Promise<void>((resolve) => {
+          const pending = waiters.get(key) ?? [];
+          pending.push(resolve);
+          waiters.set(key, pending);
+        });
+      }
+      owners.set(key, clientId);
+      heldByClient.get(clientId)!.add(key);
+    };
+    const release = (clientId: string) => {
+      for (const key of heldByClient.get(clientId)!) {
+        if (owners.get(key) !== clientId) continue;
+        owners.delete(key);
+        waiters.get(key)?.shift()?.();
+      }
+      heldByClient.get(clientId)!.clear();
+    };
+    const makeClient = (clientId: string) => ({
+      query: async (text: string, values?: unknown[]) => {
+        if (text.startsWith("SELECT pg_advisory_xact_lock")) await acquire(clientId, String(values?.[0]));
+        if (text.startsWith("INSERT INTO assets")) return { rows: [{ id: `${clientId}-asset` }], rowCount: 1 };
+        return { rows: [], rowCount: 1 };
+      }
+    });
+    const root = await mkdtemp(join(tmpdir(), "asset-original-thumbnail-race-"));
+    try {
+      await lockOriginalImages(makeClient("a") as never, ownerUserId, [
+        { bytes: secondBytes, mimeType: "image/webp" },
+        { bytes: firstBytes, mimeType: "image/png" }
+      ]);
+      const competingOriginal = persistOriginalImage(makeClient("b") as never, { root }, ownerUserId, {
+        bytes: thumbnail.bytes,
+        mimeType: "image/webp",
+        createThumbnail: false
+      });
+      await expect(Promise.race([
+        bWaiting.promise.then(() => "waiting"),
+        new Promise<string>((resolve) => setTimeout(() => resolve("not-waiting"), 250))
+      ])).resolves.toBe("waiting");
+
+      await persistOriginalImage(makeClient("a") as never, { root }, ownerUserId, {
+        bytes: firstBytes,
+        mimeType: "image/png"
+      });
+      releasedA = true;
+      release("a");
+      await expect(competingOriginal).resolves.toMatchObject({ contentHash: thumbnail.contentHash });
+      expect((await readFile(join(root, collisionPath))).equals(thumbnail.bytes)).toBe(true);
+    } finally {
+      if (!releasedA) release("a");
+      release("b");
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -590,8 +706,8 @@ describe("asset archive portability", () => {
       importLegacyStory(makePool(observedByImport[1]!), request, { root: "C:\\portable-assets" }, new Map([[assetB, secondBytes], [assetA, pngBytes]]))
     ]);
 
-    expect(observedByImport[0]).toHaveLength(2);
-    expect(observedByImport[1]).toHaveLength(2);
+    expect(observedByImport[0]).toHaveLength(4);
+    expect(observedByImport[1]).toHaveLength(4);
     expect(observedByImport[0]).toEqual([...observedByImport[0]!].sort());
     expect(observedByImport[1]).toEqual([...observedByImport[1]!].sort());
     expect(observedByImport[0]).toEqual(observedByImport[1]);
@@ -1024,6 +1140,8 @@ describe("asset archive portability", () => {
     const firstPath = `${hash.slice(0, 2)}/${hash}.png`;
     const secondHash = createHash("sha256").update(secondBytes.toString("base64")).digest("hex");
     const secondPath = `${secondHash.slice(0, 2)}/${secondHash}.png`;
+    const firstThumbnailHash = (await verifyOriginalImage(pngBytes, "image/png")).thumbnail!.contentHash;
+    const secondThumbnailHash = (await verifyOriginalImage(secondBytes, "image/png")).thumbnail!.contentHash;
     const observed: string[] = [];
     const client = {
       query: async (text: string, values?: unknown[]) => {
@@ -1038,9 +1156,11 @@ describe("asset archive portability", () => {
     ]);
 
     expect(observed).toEqual([
-      `infinitequest:asset-original:${firstPath}`,
-      `infinitequest:asset-original:${secondPath}`
-    ].sort());
+      firstPath,
+      secondPath,
+      originalStoragePath(firstThumbnailHash, ".webp"),
+      originalStoragePath(secondThumbnailHash, ".webp")
+    ].sort().map((path) => `infinitequest:asset-original:${path}`));
   });
 
   it("maps duplicate source UUIDs to one restored asset without exposing the content hash", async () => {

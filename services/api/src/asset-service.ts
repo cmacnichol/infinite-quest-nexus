@@ -51,11 +51,17 @@ export async function lockOriginalImages(
   ownerUserId: string,
   images: readonly { bytes: Buffer; mimeType: string }[]
 ): Promise<void> {
-  const paths = [...new Set(images.map((image) => originalStoragePath(
-    sha256(image.bytes.toString("base64")),
-    imageExtensionForMimeType(image.mimeType)
-  )))].sort();
-  for (const storagePath of paths) await lockOriginalAsset(client, ownerUserId, storagePath);
+  const paths = new Set<string>();
+  for (const image of images) {
+    paths.add(originalStoragePath(
+      sha256(image.bytes.toString("base64")),
+      imageExtensionForMimeType(image.mimeType)
+    ));
+    const verified = await verifyOriginalImage(image.bytes, image.mimeType);
+    if (verified.thumbnail) paths.add(originalStoragePath(verified.thumbnail.contentHash, ".webp"));
+  }
+  const sortedPaths = [...paths].sort();
+  for (const storagePath of sortedPaths) await lockOriginalAsset(client, ownerUserId, storagePath);
 }
 
 export type AssetLibraryItem = {
