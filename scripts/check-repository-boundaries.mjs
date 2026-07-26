@@ -17,6 +17,7 @@ const LEGACY_MIGRATION_ALLOWLIST = [
   "apps/web/public/nexus.js",
   "packages/contracts/src/imports.ts",
   "packages/domain/src/infinite-worlds.ts",
+  "services/api/src/archive-routes.ts",
   "services/api/src/import-service.ts",
   "services/api/src/infinite-worlds-import-service.ts",
   "services/api/src/server.ts"

@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdtemp, readFile, rm, stat, unlink } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -15,6 +15,7 @@ import { stageArchiveUpload } from "../../services/api/src/archive-io.js";
 import { persistOriginalImage } from "../../services/api/src/asset-service.js";
 import { exportCampaign, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
 import { importCampaignArchive } from "../../services/api/src/import-service.js";
+import { buildServer } from "../../services/api/src/server.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -29,6 +30,20 @@ const limits: ArchiveLimits = {
   maxExpansionRatio: 100,
   maxOriginalImageBytes: 25 * 1024 * 1024
 };
+
+function multipartBody(parts: Array<{ name: string; value: string | Buffer; filename?: string; contentType?: string }>) {
+  const boundary = `----infinitequest-${randomUUID()}`;
+  const chunks: Buffer[] = [];
+  for (const part of parts) {
+    chunks.push(Buffer.from(`--${boundary}\r\n`, "utf8"));
+    const disposition = part.filename
+      ? `Content-Disposition: form-data; name="${part.name}"; filename="${part.filename}"\r\nContent-Type: ${part.contentType ?? "application/octet-stream"}\r\n\r\n`
+      : `Content-Disposition: form-data; name="${part.name}"\r\n\r\n`;
+    chunks.push(Buffer.from(disposition, "utf8"), Buffer.isBuffer(part.value) ? part.value : Buffer.from(part.value, "utf8"), Buffer.from("\r\n", "utf8"));
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`, "utf8"));
+  return { payload: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${boundary}` };
+}
 
 integration("campaign archive export", () => {
   let pool: DatabasePool;
@@ -193,6 +208,54 @@ integration("campaign archive export", () => {
     } as RuntimeConfig;
   }
 
+  function serverConfig(): RuntimeConfig {
+    return {
+      role: "all",
+      host: "127.0.0.1",
+      port: 8080,
+      databaseUrl: databaseUrl!,
+      databaseMaxConnections: 4,
+      migrationDirectory: resolve("database/migrations"),
+      migrationWaitSeconds: 10,
+      allowMaintenanceMigrations: false,
+      workerPollIntervalMs: 1_000,
+      workerLeaseSeconds: 60,
+      webRoot: resolve("apps/web/public"),
+      assetStorageDriver: "filesystem",
+      assetStorageRoot: root,
+      archiveStorageRoot: root,
+      archivePreviewTtlSeconds: 1_800,
+      systemArchiveArtifactTtlSeconds: 86_400,
+      campaignArchiveLimits: limits,
+      systemArchiveLimits: limits,
+      credentialEncryptionKey: "",
+      security: {
+        corsAllowedOrigins: [],
+        providerNetworkAllowlist: ["localhost", "127.0.0.0/8", "::1/128"],
+        cspImageAllowedOrigins: [],
+        apiDefaultBodyLimitBytes: 1_048_576,
+        apiImportBodyLimitBytes: 16_777_216,
+        apiAssetBodyLimitBytes: 33_554_432,
+        apiRateLimitWindowSeconds: 60,
+        apiRateLimitProviderRequests: 10,
+        apiRateLimitGenerationRequests: 12,
+        apiRateLimitImportRequests: 4,
+        apiConcurrencyProviderRequests: 2,
+        apiConcurrencyImportRequests: 1,
+        trustProxyHops: 0
+      }
+    };
+  }
+
+  async function artifactNames(): Promise<string[]> {
+    try {
+      return await readdir(join(root, "artifacts"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+  }
+
   async function stagedExport() {
     const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
     return stageArchiveUpload(Readable.from(await readFile(artifact.absolutePath)), root, limits);
@@ -272,6 +335,142 @@ integration("campaign archive export", () => {
     expect(chronicle.summaries).toEqual([
       expect.objectContaining({ summary_kind: "legacy_full_history", through_turn: 1, content: { history: "Checkpoint" } })
     ]);
+  });
+
+  it("serves campaign exports as no-store attachments and removes the response artifact", async () => {
+    const app = await buildServer({ config: serverConfig(), pool });
+    const before = await artifactNames();
+    try {
+      const response = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/export` });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["content-type"]).toContain("application/zip");
+      expect(response.headers["cache-control"]).toBe("no-store");
+      expect(response.headers["content-disposition"]).toBe('attachment; filename="infinite-quest-campaign.zip"');
+      expect(response.headers["x-content-type-options"]).toBe("nosniff");
+      await expect.poll(async () => artifactNames(), { interval: 10, timeout: 1_000 }).toEqual(before);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("previews multipart Campaign Archives and commits the bound JSON request", async () => {
+    const app = await buildServer({ config: serverConfig(), pool });
+    const destination = await createCompatibleDestination("Route archive destination");
+    const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
+    const upload = multipartBody([
+      { name: "file", filename: "campaign.zip", value: await readFile(artifact.absolutePath) },
+      { name: "destination", value: JSON.stringify({ kind: "existing_world_version", worldVersionId: destination.worldVersionId }) }
+    ]);
+    await unlink(artifact.absolutePath);
+    try {
+      const preview = await app.inject({
+        method: "POST",
+        url: "/api/v1/imports/campaign-archive/preview",
+        headers: { "content-type": upload.contentType },
+        payload: upload.payload
+      });
+
+      expect(preview.statusCode).toBe(200);
+      const previewBody = preview.json();
+      expect(previewBody).toMatchObject({ archiveType: "campaign", destination: { worldVersionId: destination.worldVersionId } });
+
+      const commit = await app.inject({
+        method: "POST",
+        url: "/api/v1/imports/campaign-archive",
+        headers: { "content-type": "application/json" },
+        payload: { previewToken: previewBody.previewToken, destination: { kind: "existing_world_version", worldVersionId: destination.worldVersionId } }
+      });
+      expect([200, 201]).toContain(commit.statusCode);
+      expect(commit.json()).toMatchObject({ worldVersionId: destination.worldVersionId });
+
+      const multipartCommit = await app.inject({
+        method: "POST",
+        url: "/api/v1/imports/campaign-archive",
+        headers: { "content-type": upload.contentType },
+        payload: upload.payload
+      });
+      expect(multipartCommit.statusCode).toBe(400);
+      expect(multipartCommit.json()).toMatchObject({ error: "archive-json-invalid" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("does not export a foreign-owner campaign", async () => {
+    const foreignUserId = randomUUID();
+    await pool.query("INSERT INTO users (id,display_name) VALUES ($1,'Foreign archive owner')", [foreignUserId]);
+    const foreignWorld = await pool.query<{ id: string }>("INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Foreign archive world') RETURNING id", [foreignUserId]);
+    const foreignVersion = await pool.query<{ id: string }>("INSERT INTO world_versions (world_id,owner_user_id,version_number,content) VALUES ($1,$2,1,$3::jsonb) RETURNING id", [foreignWorld.rows[0]!.id, foreignUserId, JSON.stringify({ schemaVersion: 4, world: { title: "Foreign archive world" } })]);
+    const foreignCampaign = await pool.query<{ id: string }>("INSERT INTO campaigns (owner_user_id,world_version_id,title) VALUES ($1,$2,'Foreign archive campaign') RETURNING id", [foreignUserId, foreignVersion.rows[0]!.id]);
+    await pool.query("INSERT INTO campaign_state (campaign_id,owner_user_id) VALUES ($1,$2)", [foreignCampaign.rows[0]!.id, foreignUserId]);
+    const app = await buildServer({ config: serverConfig(), pool });
+    try {
+      const response = await app.inject({ method: "GET", url: `/api/v1/campaigns/${foreignCampaign.rows[0]!.id}/export` });
+      expect(response.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("returns the typed safe archive error for malformed archive uploads", async () => {
+    const app = await buildServer({ config: serverConfig(), pool });
+    const upload = multipartBody([
+      { name: "file", filename: "broken.zip", value: Buffer.from("not a zip archive", "utf8") },
+      { name: "destination", value: JSON.stringify({ kind: "embedded" }) }
+    ]);
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/imports/campaign-archive/preview",
+        headers: { "content-type": upload.contentType },
+        payload: upload.payload
+      });
+      const body = response.json();
+      expect(response.statusCode).toBe(400);
+      expect(body).toMatchObject({ error: "archive-format-unrecognized", details: {} });
+      expect(JSON.stringify(body)).not.toContain(root);
+      expect(JSON.stringify(body)).not.toContain("not a zip archive");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps legacy JSON imports and manifest-less ZIP previews available", async () => {
+    const app = await buildServer({ config: serverConfig(), pool });
+    const legacyZipPath = join(root, `legacy-route-${randomUUID()}.zip`);
+    const output = createWriteStream(legacyZipPath, { flags: "wx" });
+    const archive = new ZipArchive({ zlib: { level: 9 } });
+    const completed = once(output, "close");
+    archive.pipe(output);
+    archive.append(Buffer.from(JSON.stringify({ world: { title: "Manifest-less route archive" }, turns: [] }), "utf8"), { name: "campaign.json" });
+    await archive.finalize();
+    await completed;
+    const upload = multipartBody([
+      { name: "file", filename: "legacy-route.zip", value: await readFile(legacyZipPath) },
+      { name: "destination", value: JSON.stringify({ kind: "embedded" }) }
+    ]);
+    await unlink(legacyZipPath);
+    try {
+      const legacyJson = await app.inject({
+        method: "POST",
+        url: "/api/v1/imports/legacy-story",
+        headers: { "content-type": "application/json" },
+        payload: { sourceName: `legacy-json-${randomUUID()}.story`, story: { world: { title: "Legacy JSON route" }, turns: [] } }
+      });
+      expect([200, 201]).toContain(legacyJson.statusCode);
+
+      const legacyZip = await app.inject({
+        method: "POST",
+        url: "/api/v1/imports/campaign-archive/preview",
+        headers: { "content-type": upload.contentType },
+        payload: upload.payload
+      });
+      expect(legacyZip.statusCode).toBe(200);
+      expect(legacyZip.json().warnings).toEqual(expect.arrayContaining([expect.stringMatching(/no archive manifest/i)]));
+    } finally {
+      await app.close();
+    }
   });
 
   it("fails closed for an archive that exceeds configured limits", async () => {

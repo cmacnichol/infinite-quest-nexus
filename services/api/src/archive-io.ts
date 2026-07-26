@@ -126,6 +126,8 @@ export type CompletedArchiveArtifact = {
 };
 
 export class ArchiveError extends Error {
+  readonly expose = true;
+
   constructor(
     readonly code: ArchiveErrorCode,
     message: string,

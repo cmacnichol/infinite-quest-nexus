@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { buildServer } from "../../services/api/src/server.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
@@ -57,6 +59,18 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
       trustProxyHops: 0
     },
     ...overrides
+  };
+}
+
+function multipartArchiveUpload(file: Buffer, destination: Record<string, unknown>) {
+  const boundary = "----infinitequest-archive-error";
+  return {
+    contentType: `multipart/form-data; boundary=${boundary}`,
+    payload: Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="broken.zip"\r\nContent-Type: application/zip\r\n\r\n`, "utf8"),
+      file,
+      Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="destination"\r\n\r\n${JSON.stringify(destination)}\r\n--${boundary}--\r\n`, "utf8")
+    ])
   };
 }
 
@@ -118,8 +132,7 @@ describe("API server security and CORS headers", () => {
       });
       expect(response.statusCode).toBe(403);
       expect(response.json()).toMatchObject({
-        error: "OriginNotAllowedError",
-        code: "ORIGIN_NOT_ALLOWED"
+        error: "ORIGIN_NOT_ALLOWED"
       });
     }
     await app.close();
@@ -134,7 +147,7 @@ describe("API server security and CORS headers", () => {
       payload: {}
     });
     expect(response.statusCode).toBe(403);
-    expect(response.json()).toMatchObject({ code: "ORIGIN_NOT_ALLOWED" });
+    expect(response.json()).toMatchObject({ error: "ORIGIN_NOT_ALLOWED" });
     await app.close();
   });
 
@@ -147,8 +160,7 @@ describe("API server security and CORS headers", () => {
     });
     expect(response.statusCode).toBe(403);
     expect(response.json()).toMatchObject({
-      error: "OriginNotAllowedError",
-      code: "ORIGIN_NOT_ALLOWED"
+      error: "ORIGIN_NOT_ALLOWED"
     });
     await app.close();
   });
@@ -203,5 +215,30 @@ describe("API server security and CORS headers", () => {
     expect(body.message).toContain("The provided ID is not a valid UUID.");
 
     await app.close();
+  });
+
+  it("exposes typed safe archive errors without filesystem paths or raw payloads", async () => {
+    const root = await mkdtemp(join(tmpdir(), "infinitequest-archive-error-"));
+    const upload = multipartArchiveUpload(Buffer.from("not a zip archive", "utf8"), { kind: "embedded" });
+    const app = await buildServer({
+      config: makeConfig({ assetStorageRoot: join(root, "assets"), archiveStorageRoot: join(root, "archives") }),
+      pool: mockPool
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/imports/campaign-archive/preview",
+        headers: { "content-type": upload.contentType },
+        payload: upload.payload
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ error: "archive-format-unrecognized", details: {} });
+      expect(response.payload).not.toContain(root);
+      expect(response.payload).not.toContain("not a zip archive");
+    } finally {
+      await app.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

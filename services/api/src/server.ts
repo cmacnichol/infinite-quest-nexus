@@ -4,14 +4,13 @@ import { mkdir } from "node:fs/promises";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
 import fastifyMultipart from "@fastify/multipart";
-import JSZip from "jszip";
 import { z } from "zod";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import { createLoggerOptions } from "../../../packages/logger/src/index.js";
 import { characterLegacyText, effectiveCampaignCharacter } from "../../../packages/domain/src/world-characters.js";
-import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema, storyImportRequestSchema } from "../../../packages/contracts/src/imports.js";
+import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
 import {
   campaignBranchSchema,
@@ -59,7 +58,7 @@ import {
   campaignTransferCommitRequestSchema,
   campaignTransferPreviewRequestSchema
 } from "../../../packages/contracts/src/campaign-transfer.js";
-import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js";
+import { previewLegacyStoryImport } from "./import-service.js";
 import { getImportProgress, importInfiniteWorlds, previewInfiniteWorldsImport } from "./infinite-worlds-import-service.js";
 import { getSessionUserProfile, updateSessionUserProfile } from "./user-service.js";
 import { listPromptLibrary, previewPromptTemplate, resetPromptOverride, savePromptOverride } from "./prompt-library-service.js";
@@ -91,7 +90,6 @@ import {
   deleteCampaign,
   deleteWorld,
   deleteWorldVersion,
-  exportCampaign,
   exportWorld,
   forkWorld,
   getWorldVersionPlayableCharacterSummary,
@@ -120,6 +118,7 @@ import { applicationMetadata } from "./app-metadata.js";
 import { getDashboardStats } from "./dashboard-service.js";
 import { getTurnIllustrationResolution, rematchTurnIllustration } from "./illustration-resolution-service.js";
 import { installRequestSecurity } from "./request-security.js";
+import { registerArchiveRoutes } from "./archive-routes.js";
 import {
   enqueueIllustrationBackfill,
   generateTurnIllustrationSegments,
@@ -165,6 +164,17 @@ function errorDetails(error: unknown): { name: string; message: string; code?: s
   return { name: "Error", message: String(error) };
 }
 
+function safeErrorDetails(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([key, child]) => {
+    const normalized = key.replaceAll(/[^a-z0-9]/gi, "").toLowerCase();
+    if (normalized.includes("path") || normalized.includes("rawpayload")) return [];
+    if (Array.isArray(child)) return [[key, child.map((entry) => typeof entry === "string" ? entry : null)]];
+    if (child && typeof child === "object") return [[key, safeErrorDetails(child)]];
+    return [[key, child]];
+  }));
+}
+
 function exposeError(error: unknown, code: number): boolean {
   return code < 500 || (typeof error === "object" && error !== null && "expose" in error && (error as { expose?: unknown }).expose === true);
 }
@@ -185,12 +195,12 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     const transport = providerTransportErrorDetails(error);
     request.log.error({ err: error, code }, "request_failed");
     void reply.code(code).send({
-      error: exposed ? details.name || "Provider request failed" : "Internal server error",
+      error: exposed ? (details.code ?? details.name ?? "Provider request failed") : "Internal server error",
       message: exposed ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
       correlationId: request.id,
-      ...(!exposed || details.code === undefined ? {} : { code: details.code }),
-      ...(!exposed || details.details === undefined ? {} : { details: details.details }),
-      ...(transport ? { details: { code: transport.timedOut ? "provider_request_timeout" : "provider_transport_error", transport } } : {}),
+      details: transport
+        ? { code: transport.timedOut ? "provider_request_timeout" : "provider_transport_error", transport }
+        : exposed ? safeErrorDetails(details.details) : {},
       ...(details.issues === undefined ? {} : { issues: details.issues })
     });
   });
@@ -202,10 +212,15 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   });
 
   await mkdir(config.assetStorageRoot, { recursive: true });
+  await mkdir(config.archiveStorageRoot, { recursive: true });
   const assetStore: FilesystemAssetStore = { root: config.assetStorageRoot };
   await app.register(fastifyMultipart, {
-    limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
+    limits: {
+      fileSize: config.systemArchiveLimits.maxCompressedBytes,
+      fieldSize: config.systemArchiveLimits.maxJsonEntryBytes
+    }
   });
+  await app.register(registerArchiveRoutes, { pool, config, assetStore });
   await app.register(fastifyStatic, {
     root: config.webRoot,
     prefix: "/nexus/",
@@ -314,44 +329,6 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.delete<{ Params: { providerId: string } }>("/api/v1/providers/:providerId", async (request) => (
     deleteProvider(pool, uuidSchema.parse(request.params.providerId))
   ));
-
-  app.post("/api/v1/imports/legacy-story", async (request, reply) => {
-    let body;
-    let assetBuffers = new Map<string, Buffer>();
-
-    if (request.isMultipart()) {
-      const parts = request.parts();
-      for await (const part of parts) {
-        if (part.type === 'file' && part.fieldname === 'file') {
-          const buffer = await part.toBuffer();
-          const zip = await JSZip.loadAsync(buffer);
-          const campaignJsonFile = zip.file("campaign.json") || zip.file("infinite-quest-campaign.json");
-          if (!campaignJsonFile) throw new Error("Could not find campaign.json in the zip archive.");
-          body = JSON.parse(await campaignJsonFile.async("string"));
-
-          for (const [filename, file] of Object.entries(zip.files)) {
-            if (!file.dir && filename.startsWith("assets/")) {
-                const imgBuffer = await file.async("nodebuffer");
-                const name = filename.split('/').pop()!;
-                const id = name.split('.')[0]!;
-                assetBuffers.set(id, imgBuffer);
-            }
-          }
-        } else if (part.type === 'field' && part.fieldname === 'requestOverrides') {
-            const overrides = JSON.parse(part.value as string);
-            if (!body) body = overrides;
-            else Object.assign(body, overrides);
-        }
-      }
-      if (!body) throw new Error("Multipart request missing required file or requestOverrides.");
-    } else {
-      body = request.body;
-    }
-
-    const parsedBody = storyImportRequestSchema.parse(body);
-    const result = await importLegacyStory(pool, parsedBody, assetStore, assetBuffers);
-    return reply.code(result.duplicate ? 200 : 201).send(result);
-  });
 
   app.post("/api/v1/imports/legacy-story/preview", async (request) => (
     previewLegacyStoryImport(pool, storyImportPreviewRequestSchema.parse(request.body))
@@ -527,18 +504,6 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       campaignTransferCommitRequestSchema.parse(request.body)
     );
     return reply.code(result.reused ? 200 : 201).send(result);
-  });
-
-  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/export", async (request, reply) => {
-    const archive = await exportCampaign(pool, uuidSchema.parse(request.params.campaignId), {
-      assetStore,
-      archiveRoot: config.archiveStorageRoot,
-      limits: config.campaignArchiveLimits
-    });
-    return reply
-      .header("content-disposition", 'attachment; filename="infinite-quest-campaign.zip"')
-      .type("application/zip")
-      .send(await readFile(archive.absolutePath));
   });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/turns", async (request) => {
