@@ -9,6 +9,7 @@ import { buildTurnFictionMemory, formatLegacySummary, turnNarration } from "../.
 import { estimateTokens, removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { campaignCharacterSeed, campaignProfileFromCharacter, characterSnapshot } from "../../../packages/domain/src/world-characters.js";
 import { buildScopedEntityCatalog, resolveEntityMetadata } from "../../../packages/domain/src/entity-references.js";
+import { normalizeCampaignStateSnapshot, normalizeCampaignTrackers } from "../../../packages/domain/src/campaign-trackers.js";
 import {
   canonicalizeWorldContent,
   playableCharacterSchema,
@@ -694,8 +695,10 @@ export async function importLegacyStory(
       }
     }
 
-    const initialTrackers = request.story.trackers ?? [];
-    const defaultTriggers = request.story.defaultTriggers ?? request.story.baseTrackersAtStart ?? [];
+    const initialTrackers = normalizeCampaignTrackers(request.story.trackers ?? []);
+    const defaultTriggers = normalizeCampaignTrackers(
+      request.story.defaultTriggers ?? request.story.baseTrackersAtStart ?? []
+    );
     const eventTriggers = request.story.eventTriggers ?? [];
     const pendingEventTriggers = request.story.pendingEventTriggers ?? [];
     const rpgStats = request.story.rpgStats ?? [];
@@ -741,9 +744,10 @@ export async function importLegacyStory(
       completeHistoryCharacters += action.length + narration.length;
       estimatedHistoryTokens += estimateTokens(`${action}\n${narration}`);
 
-      const stateSnapshot = typeof turn.worldStateSnapshot === "object" && turn.worldStateSnapshot !== null
+      const rawStateSnapshot = typeof turn.worldStateSnapshot === "object" && turn.worldStateSnapshot !== null
         ? turn.worldStateSnapshot
         : { scratchpad: turn.scratchpadSnapshot ?? "", trackers: turn.trackersSnapshot ?? [] };
+      const stateSnapshot = normalizeCampaignStateSnapshot(rawStateSnapshot);
       const turnInsert = await client.query<{ id: string }>(
         `INSERT INTO turns (
            owner_user_id, campaign_id, turn_number, source_turn_id, action, input_mode, input_mode_source, narration, choices,
@@ -1014,13 +1018,18 @@ async function insertImportedRecords(
   );
   if (!campaign.rowCount) throw new Error("Could not create imported campaign.");
 
-  const state = objectValue(archive.campaign);
+  const importedTrackers = normalizeCampaignTrackers(archive.campaign.trackers);
+  const importedDefaultTriggers = normalizeCampaignTrackers(archive.campaign.defaultTriggers);
+  const importedInitialSnapshot = normalizeCampaignStateSnapshot({
+    scratchpad: "",
+    trackers: archive.campaign.baseTrackersAtStart ?? []
+  });
   await client.query(
     `INSERT INTO campaign_state (
        campaign_id,owner_user_id,scratchpad_private,trackers,default_triggers,event_triggers,pending_event_triggers,
        rpg_stats,import_provenance,initial_state_snapshot,revision
      ) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,$11)`,
-    [campaignId, ownerUserId, String(archive.campaign.scratchpad || ""), jsonValue(archive.campaign.trackers, []), jsonValue(archive.campaign.defaultTriggers, []), jsonValue(archive.campaign.eventTriggers, []), jsonValue(archive.campaign.pendingEventTriggers, []), jsonValue(archive.campaign.rpgStats, []), jsonValue({ world: archive.campaign.worldImportProvenance ?? null, story: archive.campaign.storyImportProvenance ?? null }, {}), jsonValue({ scratchpad: "", trackers: archive.campaign.baseTrackersAtStart ?? [] }, {}), Number(sourceCampaign.stateRevision || 0)]
+    [campaignId, ownerUserId, String(archive.campaign.scratchpad || ""), json(importedTrackers), json(importedDefaultTriggers), jsonValue(archive.campaign.eventTriggers, []), jsonValue(archive.campaign.pendingEventTriggers, []), jsonValue(archive.campaign.rpgStats, []), jsonValue({ world: archive.campaign.worldImportProvenance ?? null, story: archive.campaign.storyImportProvenance ?? null }, {}), json(importedInitialSnapshot), Number(sourceCampaign.stateRevision || 0)]
   );
 
   for (const turnValue of turns) {
@@ -1031,7 +1040,7 @@ async function insertImportedRecords(
          id,owner_user_id,campaign_id,turn_number,source_turn_id,action,input_mode,input_mode_source,narration,
          choices,custom_action_suggestion,image_prompt,image_url,mechanics_private,state_snapshot_private,model_metadata,import_metadata,accepted_at
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,'',$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17)`,
-      [requireMapped(idMap, "turn", sourceTurnId), ownerUserId, campaignId, Number(turn.turnNumber || 0), String(sourceTurnId), String(turn.action || ""), String(turn.inputMode || "action"), String(turn.inputModeSource || "explicit"), String(turn.narration || turn.story || turn.text || ""), jsonValue(turn.choices, []), String(turn.customActionSuggestion || ""), String(turn.imagePrompt || ""), turn.roll ?? null, jsonValue(turn.worldStateSnapshot, {}), jsonValue(turn.llmModelInfo, {}), jsonValue(turn.importedFrom, {}), importedDate(turn.createdAt) ?? new Date().toISOString()]
+      [requireMapped(idMap, "turn", sourceTurnId), ownerUserId, campaignId, Number(turn.turnNumber || 0), String(sourceTurnId), String(turn.action || ""), String(turn.inputMode || "action"), String(turn.inputModeSource || "explicit"), String(turn.narration || turn.story || turn.text || ""), jsonValue(turn.choices, []), String(turn.customActionSuggestion || ""), String(turn.imagePrompt || ""), turn.roll ?? null, json(normalizeCampaignStateSnapshot(turn.worldStateSnapshot)), jsonValue(turn.llmModelInfo, {}), jsonValue(turn.importedFrom, {}), importedDate(turn.createdAt) ?? new Date().toISOString()]
     );
   }
   for (const rowValue of profileEdits) {
@@ -1044,10 +1053,11 @@ async function insertImportedRecords(
   }
   for (const rowValue of stateEdits) {
     const row = objectValue(rowValue);
+    const stateSnapshot = normalizeCampaignStateSnapshot(row.state_snapshot_private);
     await client.query(
       `INSERT INTO campaign_state_edits (id,owner_user_id,campaign_id,effective_turn_number,revision,state_snapshot_private,changed_fields)
        VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)`,
-      [requireMapped(idMap, "stateEdit", row.id), ownerUserId, campaignId, Number(row.effective_turn_number || 0), Number(row.revision || 1), jsonValue(row.state_snapshot_private, {}), jsonValue(row.changed_fields, [])]
+      [requireMapped(idMap, "stateEdit", row.id), ownerUserId, campaignId, Number(row.effective_turn_number || 0), Number(row.revision || 1), json(stateSnapshot), jsonValue(row.changed_fields, [])]
     );
   }
   for (const rowValue of migrations) {

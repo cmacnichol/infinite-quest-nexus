@@ -7,6 +7,7 @@ import type {
 } from "../../../packages/contracts/src/campaign-transfer.js";
 import { worldContentSchema, type WorldContent } from "../../../packages/contracts/src/world-library.js";
 import { assessCampaignTransferCompatibility } from "../../../packages/domain/src/campaign-transfer.js";
+import { normalizeCampaignStateSnapshot, normalizeCampaignTrackers } from "../../../packages/domain/src/campaign-trackers.js";
 import { removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { enqueueEmbeddingReindex, rebuildCampaignMemories } from "./memory-service.js";
 
@@ -256,6 +257,8 @@ async function insertCampaignClone(
     ...(source.import_provenance || {}),
     transfer: { type: "nexus_world_transfer", transferId, sourceCampaignId: source.id, sourceWorldVersionId: source.world_version_id }
   };
+  const transferredTrackers = normalizeCampaignTrackers(source.trackers);
+  const transferredInitialSnapshot = normalizeCampaignStateSnapshot(source.initial_state_snapshot);
   await client.query(
     `INSERT INTO campaign_state (
        campaign_id, owner_user_id, scratchpad_private, scratchpad_safe_for_prompt, trackers,
@@ -263,9 +266,9 @@ async function insertCampaignClone(
        initial_state_snapshot, revision
      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
     [campaignId, ownerUserId, source.scratchpad_private, source.scratchpad_safe_for_prompt,
-      json(source.trackers), json(source.default_triggers), json(source.event_triggers),
+      json(transferredTrackers), json(source.default_triggers), json(source.event_triggers),
       json(source.pending_event_triggers), json(source.rpg_stats), json(provenance),
-      json(source.initial_state_snapshot), source.state_revision]
+      json(transferredInitialSnapshot), source.state_revision]
   );
   await client.query(
     `INSERT INTO campaign_state_edits (

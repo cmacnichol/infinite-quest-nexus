@@ -234,6 +234,40 @@ integration("durable Story Engine integration", () => {
     expect(nextSerialized).toContain("Determine what Marker Three unlocks");
   });
 
+  it("assigns tracker IDs when committing an unchanged generated tracker snapshot", async () => {
+    const imported = await campaign();
+    await pool.query(
+      "UPDATE campaign_state SET trackers = $2 WHERE campaign_id = $1",
+      [imported.campaignId, JSON.stringify([
+        { name: "Generated clue", value: "hidden", rules: "Update when revealed." }
+      ])]
+    );
+    const story = JSON.parse(validStory());
+    story.tracker_updates = [];
+    replies.push({ content: JSON.stringify(story) });
+    const job = await queue(imported.campaignId);
+
+    expect(await runGenerationJob(pool, "story-worker-tracker-ids", 30, credentialSecret)).toBe(true);
+
+    const persisted = await pool.query<{
+      trackers: unknown;
+      state_snapshot_private: { trackers?: unknown };
+    }>(
+      `SELECT cs.trackers, t.state_snapshot_private
+         FROM campaign_state cs
+         JOIN turns t ON t.campaign_id = cs.campaign_id
+        WHERE cs.campaign_id = $1 AND t.turn_number = 3`,
+      [imported.campaignId]
+    );
+    expect(persisted.rows[0]?.state_snapshot_private.trackers).toEqual([
+      expect.objectContaining({ id: "Generated clue", name: "Generated clue" })
+    ]);
+    expect(persisted.rows[0]?.trackers).toEqual([
+      expect.objectContaining({ id: "Generated clue", name: "Generated clue" })
+    ]);
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+  });
+
   it("stages an idempotent latest-turn replacement and swaps it only after validated commit", async () => {
     const imported = await campaign();
     const before = await pool.query<{ id: string; narration: string }>(

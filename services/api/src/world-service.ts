@@ -18,6 +18,7 @@ import {
   type WorldStatusUpdateRequest
 } from "../../../packages/contracts/src/world-library.js";
 import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
+import { normalizeCampaignTrackers } from "../../../packages/domain/src/campaign-trackers.js";
 import {
   assessWorldCampaignReadiness,
   campaignCharacterSeed,
@@ -577,8 +578,12 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
         [ownerUserId, campaignId, json(campaignProfile)]
       );
     }
-    const initialTrackers = Array.isArray(content.defaults?.trackers) && content.defaults.trackers.length
-      ? content.defaults.trackers : seed.defaultTriggers;
+    const defaultTrackers = normalizeCampaignTrackers(seed.defaultTriggers);
+    const initialTrackers = normalizeCampaignTrackers(
+      Array.isArray(content.defaults?.trackers) && content.defaults.trackers.length
+        ? content.defaults.trackers
+        : defaultTrackers
+    );
     await client.query(
       `INSERT INTO campaign_state (
          campaign_id, owner_user_id, trackers, default_triggers, event_triggers, rpg_stats, import_provenance, initial_state_snapshot
@@ -587,7 +592,7 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
         campaignId,
         ownerUserId,
         json(initialTrackers),
-        json(seed.defaultTriggers),
+        json(defaultTrackers),
         json(content.eventTriggers),
         json(seed.rpgStats),
         json({ sourceType: "world_library", worldId: source.world_id, worldVersionId: request.worldVersionId, selectedCharacterId: seed.character.id }),

@@ -123,6 +123,32 @@ integration("legacy import and Chronicle integration", () => {
     ]);
   });
 
+  it("assigns tracker IDs to imported campaign state and turn snapshots", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Tracker import ${crypto.randomUUID()}`;
+    fixture.trackers = [{ name: "Imported clue", value: "hidden", rules: "Update when discovered." }];
+    fixture.turns[0].trackersSnapshot = [{ name: "Imported clue", value: "hidden", rules: "Update when discovered." }];
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: `tracker-import-${crypto.randomUUID()}.story`,
+      story: fixture
+    }));
+
+    const state = await pool.query<{ trackers: unknown }>(
+      "SELECT trackers FROM campaign_state WHERE campaign_id = $1",
+      [imported.campaignId]
+    );
+    const turn = await pool.query<{ state_snapshot_private: { trackers?: unknown } }>(
+      "SELECT state_snapshot_private FROM turns WHERE campaign_id = $1 AND turn_number = 1",
+      [imported.campaignId]
+    );
+    expect(state.rows[0]?.trackers).toEqual([
+      expect.objectContaining({ id: "Imported clue", name: "Imported clue" })
+    ]);
+    expect(turn.rows[0]?.state_snapshot_private.trackers).toEqual([
+      expect.objectContaining({ id: "Imported clue", name: "Imported clue" })
+    ]);
+  });
+
   it("attaches a portable campaign to another world while preserving its character snapshot", async () => {
     const ownerUserId = await initialOwnerId(pool);
     const portable = JSON.parse(JSON.stringify(await exportCampaign(pool, campaignId, null)));
