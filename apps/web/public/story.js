@@ -5,10 +5,8 @@ import { branchCampaignFromTurn } from "./story-routing.js";
 import {
   addEditableStateRow,
   canonicalFactContent,
-  collectCanonicalFactEditorValues,
-  collectOpenThreadEditorValues,
   renderEditableStateCollection,
-  submitCampaignState
+  saveCampaignStateFromEditor
 } from "./story-state-editor.js";
 
 "use strict";
@@ -2219,12 +2217,12 @@ async function saveEditState() {
   const canonicalFacts = $("editStateCanonicalFacts");
   try {
     showBusy("Saving state…");
-    await submitCampaignState(api, state.campaignId, state.runtimeState, {
-        continuitySummary: continuitySummaryEl?.value || "",
-        openThreads: collectOpenThreadEditorValues(openThreads),
-        canonicalFacts: collectCanonicalFactEditorValues(canonicalFacts),
-        scratchpad: scratchpadEl?.value || "",
-        trackers: collectTrackerEditorValues()
+    await saveCampaignStateFromEditor(api, state.campaignId, state.runtimeState, {
+      summary: continuitySummaryEl,
+      threads: openThreads,
+      facts: canonicalFacts,
+      scratchpad: scratchpadEl,
+      trackers: collectTrackerEditorValues()
     }, savedState => {
       state.runtimeState = savedState;
       const dlg = $("editStateDialog");

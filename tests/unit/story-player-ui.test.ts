@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { describe, expect, it } from "vitest";
+import { saveCampaignStateFromEditor } from "../../apps/web/public/story-state-editor.js";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/public/story.js", "utf8");
@@ -297,11 +298,113 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('async function saveEditState()');
     expect(storyScript).toContain('/campaigns/${state.campaignId}/state');
     expect(storyScript).toContain('async function inspectTurnState(turnNumber)');
-    expect(storyScript).toContain('await submitCampaignState(api, state.campaignId, state.runtimeState, {');
     expect(storyHtml).toContain('id="scratchpadEditor"');
     expect(storyHtml).toContain('id="turnHistoryStatePanel"');
     expect(storyHtml).not.toContain('id="tab-history"');
     expect(storyScript).toContain('const btnSaveEditState = $("btnSaveEditState") || $("btnSaveScratch");');
+  });
+
+  it("saves editor DOM values through the campaign-state API before applying the response", async () => {
+    const { document } = parseHTML(`
+      <dialog open id="editStateDialog"></dialog>
+      <textarea id="summary">Corrected summary.</textarea>
+      <div id="threads"><div class="state-editor-row"><textarea>Find the keeper.</textarea></div></div>
+      <div id="facts"><div class="state-editor-row" data-item-id="00000000-0000-4000-8000-000000000001"><textarea>The lens is moon glass.</textarea></div></div>
+      <textarea id="scratchpad">Private continuity.</textarea>
+    `);
+    const dialog = document.querySelector("#editStateDialog");
+    const summary = document.querySelector("#summary");
+    const threads = document.querySelector("#threads");
+    const facts = document.querySelector("#facts");
+    const scratchpad = document.querySelector("#scratchpad");
+    if (!dialog || !summary || !threads || !facts || !scratchpad) throw new Error("Editor controls are required.");
+    dialog.close = () => dialog.removeAttribute("open");
+
+    const runtimeState = {
+      activeTurnNumber: 4,
+      revision: 7,
+      rpgStats: [{ id: "resolve", name: "Resolve", value: 61, note: "" }],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    };
+    const response = { ...runtimeState, revision: 8 };
+    const requests: Array<{ path: string; options: { method: string; body: string } }> = [];
+    let appliedState = runtimeState;
+
+    await saveCampaignStateFromEditor(
+      async (path, options) => {
+        requests.push({ path, options });
+        return response;
+      },
+      "campaign-id",
+      runtimeState,
+      { summary, threads, facts, scratchpad, trackers: [{ id: "trust", name: "Trust", value: "wary", rules: "" }] },
+      savedState => {
+        appliedState = savedState;
+        dialog.close();
+      }
+    );
+
+    expect(requests).toEqual([{
+      path: "/campaigns/campaign-id/state",
+      options: {
+        method: "PATCH",
+        body: JSON.stringify({
+          expectedTurnNumber: 4,
+          expectedRevision: 7,
+          continuitySummary: "Corrected summary.",
+          openThreads: ["Find the keeper."],
+          canonicalFacts: [{ id: "00000000-0000-4000-8000-000000000001", content: "The lens is moon glass." }],
+          scratchpad: "Private continuity.",
+          trackers: [{ id: "trust", name: "Trust", value: "wary", rules: "" }],
+          rpgStats: runtimeState.rpgStats,
+          eventTriggers: [],
+          pendingEventTriggers: []
+        })
+      }
+    }]);
+    expect(appliedState).toBe(response);
+    expect(dialog.hasAttribute("open")).toBe(false);
+  });
+
+  it("keeps editor controls and state intact when a campaign-state save is rejected", async () => {
+    const { document } = parseHTML(`
+      <dialog open id="editStateDialog"></dialog>
+      <textarea id="summary">Corrected summary.</textarea>
+      <div id="threads"><div class="state-editor-row"><textarea>Find the keeper.</textarea></div></div>
+      <div id="facts"><div class="state-editor-row" data-item-id="00000000-0000-4000-8000-000000000001"><textarea>The lens is moon glass.</textarea></div></div>
+      <textarea id="scratchpad">Private continuity.</textarea>
+    `);
+    const dialog = document.querySelector("#editStateDialog");
+    const summary = document.querySelector("#summary");
+    const threads = document.querySelector("#threads");
+    const facts = document.querySelector("#facts");
+    const scratchpad = document.querySelector("#scratchpad");
+    if (!dialog || !summary || !threads || !facts || !scratchpad) throw new Error("Editor controls are required.");
+
+    const runtimeState = {
+      activeTurnNumber: 4,
+      revision: 7,
+      rpgStats: [],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    };
+    let appliedState = runtimeState;
+
+    await expect(saveCampaignStateFromEditor(
+      async () => { throw new Error("Campaign state changed."); },
+      "campaign-id",
+      runtimeState,
+      { summary, threads, facts, scratchpad, trackers: [] },
+      savedState => { appliedState = savedState; dialog.removeAttribute("open"); }
+    )).rejects.toThrow("Campaign state changed.");
+
+    expect(appliedState).toBe(runtimeState);
+    expect(dialog.hasAttribute("open")).toBe(true);
+    expect(summary.value).toBe("Corrected summary.");
+    expect(threads.querySelector("textarea")?.value).toBe("Find the keeper.");
+    expect(facts.querySelector("textarea")?.value).toBe("The lens is moon glass.");
+    expect(scratchpad.value).toBe("Private continuity.");
   });
 
   it("provides editable continuity controls while keeping mechanics read-only", () => {

@@ -108,3 +108,19 @@ export async function submitCampaignState(
   onSaved(savedState);
   return savedState;
 }
+
+export async function saveCampaignStateFromEditor(
+  request,
+  campaignId,
+  runtimeState,
+  editor,
+  onSaved
+) {
+  return submitCampaignState(request, campaignId, runtimeState, {
+    continuitySummary: editor.summary?.value || "",
+    openThreads: collectOpenThreadEditorValues(editor.threads),
+    canonicalFacts: collectCanonicalFactEditorValues(editor.facts),
+    scratchpad: editor.scratchpad?.value || "",
+    trackers: editor.trackers
+  }, onSaved);
+}
