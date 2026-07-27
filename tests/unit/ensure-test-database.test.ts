@@ -2,7 +2,10 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ensureTestDatabase } from "../../scripts/ensure-test-database.mjs";
+import {
+  dockerCommandForPlatform,
+  ensureTestDatabase
+} from "../../scripts/ensure-test-database.mjs";
 import { configureIntegrationDatabase } from "../../tests/integration/ensure-test-database.setup.js";
 
 const temporaryDirectories: string[] = [];
@@ -18,6 +21,14 @@ async function temporaryProjectRoot(): Promise<string> {
 }
 
 describe("ensureTestDatabase", () => {
+  it.each([
+    ["win32", "docker.exe"],
+    ["linux", "docker"],
+    ["darwin", "docker"]
+  ] as const)("uses %s Docker command %s", (platform, expected) => {
+    expect(dockerCommandForPlatform(platform)).toBe(expected);
+  });
+
   it("creates local credentials, starts the dedicated Compose service, and creates a missing root database", async () => {
     const projectRoot = await temporaryProjectRoot();
     const execute = vi.fn(async () => undefined);
@@ -46,7 +57,7 @@ describe("ensureTestDatabase", () => {
       environmentFile: join(projectRoot, ".env.test.local")
     });
     expect(await readFile(config.environmentFile, "utf8")).toContain("POSTGRES_PASSWORD=generated-test-password");
-    expect(execute).toHaveBeenCalledWith("docker.exe", [
+    expect(execute).toHaveBeenCalledWith(dockerCommandForPlatform(), [
       "compose",
       "--env-file", config.environmentFile,
       "--project-name", "infinitequest-test",

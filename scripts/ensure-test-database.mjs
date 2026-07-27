@@ -16,6 +16,10 @@ const TEST_ENVIRONMENT_FILE = ".env.test.local";
 const STARTUP_ATTEMPTS = 120;
 const STARTUP_DELAY_MS = 250;
 
+export function dockerCommandForPlatform(platform = process.platform) {
+  return platform === "win32" ? "docker.exe" : "docker";
+}
+
 function parseEnvironmentFile(contents) {
   return Object.fromEntries(contents.split(/\r?\n/u)
     .filter((line) => line && !line.startsWith("#"))
@@ -107,7 +111,7 @@ export async function ensureTestDatabase({
   const config = await loadTestDatabaseConfig(projectRoot, { generatePassword });
   const composeFile = join(projectRoot, TEST_COMPOSE_FILE);
   try {
-    await execute("docker.exe", [
+    await execute(dockerCommandForPlatform(), [
       "compose",
       "--env-file", config.environmentFile,
       "--project-name", TEST_COMPOSE_PROJECT,

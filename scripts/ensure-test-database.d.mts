@@ -19,6 +19,10 @@ export interface EnsureTestDatabaseOptions {
   sleep?: (milliseconds: number) => Promise<void>;
 }
 
+export function dockerCommandForPlatform(
+  platform?: NodeJS.Platform
+): "docker.exe" | "docker";
+
 export function loadTestDatabaseConfig(
   projectRoot: string,
   options?: { generatePassword?: () => string }
