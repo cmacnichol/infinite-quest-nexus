@@ -73,8 +73,8 @@ async function cleanupExpiredBuckets(client: DatabaseClient, now: Date): Promise
     `DELETE FROM api_admission_buckets
       WHERE ctid IN (
         SELECT ctid
-          FROM api_admission_buckets
-         WHERE window_expires_at < $1 - interval '1 hour'
+         FROM api_admission_buckets
+         WHERE window_expires_at < $1::timestamptz - interval '1 hour'
          ORDER BY window_expires_at
          LIMIT 100
       )`,

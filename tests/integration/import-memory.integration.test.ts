@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { sha256 } from "../../packages/domain/src/text.js";
@@ -18,17 +19,20 @@ import {
   runChronicleJob,
   setCampaignEmbeddingConfig
 } from "../../services/api/src/memory-service.js";
+import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 
 integration("legacy import and Chronicle integration", () => {
   let pool: DatabasePool;
+  let providerTransport: ReturnType<typeof installIntegrationProviderTransport>;
   let campaignId = "";
   let assetRoot = "";
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
+    providerTransport = installIntegrationProviderTransport(["127.0.0.0/8", "embedding.test"]);
     assetRoot = await mkdtemp(resolve(tmpdir(), "infinitequest-assets-"));
     await migrateDatabase(pool, resolve("database/migrations"));
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
@@ -38,6 +42,7 @@ integration("legacy import and Chronicle integration", () => {
   });
 
   afterAll(async () => {
+    if (providerTransport) await providerTransport.close();
     if (pool) await pool.end();
     if (assetRoot) await rm(assetRoot, { recursive: true, force: true });
   });
@@ -578,6 +583,56 @@ integration("legacy import and Chronicle integration", () => {
     );
     expect(result.rows[0]?.image_url).toMatch(/^\/api\/v1\/assets\//);
     expect(await readFile(resolve(assetRoot, result.rows[0]!.storage_path))).toBeInstanceOf(Buffer);
+  });
+
+  it("persists and links zip archive asset buffers (JPEG/PNG/WebP) to imported campaign turns", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    const assetId = "9a3f2b1d-8e4c-4a31-b657-123456789abc";
+    fixture.world.title = `Zip asset import fixture ${crypto.randomUUID()}`;
+    fixture.turns[0].imageUrl = `/api/v1/assets/${assetId}`;
+
+    const jpegBuffer = await sharp({
+      create: {
+        width: 1,
+        height: 1,
+        channels: 3,
+        background: { r: 255, g: 255, b: 255 }
+      }
+    }).jpeg().toBuffer();
+
+    const assetBuffers = new Map<string, Buffer>();
+    assetBuffers.set(assetId, jpegBuffer);
+
+    const request = storyImportRequestSchema.parse({ sourceName: "zip-asset-import.story", story: fixture });
+    const imported = await importLegacyStory(pool, request, { root: assetRoot }, assetBuffers);
+
+    const result = await pool.query<{ image_url: string; mime_type: string; storage_path: string }>(
+      `SELECT t.image_url, a.mime_type, a.storage_path
+         FROM turns t
+         JOIN asset_references ar ON ar.turn_id = t.id AND ar.campaign_id = t.campaign_id
+         JOIN assets a ON a.id = ar.asset_id
+        WHERE t.campaign_id = $1 AND t.turn_number = 1`,
+      [imported.campaignId]
+    );
+
+    expect(result.rows[0]?.image_url).toMatch(/^\/api\/v1\/assets\//);
+    expect(result.rows[0]?.mime_type).toBe("image/jpeg");
+    expect(await readFile(resolve(assetRoot, result.rows[0]!.storage_path))).toEqual(jpegBuffer);
+
+    const configRes = await pool.query<{ enabled: boolean }>(
+      "SELECT enabled FROM campaign_illustration_configs WHERE campaign_id = $1",
+      [imported.campaignId]
+    );
+    expect(configRes.rows[0]?.enabled).toBe(true);
+
+    const segAssetRes = await pool.query<{ asset_id: string }>(
+      `SELECT tisa.asset_id
+         FROM turn_illustration_segment_assets tisa
+         JOIN turn_illustration_segments tis ON tis.id = tisa.segment_id
+        WHERE tis.campaign_id = $1`,
+      [imported.campaignId]
+    );
+    expect(segAssetRes.rows[0]?.asset_id).toBeDefined();
   });
 
   it("deduplicates active reindex requests and lets worker replicas claim different campaigns", async () => {

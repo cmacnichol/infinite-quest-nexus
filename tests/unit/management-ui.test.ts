@@ -8,6 +8,13 @@ const managementScript = readFileSync("apps/web/public/nexus.js", "utf8");
 const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
 const imageLibraryScript = readFileSync("apps/web/public/image-library-browser.js", "utf8");
 
+function managementFunction<T extends (...args: never[]) => unknown>(name: string): T {
+  const start = managementScript.indexOf(`function ${name}(`);
+  const end = managementScript.indexOf("\nfunction ", start + 1);
+  if (start < 0 || end < 0) throw new Error(`Unable to locate management function ${name}.`);
+  return Function(`${managementScript.slice(start, end)}; return ${name};`)() as T;
+}
+
 describe("Nexus management UI contracts", () => {
   it("navigates to provider management with an anchor", () => {
     expect(storyHtml).toContain('<a id="btnGettingConfigureProviders" class="buttonish accent grow" href="/nexus/">Open Provider Management in Nexus</a>');
@@ -539,11 +546,53 @@ describe("Nexus management UI contracts", () => {
   it("generates complete create-mode previews without creating a world", () => {
     expect(managementHtml).toContain('id="worldGenerator" class="character-generator"');
     expect(managementHtml).toContain('id="worldGeneratorPrompt"');
+    expect(managementHtml).toContain('id="worldGeneratorProgressContainer"');
+    expect(managementHtml).toContain('id="worldGeneratorProgressBar"');
     expect(managementScript).toContain('elements.worldGenerator.classList.toggle("hidden", mode !== "create");');
+    expect(managementScript).toContain('elements.worldGeneratorProgressContainer.classList.remove("hidden");');
     expect(managementScript).toContain('api("/api/v1/worlds/generate-preview"');
     expect(managementScript).toContain("authoritativeCreateCompleted");
     const generator = managementScript.match(/async function generateWorldFromPrompt\(\) \{[\s\S]*?\n\}/)?.[0] || "";
     expect(generator).not.toContain('api("/api/v1/worlds",');
+    expect(generator).toContain("Generating world structure and character seeds…");
+    expect(generator).toContain("Generating the world, then building each playable character…");
+    expect(generator).not.toContain("Generating a complete world and playable-character roster…");
+  });
+
+  it("renders bounded generated-world issue guidance and preserves the correlation ID", () => {
+    const failureMessage = managementFunction<(error: {
+      message: string;
+      details?: { code?: string; issues?: unknown[] };
+    }) => string>("worldGenerationFailureMessage");
+    const error = {
+      message: "The text provider did not return a complete world. Correlation ID: request-123.",
+      details: {
+        code: "incomplete_generated_world",
+        issues: [
+          { path: "world.genre", message: "Generated genre is required.", value: "PRIVATE_LORE" },
+          { path: "world.tone", message: "Generated tone is required." },
+          { path: "world.premise", message: "Generated premise is required." },
+          { path: "playableCharacters", message: "Three or four complete characters are required." },
+          { path: "world.rules", message: "Generated rules are required." }
+        ]
+      }
+    };
+
+    const message = failureMessage(error);
+
+    expect(message).toContain("Correlation ID: request-123.");
+    expect(message).toContain("world.genre: Generated genre is required.");
+    expect(message).toContain("playableCharacters: Three or four complete characters are required.");
+    expect(message).not.toContain("world.rules");
+    expect(message).not.toContain("PRIVATE_LORE");
+  });
+
+  it("uses generated-world issue guidance for prompt generation and CYOA import failures", () => {
+    const generator = managementScript.match(/async function generateWorldFromPrompt\(\) \{[\s\S]*?\n\}/)?.[0] || "";
+    const importer = managementScript.match(/async function importStory\(\) \{[\s\S]*?\n\}/)?.[0] || "";
+
+    expect(generator).toContain("worldGenerationFailureMessage(error)");
+    expect(importer).toContain("worldGenerationFailureMessage(error)");
   });
 
   it("places infrequent imports after the campaign workspace", () => {

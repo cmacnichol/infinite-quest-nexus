@@ -49,8 +49,8 @@ function parseJsonField(value: unknown, fieldName: string): unknown {
 
 function campaignMultipartLimits(config: RuntimeConfig) {
   return {
-    fileSize: config.campaignArchiveLimits.maxCompressedBytes,
-    fieldSize: config.campaignArchiveLimits.maxJsonEntryBytes,
+    fileSize: Math.min(config.campaignArchiveLimits.maxCompressedBytes, config.security.apiImportBodyLimitBytes),
+    fieldSize: Math.min(config.campaignArchiveLimits.maxJsonEntryBytes, config.security.apiImportBodyLimitBytes),
     files: 2,
     fields: 2,
     parts: 4
@@ -61,6 +61,7 @@ function legacyArchiveLimits(config: RuntimeConfig): ArchiveLimits {
   return {
     ...config.campaignArchiveLimits,
     maxCompressedBytes: Math.min(config.campaignArchiveLimits.maxCompressedBytes, config.security.apiImportBodyLimitBytes),
+    maxJsonEntryBytes: Math.min(config.campaignArchiveLimits.maxJsonEntryBytes, config.security.apiImportBodyLimitBytes),
     maxOriginalImageBytes: Math.min(config.campaignArchiveLimits.maxOriginalImageBytes, config.security.apiAssetBodyLimitBytes)
   };
 }
@@ -71,11 +72,14 @@ export function createLegacyArchiveAssetSource(
 ): LegacyAssetSource {
   const entryPathByAssetId = new Map<string, string>();
   for (const entryPath of entryPaths) {
-    const assetId = basename(entryPath).split(".")[0];
+    const name = basename(entryPath);
+    const assetId = name.split(".")[0];
     if (assetId) entryPathByAssetId.set(assetId, entryPath);
+    if (name) entryPathByAssetId.set(name, entryPath);
   }
+  const canonicalAssetIds = [...entryPathByAssetId.keys()].filter((assetId) => !assetId.includes("."));
   return {
-    assetIds: () => entryPathByAssetId.keys(),
+    assetIds: () => canonicalAssetIds,
     read: async (assetId) => {
       const entryPath = entryPathByAssetId.get(assetId);
       return entryPath ? readAsset(entryPath) : undefined;
@@ -151,6 +155,13 @@ async function receiveCampaignArchive(request: FastifyRequest, config: RuntimeCo
     return { staged, sourceName, destination: campaignArchiveDestinationSchema.parse(destination) };
   } catch (error) {
     if (staged) await removeArchivePath(config.archiveStorageRoot, staged.relativePath).catch(() => undefined);
+    if (
+      error instanceof ArchiveError
+      && error.code === "archive-limit-exceeded"
+      && config.security.apiImportBodyLimitBytes < config.campaignArchiveLimits.maxCompressedBytes
+    ) {
+      throw new ArchiveError(error.code, error.message, 413, error.details);
+    }
     throw error;
   }
 }
@@ -190,14 +201,17 @@ async function legacyMultipartImport(request: FastifyRequest, options: ArchiveRo
         body = parseJsonField((await readVerifiedContainerEntry(container, campaignEntry.path, limits.maxJsonEntryBytes)).toString("utf8"), "campaign JSON");
         legacyAssets = createLegacyArchiveAssetSource(
           [...container.entries.values()]
-            .filter((entry) => entry.path.startsWith("assets/") && !entry.path.endsWith("/"))
+            .filter((entry) => (entry.path.startsWith("assets/") || entry.path.includes("/assets/")) && !entry.path.endsWith("/"))
             .map((entry) => entry.path),
           (entryPath) => readVerifiedContainerEntry(container, entryPath, limits.maxOriginalImageBytes)
         );
         continue;
       }
       overridesCount += 1;
-      if (overridesCount !== 1 || part.fieldname !== "requestOverrides" || part.valueTruncated) {
+      if (part.valueTruncated) {
+        throw new ArchiveError("archive-limit-exceeded", "The requestOverrides field exceeds the API import body limit.", 413);
+      }
+      if (overridesCount !== 1 || part.fieldname !== "requestOverrides") {
         throw new ArchiveError("archive-json-invalid", "Legacy story import accepts only one bounded requestOverrides JSON field.");
       }
       const overrides = parseJsonField(part.value, "requestOverrides");
@@ -233,7 +247,7 @@ export async function registerArchiveRoutes(app: FastifyInstance, options: Archi
       .send(stream);
   });
 
-  app.post("/api/v1/imports/campaign-archive/preview", async (request) => {
+  app.post("/api/v1/imports/campaign-archive/preview", { bodyLimit: options.config.security.apiImportBodyLimitBytes }, async (request) => {
     const upload = await receiveCampaignArchive(request, options.config);
     try {
       return await previewCampaignArchive(options.pool, options.config, upload.staged, upload.sourceName, upload.destination, app.log);
@@ -243,13 +257,13 @@ export async function registerArchiveRoutes(app: FastifyInstance, options: Archi
     }
   });
 
-  app.post("/api/v1/imports/campaign-archive", async (request, reply) => {
+  app.post("/api/v1/imports/campaign-archive", { bodyLimit: options.config.security.apiImportBodyLimitBytes }, async (request, reply) => {
     if (request.isMultipart()) throw new ArchiveError("archive-json-invalid", "Campaign Archive commit accepts a JSON preview token and destination.");
     const result = await importCampaignArchive(options.pool, options.config, options.assetStore, campaignArchiveCommitRequestSchema.parse(request.body), app.log);
     return reply.code(result.duplicate ? 200 : 201).send(result);
   });
 
-  app.post("/api/v1/imports/legacy-story", async (request, reply) => {
+  app.post("/api/v1/imports/legacy-story", { bodyLimit: options.config.security.apiImportBodyLimitBytes }, async (request, reply) => {
     const result = await legacyMultipartImport(request, options);
     return reply.code(result.duplicate ? 200 : 201).send(result);
   });

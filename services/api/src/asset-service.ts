@@ -294,9 +294,18 @@ async function writeContentAddressed(
   return { relativePath: relativePath.replaceAll("\\", "/"), created };
 }
 
+export function detectMimeType(bytes: Buffer): string {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  if (bytes.length >= 6 && ["GIF87a", "GIF89a"].includes(bytes.subarray(0, 6).toString("ascii"))) return "image/gif";
+  return "image/png";
+}
+
 export function safeExternalImageUrl(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
+  if (trimmed.startsWith("/api/v1/assets/") || trimmed.startsWith("assets/")) return trimmed;
   try {
     const url = new URL(trimmed);
     return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : "";
@@ -399,6 +408,19 @@ async function persistImage(
   );
   const assetId = assetResult.rows[0]?.id;
   if (!assetId) throw new Error("Could not persist imported image metadata.");
+  await client.query(
+    `INSERT INTO asset_library_entries (
+       asset_id, owner_user_id, created_by_user_id, title, origin, reuse_scope, review_status, automatic_reuse_enabled
+     ) VALUES ($1, $2, $2, $3, 'imported', $4, 'eligible', true)
+     ON CONFLICT (asset_id) DO NOTHING`,
+    [
+      assetId,
+      ownerUserId,
+      provenance?.turnId ? "Turn Illustration" : "Imported Image",
+      provenance?.campaignId ? "campaign" : "private"
+    ]
+  );
+
   if (options?.createThumbnail !== false && verified.thumbnail) {
     const thumbnailPath = originalStoragePath(verified.thumbnail.contentHash, ".webp");
     await lockOriginalAsset(client, ownerUserId, thumbnailPath);
@@ -606,23 +628,23 @@ export async function queryAssets(pool: DatabasePool, ownerUserId: string, query
   if (query.creator === "me") where.push("le.created_by_user_id = $1");
   if (query.scope === "campaign" && query.campaignId) {
     const value = add(query.campaignId);
-    where.push(`EXISTS (SELECT 1 FROM asset_references ar WHERE ar.asset_id = a.id AND ar.owner_user_id = $1 AND ar.campaign_id = ${value})`);
+    where.push(`(a.campaign_id = ${value} OR EXISTS (SELECT 1 FROM asset_references ar WHERE ar.asset_id = a.id AND ar.owner_user_id = $1 AND ar.campaign_id = ${value}) OR EXISTS (SELECT 1 FROM asset_generation_contexts agc WHERE agc.asset_id = a.id AND agc.owner_user_id = $1 AND agc.campaign_id = ${value}))`);
   } else if (query.scope === "world" && query.worldId) {
     const value = add(query.worldId);
-    where.push(`EXISTS (SELECT 1 FROM asset_generation_contexts agc WHERE agc.asset_id = a.id AND agc.owner_user_id = $1 AND agc.world_id = ${value})`);
+    where.push(`(EXISTS (SELECT 1 FROM asset_generation_contexts agc WHERE agc.asset_id = a.id AND agc.owner_user_id = $1 AND agc.world_id = ${value}) OR EXISTS (SELECT 1 FROM worlds w WHERE w.id = ${value} AND w.cover_asset_id = a.id) OR EXISTS (SELECT 1 FROM campaigns c JOIN world_versions wv ON wv.id = c.world_version_id WHERE wv.world_id = ${value} AND (c.id = a.campaign_id OR EXISTS (SELECT 1 FROM asset_references ar WHERE ar.asset_id = a.id AND ar.campaign_id = c.id))))`);
   } else if (query.scope === "owner_library") where.push("le.reuse_scope = 'owner_library'");
   else if (query.scope === "shared") where.push("false /* shared-library grants are not implemented */");
   if (query.campaignId && query.scope !== "campaign") {
     const value = add(query.campaignId);
-    where.push(`EXISTS (SELECT 1 FROM asset_generation_contexts agc WHERE agc.asset_id = a.id AND agc.owner_user_id = $1 AND agc.campaign_id = ${value})`);
+    where.push(`(a.campaign_id = ${value} OR EXISTS (SELECT 1 FROM asset_references ar WHERE ar.asset_id = a.id AND ar.owner_user_id = $1 AND ar.campaign_id = ${value}) OR EXISTS (SELECT 1 FROM asset_generation_contexts agc WHERE agc.asset_id = a.id AND agc.owner_user_id = $1 AND agc.campaign_id = ${value}))`);
   }
   if (query.worldId && query.scope !== "world") {
     const value = add(query.worldId);
-    where.push(`EXISTS (SELECT 1 FROM asset_generation_contexts agc WHERE agc.asset_id = a.id AND agc.owner_user_id = $1 AND agc.world_id = ${value})`);
+    where.push(`(EXISTS (SELECT 1 FROM asset_generation_contexts agc WHERE agc.asset_id = a.id AND agc.owner_user_id = $1 AND agc.world_id = ${value}) OR EXISTS (SELECT 1 FROM worlds w WHERE w.id = ${value} AND w.cover_asset_id = a.id) OR EXISTS (SELECT 1 FROM campaigns c JOIN world_versions wv ON wv.id = c.world_version_id WHERE wv.world_id = ${value} AND (c.id = a.campaign_id OR EXISTS (SELECT 1 FROM asset_references ar WHERE ar.asset_id = a.id AND ar.campaign_id = c.id))))`);
   }
   if (query.worldVersionId) {
     const value = add(query.worldVersionId);
-    where.push(`EXISTS (SELECT 1 FROM asset_generation_contexts agc WHERE agc.asset_id = a.id AND agc.owner_user_id = $1 AND agc.world_version_id = ${value})`);
+    where.push(`(EXISTS (SELECT 1 FROM asset_generation_contexts agc WHERE agc.asset_id = a.id AND agc.owner_user_id = $1 AND agc.world_version_id = ${value}) OR EXISTS (SELECT 1 FROM campaigns c WHERE c.world_version_id = ${value} AND (c.id = a.campaign_id OR EXISTS (SELECT 1 FROM asset_references ar WHERE ar.asset_id = a.id AND ar.campaign_id = c.id))))`);
   }
   if (query.origin.length) where.push(`le.origin = ANY(${add(query.origin)}::text[])`);
   if (query.tags.length) where.push(query.allTags ? `le.tags @> ${add(query.tags)}::text[]` : `le.tags && ${add(query.tags)}::text[]`);

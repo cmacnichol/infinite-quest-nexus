@@ -21,6 +21,18 @@ describe("campaign archive route helpers", () => {
     expect(reads).toEqual(["assets/second.png"]);
   });
 
+  it("resolves nested legacy asset entries by UUID stem and original filename", async () => {
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+    const assets = createLegacyArchiveAssetSource(
+      ["backup/assets/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jpg"],
+      async () => bytes
+    );
+
+    expect([...assets.assetIds()]).toEqual(["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]);
+    await expect(assets.read("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")).resolves.toEqual(bytes);
+    await expect(assets.read("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jpg")).resolves.toEqual(bytes);
+  });
+
   it("waits for the export stream to close after an aborted response and retries bounded cleanup", async () => {
     const stream = new Readable({ read() {}, emitClose: false });
     const response = new EventEmitter();

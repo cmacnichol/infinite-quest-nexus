@@ -8,7 +8,7 @@ import { z } from "zod";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
-import { createLoggerOptions } from "../../../packages/logger/src/index.js";
+import { createLoggerOptions, logger } from "../../../packages/logger/src/index.js";
 import { characterLegacyText, effectiveCampaignCharacter } from "../../../packages/domain/src/world-characters.js";
 import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
@@ -105,6 +105,7 @@ import {
   updateWorldDraft
 } from "./world-service.js";
 import { generatePlayableCharacter, generatePlayableCharacterPreview, generateWorldPreview } from "./world-generator-service.js";
+import { deleteExpiredWorldGenerationProgress, getWorldGenerationProgress } from "./world-generation-progress-service.js";
 import {
   getCampaignCharacterProfile,
   organizeCampaignCharacterProfile,
@@ -134,6 +135,7 @@ type BuildServerOptions = {
 };
 
 const uuidSchema = z.uuid();
+let lastWorldGenerationProgressCleanupAt = 0;
 
 function statusCode(error: unknown): number {
   if (typeof error === "object" && error !== null && "statusCode" in error) {
@@ -168,8 +170,10 @@ function safeErrorDetails(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([key, child]) => {
     const normalized = key.replaceAll(/[^a-z0-9]/gi, "").toLowerCase();
-    if (normalized.includes("path") || normalized.includes("rawpayload")) return [];
-    if (Array.isArray(child)) return [[key, child.map((entry) => typeof entry === "string" ? entry : null)]];
+    if ((normalized.includes("path") && normalized !== "path") || normalized.includes("rawpayload")) return [];
+    if (Array.isArray(child)) {
+      return [[key, child.map((entry) => entry && typeof entry === "object" ? safeErrorDetails(entry) : entry)]];
+    }
     if (child && typeof child === "object") return [[key, safeErrorDetails(child)]];
     return [[key, child]];
   }));
@@ -177,6 +181,18 @@ function safeErrorDetails(value: unknown): Record<string, unknown> {
 
 function exposeError(error: unknown, code: number): boolean {
   return code < 500 || (typeof error === "object" && error !== null && "expose" in error && (error as { expose?: unknown }).expose === true);
+}
+
+function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): string {
+  if (typeof value !== "string") return fallback;
+  const normalized = value.trim().toLowerCase();
+  return /^[a-z][a-z0-9_]{0,63}$/.test(normalized) ? normalized : fallback;
+}
+
+function errorCodeFrom(error: unknown): string | null {
+  return typeof error === "object" && error !== null && "code" in error && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : null;
 }
 
 export async function buildServer({ config, pool }: BuildServerOptions): Promise<FastifyInstance> {
@@ -193,11 +209,15 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     const details = errorDetails(error);
     const exposed = exposeError(error, code);
     const transport = providerTransportErrorDetails(error);
+    const exposedError = (details.name === "ArchiveError" || details.name === "OriginNotAllowedError") && details.code
+      ? details.code
+      : details.name;
     request.log.error({ err: error, code }, "request_failed");
     void reply.code(code).send({
-      error: exposed ? (details.code ?? details.name ?? "Provider request failed") : "Internal server error",
+      error: exposed ? (exposedError || "Provider request failed") : "Internal server error",
       message: exposed ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
       correlationId: request.id,
+      ...(!exposed || details.code === undefined ? {} : { code: details.code }),
       details: transport
         ? { code: transport.timedOut ? "provider_request_timeout" : "provider_transport_error", transport }
         : exposed ? safeErrorDetails(details.details) : {},
@@ -216,8 +236,8 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   const assetStore: FilesystemAssetStore = { root: config.assetStorageRoot };
   await app.register(fastifyMultipart, {
     limits: {
-      fileSize: config.systemArchiveLimits.maxCompressedBytes,
-      fieldSize: config.systemArchiveLimits.maxJsonEntryBytes
+      fileSize: config.security.apiImportBodyLimitBytes,
+      fieldSize: config.security.apiImportBodyLimitBytes
     }
   });
   await app.register(registerArchiveRoutes, { pool, config, assetStore });
@@ -330,24 +350,24 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     deleteProvider(pool, uuidSchema.parse(request.params.providerId))
   ));
 
-  app.post("/api/v1/imports/legacy-story/preview", async (request) => (
+  app.post("/api/v1/imports/legacy-story/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => (
     previewLegacyStoryImport(pool, storyImportPreviewRequestSchema.parse(request.body))
   ));
 
-  app.post("/api/v1/imports/world/preview", async (request) => (
+  app.post("/api/v1/imports/world/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => (
     previewWorldImport(pool, worldImportRequestSchema.parse(request.body))
   ));
 
-  app.post("/api/v1/imports/world", async (request, reply) => {
+  app.post("/api/v1/imports/world", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request, reply) => {
     const result = await importWorld(pool, worldImportRequestSchema.parse(request.body));
     return reply.code(result.duplicate ? 200 : 201).send(result);
   });
 
-  app.post("/api/v1/imports/infinite-worlds/preview", async (request) => (
+  app.post("/api/v1/imports/infinite-worlds/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => (
     previewInfiniteWorldsImport(pool, infiniteWorldsImportRequestSchema.parse(request.body))
   ));
 
-  app.post("/api/v1/imports/infinite-worlds", async (request, reply) => {
+  app.post("/api/v1/imports/infinite-worlds", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request, reply) => {
     const result = await importInfiniteWorlds(
       pool,
       infiniteWorldsImportRequestSchema.parse(request.body),
@@ -377,6 +397,18 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       config.credentialEncryptionKey
     )
   ));
+
+  app.get<{ Querystring: { key?: string } }>("/api/v1/worlds/generate-progress", async (request) => {
+    const key = String(request.query.key || "").trim();
+    if (!key) return { status: "unknown", phase: "unknown", progressPercent: 0, message: "" };
+    const ownerUserId = await initialOwnerId(pool);
+    if (Date.now() - lastWorldGenerationProgressCleanupAt >= 60_000) {
+      lastWorldGenerationProgressCleanupAt = Date.now();
+      await deleteExpiredWorldGenerationProgress(pool);
+    }
+    const progress = await getWorldGenerationProgress(pool, ownerUserId, key);
+    return progress || { status: "unknown", phase: "unknown", progressPercent: 0, message: "" };
+  });
 
   app.post("/api/v1/worlds/playable-characters/generate-preview", async (request) => (
     generatePlayableCharacterPreview(
@@ -691,41 +723,72 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/stream", async (request, reply) => {
     const jobId = uuidSchema.parse(request.params.jobId);
-    reply.raw.setHeader("Content-Type", "text/event-stream");
-    reply.raw.setHeader("Cache-Control", "no-cache");
-    reply.raw.setHeader("Connection", "keep-alive");
-    if (typeof reply.raw.flushHeaders === "function") reply.raw.flushHeaders();
-
+    const streamStartedAt = Date.now();
+    let snapshotsSent = 0;
+    let finalStatus = "client_closed";
     let isClosed = false;
     request.raw.on("close", () => { isClosed = true; });
 
-    let lastSentJson = "";
-    while (!isClosed) {
-      try {
-        const job = await getGenerationJob(pool, jobId);
-        const currentJson = JSON.stringify({
-          id: job.id,
-          status: job.status,
-          action: job.action,
-          partialOutput: job.partialOutput || null,
-          partialNarration: job.partialNarration || null,
-          errorMessage: job.errorMessage || null,
-          errorCode: job.errorCode || null
-        });
-        if (currentJson !== lastSentJson) {
-          lastSentJson = currentJson;
-          reply.raw.write(`data: ${currentJson}\n\n`);
-        }
-        if (["completed", "failed", "recoverable", "discarded"].includes(job.status)) {
+    logger.info({
+      event: "turn_generation_stream_connected",
+      correlationId: request.id,
+      generationJobId: jobId
+    });
+    try {
+      reply.raw.setHeader("Content-Type", "text/event-stream");
+      reply.raw.setHeader("Cache-Control", "no-cache");
+      reply.raw.setHeader("Connection", "keep-alive");
+      if (typeof reply.raw.flushHeaders === "function") reply.raw.flushHeaders();
+
+      let lastSentJson = "";
+      while (!isClosed) {
+        try {
+          const job = await getGenerationJob(pool, jobId);
+          if (isClosed) break;
+          const currentJson = JSON.stringify({
+            id: job.id,
+            status: job.status,
+            action: job.action,
+            partialOutput: job.partialOutput || null,
+            partialNarration: job.partialNarration || null,
+            errorMessage: job.errorMessage || null,
+            errorCode: job.errorCode || null
+          });
+          if (currentJson !== lastSentJson) {
+            lastSentJson = currentJson;
+            reply.raw.write(`data: ${currentJson}\n\n`);
+            snapshotsSent += 1;
+          }
+          if (["completed", "failed", "recoverable", "discarded"].includes(job.status)) {
+            finalStatus = job.status;
+            break;
+          }
+        } catch (error) {
+          if (isClosed) break;
+          finalStatus = "stream_error";
+          logger.warn({
+            correlationId: request.id,
+            generationJobId: jobId,
+            errorName: error instanceof Error ? error.name : "Error",
+            errorCode: safeLogErrorCode(errorCodeFrom(error))
+          });
+          if (!isClosed) {
+            reply.raw.write(`data: ${JSON.stringify({ status: "failed", errorMessage: error instanceof Error ? error.message : String(error) })}\n\n`);
+            snapshotsSent += 1;
+          }
           break;
         }
-      } catch (error) {
-        if (!isClosed) {
-          reply.raw.write(`data: ${JSON.stringify({ status: "failed", errorMessage: error instanceof Error ? error.message : String(error) })}\n\n`);
-        }
-        break;
+        await new Promise((resolve) => setTimeout(resolve, 350));
       }
-      await new Promise((resolve) => setTimeout(resolve, 350));
+    } finally {
+      logger.info({
+        event: "turn_generation_stream_closed",
+        correlationId: request.id,
+        generationJobId: jobId,
+        finalStatus,
+        snapshotsSent,
+        durationMs: Date.now() - streamStartedAt
+      });
     }
     if (!isClosed) reply.raw.end();
   });

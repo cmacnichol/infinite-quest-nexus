@@ -50,11 +50,11 @@ describe("CYOA and Modular Template World creation", () => {
     };
     const prompt = buildTemplateWorldPrompt(input);
 
-    expect(prompt.systemPrompt).toContain("exactly 3 or 4 distinct, fully fleshed out playable characters in playable_characters");
+    expect(prompt.systemPrompt).toContain("exactly 3 or 4 distinct character_seeds");
     expect(prompt.systemPrompt).toContain("Do not include credentials, model instructions, private reasoning, rolls, checks, dice results, or parser diagnostics in fictional fields");
 
     const payload = JSON.parse(prompt.input);
-    expect(payload.task).toContain("3-4 identified or generated playable characters");
+    expect(payload.task).toContain("3-4 compact identified or generated character seeds");
     expect(payload.title).toBe("Test CYOA");
     expect(payload.excerpts).toHaveLength(1);
   });
@@ -72,7 +72,7 @@ describe("CYOA and Modular Template World creation", () => {
     const prompt = buildTemplateWorldPrompt(promptInput);
 
     const payload = JSON.parse(prompt.input);
-    expect(payload.task).toContain("Create a new Story World with 3-4 playable characters from this concept prompt");
+    expect(payload.task).toContain("Create a new Story World and 3-4 compact character seeds from this concept prompt");
     expect(payload.prompt).toBe("Create a cyberpunk detective world where androids and humans coexist.");
   });
 
@@ -82,6 +82,18 @@ describe("CYOA and Modular Template World creation", () => {
       prompt: "Build a luminous mystery world."
     });
     expect(() => worldGenerationPreviewRequestSchema.parse({ prompt: " " })).toThrow();
+    expect(worldGenerationPreviewRequestSchema.parse({
+      prompt: "Build a luminous mystery world.",
+      progressKey: "world-gen:test"
+    })).toEqual({
+      title: "",
+      prompt: "Build a luminous mystery world.",
+      progressKey: "world-gen:test"
+    });
+    expect(() => worldGenerationPreviewRequestSchema.parse({
+      prompt: "Build a luminous mystery world.",
+      unexpected: true
+    })).toThrow();
     expect(playableCharacterGenerationPreviewRequestSchema.parse({
       content: {
         world: {

@@ -23,6 +23,7 @@ import {
 } from "../../services/api/src/segmented-illustration-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 import { createWorld, getWorld } from "../../services/api/src/world-service.js";
+import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -47,6 +48,7 @@ function storyOutput() {
 integration("independent illustration pipeline", () => {
   let pool: DatabasePool;
   let server: Server;
+  let providerTransport: ReturnType<typeof installIntegrationProviderTransport>;
   let baseUrl = "";
   let textProviderId = "";
   let imageProviderId = "";
@@ -59,6 +61,7 @@ integration("independent illustration pipeline", () => {
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
     await migrateDatabase(pool, resolve("database/migrations"));
+    providerTransport = installIntegrationProviderTransport();
     assetRoot = await mkdtemp(join(tmpdir(), "infinitequest-image-test-"));
     server = createServer((request, response) => {
       let body = "";
@@ -155,6 +158,7 @@ integration("independent illustration pipeline", () => {
 
   afterAll(async () => {
     if (server) await new Promise<void>((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
+    if (providerTransport) await providerTransport.close();
     await pool.end();
     await rm(assetRoot, { recursive: true, force: true });
   });
@@ -200,6 +204,20 @@ integration("independent illustration pipeline", () => {
   it("creates historical segment jobs without changing accepted turn or Chronicle state", async () => {
     const imported = await campaign();
     const ownerUserId = await initialOwnerId(pool);
+    const eligibleHistoricalNarration = [
+      "Mira raises the lantern as the violet sky settles over the ancient causeway.",
+      "Synthetic Location Image glows ahead with glassy towers, moss-covered statues, quiet archways, silver leaves, and patient shadows.",
+      "The party studies painted doors, rain-dark stone, and a trail of blue sparks curling toward an unopened observatory.",
+      "Every step reveals another visual clue: braided ropes, brass mirrors, damp banners, chalk symbols, broken masks, and a shallow pool reflecting unfamiliar stars.",
+      "The scene remains calm but charged with discovery, giving the illustration pipeline enough concrete story detail to segment the accepted historical turn without changing the ledger."
+    ].join(" ");
+    await pool.query(
+      `UPDATE turns
+          SET narration = $2
+        WHERE campaign_id = $1
+          AND turn_number = (SELECT active_turn_number FROM campaigns WHERE id = $1)`,
+      [imported.campaignId, eligibleHistoricalNarration]
+    );
     const profile = {
       name: "Mira",
       profile: {

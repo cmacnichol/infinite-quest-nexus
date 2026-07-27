@@ -8,10 +8,61 @@ import {
   sampleValuesForPrompt
 } from "../../packages/contracts/src/prompt-library.js";
 import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../../packages/domain/src/illustrations.js";
+import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
 import { promptProtocolVersion, type PromptSnapshot } from "../../services/api/src/prompt-library-service.js";
 import { infiniteWorldsPromptSet } from "../../services/api/src/infinite-worlds-import-service.js";
 
 describe("Prompt Library catalog", () => {
+  it("separates world seeds from complete generated character profiles", () => {
+    const generation = PROMPT_TEMPLATE_CATALOG.world_generation.defaultContent;
+    const recovery = PROMPT_TEMPLATE_CATALOG.world_generation_recovery.defaultContent;
+    const character = PROMPT_TEMPLATE_CATALOG.world_character_generation.defaultContent;
+    const characterRecovery = PROMPT_TEMPLATE_CATALOG.world_character_generation_recovery.defaultContent;
+
+    for (const prompt of [generation, recovery]) {
+      expect(prompt).toContain("character_seeds");
+      expect(prompt).toContain("role");
+      expect(prompt).toContain("concept");
+      expect(prompt).toContain("narrative_hook");
+      expect(prompt).not.toContain('"profile":{"identity"');
+    }
+
+    for (const prompt of [character, characterRecovery]) {
+      expect(prompt).toContain("one complete playable character");
+      expect(prompt).toContain("character_text");
+      expect(prompt).toContain('"profile":{"identity"');
+      expect(prompt).toContain("rpg_statistics");
+      expect(prompt).toContain("default_triggers");
+    }
+
+    expect(recovery).toContain("complete replacement");
+    expect(characterRecovery).toContain("complete replacement");
+    expect(PROMPT_TEMPLATE_CATALOG.world_roster_supplement).toBeDefined();
+  });
+
+  it("builds seed-oriented input for prompt and CYOA sources", () => {
+    const promptInput = JSON.parse(buildTemplateWorldPrompt({
+      sourceName: "prompt",
+      sourceKind: "prompt",
+      title: "The Moving Roads",
+      summary: "Roads move beneath moonlight.",
+      keywords: [],
+      excerpts: [],
+      prompt: "Build a moving-road mystery."
+    }).input);
+    const cyoaInput = JSON.parse(buildTemplateWorldPrompt({
+      sourceName: "cyoa.json",
+      sourceKind: "cyoa_json",
+      title: "The Moving Roads",
+      summary: "Roads move beneath moonlight.",
+      keywords: [],
+      excerpts: []
+    }).input);
+
+    expect(promptInput.task).toContain("character seeds");
+    expect(cyoaInput.task).toContain("character seeds");
+  });
+
   it("enforces campaign ownership with a composite database relationship", () => {
     const migration = readFileSync("database/migrations/0038_prompt_library_hardening.sql", "utf8");
     expect(migration).toContain("FOREIGN KEY (campaign_id, owner_user_id)");

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   cancelSogniSdkGeneration,
   discoverSogniSdkModels,
+  disposeSogniSdkSessions,
   pollSogniSdkGeneration,
   setSogniSdkClientFactoryForTests,
   submitSogniSdkGeneration
@@ -53,6 +54,31 @@ function fakeClient(overrides: Record<string, unknown> = {}) {
 afterEach(() => setSogniSdkClientFactoryForTests());
 
 describe("Sogni Supernet SDK provider", () => {
+  it("reuses the same app ID after an SDK session is recreated", async () => {
+    const appIds: string[] = [];
+    const project = {
+      id: "project-app-id", status: "processing", progress: 0, queuePosition: 0,
+      eta: undefined, resultUrls: [], error: undefined
+    };
+    setSogniSdkClientFactoryForTests(async (config) => {
+      appIds.push(config.appId);
+      return fakeClient({ create: vi.fn().mockResolvedValue(project) });
+    });
+
+    await submitSogniSdkGeneration(profile, {
+      prompt: "A moonlit fictional citadel.", size: "640x512", aspectRatio: "5:4", quality: "auto",
+      outputFormat: "png", imageCount: 1, idempotencyKey: "job-app-id:0"
+    });
+    disposeSogniSdkSessions();
+    await submitSogniSdkGeneration(profile, {
+      prompt: "A moonlit fictional citadel.", size: "640x512", aspectRatio: "5:4", quality: "auto",
+      outputFormat: "png", imageCount: 1, idempotencyKey: "job-app-id:1"
+    });
+
+    expect(appIds).toHaveLength(2);
+    expect(appIds[0]).toBe(appIds[1]);
+  });
+
   it("rejects non-official SDK origins before creating a client", async () => {
     const createClient = vi.fn(async () => fakeClient());
     setSogniSdkClientFactoryForTests(createClient);

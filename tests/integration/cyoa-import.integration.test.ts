@@ -7,12 +7,46 @@ import { createDatabasePool, type DatabasePool } from "../../packages/database/s
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { getImportProgress, importInfiniteWorlds, previewInfiniteWorldsImport } from "../../services/api/src/infinite-worlds-import-service.js";
+import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "integration-test-credential-secret";
 
-function validConvertedWorldJson(): string {
+function validProfile(role: string) {
+  return {
+    story: {
+      role,
+      background: `${role} trained for dangerous underwater expeditions.`,
+      personality: "Focused and dependable.",
+      motivations: "Protect the expedition and recover the lost archive.",
+      goals: "Return from the citadel with its history intact.",
+      fearsAndConflicts: "Fears that the ruins will claim another expedition.",
+      keyRelationships: "Trusts the other members of the expedition.",
+      narrativeHooks: "Carries a clue left by an earlier explorer.",
+      voiceAndMannerisms: "Speaks with deliberate precision.",
+      otherGuidance: ""
+    }
+  };
+}
+
+function characterSeed(index: number) {
+  const characters = [
+    ["Elara the Diver", "Diver", "A master underwater specialist."],
+    ["Thalor the Scholar", "Scholar", "An elven historian seeking lost lore."],
+    ["Kael the Guard", "Guard", "A veteran sellsword protecting the expedition."]
+  ] as const;
+  const [name, role, concept] = characters[index - 1]!;
+  return {
+    id: `seed-${index}`,
+    name,
+    role,
+    concept,
+    narrative_hook: `${name} carries a clue needed by the expedition.`
+  };
+}
+
+function validWorldDraftJson(): string {
   return JSON.stringify({
     title: "Converted CYOA World",
     genre: "Fantasy Exploration",
@@ -21,55 +55,56 @@ function validConvertedWorldJson(): string {
     premise: "Explorers descend into the sunken citadel to uncover its secrets.",
     firstAction: "Examine the glowing runes on the bronze archway.",
     story_rules: "Enchantments work differently underwater.",
-    playable_characters: [
-      {
-        id: "char-1",
-        name: "Elara the Diver",
-        character_text: "A master underwater specialist.",
-        rpg_statistics: [{ name: "Diving", value: 85, note: "Expert free diver." }],
-        default_triggers: []
-      },
-      {
-        id: "char-2",
-        name: "Thalor the Scholar",
-        character_text: "An elven historian seeking lost lore.",
-        rpg_statistics: [{ name: "Arcana", value: 90, note: "Knows ancient runes." }],
-        default_triggers: []
-      },
-      {
-        id: "char-3",
-        name: "Kael the Guard",
-        character_text: "A veteran sellsword protecting the expedition.",
-        rpg_statistics: [{ name: "Combat", value: 80, note: "Spear specialist." }],
-        default_triggers: []
-      }
-    ],
+    character_seeds: [characterSeed(1), characterSeed(2), characterSeed(3)],
     rpg_statistics: [],
     default_triggers: [],
     event_triggers: []
   });
 }
 
+function validCharacterJson(index: number): string {
+  const seed = characterSeed(index);
+  return JSON.stringify({
+    id: seed.id,
+    name: seed.name,
+    character_text: seed.concept,
+    profile: validProfile(seed.role),
+    rpg_statistics: [],
+    default_triggers: []
+  });
+}
+
 integration("CYOA import service integration", () => {
   let pool: DatabasePool;
   let server: Server;
+  let providerTransport: ReturnType<typeof installIntegrationProviderTransport>;
   let baseUrl = "";
   let providerId = "";
+  const providerReplies: string[] = [];
+  const providerRequests: unknown[] = [];
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
     await migrateDatabase(pool, resolve("database/migrations"));
+    providerTransport = installIntegrationProviderTransport();
     server = createServer((request, response) => {
       let body = "";
       request.setEncoding("utf8");
       request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
+        providerRequests.push(JSON.parse(body));
+        const content = providerReplies.shift();
+        if (!content) {
+          response.writeHead(500, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ error: "Unexpected mock provider request." }));
+          return;
+        }
         response.writeHead(200, { "Content-Type": "application/json" });
         response.end(JSON.stringify({
           id: "mock-cyoa-response",
           choices: [{
             message: {
-              content: validConvertedWorldJson()
+              content
             },
             finish_reason: "stop"
           }]
@@ -98,6 +133,7 @@ integration("CYOA import service integration", () => {
 
   afterAll(async () => {
     if (server) await new Promise<void>((done) => server.close(() => done()));
+    if (providerTransport) await providerTransport.close();
     if (pool) await pool.end();
   });
 
@@ -126,6 +162,13 @@ integration("CYOA import service integration", () => {
   it("imports a CYOA export JSON, tracks progress, and creates a Story World with 3 playable characters", async () => {
     const fixturePath = path.resolve(__dirname, "../fixtures/cyoa_writing_com_sample.json");
     const sourceText = fs.readFileSync(fixturePath, "utf8");
+    providerRequests.length = 0;
+    providerReplies.push(
+      validWorldDraftJson(),
+      validCharacterJson(1),
+      validCharacterJson(2),
+      validCharacterJson(3)
+    );
 
     const importPromise = importInfiniteWorlds(pool, {
       sourceName: "cyoa_writing_com_sample.json",
@@ -146,5 +189,22 @@ integration("CYOA import service integration", () => {
     expect(progress?.status).toBe("completed");
     expect(progress?.progressPercent).toBe(100);
     expect(progress?.worldId).toBe(result.worldId);
+
+    const stored = await pool.query<{
+      content: {
+        playableCharacters: Array<{
+          characterText: string;
+          profile?: unknown;
+        }>;
+      };
+    }>(
+      "SELECT content FROM world_versions WHERE id = $1",
+      [result.worldVersionId]
+    );
+    expect(stored.rows[0]?.content.playableCharacters).toHaveLength(3);
+    expect(stored.rows[0]?.content.playableCharacters.every(
+      (character) => Boolean(character.characterText.trim() && character.profile)
+    )).toBe(true);
+    expect(providerRequests).toHaveLength(4);
   });
 });

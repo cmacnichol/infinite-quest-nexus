@@ -125,7 +125,8 @@ export const worldCreateSchema = z.object({
 
 export const worldGenerationPreviewRequestSchema = z.object({
   title: z.string().trim().max(200).default(""),
-  prompt: z.string().trim().min(1).max(20_000)
+  prompt: z.string().trim().min(1).max(20_000),
+  progressKey: z.string().trim().max(512).optional()
 }).strict();
 
 export const worldDraftUpdateSchema = z.object({

@@ -1,10 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { z } from "zod";
 import { buildServer } from "../../services/api/src/server.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
+import { logger } from "../../packages/logger/src/index.js";
+import { parseCompleteGeneratedWorld } from "../../packages/domain/src/generated-world.js";
+import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
+import { ProviderResponseTooLargeError } from "../../packages/story-engine/src/provider-response.js";
+import {
+  generatedWorldProviderError,
+  incompleteGeneratedWorldError
+} from "../../services/api/src/world-generator-service.js";
 
 function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
   return {
@@ -71,6 +80,17 @@ function multipartArchiveUpload(file: Buffer, destination: Record<string, unknow
       file,
       Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="destination"\r\n\r\n${JSON.stringify(destination)}\r\n--${boundary}--\r\n`, "utf8")
     ])
+  };
+}
+
+function multipartFieldUpload(fieldName: string, value: string) {
+  const boundary = "----infinitequest-archive-field-limit";
+  return {
+    contentType: `multipart/form-data; boundary=${boundary}`,
+    payload: Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${fieldName}"\r\n\r\n${value}\r\n--${boundary}--\r\n`,
+      "utf8"
+    )
   };
 }
 
@@ -239,6 +259,567 @@ describe("API server security and CORS headers", () => {
     } finally {
       await app.close();
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("caps Campaign Archive multipart uploads at the API import body limit", async () => {
+    const baseConfig = makeConfig();
+    const root = await mkdtemp(join(tmpdir(), "infinitequest-archive-limit-"));
+    const config = makeConfig({
+      assetStorageRoot: join(root, "assets"),
+      archiveStorageRoot: join(root, "archives"),
+      campaignArchiveLimits: {
+        ...baseConfig.campaignArchiveLimits,
+        maxCompressedBytes: 4_096,
+        maxJsonEntryBytes: 4_096
+      },
+      security: {
+        ...baseConfig.security,
+        apiDefaultBodyLimitBytes: 4_096,
+        apiImportBodyLimitBytes: 256
+      }
+    });
+    const upload = multipartArchiveUpload(Buffer.alloc(512, 0x61), { kind: "embedded" });
+    const app = await buildServer({ config, pool: mockPool });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/imports/campaign-archive/preview",
+        headers: { "content-type": upload.contentType },
+        payload: upload.payload
+      });
+
+      expect(response.statusCode).toBe(413);
+    } finally {
+      await app.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("caps legacy import override fields at the API import body limit", async () => {
+    const baseConfig = makeConfig();
+    const root = await mkdtemp(join(tmpdir(), "infinitequest-legacy-import-limit-"));
+    const config = makeConfig({
+      assetStorageRoot: join(root, "assets"),
+      archiveStorageRoot: join(root, "archives"),
+      campaignArchiveLimits: {
+        ...baseConfig.campaignArchiveLimits,
+        maxCompressedBytes: 4_096,
+        maxJsonEntryBytes: 4_096
+      },
+      security: {
+        ...baseConfig.security,
+        apiDefaultBodyLimitBytes: 4_096,
+        apiImportBodyLimitBytes: 256
+      }
+    });
+    const upload = multipartFieldUpload(
+      "requestOverrides",
+      JSON.stringify({ sourceName: "oversized", padding: "x".repeat(512) })
+    );
+    const app = await buildServer({ config, pool: mockPool });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/imports/legacy-story",
+        headers: { "content-type": upload.contentType },
+        payload: upload.payload
+      });
+
+      expect(response.statusCode).toBe(413);
+    } finally {
+      await app.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("exposes only safe structured generated-world validation details", async () => {
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-error", async () => {
+      try {
+        parseCompleteGeneratedWorld({
+          world: { title: "PRIVATE_PROVIDER_WORLD" },
+          playableCharacters: []
+        });
+      } catch (error) {
+        throw incompleteGeneratedWorldError(error);
+      }
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-error",
+      headers: { "x-correlation-id": "generated-world-test" }
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toMatchObject({
+      message: expect.stringContaining("Correlation ID: generated-world-test."),
+      correlationId: "generated-world-test",
+      details: {
+        code: "incomplete_generated_world",
+        issues: expect.arrayContaining([
+          expect.objectContaining({ path: "world.genre" })
+        ])
+      }
+    });
+    expect(response.payload).not.toContain("PRIVATE_PROVIDER_WORLD");
+
+    await app.close();
+  });
+
+  it("exposes an actionable malformed-JSON issue without the parser body", async () => {
+    const marker = "PRIVATE_MALFORMED_PROVIDER_BODY";
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-json-error", async () => {
+      throw incompleteGeneratedWorldError(
+        new SyntaxError(`Unexpected token in ${marker}`)
+      );
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-json-error"
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toMatchObject({
+      details: {
+        code: "incomplete_generated_world",
+        issues: [{
+          path: "generatedWorld",
+          code: "invalid_json",
+          message: "Generated world JSON is malformed."
+        }]
+      }
+    });
+    expect(response.payload).not.toContain(marker);
+
+    await app.close();
+  });
+
+  it("bounds generated-world issue fields before exposing the API envelope", async () => {
+    const marker = "PRIVATE_OVERSIZED_API_ISSUE";
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-oversized-error", async () => {
+      throw incompleteGeneratedWorldError(new z.ZodError([{
+        path: [`world.${"p".repeat(500)}${marker}`],
+        code: `${"c".repeat(100)}${marker}` as "custom",
+        message: `${"m".repeat(500)}${marker}`
+      }]));
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-oversized-error"
+    });
+    const issue = response.json().details.issues[0] as {
+      path: string;
+      code: string;
+      message: string;
+    };
+
+    expect(response.statusCode).toBe(502);
+    expect(issue.path.length).toBeLessThanOrEqual(500);
+    expect(issue.code.length).toBeLessThanOrEqual(100);
+    expect(issue.message.length).toBeLessThanOrEqual(500);
+    expect(response.payload).not.toContain(marker);
+
+    await app.close();
+  });
+
+  it("exposes and logs only controlled generated-world provider 429 details", async () => {
+    const marker = "SECRET_AT_START_OF_PROVIDER_429_BODY";
+    const rawProviderError = Object.assign(
+      new Error(`Provider request failed (429): ${marker}`),
+      {
+        statusCode: 429,
+        providerMessage: `${marker}${"x".repeat(2_000)}`
+      }
+    );
+    const safeProviderError = generatedWorldProviderError(rawProviderError);
+    const errorLogs: unknown[] = [];
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-provider-error", async (request) => {
+      (request.log as unknown as { error: (...args: unknown[]) => void }).error = (...args) => {
+        errorLogs.push(args);
+      };
+      throw safeProviderError;
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-provider-error",
+      headers: { "x-correlation-id": "provider-429-test" }
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(response.json()).toMatchObject({
+      error: "WorldGenerationProviderError",
+      message: "The text provider request failed with HTTP 429. Correlation ID: provider-429-test.",
+      correlationId: "provider-429-test",
+      code: "provider_http_error",
+      details: {
+        code: "provider_http_error",
+        category: "http",
+        providerStatus: 429
+      }
+    });
+    expect(response.payload).not.toContain(marker);
+    expect(JSON.stringify(errorLogs)).not.toContain(marker);
+
+    await app.close();
+  });
+
+  it.each([
+    {
+      label: "destination policy",
+      rawError: () => new ProviderDestinationNotAllowedError("dns"),
+      expectedStatus: 422,
+      expectedName: "ProviderDestinationNotAllowedError",
+      expectedCode: "PROVIDER_DESTINATION_NOT_ALLOWED",
+      expectedCategory: "destination",
+      expectedMessage: "The provider destination is not allowed by the server network policy."
+    },
+    {
+      label: "response size",
+      rawError: () => new ProviderResponseTooLargeError(4 * 1024 * 1024),
+      expectedStatus: 502,
+      expectedName: "ProviderResponseTooLargeError",
+      expectedCode: "provider_response_too_large",
+      expectedCategory: "response_limit",
+      expectedMessage: "The provider response exceeded the server's safe size limit."
+    }
+  ])("exposes and logs only controlled generated-world $label details", async ({
+    rawError,
+    expectedStatus,
+    expectedName,
+    expectedCode,
+    expectedCategory,
+    expectedMessage
+  }) => {
+    const marker = "SECRET_AT_START_OF_TYPED_PROVIDER_API_FAILURE";
+    const safeProviderError = generatedWorldProviderError(Object.assign(rawError(), {
+      cause: new Error(`${marker}: private cause`),
+      providerMessage: `${marker}: private provider body`,
+      prompt: `${marker}: private lore`,
+      credentials: `${marker}: private credentials`
+    }));
+    const errorLogs: unknown[] = [];
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.get("/test/generated-world-typed-provider-error", async (request) => {
+      (request.log as unknown as { error: (...args: unknown[]) => void }).error = (...args) => {
+        errorLogs.push(args);
+      };
+      throw safeProviderError;
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/generated-world-typed-provider-error",
+      headers: { "x-correlation-id": "typed-provider-test" }
+    });
+
+    expect(response.statusCode).toBe(expectedStatus);
+    expect(response.json()).toMatchObject({
+      error: expectedName,
+      message: `${expectedMessage} Correlation ID: typed-provider-test.`,
+      correlationId: "typed-provider-test",
+      code: expectedCode,
+      details: {
+        code: expectedCode,
+        category: expectedCategory,
+        permanent: true,
+        retryable: false
+      }
+    });
+    expect(response.payload).not.toContain(marker);
+    expect(JSON.stringify(errorLogs)).not.toContain(marker);
+
+    await app.close();
+  });
+
+  it("respects the import body limit for large request payloads", async () => {
+    const baseConfig = makeConfig();
+    const config = makeConfig({
+      security: { ...baseConfig.security, apiImportBodyLimitBytes: 10 * 1024 * 1024 }
+    });
+    const mockPool = {} as unknown as DatabasePool;
+    const app = await buildServer({ config, pool: mockPool });
+
+    // Payload larger than 10MB limit (11MB string)
+    const oversizedPayload = "a".repeat(11 * 1024 * 1024);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/imports/world",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({ sourceName: "test", worldExport: { title: oversizedPayload } })
+    });
+
+    expect(response.statusCode).toBe(413);
+    const body = JSON.parse(response.payload);
+    expect(body.correlationId).toBeDefined();
+    expect(body.message).toContain("Correlation ID");
+
+    await app.close();
+  });
+
+  it("reads world-generation progress through the owner-scoped database service", async () => {
+    const ownerUserId = "00000000-0000-0000-0000-000000000001";
+    const progressKey = "world-gen-test";
+    const mockPool = {
+      query: async (query: string) => {
+        if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
+        if (query.startsWith("DELETE FROM world_generation_progress")) return { rowCount: 0, rows: [] };
+        if (query.startsWith("SELECT status, phase, progress_percent")) {
+          return {
+            rows: [{
+              status: "processing",
+              phase: "generating_world",
+              progress_percent: 30,
+              message: "Synthesizing world overview and characters via LLM…",
+              error_message: null
+            }]
+          };
+        }
+        throw new Error(`Unexpected query: ${query}`);
+      }
+    } as unknown as DatabasePool;
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/v1/worlds/generate-progress?key=${progressKey}`
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: "processing",
+      phase: "generating_world",
+      progressPercent: 30
+    });
+
+    await app.close();
+  });
+
+  it("logs one correlated lifecycle for a terminal generation stream", async () => {
+    const ownerUserId = "00000000-0000-0000-0000-000000000001";
+    const jobId = "11111111-1111-4111-8111-111111111111";
+    const fixtureAction = "fixture action that must not appear in lifecycle logs";
+    const fixturePartialNarration = "fixture partial narration that must not appear in lifecycle logs";
+    const fixturePartialOutput = `{"narration":"${fixturePartialNarration}","choices":[]}`;
+    const mockPool = {
+      query: async (query: string) => {
+        if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
+        if (query.startsWith("SELECT id, campaign_id AS \"campaignId\"")) {
+          return {
+            rows: [{
+              id: jobId,
+              campaignId: "22222222-2222-4222-8222-222222222222",
+              providerProfileId: null,
+              expectedTurnNumber: 1,
+              action: fixtureAction,
+              status: "completed",
+              attempts: 1,
+              requestedInputMode: "action",
+              resolvedInputMode: "action",
+              inputModeSource: "explicit",
+              operationKind: "append",
+              replacementTurnId: null,
+              baseTurnNumber: null,
+              requestedModel: "fixture-model",
+              providerResponseId: null,
+              providerFinishReason: null,
+              resultTurnId: null,
+              errorCode: null,
+              errorMessage: null,
+              recoveryMetadata: {},
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              completedAt: new Date(),
+              partialOutput: fixturePartialOutput
+            }]
+          };
+        }
+        throw new Error(`Unexpected query: ${query}`);
+      }
+    } as unknown as DatabasePool;
+    const loggerInfo = vi.spyOn(logger, "info").mockImplementation(() => logger);
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+
+    try {
+      const response = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${jobId}/stream` });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["content-type"]).toContain("text/event-stream");
+      expect(response.headers["cache-control"]).toBe("no-cache");
+
+      const lifecycleLogs = loggerInfo.mock.calls
+        .map(([fields]) => fields as Record<string, unknown>)
+        .filter((fields) => String(fields.event || "").startsWith("turn_generation_stream_"));
+
+      expect(lifecycleLogs).toEqual([
+        expect.objectContaining({
+          event: "turn_generation_stream_connected",
+          generationJobId: jobId,
+          correlationId: expect.any(String)
+        }),
+        expect.objectContaining({
+          event: "turn_generation_stream_closed",
+          generationJobId: jobId,
+          correlationId: lifecycleLogs[0]?.correlationId,
+          finalStatus: "completed",
+          snapshotsSent: 1
+        })
+      ]);
+
+      const serializedLogs = JSON.stringify(loggerInfo.mock.calls);
+      expect(serializedLogs).not.toContain(fixtureAction);
+      expect(serializedLogs).not.toContain(fixturePartialOutput);
+      expect(serializedLogs).not.toContain(fixturePartialNarration);
+    } finally {
+      loggerInfo.mockRestore();
+      await app.close();
+    }
+  });
+
+  it("logs one safe lifecycle when generation stream polling fails", async () => {
+    const ownerUserId = "00000000-0000-0000-0000-000000000001";
+    const jobId = "33333333-3333-4333-8333-333333333333";
+    const unsafeCode = "REMOTE FAILURE: sensitive detail";
+    const sensitiveMessage = "sensitive polling error must not appear in logs";
+    const mockPool = {
+      query: async (query: string) => {
+        if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
+        if (query.startsWith("SELECT id, campaign_id AS \"campaignId\"")) {
+          throw Object.assign(new Error(sensitiveMessage), { code: unsafeCode });
+        }
+        throw new Error(`Unexpected query: ${query}`);
+      }
+    } as unknown as DatabasePool;
+    const loggerInfo = vi.spyOn(logger, "info").mockImplementation(() => logger);
+    const loggerWarn = vi.spyOn(logger, "warn").mockImplementation(() => logger);
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+
+    try {
+      const response = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${jobId}/stream` });
+      const lifecycleLogs = loggerInfo.mock.calls
+        .map(([fields]) => fields as Record<string, unknown>)
+        .filter((fields) => String(fields.event || "").startsWith("turn_generation_stream_"));
+      const warningLogs = loggerWarn.mock.calls.map(([fields]) => fields as Record<string, unknown>);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["content-type"]).toContain("text/event-stream");
+      expect(response.headers["cache-control"]).toBe("no-cache");
+      expect(lifecycleLogs).toEqual([
+        expect.objectContaining({ event: "turn_generation_stream_connected", generationJobId: jobId, correlationId: expect.any(String) }),
+        expect.objectContaining({
+          event: "turn_generation_stream_closed",
+          generationJobId: jobId,
+          correlationId: lifecycleLogs[0]?.correlationId,
+          finalStatus: "stream_error",
+          snapshotsSent: 1
+        })
+      ]);
+      expect(warningLogs).toEqual([
+        expect.objectContaining({
+          correlationId: lifecycleLogs[0]?.correlationId,
+          generationJobId: jobId,
+          errorName: "Error",
+          errorCode: "unclassified_error"
+        })
+      ]);
+      const serializedLogs = JSON.stringify([...loggerInfo.mock.calls, ...loggerWarn.mock.calls]);
+      expect(serializedLogs).not.toContain(sensitiveMessage);
+      expect(serializedLogs).not.toContain(unsafeCode);
+    } finally {
+      loggerInfo.mockRestore();
+      loggerWarn.mockRestore();
+      await app.close();
+    }
+  });
+
+  it("closes a generation stream once without writing after client disconnect", async () => {
+    const ownerUserId = "00000000-0000-0000-0000-000000000001";
+    const jobId = "44444444-4444-4444-8444-444444444444";
+    let closeStream: (() => void) | undefined;
+    let endStream: (() => void) | undefined;
+    const writes: string[] = [];
+    const mockPool = {
+      query: async (query: string) => {
+        if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
+        if (query.startsWith("SELECT id, campaign_id AS \"campaignId\"")) {
+          closeStream?.();
+          return {
+            rows: [{
+              id: jobId,
+              campaignId: "55555555-5555-4555-8555-555555555555",
+              providerProfileId: null,
+              expectedTurnNumber: 1,
+              action: "action after close",
+              status: "completed",
+              attempts: 1,
+              requestedInputMode: "action",
+              resolvedInputMode: "action",
+              inputModeSource: "explicit",
+              operationKind: "append",
+              replacementTurnId: null,
+              baseTurnNumber: null,
+              requestedModel: "fixture-model",
+              providerResponseId: null,
+              providerFinishReason: null,
+              resultTurnId: null,
+              errorCode: null,
+              errorMessage: null,
+              recoveryMetadata: {},
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              completedAt: new Date(),
+              partialOutput: null
+            }]
+          };
+        }
+        throw new Error(`Unexpected query: ${query}`);
+      }
+    } as unknown as DatabasePool;
+    const loggerInfo = vi.spyOn(logger, "info").mockImplementation(() => logger);
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    app.addHook("onRequest", async (request, reply) => {
+      if (request.url.endsWith(`/generation-jobs/${jobId}/stream`)) {
+        closeStream = () => { request.raw.emit("close"); };
+        endStream = () => { reply.raw.end(); };
+        const originalWrite = reply.raw.write.bind(reply.raw);
+        reply.raw.write = ((chunk: string) => {
+          writes.push(chunk);
+          return originalWrite(chunk);
+        }) as typeof reply.raw.write;
+      }
+    });
+
+    try {
+      const responsePromise = app.inject({ method: "GET", url: `/api/v1/generation-jobs/${jobId}/stream` });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const lifecycleLogs = loggerInfo.mock.calls
+        .map(([fields]) => fields as Record<string, unknown>)
+        .filter((fields) => String(fields.event || "").startsWith("turn_generation_stream_"));
+
+      expect(writes).toEqual([]);
+      expect(lifecycleLogs).toEqual([
+        expect.objectContaining({ event: "turn_generation_stream_connected", generationJobId: jobId, correlationId: expect.any(String) }),
+        expect.objectContaining({
+          event: "turn_generation_stream_closed",
+          generationJobId: jobId,
+          correlationId: lifecycleLogs[0]?.correlationId,
+          finalStatus: "client_closed",
+          snapshotsSent: 0
+        })
+      ]);
+      endStream?.();
+      await responsePromise;
+    } finally {
+      endStream?.();
+      loggerInfo.mockRestore();
+      await app.close();
     }
   });
 });

@@ -8,6 +8,13 @@ export type IllustrationSegment = {
   text: string;
 };
 
+export function isIllustrationSegmentEligible(
+  segment: Pick<IllustrationSegment, "wordCount">,
+  configuredWordCount: number
+): boolean {
+  return segment.wordCount >= configuredWordCount / 2;
+}
+
 function wordTokens(text: string): Array<{ index: number; end: number }> {
   const segmenter = new Intl.Segmenter(undefined, { granularity: "word" });
   return [...segmenter.segment(text)]

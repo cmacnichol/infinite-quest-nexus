@@ -791,6 +791,134 @@ describe("asset archive portability", () => {
     expect(observedByImport[0]).toEqual(observedByImport[1]);
   });
 
+  it("prelocks legacy JPEG, WebP, and GIF originals using their detected MIME types", async () => {
+    const [jpegBytes, webpBytes, gifBytes] = await Promise.all([
+      sharp({ create: { width: 1, height: 1, channels: 3, background: "#123456" } }).jpeg().toBuffer(),
+      sharp({ create: { width: 1, height: 1, channels: 3, background: "#654321" } }).webp().toBuffer(),
+      sharp({ create: { width: 1, height: 1, channels: 3, background: "#abcdef" } }).gif().toBuffer()
+    ]);
+    const request = storyImportRequestSchema.parse({
+      sourceName: `legacy-mime-${crypto.randomUUID()}.story`,
+      story: {
+        format: "infinite-quest-campaign",
+        formatVersion: 2,
+        world: { title: "Legacy MIME import", character: "Portable character." },
+        campaign: { title: "Legacy MIME import" },
+        turns: [],
+        settings: {}
+      },
+      targetWorldVersionId: worldVersionId
+    });
+    const targetContent = legacyWorldContent(request.story);
+    const client = {
+      query: async (text: string) => {
+        if (text === "SELECT id FROM users WHERE system_key = 'initial-owner' AND status = 'active'") {
+          return { rows: [{ id: ownerUserId }], rowCount: 1 };
+        }
+        if (text.startsWith("SELECT world_id, id AS world_version_id")) {
+          return { rows: [{ world_id: worldId, world_version_id: worldVersionId }], rowCount: 1 };
+        }
+        if (text.startsWith("SELECT content FROM world_versions")) {
+          return { rows: [{ content: targetContent }], rowCount: 1 };
+        }
+        if (text.startsWith("INSERT INTO imports") && text.includes("RETURNING id")) {
+          return { rows: [{ id: crypto.randomUUID() }], rowCount: 1 };
+        }
+        if (text.startsWith("INSERT INTO campaigns")) return { rows: [{ id: campaignId }], rowCount: 1 };
+        return { rows: [], rowCount: 1 };
+      },
+      release: () => undefined
+    };
+
+    await expect(importLegacyStory(
+      { connect: async () => client } as never,
+      request,
+      { root: "C:\\portable-assets" },
+      new Map([
+        ["legacy-photo", jpegBytes],
+        ["legacy-art", webpBytes],
+        ["legacy-animation", gifBytes]
+      ])
+    )).resolves.toMatchObject({ campaignId });
+  });
+
+  it("persists and links a legacy JPEG turn illustration inside an optional savepoint", async () => {
+    const root = await mkdtemp(join(tmpdir(), "legacy-turn-illustration-"));
+    const jpegBytes = await sharp({
+      create: { width: 2, height: 1, channels: 3, background: "#2468ac" }
+    }).jpeg().toBuffer();
+    const request = storyImportRequestSchema.parse({
+      sourceName: `legacy-turn-image-${crypto.randomUUID()}.story`,
+      story: {
+        format: "infinite-quest-campaign",
+        formatVersion: 2,
+        world: { title: "Legacy turn image", character: "Portable character." },
+        campaign: { title: "Legacy turn image" },
+        turns: [{
+          id: turnId,
+          narration: "A painted horizon opens beyond the gate.",
+          imagePrompt: "Painted fantasy horizon",
+          imageUrl: `/api/v1/assets/${assetA}`
+        }],
+        settings: {}
+      },
+      targetWorldVersionId: worldVersionId
+    });
+    const targetContent = legacyWorldContent(request.story);
+    const queries: Array<{ text: string; values?: unknown[] }> = [];
+    const setId = "99999999-9999-4999-8999-999999999999";
+    try {
+      const client = {
+        query: async (text: string, values?: unknown[]) => {
+          queries.push(values === undefined ? { text } : { text, values });
+          if (text === "SELECT id FROM users WHERE system_key = 'initial-owner' AND status = 'active'") {
+            return { rows: [{ id: ownerUserId }], rowCount: 1 };
+          }
+          if (text.startsWith("SELECT world_id, id AS world_version_id")) {
+            return { rows: [{ world_id: worldId, world_version_id: worldVersionId }], rowCount: 1 };
+          }
+          if (text.startsWith("SELECT content FROM world_versions")) {
+            return { rows: [{ content: targetContent }], rowCount: 1 };
+          }
+          if (text.startsWith("INSERT INTO imports") && text.includes("RETURNING id")) {
+            return { rows: [{ id: crypto.randomUUID() }], rowCount: 1 };
+          }
+          if (text.startsWith("INSERT INTO campaigns")) return { rows: [{ id: campaignId }], rowCount: 1 };
+          if (text.startsWith("INSERT INTO turns")) return { rows: [{ id: turnId }], rowCount: 1 };
+          if (text.startsWith("INSERT INTO assets")) return { rows: [{ id: assetA }], rowCount: 1 };
+          if (text.startsWith("INSERT INTO turn_illustration_sets")) return { rows: [{ id: setId }], rowCount: 1 };
+          if (text.startsWith("INSERT INTO turn_illustration_segments")) return { rows: [{ id: segmentId }], rowCount: 1 };
+          return { rows: [], rowCount: 1 };
+        },
+        release: () => undefined
+      };
+
+      await expect(importLegacyStory(
+        { connect: async () => client } as never,
+        request,
+        { root },
+        new Map([[assetA, jpegBytes]])
+      )).resolves.toMatchObject({ campaignId, stats: { turnCount: 1 } });
+
+      const savepointIndex = queries.findIndex((query) => query.text === "SAVEPOINT optional_import_step");
+      const assetIndex = queries.findIndex((query) => query.text.startsWith("INSERT INTO assets"));
+      expect(savepointIndex).toBeGreaterThan(-1);
+      expect(assetIndex).toBeGreaterThan(savepointIndex);
+      expect(queries).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          text: expect.stringContaining("INSERT INTO asset_library_entries"),
+          values: [assetA, ownerUserId, "Turn Illustration", "campaign"]
+        }),
+        expect.objectContaining({
+          text: expect.stringContaining("INSERT INTO turn_illustration_segment_assets"),
+          values: [segmentId, ownerUserId, assetA]
+        })
+      ]));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("fails when the destination library metadata row is absent", async () => {
     const root = await mkdtemp(join(tmpdir(), "asset-archive-metadata-"));
     try {

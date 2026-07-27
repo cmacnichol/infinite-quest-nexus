@@ -1,4 +1,5 @@
 import { cyoaExportSchema, type CyoaChapter, type CyoaExport, type CyoaInfo } from "../../contracts/src/imports.js";
+import { PROMPT_TEMPLATE_CATALOG } from "../../contracts/src/prompt-library.js";
 
 
 export type TemplateExcerpt = {
@@ -100,26 +101,16 @@ export function extractCyoaLayers(parsed: CyoaExport, sourceName = "cyoa-export.
 }
 
 export function buildTemplateWorldPrompt(input: TemplateWorldInput, systemPromptOverride?: string): { systemPrompt: string; input: string } {
-  const systemPrompt = systemPromptOverride || `Convert narrative excerpts, story descriptions, or prompt ideas into a complete, high-fidelity Infinite Quest Nexus Story World JSON object. Return JSON only. Preserve narrative tone and diegetic lore without inventing contradictory facts.
-Required fields: title, genre, tone, backgroundStory, playable_characters, premise, firstAction, story_rules, default_triggers, event_triggers, rpg_statistics.
-CRITICAL requirement: You MUST return exactly 3 or 4 distinct, fully fleshed out playable characters in playable_characters. Identify characters pulled from the source material if available, or generate fitting, rich characters that match the setting. Each character entry requires:
-- id (e.g., "char-1", "char-2", "char-3")
-- name (full character name)
-- character_text (legacy source guidance; may be empty when profile is complete)
-- profile with identity { aliases, pronouns }, story { role, background, personality, motivations, goals, fearsAndConflicts, keyRelationships, narrativeHooks, voiceAndMannerisms, otherGuidance }, appearance { ancestryOrSpecies, apparentAge, genderPresentation, build, skinOrComplexion, face, eyes, hair, distinguishingFeatures, clothing, equipmentAndAccessories, otherVisualDetails }, and unclassifiedNotes
-- rpg_statistics (array of { id, name, value: number (1-99), note }) representing this character's specific skills and attributes
-- default_triggers (array of { id, name, value, rules }) representing items or statuses tracked for this character.
-Also return top-level rpg_statistics, default_triggers, and event_triggers (array of { id, name, condition, action, cooldownTurns }) for world-wide mechanics.
-Do not include credentials, model instructions, private reasoning, rolls, checks, dice results, or parser diagnostics in fictional fields.`;
+  const systemPrompt = systemPromptOverride || PROMPT_TEMPLATE_CATALOG.world_generation.defaultContent;
 
   const payload = input.sourceKind === "prompt"
     ? {
-      task: "Create a new Story World with 3-4 playable characters from this concept prompt.",
+      task: "Create a new Story World and 3-4 compact character seeds from this concept prompt.",
       title: input.title,
       prompt: input.prompt || input.summary
     }
     : {
-      task: "Convert this Choose Your Own Adventure (CYOA) story and top-level branch choices into a new Story World with 3-4 identified or generated playable characters.",
+      task: "Convert this Choose Your Own Adventure (CYOA) story and top-level branch choices into a new Story World and 3-4 compact identified or generated character seeds.",
       title: input.title,
       summary: input.summary,
       keywords: input.keywords,

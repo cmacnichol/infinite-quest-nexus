@@ -9,6 +9,7 @@ import { createProvider } from "../../services/api/src/provider-service.js";
 import { runGenerationJob } from "../../services/api/src/generation-service.js";
 import { runImageJob } from "../../services/api/src/image-service.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
+import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -88,6 +89,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
   let pool: DatabasePool;
   let app: Awaited<ReturnType<typeof buildServer>>;
   let mockServer: Server;
+  let providerTransport: ReturnType<typeof installIntegrationProviderTransport>;
   let baseUrl = "";
   let textProviderId = "";
   let imageProviderId = "";
@@ -116,6 +118,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
     await migrateDatabase(pool, resolve("database/migrations"));
+    providerTransport = installIntegrationProviderTransport();
     const config = makeConfig(databaseUrl!);
     app = await buildServer({ config, pool });
 
@@ -186,6 +189,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
 
   afterAll(async () => {
     if (mockServer) await new Promise<void>((resolveClose, reject) => mockServer.close(error => error ? reject(error) : resolveClose()));
+    if (providerTransport) await providerTransport.close();
     await pool.end();
   });
 
