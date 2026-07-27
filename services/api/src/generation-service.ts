@@ -63,6 +63,7 @@ import {
   StreamingSegmentTracker,
   characterVisualReference,
   isIllustrationSegmentEligible,
+  normalizeCampaignStateSnapshot,
   normalizeCampaignTrackers,
   sha256,
   stableStringify,
@@ -682,25 +683,29 @@ export async function syncPlayerCampaignConfig(pool: DatabasePool, campaignId: s
         WHERE id = $1 AND owner_user_id = $2`,
       [campaignId, ownerUserId, json({ useRpgStats: config.useRpgStats, suppressEventTriggers: config.suppressEventTriggers })]
     );
-    await client.query(
+    const stateResult = await client.query<{ scratchpad_private: string; trackers: unknown }>(
       `UPDATE campaign_state
           SET rpg_stats = $3, event_triggers = $4, pending_event_triggers = $5,
               revision = revision + 1, updated_at = now()
-        WHERE campaign_id = $1 AND owner_user_id = $2`,
+        WHERE campaign_id = $1 AND owner_user_id = $2
+        RETURNING scratchpad_private, trackers`,
       [campaignId, ownerUserId, json(config.rpgStats), json(config.eventTriggers), json(config.pendingEventTriggers)]
     );
     if (row.active_turn_number === 0) {
+      const state = stateResult.rows[0];
+      if (!state) throw new Error("Campaign state was not found.");
+      const initialStateSnapshot = normalizeCampaignStateSnapshot({
+        scratchpad: state.scratchpad_private,
+        trackers: state.trackers,
+        eventTriggers: config.eventTriggers,
+        pendingEventTriggers: config.pendingEventTriggers,
+        rpgStats: config.rpgStats
+      });
       await client.query(
         `UPDATE campaign_state
-            SET initial_state_snapshot = jsonb_build_object(
-              'scratchpad', scratchpad_private,
-              'trackers', trackers,
-              'eventTriggers', $3::jsonb,
-              'pendingEventTriggers', $4::jsonb,
-              'rpgStats', $5::jsonb
-            )
+            SET initial_state_snapshot = $3::jsonb
           WHERE campaign_id = $1 AND owner_user_id = $2`,
-        [campaignId, ownerUserId, json(config.eventTriggers), json(config.pendingEventTriggers), json(config.rpgStats)]
+        [campaignId, ownerUserId, json(initialStateSnapshot)]
       );
     }
     return { campaignId, activeTurnNumber: row.active_turn_number, synchronized: true };
@@ -818,7 +823,7 @@ export async function rewindCampaign(pool: DatabasePool, campaignId: string, req
     if (!currentState) throw new Error("Campaign state was not found.");
     const snapshot = targetSnapshot;
     const scratchpad = typeof snapshot.scratchpad === "string" ? snapshot.scratchpad : "";
-    const trackers = Array.isArray(snapshot.trackers) ? snapshot.trackers : [];
+    const trackers = normalizeCampaignTrackers(snapshot.trackers);
     const eventTriggers = Array.isArray(snapshot.eventTriggers) ? snapshot.eventTriggers : currentState.event_triggers;
     const pendingEventTriggers = Array.isArray(snapshot.pendingEventTriggers) ? snapshot.pendingEventTriggers : [];
     const rpgStats = Array.isArray(snapshot.rpgStats) ? snapshot.rpgStats : currentState.rpg_stats;
@@ -987,11 +992,14 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
       );
     }
 
-    const scratchpad = typeof targetSnapshot.scratchpad === "string" ? targetSnapshot.scratchpad : "";
-    const trackers = Array.isArray(targetSnapshot.trackers) ? targetSnapshot.trackers : [];
-    const eventTriggers = Array.isArray(targetSnapshot.eventTriggers) ? targetSnapshot.eventTriggers : [];
-    const pendingEventTriggers = Array.isArray(targetSnapshot.pendingEventTriggers) ? targetSnapshot.pendingEventTriggers : [];
-    const rpgStats = Array.isArray(targetSnapshot.rpgStats) ? targetSnapshot.rpgStats : [];
+    const materializedTargetSnapshot = normalizeCampaignStateSnapshot(targetSnapshot);
+    const branchDefaultTriggers = normalizeCampaignTrackers(parentState.default_triggers);
+    const branchInitialStateSnapshot = normalizeCampaignStateSnapshot(parentState.initial_state_snapshot);
+    const scratchpad = typeof materializedTargetSnapshot.scratchpad === "string" ? materializedTargetSnapshot.scratchpad : "";
+    const trackers = normalizeCampaignTrackers(materializedTargetSnapshot.trackers);
+    const eventTriggers = Array.isArray(materializedTargetSnapshot.eventTriggers) ? materializedTargetSnapshot.eventTriggers : [];
+    const pendingEventTriggers = Array.isArray(materializedTargetSnapshot.pendingEventTriggers) ? materializedTargetSnapshot.pendingEventTriggers : [];
+    const rpgStats = Array.isArray(materializedTargetSnapshot.rpgStats) ? materializedTargetSnapshot.rpgStats : [];
     const scratchpadSafeForPrompt = targetStateEdited || typeof targetModelMetadata?.promptProtocolVersion === "string";
 
     const branchProvenance = {
@@ -1009,8 +1017,8 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [
         newCampaignId, ownerUserId, scratchpad, scratchpadSafeForPrompt,
-        json(trackers), json(parentState.default_triggers), json(eventTriggers), json(pendingEventTriggers), json(rpgStats),
-        json(branchProvenance), json(parentState.initial_state_snapshot)
+        json(trackers), json(branchDefaultTriggers), json(eventTriggers), json(pendingEventTriggers), json(rpgStats),
+        json(branchProvenance), json(branchInitialStateSnapshot)
       ]
     );
     if (targetStateEdited) {
@@ -1018,7 +1026,7 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
         `INSERT INTO campaign_state_edits (
            owner_user_id, campaign_id, effective_turn_number, revision, state_snapshot_private, changed_fields
          ) VALUES ($1,$2,$3,1,$4,$5)`,
-        [ownerUserId, newCampaignId, request.targetTurnNumber, json(targetSnapshot), json(["branchedState"])]
+        [ownerUserId, newCampaignId, request.targetTurnNumber, json(materializedTargetSnapshot), json(["branchedState"])]
       );
       await client.query(
         `UPDATE campaign_state SET revision = 1 WHERE campaign_id = $1 AND owner_user_id = $2`,

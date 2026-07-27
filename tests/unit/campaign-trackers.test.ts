@@ -46,6 +46,67 @@ describe("campaign tracker normalization", () => {
     ]);
   });
 
+  it("limits normalized output to the runtime contract maximum", () => {
+    const input = Array.from({ length: 205 }, (_, index) => ({
+      name: `Tracker ${index + 1}`,
+      value: String(index + 1)
+    }));
+
+    const trackers = normalizeCampaignTrackers(input);
+
+    expect(trackers).toHaveLength(200);
+    expect(trackers[199]).toEqual({
+      id: "Tracker 200",
+      name: "Tracker 200",
+      value: "200",
+      rules: ""
+    });
+    expect(input).toHaveLength(205);
+  });
+
+  it("uses a non-blank label when name is blank", () => {
+    expect(normalizeCampaignTrackers([{
+      name: "   ",
+      label: " Moon gate ",
+      currentValue: "sealed",
+      updateRules: "Change when the lens is lit."
+    }])).toEqual([{
+      id: "Moon gate",
+      name: "Moon gate",
+      value: "sealed",
+      rules: "Change when the lens is lit."
+    }]);
+  });
+
+  it("falls back to the normalized name when a supplied ID is blank", () => {
+    expect(normalizeCampaignTrackers([{
+      id: "   ",
+      name: " Keeper trust ",
+      value: "wary"
+    }])).toEqual([{
+      id: "Keeper trust",
+      name: "Keeper trust",
+      value: "wary",
+      rules: ""
+    }]);
+  });
+
+  it("reserves later explicit IDs before assigning derived IDs", () => {
+    const input = [
+      { name: "trust", value: "derived" },
+      { id: "trust", name: "Keeper trust", value: "explicit" }
+    ];
+
+    expect(normalizeCampaignTrackers(input)).toEqual([
+      { id: "trust-2", name: "trust", value: "derived", rules: "" },
+      { id: "trust", name: "Keeper trust", value: "explicit", rules: "" }
+    ]);
+    expect(input).toEqual([
+      { name: "trust", value: "derived" },
+      { id: "trust", name: "Keeper trust", value: "explicit" }
+    ]);
+  });
+
   it("drops malformed rows and enforces contract lengths", () => {
     const trackers = normalizeCampaignTrackers([
       null,
