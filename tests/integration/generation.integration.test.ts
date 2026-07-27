@@ -239,7 +239,8 @@ integration("durable Story Engine integration", () => {
     await pool.query(
       "UPDATE campaign_state SET trackers = $2 WHERE campaign_id = $1",
       [imported.campaignId, JSON.stringify([
-        { name: "Generated clue", value: "hidden", rules: "Update when revealed." }
+        { name: "Generated clue", value: "hidden", rules: "Update when revealed." },
+        { name: "Generated clue", value: "found", rules: "Keep independently editable." }
       ])]
     );
     const story = JSON.parse(validStory());
@@ -260,10 +261,12 @@ integration("durable Story Engine integration", () => {
       [imported.campaignId]
     );
     expect(persisted.rows[0]?.state_snapshot_private.trackers).toEqual([
-      expect.objectContaining({ id: "Generated clue", name: "Generated clue" })
+      expect.objectContaining({ id: "Generated clue", name: "Generated clue", value: "hidden" }),
+      expect.objectContaining({ id: "Generated clue-2", name: "Generated clue", value: "found" })
     ]);
     expect(persisted.rows[0]?.trackers).toEqual([
-      expect.objectContaining({ id: "Generated clue", name: "Generated clue" })
+      expect.objectContaining({ id: "Generated clue", name: "Generated clue", value: "hidden" }),
+      expect.objectContaining({ id: "Generated clue-2", name: "Generated clue", value: "found" })
     ]);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
   });

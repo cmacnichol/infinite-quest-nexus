@@ -1160,10 +1160,10 @@ export async function claimGeneration(pool: DatabasePool, workerId: string, leas
 }
 
 function mergedTrackers(current: unknown, updates: Array<Record<string, unknown>>): CampaignTracker[] {
-  const existing = Array.isArray(current)
-    ? current.filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
-    : [];
-  const map = new Map(existing.map((item, index) => [String(item.id || item.name || index), item]));
+  const existing = normalizeCampaignTrackers(current);
+  const map = new Map<string, Record<string, unknown>>(
+    existing.map((item) => [item.id, { ...item }])
+  );
   for (const update of updates) {
     const key = String(update.id || update.name || crypto.randomUUID());
     map.set(key, { ...(map.get(key) || {}), ...update });

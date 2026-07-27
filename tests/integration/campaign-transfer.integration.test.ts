@@ -80,10 +80,13 @@ integration("cross-world campaign transfer", () => {
     await pool.query("UPDATE campaigns SET active_turn_number = 1 WHERE id = $1 AND owner_user_id = $2", [source.id, ownerUserId]);
     await pool.query(
       `UPDATE campaign_state SET scratchpad_private = 'private', scratchpad_safe_for_prompt = true,
-              trackers = $3, revision = 1, updated_at = now()
+              trackers = $3, default_triggers = $4, revision = 1, updated_at = now()
         WHERE campaign_id = $1 AND owner_user_id = $2`,
       [source.id, ownerUserId, JSON.stringify([
         { name: "Transferred oath", value: "unbroken", rules: "Update when tested." }
+      ]), JSON.stringify([
+        { name: "Transferred promise", value: "pending", rules: "Update when fulfilled." },
+        { name: "Transferred promise", value: "remembered", rules: "Keep independently editable." }
       ])]
     );
     await pool.query(
@@ -127,6 +130,7 @@ integration("cross-world campaign transfer", () => {
       character_profile_revision: number;
       revision: number;
       trackers: unknown;
+      default_triggers: unknown;
       turn_count: number;
       edit_count: number;
       reference_count: number;
@@ -135,7 +139,7 @@ integration("cross-world campaign transfer", () => {
       cost_count: number;
     }>(
       `SELECT c.world_version_id, c.active_turn_number, c.selected_character_id, c.character_snapshot,
-              c.character_profile, c.character_profile_revision, cs.revision, cs.trackers,
+              c.character_profile, c.character_profile_revision, cs.revision, cs.trackers, cs.default_triggers,
               (SELECT count(*)::int FROM turns WHERE campaign_id = c.id) AS turn_count,
               (SELECT count(*)::int FROM campaign_state_edits WHERE campaign_id = c.id) AS edit_count,
               (SELECT count(*)::int FROM asset_references ar JOIN turns t ON t.id = ar.turn_id
@@ -156,6 +160,10 @@ integration("cross-world campaign transfer", () => {
       revision: 1,
       trackers: [
         expect.objectContaining({ id: "Transferred oath", name: "Transferred oath" })
+      ],
+      default_triggers: [
+        expect.objectContaining({ id: "Transferred promise", name: "Transferred promise", value: "pending" }),
+        expect.objectContaining({ id: "Transferred promise-2", name: "Transferred promise", value: "remembered" })
       ],
       turn_count: 1,
       edit_count: 1,
