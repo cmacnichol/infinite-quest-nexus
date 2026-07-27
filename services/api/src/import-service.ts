@@ -1038,6 +1038,12 @@ export async function importCampaignArchive(
   const ownerUserId = await initialOwnerId(pool);
   const tokenHash = sha256(parsed.previewToken);
   const client = await pool.connect();
+  let clientReleased = false;
+  const releaseClient = () => {
+    if (clientReleased) return;
+    client.release();
+    clientReleased = true;
+  };
   let failedPreviewId = "";
   let failedPreviewPath = "";
   let createdPaths: string[] = [];
@@ -1079,6 +1085,7 @@ export async function importCampaignArchive(
         [preview.id, JSON.stringify({ importId: row.id, duplicate: true, stagingCleanupPending: true }), tokenHash, preview.staged_archive_path]
       );
       await client.query("COMMIT");
+      releaseClient();
       await cleanupArchivePreviewStaging(pool, config, preview.id, logger)
         .catch((error) => safeCleanupWarning(logger, error, "consumed campaign archive preview staging cleanup failed"));
       return { importId: row.id, worldId: row.world_id!, worldVersionId: row.world_version_id!, campaignId: row.campaign_id!, duplicate: true, stats: row.stats as unknown as CampaignArchiveImportResult["stats"] };
@@ -1130,11 +1137,13 @@ export async function importCampaignArchive(
       }), tokenHash, preview.staged_archive_path]
     );
     await client.query("COMMIT");
+    releaseClient();
     await cleanupArchivePreviewStaging(pool, config, preview.id, logger)
       .catch((error) => safeCleanupWarning(logger, error, "consumed campaign archive preview staging cleanup failed"));
     return { importId, worldId: world.worldId, worldVersionId: world.worldVersionId, campaignId: inserted.campaignId, duplicate: false, stats };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
+    releaseClient();
     const persistedFailure = error && typeof error === "object" && "createdPaths" in error
       ? (error as { createdPaths?: unknown }).createdPaths
       : undefined;
@@ -1152,6 +1161,6 @@ export async function importCampaignArchive(
     }
     throw error;
   } finally {
-    client.release();
+    releaseClient();
   }
 }
