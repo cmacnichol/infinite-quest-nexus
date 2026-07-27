@@ -204,7 +204,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('function goToNext()');
     expect(storyScript).toContain('async function undoLatest()');
     expect(storyScript).toContain('/campaigns/${state.campaignId}/rewind');
-    expect(storyScript).toContain('/campaigns/${state.campaignId}/branch');
+    expect(storyScript).toContain('import { branchCampaignFromTurn } from "./story-routing.js";');
     expect(storyScript).not.toContain('history-branch-btn');
     expect(storyScript).not.toContain('history-state-btn');
     expect(storyScript).not.toContain('history-jump-btn');
@@ -216,7 +216,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('await runGeneration(action, {');
     expect(storyScript).not.toContain('confirm("Retry the last turn? The current outcome will be replaced.")');
     expect(storyScript).toContain('branchDlg.addEventListener("close"');
-    expect(storyScript).toContain('body: JSON.stringify({ targetTurnNumber: branchDlg._turnIndex + 1 })');
+    expect(storyScript).toContain('await branchCampaignFromTurn(state.campaignId, branchDlg._turnIndex, api);');
     expect(storyScript).toContain('function openTurnHistoryModal()');
     expect(storyScript).toContain('el.addEventListener("click", openTurnHistoryModal);');
   });

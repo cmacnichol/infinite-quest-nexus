@@ -1,6 +1,8 @@
 /* ═══════════════════════════════════════════════════════════════
    Infinite Quest — Story Player
    ═══════════════════════════════════════════════════════════════ */
+import { branchCampaignFromTurn } from "./story-routing.js";
+
 "use strict";
 
 (function () {
@@ -2648,17 +2650,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (result === "copy" && branchDlg._turnIndex !== undefined) {
       showBusy("Creating campaign branch…");
       try {
-        const newCampaign = await api(`/campaigns/${state.campaignId}/branch`, {
-          method: "POST",
-          body: JSON.stringify({ targetTurnNumber: branchDlg._turnIndex + 1 })
-        });
-        state.campaignId = newCampaign.id;
-        const newUrl = new URL(window.location.href);
-        newUrl.searchParams.set("campaignId", newCampaign.id);
-        window.history.pushState({ campaignId: newCampaign.id }, "", newUrl.toString());
-        await loadCampaign(newCampaign.id);
-        navigateTo(-1);
-        toast(`Switched to new campaign branch: "${newCampaign.title}"`);
+        await branchCampaignFromTurn(state.campaignId, branchDlg._turnIndex, api);
       } catch (err) {
         toast(`Branch failed: ${err.message}`);
       } finally {
