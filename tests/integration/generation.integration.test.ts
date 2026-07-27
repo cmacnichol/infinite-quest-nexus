@@ -575,6 +575,44 @@ integration("durable Story Engine integration", () => {
     });
   });
 
+  it("deletes provisional streaming image jobs when rewinding their generation", async () => {
+    const imported = await campaign();
+    const campaignRow = await pool.query<{ owner_user_id: string }>(
+      "SELECT owner_user_id FROM campaigns WHERE id = $1",
+      [imported.campaignId]
+    );
+    const ownerUserId = campaignRow.rows[0]?.owner_user_id;
+    if (!ownerUserId) throw new Error("Synthetic campaign owner was not found.");
+    const generationJob = await pool.query<{ id: string }>(
+      `INSERT INTO generation_jobs (
+         owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
+         action, status, requested_model, completed_at
+       ) VALUES ($1,$2,$3,$4,3,'Synthetic streaming fixture','completed','deterministic-mock',now())
+       RETURNING id`,
+      [ownerUserId, imported.campaignId, providerId, crypto.randomUUID()]
+    );
+    const generationJobId = generationJob.rows[0]?.id;
+    if (!generationJobId) throw new Error("Synthetic generation job was not created.");
+    const imageJob = await pool.query<{ id: string }>(
+      `INSERT INTO image_jobs (
+         owner_user_id, campaign_id, turn_id, provider_profile_id, requested_model, prompt,
+         prompt_hash, status, provider_type, target_type, generation_job_id, completed_at
+       ) VALUES ($1,$2,NULL,$3,'deterministic-mock','Synthetic provisional illustration',
+                 'synthetic-provisional-illustration','completed','openai_compatible',
+                 'streaming_illustration',$4,now()) RETURNING id`,
+      [ownerUserId, imported.campaignId, providerId, generationJobId]
+    );
+    const imageJobId = imageJob.rows[0]?.id;
+    if (!imageJobId) throw new Error("Synthetic streaming image job was not created.");
+
+    await expect(rewindCampaign(pool, imported.campaignId, { targetTurnNumber: 1 })).resolves.toMatchObject({
+      activeTurnNumber: 1,
+      discardedTurnCount: 1
+    });
+    await expect(pool.query("SELECT id FROM image_jobs WHERE id = $1", [imageJobId]))
+      .resolves.toMatchObject({ rows: [] });
+  });
+
   it("branches an existing campaign up to a specific turn into a separate independent campaign", async () => {
     const imported = await campaign();
     const branchProfile = {
