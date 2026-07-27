@@ -117,6 +117,30 @@ integration("standard database migration runner", () => {
     ]);
   });
 
+  it("supports state-edit canonical facts and correction-aware replacement jobs", async () => {
+    const columns = await pool.query<{
+      table_name: string;
+      column_name: string;
+      is_nullable: string;
+    }>(
+      `SELECT table_name, column_name, is_nullable
+         FROM information_schema.columns
+        WHERE (table_name = 'generation_jobs' AND column_name IN (
+          'state_edit_id', 'state_edit_revision', 'state_edit_snapshot_private'
+        )) OR (table_name = 'campaign_canonical_facts' AND column_name IN (
+          'source_turn_id', 'source_state_edit_id'
+        ))
+        ORDER BY table_name, column_name`
+    );
+    expect(columns.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ table_name: "generation_jobs", column_name: "state_edit_id" }),
+      expect.objectContaining({ table_name: "generation_jobs", column_name: "state_edit_revision" }),
+      expect.objectContaining({ table_name: "generation_jobs", column_name: "state_edit_snapshot_private" }),
+      expect.objectContaining({ table_name: "campaign_canonical_facts", column_name: "source_state_edit_id" }),
+      expect.objectContaining({ table_name: "campaign_canonical_facts", column_name: "source_turn_id", is_nullable: "YES" })
+    ]));
+  });
+
   it("blocks maintenance migrations on an existing database until explicitly allowed", async () => {
     const sourceDirectory = resolve("database/migrations");
     const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-migrations-"));
