@@ -297,7 +297,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('async function saveEditState()');
     expect(storyScript).toContain('/campaigns/${state.campaignId}/state');
     expect(storyScript).toContain('async function inspectTurnState(turnNumber)');
-    expect(storyScript).toContain('buildCampaignStateUpdate(state.runtimeState, {');
+    expect(storyScript).toContain('await submitCampaignState(api, state.campaignId, state.runtimeState, {');
     expect(storyHtml).toContain('id="scratchpadEditor"');
     expect(storyHtml).toContain('id="turnHistoryStatePanel"');
     expect(storyHtml).not.toContain('id="tab-history"');

@@ -93,3 +93,18 @@ export function buildCampaignStateUpdate(runtimeState, editorValues) {
       : []
   };
 }
+
+export async function submitCampaignState(
+  request,
+  campaignId,
+  runtimeState,
+  editorValues,
+  onSaved
+) {
+  const savedState = await request(`/campaigns/${campaignId}/state`, {
+    method: "PATCH",
+    body: JSON.stringify(buildCampaignStateUpdate(runtimeState, editorValues))
+  });
+  onSaved(savedState);
+  return savedState;
+}

@@ -4,11 +4,11 @@
 import { branchCampaignFromTurn } from "./story-routing.js";
 import {
   addEditableStateRow,
-  buildCampaignStateUpdate,
   canonicalFactContent,
   collectCanonicalFactEditorValues,
   collectOpenThreadEditorValues,
-  renderEditableStateCollection
+  renderEditableStateCollection,
+  submitCampaignState
 } from "./story-state-editor.js";
 
 "use strict";
@@ -2219,19 +2219,18 @@ async function saveEditState() {
   const canonicalFacts = $("editStateCanonicalFacts");
   try {
     showBusy("Saving state…");
-    state.runtimeState = await api(`/campaigns/${state.campaignId}/state`, {
-      method: "PATCH",
-      body: JSON.stringify(buildCampaignStateUpdate(state.runtimeState, {
+    await submitCampaignState(api, state.campaignId, state.runtimeState, {
         continuitySummary: continuitySummaryEl?.value || "",
         openThreads: collectOpenThreadEditorValues(openThreads),
         canonicalFacts: collectCanonicalFactEditorValues(canonicalFacts),
         scratchpad: scratchpadEl?.value || "",
         trackers: collectTrackerEditorValues()
-      }))
+    }, savedState => {
+      state.runtimeState = savedState;
+      const dlg = $("editStateDialog");
+      if (dlg && dlg.close) dlg.close();
     });
     toast("Current state saved. The next story turn will use these changes.");
-    const dlg = $("editStateDialog");
-    if (dlg && dlg.close) dlg.close();
   } catch (err) {
     toast(`Save failed: ${err.message}`);
   } finally {
