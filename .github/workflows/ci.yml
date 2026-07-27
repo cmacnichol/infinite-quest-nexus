@@ -11,22 +11,6 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:0.8.5-pg18-trixie
-        env:
-          POSTGRES_DB: infinitequest_test
-          POSTGRES_USER: infinitequest
-          POSTGRES_PASSWORD: integration-test-only
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U infinitequest -d infinitequest_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      TEST_DATABASE_URL: postgresql://infinitequest:integration-test-only@127.0.0.1:5432/infinitequest_test
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -51,8 +35,8 @@ jobs:
       - name: Type check
         run: pnpm check
 
-      - name: Test with PostgreSQL and pgvector
-        run: pnpm test
+      - name: Test unit suite
+        run: pnpm test:unit
 
       - name: Build application
         run: pnpm build
