@@ -737,8 +737,14 @@ integration("durable Story Engine integration", () => {
     const edited = await updateCampaignRuntimeState(pool, imported.campaignId, {
       expectedTurnNumber: before.activeTurnNumber,
       expectedRevision: before.revision,
+      continuitySummary: before.continuitySummary,
+      openThreads: before.openThreads,
+      canonicalFacts: before.canonicalFacts,
       scratchpad: "Location Beta contains a hidden silver doorway.",
-      trackers: [{ id: "doorway", name: "Silver doorway", value: "hidden", rules: "Update when its visibility changes." }]
+      trackers: [{ id: "doorway", name: "Silver doorway", value: "hidden", rules: "Update when its visibility changes." }],
+      rpgStats: before.rpgStats,
+      eventTriggers: before.eventTriggers,
+      pendingEventTriggers: before.pendingEventTriggers
     });
 
     expect(edited).toMatchObject({
@@ -749,8 +755,14 @@ integration("durable Story Engine integration", () => {
     await expect(updateCampaignRuntimeState(pool, imported.campaignId, {
       expectedTurnNumber: before.activeTurnNumber,
       expectedRevision: before.revision,
+      continuitySummary: before.continuitySummary,
+      openThreads: before.openThreads,
+      canonicalFacts: before.canonicalFacts,
       scratchpad: "A stale edit.",
-      trackers: []
+      trackers: [],
+      rpgStats: before.rpgStats,
+      eventTriggers: before.eventTriggers,
+      pendingEventTriggers: before.pendingEventTriggers
     })).rejects.toMatchObject({ statusCode: 409 });
     expect(await getCampaignRuntimeState(pool, imported.campaignId, 1)).toMatchObject({
       scratchpad: historicalBefore.scratchpad
