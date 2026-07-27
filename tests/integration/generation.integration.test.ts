@@ -889,6 +889,78 @@ integration("durable Story Engine integration", () => {
     expect(result).toMatchObject({ status: "completed", turnNumber: 1 });
   });
 
+  it("rewinds through a retained state edit without duplicating canonical Chronicle memory", async () => {
+    const imported = await campaign();
+    await rewindCampaign(pool, imported.campaignId, { targetTurnNumber: 0 });
+
+    replies.push({ content: validStory() });
+    const retained = await queue(imported.campaignId, "Create the retained turn.");
+    await runGenerationJob(pool, "story-worker-rewind-retained", 30, credentialSecret);
+    expect(await getGenerationJob(pool, retained.id)).toMatchObject({ status: "completed", expectedTurnNumber: 1 });
+
+    const before = await getCampaignRuntimeState(pool, imported.campaignId);
+    expect(before.canonicalFacts).toEqual([
+      expect.objectContaining({ content: "Location Gamma is open." })
+    ]);
+    await updateCampaignRuntimeState(pool, imported.campaignId, {
+      expectedTurnNumber: 1,
+      expectedRevision: before.revision,
+      continuitySummary: "The retained correction confirms the moon-glass lens.",
+      openThreads: ["Find the lighthouse keeper."],
+      canonicalFacts: [...before.canonicalFacts, { id: null, content: "The lighthouse lens is moon glass." }],
+      scratchpad: before.scratchpad,
+      trackers: before.trackers,
+      rpgStats: before.rpgStats,
+      eventTriggers: before.eventTriggers,
+      pendingEventTriggers: before.pendingEventTriggers
+    });
+    const retainedTurn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id = $1 AND turn_number = 1",
+      [imported.campaignId]
+    );
+    expect(retainedTurn.rows).toHaveLength(1);
+    // Legacy campaigns can retain a manual correction with its surviving turn ID; rewind must rebuild derived indexes from it.
+    const legacyCorrection = await pool.query(
+      `UPDATE chronicle_memories
+          SET turn_id = $2
+        WHERE campaign_id = $1
+          AND memory_kind = 'canonical_fact'
+          AND metadata->>'manualCorrection' = 'true'`,
+      [imported.campaignId, retainedTurn.rows[0]!.id]
+    );
+    expect(legacyCorrection.rowCount).toBe(1);
+    replies.push({ content: validStory("A replacement path opens from the lighthouse.") });
+    const replacement = await queue(imported.campaignId, "Take the replacement path.");
+    await runGenerationJob(pool, "story-worker-rewind-state-edit", 30, credentialSecret);
+    expect(await getGenerationJob(pool, replacement.id)).toMatchObject({ status: "completed", expectedTurnNumber: 2 });
+    const discardedTurn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id = $1 AND turn_number = 2",
+      [imported.campaignId]
+    );
+    expect(discardedTurn.rows).toHaveLength(1);
+
+    await expect(rewindCampaign(pool, imported.campaignId, { targetTurnNumber: 1 })).resolves.toMatchObject({
+      activeTurnNumber: 1,
+      discardedTurnCount: 1
+    });
+    const runtime = await getCampaignRuntimeState(pool, imported.campaignId);
+    expect(runtime.canonicalFacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ content: "The lighthouse lens is moon glass." })
+    ]));
+    const memories = await pool.query<{ memory_kind: string; turn_id: string | null; content: string; metadata: Record<string, unknown> }>(
+      `SELECT memory_kind, turn_id, content, metadata
+         FROM chronicle_memories
+        WHERE campaign_id = $1 AND memory_kind = 'canonical_fact'`,
+      [imported.campaignId]
+    );
+    expect(memories.rows).toEqual([expect.objectContaining({
+      turn_id: null,
+      content: expect.stringContaining("The lighthouse lens is moon glass."),
+      metadata: expect.objectContaining({ manualCorrection: true })
+    })]);
+    expect(memories.rows).not.toContainEqual(expect.objectContaining({ turn_id: discardedTurn.rows[0]!.id }));
+  });
+
   it("canonicalizes legacy tracker snapshots when rewinding without rewriting the accepted source turn", async () => {
     const imported = await campaign();
     const legacyTrackers = [
