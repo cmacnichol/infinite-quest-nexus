@@ -115,6 +115,44 @@ integration("campaign state corrections", () => {
     expect(JSON.stringify(context)).toContain("Find the keeper.");
   });
 
+  it("projects multiple manual canonical facts as one Chronicle memory", async () => {
+    const imported = await campaign();
+    const before = await getCampaignRuntimeState(pool, imported.campaignId);
+
+    await expect(updateCampaignRuntimeState(pool, imported.campaignId, {
+      expectedTurnNumber: before.activeTurnNumber,
+      expectedRevision: before.revision,
+      continuitySummary: before.continuitySummary,
+      openThreads: before.openThreads,
+      canonicalFacts: [
+        { id: null, content: "The lens is moon glass." },
+        { id: null, content: "The keeper guards the flooded stair." }
+      ],
+      scratchpad: before.scratchpad,
+      trackers: before.trackers,
+      rpgStats: before.rpgStats,
+      eventTriggers: before.eventTriggers,
+      pendingEventTriggers: before.pendingEventTriggers
+    })).resolves.toMatchObject({
+      canonicalFacts: [
+        expect.objectContaining({ content: "The lens is moon glass." }),
+        expect.objectContaining({ content: "The keeper guards the flooded stair." })
+      ]
+    });
+
+    const memories = await pool.query<{ content: string; metadata: { structuredFactIds?: string[] } }>(
+      `SELECT content, metadata FROM chronicle_memories
+        WHERE campaign_id = $1 AND memory_kind = 'canonical_fact'`,
+      [imported.campaignId]
+    );
+    expect(memories.rows).toHaveLength(1);
+    expect(memories.rows[0]).toMatchObject({
+      content: expect.stringContaining("The lens is moon glass."),
+      metadata: { structuredFactIds: expect.arrayContaining([expect.any(String), expect.any(String)]) }
+    });
+    expect(memories.rows[0]?.content).toContain("The keeper guards the flooded stair.");
+  });
+
   it("rejects unsafe continuity atomically and leaves no correction row", async () => {
     const imported = await campaign();
     const before = await getCampaignRuntimeState(pool, imported.campaignId);
