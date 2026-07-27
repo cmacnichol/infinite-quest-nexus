@@ -9,8 +9,10 @@ import {
 import { configureIntegrationDatabase } from "../../tests/integration/ensure-test-database.setup.js";
 
 const temporaryDirectories: string[] = [];
+const realSetTimeout = globalThis.setTimeout;
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -99,6 +101,56 @@ describe("ensureTestDatabase", () => {
     expect(config.databaseUrl).toBe("postgresql://infinitequest_test:recorded-test-password@127.0.0.1:55432/infinitequest_test");
     expect(queries).toContain("SELECT datname FROM pg_database WHERE datname = 'infinitequest_test'");
     expect(queries).not.toContain("CREATE DATABASE \"infinitequest_test\"");
+  });
+
+  it("bounds a PostgreSQL connection attempt that never settles", async () => {
+    vi.useFakeTimers();
+    const projectRoot = await temporaryProjectRoot();
+    const clients: Array<{
+      connect: ReturnType<typeof vi.fn>;
+      query: ReturnType<typeof vi.fn>;
+      end: ReturnType<typeof vi.fn>;
+    }> = [];
+    const readiness = ensureTestDatabase({
+      projectRoot,
+      execute: async () => undefined,
+      createClient: () => {
+        const client = {
+          connect: vi.fn(() => new Promise<void>(() => undefined)),
+          query: vi.fn(async () => ({ rows: [] })),
+          end: vi.fn(async () => undefined)
+        };
+        clients.push(client);
+        return client;
+      },
+      generatePassword: () => "generated-test-password",
+      sleep: async () => undefined
+    });
+    const outcome = readiness.then(
+      () => ({ settled: true, error: undefined }),
+      (error: unknown) => ({ settled: true, error })
+    );
+
+    await new Promise<void>((resolvePromise) => {
+      realSetTimeout(resolvePromise, 10);
+    });
+    expect(clients).toHaveLength(1);
+    await vi.runAllTimersAsync();
+    const result = await Promise.race([
+      outcome,
+      new Promise<{ settled: false; error: undefined }>((resolvePromise) => {
+        realSetTimeout(() => resolvePromise({ settled: false, error: undefined }), 50);
+      })
+    ]);
+
+    expect(result.settled).toBe(true);
+    expect(result.error).toMatchObject({
+      message: expect.stringMatching(
+        /did not become ready within 150 seconds: PostgreSQL connection attempt timed out after 1 second/u
+      )
+    });
+    expect(clients).toHaveLength(120);
+    expect(clients.every((client) => client.end.mock.calls.length === 1)).toBe(true);
   });
 
   it("publishes the provisioned root URL before integration modules load", async () => {

@@ -7,9 +7,8 @@ describe("GitHub CI test workflow", () => {
     const workflow = await readFile(resolve(".github/workflows/ci.yml"), "utf8");
 
     expect(workflow).toMatch(/name: Test unit suite\r?\n\s+run: pnpm test:unit/u);
-    expect(workflow).toMatch(
-      /name: Test PostgreSQL integration suite\r?\n\s+run: pnpm test:integration/u
-    );
+    expect(workflow).toContain("- name: Test PostgreSQL integration suite");
+    expect(workflow).toMatch(/run: pnpm test:integration/u);
     expect(workflow).toMatch(
       /name: Reject story exports and sensitive data\r?\n\s+run: pnpm check:data/u
     );
@@ -29,5 +28,13 @@ describe("GitHub CI test workflow", () => {
     expect(workflow).not.toContain("POSTGRES_PASSWORD: compose-validation-only");
     expect(workflow).not.toMatch(/POSTGRES_PASSWORD:\s*\S/u);
     expect(workflow).not.toMatch(/run: pnpm test\r?\n/u);
+  });
+
+  it("bounds the PostgreSQL integration suite step", async () => {
+    const workflow = await readFile(resolve(".github/workflows/ci.yml"), "utf8");
+
+    expect(workflow).toMatch(
+      /name: Test PostgreSQL integration suite\r?\n\s+timeout-minutes: 10\r?\n\s+run: pnpm test:integration/u
+    );
   });
 });

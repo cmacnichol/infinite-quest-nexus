@@ -15,6 +15,8 @@ const TEST_COMPOSE_FILE = "compose.test.yaml";
 const TEST_ENVIRONMENT_FILE = ".env.test.local";
 const STARTUP_ATTEMPTS = 120;
 const STARTUP_DELAY_MS = 250;
+const CONNECTION_TIMEOUT_MS = 1_000;
+const STARTUP_TIMEOUT_SECONDS = STARTUP_ATTEMPTS * (CONNECTION_TIMEOUT_MS + STARTUP_DELAY_MS) / 1_000;
 
 export function dockerCommandForPlatform(platform = process.platform) {
   return platform === "win32" ? "docker.exe" : "docker";
@@ -83,12 +85,28 @@ function runCommand(command, argumentsList, options) {
   });
 }
 
+async function connectWithTimeout(client) {
+  let timeout;
+  try {
+    await Promise.race([
+      client.connect(),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error("PostgreSQL connection attempt timed out after 1 second."));
+        }, CONNECTION_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function connectWhenReady(createClient, adminDatabaseUrl, sleep) {
   let lastError;
   for (let attempt = 0; attempt < STARTUP_ATTEMPTS; attempt += 1) {
     const client = createClient(adminDatabaseUrl);
     try {
-      await client.connect();
+      await connectWithTimeout(client);
       return client;
     } catch (error) {
       lastError = error;
@@ -97,14 +115,17 @@ async function connectWhenReady(createClient, adminDatabaseUrl, sleep) {
     }
   }
   throw new Error(
-    `The local PostgreSQL test database did not become ready after ${STARTUP_ATTEMPTS * STARTUP_DELAY_MS / 1000} seconds: ${lastError instanceof Error ? lastError.message : "unknown connection error"}`
+    `The local PostgreSQL test database did not become ready within ${STARTUP_TIMEOUT_SECONDS} seconds: ${lastError instanceof Error ? lastError.message : "unknown connection error"}`
   );
 }
 
 export async function ensureTestDatabase({
   projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
   execute = runCommand,
-  createClient = (connectionString) => new Client({ connectionString }),
+  createClient = (connectionString) => new Client({
+    connectionString,
+    connectionTimeoutMillis: CONNECTION_TIMEOUT_MS
+  }),
   generatePassword,
   sleep = delay
 } = {}) {
