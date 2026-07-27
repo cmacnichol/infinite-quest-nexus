@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { describe, expect, it } from "vitest";
+// @ts-expect-error Browser JavaScript modules intentionally do not publish TypeScript declarations.
 import { saveCampaignStateFromEditor } from "../../apps/web/public/story-state-editor.js";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
@@ -312,11 +313,11 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       <div id="facts"><div class="state-editor-row" data-item-id="00000000-0000-4000-8000-000000000001"><textarea>The lens is moon glass.</textarea></div></div>
       <textarea id="scratchpad">Private continuity.</textarea>
     `);
-    const dialog = document.querySelector("#editStateDialog");
-    const summary = document.querySelector("#summary");
+    const dialog = document.querySelector("#editStateDialog") as unknown as HTMLDialogElement | null;
+    const summary = document.querySelector("#summary") as unknown as HTMLTextAreaElement | null;
     const threads = document.querySelector("#threads");
     const facts = document.querySelector("#facts");
-    const scratchpad = document.querySelector("#scratchpad");
+    const scratchpad = document.querySelector("#scratchpad") as unknown as HTMLTextAreaElement | null;
     if (!dialog || !summary || !threads || !facts || !scratchpad) throw new Error("Editor controls are required.");
     dialog.close = () => dialog.removeAttribute("open");
 
@@ -332,14 +333,14 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     let appliedState = runtimeState;
 
     await saveCampaignStateFromEditor(
-      async (path, options) => {
+      async (path: string, options: { method: string; body: string }) => {
         requests.push({ path, options });
         return response;
       },
       "campaign-id",
       runtimeState,
       { summary, threads, facts, scratchpad, trackers: [{ id: "trust", name: "Trust", value: "wary", rules: "" }] },
-      savedState => {
+      (savedState: typeof response) => {
         appliedState = savedState;
         dialog.close();
       }
@@ -375,11 +376,11 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       <div id="facts"><div class="state-editor-row" data-item-id="00000000-0000-4000-8000-000000000001"><textarea>The lens is moon glass.</textarea></div></div>
       <textarea id="scratchpad">Private continuity.</textarea>
     `);
-    const dialog = document.querySelector("#editStateDialog");
-    const summary = document.querySelector("#summary");
+    const dialog = document.querySelector("#editStateDialog") as unknown as HTMLDialogElement | null;
+    const summary = document.querySelector("#summary") as unknown as HTMLTextAreaElement | null;
     const threads = document.querySelector("#threads");
     const facts = document.querySelector("#facts");
-    const scratchpad = document.querySelector("#scratchpad");
+    const scratchpad = document.querySelector("#scratchpad") as unknown as HTMLTextAreaElement | null;
     if (!dialog || !summary || !threads || !facts || !scratchpad) throw new Error("Editor controls are required.");
 
     const runtimeState = {
@@ -396,14 +397,16 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       "campaign-id",
       runtimeState,
       { summary, threads, facts, scratchpad, trackers: [] },
-      savedState => { appliedState = savedState; dialog.removeAttribute("open"); }
+      (savedState: typeof runtimeState) => { appliedState = savedState; dialog.removeAttribute("open"); }
     )).rejects.toThrow("Campaign state changed.");
 
     expect(appliedState).toBe(runtimeState);
     expect(dialog.hasAttribute("open")).toBe(true);
     expect(summary.value).toBe("Corrected summary.");
-    expect(threads.querySelector("textarea")?.value).toBe("Find the keeper.");
-    expect(facts.querySelector("textarea")?.value).toBe("The lens is moon glass.");
+    expect((threads.querySelector("textarea") as unknown as HTMLTextAreaElement | null)?.value)
+      .toBe("Find the keeper.");
+    expect((facts.querySelector("textarea") as unknown as HTMLTextAreaElement | null)?.value)
+      .toBe("The lens is moon glass.");
     expect(scratchpad.value).toBe("Private continuity.");
   });
 

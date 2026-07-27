@@ -10,6 +10,7 @@ import {
   normalizeTextItems,
   renderEditableStateCollection,
   submitCampaignState
+// @ts-expect-error Browser JavaScript modules intentionally do not publish TypeScript declarations.
 } from "../../apps/web/public/story-state-editor.js";
 
 describe("Story Player campaign state editor", () => {
@@ -126,7 +127,7 @@ describe("Story Player campaign state editor", () => {
       "campaign-id",
       completeRuntimeState,
       completeEditorValues,
-      value => savedStates.push(value)
+      (value: unknown) => savedStates.push(value)
     );
 
     expect(requests).toEqual([{
