@@ -133,4 +133,34 @@ integration("campaign state corrections", () => {
     await expect(pool.query("SELECT * FROM campaign_state_edits WHERE campaign_id = $1", [imported.campaignId]))
       .resolves.toMatchObject({ rowCount: 0 });
   });
+
+  it("loads current and historical state whose persisted trackers predate tracker IDs", async () => {
+    const imported = await campaign();
+    const legacyTrackers = [
+      { name: "Keeper trust", value: "wary", rules: "Update after honest exchanges." },
+      { label: "Moon gate", currentValue: "sealed", updateRules: "Change when the lens is lit." }
+    ];
+    await pool.query(
+      `UPDATE campaign_state
+          SET trackers = $2::jsonb,
+              initial_state_snapshot = jsonb_set(initial_state_snapshot, '{trackers}', $2::jsonb)
+        WHERE campaign_id = $1`,
+      [imported.campaignId, JSON.stringify(legacyTrackers)]
+    );
+    await pool.query(
+      `UPDATE turns
+          SET state_snapshot_private = jsonb_set(state_snapshot_private, '{trackers}', $2::jsonb)
+        WHERE campaign_id = $1 AND turn_number = 1`,
+      [imported.campaignId, JSON.stringify(legacyTrackers)]
+    );
+
+    const current = await getCampaignRuntimeState(pool, imported.campaignId);
+    const historical = await getCampaignRuntimeState(pool, imported.campaignId, 1);
+
+    expect(current.trackers).toEqual([
+      expect.objectContaining({ id: "Keeper trust", name: "Keeper trust" }),
+      expect.objectContaining({ id: "Moon gate", name: "Moon gate" })
+    ]);
+    expect(historical.trackers).toEqual(current.trackers);
+  });
 });

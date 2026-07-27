@@ -5,6 +5,7 @@ import {
   type CampaignRuntimeStateUpdate
 } from "../../../packages/contracts/src/generation.js";
 import { initialOwnerId, withTransaction, type DatabaseClient, type DatabasePool } from "../../../packages/database/src/pool.js";
+import { normalizeCampaignTrackers } from "../../../packages/domain/src/campaign-trackers.js";
 import { containsMechanicsLanguage } from "../../../packages/domain/src/text.js";
 import { rebuildCampaignMemories } from "./memory-service.js";
 
@@ -48,7 +49,7 @@ function runtimeStateContent(snapshot: unknown, canonicalFacts: Array<{ id: stri
     openThreads: strings(source.openThreads),
     canonicalFacts: canonicalFacts.length ? canonicalFacts : legacyFacts,
     scratchpad: typeof source.scratchpad === "string" ? source.scratchpad : "",
-    trackers: Array.isArray(source.trackers) ? source.trackers : [],
+    trackers: normalizeCampaignTrackers(source.trackers),
     rpgStats: Array.isArray(source.rpgStats) ? source.rpgStats : [],
     eventTriggers: Array.isArray(source.eventTriggers) ? source.eventTriggers : [],
     pendingEventTriggers: Array.isArray(source.pendingEventTriggers) ? source.pendingEventTriggers : []
