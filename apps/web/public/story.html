@@ -298,15 +298,21 @@
           <section id="tab-overview" class="stack">
             <p id="editStateMeta" class="mini"></p>
             <div class="track-card">
-              <h4>Continuity summary</h4>
-              <p id="editStateContinuitySummary">No continuity summary has been recorded yet.</p>
+              <label for="editStateContinuitySummary"><strong>Continuity summary</strong></label>
+              <textarea id="editStateContinuitySummary" rows="6" placeholder="Living summary used to continue the campaign."></textarea>
             </div>
             <div class="track-card">
-              <h4>Open threads</h4>
+              <div class="state-editor-heading">
+                <h4>Open threads</h4>
+                <button id="btnAddOpenThread" class="small" type="button">＋ Add thread</button>
+              </div>
               <div id="editStateOpenThreads" class="stack mini"></div>
             </div>
             <div class="track-card">
-              <h4>Canonical facts</h4>
+              <div class="state-editor-heading">
+                <h4>Canonical facts</h4>
+                <button id="btnAddCanonicalFact" class="small" type="button">＋ Add fact</button>
+              </div>
               <div id="editStateCanonicalFacts" class="stack mini"></div>
             </div>
           </section>
@@ -333,7 +339,7 @@
           </section>
 
           <section id="tab-mechanics" class="stack hidden">
-            <p class="mini">Mechanics are shown for context but are managed through Current World Setup.</p>
+            <p class="mini">Generated mechanics are static for this campaign and are shown for context.</p>
             <div class="track-card"><h4>RPG stats</h4><div id="editStateRpgStats"></div></div>
             <div class="track-card"><h4>Event triggers</h4><div id="editStateEventTriggers" class="stack mini"></div></div>
             <div class="track-card"><h4>Pending triggers</h4><div id="editStatePendingTriggers" class="stack mini"></div></div>

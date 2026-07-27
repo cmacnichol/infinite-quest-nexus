@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { parseHTML } from "linkedom";
 import { describe, expect, it } from "vitest";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
@@ -296,11 +297,26 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('async function saveEditState()');
     expect(storyScript).toContain('/campaigns/${state.campaignId}/state');
     expect(storyScript).toContain('async function inspectTurnState(turnNumber)');
-    expect(storyScript).toContain('expectedRevision: state.runtimeState.revision');
+    expect(storyScript).toContain('buildCampaignStateUpdate(state.runtimeState, {');
     expect(storyHtml).toContain('id="scratchpadEditor"');
     expect(storyHtml).toContain('id="turnHistoryStatePanel"');
     expect(storyHtml).not.toContain('id="tab-history"');
     expect(storyScript).toContain('const btnSaveEditState = $("btnSaveEditState") || $("btnSaveScratch");');
+  });
+
+  it("provides editable continuity controls while keeping mechanics read-only", () => {
+    const { document } = parseHTML(storyHtml);
+    const dialog = document.querySelector("#editStateDialog");
+
+    expect(dialog?.querySelector("textarea#editStateContinuitySummary")).not.toBeNull();
+    expect(dialog?.querySelector("button#btnAddOpenThread")?.textContent).toContain("Add thread");
+    expect(dialog?.querySelector("#editStateOpenThreads")).not.toBeNull();
+    expect(dialog?.querySelector("button#btnAddCanonicalFact")?.textContent).toContain("Add fact");
+    expect(dialog?.querySelector("#editStateCanonicalFacts")).not.toBeNull();
+    expect(dialog?.querySelector("#editStateRpgStatsEditor")).toBeNull();
+    expect(dialog?.querySelector("#tab-mechanics")?.textContent).toContain(
+      "Generated mechanics are static for this campaign and are shown for context."
+    );
   });
 
   it("shows the recorded Story Engine prompt interpretation on every turn-history card", () => {
