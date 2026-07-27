@@ -2,6 +2,13 @@
    Infinite Quest — Story Player
    ═══════════════════════════════════════════════════════════════ */
 import { branchCampaignFromTurn } from "./story-routing.js";
+import {
+  addEditableStateRow,
+  captureCampaignStateEditSession,
+  renderCampaignStateInspector,
+  renderEditableStateCollection,
+  saveCampaignStateFromEditor
+} from "./story-state-editor.js";
 
 "use strict";
 
@@ -37,6 +44,7 @@ const state = {
   world: null,
   playerConfig: null,
   runtimeState: null,
+  editStateSession: null,
   turns: [],
   viewIndex: -1,
   busy: false,
@@ -1929,9 +1937,14 @@ async function removeIllustration(turnId) {
 async function openEditState() {
   const dlg = $("editStateDialog");
   if (!dlg || !state.campaignId) return;
+  const campaignId = state.campaignId;
   try {
     showBusy("Loading current state…");
-    state.runtimeState = await api(`/campaigns/${state.campaignId}/state`);
+    state.runtimeState = await api(`/campaigns/${campaignId}/state`);
+    state.editStateSession = Object.freeze({
+      campaignId,
+      runtimeState: captureCampaignStateEditSession(state.runtimeState)
+    });
     renderCurrentRuntimeState();
     switchEditStateTab("overview");
     openManagedModal(dlg);
@@ -1965,9 +1978,9 @@ function renderCurrentRuntimeState() {
   const meta = $("editStateMeta");
   if (meta) meta.textContent = `Current authoritative state after turn ${runtime.activeTurnNumber || 0} · revision ${runtime.revision || 0}`;
   const summary = $("editStateContinuitySummary");
-  if (summary) summary.textContent = runtime.continuitySummary || "No continuity summary has been recorded yet.";
-  renderTextCollection("editStateOpenThreads", runtime.openThreads || [], "No open threads recorded.");
-  renderTextCollection("editStateCanonicalFacts", runtime.canonicalFacts || [], "No canonical facts recorded.");
+  if (summary) summary.value = runtime.continuitySummary || "";
+  renderEditableStateCollection(document, $("editStateOpenThreads"), runtime.openThreads || [], "thread");
+  renderEditableStateCollection(document, $("editStateCanonicalFacts"), runtime.canonicalFacts || [], "fact");
 
   const scratchpad = $("scratchpadEditor");
   if (scratchpad) scratchpad.value = runtime.scratchpad || "";
@@ -2200,18 +2213,7 @@ async function inspectTurnState(turnNumber) {
   try {
     const runtime = await api(`/campaigns/${state.campaignId}/state?turnNumber=${turnNumber}`);
     if (requestId !== state.historyInspectionRequestId) return;
-    const list = (values, empty) => values && values.length
-      ? `<ul>${values.map(value => `<li>${escapeHtml(String(value))}</li>`).join("")}</ul>`
-      : `<p class="mini dim">${escapeHtml(empty)}</p>`;
-    panel.innerHTML = `
-      <h4>${runtime.isCurrent ? "Current state" : `Historical state after turn ${runtime.viewedTurnNumber}`}</h4>
-      <p class="mini">${runtime.isCurrent ? "Editable from Menu → Edit State." : "Read-only. Reset or branch here to make this state current."}</p>
-      <details open><summary>Continuity summary</summary><div>${escapeHtml(runtime.continuitySummary || "No summary recorded.")}</div></details>
-      <details><summary>Private scratchpad</summary><div class="state-inspector-pre">${escapeHtml(runtime.scratchpad || "No scratchpad recorded.")}</div></details>
-      <details><summary>Trackers</summary><div>${list((runtime.trackers || []).map(tracker => `${tracker.name}: ${tracker.value}`), "No trackers recorded.")}</div></details>
-      <details><summary>Open threads</summary><div>${list(runtime.openThreads, "No open threads recorded.")}</div></details>
-      <details><summary>Canonical facts</summary><div>${list(runtime.canonicalFacts, "No canonical facts recorded.")}</div></details>
-    `;
+    renderCampaignStateInspector(panel, runtime);
   } catch (err) {
     if (requestId !== state.historyInspectionRequestId) return;
     panel.innerHTML = `<p class="mini">State could not be loaded: ${escapeHtml(err.message)}</p>`;
@@ -2219,22 +2221,27 @@ async function inspectTurnState(turnNumber) {
 }
 
 async function saveEditState() {
-  if (!state.campaignId || !state.runtimeState) return;
+  const editSession = state.editStateSession;
+  if (!editSession) return;
   const scratchpadEl = $("scratchpadEditor");
+  const continuitySummaryEl = $("editStateContinuitySummary");
+  const openThreads = $("editStateOpenThreads");
+  const canonicalFacts = $("editStateCanonicalFacts");
   try {
     showBusy("Saving state…");
-    state.runtimeState = await api(`/campaigns/${state.campaignId}/state`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        expectedTurnNumber: state.runtimeState.activeTurnNumber,
-        expectedRevision: state.runtimeState.revision,
-        scratchpad: scratchpadEl?.value || "",
-        trackers: collectTrackerEditorValues()
-      })
+    await saveCampaignStateFromEditor(api, editSession.campaignId, editSession.runtimeState, {
+      summary: continuitySummaryEl,
+      threads: openThreads,
+      facts: canonicalFacts,
+      scratchpad: scratchpadEl,
+      trackers: collectTrackerEditorValues()
+    }, savedState => {
+      state.runtimeState = savedState;
+      state.editStateSession = null;
+      const dlg = $("editStateDialog");
+      if (dlg && dlg.close) dlg.close();
     });
     toast("Current state saved. The next story turn will use these changes.");
-    const dlg = $("editStateDialog");
-    if (dlg && dlg.close) dlg.close();
   } catch (err) {
     toast(`Save failed: ${err.message}`);
   } finally {
@@ -2573,6 +2580,14 @@ document.addEventListener("DOMContentLoaded", () => {
   if (scratchpadEditor) scratchpadEditor.addEventListener("input", updateScratchpadCharacterCount);
   const btnAddTracker = $("btnAddTracker");
   if (btnAddTracker) btnAddTracker.addEventListener("click", addTrackerFromEditor);
+  const btnAddOpenThread = $("btnAddOpenThread");
+  if (btnAddOpenThread) btnAddOpenThread.addEventListener("click", () => {
+    addEditableStateRow(document, $("editStateOpenThreads"), "thread");
+  });
+  const btnAddCanonicalFact = $("btnAddCanonicalFact");
+  if (btnAddCanonicalFact) btnAddCanonicalFact.addEventListener("click", () => {
+    addEditableStateRow(document, $("editStateCanonicalFacts"), "fact");
+  });
   const btnCloseEditState = $("btnCloseEditState");
   if (btnCloseEditState) btnCloseEditState.addEventListener("click", () => { const d = $("editStateDialog"); if (d && d.close) d.close(); });
   document.querySelectorAll("#editStateDialog .tab").forEach(tab => {

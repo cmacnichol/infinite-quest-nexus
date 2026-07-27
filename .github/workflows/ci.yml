@@ -38,13 +38,15 @@ jobs:
       - name: Test unit suite
         run: pnpm test:unit
 
+      - name: Test PostgreSQL integration suite
+        timeout-minutes: 10
+        run: pnpm test:integration
+
       - name: Build application
         run: pnpm build
 
       - name: Validate Compose configuration
-        env:
-          POSTGRES_PASSWORD: compose-validation-only
-        run: docker compose config --quiet
+        run: POSTGRES_PASSWORD="$(openssl rand -hex 32)" docker compose config --quiet
 
       - name: Validate Swarm configuration
         run: docker stack config -c deploy/swarm/stack.yaml >/dev/null

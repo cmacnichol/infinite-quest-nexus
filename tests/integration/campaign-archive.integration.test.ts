@@ -11,8 +11,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { calculateContentFingerprint, canonicalArchiveJson } from "../../packages/contracts/src/archives.js";
-import { inspectArchive, readVerifiedEntry, type ArchiveLimits } from "../../services/api/src/archive-io.js";
-import { stageArchiveUpload } from "../../services/api/src/archive-io.js";
+import {
+  inspectArchive,
+  readVerifiedEntry,
+  stageArchiveUpload,
+  supportsSecureGeneratedArchiveStaging,
+  type ArchiveLimits
+} from "../../services/api/src/archive-io.js";
 import { persistOriginalImage } from "../../services/api/src/asset-service.js";
 import { cleanupExpiredArchivePreviews, exportCampaign, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
 import { importCampaignArchive } from "../../services/api/src/import-service.js";
@@ -38,6 +43,7 @@ vi.mock("../../services/api/src/archive-io.js", async (importOriginal) => {
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
+const secureGeneratedStagingIt = supportsSecureGeneratedArchiveStaging() ? it : it.skip;
 
 const limits: ArchiveLimits = {
   maxCompressedBytes: 10 * 1024 * 1024,
@@ -350,7 +356,7 @@ integration("campaign archive export", () => {
     )).rows[0]!;
   }
 
-  it("exports only the selected campaign and pinned world version as a deterministic manifest archive", async () => {
+  secureGeneratedStagingIt("[secure generated staging] exports only the selected campaign and pinned world version as a deterministic manifest archive", async () => {
     const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
     const repeated = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
     expect(repeated.contentFingerprint).toBe(artifact.contentFingerprint);
@@ -421,7 +427,7 @@ integration("campaign archive export", () => {
     ]);
   });
 
-  it("serves campaign exports as no-store attachments and removes the response artifact", async () => {
+  secureGeneratedStagingIt("[secure generated staging] serves campaign exports as no-store attachments and removes the response artifact", async () => {
     const app = await buildServer({ config: serverConfig(), pool });
     const before = await artifactNames();
     try {
@@ -438,7 +444,7 @@ integration("campaign archive export", () => {
     }
   });
 
-  it("previews multipart Campaign Archives and commits the bound JSON request", async () => {
+  secureGeneratedStagingIt("[secure generated staging] previews multipart Campaign Archives and commits the bound JSON request", async () => {
     const app = await buildServer({ config: serverConfig(), pool });
     const destination = await createCompatibleDestination("Route archive destination");
     const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
@@ -520,7 +526,7 @@ integration("campaign archive export", () => {
     }
   });
 
-  it("rejects an assets payload that contradicts manifest asset metadata", async () => {
+  secureGeneratedStagingIt("[secure generated staging] rejects an assets payload that contradicts manifest asset metadata", async () => {
     await expect(previewCampaignArchive(
       pool,
       runtimeConfig(),
@@ -567,7 +573,7 @@ integration("campaign archive export", () => {
     }
   });
 
-  it("fails closed for an archive that exceeds configured limits", async () => {
+  secureGeneratedStagingIt("[secure generated staging] fails closed for an archive that exceeds configured limits", async () => {
     await expect(exportCampaign(pool, campaignId, {
       assetStore: { root }, archiveRoot: root, limits: { ...limits, maxEntries: 1 }
     })).rejects.toMatchObject({ code: "archive-limit-exceeded" });
@@ -585,7 +591,7 @@ integration("campaign archive export", () => {
     await pool.query("UPDATE campaign_state SET revision=1 WHERE campaign_id=$1", [campaignId]);
   });
 
-  it("fails closed when a required original is absent", async () => {
+  secureGeneratedStagingIt("[secure generated staging] fails closed when a required original is absent", async () => {
     const source = await pool.query<{ storage_path: string }>("SELECT storage_path FROM assets WHERE id=$1", [requiredAssetId]);
     const originalPath = resolve(root, source.rows[0]!.storage_path);
     const originalBytes = await readFile(originalPath);
@@ -598,7 +604,7 @@ integration("campaign archive export", () => {
     }
   });
 
-  it("preview cleanup removes a successful new import upload after commit", async () => {
+  secureGeneratedStagingIt("[secure generated staging] preview cleanup removes a successful new import upload after commit", async () => {
     const config = {
       assetStorageRoot: root,
       archiveStorageRoot: root,
@@ -655,7 +661,7 @@ integration("campaign archive export", () => {
     await expect(previewRow(preview.previewToken)).resolves.toMatchObject({ status: "consumed" });
   });
 
-  it("canonicalizes ID-less campaign, turn, and state-edit tracker snapshots on import", async () => {
+  secureGeneratedStagingIt("[secure generated staging] canonicalizes ID-less campaign, turn, and state-edit tracker snapshots on import", async () => {
     const campaignTrackers = [
       { name: "Archive campaign clue", value: "hidden", rules: "Update when found." }
     ];
@@ -806,7 +812,7 @@ integration("campaign archive export", () => {
     }
   });
 
-  it("migration history omits audit rows whose world versions are not portable", async () => {
+  secureGeneratedStagingIt("[secure generated staging] migration history omits audit rows whose world versions are not portable", async () => {
     const destination = await createCompatibleDestination("Migration history destination");
     const before = await pool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM world_versions WHERE world_id=$1",
@@ -849,7 +855,7 @@ integration("campaign archive export", () => {
     expect(importedMigrations.rows).toEqual([]);
   });
 
-  it("preview cleanup retries a superseded upload without deleting the replacement", async () => {
+  secureGeneratedStagingIt("[secure generated staging] preview cleanup retries a superseded upload without deleting the replacement", async () => {
     const config = runtimeConfig();
     const firstStaged = await stagedExport();
     const firstPreview = await previewCampaignArchive(pool, config, firstStaged, "superseded-first.zip", { kind: "embedded" });
@@ -878,7 +884,7 @@ integration("campaign archive export", () => {
     expect(secondRow).toMatchObject({ staged_archive_path: secondStaged.relativePath, status: "previewed" });
   });
 
-  it("commits a persisted staged archive from only the preview token and destination", async () => {
+  secureGeneratedStagingIt("[secure generated staging] commits a persisted staged archive from only the preview token and destination", async () => {
     const config = runtimeConfig();
     const destination = await createCompatibleDestination("Persisted staged destination");
     const preview = await (async () => {
@@ -906,7 +912,7 @@ integration("campaign archive export", () => {
     expect(inserted.rows).toEqual([{ campaign_id: imported.campaignId, world_id: imported.worldId }]);
   });
 
-  it("rejects an explicitly selected destination version whose canonical world content differs", async () => {
+  secureGeneratedStagingIt("[secure generated staging] rejects an explicitly selected destination version whose canonical world content differs", async () => {
     await expect(previewCampaignArchive(
       pool,
       runtimeConfig(),
@@ -916,7 +922,7 @@ integration("campaign archive export", () => {
     )).rejects.toMatchObject({ code: "archive-world-mismatch" });
   });
 
-  it("attaches an explicitly selected world version when only export-removed provider secrets differ", async () => {
+  secureGeneratedStagingIt("[secure generated staging] attaches an explicitly selected world version when only export-removed provider secrets differ", async () => {
     const destination = await createCompatibleDestination("Secret-compatible destination");
     await pool.query(
       "UPDATE world_versions SET content=jsonb_set(content,'{world,provider,apiKey}','\"destination-only-secret\"'::jsonb,true) WHERE id=$1",
@@ -934,7 +940,7 @@ integration("campaign archive export", () => {
     expect(imported).toMatchObject({ duplicate: false, worldId: destination.worldId, worldVersionId: destination.worldVersionId });
   });
 
-  it("revalidates explicit attachment through export-compatible sanitization after a secret changes post-preview", async () => {
+  secureGeneratedStagingIt("[secure generated staging] revalidates explicit attachment through export-compatible sanitization after a secret changes post-preview", async () => {
     const destination = await createCompatibleDestination("Post-preview secret destination");
     await pool.query("UPDATE world_versions SET content=content #- '{world,provider,apiKey}' WHERE id=$1", [destination.worldVersionId]);
     const preview = await previewCampaignArchive(pool, runtimeConfig(), await stagedExport(), "post-preview-secret.zip", {
@@ -951,7 +957,7 @@ integration("campaign archive export", () => {
     })).resolves.toMatchObject({ duplicate: false, worldId: destination.worldId, worldVersionId: destination.worldVersionId });
   });
 
-  it("preview cleanup removes an idempotent duplicate import upload after commit", async () => {
+  secureGeneratedStagingIt("[secure generated staging] preview cleanup removes an idempotent duplicate import upload after commit", async () => {
     const firstDestination = await createCompatibleDestination("Exact destination one");
     const secondDestination = await createCompatibleDestination("Exact destination two");
     const firstPreview = await previewCampaignArchive(pool, runtimeConfig(), await stagedExport(), "exact-one.zip", {
@@ -1004,7 +1010,7 @@ integration("campaign archive export", () => {
     });
   });
 
-  it("preview cleanup retries a consumed upload without rolling back the committed import", async () => {
+  secureGeneratedStagingIt("[secure generated staging] preview cleanup retries a consumed upload without rolling back the committed import", async () => {
     const config = runtimeConfig();
     const destination = await createCompatibleDestination("Consumed cleanup retry destination");
     const staged = await stagedExport();
@@ -1039,7 +1045,7 @@ integration("campaign archive export", () => {
     await expect(stat(staged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("preview cleanup retries expired staging after a transient deletion failure", async () => {
+  secureGeneratedStagingIt("[secure generated staging] preview cleanup retries expired staging after a transient deletion failure", async () => {
     const config = runtimeConfig();
     const staged = await stagedExport();
     const preview = await previewCampaignArchive(pool, config, staged, "cleanup-expired.zip", { kind: "embedded" });
@@ -1072,7 +1078,7 @@ integration("campaign archive export", () => {
     await expect(stat(staged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("rejects expired, consumed, and application-stale preview tokens", async () => {
+  secureGeneratedStagingIt("[secure generated staging] rejects expired, consumed, and application-stale preview tokens", async () => {
     const expiredPreview = await previewCampaignArchive(pool, runtimeConfig(-1), await stagedExport(), "expired.zip", { kind: "embedded" });
     await expect(importCampaignArchive(pool, runtimeConfig(-1), { root }, {
       previewToken: expiredPreview.previewToken,
@@ -1114,7 +1120,7 @@ integration("campaign archive export", () => {
     expect(preview.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/no archive manifest/i)]));
   });
 
-  it("preview cleanup lets a failed commit supersede expiry after rollback", async () => {
+  secureGeneratedStagingIt("[secure generated staging] preview cleanup lets a failed commit supersede expiry after rollback", async () => {
     const config = runtimeConfig();
     const staged = await stagedExport();
     const destination = await createCompatibleDestination("Expired rollback destination");
@@ -1166,7 +1172,7 @@ integration("campaign archive export", () => {
     await expect(stat(staged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("preview cleanup marks failed commits failed and removes staging plus newly persisted archive originals", async () => {
+  secureGeneratedStagingIt("[secure generated staging] preview cleanup marks failed commits failed and removes staging plus newly persisted archive originals", async () => {
     const staged = await stagedExport();
     const sourceAsset = await pool.query<{ storage_path: string }>("SELECT storage_path FROM assets WHERE id=$1", [requiredAssetId]);
     const originalPath = resolve(root, sourceAsset.rows[0]!.storage_path);

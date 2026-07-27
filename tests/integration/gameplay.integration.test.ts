@@ -8,11 +8,13 @@ import { buildServer } from "../../services/api/src/server.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { runGenerationJob } from "../../services/api/src/generation-service.js";
 import { runImageJob } from "../../services/api/src/image-service.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
+const secureGeneratedStagingIt = supportsSecureGeneratedArchiveStaging() ? it : it.skip;
 const credentialSecret = "integration-test-credential-secret";
 
 function makeConfig(databaseUrl: string): RuntimeConfig {
@@ -406,7 +408,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(turns[0].turnNumber).toBe(1);
   });
 
-  it("exports the portable campaign ZIP format via GET /api/v1/campaigns/:id/export", async () => {
+  secureGeneratedStagingIt("[secure generated staging] exports the portable campaign ZIP format via GET /api/v1/campaigns/:id/export", async () => {
     const { campaignId, worldTitle } = await importCampaign("export");
 
     const jsonExport = await app.inject({
