@@ -1458,15 +1458,28 @@ export async function projectCampaignStateCorrection(
       ORDER BY source_turn_number, source_fact_index`,
     [ownerUserId, campaignId]
   );
+  const grouped = new Map<string | null, typeof projected.rows>();
   for (const fact of projected.rows) {
+    const facts = grouped.get(fact.source_turn_id) ?? [];
+    facts.push(fact);
+    grouped.set(fact.source_turn_id, facts);
+  }
+  for (const [sourceTurnId, facts] of grouped) {
+    const ordinal = facts[0]!.source_turn_number;
+    const content = [
+      `Canonical facts established or corrected at turn ${ordinal}`,
+      ...facts.map((fact) => `- [fact_id: ${fact.id}] ${fact.content}`)
+    ].join("\n");
+    const entities = [...new Set(facts.flatMap((fact) => fact.entities))].slice(0, 100);
+    const entityIds = [...new Set(facts.flatMap((fact) => fact.entity_ids))];
     await client.query(
       `INSERT INTO chronicle_memories (
          owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content,
          token_estimate, importance, entities, entity_ids, metadata
        ) VALUES ($1,$2,$3,$4,'canonical_fact',$5,$6,$7,0.85,$8,$9,$10)`,
-      [ownerUserId, campaignId, scope.world_version_id, fact.source_turn_id, fact.source_turn_number,
-        `- [fact_id: ${fact.id}] ${fact.content}`, estimateTokens(fact.content), fact.entities, fact.entity_ids,
-        json({ stateEditId: edit.id, manualCorrection: true, structuredFactIds: [fact.id] })]
+      [ownerUserId, campaignId, scope.world_version_id, sourceTurnId, ordinal,
+        content, estimateTokens(content), entities, entityIds,
+        json({ stateEditId: edit.id, manualCorrection: true, structuredFactIds: facts.map((fact) => fact.id) })]
     );
   }
   const summary = sanitizedFictionString(edit.snapshot.continuitySummary, 20_000);
