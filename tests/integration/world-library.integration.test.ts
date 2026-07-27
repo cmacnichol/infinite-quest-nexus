@@ -246,6 +246,44 @@ integration("World Library and campaign version integration", () => {
     });
   });
 
+  it("assigns stable unique tracker IDs when creating a campaign from world defaults", async () => {
+    const title = `Tracker defaults ${crypto.randomUUID()}`;
+    const created = await createWorld(pool, worldCreateSchema.parse({
+      title,
+      content: {
+        ...content(title, "Tracker"),
+        defaults: {
+          trackers: [
+            { name: "Keeper trust", value: "wary", rules: "Update after honest exchanges." },
+            { name: "Keeper trust", value: "unknown", rules: "A duplicate name must remain independently editable." }
+          ]
+        },
+        playableCharacters: [{
+          id: "tracker-keeper",
+          name: "Tracker Keeper",
+          characterText: "Keeps watch over campaign trackers."
+        }]
+      }
+    }));
+    const published = await publishWorld(pool, created.id, worldPublishSchema.parse({
+      expectedRevision: created.draftRevision
+    }));
+    const campaign = await createCampaign(pool, campaignCreateSchema.parse({
+      title: `Tracker campaign ${crypto.randomUUID()}`,
+      worldVersionId: published.worldVersionId,
+      selectedCharacterId: "tracker-keeper"
+    }));
+
+    const state = await pool.query<{ trackers: unknown }>(
+      "SELECT trackers FROM campaign_state WHERE campaign_id = $1",
+      [campaign.id]
+    );
+    expect(state.rows[0]?.trackers).toEqual([
+      expect.objectContaining({ id: "Keeper trust", name: "Keeper trust" }),
+      expect.objectContaining({ id: "Keeper trust-2", name: "Keeper trust" })
+    ]);
+  });
+
   it("deletes an unused intermediate version without renumbering survivors", async () => {
     const world = await publishedWorld("Delete Intermediate");
     const second = await publishNextVersion(world.created.id, world.title, "Two");

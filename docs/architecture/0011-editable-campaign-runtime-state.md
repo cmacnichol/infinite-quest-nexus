@@ -12,6 +12,19 @@ Manual updates use the campaign turn number and a monotonically increasing campa
 
 Historical state inspection belongs to the Turn History surface and is read-only. Edit State changes only the latest authoritative campaign state. A historical state must first become current through an explicit rewind or branch operation before it can be edited.
 
+## Tracker identity compatibility
+
+The browser/API runtime-state contract requires every tracker to have a
+non-empty stable `id`; the Story editor uses that ID for row identity and
+removal. Older worlds, character-generation output, portable imports, and
+accepted snapshots may contain tracker-shaped objects without IDs.
+
+The API canonicalizes those persisted shapes before strict runtime-state
+validation. Valid IDs are preserved, missing IDs receive deterministic
+fallbacks, and collisions receive deterministic suffixes. Campaign creation,
+imports, transfers, and turn commits apply the same canonicalization before
+new writes. Accepted turns are not rewritten solely for compatibility.
+
 ## Consequences
 
 - A manual correction is available to the next Story Engine prompt immediately after a successful save.

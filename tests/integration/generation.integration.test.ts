@@ -234,6 +234,43 @@ integration("durable Story Engine integration", () => {
     expect(nextSerialized).toContain("Determine what Marker Three unlocks");
   });
 
+  it("assigns tracker IDs when committing an unchanged generated tracker snapshot", async () => {
+    const imported = await campaign();
+    await pool.query(
+      "UPDATE campaign_state SET trackers = $2 WHERE campaign_id = $1",
+      [imported.campaignId, JSON.stringify([
+        { name: "Generated clue", value: "hidden", rules: "Update when revealed." },
+        { name: "Generated clue", value: "found", rules: "Keep independently editable." }
+      ])]
+    );
+    const story = JSON.parse(validStory());
+    story.tracker_updates = [];
+    replies.push({ content: JSON.stringify(story) });
+    const job = await queue(imported.campaignId);
+
+    expect(await runGenerationJob(pool, "story-worker-tracker-ids", 30, credentialSecret)).toBe(true);
+
+    const persisted = await pool.query<{
+      trackers: unknown;
+      state_snapshot_private: { trackers?: unknown };
+    }>(
+      `SELECT cs.trackers, t.state_snapshot_private
+         FROM campaign_state cs
+         JOIN turns t ON t.campaign_id = cs.campaign_id
+        WHERE cs.campaign_id = $1 AND t.turn_number = 3`,
+      [imported.campaignId]
+    );
+    expect(persisted.rows[0]?.state_snapshot_private.trackers).toEqual([
+      expect.objectContaining({ id: "Generated clue", name: "Generated clue", value: "hidden" }),
+      expect.objectContaining({ id: "Generated clue-2", name: "Generated clue", value: "found" })
+    ]);
+    expect(persisted.rows[0]?.trackers).toEqual([
+      expect.objectContaining({ id: "Generated clue", name: "Generated clue", value: "hidden" }),
+      expect.objectContaining({ id: "Generated clue-2", name: "Generated clue", value: "found" })
+    ]);
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+  });
+
   it("stages an idempotent latest-turn replacement and swaps it only after validated commit", async () => {
     const imported = await campaign();
     const before = await pool.query<{ id: string; narration: string }>(
@@ -592,6 +629,108 @@ integration("durable Story Engine integration", () => {
     expect(branchTurns.rows.map((row) => row.turn_number)).toEqual([1, 2]);
   });
 
+  it("canonicalizes branch materialized tracker state without rewriting accepted turns", async () => {
+    const imported = await campaign();
+    const acceptedTrackers = [
+      { name: "Accepted path", value: "open", rules: "Update when the path closes." }
+    ];
+    const editedTrackers = [
+      { label: "Edited oath", currentValue: "unbroken", updateRules: "Update when tested." }
+    ];
+    const defaultTriggers = [
+      { name: "Branch promise", value: "pending", rules: "Update when fulfilled." }
+    ];
+    const initialTrackers = [
+      { title: "Initial lantern", value: "lit", rules: "Update when extinguished." }
+    ];
+    await pool.query(
+      `UPDATE turns
+          SET state_snapshot_private = jsonb_set(
+            coalesce(state_snapshot_private, '{}'::jsonb),
+            '{trackers}',
+            $2::jsonb,
+            true
+          )
+        WHERE campaign_id = $1 AND turn_number = 1`,
+      [imported.campaignId, JSON.stringify(acceptedTrackers)]
+    );
+    await pool.query(
+      `UPDATE campaign_state
+          SET default_triggers = $2::jsonb,
+              initial_state_snapshot = jsonb_set(
+                coalesce(initial_state_snapshot, '{}'::jsonb),
+                '{trackers}',
+                $3::jsonb,
+                true
+              )
+        WHERE campaign_id = $1`,
+      [imported.campaignId, JSON.stringify(defaultTriggers), JSON.stringify(initialTrackers)]
+    );
+    await pool.query(
+      `INSERT INTO campaign_state_edits (
+         owner_user_id, campaign_id, effective_turn_number, revision,
+         state_snapshot_private, changed_fields
+       )
+       SELECT owner_user_id, id, 1, 1, $2::jsonb, '["trackers"]'::jsonb
+         FROM campaigns WHERE id = $1`,
+      [imported.campaignId, JSON.stringify({
+        scratchpad: "The branch oath is current.",
+        trackers: editedTrackers,
+        eventTriggers: [],
+        pendingEventTriggers: [],
+        rpgStats: []
+      })]
+    );
+    const acceptedBefore = await pool.query<{ state_snapshot_private: Record<string, unknown> }>(
+      "SELECT state_snapshot_private FROM turns WHERE campaign_id = $1 AND turn_number = 1",
+      [imported.campaignId]
+    );
+
+    const branched = await branchCampaign(pool, imported.campaignId, { targetTurnNumber: 1 });
+
+    const branchState = await pool.query<{
+      trackers: unknown;
+      default_triggers: unknown;
+      initial_state_snapshot: { trackers?: unknown };
+    }>(
+      `SELECT trackers, default_triggers, initial_state_snapshot
+         FROM campaign_state WHERE campaign_id = $1`,
+      [branched.id]
+    );
+    const branchEdit = await pool.query<{ state_snapshot_private: { trackers?: unknown } }>(
+      "SELECT state_snapshot_private FROM campaign_state_edits WHERE campaign_id = $1",
+      [branched.id]
+    );
+    const acceptedAfter = await pool.query<{ state_snapshot_private: Record<string, unknown> }>(
+      "SELECT state_snapshot_private FROM turns WHERE campaign_id = $1 AND turn_number = 1",
+      [imported.campaignId]
+    );
+    const copiedTurn = await pool.query<{ state_snapshot_private: Record<string, unknown> }>(
+      "SELECT state_snapshot_private FROM turns WHERE campaign_id = $1 AND turn_number = 1",
+      [branched.id]
+    );
+
+    expect(branchState.rows[0]).toMatchObject({
+      trackers: [
+        expect.objectContaining({ id: "Edited oath", name: "Edited oath" })
+      ],
+      default_triggers: [
+        expect.objectContaining({ id: "Branch promise", name: "Branch promise" })
+      ],
+      initial_state_snapshot: {
+        trackers: [
+          expect.objectContaining({ id: "Initial lantern", name: "Initial lantern" })
+        ]
+      }
+    });
+    expect(branchEdit.rows[0]?.state_snapshot_private.trackers).toEqual([
+      expect.objectContaining({ id: "Edited oath", name: "Edited oath" })
+    ]);
+    expect(acceptedAfter.rows[0]?.state_snapshot_private).toEqual(acceptedBefore.rows[0]?.state_snapshot_private);
+    expect(copiedTurn.rows[0]?.state_snapshot_private).toEqual(acceptedBefore.rows[0]?.state_snapshot_private);
+    expect(copiedTurn.rows[0]?.state_snapshot_private.trackers).toEqual(acceptedTrackers);
+  });
+
   it("copies artwork references to mapped branch turns and preserves the blob after deleting the parent", async () => {
     const imported = await campaign();
     const source = await pool.query<{ owner_user_id: string; turn_id: string }>(
@@ -712,9 +851,56 @@ integration("durable Story Engine integration", () => {
     expect(result).toMatchObject({ status: "completed", turnNumber: 1 });
   });
 
-  it("refreshes initial_state_snapshot when player configuration is synced while at turn zero", async () => {
+  it("canonicalizes legacy tracker snapshots when rewinding without rewriting the accepted source turn", async () => {
+    const imported = await campaign();
+    const legacyTrackers = [
+      { name: "Rewind oath", value: "unbroken", rules: "Update when tested." }
+    ];
+    await pool.query(
+      `UPDATE turns
+          SET state_snapshot_private = jsonb_set(
+            coalesce(state_snapshot_private, '{}'::jsonb),
+            '{trackers}',
+            $2::jsonb,
+            true
+          )
+        WHERE campaign_id = $1 AND turn_number = 1`,
+      [imported.campaignId, JSON.stringify(legacyTrackers)]
+    );
+    const acceptedBefore = await pool.query<{ state_snapshot_private: Record<string, unknown> }>(
+      "SELECT state_snapshot_private FROM turns WHERE campaign_id = $1 AND turn_number = 1",
+      [imported.campaignId]
+    );
+
+    const rewound = await rewindCampaign(pool, imported.campaignId, { targetTurnNumber: 1 });
+
+    const state = await pool.query<{ trackers: unknown }>(
+      "SELECT trackers FROM campaign_state WHERE campaign_id = $1",
+      [imported.campaignId]
+    );
+    const acceptedAfter = await pool.query<{ state_snapshot_private: Record<string, unknown> }>(
+      "SELECT state_snapshot_private FROM turns WHERE campaign_id = $1 AND turn_number = 1",
+      [imported.campaignId]
+    );
+    expect(rewound.stateSnapshot.trackers).toEqual([
+      expect.objectContaining({ id: "Rewind oath", name: "Rewind oath" })
+    ]);
+    expect(state.rows[0]?.trackers).toEqual([
+      expect.objectContaining({ id: "Rewind oath", name: "Rewind oath" })
+    ]);
+    expect(acceptedAfter.rows[0]?.state_snapshot_private).toEqual(acceptedBefore.rows[0]?.state_snapshot_private);
+    expect(acceptedAfter.rows[0]?.state_snapshot_private.trackers).toEqual(legacyTrackers);
+  });
+
+  it("canonicalizes trackers when player configuration refreshes turn-zero initial state", async () => {
     const imported = await campaign();
     await rewindCampaign(pool, imported.campaignId, { targetTurnNumber: 0 });
+    await pool.query(
+      "UPDATE campaign_state SET trackers = $2::jsonb WHERE campaign_id = $1",
+      [imported.campaignId, JSON.stringify([
+        { label: "Turn-zero promise", currentValue: "pending", updateRules: "Update when fulfilled." }
+      ])]
+    );
     await syncPlayerCampaignConfig(pool, imported.campaignId, {
       expectedTurnNumber: 0,
       useRpgStats: true,
@@ -723,10 +909,18 @@ integration("durable Story Engine integration", () => {
       eventTriggers: [],
       pendingEventTriggers: []
     });
-    const stateRow = await pool.query<{ initial_state_snapshot: { rpgStats: Array<{ id: string; name: string; value: number; note: string }> } }>(
+    const stateRow = await pool.query<{
+      initial_state_snapshot: {
+        trackers: unknown;
+        rpgStats: Array<{ id: string; name: string; value: number; note: string }>;
+      };
+    }>(
       "SELECT initial_state_snapshot FROM campaign_state WHERE campaign_id = $1",
       [imported.campaignId]
     );
+    expect(stateRow.rows[0]?.initial_state_snapshot?.trackers).toEqual([
+      expect.objectContaining({ id: "Turn-zero promise", name: "Turn-zero promise" })
+    ]);
     expect(stateRow.rows[0]?.initial_state_snapshot?.rpgStats).toEqual([{ id: "stat1", name: "Strength", value: 18, note: "" }]);
   });
 

@@ -655,6 +655,157 @@ integration("campaign archive export", () => {
     await expect(previewRow(preview.previewToken)).resolves.toMatchObject({ status: "consumed" });
   });
 
+  it("canonicalizes ID-less campaign, turn, and state-edit tracker snapshots on import", async () => {
+    const campaignTrackers = [
+      { name: "Archive campaign clue", value: "hidden", rules: "Update when found." }
+    ];
+    const defaultTriggers = [
+      { label: "Archive default oath", currentValue: "unbroken", updateRules: "Update when tested." }
+    ];
+    const initialTrackers = defaultTriggers;
+    const turnTrackers = [
+      { name: "Archive turn lantern", value: "lit", rules: "Update when extinguished." }
+    ];
+    const editTrackers = [
+      { label: "Archive edited promise", currentValue: "pending", updateRules: "Update when fulfilled." }
+    ];
+    const [stateBefore, turnBefore, editBefore] = await Promise.all([
+      pool.query<{
+        trackers: unknown;
+        default_triggers: unknown;
+        initial_state_snapshot: Record<string, unknown>;
+      }>(
+        "SELECT trackers, default_triggers, initial_state_snapshot FROM campaign_state WHERE campaign_id = $1",
+        [campaignId]
+      ),
+      pool.query<{ state_snapshot_private: Record<string, unknown> }>(
+        "SELECT state_snapshot_private FROM turns WHERE id = $1",
+        [turnId]
+      ),
+      pool.query<{ state_snapshot_private: Record<string, unknown> }>(
+        "SELECT state_snapshot_private FROM campaign_state_edits WHERE campaign_id = $1 AND revision = 1",
+        [campaignId]
+      )
+    ]);
+
+    try {
+      await pool.query(
+        `UPDATE campaign_state
+            SET trackers = $2::jsonb,
+                default_triggers = $3::jsonb,
+                initial_state_snapshot = jsonb_set(
+                  coalesce(initial_state_snapshot, '{}'::jsonb),
+                  '{trackers}',
+                  $4::jsonb,
+                  true
+                )
+          WHERE campaign_id = $1`,
+        [
+          campaignId,
+          JSON.stringify(campaignTrackers),
+          JSON.stringify(defaultTriggers),
+          JSON.stringify(initialTrackers)
+        ]
+      );
+      await pool.query(
+        `UPDATE turns
+            SET state_snapshot_private = jsonb_set(
+              coalesce(state_snapshot_private, '{}'::jsonb),
+              '{trackers}',
+              $2::jsonb,
+              true
+            )
+          WHERE id = $1`,
+        [turnId, JSON.stringify(turnTrackers)]
+      );
+      await pool.query(
+        `UPDATE campaign_state_edits
+            SET state_snapshot_private = jsonb_set(
+              coalesce(state_snapshot_private, '{}'::jsonb),
+              '{trackers}',
+              $2::jsonb,
+              true
+            )
+          WHERE campaign_id = $1 AND revision = 1`,
+        [campaignId, JSON.stringify(editTrackers)]
+      );
+
+      const preview = await previewCampaignArchive(
+        pool,
+        runtimeConfig(),
+        await stagedExport(),
+        "id-less-trackers.zip",
+        { kind: "embedded" }
+      );
+      const imported = await importCampaignArchive(pool, runtimeConfig(), { root }, {
+        previewToken: preview.previewToken,
+        destination: { kind: "embedded" }
+      });
+      const [state, turn, edit] = await Promise.all([
+        pool.query<{
+          trackers: unknown;
+          default_triggers: unknown;
+          initial_state_snapshot: { trackers?: unknown };
+        }>(
+          "SELECT trackers, default_triggers, initial_state_snapshot FROM campaign_state WHERE campaign_id = $1",
+          [imported.campaignId]
+        ),
+        pool.query<{ state_snapshot_private: { trackers?: unknown } }>(
+          "SELECT state_snapshot_private FROM turns WHERE campaign_id = $1 AND turn_number = 1",
+          [imported.campaignId]
+        ),
+        pool.query<{ state_snapshot_private: { trackers?: unknown } }>(
+          "SELECT state_snapshot_private FROM campaign_state_edits WHERE campaign_id = $1 AND revision = 1",
+          [imported.campaignId]
+        )
+      ]);
+
+      expect(state.rows[0]).toMatchObject({
+        trackers: [
+          expect.objectContaining({ id: "Archive campaign clue", name: "Archive campaign clue" })
+        ],
+        default_triggers: [
+          expect.objectContaining({ id: "Archive default oath", name: "Archive default oath" })
+        ],
+        initial_state_snapshot: {
+          trackers: [
+            expect.objectContaining({ id: "Archive default oath", name: "Archive default oath" })
+          ]
+        }
+      });
+      expect(turn.rows[0]?.state_snapshot_private.trackers).toEqual([
+        expect.objectContaining({ id: "Archive turn lantern", name: "Archive turn lantern" })
+      ]);
+      expect(edit.rows[0]?.state_snapshot_private.trackers).toEqual([
+        expect.objectContaining({ id: "Archive edited promise", name: "Archive edited promise" })
+      ]);
+    } finally {
+      await pool.query(
+        `UPDATE campaign_state
+            SET trackers = $2::jsonb,
+                default_triggers = $3::jsonb,
+                initial_state_snapshot = $4::jsonb
+          WHERE campaign_id = $1`,
+        [
+          campaignId,
+          JSON.stringify(stateBefore.rows[0]?.trackers ?? []),
+          JSON.stringify(stateBefore.rows[0]?.default_triggers ?? []),
+          JSON.stringify(stateBefore.rows[0]?.initial_state_snapshot ?? {})
+        ]
+      );
+      await pool.query(
+        "UPDATE turns SET state_snapshot_private = $2::jsonb WHERE id = $1",
+        [turnId, JSON.stringify(turnBefore.rows[0]?.state_snapshot_private ?? {})]
+      );
+      await pool.query(
+        `UPDATE campaign_state_edits
+            SET state_snapshot_private = $2::jsonb
+          WHERE campaign_id = $1 AND revision = 1`,
+        [campaignId, JSON.stringify(editBefore.rows[0]?.state_snapshot_private ?? {})]
+      );
+    }
+  });
+
   it("migration history omits audit rows whose world versions are not portable", async () => {
     const destination = await createCompatibleDestination("Migration history destination");
     const before = await pool.query<{ count: string }>(
