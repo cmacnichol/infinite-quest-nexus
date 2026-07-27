@@ -4,7 +4,8 @@
 import { branchCampaignFromTurn } from "./story-routing.js";
 import {
   addEditableStateRow,
-  canonicalFactContent,
+  captureCampaignStateEditSession,
+  renderCampaignStateInspector,
   renderEditableStateCollection,
   saveCampaignStateFromEditor
 } from "./story-state-editor.js";
@@ -43,6 +44,7 @@ const state = {
   world: null,
   playerConfig: null,
   runtimeState: null,
+  editStateSession: null,
   turns: [],
   viewIndex: -1,
   busy: false,
@@ -1920,9 +1922,14 @@ async function removeIllustration(turnId) {
 async function openEditState() {
   const dlg = $("editStateDialog");
   if (!dlg || !state.campaignId) return;
+  const campaignId = state.campaignId;
   try {
     showBusy("Loading current state…");
-    state.runtimeState = await api(`/campaigns/${state.campaignId}/state`);
+    state.runtimeState = await api(`/campaigns/${campaignId}/state`);
+    state.editStateSession = Object.freeze({
+      campaignId,
+      runtimeState: captureCampaignStateEditSession(state.runtimeState)
+    });
     renderCurrentRuntimeState();
     switchEditStateTab("overview");
     openManagedModal(dlg);
@@ -2191,18 +2198,7 @@ async function inspectTurnState(turnNumber) {
   try {
     const runtime = await api(`/campaigns/${state.campaignId}/state?turnNumber=${turnNumber}`);
     if (requestId !== state.historyInspectionRequestId) return;
-    const list = (values, empty) => values && values.length
-      ? `<ul>${values.map(value => `<li>${escapeHtml(String(value))}</li>`).join("")}</ul>`
-      : `<p class="mini dim">${escapeHtml(empty)}</p>`;
-    panel.innerHTML = `
-      <h4>${runtime.isCurrent ? "Current state" : `Historical state after turn ${runtime.viewedTurnNumber}`}</h4>
-      <p class="mini">${runtime.isCurrent ? "Editable from Menu → Edit State." : "Read-only. Reset or branch here to make this state current."}</p>
-      <details open><summary>Continuity summary</summary><div>${escapeHtml(runtime.continuitySummary || "No summary recorded.")}</div></details>
-      <details><summary>Private scratchpad</summary><div class="state-inspector-pre">${escapeHtml(runtime.scratchpad || "No scratchpad recorded.")}</div></details>
-      <details><summary>Trackers</summary><div>${list((runtime.trackers || []).map(tracker => `${tracker.name}: ${tracker.value}`), "No trackers recorded.")}</div></details>
-      <details><summary>Open threads</summary><div>${list(runtime.openThreads, "No open threads recorded.")}</div></details>
-      <details><summary>Canonical facts</summary><div>${list((runtime.canonicalFacts || []).map(canonicalFactContent), "No canonical facts recorded.")}</div></details>
-    `;
+    renderCampaignStateInspector(panel, runtime);
   } catch (err) {
     if (requestId !== state.historyInspectionRequestId) return;
     panel.innerHTML = `<p class="mini">State could not be loaded: ${escapeHtml(err.message)}</p>`;
@@ -2210,14 +2206,15 @@ async function inspectTurnState(turnNumber) {
 }
 
 async function saveEditState() {
-  if (!state.campaignId || !state.runtimeState) return;
+  const editSession = state.editStateSession;
+  if (!editSession) return;
   const scratchpadEl = $("scratchpadEditor");
   const continuitySummaryEl = $("editStateContinuitySummary");
   const openThreads = $("editStateOpenThreads");
   const canonicalFacts = $("editStateCanonicalFacts");
   try {
     showBusy("Saving state…");
-    await saveCampaignStateFromEditor(api, state.campaignId, state.runtimeState, {
+    await saveCampaignStateFromEditor(api, editSession.campaignId, editSession.runtimeState, {
       summary: continuitySummaryEl,
       threads: openThreads,
       facts: canonicalFacts,
@@ -2225,6 +2222,7 @@ async function saveEditState() {
       trackers: collectTrackerEditorValues()
     }, savedState => {
       state.runtimeState = savedState;
+      state.editStateSession = null;
       const dlg = $("editStateDialog");
       if (dlg && dlg.close) dlg.close();
     });

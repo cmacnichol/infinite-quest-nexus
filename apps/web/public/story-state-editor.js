@@ -5,6 +5,22 @@ export function canonicalFactContent(value) {
     : "";
 }
 
+function cloneAndFreeze(value) {
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map(cloneAndFreeze));
+  }
+  if (value && typeof value === "object") {
+    return Object.freeze(Object.fromEntries(
+      Object.entries(value).map(([key, nestedValue]) => [key, cloneAndFreeze(nestedValue)])
+    ));
+  }
+  return value;
+}
+
+export function captureCampaignStateEditSession(runtimeState) {
+  return cloneAndFreeze(runtimeState || {});
+}
+
 export function normalizeTextItems(values) {
   return Array.isArray(values)
     ? values
@@ -62,6 +78,87 @@ export function renderEditableStateCollection(document, container, values, kind)
   (Array.isArray(values) ? values : []).forEach(value => {
     container.appendChild(createEditableStateRow(document, kind, value));
   });
+}
+
+function createInspectorText(document, className, text) {
+  const element = document.createElement("p");
+  element.className = className;
+  element.textContent = text;
+  return element;
+}
+
+function createInspectorList(document, values, emptyText) {
+  if (!values.length) return createInspectorText(document, "mini dim", emptyText);
+  const list = document.createElement("ul");
+  values.forEach(value => {
+    const item = document.createElement("li");
+    item.textContent = value;
+    list.appendChild(item);
+  });
+  return list;
+}
+
+function createInspectorSection(document, title, content, open = false) {
+  const details = document.createElement("details");
+  details.open = open;
+  const summary = document.createElement("summary");
+  summary.textContent = title;
+  const body = document.createElement("div");
+  body.appendChild(content);
+  details.append(summary, body);
+  return details;
+}
+
+export function renderCampaignStateInspector(panel, runtimeState) {
+  if (!panel) return;
+  const document = panel.ownerDocument;
+  const runtime = runtimeState || {};
+  const title = document.createElement("h4");
+  title.textContent = runtime.isCurrent
+    ? "Current state"
+    : `Historical state after turn ${runtime.viewedTurnNumber}`;
+  const guidance = createInspectorText(
+    document,
+    "mini",
+    runtime.isCurrent
+      ? "Editable from Menu → Edit State."
+      : "Read-only. Reset or branch here to make this state current."
+  );
+  const continuitySummary = createInspectorText(
+    document,
+    "",
+    runtime.continuitySummary || "No summary recorded."
+  );
+  const scratchpad = createInspectorText(
+    document,
+    "state-inspector-pre",
+    runtime.scratchpad || "No scratchpad recorded."
+  );
+  const trackers = createInspectorList(
+    document,
+    (runtime.trackers || []).map(tracker => `${tracker.name}: ${tracker.value}`),
+    "No trackers recorded."
+  );
+  const openThreads = createInspectorList(
+    document,
+    runtime.openThreads || [],
+    "No open threads recorded."
+  );
+  const canonicalFacts = createInspectorList(
+    document,
+    (runtime.canonicalFacts || []).map(canonicalFactContent),
+    "No canonical facts recorded."
+  );
+
+  panel.replaceChildren(
+    title,
+    guidance,
+    createInspectorSection(document, "Continuity summary", continuitySummary, true),
+    createInspectorSection(document, "Private scratchpad", scratchpad),
+    createInspectorSection(document, "Trackers", trackers),
+    createInspectorSection(document, "Open threads", openThreads),
+    createInspectorSection(document, "Canonical facts", canonicalFacts)
+  );
 }
 
 export function collectOpenThreadEditorValues(container) {
