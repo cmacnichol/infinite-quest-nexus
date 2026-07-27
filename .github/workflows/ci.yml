@@ -38,6 +38,9 @@ jobs:
       - name: Test unit suite
         run: pnpm test:unit
 
+      - name: Test PostgreSQL integration suite
+        run: pnpm test:integration
+
       - name: Build application
         run: pnpm build
 

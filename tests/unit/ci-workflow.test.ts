@@ -3,10 +3,13 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 describe("GitHub CI test workflow", () => {
-  it("runs only database-independent unit tests", async () => {
+  it("runs unit and Docker-provisioned PostgreSQL integration tests", async () => {
     const workflow = await readFile(resolve(".github/workflows/ci.yml"), "utf8");
 
     expect(workflow).toMatch(/name: Test unit suite\r?\n\s+run: pnpm test:unit/u);
+    expect(workflow).toMatch(
+      /name: Test PostgreSQL integration suite\r?\n\s+run: pnpm test:integration/u
+    );
     expect(workflow).not.toMatch(/services:\r?\n\s+postgres:/u);
     expect(workflow).not.toContain("TEST_DATABASE_URL:");
     expect(workflow).not.toMatch(/run: pnpm test\r?\n/u);
