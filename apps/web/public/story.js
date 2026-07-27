@@ -282,13 +282,7 @@ async function loadCampaign(campaignId, options = {}) {
     renderAllScenes({ autoScroll: options.autoScroll });
     updateStatusBar();
 
-    // Show latest choices if available
-    if (state.turns.length > 0) {
-      const last = state.turns[state.turns.length - 1];
-      renderChoices(last.choices || [], last.customActionSuggestion || "");
-    } else {
-      renderChoices([firstActionForNewAdventure()], firstActionForNewAdventure());
-    }
+    renderTurnInput();
 
     recordActivity("system", "Campaign loaded", `${state.turns.length} turns loaded for "${name}".`);
   } catch (err) {
@@ -761,6 +755,24 @@ function renderChoices(choices, customSuggestion) {
   }
 }
 
+function renderTurnInput() {
+  const inputPanel = document.querySelector(".input-action");
+  if (!inputPanel) return;
+  const isLatest = state.viewIndex === -1 || state.viewIndex >= state.turns.length - 1;
+  const shouldShowInput = !state.generationDisplayActive && isLatest;
+  inputPanel.classList.toggle("hidden", !shouldShowInput);
+  if (!shouldShowInput) {
+    clearTurnIntentDecision();
+    return;
+  }
+  const latestTurn = state.turns[state.turns.length - 1];
+  if (latestTurn) {
+    renderChoices(latestTurn.choices || [], latestTurn.customActionSuggestion || "");
+  } else {
+    renderChoices([firstActionForNewAdventure()], firstActionForNewAdventure());
+  }
+}
+
 function showAmbiguousTurnIntent(action, classification) {
   state.pendingIntentDecision = { action, classification };
   const panel = $("turnIntentDecision");
@@ -1054,6 +1066,7 @@ function clearStreamingPreview() {
 function beginGenerationDisplay(action) {
   state.generationDisplayActive = true;
   state.generationDisplayAction = action || "";
+  renderTurnInput();
   const container = $("storyArea");
   if (container) container.replaceChildren();
   renderStoryIllustration();
@@ -1066,6 +1079,7 @@ function restoreGenerationDisplay() {
   state.generationJobId = null;
   clearStreamingPreview();
   renderAllScenes({ autoScroll: false });
+  renderTurnInput();
 }
 
 function commitGenerationDisplay() {
@@ -1142,6 +1156,7 @@ async function finalizeCompletedGeneration(result) {
   recordActivity("success", "Turn generated", `Turn ${result.turnNumber || ""} completed.`);
   clearStreamingPreview();
   await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });
+  renderTurnInput();
   if (result.resultTurnId && !state.turns.some((turn) => turn.id === result.resultTurnId)) {
     const completedTurn = { ...result, id: result.resultTurnId };
     state.turns = state.turns
@@ -1150,7 +1165,7 @@ async function finalizeCompletedGeneration(result) {
       .sort((left, right) => Number(left.turnNumber) - Number(right.turnNumber));
     state.viewIndex = -1;
     renderAllScenes({ autoScroll: !preserveViewport });
-    renderChoices(completedTurn.choices || [], completedTurn.customActionSuggestion || "");
+    renderTurnInput();
     recordActivity("system", "Completed turn applied from generation result", `Turn ${result.turnNumber || ""} was applied while campaign state caught up.`);
   }
 

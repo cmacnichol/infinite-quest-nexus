@@ -151,7 +151,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('fetch(url, { ...options, cache: "no-store", headers })');
     expect(storyScript).toContain('result.resultTurnId && !state.turns.some((turn) => turn.id === result.resultTurnId)');
     expect(storyScript).toContain('const completedTurn = { ...result, id: result.resultTurnId };');
-    expect(storyScript).toContain('renderChoices(completedTurn.choices || [], completedTurn.customActionSuggestion || "");');
+    expect(storyScript).toContain("renderTurnInput();");
   });
 
   it("renders streaming narration full-width in the same scene structure as a completed turn", () => {
@@ -163,14 +163,18 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyCss).not.toContain('.turn-streaming-preview {\n  display: flex;');
   });
 
-  it("uses a transactional generation display that restores the accepted turn only on failure", () => {
+  it("hides prior turn controls during generation and restores them only after resolution", () => {
     expect(storyScript).toContain("function beginGenerationDisplay(action)");
     expect(storyScript).toContain("function restoreGenerationDisplay()");
     expect(storyScript).toContain("function commitGenerationDisplay()");
+    expect(storyScript).toContain("function renderTurnInput()");
+    expect(storyScript).toContain('const shouldShowInput = !state.generationDisplayActive && isLatest;');
+    expect(storyScript).toContain('inputPanel.classList.toggle("hidden", !shouldShowInput);');
     expect(storyScript).toContain("container.replaceChildren();");
     expect(storyScript).toContain("beginGenerationDisplay(action);");
     expect(storyScript).toContain("restoreGenerationDisplay();");
     expect(storyScript).toContain("commitGenerationDisplay();");
+    expect(storyScript).toContain("await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });\n  renderTurnInput();");
     expect(storyScript).toContain("state.generationDisplayActive");
   });
 
