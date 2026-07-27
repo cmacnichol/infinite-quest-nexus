@@ -1007,7 +1007,10 @@ async function insertImportedRecords(
      ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11::jsonb,$12) RETURNING id`,
     [campaignId, ownerUserId, worldVersionId, title, activeTurnNumber,
       jsonValue(settings, {}), String(settings.storyLength || "standard"), String(settings.turnControlStyle || "flexible_action"),
-      sourceCampaign.selectedCharacterId || null, jsonValue(sourceCampaign.characterSnapshot, null), jsonValue(sourceCampaign.characterProfile, null), Number(sourceCampaign.characterProfileRevision || 0)]
+      sourceCampaign.selectedCharacterId || null,
+      sourceCampaign.characterSnapshot == null ? null : jsonValue(sourceCampaign.characterSnapshot, null),
+      sourceCampaign.characterProfile == null ? null : jsonValue(sourceCampaign.characterProfile, null),
+      Number(sourceCampaign.characterProfileRevision || 0)]
   );
   if (!campaign.rowCount) throw new Error("Could not create imported campaign.");
 
@@ -1110,7 +1113,10 @@ async function insertImportedRecords(
     await client.query(
       `INSERT INTO provider_cost_events (owner_user_id,campaign_id,turn_id,local_call_id,provider_type,category,operation,requested_model,resolved_model,amount,currency,usage_metadata,occurred_at,created_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$13)`,
-      [ownerUserId, campaignId, cost.turn_id ? requireMapped(idMap, "turn", cost.turn_id) : null, String(cost.local_call_id || randomUUID()), String(cost.provider_type || "openai_compatible"), String(cost.category || "image"), String(cost.operation || "illustration"), String(cost.requested_model || ""), String(cost.resolved_model || ""), String(cost.amount || "0"), String(cost.currency || "USD"), jsonValue(cost.usage_metadata, {}), importedDate(cost.occurred_at) ?? new Date().toISOString()]
+      [ownerUserId, campaignId, cost.turn_id ? requireMapped(idMap, "turn", cost.turn_id) : null, randomUUID(),
+        String(cost.provider_type || "openai_compatible"), String(cost.category || "image"), String(cost.operation || "illustration"),
+        String(cost.requested_model || ""), String(cost.resolved_model || ""), String(cost.amount || "0"), String(cost.currency || "USD"),
+        jsonValue(cost.usage_metadata, {}), importedDate(cost.occurred_at) ?? new Date().toISOString()]
     );
   }
   return { campaignId, turnCount: turns.length, memoryCount: archive.chronicle.memories.length, summaryCount: archive.chronicle.summaries.length };

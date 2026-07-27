@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
-import { canonicalizeWorldContent, type WorldContent } from "../../../packages/contracts/src/world-library.js";
+import { canonicalizeWorldContent, WORLD_CONTENT_SCHEMA_VERSION, type WorldContent } from "../../../packages/contracts/src/world-library.js";
 import { characterLegacyText } from "../../../packages/domain/src/world-characters.js";
 import { archiveAssetRecordSchema, calculateContentFingerprint, canonicalArchiveJson, campaignArchiveDestinationSchema, campaignArchivePreviewResponseSchema, sanitizePortableMetadata, type ArchiveAssetBinding, type ArchiveAssetRecord, type ArchiveEntry, type ArchiveManifest, type CampaignArchiveDestination as ContractCampaignArchiveDestination, type CampaignArchivePreviewResponse } from "../../../packages/contracts/src/archives.js";
 import { removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
@@ -93,6 +93,8 @@ function secretKey(key: string): boolean {
 function excludedPortableKey(key: string): boolean {
   const normalized = key.replaceAll(/[^a-z0-9]/gi, "").toLowerCase();
   return secretKey(key)
+    || /^(?:baseurl|endpoint|customendpoint|lmstudioendpoint|imageendpoint|providerurl)$/.test(normalized)
+    || /^nexus(?:provider|imageprovider|embeddingprovider)/.test(normalized)
     || /(?:embedding|vector|thumbnail|providerprofile|responsechain|rawresponse)/.test(normalized);
 }
 
@@ -122,6 +124,40 @@ function sanitizeWorldValue(value: unknown): unknown {
 
 function portableWorldContent(value: unknown): WorldContent {
   return canonicalizeWorldContent(sanitizeWorldValue(value) as WorldContent);
+}
+
+function portableLegacyWorldContent(campaign: Record<string, unknown>): WorldContent {
+  const source = archiveObject(campaign.world);
+  if (source.world && typeof source.world === "object" && !Array.isArray(source.world)) {
+    return portableWorldContent(source);
+  }
+  const title = typeof source.title === "string" && source.title.trim()
+    ? source.title.trim()
+    : "Imported adventure";
+  const characterText = typeof source.character === "string" ? source.character.trim() : "";
+  const characterName = characterText.split(/\r?\n/).find((line) => line.trim())?.trim() || "Default character";
+  const world: Record<string, unknown> = { ...source, title };
+  delete world.character;
+  return portableWorldContent({
+    schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
+    world,
+    playableCharacters: [{
+      id: `legacy-import-character-${sha256(stableStringify({
+        characterText,
+        rpgStats: campaign.rpgStats ?? [],
+        defaultTriggers: campaign.defaultTriggers ?? campaign.baseTrackersAtStart ?? []
+      })).slice(0, 24)}`,
+      name: characterName.slice(0, 200),
+      characterText,
+      rpgStats: campaign.rpgStats ?? [],
+      defaultTriggers: campaign.defaultTriggers ?? campaign.baseTrackersAtStart ?? [],
+      source: { type: "legacy-campaign-import" }
+    }],
+    rpgStats: [],
+    defaultTriggers: [],
+    eventTriggers: campaign.eventTriggers ?? [],
+    importedFromLegacyStory: true
+  });
 }
 
 /** Matches the canonical world representation written to Campaign Archives. */
@@ -178,7 +214,7 @@ export async function captureCampaignArchiveSnapshot(pool: DatabasePool, campaig
       queryRows(client, "SELECT enabled,model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,images_per_segment,segment_prompt_mode,created_at,updated_at FROM campaign_illustration_configs WHERE owner_user_id=$1 AND campaign_id=$2", values),
       queryRows(client, "SELECT id,turn_id,source_text_hash,segment_word_count,images_per_segment,prompt_mode,status,is_active,character_visual_reference,created_at,completed_at FROM turn_illustration_sets WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY created_at,id", values),
       queryRows(client, "SELECT id,illustration_set_id,turn_id,ordinal,start_offset,end_offset,start_word,end_word,source_text,source_text_hash,direct_prompt,resolved_prompt,prompt_source,status,created_at,updated_at FROM turn_illustration_segments WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY illustration_set_id,ordinal", values),
-      queryRows(client, "SELECT id,turn_id,local_call_id,provider_type,category,operation,requested_model,resolved_model,amount::text,currency,usage_metadata,occurred_at,created_at FROM provider_cost_events WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY occurred_at,id", values),
+      queryRows(client, "SELECT id,turn_id,local_call_id,provider_type,category,operation,requested_model,resolved_model,trim(trailing '.' from trim(trailing '0' from amount::text)) AS amount,currency,usage_metadata,occurred_at,created_at FROM provider_cost_events WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY occurred_at,id", values),
       queryRows(client, "SELECT id,turn_id,memory_kind,ordinal,content,token_estimate,importance,entities,entity_ids,metadata,created_at,updated_at FROM chronicle_memories WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY ordinal,id", values),
       queryRows(client, "SELECT id,summary_kind,through_turn,content,created_at FROM summary_checkpoints WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY through_turn,id", values)
     ]);
@@ -609,8 +645,8 @@ export async function adaptLegacyCampaignZip(staged: StagedArchive, limits: Arch
   const sourceCampaignId = typeof campaignMetadata.sourceCampaignId === "string" ? campaignMetadata.sourceCampaignId : randomUUID();
   const sourceWorldVersionId = typeof campaignMetadata.sourceWorldVersionId === "string" ? campaignMetadata.sourceWorldVersionId : randomUUID();
   const sourceWorldId = randomUUID();
-  const content = portableWorldContent(legacyCampaign.world);
-  const worldHash = portableWorldContentHash(legacyCampaign.world);
+  const content = portableLegacyWorldContent(legacyCampaign);
+  const worldHash = portableWorldContentHash(content);
   const normalizedTurns = (Array.isArray(legacyCampaign.turns) ? legacyCampaign.turns : []).map((turnValue) => {
     const turn = archiveObject(turnValue);
     return { ...turn, id: typeof turn.id === "string" && turn.id ? turn.id : randomUUID() };

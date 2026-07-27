@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema, illustrationConfigSchema, illustrationSegmentRequestSchema, worldCoverRequestSchema } from "../../packages/contracts/src/generation.js";
 import { assetListQuerySchema } from "../../packages/contracts/src/assets.js";
@@ -543,8 +544,11 @@ integration("independent illustration pipeline", () => {
 
   it("restores an original without a thumbnail and lets metadata backfill regenerate it", async () => {
     const ownerUserId = await initialOwnerId(pool);
+    const restoredBytes = await sharp({
+      create: { width: 2, height: 3, channels: 4, background: "#123456" }
+    }).png().toBuffer();
     const restored = await withTransaction(pool, (client) => persistOriginalImage(client, { root: assetRoot }, ownerUserId, {
-      bytes: Buffer.from(tinyPng, "base64"), mimeType: "image/png", createThumbnail: false
+      bytes: restoredBytes, mimeType: "image/png", createThumbnail: false
     }));
     const before = await pool.query(
       "SELECT count(*)::int AS count FROM asset_derivatives WHERE owner_user_id = $1 AND source_asset_id = $2 AND derivative_kind = 'thumbnail'",

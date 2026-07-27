@@ -285,11 +285,12 @@ integration("campaign archive export", () => {
 
   async function stagedExportWithContradictoryAssetPayload() {
     const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
-    const inspected = await inspectArchive({
-      relativePath: artifact.relativePath,
-      absolutePath: artifact.absolutePath,
-      compressedBytes: artifact.byteLength
-    }, limits, "campaign");
+    const stagedArtifact = await stageArchiveUpload(
+      Readable.from(await readFile(artifact.absolutePath)),
+      root,
+      limits
+    );
+    const inspected = await inspectArchive(stagedArtifact, limits, "campaign");
     const entryBytes = new Map<string, Buffer>();
     for (const entry of inspected.manifest.entries) {
       entryBytes.set(entry.path, await readVerifiedEntry(
@@ -353,7 +354,12 @@ integration("campaign archive export", () => {
     const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
     const repeated = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
     expect(repeated.contentFingerprint).toBe(artifact.contentFingerprint);
-    const archive = await inspectArchive({ relativePath: artifact.relativePath, absolutePath: artifact.absolutePath, compressedBytes: artifact.byteLength }, limits, "campaign");
+    const stagedArtifact = await stageArchiveUpload(
+      Readable.from(await readFile(artifact.absolutePath)),
+      root,
+      limits
+    );
+    const archive = await inspectArchive(stagedArtifact, limits, "campaign");
     const paths = [...archive.entries.keys()].sort();
     expect(paths).toEqual([
       "assets/assets.json",
@@ -631,15 +637,18 @@ integration("campaign archive export", () => {
       previewToken: preview.previewToken,
       destination: { kind: "embedded" }
     });
-    expect(imported).toMatchObject({ duplicate: false, worldId, worldVersionId: expect.any(String), campaignId: expect.any(String) });
+    expect(imported).toMatchObject({
+      duplicate: false,
+      worldId: preview.destination.worldId,
+      worldVersionId: preview.destination.worldVersionId,
+      campaignId: expect.any(String)
+    });
     expect(imported.campaignId).not.toBe(campaignId);
-    expect(imported.worldVersionId).toBe((await pool.query<{ id: string }>(
-      "SELECT world_version_id AS id FROM campaigns WHERE id=$1", [campaignId]
-    )).rows[0]!.id);
+    expect(imported.worldVersionId).toBe(preview.destination.worldVersionId);
     const importedTurn = await pool.query<{ id: string; image_url: string }>(
       "SELECT id,image_url FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [imported.campaignId]
     );
-    expect(importedTurn).toHaveLength(1);
+    expect(importedTurn.rows).toHaveLength(1);
     expect(importedTurn.rows[0]!.id).not.toBe(turnId);
     expect(imported.stats).toMatchObject({ turnCount: 1, memoryCount: 1 });
     await expect(stat(resolve(root, stagedPath))).rejects.toMatchObject({ code: "ENOENT" });

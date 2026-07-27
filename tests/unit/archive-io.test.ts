@@ -1091,7 +1091,12 @@ describe("archive artifact writing and cleanup", () => {
       { path: "assets/second.bin", logicalType: "asset", mediaType: "application/octet-stream", source: Readable.from(second) }
     ];
 
-    const completed = await writeArchiveArtifact(root, sources, (entries) => systemManifest(entries));
+    const completed = await writeArchiveArtifact(
+      root,
+      sources,
+      (entries) => systemManifest(entries),
+      DEFAULT_LIMITS
+    );
     const directory = await Open.file(completed.absolutePath);
     const manifestFile = directory.files.at(-1);
     const manifest = JSON.parse((await manifestFile!.buffer()).toString("utf8")) as ArchiveManifest;

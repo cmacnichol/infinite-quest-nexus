@@ -1359,7 +1359,7 @@ export async function writeArchiveArtifact(
 
   try {
     await assertDirectoryStable(stable);
-    handle = await open(temporaryOperationPath, "wx", 0o640);
+    handle = await open(temporaryOperationPath, "wx+", 0o640);
     identity = await openedFileIdentityAtIntendedPath(handle, temporaryPath);
     await assertDirectoryStable(stable);
     output = fileHandleWritable(handle);
