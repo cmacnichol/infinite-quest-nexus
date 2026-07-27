@@ -49,9 +49,29 @@ services:
     networks:
       - infinitequest-test-backend
 
+  integration-postgres:
+    container_name: infinitequest-integration-postgres
+    image: pgvector/pgvector:0.8.5-pg18-trixie
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Run scripts/ensure-test-database.mjs first}
+      POSTGRES_USER: ${POSTGRES_USER:?Run scripts/ensure-test-database.mjs first}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run scripts/ensure-test-database.mjs first}
+    ports:
+      - "127.0.0.1:${TEST_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - infinitequest-integration-postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: "no"
+
 volumes:
   infinitequest-test-postgres:
   infinitequest-test-assets:
+  infinitequest-integration-postgres-data:
 
 networks:
   infinitequest-test-backend:
