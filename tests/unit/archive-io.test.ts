@@ -9,6 +9,7 @@ import {
   readdir,
   rename,
   rm,
+  stat,
   symlink,
   unlink,
   writeFile
@@ -27,6 +28,7 @@ import {
   rehydratePersistedStagedArchive,
   removeArchivePath,
   stageArchiveUpload,
+  supportsSecureGeneratedArchiveStaging,
   writeArchiveArtifact,
   type ArchiveArtifactEntry,
   type ArchiveLimits,
@@ -377,6 +379,16 @@ describe("archive runtime configuration", () => {
   });
 });
 
+describe("secure generated archive staging capability", () => {
+  it.each([
+    ["linux", true],
+    ["win32", false],
+    ["darwin", false]
+  ] as const)("reports %s support as %s", (platform, expected) => {
+    expect(supportsSecureGeneratedArchiveStaging(platform)).toBe(expected);
+  });
+});
+
 describe("staged archive uploads", () => {
   it("rejects a substituted staging directory before creating generated archive assets", async () => {
     const root = await temporaryRoot();
@@ -408,8 +420,13 @@ describe("staged archive uploads", () => {
     vi.spyOn(process, "platform", "get").mockReturnValue("win32");
     const root = await temporaryRoot();
 
-    await expectArchiveError(createArchiveStagingDirectory(root, "campaign-export-"), "archive-entry-unsafe");
-    expect(await readdir(join(root, "staging"))).toEqual([]);
+    const error = await expectArchiveError(
+      createArchiveStagingDirectory(root, "campaign-export-"),
+      "archive-entry-unsafe"
+    );
+
+    expect(error.message).toBe("This platform cannot safely stage generated archive assets.");
+    await expect(stat(join(root, "staging"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("enforces the compressed-byte limit and removes the partial staging file", async () => {

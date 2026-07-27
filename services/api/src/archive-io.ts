@@ -45,6 +45,12 @@ const EOCD_MINIMUM_BYTES = 22;
 const EOCD_MAXIMUM_COMMENT_BYTES = 65_535;
 const EOCD_TAIL_BYTES = EOCD_MINIMUM_BYTES + EOCD_MAXIMUM_COMMENT_BYTES;
 
+export function supportsSecureGeneratedArchiveStaging(
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  return platform === "linux";
+}
+
 export type ArchiveLimits = RuntimeArchiveLimits;
 
 export type StagedArchive = {
@@ -372,18 +378,18 @@ export async function createArchiveStagingDirectory(
   if (!/^[a-z0-9-]+$/i.test(prefix)) {
     throw archiveError("archive-entry-unsafe", "Archive staging requires a safe directory prefix.");
   }
+  if (!supportsSecureGeneratedArchiveStaging()) {
+    throw archiveError(
+      "archive-entry-unsafe",
+      "This platform cannot safely stage generated archive assets."
+    );
+  }
   const { root, directory, stable } = await prepareRootDirectory(archiveRoot, "staging");
   let directoryName: string | undefined;
   let childStable: StableDirectory | undefined;
   let cleaned = false;
   try {
     await assertDirectoryStable(stable);
-    if (!stable.anchor) {
-      throw archiveError(
-        "archive-entry-unsafe",
-        "This platform cannot safely stage generated archive assets."
-      );
-    }
     const createdPath = await mkdtemp(stableChildPath(stable, prefix));
     directoryName = basename(createdPath);
     const absolutePath = resolve(directory, directoryName);
