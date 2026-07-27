@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, extname, resolve, sep } from "node:path";
 import sharp from "sharp";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
@@ -11,7 +11,7 @@ const ALLOWED_IMAGE_TYPES = new Map([
   ["image/webp", ".webp"],
   ["image/gif", ".gif"]
 ]);
-const MAX_IMPORTED_IMAGE_BYTES = 25 * 1024 * 1024;
+export const MAX_IMPORTED_IMAGE_BYTES = 25 * 1024 * 1024;
 
 function matchesImageSignature(bytes: Buffer, mimeType: string): boolean {
   if (mimeType === "image/png") return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
@@ -30,6 +30,39 @@ export type StoredAsset = {
   publicUrl: string;
   contentHash: string;
 };
+
+export function originalStoragePath(contentHash: string, extension: string): string {
+  return `${contentHash.slice(0, 2)}/${contentHash}${extension}`;
+}
+
+export function originalAssetAdvisoryLockKey(_ownerUserId: string, storagePath: string): string {
+  return `infinitequest:asset-original:${storagePath}`;
+}
+
+export async function lockOriginalAsset(client: DatabaseClient, ownerUserId: string, storagePath: string): Promise<void> {
+  await client.query(
+    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+    [originalAssetAdvisoryLockKey(ownerUserId, storagePath)]
+  );
+}
+
+export async function lockOriginalImages(
+  client: DatabaseClient,
+  ownerUserId: string,
+  images: Iterable<{ bytes: Buffer; mimeType: string }> | AsyncIterable<{ bytes: Buffer; mimeType: string }>
+): Promise<void> {
+  const paths = new Set<string>();
+  for await (const image of images) {
+    paths.add(originalStoragePath(
+      sha256(image.bytes.toString("base64")),
+      imageExtensionForMimeType(image.mimeType)
+    ));
+    const verified = await verifyOriginalImage(image.bytes, image.mimeType);
+    if (verified.thumbnail) paths.add(originalStoragePath(verified.thumbnail.contentHash, ".webp"));
+  }
+  const sortedPaths = [...paths].sort();
+  for (const storagePath of sortedPaths) await lockOriginalAsset(client, ownerUserId, storagePath);
+}
 
 export type AssetLibraryItem = {
   id: string;
@@ -84,7 +117,7 @@ type GenerationContext = {
   generationParameters: Record<string, unknown>;
 };
 
-type VerifiedImage = {
+export type VerifiedImage = {
   width: number;
   height: number;
   format: string;
@@ -117,6 +150,23 @@ async function verifyImage(bytes: Buffer): Promise<VerifiedImage> {
   };
 }
 
+export function imageExtensionForMimeType(mimeType: string): string {
+  const extension = ALLOWED_IMAGE_TYPES.get(mimeType.toLowerCase());
+  if (!extension) throw new Error(`Image type '${mimeType}' is not supported.`);
+  return extension;
+}
+
+export async function verifyOriginalImage(bytes: Buffer, mimeType: string): Promise<VerifiedImage> {
+  const normalizedMimeType = mimeType.toLowerCase();
+  imageExtensionForMimeType(normalizedMimeType);
+  if (!bytes.length) throw new Error("Imported image data was empty.");
+  if (bytes.length > MAX_IMPORTED_IMAGE_BYTES) throw new Error("Imported image exceeded the 25 MB per-image limit.");
+  if (!matchesImageSignature(bytes, normalizedMimeType)) {
+    throw new Error(`Image bytes did not match declared type '${normalizedMimeType}'.`);
+  }
+  return verifyImage(bytes);
+}
+
 export async function runAssetMetadataBackfill(
   pool: DatabasePool,
   store: FilesystemAssetStore,
@@ -130,7 +180,17 @@ export async function runAssetMetadataBackfill(
   }>(
     `SELECT id, owner_user_id, storage_driver, storage_path
        FROM assets
-      WHERE (pixel_width IS NULL OR pixel_height IS NULL)
+      WHERE (
+        pixel_width IS NULL
+        OR pixel_height IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM asset_derivatives derivatives
+           WHERE derivatives.owner_user_id = assets.owner_user_id
+             AND derivatives.source_asset_id = assets.id
+             AND derivatives.derivative_kind = 'thumbnail'
+             AND derivatives.transform_version = 1
+        )
+      )
         AND NOT (technical_metadata ? 'backfillError')
       ORDER BY created_at ASC, id ASC LIMIT $1`,
     [Math.max(1, Math.min(50, limit))]
@@ -152,7 +212,9 @@ export async function runAssetMetadataBackfill(
             JSON.stringify({ format: verified.format, pages: verified.pages, orientation: verified.orientation, backfilledAt: new Date().toISOString() })]
         );
         if (verified.thumbnail) {
-          const path = await writeContentAddressed(store, verified.thumbnail.contentHash, ".webp", verified.thumbnail.bytes);
+          const path = originalStoragePath(verified.thumbnail.contentHash, ".webp");
+          await lockOriginalAsset(client, asset.owner_user_id, path);
+          const written = await writeContentAddressed(store, verified.thumbnail.contentHash, ".webp", verified.thumbnail.bytes);
           await client.query(
             `INSERT INTO asset_derivatives (
                owner_user_id, source_asset_id, derivative_kind, transform_version, pixel_width, pixel_height,
@@ -160,8 +222,8 @@ export async function runAssetMetadataBackfill(
              ) VALUES ($1,$2,'thumbnail',1,$3,$4,'filesystem',$5,'image/webp',$6,$7)
              ON CONFLICT (owner_user_id, source_asset_id, derivative_kind, transform_version, pixel_width, pixel_height)
              DO NOTHING`,
-            [asset.owner_user_id, asset.id, verified.thumbnail.width, verified.thumbnail.height,
-              path, verified.thumbnail.bytes.length, verified.thumbnail.contentHash]
+             [asset.owner_user_id, asset.id, verified.thumbnail.width, verified.thumbnail.height,
+               written.relativePath, verified.thumbnail.bytes.length, verified.thumbnail.contentHash]
           );
         }
       });
@@ -191,7 +253,7 @@ async function withAssetBackfillTransaction<T>(pool: DatabasePool, work: (client
   }
 }
 
-function parseDataImage(value: string): { mimeType: string; bytes: Buffer; extension: string } | null {
+export function parseDataImage(value: string): { mimeType: string; bytes: Buffer; extension: string } | null {
   const match = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\r\n]+)$/i.exec(value.trim());
   if (!match?.[1] || !match[2]) return null;
   const mimeType = match[1].toLowerCase();
@@ -203,21 +265,33 @@ function parseDataImage(value: string): { mimeType: string; bytes: Buffer; exten
   return { mimeType, bytes, extension };
 }
 
-async function writeContentAddressed(store: FilesystemAssetStore, contentHash: string, extension: string, bytes: Buffer): Promise<string> {
-  const relativePath = `${contentHash.slice(0, 2)}/${contentHash}${extension}`;
+async function writeContentAddressed(
+  store: FilesystemAssetStore,
+  contentHash: string,
+  extension: string,
+  bytes: Buffer
+): Promise<{ relativePath: string; created: boolean }> {
+  const relativePath = originalStoragePath(contentHash, extension);
   const finalPath = resolve(store.root, relativePath);
   const rootPrefix = `${resolve(store.root)}${sep}`;
   if (!finalPath.startsWith(rootPrefix)) throw new Error("Refusing to write an asset outside the configured storage root.");
   await mkdir(dirname(finalPath), { recursive: true });
   const temporaryPath = `${finalPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await writeFile(temporaryPath, bytes, { flag: "wx", mode: 0o640 });
+  let created = false;
   try {
-    await rename(temporaryPath, finalPath);
+    await link(temporaryPath, finalPath);
+    created = true;
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     const existing = await readFile(finalPath).catch(() => null);
     if (!existing || !existing.equals(bytes)) throw error;
+  } finally {
+    await unlink(temporaryPath).catch((cleanupError: unknown) => {
+      if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") throw cleanupError;
+    });
   }
-  return relativePath.replaceAll("\\", "/");
+  return { relativePath: relativePath.replaceAll("\\", "/"), created };
 }
 
 export function detectMimeType(bytes: Buffer): string {
@@ -263,7 +337,7 @@ export async function persistTurnImage(
   mimeType: string,
   options?: { generationContext?: GenerationContext; attachReference?: boolean }
 ): Promise<StoredAsset> {
-  return persistImage(client, store, ownerUserId, bytes, mimeType, { campaignId, turnId }, options);
+  return persistImage(client, store, ownerUserId, bytes, mimeType, { campaignId, turnId }, { ...options, createThumbnail: true });
 }
 
 export async function persistWorldCover(
@@ -274,7 +348,27 @@ export async function persistWorldCover(
   mimeType: string,
   options?: { generationContext?: GenerationContext }
 ): Promise<StoredAsset> {
-  return persistImage(client, store, ownerUserId, bytes, mimeType, undefined, options);
+  return persistImage(client, store, ownerUserId, bytes, mimeType, undefined, { ...options, createThumbnail: true });
+}
+
+export async function persistOriginalImage(
+  client: DatabaseClient,
+  store: FilesystemAssetStore,
+  ownerUserId: string,
+  input: {
+    bytes: Buffer;
+    mimeType: string;
+    sourceAssetId?: string;
+    provenance?: { campaignId: string | null; turnId: string | null };
+    createThumbnail?: boolean;
+    onOriginalCreated?: (storagePath: string) => void | Promise<void>;
+  }
+): Promise<StoredAsset> {
+  return persistImage(client, store, ownerUserId, input.bytes, input.mimeType, input.provenance, {
+    createThumbnail: input.createThumbnail ?? true,
+    attachReference: false,
+    ...(input.onOriginalCreated ? { onOriginalCreated: input.onOriginalCreated } : {})
+  });
 }
 
 async function persistImage(
@@ -284,16 +378,21 @@ async function persistImage(
   bytes: Buffer,
   mimeType: string,
   provenance?: { campaignId: string | null; turnId: string | null },
-  options?: { generationContext?: GenerationContext; attachReference?: boolean }
+  options?: {
+    generationContext?: GenerationContext;
+    attachReference?: boolean;
+    createThumbnail?: boolean;
+    onOriginalCreated?: (storagePath: string) => void | Promise<void>;
+  }
 ): Promise<StoredAsset> {
-  const extension = ALLOWED_IMAGE_TYPES.get(mimeType);
-  if (!extension) throw new Error(`Generated image type '${mimeType}' is not supported.`);
-  if (!bytes.length) throw new Error("Generated image data was empty.");
-  if (bytes.length > MAX_IMPORTED_IMAGE_BYTES) throw new Error("Generated image exceeded the 25 MB per-image limit.");
-  if (!matchesImageSignature(bytes, mimeType)) throw new Error(`Image bytes did not match declared type '${mimeType}'.`);
-  const verified = await verifyImage(bytes);
+  const extension = imageExtensionForMimeType(mimeType);
+  const verified = await verifyOriginalImage(bytes, mimeType);
   const contentHash = sha256(bytes.toString("base64"));
-  const storagePath = await writeContentAddressed(store, contentHash, extension, bytes);
+  const storagePath = originalStoragePath(contentHash, extension);
+  await lockOriginalAsset(client, ownerUserId, storagePath);
+  const original = await writeContentAddressed(store, contentHash, extension, bytes);
+  const publishedStoragePath = original.relativePath;
+  if (original.created) await options?.onOriginalCreated?.(publishedStoragePath);
   const assetResult = await client.query<{ id: string }>(
     `INSERT INTO assets (
        owner_user_id, campaign_id, turn_id, content_hash, storage_driver, storage_path, mime_type, byte_length,
@@ -304,12 +403,11 @@ async function persistImage(
                    pixel_height = COALESCE(assets.pixel_height, EXCLUDED.pixel_height),
                    technical_metadata = CASE WHEN assets.technical_metadata = '{}'::jsonb THEN EXCLUDED.technical_metadata ELSE assets.technical_metadata END
      RETURNING id`,
-    [ownerUserId, provenance?.campaignId ?? null, provenance?.turnId ?? null, contentHash, storagePath, mimeType, bytes.length,
+     [ownerUserId, provenance?.campaignId ?? null, provenance?.turnId ?? null, contentHash, publishedStoragePath, mimeType, bytes.length,
       verified.width, verified.height, JSON.stringify({ format: verified.format, pages: verified.pages, orientation: verified.orientation })]
   );
   const assetId = assetResult.rows[0]?.id;
   if (!assetId) throw new Error("Could not persist imported image metadata.");
-
   await client.query(
     `INSERT INTO asset_library_entries (
        asset_id, owner_user_id, created_by_user_id, title, origin, reuse_scope, review_status, automatic_reuse_enabled
@@ -322,8 +420,11 @@ async function persistImage(
       provenance?.campaignId ? "campaign" : "private"
     ]
   );
-  if (verified.thumbnail) {
-    const thumbnailPath = await writeContentAddressed(store, verified.thumbnail.contentHash, ".webp", verified.thumbnail.bytes);
+
+  if (options?.createThumbnail !== false && verified.thumbnail) {
+    const thumbnailPath = originalStoragePath(verified.thumbnail.contentHash, ".webp");
+    await lockOriginalAsset(client, ownerUserId, thumbnailPath);
+    const writtenThumbnail = await writeContentAddressed(store, verified.thumbnail.contentHash, ".webp", verified.thumbnail.bytes);
     await client.query(
       `INSERT INTO asset_derivatives (
          owner_user_id, source_asset_id, derivative_kind, transform_version, pixel_width, pixel_height,
@@ -331,7 +432,7 @@ async function persistImage(
        ) VALUES ($1,$2,'thumbnail',1,$3,$4,'filesystem',$5,'image/webp',$6,$7)
        ON CONFLICT (owner_user_id, source_asset_id, derivative_kind, transform_version, pixel_width, pixel_height)
        DO UPDATE SET storage_path = EXCLUDED.storage_path, byte_length = EXCLUDED.byte_length, content_hash = EXCLUDED.content_hash`,
-      [ownerUserId, assetId, verified.thumbnail.width, verified.thumbnail.height, thumbnailPath,
+      [ownerUserId, assetId, verified.thumbnail.width, verified.thumbnail.height, writtenThumbnail.relativePath,
         verified.thumbnail.bytes.length, verified.thumbnail.contentHash]
     );
   }

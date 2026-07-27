@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { z } from "zod";
 import { buildServer } from "../../services/api/src/server.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
@@ -28,6 +30,27 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
     webRoot: resolve("apps/web/public"),
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve("local-data/assets"),
+    archiveStorageRoot: resolve("local-data/archives"),
+    archivePreviewTtlSeconds: 1_800,
+    systemArchiveArtifactTtlSeconds: 86_400,
+    campaignArchiveLimits: {
+      maxCompressedBytes: 2_147_483_648,
+      maxUncompressedBytes: 21_474_836_480,
+      maxEntries: 100_000,
+      maxExpansionRatio: 100,
+      maxManifestBytes: 5_242_880,
+      maxJsonEntryBytes: 1_073_741_824,
+      maxOriginalImageBytes: 26_214_400
+    },
+    systemArchiveLimits: {
+      maxCompressedBytes: 53_687_091_200,
+      maxUncompressedBytes: 214_748_364_800,
+      maxEntries: 1_000_000,
+      maxExpansionRatio: 100,
+      maxManifestBytes: 5_242_880,
+      maxJsonEntryBytes: 1_073_741_824,
+      maxOriginalImageBytes: 26_214_400
+    },
     credentialEncryptionKey: "",
     security: {
       corsAllowedOrigins: [],
@@ -45,6 +68,29 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
       trustProxyHops: 0
     },
     ...overrides
+  };
+}
+
+function multipartArchiveUpload(file: Buffer, destination: Record<string, unknown>) {
+  const boundary = "----infinitequest-archive-error";
+  return {
+    contentType: `multipart/form-data; boundary=${boundary}`,
+    payload: Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="broken.zip"\r\nContent-Type: application/zip\r\n\r\n`, "utf8"),
+      file,
+      Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="destination"\r\n\r\n${JSON.stringify(destination)}\r\n--${boundary}--\r\n`, "utf8")
+    ])
+  };
+}
+
+function multipartFieldUpload(fieldName: string, value: string) {
+  const boundary = "----infinitequest-archive-field-limit";
+  return {
+    contentType: `multipart/form-data; boundary=${boundary}`,
+    payload: Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${fieldName}"\r\n\r\n${value}\r\n--${boundary}--\r\n`,
+      "utf8"
+    )
   };
 }
 
@@ -106,8 +152,7 @@ describe("API server security and CORS headers", () => {
       });
       expect(response.statusCode).toBe(403);
       expect(response.json()).toMatchObject({
-        error: "OriginNotAllowedError",
-        code: "ORIGIN_NOT_ALLOWED"
+        error: "ORIGIN_NOT_ALLOWED"
       });
     }
     await app.close();
@@ -122,7 +167,7 @@ describe("API server security and CORS headers", () => {
       payload: {}
     });
     expect(response.statusCode).toBe(403);
-    expect(response.json()).toMatchObject({ code: "ORIGIN_NOT_ALLOWED" });
+    expect(response.json()).toMatchObject({ error: "ORIGIN_NOT_ALLOWED" });
     await app.close();
   });
 
@@ -135,8 +180,7 @@ describe("API server security and CORS headers", () => {
     });
     expect(response.statusCode).toBe(403);
     expect(response.json()).toMatchObject({
-      error: "OriginNotAllowedError",
-      code: "ORIGIN_NOT_ALLOWED"
+      error: "ORIGIN_NOT_ALLOWED"
     });
     await app.close();
   });
@@ -191,6 +235,102 @@ describe("API server security and CORS headers", () => {
     expect(body.message).toContain("The provided ID is not a valid UUID.");
 
     await app.close();
+  });
+
+  it("exposes typed safe archive errors without filesystem paths or raw payloads", async () => {
+    const root = await mkdtemp(join(tmpdir(), "infinitequest-archive-error-"));
+    const upload = multipartArchiveUpload(Buffer.from("not a zip archive", "utf8"), { kind: "embedded" });
+    const app = await buildServer({
+      config: makeConfig({ assetStorageRoot: join(root, "assets"), archiveStorageRoot: join(root, "archives") }),
+      pool: mockPool
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/imports/campaign-archive/preview",
+        headers: { "content-type": upload.contentType },
+        payload: upload.payload
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ error: "archive-format-unrecognized", details: {} });
+      expect(response.payload).not.toContain(root);
+      expect(response.payload).not.toContain("not a zip archive");
+    } finally {
+      await app.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("caps Campaign Archive multipart uploads at the API import body limit", async () => {
+    const baseConfig = makeConfig();
+    const root = await mkdtemp(join(tmpdir(), "infinitequest-archive-limit-"));
+    const config = makeConfig({
+      assetStorageRoot: join(root, "assets"),
+      archiveStorageRoot: join(root, "archives"),
+      campaignArchiveLimits: {
+        ...baseConfig.campaignArchiveLimits,
+        maxCompressedBytes: 4_096,
+        maxJsonEntryBytes: 4_096
+      },
+      security: {
+        ...baseConfig.security,
+        apiDefaultBodyLimitBytes: 4_096,
+        apiImportBodyLimitBytes: 256
+      }
+    });
+    const upload = multipartArchiveUpload(Buffer.alloc(512, 0x61), { kind: "embedded" });
+    const app = await buildServer({ config, pool: mockPool });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/imports/campaign-archive/preview",
+        headers: { "content-type": upload.contentType },
+        payload: upload.payload
+      });
+
+      expect(response.statusCode).toBe(413);
+    } finally {
+      await app.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("caps legacy import override fields at the API import body limit", async () => {
+    const baseConfig = makeConfig();
+    const root = await mkdtemp(join(tmpdir(), "infinitequest-legacy-import-limit-"));
+    const config = makeConfig({
+      assetStorageRoot: join(root, "assets"),
+      archiveStorageRoot: join(root, "archives"),
+      campaignArchiveLimits: {
+        ...baseConfig.campaignArchiveLimits,
+        maxCompressedBytes: 4_096,
+        maxJsonEntryBytes: 4_096
+      },
+      security: {
+        ...baseConfig.security,
+        apiDefaultBodyLimitBytes: 4_096,
+        apiImportBodyLimitBytes: 256
+      }
+    });
+    const upload = multipartFieldUpload(
+      "requestOverrides",
+      JSON.stringify({ sourceName: "oversized", padding: "x".repeat(512) })
+    );
+    const app = await buildServer({ config, pool: mockPool });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/imports/legacy-story",
+        headers: { "content-type": upload.contentType },
+        payload: upload.payload
+      });
+
+      expect(response.statusCode).toBe(413);
+    } finally {
+      await app.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("exposes only safe structured generated-world validation details", async () => {

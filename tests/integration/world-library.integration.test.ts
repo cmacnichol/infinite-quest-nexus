@@ -816,6 +816,10 @@ integration("World Library and campaign version integration", () => {
         promptProtocolVersion: "synthetic-protocol"
       })]
     );
+    await pool.query(
+      "UPDATE campaigns SET active_turn_number = 1 WHERE id = $1 AND owner_user_id = $2",
+      [campaign.id, ownerUserId]
+    );
     const exported = await exportCampaign(pool, campaign.id, null);
     const serialized = JSON.stringify(exported);
     expect(exported).toMatchObject({

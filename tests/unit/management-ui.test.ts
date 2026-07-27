@@ -638,4 +638,116 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("expectedConfigUpdatedAt");
     expect(managementScript).toContain("Only turns without an active segment set will be queued.");
   });
+
+  it("previews and commits one standalone Campaign Archive without uploading it twice", () => {
+    expect(managementHtml).toContain('id="importSourceType"');
+    expect(managementHtml).toContain('<option value="auto">Detect world, campaign, or Infinite Worlds content</option>');
+    expect(managementHtml).toContain('<option value="campaign_archive">Campaign backup (.zip)</option>');
+    expect(managementHtml).toContain("one standalone campaign with its attached world and original images");
+    expect(managementHtml).toContain("provider profiles and credentials remain excluded");
+    expect(managementHtml).toContain('role="status" aria-live="polite"');
+    expect(managementScript).toContain('"/api/v1/imports/campaign-archive/preview"');
+    expect(managementScript).toContain('"/api/v1/imports/campaign-archive"');
+    expect(managementScript).toContain('previewToken: selectedImport.previewToken');
+    expect(managementScript).toContain('accepted turns');
+    expect(managementScript).toContain('Chronicle memories');
+    expect(managementScript).toContain('original images');
+    expect(managementScript).toContain('selected character');
+    expect(managementScript).toContain('Provider profiles and credentials are excluded');
+    expect(managementScript).toContain('archive-preview-stale');
+    expect(managementScript).toContain('function previewImportSource(');
+    expect(managementScript).toContain('function validateClipboardImport(');
+    const archiveCommitStart = managementScript.indexOf('else if (selectedImport.kind === "campaign_archive")');
+    const archiveCommitEnd = managementScript.indexOf("\n    } else {", archiveCommitStart);
+    const campaignArchiveCommit = managementScript.slice(archiveCommitStart, archiveCommitEnd);
+    expect(campaignArchiveCommit).toContain("previewToken: selectedImport.previewToken");
+    expect(campaignArchiveCommit).not.toContain("FormData");
+  });
+
+  it("keeps Campaign Archive previews current, recoverable, and safely refreshable", () => {
+    expect(managementHtml).toContain('id="previewCampaignArchiveAgain"');
+    expect(managementHtml).toContain("Preview again");
+    const archivePreviewStart = managementScript.indexOf("async function previewCampaignArchive(file)");
+    const archivePreviewEnd = managementScript.indexOf("\nasync function refreshCampaignArchivePreview()", archivePreviewStart);
+    const archivePreview = managementScript.slice(archivePreviewStart, archivePreviewEnd);
+    expect(archivePreview).toContain("campaignArchivePreviewSequence");
+    expect(archivePreview).toContain("campaignArchivePreviewAbortController");
+    expect(archivePreview).toContain("signal: abortController.signal");
+    expect(archivePreview).toContain("isCampaignArchivePreviewCurrent(previewSequence, file, destination)");
+    expect(managementScript).toContain("sameCampaignArchiveDestination(destination, campaignArchiveDestination())");
+    const sourceChangeStart = managementScript.indexOf('elements.importSourceType.addEventListener("change"');
+    const sourceChangeEnd = managementScript.indexOf("\nelements.infiniteWorldsKind", sourceChangeStart);
+    const sourceChange = managementScript.slice(sourceChangeStart, sourceChangeEnd);
+    expect(sourceChange).toContain("const sourceRefreshSequence = beginCampaignImportRefresh();");
+    expect(sourceChange.indexOf("beginCampaignImportRefresh()")).toBeLessThan(sourceChange.indexOf("previewImportFile(selectedFile)"));
+    expect(managementScript).toContain("Campaign Archive imports require a .zip backup.");
+    expect(managementScript).toContain("clearCampaignArchivePreview();\n      throw new Error");
+    expect(managementScript).toContain("handleCampaignImportRefreshError");
+    const destinationChangeStart = managementScript.indexOf('elements.campaignImportDestination.addEventListener("change"');
+    const destinationChangeEnd = managementScript.indexOf("\nelements.importBrowserState", destinationChangeStart);
+    const destinationChange = managementScript.slice(destinationChangeStart, destinationChangeEnd);
+    expect(destinationChange).toContain("refresh.catch((error) => handleCampaignImportRefreshError(error, refreshSequence))");
+    expect(managementScript).toContain("elements.previewCampaignArchiveAgain.addEventListener");
+    expect(managementScript).toContain("Your file is still selected; preview it again before importing.");
+  });
+
+  it("routes auto-mode .story archive rejection to portable refresh while retrying recognized archives", () => {
+    const filePreviewStart = managementScript.indexOf("async function previewImportFile(file)");
+    const filePreviewEnd = managementScript.indexOf("\nfunction clipboardGuidance", filePreviewStart);
+    const filePreview = managementScript.slice(filePreviewStart, filePreviewEnd);
+    expect(filePreview).toContain('campaignArchiveErrorCode(error) === "archive-format-unrecognized"');
+    expect(filePreview).toContain('await previewImportSource(file.name, sourceText, elements.infiniteWorldsKind.value, "file");');
+    const archiveFileStart = managementScript.indexOf("function campaignArchiveFileSelected()");
+    const archiveFileEnd = managementScript.indexOf("\nfunction clearCampaignArchivePreview()", archiveFileStart);
+    const archiveFilePredicate = managementScript.slice(archiveFileStart, archiveFileEnd);
+    expect(archiveFilePredicate).toContain('selectedImportSource?.sourceKind === "campaign_archive"');
+    expect(archiveFilePredicate).not.toContain('endsWith(".story")');
+    const importRefreshStart = managementScript.indexOf("async function refreshCampaignImportPreview()");
+    const importRefreshEnd = managementScript.indexOf("\nfunction campaignImportRequest", importRefreshStart);
+    const importRefresh = managementScript.slice(importRefreshStart, importRefreshEnd);
+    expect(importRefresh).toContain("if (campaignArchiveImportActive())");
+    expect(importRefresh).toContain("await refreshPortableCampaignPreview();");
+    const retryStart = managementScript.indexOf('elements.previewCampaignArchiveAgain.addEventListener("click"');
+    const retryEnd = managementScript.indexOf("\nelements.worldSearch", retryStart);
+    const retryHandler = managementScript.slice(retryStart, retryEnd);
+    expect(retryHandler).toContain("campaignArchiveFileSelected()");
+    expect(retryHandler).toContain("previewCampaignArchive(selectedFile)");
+  });
+
+  it("preserves archive errors named by the API helper for fallback and stale recovery", () => {
+    const errorCodeSource = managementScript.match(/function campaignArchiveErrorCode\(error\) \{[\s\S]*?\n\}/)?.[0];
+    expect(errorCodeSource).toBeTruthy();
+    const campaignArchiveErrorCode = new Function(`${errorCodeSource}; return campaignArchiveErrorCode;`)();
+    expect(campaignArchiveErrorCode({ name: "archive-format-unrecognized" })).toBe("archive-format-unrecognized");
+    expect(campaignArchiveErrorCode({ name: "archive-preview-stale" })).toBe("archive-preview-stale");
+
+    const archivePreviewStart = managementScript.indexOf("async function previewCampaignArchive(file)");
+    const archivePreviewEnd = managementScript.indexOf("\nasync function refreshCampaignArchivePreview()", archivePreviewStart);
+    const archivePreview = managementScript.slice(archivePreviewStart, archivePreviewEnd);
+    expect(archivePreview).toContain('error.name = payload.error || "ApiError"');
+
+    const filePreviewStart = managementScript.indexOf("async function previewImportFile(file)");
+    const filePreviewEnd = managementScript.indexOf("\nfunction clipboardGuidance", filePreviewStart);
+    const filePreview = managementScript.slice(filePreviewStart, filePreviewEnd);
+    expect(filePreview).toContain('campaignArchiveErrorCode(error) === "archive-format-unrecognized"');
+    expect(filePreview).toContain('await previewImportSource(file.name, sourceText, elements.infiniteWorldsKind.value, "file");');
+
+    const importStoryStart = managementScript.indexOf("async function importStory()");
+    const importStoryEnd = managementScript.indexOf("\nasync function importBrowserState", importStoryStart);
+    const importStory = managementScript.slice(importStoryStart, importStoryEnd);
+    expect(importStory).toContain('campaignArchiveErrorCode(error) === "archive-preview-stale"');
+    expect(importStory).toContain('elements.previewCampaignArchiveAgain.classList.remove("hidden")');
+  });
+
+  it("clears a successfully consumed Campaign Archive import", () => {
+    const importStoryStart = managementScript.indexOf("async function importStory()");
+    const importStoryEnd = managementScript.indexOf("\nasync function importBrowserState", importStoryStart);
+    const importStory = managementScript.slice(importStoryStart, importStoryEnd);
+    const archiveCommitStart = importStory.indexOf('else if (selectedImport.kind === "campaign_archive")');
+    const archiveCommitEnd = importStory.indexOf("\n    } else {", archiveCommitStart);
+    const campaignArchiveCommit = importStory.slice(archiveCommitStart, archiveCommitEnd);
+    expect(campaignArchiveCommit).toContain("selectedImport = null;");
+    expect(campaignArchiveCommit).toContain('elements.previewCampaignArchiveAgain.classList.add("hidden")');
+    expect(campaignArchiveCommit).toContain("elements.importStory.disabled = true;");
+  });
 });

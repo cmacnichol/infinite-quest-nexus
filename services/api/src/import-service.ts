@@ -1,6 +1,9 @@
+import { randomUUID } from "node:crypto";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
+import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { LegacyStory, LegacyTurn, StoryImportRequest, StoryImportResult } from "../../../packages/contracts/src/imports.js";
+import { campaignArchiveCommitRequestSchema, campaignArchiveDestinationSchema, canonicalArchiveJson, type CampaignArchiveCommitRequest, type CampaignArchiveDestination } from "../../../packages/contracts/src/archives.js";
 import { storyLengthProfileFromUnknown } from "../../../packages/contracts/src/story-settings.js";
 import { buildTurnFictionMemory, formatLegacySummary, turnNarration } from "../../../packages/story-engine/src/chronicle.js";
 import { estimateTokens, removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
@@ -13,8 +16,153 @@ import {
   WORLD_CONTENT_SCHEMA_VERSION,
   type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
-import { persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, detectMimeType, type FilesystemAssetStore } from "./asset-service.js";
+import { cleanupUnreferencedCreatedPaths, persistArchiveAssets, restoreAssetBindings, type ArchiveIdMap } from "./asset-archive-service.js";
+import { detectMimeType, lockOriginalImages, parseDataImage, persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
 import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
+import { ArchiveError, rehydratePersistedStagedArchive } from "./archive-io.js";
+import { campaignArchiveApplicationVersion, cleanupArchivePreviewStaging, cleanupExpiredArchivePreviews, decodeCampaignArchive, portableWorldContentHash, type ArchiveCleanupLogger, type DecodedCampaignArchive } from "./campaign-archive-service.js";
+
+export type CampaignArchiveImportResult = {
+  importId: string;
+  worldId: string;
+  worldVersionId: string;
+  campaignId: string;
+  duplicate: boolean;
+  stats: { turnCount: number; memoryCount: number; summaryCount: number; assetCount: number; assetBytes: number };
+};
+
+export type LegacyAssetSource = {
+  assetIds(): Iterable<string>;
+  read(assetId: string): Promise<Buffer | undefined>;
+};
+
+type LegacyAssets = Map<string, Buffer> | LegacyAssetSource;
+
+function legacyAssetIds(assets: LegacyAssets): Iterable<string> {
+  return assets instanceof Map ? assets.keys() : assets.assetIds();
+}
+
+async function readLegacyAsset(assets: LegacyAssets, assetId: string): Promise<Buffer | undefined> {
+  return assets instanceof Map ? assets.get(assetId) : assets.read(assetId);
+}
+
+function legacyAssetLookupKeys(value: string): string[] {
+  const uuid = value.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/)?.[0];
+  const name = value.split("/").pop()?.split("?")[0];
+  const stem = name?.split(".")[0];
+  return [...new Set([uuid, name, stem].filter((key): key is string => Boolean(key)))];
+}
+
+async function readLegacyAssetUrl(assets: LegacyAssets, value: string): Promise<Buffer | undefined> {
+  for (const key of legacyAssetLookupKeys(value)) {
+    const bytes = await readLegacyAsset(assets, key);
+    if (bytes) return bytes;
+  }
+  return undefined;
+}
+
+type ArchivePreviewRow = {
+  id: string;
+  owner_user_id: string;
+  content_fingerprint: string;
+  destination_hash: string;
+  application_version: string;
+  staged_archive_path: string;
+  source_name: string;
+  preview: Record<string, unknown>;
+  status: "previewed" | "superseded" | "consumed" | "expired" | "failed";
+  expires_at: Date | string;
+};
+
+const archiveIdKinds = ["world", "worldVersion", "campaign", "turn", "memory", "summary", "profileEdit", "stateEdit", "migration", "transfer", "illustrationSet", "illustrationSegment", "asset", "generationContext"] as const;
+
+function newArchiveIdMap(): ArchiveIdMap {
+  return new Map(archiveIdKinds.map((kind) => [kind, new Map<string, string>()]));
+}
+
+function mapArchiveId(idMap: ArchiveIdMap, kind: typeof archiveIdKinds[number], source: unknown): string {
+  if (typeof source !== "string" || !source.trim()) throw new ArchiveError("archive-json-invalid", `The archive contains an unknown ${kind} reference.`);
+  const existing = idMap.get(kind)?.get(source);
+  if (existing) return existing;
+  const destination = randomUUID();
+  idMap.get(kind)!.set(source, destination);
+  return destination;
+}
+
+function requireMapped(idMap: ArchiveIdMap, kind: typeof archiveIdKinds[number], source: unknown): string {
+  if (typeof source !== "string" || !idMap.get(kind)?.has(source)) throw new ArchiveError("archive-json-invalid", `The archive contains an unknown ${kind} reference.`);
+  return idMap.get(kind)!.get(source)!;
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function jsonValue(value: unknown, fallback: unknown): string {
+  return JSON.stringify(value === undefined ? fallback : value);
+}
+
+function importedDate(value: unknown): string | null {
+  if (typeof value !== "string" || !value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? null : date.toISOString();
+}
+
+function rewriteAssetPointers(value: unknown, assetIds: Map<string, string>): unknown {
+  if (Array.isArray(value)) return value.map((item) => rewriteAssetPointers(item, assetIds));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [key, rewriteAssetPointers(child, assetIds)]));
+  if (typeof value !== "string") return value;
+  return value.replaceAll(/\/api\/v1\/assets\/([0-9a-f-]{36})/gi, (_whole, sourceId: string) => {
+    const destination = assetIds.get(sourceId) ?? assetIds.get(sourceId.toLowerCase());
+    if (!destination) {
+      throw new ArchiveError("archive-asset-missing", "A portable asset pointer is not declared by the validated archive.", 400, { sourceAssetId: sourceId });
+    }
+    return `/api/v1/assets/${destination}`;
+  });
+}
+
+function campaignArchiveSourceHash(fingerprint: string, destination: CampaignArchiveDestination): string {
+  return sha256(`campaign-archive-v1\0${fingerprint}\0${sha256(canonicalArchiveJson(campaignArchiveDestinationSchema.parse(destination)))}`);
+}
+
+function cleanupErrorCode(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code.length <= 80 ? code : "cleanup-failed";
+}
+
+function safeCleanupWarning(logger: ArchiveCleanupLogger | undefined, error: unknown, message: string): void {
+  try {
+    logger?.warn({ errorCode: cleanupErrorCode(error) }, message);
+  } catch {
+    // Cleanup reporting must never change an already committed lifecycle result.
+  }
+}
+
+async function markArchivePreviewFailed(
+  pool: DatabasePool,
+  previewId: string,
+  tokenHash: string,
+  stagedPath: string,
+  error: unknown,
+  logger?: ArchiveCleanupLogger
+): Promise<string | null> {
+  try {
+    const updated = await pool.query<{ id: string }>(
+      `UPDATE archive_previews
+          SET status='failed',result=$2::jsonb,updated_at=now()
+        WHERE id=$1 AND token_hash=$3 AND staged_archive_path=$4 AND status IN ('previewed','expired')
+      RETURNING id`,
+      [previewId, JSON.stringify({
+        error: error instanceof ArchiveError ? error.code : "archive-import-failed",
+        stagingCleanupPending: true
+      }), tokenHash, stagedPath]
+    );
+    return updated.rows[0]?.id ?? null;
+  } catch (updateError) {
+    safeCleanupWarning(logger, updateError, "campaign archive preview failure status update failed");
+    return null;
+  }
+}
 
 type ImportRow = {
   id: string;
@@ -389,7 +537,7 @@ export async function importLegacyStory(
   pool: DatabasePool,
   request: StoryImportRequest,
   assetStore?: FilesystemAssetStore,
-  assetBuffers?: Map<string, Buffer>
+  legacyAssets?: LegacyAssets
 ): Promise<StoryImportResult> {
   const sourceHash = importSourceHash(request);
 
@@ -516,17 +664,33 @@ export async function importLegacyStory(
 
 
 
-    if (assetStore && assetBuffers && !existingTarget) {
+    if (assetStore) {
+      async function* originalImages() {
+        if (legacyAssets) {
+          for (const assetId of legacyAssetIds(legacyAssets)) {
+            const bytes = await readLegacyAsset(legacyAssets, assetId);
+            if (bytes) yield { bytes, mimeType: detectMimeType(bytes) };
+          }
+        }
+        for (const turn of request.story.turns) {
+          if (!turn.imageUrl?.startsWith("data:image/")) continue;
+          const parsed = parseDataImage(turn.imageUrl);
+          if (parsed) yield { bytes: parsed.bytes, mimeType: parsed.mimeType };
+        }
+      }
+      await lockOriginalImages(client, ownerUserId, originalImages());
+    }
+
+    if (assetStore && legacyAssets && !existingTarget) {
       const coverUrl = typeof request.story.world.coverImageUrl === 'string' ? request.story.world.coverImageUrl : '';
-      const match = coverUrl.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
-      const id = match ? match[0] : coverUrl.split('/').pop()?.split('.')[0];
-      if (id && assetBuffers.has(id)) {
-        await withOptionalImportStep(client, async () => {
-          const buffer = assetBuffers.get(id)!;
-          const mimeType = detectMimeType(buffer);
-          const asset = await persistWorldCover(client, assetStore, ownerUserId, buffer, mimeType);
-          await client.query("UPDATE worlds SET cover_asset_id = $2 WHERE id = $1", [worldId, asset.id]);
-        });
+      if (coverUrl) {
+        const bytes = await readLegacyAssetUrl(legacyAssets, coverUrl);
+        if (bytes) {
+          await withOptionalImportStep(client, async () => {
+            const asset = await persistWorldCover(client, assetStore, ownerUserId, bytes, detectMimeType(bytes));
+            await client.query("UPDATE worlds SET cover_asset_id = $2 WHERE id = $1", [worldId, asset.id]);
+          });
+        }
       }
     }
 
@@ -616,16 +780,11 @@ export async function importLegacyStory(
           importedAssetId = asset.id;
           await client.query("UPDATE turns SET image_url = $2 WHERE id = $1", [turnId, asset.publicUrl]);
         }
-      } else if (assetStore && assetBuffers && turn.imageUrl) {
-        const match = turn.imageUrl.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
-        const name = turn.imageUrl.split('/').pop()?.split('?')[0];
-        const id = match ? match[0] : (name?.split('.')[0] || null);
-        const key = (id && assetBuffers.has(id)) ? id : (name && assetBuffers.has(name)) ? name : null;
-        if (key) {
+      } else if (assetStore && legacyAssets && turn.imageUrl) {
+        const bytes = await readLegacyAssetUrl(legacyAssets, turn.imageUrl);
+        if (bytes) {
           const persisted = await withOptionalImportStep(client, async () => {
-            const buffer = assetBuffers.get(key)!;
-            const mimeType = detectMimeType(buffer);
-            const asset = await persistTurnImage(client, assetStore, ownerUserId, campaignId, turnId, buffer, mimeType);
+            const asset = await persistTurnImage(client, assetStore, ownerUserId, campaignId, turnId, bytes, detectMimeType(bytes));
             if (asset) {
               await client.query("UPDATE turns SET image_url = $2 WHERE id = $1", [turnId, asset.publicUrl]);
             }
@@ -771,4 +930,333 @@ export async function previewLegacyStoryImport(pool: DatabasePool, request: Stor
     },
     warnings
   };
+}
+
+async function resolveImportedWorld(
+  client: DatabaseClient,
+  ownerUserId: string,
+  archive: DecodedCampaignArchive,
+  preview: Record<string, unknown>,
+  idMap: ArchiveIdMap
+): Promise<{ worldId: string; worldVersionId: string; created: boolean }> {
+  const destination = objectValue(preview.destination);
+  const operation = destination.operation;
+  let worldId = "";
+  let worldVersionId = "";
+  if (destination.kind === "existing_world_version" || operation === "attach_existing_world_version" || operation === "reuse_world_version") {
+    worldId = String(destination.worldId || "");
+    worldVersionId = String(destination.worldVersionId || "");
+    const selected = await client.query<{ world_id: string; content: WorldContent }>(
+      "SELECT world_id,content FROM world_versions WHERE id=$1 AND owner_user_id=$2", [worldVersionId, ownerUserId]
+    );
+    if (!selected.rowCount || selected.rows[0]!.world_id !== worldId) throw new ArchiveError("archive-destination-not-empty", "The destination world version is no longer available.");
+    const destinationHash = portableWorldContentHash(selected.rows[0]!.content);
+    if (destinationHash !== archive.world.canonicalHash) {
+      throw new ArchiveError("archive-world-mismatch", "The destination world version no longer matches the archive world.");
+    }
+  } else {
+    const createdWorld = await client.query<{ id: string }>(
+      "INSERT INTO worlds (owner_user_id,title) VALUES ($1,$2) RETURNING id", [ownerUserId, String(objectValue(archive.world.content).world && objectValue(objectValue(archive.world.content).world).title || "Imported world")]
+    );
+    worldId = createdWorld.rows[0]!.id;
+    const createdVersion = await client.query<{ id: string }>(
+      `INSERT INTO world_versions (world_id,owner_user_id,version_number,content,source_hash)
+       VALUES ($1,$2,1,$3::jsonb,$4) RETURNING id`,
+      [worldId, ownerUserId, JSON.stringify(archive.world.content), archive.world.canonicalHash]
+    );
+    worldVersionId = createdVersion.rows[0]!.id;
+  }
+  idMap.get("world")!.set(archive.world.sourceWorldId, worldId);
+  idMap.get("worldVersion")!.set(archive.world.sourceWorldVersionId, worldVersionId);
+  return { worldId, worldVersionId, created: operation !== "reuse_world_version" && operation !== "attach_existing_world_version" };
+}
+
+async function insertImportedRecords(
+  client: DatabaseClient,
+  ownerUserId: string,
+  archive: DecodedCampaignArchive,
+  idMap: ArchiveIdMap,
+  worldVersionId: string
+): Promise<{ campaignId: string; turnCount: number; memoryCount: number; summaryCount: number }> {
+  const sourceCampaign = objectValue(archive.campaign.campaign);
+  const sourceCampaignId = sourceCampaign.sourceCampaignId || archive.inspected.manifest.campaignId;
+  const campaignId = mapArchiveId(idMap, "campaign", sourceCampaignId);
+  const turns = Array.isArray(archive.campaign.turns) ? archive.campaign.turns : [];
+  for (const turn of turns) mapArchiveId(idMap, "turn", objectValue(turn).id);
+  const records = archive.campaign.archiveRecords;
+  const profileEdits = Array.isArray(records.characterProfileEdits) ? records.characterProfileEdits : [];
+  const stateEdits = Array.isArray(records.stateEdits) ? records.stateEdits : [];
+  const migrations = Array.isArray(records.worldMigrations) ? records.worldMigrations : [];
+  const illustrationSets = Array.isArray(records.illustrationSets) ? records.illustrationSets : [];
+  const illustrationSegments = Array.isArray(records.illustrationSegments) ? records.illustrationSegments : [];
+  for (const row of profileEdits) mapArchiveId(idMap, "profileEdit", objectValue(row).id);
+  for (const row of stateEdits) mapArchiveId(idMap, "stateEdit", objectValue(row).id);
+  for (const row of migrations) mapArchiveId(idMap, "migration", objectValue(row).id);
+  for (const row of illustrationSets) mapArchiveId(idMap, "illustrationSet", objectValue(row).id);
+  for (const row of illustrationSegments) mapArchiveId(idMap, "illustrationSegment", objectValue(row).id);
+  for (const memory of archive.chronicle.memories) mapArchiveId(idMap, "memory", objectValue(memory).id);
+  for (const summary of archive.chronicle.summaries) mapArchiveId(idMap, "summary", objectValue(summary).id);
+
+  const settings = objectValue(archive.campaign.settings);
+  const title = String(sourceCampaign.title || "Imported campaign");
+  const activeTurnNumber = Math.max(0, ...turns.map((turn) => Number(objectValue(turn).turnNumber || 0)));
+  const campaign = await client.query<{ id: string }>(
+    `INSERT INTO campaigns (
+       id,owner_user_id,world_version_id,title,active_turn_number,legacy_settings,story_length_profile,
+       turn_control_style,selected_character_id,character_snapshot,character_profile,character_profile_revision
+     ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11::jsonb,$12) RETURNING id`,
+    [campaignId, ownerUserId, worldVersionId, title, activeTurnNumber,
+      jsonValue(settings, {}), String(settings.storyLength || "standard"), String(settings.turnControlStyle || "flexible_action"),
+      sourceCampaign.selectedCharacterId || null,
+      sourceCampaign.characterSnapshot == null ? null : jsonValue(sourceCampaign.characterSnapshot, null),
+      sourceCampaign.characterProfile == null ? null : jsonValue(sourceCampaign.characterProfile, null),
+      Number(sourceCampaign.characterProfileRevision || 0)]
+  );
+  if (!campaign.rowCount) throw new Error("Could not create imported campaign.");
+
+  const state = objectValue(archive.campaign);
+  await client.query(
+    `INSERT INTO campaign_state (
+       campaign_id,owner_user_id,scratchpad_private,trackers,default_triggers,event_triggers,pending_event_triggers,
+       rpg_stats,import_provenance,initial_state_snapshot,revision
+     ) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,$11)`,
+    [campaignId, ownerUserId, String(archive.campaign.scratchpad || ""), jsonValue(archive.campaign.trackers, []), jsonValue(archive.campaign.defaultTriggers, []), jsonValue(archive.campaign.eventTriggers, []), jsonValue(archive.campaign.pendingEventTriggers, []), jsonValue(archive.campaign.rpgStats, []), jsonValue({ world: archive.campaign.worldImportProvenance ?? null, story: archive.campaign.storyImportProvenance ?? null }, {}), jsonValue({ scratchpad: "", trackers: archive.campaign.baseTrackersAtStart ?? [] }, {}), Number(sourceCampaign.stateRevision || 0)]
+  );
+
+  for (const turnValue of turns) {
+    const turn = objectValue(turnValue);
+    const sourceTurnId = turn.id;
+    await client.query(
+      `INSERT INTO turns (
+         id,owner_user_id,campaign_id,turn_number,source_turn_id,action,input_mode,input_mode_source,narration,
+         choices,custom_action_suggestion,image_prompt,image_url,mechanics_private,state_snapshot_private,model_metadata,import_metadata,accepted_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,'',$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17)`,
+      [requireMapped(idMap, "turn", sourceTurnId), ownerUserId, campaignId, Number(turn.turnNumber || 0), String(sourceTurnId), String(turn.action || ""), String(turn.inputMode || "action"), String(turn.inputModeSource || "explicit"), String(turn.narration || turn.story || turn.text || ""), jsonValue(turn.choices, []), String(turn.customActionSuggestion || ""), String(turn.imagePrompt || ""), turn.roll ?? null, jsonValue(turn.worldStateSnapshot, {}), jsonValue(turn.llmModelInfo, {}), jsonValue(turn.importedFrom, {}), importedDate(turn.createdAt) ?? new Date().toISOString()]
+    );
+  }
+  for (const rowValue of profileEdits) {
+    const row = objectValue(rowValue);
+    await client.query(
+      `INSERT INTO campaign_character_profile_edits (id,owner_user_id,campaign_id,revision,previous_profile,next_profile,edit_source)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7)`,
+      [requireMapped(idMap, "profileEdit", row.id), ownerUserId, campaignId, Number(row.revision || 1), jsonValue(row.previous_profile, null), jsonValue(row.next_profile, {}), ["world_version_seed", "manual", "ai_organized", "imported", "branch", "transfer"].includes(String(row.edit_source)) ? String(row.edit_source) : "imported"]
+    );
+  }
+  for (const rowValue of stateEdits) {
+    const row = objectValue(rowValue);
+    await client.query(
+      `INSERT INTO campaign_state_edits (id,owner_user_id,campaign_id,effective_turn_number,revision,state_snapshot_private,changed_fields)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)`,
+      [requireMapped(idMap, "stateEdit", row.id), ownerUserId, campaignId, Number(row.effective_turn_number || 0), Number(row.revision || 1), jsonValue(row.state_snapshot_private, {}), jsonValue(row.changed_fields, [])]
+    );
+  }
+  for (const rowValue of migrations) {
+    const row = objectValue(rowValue);
+    const fromVersion = typeof row.from_world_version_id === "string"
+      ? idMap.get("worldVersion")!.get(row.from_world_version_id)
+      : undefined;
+    const toVersion = typeof row.to_world_version_id === "string"
+      ? idMap.get("worldVersion")!.get(row.to_world_version_id)
+      : undefined;
+    if (!fromVersion || !toVersion) continue;
+    if (fromVersion === toVersion) continue;
+    await client.query(
+      `INSERT INTO campaign_world_migrations (id,owner_user_id,campaign_id,from_world_version_id,to_world_version_id,note,created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [requireMapped(idMap, "migration", row.id), ownerUserId, campaignId, fromVersion, toVersion, String(row.note || ""), importedDate(row.created_at) ?? new Date().toISOString()]
+    );
+  }
+  for (const memoryValue of archive.chronicle.memories) {
+    const memory = objectValue(memoryValue);
+    await client.query(
+      `INSERT INTO chronicle_memories (id,owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate,importance,entities,entity_ids,metadata,created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14)`,
+      [requireMapped(idMap, "memory", memory.id), ownerUserId, campaignId, requireMapped(idMap, "worldVersion", memory.world_version_id || archive.world.sourceWorldVersionId), memory.turn_id ? requireMapped(idMap, "turn", memory.turn_id) : null, String(memory.memory_kind || "legacy_summary"), Number(memory.ordinal || 0), String(memory.content || ""), Number(memory.token_estimate || 0), Number(memory.importance ?? 0.5), memory.entities || [], memory.entity_ids || [], jsonValue(memory.metadata, {}), importedDate(memory.created_at) ?? new Date().toISOString()]
+    );
+  }
+  for (const summaryValue of archive.chronicle.summaries) {
+    const summary = objectValue(summaryValue);
+    await client.query(
+      `INSERT INTO summary_checkpoints (id,owner_user_id,campaign_id,through_turn,summary_kind,content,token_estimate,created_at)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`,
+      [requireMapped(idMap, "summary", summary.id), ownerUserId, campaignId, Number(summary.through_turn || 0), String(summary.summary_kind || "campaign_summary"), jsonValue(summary.content, {}), Number(summary.token_estimate || 0), importedDate(summary.created_at) ?? new Date().toISOString()]
+    );
+  }
+
+  const config = records.illustrationConfig && typeof records.illustrationConfig === "object" ? records.illustrationConfig as Record<string, unknown> : null;
+  if (config) {
+    await client.query(
+      `INSERT INTO campaign_illustration_configs (campaign_id,owner_user_id,enabled,model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,images_per_segment,segment_prompt_mode)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [campaignId, ownerUserId, Boolean(config.enabled), String(config.model || ""), String(config.size || "1024x1024"), String(config.aspect_ratio || "1:1"), ["auto", "low", "medium", "high"].includes(String(config.quality)) ? String(config.quality) : "auto", ["png", "jpeg", "webp"].includes(String(config.output_format)) ? String(config.output_format) : "png", Number(config.max_attempts || 3), Number(config.segment_word_count || 500), Number(config.images_per_segment || 1), ["direct", "ai_refined"].includes(String(config.segment_prompt_mode)) ? String(config.segment_prompt_mode) : "direct"]
+    );
+  }
+  for (const setValue of illustrationSets) {
+    const set = objectValue(setValue);
+    await client.query(
+      `INSERT INTO turn_illustration_sets (id,owner_user_id,campaign_id,turn_id,source_text_hash,segment_word_count,images_per_segment,prompt_mode,status,is_active,character_visual_reference,created_at,completed_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [requireMapped(idMap, "illustrationSet", set.id), ownerUserId, campaignId, requireMapped(idMap, "turn", set.turn_id), String(set.source_text_hash || ""), Number(set.segment_word_count || 100), Number(set.images_per_segment || 1), ["direct", "ai_refined", "legacy"].includes(String(set.prompt_mode)) ? String(set.prompt_mode) : "direct", ["queued", "refining", "generating", "completed", "partial", "failed", "superseded"].includes(String(set.status)) ? String(set.status) : "failed", Boolean(set.is_active), String(set.character_visual_reference || ""), importedDate(set.created_at) ?? new Date().toISOString(), importedDate(set.completed_at)]
+    );
+  }
+  for (const segmentValue of illustrationSegments) {
+    const segment = objectValue(segmentValue);
+    await client.query(
+      `INSERT INTO turn_illustration_segments (id,owner_user_id,illustration_set_id,campaign_id,turn_id,ordinal,start_offset,end_offset,start_word,end_word,source_text,source_text_hash,direct_prompt,resolved_prompt,prompt_source,status,created_at,updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$17)`,
+      [requireMapped(idMap, "illustrationSegment", segment.id), ownerUserId, requireMapped(idMap, "illustrationSet", segment.illustration_set_id), campaignId, requireMapped(idMap, "turn", segment.turn_id), Number(segment.ordinal || 0), Number(segment.start_offset || 0), Number(segment.end_offset || 0), Number(segment.start_word || 0), Number(segment.end_word || 0), String(segment.source_text || ""), String(segment.source_text_hash || ""), String(segment.direct_prompt || ""), String(segment.resolved_prompt || ""), ["direct", "ai_refined", "ai_fallback", "legacy"].includes(String(segment.prompt_source)) ? String(segment.prompt_source) : "legacy", ["queued", "refining", "generating", "completed", "partial", "recoverable", "failed", "superseded"].includes(String(segment.status)) ? String(segment.status) : "failed", importedDate(segment.created_at) ?? new Date().toISOString()]
+    );
+  }
+  const costs = Array.isArray(records.costs) ? records.costs : [];
+  for (const costValue of costs) {
+    const cost = objectValue(costValue);
+    await client.query(
+      `INSERT INTO provider_cost_events (owner_user_id,campaign_id,turn_id,local_call_id,provider_type,category,operation,requested_model,resolved_model,amount,currency,usage_metadata,occurred_at,created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$13)`,
+      [ownerUserId, campaignId, cost.turn_id ? requireMapped(idMap, "turn", cost.turn_id) : null, randomUUID(),
+        String(cost.provider_type || "openai_compatible"), String(cost.category || "image"), String(cost.operation || "illustration"),
+        String(cost.requested_model || ""), String(cost.resolved_model || ""), String(cost.amount || "0"), String(cost.currency || "USD"),
+        jsonValue(cost.usage_metadata, {}), importedDate(cost.occurred_at) ?? new Date().toISOString()]
+    );
+  }
+  return { campaignId, turnCount: turns.length, memoryCount: archive.chronicle.memories.length, summaryCount: archive.chronicle.summaries.length };
+}
+
+export async function importCampaignArchive(
+  pool: DatabasePool,
+  config: RuntimeConfig,
+  assetStore: FilesystemAssetStore,
+  request: CampaignArchiveCommitRequest,
+  logger?: ArchiveCleanupLogger
+): Promise<CampaignArchiveImportResult> {
+  await cleanupExpiredArchivePreviews(pool, config, new Date(), logger);
+  const parsed = campaignArchiveCommitRequestSchema.parse(request);
+  const ownerUserId = await initialOwnerId(pool);
+  const tokenHash = sha256(parsed.previewToken);
+  const client = await pool.connect();
+  let clientReleased = false;
+  const releaseClient = () => {
+    if (clientReleased) return;
+    client.release();
+    clientReleased = true;
+  };
+  let failedPreviewId = "";
+  let failedPreviewPath = "";
+  let createdPaths: string[] = [];
+  try {
+    await client.query("BEGIN");
+    const previewResult = await client.query<ArchivePreviewRow>(
+      `SELECT id,owner_user_id,content_fingerprint,destination_hash,application_version,staged_archive_path,source_name,preview,status,expires_at
+         FROM archive_previews WHERE owner_user_id=$1 AND token_hash=$2 FOR UPDATE`, [ownerUserId, tokenHash]
+    );
+    const preview = previewResult.rows[0];
+    if (!preview) throw new ArchiveError("archive-preview-stale", "The archive preview token is invalid or expired.");
+    if (preview.status !== "previewed" || new Date(preview.expires_at).getTime() <= Date.now() || preview.application_version !== campaignArchiveApplicationVersion()) {
+      if (preview.status === "previewed" && new Date(preview.expires_at).getTime() <= Date.now()) await client.query("UPDATE archive_previews SET status='expired',updated_at=now() WHERE id=$1", [preview.id]);
+      throw new ArchiveError("archive-preview-stale", "The archive preview is no longer valid.");
+    }
+    const expectedDestinationHash = sha256(`campaign-archive-destination-v1\0${canonicalArchiveJson(parsed.destination)}`);
+    if (expectedDestinationHash !== preview.destination_hash) throw new ArchiveError("archive-preview-stale", "The destination changed after preview.");
+    const compressedBytes = preview.preview.stagedCompressedBytes;
+    if (typeof compressedBytes !== "number" || !Number.isSafeInteger(compressedBytes) || compressedBytes < 0) {
+      throw new ArchiveError("archive-preview-stale", "The archive preview is missing its staged compressed size.");
+    }
+    failedPreviewId = preview.id;
+    failedPreviewPath = preview.staged_archive_path;
+    const staged = await rehydratePersistedStagedArchive({
+      archiveRoot: config.archiveStorageRoot,
+      relativePath: preview.staged_archive_path,
+      compressedBytes
+    });
+    const archive = await decodeCampaignArchive(staged, config.campaignArchiveLimits);
+    if (archive.contentFingerprint !== preview.content_fingerprint) throw new ArchiveError("archive-preview-stale", "The staged archive changed after preview.");
+    const sourceHash = campaignArchiveSourceHash(archive.contentFingerprint, parsed.destination);
+    const prior = await client.query<ImportRow>("SELECT id,world_id,world_version_id,campaign_id,status,stats FROM imports WHERE owner_user_id=$1 AND source_hash=$2 FOR UPDATE", [ownerUserId, sourceHash]);
+    if (prior.rows[0]?.status === "completed") {
+      const row = prior.rows[0];
+      await client.query(
+        `UPDATE archive_previews
+            SET status='consumed',consumed_at=now(),result=$2::jsonb,updated_at=now()
+          WHERE id=$1 AND token_hash=$3 AND staged_archive_path=$4 AND status='previewed'`,
+        [preview.id, JSON.stringify({ importId: row.id, duplicate: true, stagingCleanupPending: true }), tokenHash, preview.staged_archive_path]
+      );
+      await client.query("COMMIT");
+      releaseClient();
+      await cleanupArchivePreviewStaging(pool, config, preview.id, logger)
+        .catch((error) => safeCleanupWarning(logger, error, "consumed campaign archive preview staging cleanup failed"));
+      return { importId: row.id, worldId: row.world_id!, worldVersionId: row.world_version_id!, campaignId: row.campaign_id!, duplicate: true, stats: row.stats as unknown as CampaignArchiveImportResult["stats"] };
+    }
+    if (prior.rows[0]) throw new ArchiveError("archive-import-conflict", "An import with this archive is already in progress.");
+    const importRecord = await client.query<{ id: string }>(
+      `INSERT INTO imports (owner_user_id,source_type,source_name,source_hash,status) VALUES ($1,'campaign_archive',$2,$3,'processing') RETURNING id`, [ownerUserId, preview.source_name, sourceHash]
+    );
+    const importId = importRecord.rows[0]!.id;
+    const idMap = newArchiveIdMap();
+    const destinationPreview = objectValue(preview.preview).destination;
+    const world = await resolveImportedWorld(client, ownerUserId, archive, objectValue({ destination: destinationPreview }), idMap);
+    const inserted = await insertImportedRecords(client, ownerUserId, archive, idMap, world.worldVersionId);
+    const persisted = await persistArchiveAssets(client, assetStore, ownerUserId, archive.assets, idMap);
+    createdPaths = persisted.createdPaths;
+    const insertedGenerationContexts = new Set<string>();
+    for (const record of archive.inspected.manifest.assets) {
+      for (const binding of record.bindings) {
+        if (binding.role !== "generation_context") continue;
+        const contextId = mapArchiveId(idMap, "generationContext", binding.sourceContextId);
+        if (insertedGenerationContexts.has(contextId)) continue;
+        insertedGenerationContexts.add(contextId);
+        const assetId = persisted.assetIds.get(record.sourceAssetId);
+        if (!assetId) throw new ArchiveError("archive-json-invalid", "The archive generation context asset mapping is missing.");
+        await client.query(
+          `INSERT INTO asset_generation_contexts (id,owner_user_id,asset_id,created_by_user_id,world_id,world_version_id,campaign_id,turn_id,target_type,variant_index)
+           VALUES ($1,$2,$3,$2,$4,$5,$6,$7,'other',0)`,
+          [contextId, ownerUserId, assetId, binding.worldId === null ? null : requireMapped(idMap, "world", binding.worldId), binding.worldVersionId === null ? null : requireMapped(idMap, "worldVersion", binding.worldVersionId), binding.campaignId === null ? null : requireMapped(idMap, "campaign", binding.campaignId), binding.turnId === null ? null : requireMapped(idMap, "turn", binding.turnId)]
+        );
+      }
+    }
+    if (world.created) {
+      await client.query("UPDATE world_versions SET content=$2::jsonb WHERE id=$1 AND owner_user_id=$3", [world.worldVersionId, JSON.stringify(rewriteAssetPointers(archive.world.content, persisted.assetIds)), ownerUserId]);
+    }
+    await restoreAssetBindings(client, ownerUserId, archive.inspected.manifest.assets, persisted.assetIds, idMap);
+    const stats: CampaignArchiveImportResult["stats"] = { turnCount: inserted.turnCount, memoryCount: inserted.memoryCount, summaryCount: inserted.summaryCount, assetCount: archive.assets.originals.length, assetBytes: archive.assets.originals.reduce((sum, asset) => sum + asset.byteLength, 0) };
+    await client.query("UPDATE imports SET status='completed',world_id=$2,world_version_id=$3,campaign_id=$4,stats=$5::jsonb,completed_at=now() WHERE id=$1", [importId, world.worldId, world.worldVersionId, inserted.campaignId, JSON.stringify(stats)]);
+    await client.query(
+      `UPDATE archive_previews
+          SET status='consumed',consumed_at=now(),result=$2::jsonb,updated_at=now()
+        WHERE id=$1 AND token_hash=$3 AND staged_archive_path=$4 AND status='previewed'`,
+      [preview.id, JSON.stringify({
+        importId,
+        worldId: world.worldId,
+        worldVersionId: world.worldVersionId,
+        campaignId: inserted.campaignId,
+        stats,
+        stagingCleanupPending: true
+      }), tokenHash, preview.staged_archive_path]
+    );
+    await client.query("COMMIT");
+    releaseClient();
+    await cleanupArchivePreviewStaging(pool, config, preview.id, logger)
+      .catch((error) => safeCleanupWarning(logger, error, "consumed campaign archive preview staging cleanup failed"));
+    return { importId, worldId: world.worldId, worldVersionId: world.worldVersionId, campaignId: inserted.campaignId, duplicate: false, stats };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    releaseClient();
+    const persistedFailure = error && typeof error === "object" && "createdPaths" in error
+      ? (error as { createdPaths?: unknown }).createdPaths
+      : undefined;
+    if (Array.isArray(persistedFailure)) createdPaths = [...new Set([...createdPaths, ...persistedFailure.filter((path): path is string => typeof path === "string")])];
+    if (createdPaths.length) {
+      await cleanupUnreferencedCreatedPaths(pool, assetStore, ownerUserId, createdPaths)
+        .catch((cleanupError) => safeCleanupWarning(logger, cleanupError, "failed campaign archive asset cleanup failed"));
+    }
+    if (failedPreviewId) {
+      const failedId = await markArchivePreviewFailed(pool, failedPreviewId, tokenHash, failedPreviewPath, error, logger);
+      if (failedId) {
+        await cleanupArchivePreviewStaging(pool, config, failedId, logger)
+          .catch((cleanupError) => safeCleanupWarning(logger, cleanupError, "failed campaign archive preview staging cleanup failed"));
+      }
+    }
+    throw error;
+  } finally {
+    releaseClient();
+  }
 }

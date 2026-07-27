@@ -21,6 +21,27 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
     webRoot: resolve("apps/web/public"),
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve("local-data/assets"),
+    archiveStorageRoot: resolve("local-data/archives"),
+    archivePreviewTtlSeconds: 1_800,
+    systemArchiveArtifactTtlSeconds: 86_400,
+    campaignArchiveLimits: {
+      maxCompressedBytes: 2_147_483_648,
+      maxUncompressedBytes: 21_474_836_480,
+      maxEntries: 100_000,
+      maxExpansionRatio: 100,
+      maxManifestBytes: 5_242_880,
+      maxJsonEntryBytes: 1_073_741_824,
+      maxOriginalImageBytes: 26_214_400
+    },
+    systemArchiveLimits: {
+      maxCompressedBytes: 53_687_091_200,
+      maxUncompressedBytes: 214_748_364_800,
+      maxEntries: 1_000_000,
+      maxExpansionRatio: 100,
+      maxManifestBytes: 5_242_880,
+      maxJsonEntryBytes: 1_073_741_824,
+      maxOriginalImageBytes: 26_214_400
+    },
     credentialEncryptionKey: "",
     security: {
       corsAllowedOrigins: [],

@@ -20,7 +20,7 @@ import {
   type ImageProviderResult,
   type TextProviderProfile
 } from "../../../packages/story-engine/src/index.js";
-import { persistTurnImage, persistWorldCover, type FilesystemAssetStore } from "./asset-service.js";
+import { lockOriginalImages, persistTurnImage, persistWorldCover, type FilesystemAssetStore } from "./asset-service.js";
 import { loadImageProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
 import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
@@ -594,6 +594,7 @@ async function completeImageJob(
   await withTransaction(pool, async (client) => {
     const lease = await client.query<{ lease_owner: string | null }>("SELECT lease_owner FROM image_jobs WHERE id = $1 FOR UPDATE", [job.id]);
     if (lease.rows[0]?.lease_owner !== workerId) throw Object.assign(new Error("Image job lease was lost before commit."), { code: "lease_lost" });
+    await lockOriginalImages(client, job.owner_user_id, downloaded);
     const assets = [];
     const rawRequestedVariantIndex = job.provider_request_metadata.targetVariantIndex;
     const requestedVariantIndex = Number(rawRequestedVariantIndex);

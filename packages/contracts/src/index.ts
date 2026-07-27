@@ -6,3 +6,4 @@ export * from "./world-library.js";
 export * from "./users.js";
 export * from "./campaign-transfer.js";
 export * from "./assets.js";
+export * from "./archives.js";
