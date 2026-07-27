@@ -21,6 +21,7 @@
 - Do not alter the existing API, database schema, or accepted turns.
 - Keep unrelated user changes in `.claude`, `.repowise`, `.vscode`, and `AGENTS.md` untouched.
 - Never report PostgreSQL integration behavior as runtime-verified when `TEST_DATABASE_URL` is absent.
+- Use `linkedom` version `0.18.13` only as a development dependency for executable DOM behavior tests.
 
 ---
 
@@ -220,36 +221,57 @@ git commit -m "Add campaign state editor model"
 ### Task 2: Editable Continuity Controls and Structured Fact Rendering
 
 **Files:**
+- Modify: `package.json`
+- Modify: `pnpm-lock.yaml`
 - Modify: `apps/web/public/story.html:298-312`
 - Modify: `apps/web/public/story.js:1-5, 1913-1964, 2179-2199, 2546-2565`
+- Modify: `apps/web/public/story-state-editor.js`
 - Modify: `apps/web/public/story.css`
 - Modify: `tests/unit/story-player-ui.test.ts`
+- Modify: `tests/unit/story-state-editor.test.ts`
 
 **Interfaces:**
 - Consumes: `canonicalFactContent()` from Task 1 and `state.runtimeState` loaded by `openEditState()`.
 - Produces:
-  - `renderEditableStateCollection(containerId, values, kind)`
-  - `addEditableStateRow(containerId, kind, value?)`
-  - `collectOpenThreadEditorValues(): string[]`
-  - `collectCanonicalFactEditorValues(): Array<{ id: string | null; content: string }>`
+  - `createEditableStateRow(document, kind, value): HTMLElement`
+  - `renderEditableStateCollection(document, container, values, kind): void`
+  - `addEditableStateRow(document, container, kind, value?): void`
+  - `collectOpenThreadEditorValues(container): string[]`
+  - `collectCanonicalFactEditorValues(container): Array<{ id: string | null; content: string }>`
 
-- [ ] **Step 1: Add failing dialog-structure assertions**
+- [ ] **Step 1: Install the DOM test dependency**
 
-Add a focused test to `tests/unit/story-player-ui.test.ts`:
+Run:
+
+```powershell
+$env:Path = 'C:\Program Files\nodejs;' + $env:Path
+pnpm add --save-dev --save-exact linkedom@0.18.13
+```
+
+Expected: `package.json` and `pnpm-lock.yaml` record exactly `linkedom` version `0.18.13`.
+
+- [ ] **Step 2: Add a failing semantic dialog-structure test**
+
+Import `parseHTML` from `linkedom` in `tests/unit/story-player-ui.test.ts`, parse the real Story Player document, and test its semantic controls:
 
 ```ts
 it("provides editable continuity controls while keeping mechanics read-only", () => {
-  expect(storyHtml).toContain('textarea id="editStateContinuitySummary"');
-  expect(storyHtml).toContain('id="btnAddOpenThread"');
-  expect(storyHtml).toContain('id="editStateOpenThreads"');
-  expect(storyHtml).toContain('id="btnAddCanonicalFact"');
-  expect(storyHtml).toContain('id="editStateCanonicalFacts"');
-  expect(storyHtml).not.toContain('id="editStateRpgStatsEditor"');
-  expect(storyHtml).toContain("Generated mechanics are static for this campaign.");
+  const { document } = parseHTML(storyHtml);
+  const dialog = document.querySelector("#editStateDialog");
+
+  expect(dialog?.querySelector("textarea#editStateContinuitySummary")).not.toBeNull();
+  expect(dialog?.querySelector("button#btnAddOpenThread")?.textContent).toContain("Add thread");
+  expect(dialog?.querySelector("#editStateOpenThreads")).not.toBeNull();
+  expect(dialog?.querySelector("button#btnAddCanonicalFact")?.textContent).toContain("Add fact");
+  expect(dialog?.querySelector("#editStateCanonicalFacts")).not.toBeNull();
+  expect(dialog?.querySelector("#editStateRpgStatsEditor")).toBeNull();
+  expect(dialog?.querySelector("#tab-mechanics")?.textContent).toContain(
+    "Generated mechanics are static for this campaign."
+  );
 });
 ```
 
-- [ ] **Step 2: Run the UI test and verify RED**
+- [ ] **Step 3: Run the UI test and verify RED**
 
 Run:
 
@@ -260,7 +282,7 @@ $env:Path = 'C:\Program Files\nodejs;' + $env:Path
 
 Expected: FAIL because the summary is a paragraph and collection Add buttons do not exist.
 
-- [ ] **Step 3: Replace read-only continuity markup with editors**
+- [ ] **Step 4: Replace read-only continuity markup with editors**
 
 In `apps/web/public/story.html`, replace the Current State cards with:
 
@@ -291,65 +313,59 @@ Change the Mechanics tab help text to:
 <p class="mini">Generated mechanics are static for this campaign and are shown for context.</p>
 ```
 
-- [ ] **Step 4: Run the UI test and verify GREEN**
+- [ ] **Step 5: Run the UI test and verify GREEN**
 
-Run the Step 2 command.
+Run the Step 3 command.
 
 Expected: PASS.
 
-- [ ] **Step 5: Add failing rendering and collection integration assertions**
+- [ ] **Step 6: Add failing executable editor behavior tests**
 
-Add to the same UI test file:
+Add imports for `parseHTML` and the planned DOM helpers to `tests/unit/story-state-editor.test.ts`, then add:
 
 ```ts
-it("hydrates editable state collections and renders canonical fact content", () => {
-  expect(storyScript).toContain('import { canonicalFactContent } from "./story-state-editor.js";');
-  expect(storyScript).toContain('function renderEditableStateCollection(containerId, values, kind)');
-  expect(storyScript).toContain('function collectOpenThreadEditorValues()');
-  expect(storyScript).toContain('function collectCanonicalFactEditorValues()');
-  expect(storyScript).toContain('canonicalFactContent(value)');
-  expect(storyScript).not.toContain('renderTextCollection("editStateCanonicalFacts"');
-  expect(storyScript).toContain('(runtime.canonicalFacts || []).map(canonicalFactContent)');
+it("renders, adds, removes, and collects editable continuity rows", () => {
+  const { document } = parseHTML('<div id="threads"></div><div id="facts"></div>');
+  const threads = document.querySelector("#threads");
+  const facts = document.querySelector("#facts");
+  if (!threads || !facts) throw new Error("Test containers are required.");
+
+  renderEditableStateCollection(document, threads, ["First thread"], "thread");
+  renderEditableStateCollection(document, facts, [{
+    id: "00000000-0000-4000-8000-000000000001",
+    content: "The lens is moon glass."
+  }], "fact");
+
+  expect(threads.querySelector("textarea")?.value).toBe("First thread");
+  expect(facts.querySelector("textarea")?.value).toBe("The lens is moon glass.");
+  expect(facts.querySelector(".state-editor-row")?.getAttribute("data-item-id"))
+    .toBe("00000000-0000-4000-8000-000000000001");
+
+  addEditableStateRow(document, threads, "thread", "Second thread");
+  expect(collectOpenThreadEditorValues(threads)).toEqual(["First thread", "Second thread"]);
+
+  facts.querySelector("button")?.click();
+  expect(collectCanonicalFactEditorValues(facts)).toEqual([]);
 });
 ```
 
-- [ ] **Step 6: Run the UI test and verify RED**
+- [ ] **Step 7: Run the editor test and verify RED**
 
-Run the Step 2 command.
+Run:
 
-Expected: FAIL because the editor-row functions and state-editor import do not exist.
-
-- [ ] **Step 7: Implement repeatable editor rows**
-
-In `apps/web/public/story.js`:
-
-1. Import the Task 1 display helper beside the routing import:
-
-```js
-import { canonicalFactContent } from "./story-state-editor.js";
+```powershell
+$env:Path = 'C:\Program Files\nodejs;' + $env:Path
+& '.\node_modules\.bin\vitest.CMD' run tests/unit/story-state-editor.test.ts
 ```
 
-2. Replace the read-only overview hydration with:
+Expected: FAIL because the DOM editor functions are not exported.
+
+- [ ] **Step 8: Implement repeatable editor rows in the focused module**
+
+Add the following exports to `apps/web/public/story-state-editor.js`:
 
 ```js
-const summary = $("editStateContinuitySummary");
-if (summary) summary.value = runtime.continuitySummary || "";
-renderEditableStateCollection("editStateOpenThreads", runtime.openThreads || [], "thread");
-renderEditableStateCollection("editStateCanonicalFacts", runtime.canonicalFacts || [], "fact");
-```
-
-3. Implement DOM helpers that:
-   - create one `.state-editor-row` containing a textarea and Remove button;
-   - set `row.dataset.itemId` to the canonical fact ID or an empty string;
-   - display `canonicalFactContent(value)` for fact rows;
-   - remove only the selected row;
-   - append a blank row from each Add button; and
-   - return raw textarea values for threads and `{ id, content }` values for facts.
-
-Use this implementation:
-
-```js
-function createEditableStateRow(kind, value) {
+export function createEditableStateRow(document, kind, value) {
   const row = document.createElement("div");
   row.className = "state-editor-row";
   if (kind === "fact") {
@@ -369,31 +385,30 @@ function createEditableStateRow(kind, value) {
   return row;
 }
 
-function addEditableStateRow(
-  containerId,
+export function addEditableStateRow(
+  document,
+  container,
   kind,
   value = kind === "fact" ? { id: null, content: "" } : ""
 ) {
-  const container = $(containerId);
-  if (container) container.appendChild(createEditableStateRow(kind, value));
+  if (container) container.appendChild(createEditableStateRow(document, kind, value));
 }
 
-function renderEditableStateCollection(containerId, values, kind) {
-  const container = $(containerId);
+export function renderEditableStateCollection(document, container, values, kind) {
   if (!container) return;
   container.replaceChildren();
   (Array.isArray(values) ? values : []).forEach(value => {
-    container.appendChild(createEditableStateRow(kind, value));
+    container.appendChild(createEditableStateRow(document, kind, value));
   });
 }
 
-function collectOpenThreadEditorValues() {
-  return [...document.querySelectorAll("#editStateOpenThreads .state-editor-row textarea")]
+export function collectOpenThreadEditorValues(container) {
+  return [...container.querySelectorAll(".state-editor-row textarea")]
     .map(editor => editor.value);
 }
 
-function collectCanonicalFactEditorValues() {
-  return [...document.querySelectorAll("#editStateCanonicalFacts .state-editor-row")]
+export function collectCanonicalFactEditorValues(container) {
+  return [...container.querySelectorAll(".state-editor-row")]
     .map(row => ({
       id: row.dataset.itemId || null,
       content: row.querySelector("textarea")?.value || ""
@@ -401,11 +416,23 @@ function collectCanonicalFactEditorValues() {
 }
 ```
 
-4. Bind `btnAddOpenThread` and `btnAddCanonicalFact` in the Edit State event-binding block.
+- [ ] **Step 9: Run the editor tests and verify GREEN**
 
+Run the Step 7 command.
+
+Expected: PASS.
+
+- [ ] **Step 10: Integrate the tested helpers with the Story Player**
+
+In `apps/web/public/story.js`:
+
+1. Import `addEditableStateRow`, `canonicalFactContent`, `collectCanonicalFactEditorValues`, `collectOpenThreadEditorValues`, and `renderEditableStateCollection` from `./story-state-editor.js`.
+2. Set the summary textarea's `.value` from `runtime.continuitySummary`.
+3. Hydrate the thread and fact containers with `renderEditableStateCollection(document, container, values, kind)`.
+4. Bind `btnAddOpenThread` and `btnAddCanonicalFact` with `addEditableStateRow(document, container, kind)`.
 5. In `inspectTurnState()`, pass `(runtime.canonicalFacts || []).map(canonicalFactContent)` to the existing read-only list renderer.
 
-- [ ] **Step 8: Add focused editor layout styles**
+- [ ] **Step 11: Add focused editor layout styles**
 
 In `apps/web/public/story.css`, add:
 
@@ -420,7 +447,7 @@ In `apps/web/public/story.css`, add:
 }
 ```
 
-- [ ] **Step 9: Run Task 1 and Task 2 tests and verify GREEN**
+- [ ] **Step 12: Run Task 1 and Task 2 tests and verify GREEN**
 
 Run:
 
@@ -431,10 +458,10 @@ $env:Path = 'C:\Program Files\nodejs;' + $env:Path
 
 Expected: PASS.
 
-- [ ] **Step 10: Commit Task 2**
+- [ ] **Step 13: Commit Task 2**
 
 ```powershell
-git add -- apps/web/public/story.html apps/web/public/story.js apps/web/public/story.css tests/unit/story-player-ui.test.ts
+git add -- package.json pnpm-lock.yaml apps/web/public/story-state-editor.js apps/web/public/story.html apps/web/public/story.js apps/web/public/story.css tests/unit/story-state-editor.test.ts tests/unit/story-player-ui.test.ts
 git commit -m "Make campaign continuity state editable"
 ```
 
@@ -444,70 +471,160 @@ git commit -m "Make campaign continuity state editable"
 
 **Files:**
 - Modify: `apps/web/public/story.js:2206-2228`
-- Modify: `tests/unit/story-player-ui.test.ts`
+- Modify: `apps/web/public/story-state-editor.js`
 - Test: `tests/unit/story-state-editor.test.ts`
 - Test: `tests/integration/campaign-state-corrections.integration.test.ts`
 
 **Interfaces:**
 - Consumes: `buildCampaignStateUpdate()` from Task 1 and all collection functions from Task 2.
-- Produces: A complete `PATCH /campaigns/:campaignId/state` request that matches `campaignRuntimeStateUpdateSchema`.
+- Produces: `submitCampaignState(request, campaignId, runtimeState, editorValues, onSaved)` and a complete `PATCH /campaigns/:campaignId/state` request that matches `campaignRuntimeStateUpdateSchema`.
 
-- [ ] **Step 1: Add a failing save-wiring assertion**
+- [ ] **Step 1: Add failing executable save behavior tests**
 
-Add to `tests/unit/story-player-ui.test.ts`:
+Add to `tests/unit/story-state-editor.test.ts`:
 
 ```ts
-it("submits a complete campaign state update from the editor", () => {
-  expect(storyScript).toContain('import { buildCampaignStateUpdate, canonicalFactContent } from "./story-state-editor.js";');
-  expect(storyScript).toContain("buildCampaignStateUpdate(state.runtimeState, {");
-  expect(storyScript).toContain('continuitySummary: $("editStateContinuitySummary")?.value || ""');
-  expect(storyScript).toContain("openThreads: collectOpenThreadEditorValues()");
-  expect(storyScript).toContain("canonicalFacts: collectCanonicalFactEditorValues()");
-  expect(storyScript).toContain("trackers: collectTrackerEditorValues()");
-  expect(storyScript).toContain("body: JSON.stringify(payload)");
+const completeRuntimeState = {
+  campaignId: "campaign-id",
+  activeTurnNumber: 4,
+  viewedTurnNumber: 4,
+  isCurrent: true,
+  revision: 7,
+  updatedAt: "2026-07-27T12:00:00.000Z",
+  continuitySummary: "Earlier summary.",
+  openThreads: ["Earlier thread."],
+  canonicalFacts: [],
+  scratchpad: "Earlier scratchpad.",
+  trackers: [],
+  rpgStats: [{ id: "resolve", name: "Resolve", value: 61, note: "" }],
+  eventTriggers: [],
+  pendingEventTriggers: []
+};
+
+const completeEditorValues = {
+  continuitySummary: "Corrected summary.",
+  openThreads: ["Find the keeper."],
+  canonicalFacts: [{
+    id: "00000000-0000-4000-8000-000000000001",
+    content: "The lens is moon glass."
+  }],
+  scratchpad: "Private continuity.",
+  trackers: [{ id: "trust", name: "Trust", value: "wary", rules: "" }]
+};
+
+const expectedCompletePayload = {
+  expectedTurnNumber: 4,
+  expectedRevision: 7,
+  ...completeEditorValues,
+  rpgStats: completeRuntimeState.rpgStats,
+  eventTriggers: completeRuntimeState.eventTriggers,
+  pendingEventTriggers: completeRuntimeState.pendingEventTriggers
+};
+
+it("submits the complete payload and applies the saved state only after success", async () => {
+  const requests: Array<{ path: string; options: { method: string; body: string } }> = [];
+  const savedStates: unknown[] = [];
+  const response = { ...completeRuntimeState, ...completeEditorValues, revision: 8 };
+  const request = async (path: string, options: { method: string; body: string }) => {
+    requests.push({ path, options });
+    return response;
+  };
+
+  await submitCampaignState(
+    request,
+    "campaign-id",
+    completeRuntimeState,
+    completeEditorValues,
+    value => savedStates.push(value)
+  );
+
+  expect(requests).toEqual([{
+    path: "/campaigns/campaign-id/state",
+    options: {
+      method: "PATCH",
+      body: JSON.stringify(expectedCompletePayload)
+    }
+  }]);
+  expect(savedStates).toEqual([response]);
+});
+
+it("does not apply or close state after a rejected save", async () => {
+  let applied = false;
+  const request = async () => {
+    throw new Error("Campaign state changed.");
+  };
+
+  await expect(submitCampaignState(
+    request,
+    "campaign-id",
+    completeRuntimeState,
+    completeEditorValues,
+    () => { applied = true; }
+  )).rejects.toThrow("Campaign state changed.");
+
+  expect(applied).toBe(false);
 });
 ```
 
-- [ ] **Step 2: Run the UI test and verify RED**
+- [ ] **Step 2: Run the save tests and verify RED**
 
 Run:
 
 ```powershell
 $env:Path = 'C:\Program Files\nodejs;' + $env:Path
-& '.\node_modules\.bin\vitest.CMD' run tests/unit/story-player-ui.test.ts
+& '.\node_modules\.bin\vitest.CMD' run tests/unit/story-state-editor.test.ts
 ```
 
-Expected: FAIL because `saveEditState()` still serializes only scratchpad and trackers.
+Expected: FAIL because `submitCampaignState` is not exported.
 
-- [ ] **Step 3: Construct and submit the complete payload**
+- [ ] **Step 3: Implement the tested save orchestration**
 
-Update `saveEditState()` to collect values before entering the request:
-
-First extend the state-editor import:
+Add to `apps/web/public/story-state-editor.js`:
 
 ```js
-import { buildCampaignStateUpdate, canonicalFactContent } from "./story-state-editor.js";
+export async function submitCampaignState(
+  request,
+  campaignId,
+  runtimeState,
+  editorValues,
+  onSaved
+) {
+  const savedState = await request(`/campaigns/${campaignId}/state`, {
+    method: "PATCH",
+    body: JSON.stringify(buildCampaignStateUpdate(runtimeState, editorValues))
+  });
+  onSaved(savedState);
+  return savedState;
+}
 ```
 
+- [ ] **Step 4: Run the save tests and verify GREEN**
+
+Run the Step 2 command.
+
+Expected: PASS, including success and rejected-save behavior.
+
+- [ ] **Step 5: Integrate complete save collection**
+
+Update `saveEditState()` to call `submitCampaignState()` with editor values:
+
 ```js
-const payload = buildCampaignStateUpdate(state.runtimeState, {
+await submitCampaignState(api, state.campaignId, state.runtimeState, {
   continuitySummary: $("editStateContinuitySummary")?.value || "",
-  openThreads: collectOpenThreadEditorValues(),
-  canonicalFacts: collectCanonicalFactEditorValues(),
+  openThreads: collectOpenThreadEditorValues($("editStateOpenThreads")),
+  canonicalFacts: collectCanonicalFactEditorValues($("editStateCanonicalFacts")),
   scratchpad: scratchpadEl?.value || "",
   trackers: collectTrackerEditorValues()
+}, savedState => {
+  state.runtimeState = savedState;
+  const dlg = $("editStateDialog");
+  if (dlg && dlg.close) dlg.close();
 });
 ```
 
-Then send:
+Import `submitCampaignState` from the focused module. Remove the old inline PATCH body, runtime-state assignment, and success-path dialog close. The callback runs only after the request resolves, so rejected saves leave runtime state, the open dialog, and entered controls unchanged.
 
-```js
-body: JSON.stringify(payload)
-```
-
-Do not mutate `state.runtimeState` until `api()` resolves. Keep the existing close operation only in the success path so rejected saves leave the dialog and entered controls intact.
-
-- [ ] **Step 4: Run focused unit tests and verify GREEN**
+- [ ] **Step 6: Run focused unit tests and verify GREEN**
 
 Run:
 
@@ -518,7 +635,7 @@ $env:Path = 'C:\Program Files\nodejs;' + $env:Path
 
 Expected: PASS.
 
-- [ ] **Step 5: Run the existing PostgreSQL correction test when available**
+- [ ] **Step 7: Run the existing PostgreSQL correction test when available**
 
 Check:
 
@@ -532,10 +649,10 @@ if ($env:TEST_DATABASE_URL) {
 
 Expected with `TEST_DATABASE_URL`: PASS. Expected without it: the explicit SKIPPED message; do not describe persistence as runtime-verified.
 
-- [ ] **Step 6: Commit Task 3**
+- [ ] **Step 8: Commit Task 3**
 
 ```powershell
-git add -- apps/web/public/story.js tests/unit/story-player-ui.test.ts
+git add -- apps/web/public/story-state-editor.js apps/web/public/story.js tests/unit/story-state-editor.test.ts
 git commit -m "Save complete campaign continuity state"
 ```
 
