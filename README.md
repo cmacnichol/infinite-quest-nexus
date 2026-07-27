@@ -99,7 +99,7 @@ pnpm test
 pnpm build
 ```
 
-Integration tests require PostgreSQL with pgvector. The application and documentation have separate CI build checks.
+Integration tests automatically provision a dedicated local PostgreSQL 18/pgvector container through Docker Engine. The generated test-only credentials remain in the ignored `.env.test.local` file. See [the integration test database guide](docs/contributing/integration-test-database.md) for the local endpoint, inspection command, and targeted reset procedure. The application and documentation have separate CI build checks.
 
 The active code is organized under:
 

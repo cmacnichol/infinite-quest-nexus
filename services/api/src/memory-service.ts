@@ -900,6 +900,9 @@ export async function buildContextPreview(
   const openThreads = memories.filter((memory) => memory.memory_kind === "open_thread")
     .sort((left, right) => right.ordinal - left.ordinal)[0];
   if (openThreads) addMemory(openThreads, openThreads.content, "open_threads");
+  for (const fact of memories.filter((memory) => memory.memory_kind === "canonical_fact")) {
+    addMemory(fact, fact.content, "canonical_fact");
+  }
 
   for (const memory of recentCandidates) {
     const isVeryRecent = memory.ordinal > campaign.active_turn_number - 3;
@@ -1355,6 +1358,143 @@ async function embedCampaignMemories(
   return { embedded, skipped: result.rows.length - pending.length, dimensions, providerProfileId: provider.id, model: provider.model };
 }
 
+export async function projectCampaignStateCorrection(
+  client: DatabaseClient,
+  ownerUserId: string,
+  campaignId: string,
+  edit: {
+    id: string;
+    effectiveTurnNumber: number;
+    snapshot: {
+      continuitySummary: string;
+      openThreads: string[];
+      canonicalFacts: Array<{ id: string | null; content: string }>;
+    };
+  }
+): Promise<void> {
+  const scope = await campaignScope(client, ownerUserId, campaignId);
+  const entityCatalog = buildScopedEntityCatalog({
+    worldContent: scope.world_content,
+    characterSnapshot: scope.character_snapshot,
+    characterProfile: scope.character_profile
+  });
+  const active = await client.query<{
+    id: string;
+    source_turn_number: number;
+    content: string;
+  }>(
+    `SELECT id, source_turn_number, content
+       FROM campaign_canonical_facts
+      WHERE owner_user_id = $1 AND campaign_id = $2
+        AND valid_from_turn <= $3
+        AND (valid_until_turn IS NULL OR valid_until_turn > $3)
+      ORDER BY source_turn_number, source_fact_index`,
+    [ownerUserId, campaignId, edit.effectiveTurnNumber]
+  );
+  const activeById = new Map(active.rows.map((fact) => [fact.id, fact]));
+  const desiredIds = new Set(edit.snapshot.canonicalFacts.flatMap((fact) => fact.id ? [fact.id] : []));
+  for (const fact of active.rows) {
+    if (desiredIds.has(fact.id)) continue;
+    if (fact.source_turn_number < edit.effectiveTurnNumber) {
+      await client.query(
+        `UPDATE campaign_canonical_facts
+            SET valid_until_turn = $4, updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3`,
+        [fact.id, ownerUserId, campaignId, edit.effectiveTurnNumber]
+      );
+    } else {
+      await client.query(
+        "DELETE FROM campaign_canonical_facts WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3",
+        [fact.id, ownerUserId, campaignId]
+      );
+    }
+  }
+  for (const [index, desired] of edit.snapshot.canonicalFacts.entries()) {
+    const id = desired.id ?? crypto.randomUUID();
+    const existing = activeById.get(id);
+    const entityMetadata = resolveEntityMetadata(desired.content, entityCatalog);
+    if (existing?.source_turn_number === edit.effectiveTurnNumber) {
+      await client.query(
+        `UPDATE campaign_canonical_facts
+            SET source_turn_id = NULL, source_state_edit_id = $4, source_fact_index = $5,
+                content = $6, normalized_content = $7, entities = $8, entity_ids = $9,
+                metadata = $10, updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3`,
+        [id, ownerUserId, campaignId, edit.id, index, desired.content,
+          canonicalFactDeduplicationKey(desired.content), entityMetadata.entities, entityMetadata.entityIds,
+          json({ stateEditId: edit.id, manualCorrection: true })]
+      );
+      continue;
+    }
+    if (existing) continue;
+    await client.query(
+      `INSERT INTO campaign_canonical_facts (
+         id, owner_user_id, campaign_id, world_version_id, source_state_edit_id, source_turn_number,
+         source_fact_index, content, normalized_content, entities, entity_ids, valid_from_turn, metadata
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$6,$12)`,
+      [id, ownerUserId, campaignId, scope.world_version_id, edit.id, edit.effectiveTurnNumber, index,
+        desired.content, canonicalFactDeduplicationKey(desired.content), entityMetadata.entities, entityMetadata.entityIds,
+        json({ stateEditId: edit.id, manualCorrection: true })]
+    );
+  }
+
+  await client.query(
+    `DELETE FROM chronicle_memories
+      WHERE owner_user_id = $1 AND campaign_id = $2
+        AND memory_kind IN ('campaign_summary', 'canonical_fact', 'open_thread')`,
+    [ownerUserId, campaignId]
+  );
+  const projected = await client.query<{
+    id: string;
+    source_turn_id: string | null;
+    source_turn_number: number;
+    content: string;
+    entities: string[];
+    entity_ids: string[];
+  }>(
+    `SELECT id, source_turn_id, source_turn_number, content, entities, entity_ids
+       FROM campaign_canonical_facts
+      WHERE owner_user_id = $1 AND campaign_id = $2 AND valid_until_turn IS NULL
+      ORDER BY source_turn_number, source_fact_index`,
+    [ownerUserId, campaignId]
+  );
+  for (const fact of projected.rows) {
+    await client.query(
+      `INSERT INTO chronicle_memories (
+         owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content,
+         token_estimate, importance, entities, entity_ids, metadata
+       ) VALUES ($1,$2,$3,$4,'canonical_fact',$5,$6,$7,0.85,$8,$9,$10)`,
+      [ownerUserId, campaignId, scope.world_version_id, fact.source_turn_id, fact.source_turn_number,
+        `- [fact_id: ${fact.id}] ${fact.content}`, estimateTokens(fact.content), fact.entities, fact.entity_ids,
+        json({ stateEditId: edit.id, manualCorrection: true, structuredFactIds: [fact.id] })]
+    );
+  }
+  const summary = sanitizedFictionString(edit.snapshot.continuitySummary, 20_000);
+  if (summary) {
+    const entityMetadata = resolveEntityMetadata(summary, entityCatalog);
+    await client.query(
+      `INSERT INTO chronicle_memories (
+         owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content,
+         token_estimate, importance, entities, entity_ids, metadata
+       ) VALUES ($1,$2,$3,'campaign_summary',$4,$5,$6,0.9,$7,$8,$9)`,
+      [ownerUserId, campaignId, scope.world_version_id, edit.effectiveTurnNumber, summary, estimateTokens(summary),
+        entityMetadata.entities, entityMetadata.entityIds, json({ stateEditId: edit.id, manualCorrection: true })]
+    );
+  }
+  if (edit.snapshot.openThreads.length) {
+    const content = [`Open story threads after turn ${edit.effectiveTurnNumber}`, ...edit.snapshot.openThreads.map((thread) => `- ${thread}`)].join("\n");
+    const entityMetadata = resolveEntityMetadata(content, entityCatalog);
+    await client.query(
+      `INSERT INTO chronicle_memories (
+         owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content,
+         token_estimate, importance, entities, entity_ids, metadata
+       ) VALUES ($1,$2,$3,'open_thread',$4,$5,$6,0.95,$7,$8,$9)`,
+      [ownerUserId, campaignId, scope.world_version_id, edit.effectiveTurnNumber, content, estimateTokens(content),
+        entityMetadata.entities, entityMetadata.entityIds, json({ stateEditId: edit.id, manualCorrection: true })]
+    );
+  }
+}
+
 export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserId: string, campaignId: string): Promise<number> {
   const scope = await campaignScope(client, ownerUserId, campaignId);
   const entityCatalog = buildScopedEntityCatalog({
@@ -1440,6 +1580,38 @@ export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserI
         : [],
       entityCatalog,
       ...(openThreads ? { openThreads } : {})
+    });
+  }
+  const edits = await client.query<{
+    id: string;
+    effective_turn_number: number;
+    state_snapshot_private: Record<string, unknown>;
+  }>(
+    `SELECT id, effective_turn_number, state_snapshot_private
+       FROM campaign_state_edits
+      WHERE owner_user_id = $1 AND campaign_id = $2
+      ORDER BY effective_turn_number, revision`,
+    [ownerUserId, campaignId]
+  );
+  for (const edit of edits.rows) {
+    const snapshot = edit.state_snapshot_private;
+    await projectCampaignStateCorrection(client, ownerUserId, campaignId, {
+      id: edit.id,
+      effectiveTurnNumber: edit.effective_turn_number,
+      snapshot: {
+        continuitySummary: typeof snapshot.continuitySummary === "string" ? snapshot.continuitySummary : "",
+        openThreads: Array.isArray(snapshot.openThreads)
+          ? snapshot.openThreads.filter((value): value is string => typeof value === "string") : [],
+        canonicalFacts: Array.isArray(snapshot.canonicalFacts)
+          ? snapshot.canonicalFacts.flatMap((value) => {
+            if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+            const fact = value as Record<string, unknown>;
+            return typeof fact.id === "string" && typeof fact.content === "string"
+              ? [{ id: fact.id, content: fact.content }]
+              : [];
+          })
+          : []
+      }
     });
   }
   return turns.rows.length;

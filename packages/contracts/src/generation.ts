@@ -320,28 +320,34 @@ export const campaignTrackerSchema = z.object({
   rules: z.string().max(4000).default("")
 });
 
-export const campaignRuntimeStateUpdateSchema = z.object({
-  expectedTurnNumber: z.coerce.number().int().min(0),
-  expectedRevision: z.coerce.number().int().min(0),
-  scratchpad: z.string().max(100_000),
-  trackers: z.array(campaignTrackerSchema).max(200)
+export const campaignCanonicalFactEditorSchema = z.object({
+  id: z.uuid().nullable().default(null),
+  content: z.string().trim().min(1).max(20_000)
 });
 
-export const campaignRuntimeStateSchema = z.object({
+export const campaignRuntimeStateContentSchema = z.object({
+  continuitySummary: z.string().max(20_000),
+  openThreads: z.array(z.string().trim().min(1).max(4000)).max(500),
+  canonicalFacts: z.array(campaignCanonicalFactEditorSchema).max(2000),
+  scratchpad: z.string().max(100_000),
+  trackers: z.array(campaignTrackerSchema).max(200),
+  rpgStats: z.array(playerRpgStatSchema).max(100),
+  eventTriggers: z.array(playerEventTriggerSchema).max(200),
+  pendingEventTriggers: z.array(pendingEventTriggerSchema).max(200)
+});
+
+export const campaignRuntimeStateUpdateSchema = campaignRuntimeStateContentSchema.extend({
+  expectedTurnNumber: z.coerce.number().int().min(0),
+  expectedRevision: z.coerce.number().int().min(0)
+});
+
+export const campaignRuntimeStateSchema = campaignRuntimeStateContentSchema.extend({
   campaignId: z.uuid(),
   activeTurnNumber: z.coerce.number().int().min(0),
   viewedTurnNumber: z.coerce.number().int().min(0),
   isCurrent: z.boolean(),
   revision: z.coerce.number().int().min(0),
-  updatedAt: z.union([z.string(), z.date()]),
-  scratchpad: z.string(),
-  trackers: z.array(campaignTrackerSchema),
-  rpgStats: z.array(z.unknown()),
-  eventTriggers: z.array(z.unknown()),
-  pendingEventTriggers: z.array(z.unknown()),
-  continuitySummary: z.string(),
-  canonicalFacts: z.array(z.string()),
-  openThreads: z.array(z.string())
+  updatedAt: z.union([z.string(), z.date()])
 });
 
 export const rpgAssessmentOutputSchema = z.object({
@@ -436,6 +442,7 @@ export type SogniSdkIllustrationProviderConfig = z.infer<typeof sogniSdkIllustra
 export type IllustrationGenerationRequest = z.infer<typeof illustrationGenerationRequestSchema>;
 export type StoryTurnOutput = z.infer<typeof storyTurnOutputSchema>;
 export type PlayerCampaignConfig = z.infer<typeof playerCampaignConfigSchema>;
+export type CampaignRuntimeStateContent = z.infer<typeof campaignRuntimeStateContentSchema>;
 export type CampaignRuntimeStateUpdate = z.infer<typeof campaignRuntimeStateUpdateSchema>;
 export type CampaignRuntimeState = z.infer<typeof campaignRuntimeStateSchema>;
 export type CampaignTracker = z.infer<typeof campaignTrackerSchema>;
