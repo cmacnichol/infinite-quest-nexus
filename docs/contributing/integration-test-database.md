@@ -11,7 +11,7 @@ The first integration-test run creates the ignored file
 `.env.test.local`. It is the local record of the generated test-only password
 and complete `TEST_DATABASE_URL`. Do not commit or share that file.
 
-The committed [.env.test.example](../../.env.test.example) documents the
+The committed `.env.test.example` documents the
 variable names without a usable password. The provisioner reuses the password
 in `.env.test.local` on later runs, so existing local test data remains
 available.

@@ -32,7 +32,7 @@
 
 ### New files
 
-- `database/migrations/0045_full_campaign_state_corrections.sql` — permits canonical facts sourced from state edits and snapshots active corrections on replacement jobs.
+- `database/migrations/0047_full_campaign_state_corrections.sql` — permits canonical facts sourced from state edits and snapshots active corrections on replacement jobs.
 - `apps/web/public/story-state-editor.js` — focused browser helpers for rendering and collecting all Edit State fields.
 - `tests/unit/campaign-state-contract.test.ts` — typed runtime-state and canonical-fact editor contract tests.
 - `tests/unit/story-state-editor.test.ts` — Happy DOM behavioral tests for enabled controls and complete save payloads.
@@ -248,7 +248,7 @@ git commit -m "Type complete campaign state corrections"
 ### Task 2: Add state-edit projection and replacement schema
 
 **Files:**
-- Create: `database/migrations/0045_full_campaign_state_corrections.sql`
+- Create: `database/migrations/0047_full_campaign_state_corrections.sql`
 - Modify: `tests/integration/migrations.integration.test.ts`
 
 **Interfaces:**
@@ -292,7 +292,7 @@ Expected: FAIL because migration 0045 and its columns do not exist. If `TEST_DAT
 
 - [ ] **Step 3: Write the additive online migration**
 
-Create `database/migrations/0045_full_campaign_state_corrections.sql` with:
+Create `database/migrations/0047_full_campaign_state_corrections.sql` with:
 
 ```sql
 ALTER TABLE campaign_state_edits
@@ -365,7 +365,7 @@ Expected: PASS with the PostgreSQL suite executed.
 - [ ] **Step 5: Commit the migration**
 
 ```powershell
-git add database/migrations/0045_full_campaign_state_corrections.sql tests/integration/migrations.integration.test.ts
+git add database/migrations/0047_full_campaign_state_corrections.sql tests/integration/migrations.integration.test.ts
 git diff --cached --check
 git commit -m "Add full state correction projections"
 ```
