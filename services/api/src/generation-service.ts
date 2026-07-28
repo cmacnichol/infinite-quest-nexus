@@ -642,6 +642,57 @@ export async function retryGeneration(pool: DatabasePool, jobId: string) {
   return { id: requeued.id, status: requeued.status };
 }
 
+export async function cancelGeneration(pool: DatabasePool, jobId: string): Promise<{
+  id: string;
+  status: "cancelled";
+  campaignId: string;
+  operationKind: "append" | "replace_latest";
+}> {
+  const ownerUserId = await initialOwnerId(pool);
+  const cancelled = await withTransaction(pool, async (client) => {
+    const result = await client.query<{
+      id: string;
+      status: "cancelled";
+      campaignId: string;
+      operationKind: "append" | "replace_latest";
+    }>(
+      `UPDATE generation_jobs
+          SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL, partial_output = NULL,
+              error_code = 'cancelled_by_player', error_message = 'Cancelled by player.', updated_at = now()
+        WHERE id = $1 AND owner_user_id = $2
+          AND status IN ('queued', 'replacement_queued', 'assessing', 'generating', 'validating', 'committing')
+        RETURNING id, status, campaign_id AS "campaignId", operation_kind AS "operationKind"`,
+      [jobId, ownerUserId]
+    );
+    const job = result.rows[0];
+    if (!job) {
+      const existing = await client.query<{ id: string }>(
+        "SELECT id FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE",
+        [jobId, ownerUserId]
+      );
+      if (!existing.rows[0]) throw Object.assign(new Error("Generation job not found."), { statusCode: 404 });
+      throw Object.assign(new Error("Only active generation jobs can be cancelled."), { statusCode: 409 });
+    }
+    await client.query(
+      `UPDATE image_jobs
+          SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL, completed_at = now(), updated_at = now()
+        WHERE generation_job_id = $1 AND owner_user_id = $2 AND campaign_id = $3
+          AND target_type = 'streaming_illustration'
+          AND status IN ('queued', 'generating', 'provider_pending', 'downloading')`,
+      [job.id, ownerUserId, job.campaignId]
+    );
+    await orphanProvisionalSet(client, ownerUserId, job.id);
+    return job;
+  });
+  logger.info({
+    event: "turn_generation_cancelled",
+    generationJobId: cancelled.id,
+    campaignId: cancelled.campaignId,
+    operationKind: cancelled.operationKind
+  });
+  return cancelled;
+}
+
 export async function discardGeneration(pool: DatabasePool, jobId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const result = await pool.query(
