@@ -107,8 +107,12 @@ function imageConfig(config: SegmentConfigRow, providerProfileId: string | null)
   };
 }
 
+function isDatabasePool(client: DatabaseClient | DatabasePool): client is DatabasePool {
+  return typeof (client as DatabasePool).totalCount === "number";
+}
+
 async function lockActiveProvisionalGeneration(
-  client: DatabaseClient | DatabasePool,
+  client: DatabaseClient,
   ownerUserId: string,
   campaignId: string,
   generationJobId: string | null,
@@ -119,7 +123,7 @@ async function lockActiveProvisionalGeneration(
     `SELECT id FROM generation_jobs
       WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3
         AND status IN ('assessing', 'generating', 'validating', 'committing')
-      FOR KEY SHARE`,
+      FOR UPDATE`,
     [generationJobId, ownerUserId, campaignId]
   );
   return Boolean(active.rows[0]);
@@ -186,8 +190,8 @@ async function queueSegmentDelivery(
   return true;
 }
 
-export async function createProvisionalSet(
-  client: DatabaseClient | DatabasePool,
+async function createProvisionalSetInTransaction(
+  client: DatabaseClient,
   ownerUserId: string,
   campaignId: string,
   generationJobId: string,
@@ -214,8 +218,23 @@ export async function createProvisionalSet(
   return setResult.rows[0]!.id;
 }
 
-export async function createProvisionalSegment(
+export async function createProvisionalSet(
   client: DatabaseClient | DatabasePool,
+  ownerUserId: string,
+  campaignId: string,
+  generationJobId: string,
+  visualReference?: string
+): Promise<string | null> {
+  if (isDatabasePool(client)) {
+    return withTransaction(client, (transaction) => createProvisionalSetInTransaction(
+      transaction, ownerUserId, campaignId, generationJobId, visualReference
+    ));
+  }
+  return createProvisionalSetInTransaction(client, ownerUserId, campaignId, generationJobId, visualReference);
+}
+
+async function createProvisionalSegmentInTransaction(
+  client: DatabaseClient,
   ownerUserId: string,
   campaignId: string,
   generationJobId: string,
@@ -309,6 +328,34 @@ export async function createProvisionalSegment(
     }
   }
   return true;
+}
+
+export async function createProvisionalSegment(
+  client: DatabaseClient | DatabasePool,
+  ownerUserId: string,
+  campaignId: string,
+  generationJobId: string,
+  setId: string,
+  segmentData: {
+    ordinal: number;
+    startOffset: number;
+    endOffset: number;
+    startWord: number;
+    endWord: number;
+    wordCount: number;
+    text: string;
+  },
+  config: SegmentConfigRow,
+  visualReference?: string
+): Promise<boolean> {
+  if (isDatabasePool(client)) {
+    return withTransaction(client, (transaction) => createProvisionalSegmentInTransaction(
+      transaction, ownerUserId, campaignId, generationJobId, setId, segmentData, config, visualReference
+    ));
+  }
+  return createProvisionalSegmentInTransaction(
+    client, ownerUserId, campaignId, generationJobId, setId, segmentData, config, visualReference
+  );
 }
 
 export async function promoteProvisionalSet(

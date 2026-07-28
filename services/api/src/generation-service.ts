@@ -706,6 +706,27 @@ export async function cancelGeneration(pool: DatabasePool, jobId: string): Promi
       );
     }
     await client.query(
+      `DELETE FROM asset_references refs
+        USING illustration_resolution_jobs resolutions, turn_illustration_segments segments
+        WHERE resolutions.segment_id = segments.id
+          AND segments.generation_job_id = $1 AND segments.owner_user_id = $2
+          AND segments.campaign_id = $3 AND segments.turn_id IS NULL
+          AND refs.owner_user_id = segments.owner_user_id
+          AND refs.campaign_id = segments.campaign_id
+          AND refs.asset_id = resolutions.selected_asset_id
+          AND refs.turn_id IS NOT DISTINCT FROM resolutions.turn_id
+          AND refs.asset_role = 'turn_illustration'`,
+      [job.id, ownerUserId, job.campaignId]
+    );
+    await client.query(
+      `DELETE FROM turn_illustration_segment_assets assets
+        USING turn_illustration_segments segments
+        WHERE assets.segment_id = segments.id AND assets.owner_user_id = segments.owner_user_id
+          AND segments.generation_job_id = $1 AND segments.owner_user_id = $2
+          AND segments.campaign_id = $3 AND segments.turn_id IS NULL`,
+      [job.id, ownerUserId, job.campaignId]
+    );
+    await client.query(
       `UPDATE turn_illustration_segments
           SET status = 'failed', updated_at = now()
         WHERE generation_job_id = $1 AND owner_user_id = $2 AND turn_id IS NULL

@@ -13,7 +13,7 @@ type ResolutionRow = {
   id: string;
   owner_user_id: string;
   campaign_id: string;
-  turn_id: string;
+  turn_id: string | null;
   segment_id: string | null;
   source_policy: "library_only" | "library_then_generate";
   matching_scope: "campaign" | "world" | "owner_library" | "shared";
@@ -129,21 +129,27 @@ async function resolutionContext(client: DatabaseClient, job: ResolutionRow) {
     world_version_id: string;
     entities: string[];
   }>(
-    `SELECT COALESCE(NULLIF(segments.resolved_prompt, ''), turns.image_prompt) AS image_prompt,
+    `SELECT COALESCE(
+              NULLIF(segments.resolved_prompt, ''),
+              NULLIF($5::jsonb->>'imagePrompt', ''),
+              NULLIF(turns.image_prompt, ''),
+              ''
+            ) AS image_prompt,
             world_versions.world_id, campaigns.world_version_id,
             COALESCE(ARRAY(
               SELECT DISTINCT unnest(memories.entities)
                 FROM chronicle_memories memories
                WHERE memories.turn_id = turns.id AND memories.owner_user_id = turns.owner_user_id
             ), '{}') AS entities
-       FROM turns
-       JOIN campaigns ON campaigns.id = turns.campaign_id AND campaigns.owner_user_id = turns.owner_user_id
+       FROM campaigns
        JOIN world_versions ON world_versions.id = campaigns.world_version_id
-        AND world_versions.owner_user_id = turns.owner_user_id
+        AND world_versions.owner_user_id = campaigns.owner_user_id
+       LEFT JOIN turns
+         ON turns.id = $1 AND turns.campaign_id = campaigns.id AND turns.owner_user_id = campaigns.owner_user_id
        LEFT JOIN turn_illustration_segments segments
-         ON segments.id = $4 AND segments.owner_user_id = turns.owner_user_id
-      WHERE turns.id = $1 AND turns.campaign_id = $2 AND turns.owner_user_id = $3`,
-    [job.turn_id, job.campaign_id, job.owner_user_id, job.segment_id]
+         ON segments.id = $4 AND segments.owner_user_id = campaigns.owner_user_id
+      WHERE campaigns.id = $2 AND campaigns.owner_user_id = $3`,
+    [job.turn_id, job.campaign_id, job.owner_user_id, job.segment_id, JSON.stringify(job.query_context_snapshot)]
   );
   const row = result.rows[0];
   if (!row) throw Object.assign(new Error("Resolution turn no longer exists."), { code: "turn_missing", permanent: true });
@@ -205,7 +211,31 @@ async function candidates(client: DatabaseClient, job: ResolutionRow, context: A
   );
 }
 
-async function attachMatch(client: DatabaseClient, job: ResolutionRow, assetId: string) {
+async function lockActiveProvisionalParent(client: DatabaseClient, job: ResolutionRow): Promise<boolean> {
+  if (!job.segment_id) return true;
+  const segment = await client.query<{ generation_job_id: string | null; turn_id: string | null }>(
+    `SELECT segments.generation_job_id, segments.turn_id
+       FROM turn_illustration_segments segments
+       JOIN turn_illustration_sets sets
+         ON sets.id = segments.illustration_set_id AND sets.owner_user_id = segments.owner_user_id
+      WHERE segments.id = $1 AND segments.owner_user_id = $2`,
+    [job.segment_id, job.owner_user_id]
+  );
+  const provisional = segment.rows[0];
+  if (!provisional) return false;
+  if (!provisional.generation_job_id || provisional.turn_id) return true;
+  const parent = await client.query<{ id: string }>(
+    `SELECT id FROM generation_jobs
+      WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3
+        AND status IN ('assessing', 'generating', 'validating', 'committing')
+      FOR UPDATE`,
+    [provisional.generation_job_id, job.owner_user_id, job.campaign_id]
+  );
+  return Boolean(parent.rows[0]);
+}
+
+async function attachMatch(client: DatabaseClient, job: ResolutionRow, assetId: string): Promise<boolean> {
+  if (!await lockActiveProvisionalParent(client, job)) return false;
   if (job.segment_id) {
     await client.query(
       `INSERT INTO turn_illustration_segment_assets (
@@ -241,7 +271,7 @@ async function attachMatch(client: DatabaseClient, job: ResolutionRow, assetId: 
        VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
       [job.owner_user_id, assetId, job.campaign_id, job.turn_id]
     );
-    return;
+    return true;
   }
   await client.query("UPDATE turns SET image_url = $3 WHERE id = $1 AND owner_user_id = $2", [job.turn_id, job.owner_user_id, `/api/v1/assets/${assetId}`]);
   await client.query(
@@ -254,6 +284,7 @@ async function attachMatch(client: DatabaseClient, job: ResolutionRow, assetId: 
      VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
     [job.owner_user_id, assetId, job.campaign_id, job.turn_id]
   );
+  return true;
 }
 
 async function markResolutionFailure(pool: DatabasePool, job: ResolutionRow, workerId: string, error: unknown) {
@@ -268,7 +299,7 @@ async function markResolutionFailure(pool: DatabasePool, job: ResolutionRow, wor
         WHERE id = $1 AND lease_owner = $2`,
       [job.id, workerId, terminal ? "failed" : "recoverable", String(details.code || details.message || "matcher_failed").slice(0, 200)]
     );
-    if (job.segment_id) {
+    if (job.segment_id && await lockActiveProvisionalParent(client, job)) {
       await client.query(
         `UPDATE turn_illustration_segments
             SET status = $3, updated_at = now()
@@ -299,6 +330,9 @@ export async function runIllustrationResolutionJob(pool: DatabasePool, workerId:
   const startedAt = Date.now();
   try {
     const outcome = await withTransaction(pool, async (client) => {
+      if (!await lockActiveProvisionalParent(client, job)) {
+        return { kind: "stale" as const, candidateCount: 0, selectedAssetId: null, selectedScore: null, threshold: THRESHOLDS[job.confidence_profile] };
+      }
       const context = await resolutionContext(client, job);
       const result = await candidates(client, job, context);
       const scored = result.rows
@@ -324,7 +358,9 @@ export async function runIllustrationResolutionJob(pool: DatabasePool, workerId:
       const snapshot = { imagePrompt: context.image_prompt, entities: context.entities, worldId: context.world_id, worldVersionId: context.world_version_id,
         excludedAssetIds: job.query_context_snapshot.excludedAssetIds || [] };
       if (best && best.score >= threshold) {
-        await attachMatch(client, job, best.candidate.asset_id);
+        if (!await attachMatch(client, job, best.candidate.asset_id)) {
+          return { kind: "stale" as const, candidateCount: scored.length, selectedAssetId: null, selectedScore: null, threshold };
+        }
         await client.query(
           `UPDATE illustration_resolution_jobs
               SET status = 'completed', selected_asset_id = $3, selected_score = $4,
@@ -378,7 +414,7 @@ export async function runIllustrationResolutionJob(pool: DatabasePool, workerId:
     if (outcome.kind === "generate") {
       const imageJob = job.segment_id
         ? await enqueueSegmentProviderImage(pool, job.segment_id)
-        : await enqueueIllustration(pool, job.turn_id, { replace: false });
+        : await enqueueIllustration(pool, job.turn_id!, { replace: false });
       if (!imageJob) return true;
       await pool.query(
         `UPDATE illustration_resolution_jobs
