@@ -3,6 +3,11 @@
    ═══════════════════════════════════════════════════════════════ */
 import { branchCampaignFromTurn } from "./story-routing.js";
 import {
+  cancelGeneration,
+  reconcileRemoteGenerationCancellation,
+  syncCancelGenerationButton
+} from "./story-generation-cancellation.js";
+import {
   addEditableStateRow,
   captureCampaignStateEditSession,
   renderCampaignStateInspector,
@@ -1021,7 +1026,6 @@ function renderStreamingPreview(narrationText, action) {
         <div class="turn-streaming-header">
           <span class="turn-streaming-badge"><span class="turn-streaming-pulse"></span> Streaming Live</span>
           <button type="button" class="streaming-follow-button hidden" data-action="follow-stream" aria-label="Resume following live narration">Follow live</button>
-          ${state.generationDisplayActive && state.generationJobId ? '<button class="small ghost" type="button" data-action="cancel-generation">Cancel generation</button>' : ""}
         </div>
         <div class="turn-meta">
           <div class="action-tag">➜ ${escapeHtml(actionText)}</div>
@@ -1033,13 +1037,7 @@ function renderStreamingPreview(narrationText, action) {
   }
 
   const header = card.querySelector(".turn-streaming-header");
-  let cancelButton = card.querySelector('[data-action="cancel-generation"]');
-  if (state.generationDisplayActive && state.generationJobId && !cancelButton && header) {
-    header.insertAdjacentHTML("beforeend", '<button class="small ghost" type="button" data-action="cancel-generation">Cancel generation</button>');
-    cancelButton = card.querySelector('[data-action="cancel-generation"]');
-  } else if ((!state.generationDisplayActive || !state.generationJobId) && cancelButton) {
-    cancelButton.remove();
-  }
+  if (header) syncCancelGenerationButton(header, state);
 
   const narration = card.querySelector(".streaming-narration");
   if (narration) {
@@ -1113,39 +1111,18 @@ function commitGenerationDisplay() {
 }
 
 async function cancelActiveGeneration() {
-  if (!state.generationDisplayActive || !state.generationJobId) return;
-
-  const jobId = state.generationJobId;
-  const cancelButton = $("streamingPreviewCard")?.querySelector('[data-action="cancel-generation"]');
-  if (cancelButton) {
-    cancelButton.disabled = true;
-    cancelButton.textContent = "Cancelling turn generation…";
-  }
-  showBusy("Cancelling turn generation…");
-
-  try {
-    await api(`/generation-jobs/${jobId}/cancel`, { method: "POST", body: "{}" });
-  } catch (error) {
-    if (cancelButton) {
-      cancelButton.disabled = false;
-      cancelButton.textContent = "Cancel generation";
-    }
-    toast(`Could not cancel generation: ${error.message}`);
-    return;
-  }
-
-  clearPendingSubmission();
-  state.pendingGeneration = null;
-  state.cancellationConfirmed = true;
-  state.abortController?.abort();
-  restoreGenerationDisplay();
-  try {
-    await loadCampaign(state.campaignId, { autoScroll: false });
-    recordActivity("system", "Generation cancelled", `jobId=${jobId}`);
-    toast("Generation cancelled.");
-  } catch (error) {
-    toast(`Generation cancelled, but campaign reload failed: ${error.message}`);
-  }
+  await cancelGeneration({
+    state,
+    getCancelButton: () => $("streamingPreviewCard")?.querySelector('[data-action="cancel-generation"]'),
+    requestCancellation: (jobId) => api(`/generation-jobs/${jobId}/cancel`, { method: "POST", body: "{}" }),
+    clearPendingSubmission,
+    restoreGenerationDisplay,
+    abortLocalMonitoring: () => state.abortController?.abort(),
+    reloadCampaign: (campaignId) => loadCampaign(campaignId, { autoScroll: false }),
+    recordActivity,
+    toast,
+    showBusy
+  });
 }
 
 function showGenerationRecovery(jobId, message) {
@@ -1302,10 +1279,13 @@ async function pollGenerationJob(jobId, action) {
               }
             } else if (job.status === "cancelled") {
               cleanup();
-              clearPendingSubmission();
-              state.pendingGeneration = null;
-              restoreGenerationDisplay();
-              reject(new DOMException("Generation cancelled.", "AbortError"));
+              reject(await reconcileRemoteGenerationCancellation({
+                state,
+                clearPendingSubmission,
+                restoreGenerationDisplay,
+                reloadCampaign: (campaignId) => loadCampaign(campaignId, { autoScroll: false }),
+                toast
+              }));
             } else if (job.status === "failed") {
               cleanup();
               clearStreamingPreview();
@@ -1366,10 +1346,13 @@ async function pollGenerationJob(jobId, action) {
       return;
     }
     if (job.status === "cancelled") {
-      clearPendingSubmission();
-      state.pendingGeneration = null;
-      restoreGenerationDisplay();
-      throw new DOMException("Generation cancelled.", "AbortError");
+      throw await reconcileRemoteGenerationCancellation({
+        state,
+        clearPendingSubmission,
+        restoreGenerationDisplay,
+        reloadCampaign: (campaignId) => loadCampaign(campaignId, { autoScroll: false }),
+        toast
+      });
     }
     if (job.status === "failed") {
       clearStreamingPreview();
