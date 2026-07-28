@@ -10,15 +10,18 @@ import { worldContentSchema, worldCreateSchema } from "../../packages/contracts/
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
-import { enqueueGeneration, getGenerationJob, runGenerationJob } from "../../services/api/src/generation-service.js";
+import { cancelGeneration, enqueueGeneration, getGenerationJob, runGenerationJob } from "../../services/api/src/generation-service.js";
 import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { listAssets, persistOriginalImage, queryAssets, readAssetDerivative, runAssetMetadataBackfill, selectTurnIllustration, selectWorldCover, updateAssetMetadata } from "../../services/api/src/asset-service.js";
 import { getTurnIllustrationResolution, runIllustrationResolutionJob } from "../../services/api/src/illustration-resolution-service.js";
 import {
+  createProvisionalSegment,
+  createProvisionalSet,
   generateTurnIllustrationSegments,
   listCampaignIllustrationSegments,
+  loadConfig,
   previewIllustrationBackfill,
   runIllustrationPromptJob
 } from "../../services/api/src/segmented-illustration-service.js";
@@ -55,6 +58,7 @@ integration("independent illustration pipeline", () => {
   let imageProviderId = "";
   let assetRoot = "";
   let failImages = false;
+  let imageResponseBarrier: { signalStarted: () => void; release: Promise<void> } | null = null;
   const imageRequests: Array<Record<string, unknown>> = [];
   const refinementRequests: Array<Record<string, unknown>> = [];
   const sogniRequests: Array<{ body: Record<string, unknown>; idempotencyKey: string }> = [];
@@ -99,7 +103,11 @@ integration("independent illustration pipeline", () => {
             return;
           }
           response.writeHead(200, { "content-type": "application/json" });
-          response.end(JSON.stringify({ id: crypto.randomUUID(), data: [{ b64_json: tinyPng }], usage: { cost: 0.04 } }));
+          const body = JSON.stringify({ id: crypto.randomUUID(), data: [{ b64_json: tinyPng }], usage: { cost: 0.04 } });
+          if (imageResponseBarrier) {
+            imageResponseBarrier.signalStarted();
+            void imageResponseBarrier.release.then(() => response.end(body));
+          } else response.end(body);
           return;
         }
         if (JSON.stringify(parsed).includes("expert visual translator and prompt engineer")) {
@@ -201,6 +209,665 @@ integration("independent illustration pipeline", () => {
     }
     return getImageJob(pool, jobId);
   }
+
+  async function installInsertBarrier(table: string, predicate: string) {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const trigger = `hold_${table}_${suffix}`;
+    const classId = Number.parseInt(suffix.slice(0, 7), 16);
+    const objectId = Number.parseInt(suffix.slice(7, 14), 16);
+    const holder = await pool.connect();
+    const holderPid = (await holder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+    await holder.query("SELECT pg_advisory_lock($1::integer, $2::integer)", [classId, objectId]);
+    await pool.query(`CREATE FUNCTION ${trigger}_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        PERFORM pg_advisory_xact_lock(${classId}, ${objectId});
+        RETURN NEW;
+      END
+    $$`);
+    await pool.query(`CREATE TRIGGER ${trigger} BEFORE INSERT ON ${table}
+      FOR EACH ROW WHEN (${predicate}) EXECUTE FUNCTION ${trigger}_fn()`);
+    return {
+      wait: async () => expect.poll(async () => pool.query<{ pid: number }>(
+        `SELECT activity.pid FROM pg_stat_activity activity
+         WHERE activity.datname = current_database()
+           AND activity.wait_event_type = 'Lock'
+           AND $1 = ANY(pg_blocking_pids(activity.pid))`,
+        [holderPid]
+      ).then((result) => result.rows[0]?.pid), { timeout: 5_000 }).toBeTypeOf("number"),
+      release: async () => holder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [classId, objectId]),
+      cleanup: async () => {
+        await holder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [classId, objectId]).catch(() => undefined);
+        holder.release();
+        await pool.query(`DROP TRIGGER IF EXISTS ${trigger} ON ${table}`);
+        await pool.query(`DROP FUNCTION IF EXISTS ${trigger}_fn()`);
+      }
+    };
+  }
+
+  it("does not complete a stale streaming image worker after parent cancellation", async () => {
+    const imported = await campaign();
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Cancel the stale streaming worker.", providerProfileId: textProviderId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const imageJob = await pool.query<{ id: string }>(
+      `INSERT INTO image_jobs (
+         owner_user_id, campaign_id, provider_profile_id, requested_model, prompt, prompt_hash,
+         status, provider_type, target_type, generation_job_id
+       ) VALUES ($1,$2,$3,'synthetic-image-model','A stale provisional scene.',
+                 'cancel-stale-image','queued','openai_compatible','streaming_illustration',$4) RETURNING id`,
+      [ownerUserId, imported.campaignId, imageProviderId, generation.id]
+    );
+    let releaseProviderResponse!: () => void;
+    const providerRequestStarted = new Promise<void>((resolveStarted) => {
+      imageResponseBarrier = {
+        signalStarted: resolveStarted,
+        release: new Promise<void>((resolveRelease) => { releaseProviderResponse = resolveRelease; })
+      };
+    });
+    try {
+      const worker = runImageJob(pool, "stale-streaming-image-worker", 30, credentialSecret, { root: assetRoot });
+      await providerRequestStarted;
+      await expect.poll(async () => getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "generating" });
+      await expect(cancelGeneration(pool, generation.id)).resolves.toMatchObject({ status: "cancelled" });
+      releaseProviderResponse();
+      await expect(worker).resolves.toBe(true);
+    } finally {
+      imageResponseBarrier = null;
+      releaseProviderResponse();
+    }
+    expect(await getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "cancelled", assetId: null });
+  });
+
+  it("does not create provisional set or segment work after cancellation between streamed output and child delivery", async () => {
+    const imported = await campaign();
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Cancel after streamed narration before illustration delivery.",
+      providerProfileId: textProviderId,
+      idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const config = await loadConfig(pool, ownerUserId, imported.campaignId);
+
+    await expect(cancelGeneration(pool, generation.id)).resolves.toMatchObject({ status: "cancelled" });
+    await expect(createProvisionalSet(pool, ownerUserId, imported.campaignId, generation.id)).resolves.toBeNull();
+    await expect(createProvisionalSegment(
+      pool, ownerUserId, imported.campaignId, generation.id, crypto.randomUUID(),
+      { ordinal: 0, startOffset: 0, endOffset: 61, startWord: 0, endWord: 11, wordCount: 11, text: "A lantern reveals a silent causeway beneath violet clouds tonight." },
+      config
+    )).resolves.toBe(false);
+    await expect(pool.query(
+      "SELECT id FROM turn_illustration_sets WHERE generation_job_id = $1 UNION ALL SELECT id FROM turn_illustration_segments WHERE generation_job_id = $1 UNION ALL SELECT id FROM image_jobs WHERE generation_job_id = $1",
+      [generation.id]
+    )).resolves.toMatchObject({ rows: [] });
+  });
+
+  async function installResolutionFailureBarrier(resolutionJobId: string) {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const trigger = `hold_resolution_failure_${suffix}`;
+    const classId = Number.parseInt(suffix.slice(0, 7), 16);
+    const objectId = Number.parseInt(suffix.slice(7, 14), 16);
+    const holder = await pool.connect();
+    const holderPid = (await holder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+    await holder.query("SELECT pg_advisory_lock($1::integer, $2::integer)", [classId, objectId]);
+    await pool.query(`CREATE FUNCTION ${trigger}_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        PERFORM pg_advisory_xact_lock(${classId}, ${objectId});
+        RETURN NEW;
+      END
+    $$`);
+    await pool.query(`CREATE TRIGGER ${trigger} BEFORE UPDATE OF status ON illustration_resolution_jobs
+      FOR EACH ROW WHEN (OLD.id = '${resolutionJobId}'::uuid AND OLD.status = 'matching' AND NEW.status = 'failed')
+      EXECUTE FUNCTION ${trigger}_fn()`);
+    return {
+      wait: async () => {
+        let resolutionBackendPid: number | undefined;
+        await expect.poll(async () => pool.query<{ pid: number }>(
+          `SELECT activity.pid
+             FROM pg_stat_activity activity
+             JOIN pg_locks advisory_lock ON advisory_lock.pid = activity.pid
+             JOIN pg_locks resolution_relation_lock ON resolution_relation_lock.pid = activity.pid
+            WHERE activity.datname = current_database()
+              AND activity.query LIKE 'UPDATE illustration_resolution_jobs%'
+              AND activity.wait_event_type = 'Lock' AND activity.wait_event = 'advisory'
+              AND $1 = ANY(pg_blocking_pids(activity.pid))
+              AND advisory_lock.locktype = 'advisory' AND NOT advisory_lock.granted
+              AND advisory_lock.classid = $2 AND advisory_lock.objid = $3 AND advisory_lock.objsubid = 2
+              AND resolution_relation_lock.locktype = 'relation'
+              AND resolution_relation_lock.relation = 'illustration_resolution_jobs'::regclass
+              AND resolution_relation_lock.mode = 'RowExclusiveLock' AND resolution_relation_lock.granted`,
+          [holderPid, classId, objectId]
+        ).then((result) => {
+          resolutionBackendPid = result.rows[0]?.pid;
+          return resolutionBackendPid;
+        }), { timeout: 5_000 }).toBeTypeOf("number");
+        return resolutionBackendPid!;
+      },
+      release: async () => holder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [classId, objectId]),
+      cleanup: async () => {
+        await holder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [classId, objectId]).catch(() => undefined);
+        holder.release();
+        await pool.query(`DROP TRIGGER IF EXISTS ${trigger} ON illustration_resolution_jobs`);
+        await pool.query(`DROP FUNCTION IF EXISTS ${trigger}_fn()`);
+      }
+    };
+  }
+
+  async function waitForCancellationAttempt(jobId: string) {
+    await expect.poll(async () => {
+      const result = await pool.query<{ cancelled: boolean; waiting: boolean }>(
+        `SELECT jobs.status = 'cancelled' AS cancelled,
+                EXISTS (
+                  SELECT 1 FROM pg_stat_activity activity
+                   WHERE activity.datname = current_database()
+                     AND activity.query LIKE 'UPDATE generation_jobs%'
+                     AND activity.wait_event_type = 'Lock'
+                ) AS waiting
+           FROM generation_jobs jobs WHERE jobs.id = $1`,
+        [jobId]
+      );
+      return Boolean(result.rows[0]?.cancelled || result.rows[0]?.waiting);
+    }, { timeout: 5_000 }).toBe(true);
+  }
+
+  async function startCancellationSession(jobId: string) {
+    const applicationName = `iq-cancel:${jobId}`;
+    const cancellationUrl = new URL(databaseUrl!);
+    cancellationUrl.searchParams.set("application_name", applicationName);
+    const cancellationPool = createDatabasePool(cancellationUrl.toString(), 1);
+    const backendPid = (await cancellationPool.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+    return {
+      applicationName,
+      backendPid,
+      cancellation: cancelGeneration(cancellationPool, jobId),
+      close: async () => cancellationPool.end()
+    };
+  }
+
+  async function waitForCancellationBlockedByResolution(input: {
+    applicationName: string;
+    cancellationBackendPid: number;
+    resolutionBackendPid: number;
+    generationJobId: string;
+    resolutionJobId: string;
+  }) {
+    await expect.poll(async () => pool.query<{ blocked: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM pg_stat_activity cancellation
+           JOIN pg_locks generation_relation_lock ON generation_relation_lock.pid = cancellation.pid
+           JOIN pg_stat_activity resolution_failure ON resolution_failure.pid = $3
+          WHERE cancellation.datname = current_database()
+            AND cancellation.pid = $1
+            AND cancellation.application_name = $2
+            AND cancellation.query LIKE 'UPDATE generation_jobs%'
+            AND cancellation.wait_event_type = 'Lock'
+            AND $3 = ANY(pg_blocking_pids(cancellation.pid))
+            AND generation_relation_lock.locktype = 'relation'
+            AND generation_relation_lock.relation = 'generation_jobs'::regclass
+            AND generation_relation_lock.mode = 'RowExclusiveLock' AND generation_relation_lock.granted
+            AND resolution_failure.datname = current_database()
+            AND resolution_failure.query LIKE 'UPDATE illustration_resolution_jobs%'
+            AND resolution_failure.wait_event_type = 'Lock' AND resolution_failure.wait_event = 'advisory'
+            AND EXISTS (
+              SELECT 1
+                FROM illustration_resolution_jobs resolution
+                JOIN turn_illustration_segments segment ON segment.id = resolution.segment_id
+               WHERE resolution.id = $4 AND segment.generation_job_id = $5
+            )
+       ) AS blocked`,
+      [input.cancellationBackendPid, input.applicationName, input.resolutionBackendPid,
+        input.resolutionJobId, input.generationJobId]
+    ).then((result) => result.rows[0]?.blocked), { timeout: 5_000 }).toBe(true);
+  }
+
+  it("atomically fences provisional set, segment, and direct-image creation against cancellation", async () => {
+    const imported = await campaign();
+    const ownerUserId = await initialOwnerId(pool);
+    const config = await loadConfig(pool, ownerUserId, imported.campaignId);
+
+    const setGeneration = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Race provisional set creation.", providerProfileId: textProviderId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    await pool.query("UPDATE generation_jobs SET status = 'generating' WHERE id = $1", [setGeneration.id]);
+    const setBarrier = await installInsertBarrier(
+      "turn_illustration_sets",
+      `NEW.generation_job_id = '${setGeneration.id}'::uuid`
+    );
+    try {
+      const creation = createProvisionalSet(pool, ownerUserId, imported.campaignId, setGeneration.id);
+      await setBarrier.wait();
+      const cancellation = cancelGeneration(pool, setGeneration.id);
+      await waitForCancellationAttempt(setGeneration.id);
+      await setBarrier.release();
+      await creation;
+      await cancellation;
+    } finally {
+      await setBarrier.cleanup();
+    }
+    expect(await pool.query(
+      "SELECT id FROM turn_illustration_sets WHERE generation_job_id = $1 AND status <> 'orphaned'",
+      [setGeneration.id]
+    )).toMatchObject({ rows: [] });
+
+    const childGeneration = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Race provisional direct-image creation.", providerProfileId: textProviderId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    await pool.query("UPDATE generation_jobs SET status = 'generating' WHERE id = $1", [childGeneration.id]);
+    const setId = await createProvisionalSet(pool, ownerUserId, imported.campaignId, childGeneration.id);
+    expect(setId).toBeTruthy();
+    const imageBarrier = await installInsertBarrier("image_jobs", `NEW.generation_job_id = '${childGeneration.id}'::uuid`);
+    try {
+      const creation = createProvisionalSegment(
+        pool, ownerUserId, imported.campaignId, childGeneration.id, setId!,
+        { ordinal: 0, startOffset: 0, endOffset: 67, startWord: 0, endWord: 12, wordCount: 12,
+          text: "A lantern reveals a silent causeway beneath violet clouds tonight." },
+        config
+      );
+      await imageBarrier.wait();
+      const cancellation = cancelGeneration(pool, childGeneration.id);
+      await waitForCancellationAttempt(childGeneration.id);
+      await imageBarrier.release();
+      await creation;
+      await cancellation;
+    } finally {
+      await imageBarrier.cleanup();
+    }
+    expect(await pool.query(
+      `SELECT jobs.id FROM image_jobs jobs WHERE jobs.generation_job_id = $1
+         AND jobs.status IN ('queued','generating','provider_pending','downloading','completed')`,
+      [childGeneration.id]
+    )).toMatchObject({ rows: [] });
+    expect(await pool.query(
+      "SELECT status FROM turn_illustration_sets WHERE generation_job_id = $1", [childGeneration.id]
+    )).toMatchObject({ rows: [{ status: "orphaned" }] });
+  });
+
+  it("fences claimed library attachment against provisional generation cancellation", async () => {
+    const imported = await campaign();
+    const ownerUserId = await initialOwnerId(pool);
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Race a claimed library attachment.", providerProfileId: textProviderId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    await pool.query("UPDATE generation_jobs SET status = 'generating' WHERE id = $1", [generation.id]);
+    const acceptedTurn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId]
+    );
+    const world = await pool.query<{ world_id: string; world_version_id: string }>(
+      `SELECT versions.world_id, campaigns.world_version_id FROM campaigns
+        JOIN world_versions versions ON versions.id = campaigns.world_version_id
+       WHERE campaigns.id = $1`,
+      [imported.campaignId]
+    );
+    const asset = await pool.query<{ id: string }>(
+      `INSERT INTO assets (owner_user_id, content_hash, storage_driver, storage_path, mime_type, byte_length)
+       VALUES ($1,$2,'filesystem',$3,'image/png',68) RETURNING id`,
+      [ownerUserId, crypto.randomUUID().replaceAll("-", "").padEnd(64, "0").slice(0, 64), `race/${crypto.randomUUID()}.png`]
+    );
+    await pool.query(
+      `INSERT INTO asset_references (owner_user_id, asset_id, campaign_id, turn_id, asset_role)
+       VALUES ($1,$2,$3,$4,'turn_illustration')`,
+      [ownerUserId, asset.rows[0]!.id, imported.campaignId, acceptedTurn.rows[0]!.id]
+    );
+    await pool.query(
+      `UPDATE asset_library_entries SET title = 'violet lantern causeway', tags = ARRAY['violet','lantern','causeway'],
+              reuse_scope = 'owner_library', automatic_reuse_enabled = true, review_status = 'eligible'
+        WHERE asset_id = $1 AND owner_user_id = $2`,
+      [asset.rows[0]!.id, ownerUserId]
+    );
+    await pool.query(
+      `INSERT INTO asset_generation_contexts (
+         owner_user_id, asset_id, created_by_user_id, world_id, world_version_id, campaign_id,
+         target_type, fiction_prompt
+       ) VALUES ($1,$2,$1,$3,$4,$5,'turn_illustration','A violet lantern illuminates the silent causeway')`,
+      [ownerUserId, asset.rows[0]!.id, world.rows[0]!.world_id, world.rows[0]!.world_version_id, imported.campaignId]
+    );
+    const acceptedSet = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_sets (
+         owner_user_id, campaign_id, turn_id, generation_job_id, source_text_hash, segment_word_count,
+         images_per_segment, prompt_mode, status, is_active, completed_at
+       ) VALUES ($1,$2,$3,$4,'accepted-library-race-set',500,1,'direct','completed',false,now()) RETURNING id`,
+      [ownerUserId, imported.campaignId, acceptedTurn.rows[0]!.id, generation.id]
+    );
+    const acceptedSegment = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_segments (
+         owner_user_id, illustration_set_id, campaign_id, turn_id, generation_job_id, ordinal,
+         start_offset, end_offset, start_word, end_word, source_text, source_text_hash,
+         direct_prompt, resolved_prompt, prompt_source, status
+       ) VALUES ($1,$2,$3,$4,$5,999,0,48,0,8,'Accepted violet lantern artwork.','accepted-library-race-segment',
+                 'Accepted violet lantern artwork.','Accepted violet lantern artwork.','direct','completed') RETURNING id`,
+      [ownerUserId, acceptedSet.rows[0]!.id, imported.campaignId, acceptedTurn.rows[0]!.id, generation.id]
+    );
+    await pool.query(
+      `INSERT INTO turn_illustration_segment_assets (segment_id, owner_user_id, asset_id, variant_index)
+       VALUES ($1,$2,$3,0)`,
+      [acceptedSegment.rows[0]!.id, ownerUserId, asset.rows[0]!.id]
+    );
+    const set = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_sets (
+         owner_user_id, campaign_id, generation_job_id, source_text_hash, segment_word_count,
+         images_per_segment, prompt_mode, status
+       ) VALUES ($1,$2,$3,'library-race-set',500,1,'direct','provisional') RETURNING id`,
+      [ownerUserId, imported.campaignId, generation.id]
+    );
+    const segment = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_segments (
+         owner_user_id, illustration_set_id, campaign_id, generation_job_id, ordinal,
+         start_offset, end_offset, start_word, end_word, source_text, source_text_hash,
+         direct_prompt, resolved_prompt, prompt_source, status
+       ) VALUES ($1,$2,$3,$4,0,0,60,0,10,'A violet lantern illuminates the silent causeway.','library-race-segment',
+                 'A violet lantern illuminates the silent causeway.','A violet lantern illuminates the silent causeway.','direct','generating') RETURNING id`,
+      [ownerUserId, set.rows[0]!.id, imported.campaignId, generation.id]
+    );
+    await pool.query(
+      `INSERT INTO illustration_resolution_jobs (
+         owner_user_id, campaign_id, turn_id, segment_id, source_policy, matching_scope,
+         confidence_profile, repetition_window, query_context_snapshot
+       ) VALUES ($1,$2,NULL,$3,'library_only','owner_library','broad',0,$4)`,
+      [ownerUserId, imported.campaignId, segment.rows[0]!.id,
+        JSON.stringify({ imagePrompt: "A violet lantern illuminates the silent causeway." })]
+    );
+    const barrier = await installInsertBarrier(
+      "turn_illustration_segment_assets",
+      `NEW.segment_id = '${segment.rows[0]!.id}'::uuid`
+    );
+    try {
+      const resolution = runIllustrationResolutionJob(pool, `library-race-${crypto.randomUUID()}`, 30);
+      await barrier.wait();
+      const cancellation = cancelGeneration(pool, generation.id);
+      await waitForCancellationAttempt(generation.id);
+      await barrier.release();
+      await resolution;
+      await cancellation;
+    } finally {
+      await barrier.cleanup();
+    }
+    expect(await pool.query("SELECT asset_id FROM turn_illustration_segment_assets WHERE segment_id = $1", [segment.rows[0]!.id]))
+      .toMatchObject({ rows: [] });
+    expect(await pool.query(
+      "SELECT id FROM asset_references WHERE asset_id = $1 AND campaign_id = $2 AND turn_id IS NULL",
+      [asset.rows[0]!.id, imported.campaignId]
+    )).toMatchObject({ rows: [] });
+    expect(await pool.query("SELECT status FROM turn_illustration_sets WHERE id = $1", [set.rows[0]!.id]))
+      .toMatchObject({ rows: [{ status: "orphaned" }] });
+    expect(await pool.query("SELECT status FROM turn_illustration_segments WHERE id = $1", [segment.rows[0]!.id]))
+      .toMatchObject({ rows: [{ status: "failed" }] });
+    expect(await pool.query(
+      "SELECT id FROM asset_references WHERE asset_id = $1 AND turn_id = $2",
+      [asset.rows[0]!.id, acceptedTurn.rows[0]!.id]
+    )).toMatchObject({ rowCount: 1 });
+    expect(await pool.query(
+      "SELECT asset_id FROM turn_illustration_segment_assets WHERE segment_id = $1",
+      [acceptedSegment.rows[0]!.id]
+    )).toMatchObject({ rows: [{ asset_id: asset.rows[0]!.id }] });
+    await pool.query("DELETE FROM turn_illustration_segments WHERE id = $1", [acceptedSegment.rows[0]!.id]);
+    await pool.query("DELETE FROM assets WHERE id = $1 AND owner_user_id = $2", [asset.rows[0]!.id, ownerUserId]);
+  });
+
+  it("serializes resolution failure with cancellation without reverse parent-child locking", async () => {
+    const imported = await campaign();
+    const ownerUserId = await initialOwnerId(pool);
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Race resolution failure with cancellation.", providerProfileId: textProviderId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    await pool.query("UPDATE generation_jobs SET status = 'generating' WHERE id = $1", [generation.id]);
+    const set = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_sets (
+         owner_user_id, campaign_id, generation_job_id, source_text_hash, segment_word_count,
+         images_per_segment, prompt_mode, status
+       ) VALUES ($1,$2,$3,'resolution-failure-race-set',500,1,'direct','provisional') RETURNING id`,
+      [ownerUserId, imported.campaignId, generation.id]
+    );
+    const segment = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_segments (
+         owner_user_id, illustration_set_id, campaign_id, generation_job_id, ordinal,
+         start_offset, end_offset, start_word, end_word, source_text, source_text_hash,
+         direct_prompt, resolved_prompt, prompt_source, status
+       ) VALUES ($1,$2,$3,$4,0,0,48,0,8,'Unsafe resolution failure race.','resolution-failure-race-segment',
+                 'Unsafe resolution failure race.','','direct','generating') RETURNING id`,
+      [ownerUserId, set.rows[0]!.id, imported.campaignId, generation.id]
+    );
+    const resolution = await pool.query<{ id: string }>(
+      `INSERT INTO illustration_resolution_jobs (
+         owner_user_id, campaign_id, segment_id, source_policy, matching_scope,
+         confidence_profile, repetition_window, query_context_snapshot
+       ) VALUES ($1,$2,$3,'library_only','campaign','balanced',0,'{}'::jsonb) RETURNING id`,
+      [ownerUserId, imported.campaignId, segment.rows[0]!.id]
+    );
+    const barrier = await installResolutionFailureBarrier(resolution.rows[0]!.id);
+    let cancellationSession: Awaited<ReturnType<typeof startCancellationSession>> | undefined;
+    try {
+      const failure = runIllustrationResolutionJob(pool, `resolution-failure-race-${crypto.randomUUID()}`, 30);
+      const resolutionBackendPid = await barrier.wait();
+      cancellationSession = await startCancellationSession(generation.id);
+      await waitForCancellationBlockedByResolution({
+        applicationName: cancellationSession.applicationName,
+        cancellationBackendPid: cancellationSession.backendPid,
+        resolutionBackendPid,
+        generationJobId: generation.id,
+        resolutionJobId: resolution.rows[0]!.id
+      });
+      await barrier.release();
+      await expect(Promise.all([failure, cancellationSession.cancellation])).resolves.toEqual([
+        true,
+        expect.objectContaining({ status: "cancelled" })
+      ]);
+    } finally {
+      await barrier.cleanup();
+      if (cancellationSession) {
+        await cancellationSession.cancellation.catch(() => undefined);
+        await cancellationSession.close();
+      }
+    }
+    expect(await pool.query("SELECT status FROM generation_jobs WHERE id = $1", [generation.id]))
+      .toMatchObject({ rows: [{ status: "cancelled" }] });
+    expect(await pool.query("SELECT status FROM illustration_resolution_jobs WHERE id = $1", [resolution.rows[0]!.id]))
+      .toMatchObject({ rows: [{ status: "failed" }] });
+    expect(await pool.query("SELECT status FROM turn_illustration_sets WHERE id = $1", [set.rows[0]!.id]))
+      .toMatchObject({ rows: [{ status: "orphaned" }] });
+    expect(await pool.query("SELECT status FROM turn_illustration_segments WHERE id = $1", [segment.rows[0]!.id]))
+      .toMatchObject({ rows: [{ status: "failed" }] });
+    expect(await pool.query(
+      `SELECT id FROM illustration_resolution_jobs WHERE id = $1 AND status IN ('queued','matching','recoverable','generation_queued')
+       UNION ALL SELECT id FROM image_jobs WHERE generation_job_id = $2 AND status IN ('queued','generating','provider_pending','downloading','completed')
+       UNION ALL SELECT id FROM illustration_prompt_jobs WHERE generation_job_id = $2 AND status IN ('queued','refining','recoverable','fallback')`,
+      [resolution.rows[0]!.id, generation.id]
+    )).toMatchObject({ rows: [] });
+  });
+
+  it("prevents AI-refinement delivery from enqueueing an image after cancellation", async () => {
+    const imported = await campaign();
+    const ownerUserId = await initialOwnerId(pool);
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      enabled: true, providerProfileId: imageProviderId, model: "synthetic-image-model",
+      sourcePolicy: "generate_only", segmentPromptMode: "ai_refined"
+    }));
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Race AI-refinement delivery.", providerProfileId: textProviderId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    const config = await loadConfig(pool, ownerUserId, imported.campaignId);
+    await pool.query("UPDATE generation_jobs SET status = 'generating' WHERE id = $1", [generation.id]);
+    const setId = await createProvisionalSet(pool, ownerUserId, imported.campaignId, generation.id);
+    await createProvisionalSegment(
+      pool, ownerUserId, imported.campaignId, generation.id, setId!,
+      { ordinal: 0, startOffset: 0, endOffset: 67, startWord: 0, endWord: 12, wordCount: 12,
+        text: "A lantern reveals a silent causeway beneath violet clouds tonight." }, config
+    );
+    const barrier = await installInsertBarrier("image_jobs", `NEW.generation_job_id = '${generation.id}'::uuid`);
+    try {
+      const refinement = runIllustrationPromptJob(pool, `prompt-race-${crypto.randomUUID()}`, 30, credentialSecret);
+      await barrier.wait();
+      const cancellation = cancelGeneration(pool, generation.id);
+      await waitForCancellationAttempt(generation.id);
+      await barrier.release();
+      await refinement;
+      await cancellation;
+    } finally {
+      await barrier.cleanup();
+    }
+    expect(await pool.query(
+      `SELECT id FROM image_jobs WHERE generation_job_id = $1
+         AND status IN ('queued','generating','provider_pending','downloading','completed')`, [generation.id]
+    )).toMatchObject({ rows: [] });
+    const promptStatus = await pool.query<{ status: string }>(
+      "SELECT status FROM illustration_prompt_jobs WHERE generation_job_id = $1", [generation.id]
+    );
+    expect(["cancelled", "completed"]).toContain(promptStatus.rows[0]?.status);
+  });
+
+  it("terminalizes provisional refinement and resolution work when cancelling a generation", async () => {
+    const imported = await campaign();
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Cancel provisional non-direct illustration work.",
+      providerProfileId: textProviderId,
+      idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const set = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_sets (
+         owner_user_id, campaign_id, generation_job_id, source_text_hash, segment_word_count,
+         images_per_segment, prompt_mode, status
+       ) VALUES ($1,$2,$3,'cancel-non-direct-set',500,1,'ai_refined','provisional') RETURNING id`,
+      [ownerUserId, imported.campaignId, generation.id]
+    );
+    const segment = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_segments (
+         owner_user_id, illustration_set_id, campaign_id, generation_job_id, ordinal,
+         start_offset, end_offset, start_word, end_word, source_text, source_text_hash,
+         direct_prompt, resolved_prompt, prompt_source, status
+       ) VALUES ($1,$2,$3,$4,0,0,65,0,12,'A violet dawn crosses the silent causeway.','cancel-non-direct-segment',
+                 'A violet dawn crosses the silent causeway.','','direct','refining') RETURNING id`,
+      [ownerUserId, set.rows[0]!.id, imported.campaignId, generation.id]
+    );
+    const prompt = await pool.query<{ id: string }>(
+      `INSERT INTO illustration_prompt_jobs (
+         owner_user_id, campaign_id, generation_job_id, segment_id, provider_profile_id, requested_model
+       ) VALUES ($1,$2,$3,$4,$5,'synthetic-text-model') RETURNING id`,
+      [ownerUserId, imported.campaignId, generation.id, segment.rows[0]!.id, textProviderId]
+    );
+    const resolution = await pool.query<{ id: string }>(
+      `INSERT INTO illustration_resolution_jobs (
+         owner_user_id, campaign_id, segment_id, source_policy, matching_scope, confidence_profile, repetition_window
+       ) VALUES ($1,$2,$3,'library_then_generate','campaign','balanced',0) RETURNING id`,
+      [ownerUserId, imported.campaignId, segment.rows[0]!.id]
+    );
+
+    await expect(cancelGeneration(pool, generation.id)).resolves.toMatchObject({ status: "cancelled" });
+    await expect(pool.query("SELECT status FROM illustration_prompt_jobs WHERE id = $1", [prompt.rows[0]!.id]))
+      .resolves.toMatchObject({ rows: [{ status: "cancelled" }] });
+    await expect(pool.query("SELECT status FROM illustration_resolution_jobs WHERE id = $1", [resolution.rows[0]!.id]))
+      .resolves.toMatchObject({ rows: [{ status: "cancelled" }] });
+    await expect(runIllustrationPromptJob(pool, "cancelled-prompt-worker", 30, credentialSecret)).resolves.toBe(false);
+    await expect(runIllustrationResolutionJob(pool, "cancelled-resolution-worker", 30)).resolves.toBe(false);
+    await expect(pool.query("SELECT id FROM image_jobs WHERE generation_job_id = $1", [generation.id]))
+      .resolves.toMatchObject({ rows: [] });
+  });
+
+  it("cancels a streaming image completion that holds its row lock without retaining provisional artwork", async () => {
+    const imported = await campaign();
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Cancel the streaming image completion.",
+      providerProfileId: textProviderId,
+      idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const illustrationSet = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_sets (
+         owner_user_id, campaign_id, generation_job_id, source_text_hash, segment_word_count,
+         images_per_segment, prompt_mode, status
+       ) VALUES ($1,$2,$3,'cancel-completion-set',500,1,'direct','provisional') RETURNING id`,
+      [ownerUserId, imported.campaignId, generation.id]
+    );
+    const segment = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_segments (
+         owner_user_id, illustration_set_id, campaign_id, generation_job_id, ordinal,
+         start_offset, end_offset, start_word, end_word, source_text, source_text_hash,
+         direct_prompt, resolved_prompt, prompt_source, status
+       ) VALUES ($1,$2,$3,$4,0,0,64,0,12,'A provisional scene for cancellation testing.','cancel-completion-segment',
+                 'A provisional scene for cancellation testing.','A provisional scene for cancellation testing.','direct','generating') RETURNING id`,
+      [ownerUserId, illustrationSet.rows[0]!.id, imported.campaignId, generation.id]
+    );
+    const imageJob = await pool.query<{ id: string }>(
+      `INSERT INTO image_jobs (
+         owner_user_id, campaign_id, provider_profile_id, requested_model, prompt, prompt_hash,
+         status, provider_type, target_type, segment_id, generation_job_id
+       ) VALUES ($1,$2,$3,'synthetic-image-model','A provisional scene for cancellation testing.',
+                 'cancel-completion-image','queued','openai_compatible','streaming_illustration',$4,$5) RETURNING id`,
+      [ownerUserId, imported.campaignId, imageProviderId, segment.rows[0]!.id, generation.id]
+    );
+    const trigger = `hold_streaming_completion_${crypto.randomUUID().replaceAll("-", "")}`;
+    const advisoryLockClassId = Number.parseInt(crypto.randomUUID().replaceAll("-", "").slice(0, 7), 16);
+    const advisoryLockObjectId = Number.parseInt(crypto.randomUUID().replaceAll("-", "").slice(0, 7), 16);
+    const lockHolder = await pool.connect();
+    await lockHolder.query("SELECT pg_advisory_lock($1::integer, $2::integer)", [advisoryLockClassId, advisoryLockObjectId]);
+    await pool.query(`CREATE FUNCTION ${trigger}_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        PERFORM pg_advisory_xact_lock(${advisoryLockClassId}, ${advisoryLockObjectId});
+        RETURN NEW;
+      END
+    $$`);
+    await pool.query(`CREATE TRIGGER ${trigger} BEFORE UPDATE OF status ON image_jobs
+      FOR EACH ROW WHEN (NEW.status = 'downloading' AND NEW.id = '${imageJob.rows[0]!.id}'::uuid) EXECUTE FUNCTION ${trigger}_fn()`);
+    try {
+      const worker = runImageJob(pool, "streaming-image-cancel-worker", 30, credentialSecret, { root: assetRoot });
+      await expect.poll(async () => getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "generating" });
+      let workerBackendPid: number | undefined;
+      await expect.poll(async () => pool.query<{ pid: number }>(
+        `SELECT activity.pid
+           FROM pg_stat_activity activity
+           JOIN pg_locks advisory_lock ON advisory_lock.pid = activity.pid
+           JOIN pg_locks image_jobs_lock ON image_jobs_lock.pid = activity.pid
+          WHERE activity.datname = current_database()
+            AND activity.wait_event_type = 'Lock' AND activity.wait_event = 'advisory'
+            AND advisory_lock.locktype = 'advisory' AND NOT advisory_lock.granted
+            AND advisory_lock.classid = $1 AND advisory_lock.objid = $2 AND advisory_lock.objsubid = 2
+            AND image_jobs_lock.locktype = 'relation' AND image_jobs_lock.relation = 'image_jobs'::regclass
+            AND image_jobs_lock.mode = 'RowExclusiveLock' AND image_jobs_lock.granted`,
+        [advisoryLockClassId, advisoryLockObjectId]
+      ).then((result) => {
+        workerBackendPid = result.rows[0]?.pid;
+        return workerBackendPid;
+      }), { timeout: 5_000 }).toBeTypeOf("number");
+      const cancellation = cancelGeneration(pool, generation.id);
+      let cancellationBackendPid: number | undefined;
+      await expect.poll(async () => pool.query<{ pid: number }>(
+        `SELECT cancellation.pid
+           FROM pg_stat_activity cancellation
+          WHERE cancellation.datname = current_database()
+            AND cancellation.wait_event_type = 'Lock'
+            AND cancellation.query LIKE 'UPDATE image_jobs%'
+            AND $1 = ANY(pg_blocking_pids(cancellation.pid))`,
+        [workerBackendPid]
+      ).then((result) => {
+        cancellationBackendPid = result.rows[0]?.pid;
+        return cancellationBackendPid;
+      })).toBeTypeOf("number");
+      expect(cancellationBackendPid).not.toBe(workerBackendPid);
+      await lockHolder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [advisoryLockClassId, advisoryLockObjectId]);
+      await expect(worker).resolves.toBe(true);
+      await expect(cancellation).resolves.toMatchObject({ status: "cancelled" });
+    } finally {
+      await lockHolder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [advisoryLockClassId, advisoryLockObjectId]).catch(() => undefined);
+      lockHolder.release();
+      await pool.query(`DROP TRIGGER IF EXISTS ${trigger} ON image_jobs`);
+      await pool.query(`DROP FUNCTION IF EXISTS ${trigger}_fn()`);
+    }
+
+    expect(await getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "cancelled", assetId: null });
+    expect(await pool.query("SELECT status FROM turn_illustration_sets WHERE id = $1", [illustrationSet.rows[0]!.id]))
+      .toMatchObject({ rows: [{ status: "orphaned" }] });
+    expect(await pool.query("SELECT asset_id FROM turn_illustration_segment_assets WHERE image_job_id = $1", [imageJob.rows[0]!.id]))
+      .toMatchObject({ rows: [] });
+  });
 
   it("creates historical segment jobs without changing accepted turn or Chronicle state", async () => {
     const imported = await campaign();

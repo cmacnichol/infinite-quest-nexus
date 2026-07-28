@@ -72,7 +72,7 @@ import {
 } from "./memory-service.js";
 import { queryAssets, readAsset, readAssetDerivative, selectTurnIllustration, selectWorldCover, updateAssetMetadata, type FilesystemAssetStore } from "./asset-service.js";
 import { createProvider, deleteProvider, discoverUnsavedProviderModels, generateProviderText, listProviders, providerModels, setDefaultProvider, updateProvider } from "./provider-service.js";
-import { branchCampaign, discardGeneration, enqueueGeneration, enqueueLatestReplacement, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, syncPlayerCampaignConfig } from "./generation-service.js";
+import { branchCampaign, cancelGeneration, discardGeneration, enqueueGeneration, enqueueLatestReplacement, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, syncPlayerCampaignConfig } from "./generation-service.js";
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "./campaign-state-service.js";
 import {
   enqueueIllustration,
@@ -759,7 +759,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
             reply.raw.write(`data: ${currentJson}\n\n`);
             snapshotsSent += 1;
           }
-          if (["completed", "failed", "recoverable", "discarded"].includes(job.status)) {
+          if (["completed", "failed", "recoverable", "discarded", "cancelled"].includes(job.status)) {
             finalStatus = job.status;
             break;
           }
@@ -799,6 +799,10 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/retry", async (request, reply) => (
     reply.code(202).send(await retryGeneration(pool, uuidSchema.parse(request.params.jobId)))
+  ));
+
+  app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/cancel", async (request, reply) => (
+    reply.code(202).send(await cancelGeneration(pool, uuidSchema.parse(request.params.jobId)))
   ));
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/discard", async (request) => (

@@ -3,6 +3,11 @@
    ═══════════════════════════════════════════════════════════════ */
 import { branchCampaignFromTurn } from "./story-routing.js";
 import {
+  cancelGeneration,
+  reconcileRemoteGenerationCancellation,
+  syncCancelGenerationButton
+} from "./story-generation-cancellation.js";
+import {
   addEditableStateRow,
   captureCampaignStateEditSession,
   renderCampaignStateInspector,
@@ -54,6 +59,7 @@ const state = {
   generationDisplayActive: false,
   generationDisplayAction: "",
   generationJobId: null,
+  cancellationConfirmed: false,
   illustrationConfig: null,
   illustrationSegments: [],
   illustrationVariantIndexes: new Map(),
@@ -982,8 +988,11 @@ async function runGeneration(action, options = {}) {
     if (err.pendingGeneration) state.pendingGeneration = err.pendingGeneration;
     restoreGenerationDisplay();
     if (err.name === "AbortError") {
-      toast("Generation cancelled.");
-      recordActivity("system", "Generation cancelled");
+      if (!state.cancellationConfirmed) {
+        toast("Generation cancelled.");
+        recordActivity("system", "Generation cancelled");
+      }
+      state.cancellationConfirmed = false;
     } else {
       const preserved = options.operationKind === "replace_latest" ? " The original turn was preserved." : "";
       toast(`Generation failed: ${err.message}${preserved}`);
@@ -1026,6 +1035,9 @@ function renderStreamingPreview(narrationText, action) {
       </div>
     `;
   }
+
+  const header = card.querySelector(".turn-streaming-header");
+  if (header) syncCancelGenerationButton(header, state);
 
   const narration = card.querySelector(".streaming-narration");
   if (narration) {
@@ -1072,6 +1084,7 @@ function clearStreamingPreview() {
 }
 
 function beginGenerationDisplay(action) {
+  state.cancellationConfirmed = false;
   state.generationDisplayActive = true;
   state.generationDisplayAction = action || "";
   renderTurnInput();
@@ -1095,6 +1108,21 @@ function commitGenerationDisplay() {
   state.generationDisplayAction = "";
   state.generationJobId = null;
   $("streamingPreviewCard")?.remove();
+}
+
+async function cancelActiveGeneration() {
+  await cancelGeneration({
+    state,
+    getCancelButton: () => $("streamingPreviewCard")?.querySelector('[data-action="cancel-generation"]'),
+    requestCancellation: (jobId) => api(`/generation-jobs/${jobId}/cancel`, { method: "POST", body: "{}" }),
+    clearPendingSubmission,
+    restoreGenerationDisplay,
+    abortLocalMonitoring: () => state.abortController?.abort(),
+    reloadCampaign: (campaignId) => loadCampaign(campaignId, { autoScroll: false }),
+    recordActivity,
+    toast,
+    showBusy
+  });
 }
 
 function showGenerationRecovery(jobId, message) {
@@ -1127,7 +1155,12 @@ async function monitorRecoveryJob(retryFirst) {
     await pollGenerationJob(jobId, state.pendingGeneration?.action || "");
   } catch (error) {
     restoreGenerationDisplay();
-    toast(`Generation recovery failed: ${error.message}`);
+    if (error.name === "AbortError") {
+      toast("Generation cancelled.");
+      recordActivity("system", "Generation cancelled");
+    } else {
+      toast(`Generation recovery failed: ${error.message}`);
+    }
   } finally {
     hideBusy();
   }
@@ -1244,6 +1277,15 @@ async function pollGenerationJob(jobId, action) {
               } catch (err) {
                 reject(err);
               }
+            } else if (job.status === "cancelled") {
+              cleanup();
+              reject(await reconcileRemoteGenerationCancellation({
+                state,
+                clearPendingSubmission,
+                restoreGenerationDisplay,
+                reloadCampaign: (campaignId) => loadCampaign(campaignId, { autoScroll: false }),
+                toast
+              }));
             } else if (job.status === "failed") {
               cleanup();
               clearStreamingPreview();
@@ -1302,6 +1344,15 @@ async function pollGenerationJob(jobId, action) {
       const result = await api(`/generation-jobs/${jobId}/result`);
       await finalizeCompletedGeneration(result);
       return;
+    }
+    if (job.status === "cancelled") {
+      throw await reconcileRemoteGenerationCancellation({
+        state,
+        clearPendingSubmission,
+        restoreGenerationDisplay,
+        reloadCampaign: (campaignId) => loadCampaign(campaignId, { autoScroll: false }),
+        toast
+      });
     }
     if (job.status === "failed") {
       clearStreamingPreview();
@@ -2695,6 +2746,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!btn) return;
     if (btn.dataset.action === "follow-stream") {
       followStreamingPreview();
+      return;
+    }
+    if (btn.dataset.action === "cancel-generation") {
+      void cancelActiveGeneration();
       return;
     }
     if (btn.dataset.action === "previous-segment-image" || btn.dataset.action === "next-segment-image") {

@@ -400,7 +400,7 @@ export const generationJobStatusSchema = z.object({
   operationKind: z.enum(["append", "replace_latest"]).default("append"),
   replacementTurnId: z.string().uuid().nullable().optional(),
   baseTurnNumber: z.coerce.number().int().min(0).nullable().optional(),
-  status: z.enum(["queued", "replacement_queued", "assessing", "generating", "validating", "committing", "completed", "recoverable", "failed", "discarded"]),
+  status: z.enum(["queued", "replacement_queued", "assessing", "generating", "validating", "committing", "completed", "recoverable", "failed", "discarded", "cancelled"]),
   attempts: z.coerce.number().int().min(0),
   requestedModel: z.string().optional(),
   providerResponseId: z.string().nullable().optional(),

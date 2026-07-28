@@ -7,6 +7,12 @@ import {
   saveCampaignStateFromEditor
 // @ts-expect-error Browser JavaScript modules intentionally do not publish TypeScript declarations.
 } from "../../apps/web/public/story-state-editor.js";
+import {
+  cancelGeneration,
+  reconcileRemoteGenerationCancellation,
+  syncCancelGenerationButton
+// @ts-expect-error Browser JavaScript modules intentionally do not publish TypeScript declarations.
+} from "../../apps/web/public/story-generation-cancellation.js";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/public/story.js", "utf8");
@@ -152,6 +158,120 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('if (job.status === "recoverable") {');
     expect(storyScript).toContain('The original turn was preserved.');
     expect(storyScript).toContain('class="replacement-pending-banner"');
+  });
+
+  it("shows the cancellation control only while a durable generation job is active", () => {
+    const { document } = parseHTML('<div class="turn-streaming-header"></div>');
+    const header = document.querySelector(".turn-streaming-header");
+    if (!header) throw new Error("Streaming header is required.");
+    const state = { generationDisplayActive: true, generationJobId: null as string | null };
+
+    syncCancelGenerationButton(header, state);
+    expect(header.querySelector('[data-action="cancel-generation"]')).toBeNull();
+
+    state.generationJobId = "job-1";
+    syncCancelGenerationButton(header, state);
+    expect(header.querySelector('[data-action="cancel-generation"]')?.textContent).toBe("Cancel generation");
+
+    state.generationDisplayActive = false;
+    syncCancelGenerationButton(header, state);
+    expect(header.querySelector('[data-action="cancel-generation"]')).toBeNull();
+  });
+
+  it("waits for durable cancellation before aborting monitoring and reloading campaign state", async () => {
+    const { document } = parseHTML('<button data-action="cancel-generation">Cancel generation</button>');
+    const button = document.querySelector("button") as HTMLButtonElement | null;
+    if (!button) throw new Error("Cancellation button is required.");
+    const state = {
+      campaignId: "campaign-1",
+      generationDisplayActive: true,
+      generationJobId: "job-1",
+      pendingGeneration: { id: "job-1" },
+      cancellationConfirmed: false
+    };
+    const events: string[] = [];
+
+    await cancelGeneration({
+      state,
+      getCancelButton: () => button,
+      requestCancellation: async (jobId: string) => { events.push(`request:${jobId}`); },
+      clearPendingSubmission: () => { events.push("clear-pending"); },
+      restoreGenerationDisplay: () => { events.push("restore-display"); },
+      abortLocalMonitoring: () => { events.push("abort-monitoring"); },
+      reloadCampaign: async (campaignId: string) => { events.push(`reload:${campaignId}`); },
+      recordActivity: () => { events.push("record"); },
+      toast: () => { events.push("toast"); },
+      showBusy: () => { events.push("busy"); }
+    });
+
+    expect(events).toEqual([
+      "busy",
+      "request:job-1",
+      "clear-pending",
+      "abort-monitoring",
+      "restore-display",
+      "reload:campaign-1",
+      "record",
+      "toast"
+    ]);
+    expect(state.pendingGeneration).toBeNull();
+    expect(state.cancellationConfirmed).toBe(true);
+  });
+
+  it("preserves monitoring and re-enables cancellation after durable cancellation fails", async () => {
+    const { document } = parseHTML('<button data-action="cancel-generation">Cancel generation</button>');
+    const button = document.querySelector("button") as HTMLButtonElement | null;
+    if (!button) throw new Error("Cancellation button is required.");
+    const pendingGeneration = { id: "job-1" };
+    const state = {
+      campaignId: "campaign-1",
+      generationDisplayActive: true,
+      generationJobId: "job-1",
+      pendingGeneration,
+      cancellationConfirmed: false
+    };
+    const events: string[] = [];
+
+    await cancelGeneration({
+      state,
+      getCancelButton: () => button,
+      requestCancellation: async () => { throw new Error("Still generating"); },
+      clearPendingSubmission: () => { events.push("clear-pending"); },
+      restoreGenerationDisplay: () => { events.push("restore-display"); },
+      abortLocalMonitoring: () => { events.push("abort-monitoring"); },
+      reloadCampaign: async () => { events.push("reload"); },
+      recordActivity: () => { events.push("record"); },
+      toast: (message: string) => { events.push(message); },
+      showBusy: () => { events.push("busy"); }
+    });
+
+    expect(button.disabled).toBe(false);
+    expect(button.textContent).toBe("Cancel generation");
+    expect(state.pendingGeneration).toBe(pendingGeneration);
+    expect(state.generationDisplayActive).toBe(true);
+    expect(events).toEqual(["busy", "Could not cancel generation: Still generating"]);
+  });
+
+  it("reloads authoritative state when remote monitoring reports cancellation", async () => {
+    const state = {
+      campaignId: "campaign-1",
+      generationDisplayActive: true,
+      generationJobId: "job-1",
+      pendingGeneration: { id: "job-1" }
+    };
+    const events: string[] = [];
+
+    const cancellation = await reconcileRemoteGenerationCancellation({
+      state,
+      clearPendingSubmission: () => { events.push("clear-pending"); },
+      restoreGenerationDisplay: () => { events.push("restore-display"); },
+      reloadCampaign: async (campaignId: string) => { events.push(`reload:${campaignId}`); },
+      toast: (message: string) => { events.push(message); }
+    });
+
+    expect(cancellation.name).toBe("AbortError");
+    expect(state.pendingGeneration).toBeNull();
+    expect(events).toEqual(["clear-pending", "restore-display", "reload:campaign-1"]);
   });
 
   it("reloads authoritative campaign state without reusing a stale pre-generation response", () => {

@@ -602,7 +602,55 @@ describe("API server security and CORS headers", () => {
     await app.close();
   });
 
-  it("logs one correlated lifecycle for a terminal generation stream", async () => {
+  it("cancels an active generation", async () => {
+    const ownerUserId = "00000000-0000-0000-0000-000000000001";
+    const jobId = "99999999-9999-4999-8999-999999999999";
+    const cancelledJob = {
+      id: jobId,
+      status: "cancelled" as const,
+      campaignId: "88888888-8888-4888-8888-888888888888",
+      operationKind: "append" as const
+    };
+    const transactionControls: string[] = [];
+    const mockClient = {
+      query: async (query: string) => {
+        if (query === "BEGIN" || query === "COMMIT" || query === "ROLLBACK") {
+          transactionControls.push(query);
+          return { rows: [] };
+        }
+        if (query.includes("UPDATE generation_jobs")) return { rows: [cancelledJob] };
+        if (query.includes("UPDATE image_jobs")) return { rows: [] };
+        if (query.includes("DELETE FROM asset_references")) return { rows: [] };
+        if (query.includes("DELETE FROM turn_illustration_segment_assets")) return { rows: [] };
+        if (query.includes("UPDATE turn_illustration_segments")) return { rows: [] };
+        if (query.includes("UPDATE illustration_prompt_jobs")) return { rows: [] };
+        if (query.includes("UPDATE illustration_resolution_jobs")) return { rows: [] };
+        if (query.includes("UPDATE turn_illustration_sets")) return { rows: [] };
+        throw new Error(`Unexpected transaction query: ${query}`);
+      },
+      release: () => undefined
+    };
+    const mockPool = {
+      query: async (query: string) => {
+        if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
+        throw new Error(`Unexpected query: ${query}`);
+      },
+      connect: async () => mockClient
+    } as unknown as DatabasePool;
+    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+
+    try {
+      const response = await app.inject({ method: "POST", url: `/api/v1/generation-jobs/${jobId}/cancel` });
+
+      expect(response.statusCode).toBe(202);
+      expect(response.json()).toMatchObject(cancelledJob);
+      expect(transactionControls).toEqual(["BEGIN", "COMMIT"]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("closes a generation stream after cancelled status", async () => {
     const ownerUserId = "00000000-0000-0000-0000-000000000001";
     const jobId = "11111111-1111-4111-8111-111111111111";
     const fixtureAction = "fixture action that must not appear in lifecycle logs";
@@ -619,7 +667,7 @@ describe("API server security and CORS headers", () => {
               providerProfileId: null,
               expectedTurnNumber: 1,
               action: fixtureAction,
-              status: "completed",
+              status: "cancelled",
               attempts: 1,
               requestedInputMode: "action",
               resolvedInputMode: "action",
@@ -653,6 +701,8 @@ describe("API server security and CORS headers", () => {
       expect(response.statusCode).toBe(200);
       expect(response.headers["content-type"]).toContain("text/event-stream");
       expect(response.headers["cache-control"]).toBe("no-cache");
+      expect(response.body.match(/^data: /gm)).toHaveLength(1);
+      expect(response.body).toContain('"status":"cancelled"');
 
       const lifecycleLogs = loggerInfo.mock.calls
         .map(([fields]) => fields as Record<string, unknown>)
@@ -668,7 +718,7 @@ describe("API server security and CORS headers", () => {
           event: "turn_generation_stream_closed",
           generationJobId: jobId,
           correlationId: lifecycleLogs[0]?.correlationId,
-          finalStatus: "completed",
+          finalStatus: "cancelled",
           snapshotsSent: 1
         })
       ]);

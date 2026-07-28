@@ -642,6 +642,137 @@ export async function retryGeneration(pool: DatabasePool, jobId: string) {
   return { id: requeued.id, status: requeued.status };
 }
 
+export async function cancelGeneration(pool: DatabasePool, jobId: string): Promise<{
+  id: string;
+  status: "cancelled";
+  campaignId: string;
+  operationKind: "append" | "replace_latest";
+}> {
+  const ownerUserId = await initialOwnerId(pool);
+  const cancelled = await withTransaction(pool, async (client) => {
+    const result = await client.query<{
+      id: string;
+      status: "cancelled";
+      campaignId: string;
+      operationKind: "append" | "replace_latest";
+    }>(
+      `UPDATE generation_jobs
+          SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL, partial_output = NULL,
+              error_code = 'cancelled_by_player', error_message = 'Cancelled by player.', updated_at = now()
+        WHERE id = $1 AND owner_user_id = $2
+          AND status IN ('queued', 'replacement_queued', 'assessing', 'generating', 'validating', 'committing')
+        RETURNING id, status, campaign_id AS "campaignId", operation_kind AS "operationKind"`,
+      [jobId, ownerUserId]
+    );
+    const job = result.rows[0];
+    if (!job) {
+      const existing = await client.query<{
+        id: string;
+        status: string;
+        campaignId: string;
+        operationKind: "append" | "replace_latest";
+      }>(
+        `SELECT id, status, campaign_id AS "campaignId", operation_kind AS "operationKind"
+           FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
+        [jobId, ownerUserId]
+      );
+      if (!existing.rows[0]) throw Object.assign(new Error("Generation job not found."), { statusCode: 404 });
+      if (existing.rows[0].status === "cancelled") {
+        const existingCancelled = existing.rows[0];
+        return {
+          id: existingCancelled.id,
+          status: "cancelled" as const,
+          campaignId: existingCancelled.campaignId,
+          operationKind: existingCancelled.operationKind
+        };
+      }
+      throw Object.assign(new Error("Only active generation jobs can be cancelled."), { statusCode: 409 });
+    }
+    const cancelledImages = await client.query<{ id: string }>(
+      `UPDATE image_jobs
+          SET status = 'cancelled', asset_id = NULL, lease_owner = NULL, lease_expires_at = NULL,
+              completed_at = now(), updated_at = now()
+        WHERE generation_job_id = $1 AND owner_user_id = $2 AND campaign_id = $3
+          AND target_type = 'streaming_illustration'
+          AND status IN ('queued', 'generating', 'provider_pending', 'downloading', 'completed')
+        RETURNING id`,
+      [job.id, ownerUserId, job.campaignId]
+    );
+    if (cancelledImages.rows.length) {
+      await client.query(
+        `DELETE FROM turn_illustration_segment_assets
+          WHERE owner_user_id = $1 AND image_job_id = ANY($2::uuid[])`,
+        [ownerUserId, cancelledImages.rows.map((image) => image.id)]
+      );
+    }
+    await client.query(
+      `DELETE FROM asset_references refs
+        USING illustration_resolution_jobs resolutions, turn_illustration_segments segments
+        WHERE resolutions.segment_id = segments.id
+          AND segments.generation_job_id = $1 AND segments.owner_user_id = $2
+          AND segments.campaign_id = $3 AND segments.turn_id IS NULL
+          AND refs.owner_user_id = segments.owner_user_id
+          AND refs.campaign_id = segments.campaign_id
+          AND refs.asset_id = resolutions.selected_asset_id
+          AND refs.turn_id IS NOT DISTINCT FROM resolutions.turn_id
+          AND refs.asset_role = 'turn_illustration'`,
+      [job.id, ownerUserId, job.campaignId]
+    );
+    await client.query(
+      `DELETE FROM turn_illustration_segment_assets assets
+        USING turn_illustration_segments segments
+        WHERE assets.segment_id = segments.id AND assets.owner_user_id = segments.owner_user_id
+          AND segments.generation_job_id = $1 AND segments.owner_user_id = $2
+          AND segments.campaign_id = $3 AND segments.turn_id IS NULL`,
+      [job.id, ownerUserId, job.campaignId]
+    );
+    await client.query(
+      `UPDATE turn_illustration_segments
+          SET status = 'failed', updated_at = now()
+        WHERE generation_job_id = $1 AND owner_user_id = $2 AND turn_id IS NULL
+          AND status = 'completed'`,
+      [job.id, ownerUserId]
+    );
+    await client.query(
+      `UPDATE illustration_prompt_jobs prompts
+          SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
+              error_code = 'generation_cancelled', error_message = 'Parent generation was cancelled.',
+              completed_at = now(), updated_at = now()
+         FROM turn_illustration_segments segments
+        WHERE prompts.segment_id = segments.id AND prompts.owner_user_id = segments.owner_user_id
+          AND segments.generation_job_id = $1 AND segments.owner_user_id = $2 AND segments.campaign_id = $3
+          AND segments.turn_id IS NULL
+          AND prompts.status IN ('queued', 'refining', 'recoverable', 'fallback')`,
+      [job.id, ownerUserId, job.campaignId]
+    );
+    await client.query(
+      `UPDATE illustration_resolution_jobs resolutions
+          SET status = 'cancelled', reason_code = 'generation_cancelled', lease_owner = NULL, lease_expires_at = NULL,
+              completed_at = now(), updated_at = now()
+         FROM turn_illustration_segments segments
+        WHERE resolutions.segment_id = segments.id AND resolutions.owner_user_id = segments.owner_user_id
+          AND segments.generation_job_id = $1 AND segments.owner_user_id = $2 AND segments.campaign_id = $3
+          AND segments.turn_id IS NULL
+          AND resolutions.status IN ('queued', 'matching', 'recoverable', 'generation_queued')`,
+      [job.id, ownerUserId, job.campaignId]
+    );
+    await client.query(
+      `UPDATE turn_illustration_sets SET status = 'orphaned', completed_at = NULL
+        WHERE generation_job_id = $1 AND owner_user_id = $2
+          AND turn_id IS NULL AND status <> 'orphaned'`,
+      [job.id, ownerUserId]
+    );
+    return job;
+  });
+  logger.info({
+    event: "turn_generation_cancelled",
+    generationJobId: cancelled.id,
+    campaignId: cancelled.campaignId,
+    operationKind: cancelled.operationKind
+  });
+  return cancelled;
+}
+
 export async function discardGeneration(pool: DatabasePool, jobId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const result = await pool.query(
@@ -1244,15 +1375,24 @@ async function loadOrchestrationInputs(pool: DatabasePool, job: ClaimedJob): Pro
   };
 }
 
+function assertActiveGenerationUpdate(result: { rows: Array<{ id: string }> }, action: string): void {
+  if (!result.rows[0]) {
+    throw Object.assign(new Error(`Generation was cancelled or its lease was lost while ${action}.`), {
+      code: "generation_cancelled"
+    });
+  }
+}
+
 async function persistOrchestration(pool: DatabasePool, job: ClaimedJob, patch: Partial<OrchestrationPrivate>, workerId: string): Promise<OrchestrationPrivate> {
   const merged = { ...(job.orchestration_private || {}), ...patch };
-  const result = await pool.query(
+  const result = await pool.query<{ id: string }>(
     `UPDATE generation_jobs SET orchestration_private = $3, updated_at = now()
       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $4
+        AND status IN ('assessing','generating','validating','committing')
       RETURNING id`,
     [job.id, job.owner_user_id, json(merged), workerId]
   );
-  if (!result.rows[0]) throw Object.assign(new Error("Generation lease was lost while persisting private orchestration."), { code: "lease_lost" });
+  assertActiveGenerationUpdate(result, "persisting private orchestration");
   job.orchestration_private = merged;
   return merged;
 }
@@ -1294,11 +1434,13 @@ async function commitStory(
   fictionAction: string,
   workerId: string
 ): Promise<string> {
-  const lease = await client.query<{ lease_owner: string | null }>(
-    `SELECT lease_owner FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
-    [job.id, job.owner_user_id]
+  const lease = await client.query<{ id: string }>(
+    `SELECT id FROM generation_jobs
+      WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'committing'
+      FOR UPDATE`,
+    [job.id, job.owner_user_id, workerId]
   );
-  if (lease.rows[0]?.lease_owner !== workerId) throw Object.assign(new Error("Generation lease was lost before commit."), { code: "lease_lost" });
+  if (!lease.rows[0]) throw Object.assign(new Error("Generation lease was lost or cancelled before commit."), { code: "lease_lost" });
   const campaignResult = await client.query<{
     active_turn_number: number;
     world_version_id: string;
@@ -1466,13 +1608,15 @@ async function commitStory(
     await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
   }
   await enqueueEmbeddingReindex(client, job.campaign_id);
-  await client.query(
+  const completed = await client.query<{ id: string }>(
     `UPDATE generation_jobs SET status = 'completed', result_turn_id = $3, provider_response_id = $4,
        provider_finish_reason = $5, completed_at = now(), updated_at = now(), lease_owner = NULL, lease_expires_at = NULL,
        partial_output = NULL, error_code = NULL, error_message = NULL
-     WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $6`,
+     WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $6 AND status = 'committing'
+     RETURNING id`,
     [job.id, job.owner_user_id, turnId, response.responseId || null, response.finishReason || null, workerId]
   );
+  assertActiveGenerationUpdate(completed, "marking the committed turn complete");
   return turnId;
 }
 
@@ -1568,7 +1712,13 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
       ...fictionGuidanceForRoll(orchestration.roll || null),
       ...fictionGuidanceForEvents(orchestration.beforeEvents || [])
     ].filter((entry) => entry && !containsMechanicsLanguage(entry));
-    await pool.query(`UPDATE generation_jobs SET status = 'generating', updated_at = now() WHERE id = $1 AND lease_owner = $2`, [job.id, workerId]);
+    const generating = await pool.query<{ id: string }>(
+      `UPDATE generation_jobs SET status = 'generating', updated_at = now()
+        WHERE id = $1 AND lease_owner = $2 AND status = 'assessing'
+        RETURNING id`,
+      [job.id, workerId]
+    );
+    assertActiveGenerationUpdate(generating, "entering generation");
     let storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength, job.resolved_input_mode);
     const removalPriority = ["chronological", "relevant", "summary_checkpoint", "recent", "open_threads"];
     while (budgetTokenEstimate(storySystemPrompt) + budgetTokenEstimate(storyInput) > inputTokenLimit && promptContext.chronicle.length) {
@@ -1636,10 +1786,11 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
         
         try {
           const partialUpdate = await pool.query<{ id: string }>(
-            `UPDATE generation_jobs SET partial_output = $2, updated_at = now() WHERE id = $1 AND lease_owner = $3 RETURNING id`,
+            `UPDATE generation_jobs SET partial_output = $2, updated_at = now()
+              WHERE id = $1 AND lease_owner = $3 AND status = 'generating' RETURNING id`,
             [job.id, accumulated, workerId]
           );
-          if (!partialUpdate.rows[0]) return;
+          assertActiveGenerationUpdate(partialUpdate, "persisting streamed output");
           if (lastStreamLogAt === 0 || now - lastStreamLogAt >= 5000 || accumulated.length - lastStreamLogChars >= 4096) {
             const narration = extractPartialNarration(accumulated);
             logger.info({
@@ -1654,6 +1805,7 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
             lastStreamLogChars = accumulated.length;
           }
         } catch (error) {
+          if (errorCodeFrom(error) === "generation_cancelled") throw error;
           if (now - lastStreamPersistWarningAt >= 5000) {
             const rawErrorCode = errorCodeFrom(error);
             const errorCode = rawErrorCode ? safeLogErrorCode(rawErrorCode) : null;
@@ -1675,14 +1827,18 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
               const newSegments = segmentTracker.detectNewSegments(narration);
               for (const segment of newSegments) {
                 if (!provisionalSetId) {
-                  provisionalSetId = await createProvisionalSet(
+                  const createdSetId = await createProvisionalSet(
                     pool, job.owner_user_id, job.campaign_id, job.id,
                     characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
                   );
-                  await pool.query(
-                    `UPDATE generation_jobs SET streaming_segments_state = jsonb_set(streaming_segments_state, '{provisionalSetId}', $2) WHERE id = $1`,
-                    [job.id, JSON.stringify(provisionalSetId)]
+                  if (!createdSetId) throw Object.assign(new Error("Generation was cancelled before creating provisional illustrations."), { code: "generation_cancelled" });
+                  provisionalSetId = createdSetId;
+                  const state = await pool.query<{ id: string }>(
+                    `UPDATE generation_jobs SET streaming_segments_state = jsonb_set(streaming_segments_state, '{provisionalSetId}', $2)
+                      WHERE id = $1 AND owner_user_id = $3 AND lease_owner = $4 AND status = 'generating' RETURNING id`,
+                    [job.id, JSON.stringify(provisionalSetId), job.owner_user_id, workerId]
                   );
+                  assertActiveGenerationUpdate(state, "persisting provisional illustration state");
                 }
                 await createProvisionalSegment(
                   pool, job.owner_user_id, job.campaign_id, job.id,
@@ -1695,14 +1851,18 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
                 singleSectionDetected = true;
                 if (!isIllustrationSegmentEligible({ wordCount: segmentTracker.accumulatedWordCount }, illustrationConfig.segment_word_count)) return;
                 if (!provisionalSetId) {
-                  provisionalSetId = await createProvisionalSet(
+                  const createdSetId = await createProvisionalSet(
                     pool, job.owner_user_id, job.campaign_id, job.id,
                     characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
                   );
-                  await pool.query(
-                    `UPDATE generation_jobs SET streaming_segments_state = jsonb_set(streaming_segments_state, '{provisionalSetId}', $2) WHERE id = $1`,
-                    [job.id, JSON.stringify(provisionalSetId)]
+                  if (!createdSetId) throw Object.assign(new Error("Generation was cancelled before creating provisional illustrations."), { code: "generation_cancelled" });
+                  provisionalSetId = createdSetId;
+                  const state = await pool.query<{ id: string }>(
+                    `UPDATE generation_jobs SET streaming_segments_state = jsonb_set(streaming_segments_state, '{provisionalSetId}', $2)
+                      WHERE id = $1 AND owner_user_id = $3 AND lease_owner = $4 AND status = 'generating' RETURNING id`,
+                    [job.id, JSON.stringify(provisionalSetId), job.owner_user_id, workerId]
                   );
+                  assertActiveGenerationUpdate(state, "persisting provisional illustration state");
                 }
                 await createProvisionalSegment(
                   pool, job.owner_user_id, job.campaign_id, job.id,
@@ -1805,11 +1965,12 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
            error_code = $5, error_message = $6, recovery_metadata = recovery_metadata || $7::jsonb,
            lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
          WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $8
+           AND status IN ('assessing','generating','validating','committing')
          RETURNING id`,
         [job.id, job.owner_user_id, result.responseId || null, result.finishReason || null, code,
           messages.join(" ").slice(0, 4000), json({ retryable: true, attemptCount: firstReason ? 2 : 1 }), workerId]
       );
-      if (!recoverable.rows[0]) throw Object.assign(new Error("Generation lease was lost before recovery state could be saved."), { code: "lease_lost" });
+      assertActiveGenerationUpdate(recoverable, "saving recovery state");
       logger.warn({
         event: "turn_generation_recoverable",
         ...generationLogContext(job, workerId),
@@ -1891,11 +2052,12 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
                error_code = 'scene_coverage', error_message = $5,
                recovery_metadata = recovery_metadata || $6::jsonb, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
              WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $7
+               AND status IN ('assessing','generating','validating','committing')
              RETURNING id`,
             [job.id, job.owner_user_id, result.responseId || null, result.finishReason || null,
               details.join(" ").slice(0, 4000), json({ retryable: true, sceneCoverageRewriteAttempted: true }), workerId]
           );
-          if (!recoverable.rows[0]) throw Object.assign(new Error("Generation lease was lost before scene recovery state could be saved."), { code: "lease_lost" });
+          assertActiveGenerationUpdate(recoverable, "saving scene recovery state");
           logger.warn({
             event: "turn_generation_recoverable",
             ...generationLogContext(job, workerId),
@@ -1907,7 +2069,13 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
         }
       }
     }
-    await pool.query(`UPDATE generation_jobs SET status = 'validating', updated_at = now() WHERE id = $1 AND lease_owner = $2`, [job.id, workerId]);
+    const validating = await pool.query<{ id: string }>(
+      `UPDATE generation_jobs SET status = 'validating', updated_at = now()
+        WHERE id = $1 AND lease_owner = $2 AND status = 'generating'
+        RETURNING id`,
+      [job.id, workerId]
+    );
+    assertActiveGenerationUpdate(validating, "entering validation");
     if (orchestration.afterEvents === undefined) {
       let activated: ActivatedEvent[] = [];
       let triggerError = "";
@@ -1953,7 +2121,13 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
       tracker_updates: [...parsed.story.tracker_updates, ...orchestration.extension.trackerUpdates]
     } : parsed.story;
     if (mechanicsLeakFields(committedStory).length) throw new Error("Mechanics validation invariant failed after event extension.");
-    await pool.query(`UPDATE generation_jobs SET status = 'committing', updated_at = now() WHERE id = $1 AND lease_owner = $2`, [job.id, workerId]);
+    const committing = await pool.query<{ id: string }>(
+      `UPDATE generation_jobs SET status = 'committing', updated_at = now()
+        WHERE id = $1 AND lease_owner = $2 AND status = 'validating'
+        RETURNING id`,
+      [job.id, workerId]
+    );
+    assertActiveGenerationUpdate(committing, "entering commit");
     const turnId = await withTransaction(pool, (client) => commitStory(client, job, committedStory, provider, result, contextFingerprint,
       contextDiagnostics, inputs, orchestration, safeAction, workerId));
     logger.info({
@@ -1974,7 +2148,8 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
       `UPDATE generation_jobs SET status = 'failed', error_code = $3, error_message = $4,
          recovery_metadata = recovery_metadata || $5::jsonb,
          lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-       WHERE id = $1 AND owner_user_id = $2 AND status <> 'completed' AND lease_owner = $6
+       WHERE id = $1 AND owner_user_id = $2
+         AND status IN ('assessing','generating','validating','committing') AND lease_owner = $6
        RETURNING id`,
       [job.id, job.owner_user_id, code, (error instanceof Error ? error.message : String(error)).slice(0, 4000),
         json(transportError ? { transportError } : {}), workerId]
