@@ -1318,7 +1318,10 @@ integration("durable Story Engine integration", () => {
         .sort((left, right) => left.order - right.order)
         .map(({ event }) => event)
         .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null && "event" in event);
-      expect(events.map((event) => event.event)).toEqual([
+      const phaseEvents = events.filter((event) => String(event.event).startsWith("turn_generation_phase_"));
+      const legacyEvents = events.filter((event) => !String(event.event).startsWith("turn_generation_phase_"));
+
+      expect(legacyEvents.map((event) => event.event)).toEqual([
         "turn_generation_claimed",
         "turn_generation_started",
         "turn_generation_provider_started",
@@ -1331,8 +1334,47 @@ integration("durable Story Engine integration", () => {
         "turn_generation_validation_completed",
         "turn_generation_completed"
       ]);
-      expect(events.filter((event) => event.event === "turn_generation_stream_progress")).toHaveLength(1);
-      for (const event of events) {
+
+      const completedPhases = phaseEvents
+        .filter((event) => event.event === "turn_generation_phase_completed")
+        .map((event) => event.phase);
+      expect(completedPhases).toEqual([
+        "provider_loading",
+        "input_preparation",
+        "context_retrieval",
+        "orchestration_loading",
+        "rpg_assessment",
+        "before_event_evaluation",
+        "prompt_preparation",
+        "streaming_illustration_setup",
+        "story_generation",
+        "story_validation",
+        "story_recovery",
+        "story_validation",
+        "after_event_evaluation",
+        "turn_commit"
+      ]);
+      expect(phaseEvents.filter((event) => event.event === "turn_generation_phase_started")).toHaveLength(completedPhases.length);
+      expect(phaseEvents.filter((event) => event.event === "turn_generation_phase_failed")).toHaveLength(0);
+      expect(phaseEvents.filter((event) => event.event === "turn_generation_phase_stalled")).toHaveLength(0);
+      for (const event of phaseEvents) {
+        expect(event).toMatchObject({
+          generationJobId: job.id,
+          campaignId: imported.campaignId,
+          providerProfileId: providerId,
+          expectedTurnNumber: 3,
+          operationKind: "append",
+          jobAttempt: 1,
+          workerId: "story-worker-lifecycle-logs",
+          phase: expect.any(String),
+          totalDurationMs: expect.any(Number)
+        });
+      }
+      for (const event of phaseEvents.filter((event) => event.event !== "turn_generation_phase_started")) {
+        expect(event.durationMs).toEqual(expect.any(Number));
+      }
+      expect(legacyEvents.filter((event) => event.event === "turn_generation_stream_progress")).toHaveLength(1);
+      for (const event of legacyEvents) {
         expect(event).toMatchObject({
           generationJobId: job.id,
           campaignId: imported.campaignId,
@@ -1355,6 +1397,7 @@ integration("durable Story Engine integration", () => {
       expect(serializedLogs).not.toContain(credentialSecret);
       expect(serializedLogs).not.toContain(streamedDraft);
       expect(serializedLogs).not.toContain(acceptedStory);
+      expect(serializedLogs).not.toContain("Open Location Gamma.");
     } finally {
       await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
       infoSpy.mockRestore();

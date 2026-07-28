@@ -85,6 +85,11 @@ import { attributeGenerationCostsToTurn, recordProfileCost, turnReportedCosts } 
 import { promptFromSnapshot, promptProtocolVersion, resolvePromptSnapshot, type PromptSnapshot } from "./prompt-library-service.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import { logger } from "../../../packages/logger/src/index.js";
+import {
+  runTurnGenerationPhase,
+  type TurnGenerationDiagnosticContext,
+  type TurnGenerationPhase
+} from "./generation-diagnostics.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
 
@@ -1622,6 +1627,22 @@ async function commitStory(
 
 export async function executeGenerationJob(pool: DatabasePool, workerId: string, job: ClaimedJob, leaseSeconds: number, credentialSecret: string): Promise<boolean> {
   const generationStartedAt = Date.now();
+  const diagnosticContext: TurnGenerationDiagnosticContext = {
+    generationJobId: job.id,
+    campaignId: job.campaign_id,
+    providerProfileId: job.provider_profile_id,
+    expectedTurnNumber: job.expected_turn_number,
+    operationKind: job.operation_kind,
+    jobAttempt: job.attempts,
+    workerId
+  };
+  const phase = <T>(phaseName: TurnGenerationPhase, operation: () => Promise<T>) =>
+    runTurnGenerationPhase({
+      logger,
+      context: diagnosticContext,
+      phase: phaseName,
+      generationStartedAt
+    }, operation);
   logger.info({
     event: "turn_generation_started",
     ...generationLogContext(job, workerId)
@@ -1634,25 +1655,32 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
     ).catch(() => undefined);
   }, Math.max(5000, Math.floor(leaseSeconds * 1000 / 3)));
   try {
-    const provider = await loadTextProvider(pool, job.owner_user_id, job.provider_profile_id, credentialSecret, job.requested_model);
-    const safeAction = safeTurnInput(job.action);
-    const storyLength = snapshottedStoryLength(job.context_options);
-    const requestedContextWindow = Number(job.context_options.modelContextWindowTokens || provider.contextWindowTokens);
-    const effectiveContextWindow = Math.min(provider.contextWindowTokens, requestedContextWindow);
-    const inputTokenLimit = effectiveContextWindow - provider.maxOutputTokens;
-    const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
-    const storySystemPrompt = promptFromSnapshot(job.prompt_snapshot, "story_system");
-    const fixedPromptEnvelope = budgetTokenEstimate(storySystemPrompt)
-      + budgetTokenEstimate(buildStoryUserPrompt(emptyPromptContext, safeAction, false, [], storyLength, job.resolved_input_mode))
-      + 1024;
-    if (inputTokenLimit - fixedPromptEnvelope < 512) {
-      throw Object.assign(new Error(`The provider context window (${effectiveContextWindow}) cannot fit the configured output reserve (${provider.maxOutputTokens}) and story prompt envelope.`), { code: "context_budget_invalid" });
-    }
-    const safeContextBudget = Math.max(512, Math.min(
-      Number(job.context_options.budgetTokens || 32000),
-      inputTokenLimit - fixedPromptEnvelope
-    ));
-    const context = await buildContextPreview(
+    const provider = await phase("provider_loading", () =>
+      loadTextProvider(pool, job.owner_user_id, job.provider_profile_id, credentialSecret, job.requested_model));
+
+    const preparedInput = await phase("input_preparation", async () => {
+      const safeAction = safeTurnInput(job.action);
+      const storyLength = snapshottedStoryLength(job.context_options);
+      const requestedContextWindow = Number(job.context_options.modelContextWindowTokens || provider.contextWindowTokens);
+      const effectiveContextWindow = Math.min(provider.contextWindowTokens, requestedContextWindow);
+      const inputTokenLimit = effectiveContextWindow - provider.maxOutputTokens;
+      const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
+      const storySystemPrompt = promptFromSnapshot(job.prompt_snapshot, "story_system");
+      const fixedPromptEnvelope = budgetTokenEstimate(storySystemPrompt)
+        + budgetTokenEstimate(buildStoryUserPrompt(emptyPromptContext, safeAction, false, [], storyLength, job.resolved_input_mode))
+        + 1024;
+      if (inputTokenLimit - fixedPromptEnvelope < 512) {
+        throw Object.assign(new Error(`The provider context window (${effectiveContextWindow}) cannot fit the configured output reserve (${provider.maxOutputTokens}) and story prompt envelope.`), { code: "context_budget_invalid" });
+      }
+      const safeContextBudget = Math.max(512, Math.min(
+        Number(job.context_options.budgetTokens || 32000),
+        inputTokenLimit - fixedPromptEnvelope
+      ));
+      return { safeAction, storyLength, effectiveContextWindow, inputTokenLimit, storySystemPrompt, safeContextBudget };
+    });
+    const { safeAction, storyLength, effectiveContextWindow, inputTokenLimit, storySystemPrompt, safeContextBudget } = preparedInput;
+
+    const context = await phase("context_retrieval", () => buildContextPreview(
       pool,
       job.campaign_id,
       { ...job.context_options, budgetTokens: safeContextBudget, query: safeAction },
@@ -1665,111 +1693,125 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
             scratchpadSafeForPrompt: job.base_scratchpad_safe_for_prompt
           }
         : {}
-    );
+    ));
     const promptContext = context.scopes;
-    const inputs = await loadOrchestrationInputs(pool, job);
+    const inputs = await phase("orchestration_loading", () => loadOrchestrationInputs(pool, job));
     let orchestration = job.orchestration_private || {};
     if (orchestration.roll === undefined) {
-      if (job.resolved_input_mode === "action" && inputs.useRpgStats && job.expected_turn_number > 1 && inputs.rpgStats.length) {
-        let assessment;
-        let assessmentError = "";
-        try {
-          const response = await callCampaignTextProvider(pool, provider, job, "rpg_assessment", {
-            systemPrompt: promptFromSnapshot(job.prompt_snapshot, "rpg_assessment"),
-            input: buildRpgAssessmentPrompt(promptContext, job.action, inputs.rpgStats)
-          });
-          if (response.outputLimited) throw new Error("The private RPG assessment reached its output limit.");
-          assessment = parseRpgAssessment(response.content);
-        } catch (error) {
-          assessmentError = error instanceof Error ? error.message : String(error);
-          assessment = localRpgAssessment(job.action, inputs.rpgStats);
+      await phase("rpg_assessment", async () => {
+        if (job.resolved_input_mode === "action" && inputs.useRpgStats && job.expected_turn_number > 1 && inputs.rpgStats.length) {
+          let assessment;
+          let assessmentError = "";
+          try {
+            const response = await callCampaignTextProvider(pool, provider, job, "rpg_assessment", {
+              systemPrompt: promptFromSnapshot(job.prompt_snapshot, "rpg_assessment"),
+              input: buildRpgAssessmentPrompt(promptContext, job.action, inputs.rpgStats)
+            });
+            if (response.outputLimited) throw new Error("The private RPG assessment reached its output limit.");
+            assessment = parseRpgAssessment(response.content);
+          } catch (error) {
+            assessmentError = error instanceof Error ? error.message : String(error);
+            assessment = localRpgAssessment(job.action, inputs.rpgStats);
+          }
+          orchestration = await persistOrchestration(pool, job, {
+            roll: performPrivateRoll(assessment, inputs.rpgStats),
+            ...(assessmentError ? { rpgAssessmentError: assessmentError.slice(0, 2000) } : {})
+          }, workerId);
+        } else {
+          orchestration = await persistOrchestration(pool, job, { roll: null }, workerId);
         }
-        orchestration = await persistOrchestration(pool, job, {
-          roll: performPrivateRoll(assessment, inputs.rpgStats),
-          ...(assessmentError ? { rpgAssessmentError: assessmentError.slice(0, 2000) } : {})
-        }, workerId);
-      } else {
-        orchestration = await persistOrchestration(pool, job, { roll: null }, workerId);
-      }
+      });
     }
     if (orchestration.beforeEvents === undefined) {
-      let activated: ActivatedEvent[] = [];
-      let triggerError = "";
-      if (!inputs.suppressEventTriggers) {
-        const triggers = inputs.eventTriggers.filter((trigger) => trigger.timing === "before");
-        try {
-          activated = await evaluateTriggers(pool, provider, "before", promptContext, job, triggers);
-        } catch (error) {
-          triggerError = error instanceof Error ? error.message : String(error);
+      await phase("before_event_evaluation", async () => {
+        let activated: ActivatedEvent[] = [];
+        let triggerError = "";
+        if (!inputs.suppressEventTriggers) {
+          const triggers = inputs.eventTriggers.filter((trigger) => trigger.timing === "before");
+          try {
+            activated = await evaluateTriggers(pool, provider, "before", promptContext, job, triggers);
+          } catch (error) {
+            triggerError = error instanceof Error ? error.message : String(error);
+          }
         }
+        orchestration = await persistOrchestration(pool, job, {
+          beforeEvents: [...inputs.pendingEventTriggers, ...activated],
+          ...(triggerError ? { beforeTriggerError: triggerError.slice(0, 2000) } : {})
+        }, workerId);
+      });
+    }
+    const promptPreparation = await phase("prompt_preparation", async () => {
+      const safeGuidance = [
+        ...fictionGuidanceForRoll(orchestration.roll || null),
+        ...fictionGuidanceForEvents(orchestration.beforeEvents || [])
+      ].filter((entry) => entry && !containsMechanicsLanguage(entry));
+      const generating = await pool.query<{ id: string }>(
+        `UPDATE generation_jobs SET status = 'generating', updated_at = now()
+          WHERE id = $1 AND lease_owner = $2 AND status = 'assessing'
+          RETURNING id`,
+        [job.id, workerId]
+      );
+      assertActiveGenerationUpdate(generating, "entering generation");
+      let storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength, job.resolved_input_mode);
+      const removalPriority = ["chronological", "relevant", "summary_checkpoint", "recent", "open_threads"];
+      while (budgetTokenEstimate(storySystemPrompt) + budgetTokenEstimate(storyInput) > inputTokenLimit && promptContext.chronicle.length) {
+        let removalIndex = -1;
+        for (const reason of removalPriority) {
+          removalIndex = promptContext.chronicle.findIndex((memory) => memory.reason === reason);
+          if (removalIndex >= 0) break;
+        }
+        promptContext.chronicle.splice(removalIndex >= 0 ? removalIndex : 0, 1);
+        storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength, job.resolved_input_mode);
       }
-      orchestration = await persistOrchestration(pool, job, {
-        beforeEvents: [...inputs.pendingEventTriggers, ...activated],
-        ...(triggerError ? { beforeTriggerError: triggerError.slice(0, 2000) } : {})
-      }, workerId);
-    }
-    const safeGuidance = [
-      ...fictionGuidanceForRoll(orchestration.roll || null),
-      ...fictionGuidanceForEvents(orchestration.beforeEvents || [])
-    ].filter((entry) => entry && !containsMechanicsLanguage(entry));
-    const generating = await pool.query<{ id: string }>(
-      `UPDATE generation_jobs SET status = 'generating', updated_at = now()
-        WHERE id = $1 AND lease_owner = $2 AND status = 'assessing'
-        RETURNING id`,
-      [job.id, workerId]
-    );
-    assertActiveGenerationUpdate(generating, "entering generation");
-    let storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength, job.resolved_input_mode);
-    const removalPriority = ["chronological", "relevant", "summary_checkpoint", "recent", "open_threads"];
-    while (budgetTokenEstimate(storySystemPrompt) + budgetTokenEstimate(storyInput) > inputTokenLimit && promptContext.chronicle.length) {
-      let removalIndex = -1;
-      for (const reason of removalPriority) {
-        removalIndex = promptContext.chronicle.findIndex((memory) => memory.reason === reason);
-        if (removalIndex >= 0) break;
+      const estimatedPromptTokens = budgetTokenEstimate(storySystemPrompt) + budgetTokenEstimate(storyInput);
+      if (estimatedPromptTokens > inputTokenLimit) {
+        throw Object.assign(new Error(`The fixed authoritative story context requires about ${estimatedPromptTokens} input tokens but only ${inputTokenLimit} are available.`), { code: "context_budget_exceeded" });
       }
-      promptContext.chronicle.splice(removalIndex >= 0 ? removalIndex : 0, 1);
-      storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength, job.resolved_input_mode);
-    }
-    const estimatedPromptTokens = budgetTokenEstimate(storySystemPrompt) + budgetTokenEstimate(storyInput);
-    if (estimatedPromptTokens > inputTokenLimit) {
-      throw Object.assign(new Error(`The fixed authoritative story context requires about ${estimatedPromptTokens} input tokens but only ${inputTokenLimit} are available.`), { code: "context_budget_exceeded" });
-    }
-    const contextFingerprint = sha256(stableStringify({
-      provider: provider.id,
-      model: provider.model,
-      protocol: job.prompt_protocol_version,
-      expectedTurnNumber: job.expected_turn_number,
-      action: safeAction,
-      inputMode: job.resolved_input_mode,
-      storyLength,
-      context: promptContext
-    }));
-    const contextDiagnostics = {
-      effectiveContextWindow,
-      inputTokenLimit,
-      reservedOutputTokens: provider.maxOutputTokens,
-      estimatedPromptTokens,
-      campaignId: context.campaign.id,
-      worldVersionId: context.campaign.worldVersionId,
-      selectedCharacterId: context.campaign.selectedCharacterId,
-      characterProfileRevision: context.campaign.characterProfileRevision,
-      promptProtocolVersion: job.prompt_protocol_version,
-      storyLength,
-      selectedMemoryIds: promptContext.chronicle.map((memory) => memory.id),
-      selectedMemoryHashes: promptContext.chronicle.map((memory) => sha256(memory.content)),
-      selectedCompression: context.selectedCompression,
-      retrieval: context.retrieval
-    };
-    const storyMemoryDefaults = {
-      ...storyMemoryDefaultsFromContext(promptContext),
-      ...inputs.storyMemoryDefaults
-    };
+      const contextFingerprint = sha256(stableStringify({
+        provider: provider.id,
+        model: provider.model,
+        protocol: job.prompt_protocol_version,
+        expectedTurnNumber: job.expected_turn_number,
+        action: safeAction,
+        inputMode: job.resolved_input_mode,
+        storyLength,
+        context: promptContext
+      }));
+      const contextDiagnostics = {
+        effectiveContextWindow,
+        inputTokenLimit,
+        reservedOutputTokens: provider.maxOutputTokens,
+        estimatedPromptTokens,
+        campaignId: context.campaign.id,
+        worldVersionId: context.campaign.worldVersionId,
+        selectedCharacterId: context.campaign.selectedCharacterId,
+        characterProfileRevision: context.campaign.characterProfileRevision,
+        promptProtocolVersion: job.prompt_protocol_version,
+        storyLength,
+        selectedMemoryIds: promptContext.chronicle.map((memory) => memory.id),
+        selectedMemoryHashes: promptContext.chronicle.map((memory) => sha256(memory.content)),
+        selectedCompression: context.selectedCompression,
+        retrieval: context.retrieval
+      };
+      const storyMemoryDefaults = {
+        ...storyMemoryDefaultsFromContext(promptContext),
+        ...inputs.storyMemoryDefaults
+      };
+      return { storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults };
+    });
+    const { storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults } = promptPreparation;
 
-    const illustrationConfig = await loadStreamingIllustrationConfig(pool, job.owner_user_id, job.campaign_id)
-      .catch(() => null);
-    const segmentTracker = illustrationConfig
-      ? new StreamingSegmentTracker(illustrationConfig.segment_word_count)
-      : null;
+    const streamingIllustration = await phase("streaming_illustration_setup", async () => {
+      const illustrationConfig = await loadStreamingIllustrationConfig(pool, job.owner_user_id, job.campaign_id)
+        .catch(() => null);
+      return {
+        illustrationConfig,
+        segmentTracker: illustrationConfig
+          ? new StreamingSegmentTracker(illustrationConfig.segment_word_count)
+          : null
+      };
+    });
+    const { illustrationConfig, segmentTracker } = streamingIllustration;
     let provisionalSetId: string | null = null;
     let singleSectionDetected = false;
 
@@ -1892,69 +1934,82 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
     const primaryRequest = supportsStreaming && job.attempts === 1
       ? { ...baseRequest, onChunk }
       : baseRequest;
-    let result = await callCampaignTextProvider(pool, provider, job, "story_generation", primaryRequest);
-    let parsed = parseStoryOutput(result.content, storyMemoryDefaults);
-    const firstReason = result.outputLimited ? "output_limit" : (!parsed.ok ? parsed.code : null);
-    const initialValidationErrors = parsed.ok ? [] : parsed.errors;
-    const initialAttemptNumber = job.attempts * 2 - 1;
-    logger.info({
-      event: "turn_generation_validation_completed",
-      ...generationLogContext(job, workerId),
-      storyOperation: "story_generation",
-      valid: parsed.ok && !result.outputLimited,
-      outputLimited: result.outputLimited,
-      validationCode: firstReason,
-      validationErrorCount: initialValidationErrors.length,
-      attemptNumber: initialAttemptNumber
-    });
-    await pool.query(
-      `INSERT INTO generation_attempts (owner_user_id, generation_job_id, attempt_number, recovery_kind, request_metadata,
-         response_metadata, provider_response_id, finish_reason, raw_output, validation_errors, completed_at)
-       VALUES ($1,$2,$3,'initial',$4,$5,$6,$7,$8,$9,now())
-       ON CONFLICT (generation_job_id, attempt_number) DO UPDATE SET response_metadata = EXCLUDED.response_metadata,
-         provider_response_id = EXCLUDED.provider_response_id, finish_reason = EXCLUDED.finish_reason,
-         raw_output = EXCLUDED.raw_output, validation_errors = EXCLUDED.validation_errors, completed_at = now()`,
-      [job.owner_user_id, job.id, initialAttemptNumber, json({ model: provider.model, providerType: provider.providerType, contextFingerprint, contextDiagnostics }),
-        json({ usage: result.usage, outputLimited: result.outputLimited, modelInstanceId: result.modelInstanceId }), result.responseId || null,
-        result.finishReason || null, result.content || null, json(initialValidationErrors)]
-    );
-    if (firstReason) {
-      const recoveryKind = firstReason === "mechanics_leak" ? "mechanics_cleanup" : firstReason === "output_limit" ? "compact_completion" : "schema_repair";
-      const rejectedResponse = result.content;
-      logger.warn({
-        event: "turn_generation_recovery_started",
-        ...generationLogContext(job, workerId),
-        firstReason,
-        recoveryKind,
-        initialAttemptNumber,
-        validationErrorCount: initialValidationErrors.length
-      });
-      result = await callCampaignTextProvider(pool, provider, job, "story_recovery", {
-        ...baseRequest,
-        ...(provider.providerType === "lmstudio" && result.responseId && firstReason !== "mechanics_leak" ? { previousResponseId: result.responseId } : {}),
-        recoveryInput: recoveryPromptFromSnapshot(job, firstReason, initialValidationErrors, storyLength),
-        rejectedResponse
-      });
-      parsed = parseStoryOutput(result.content, storyMemoryDefaults);
+    let result = await phase("story_generation", () =>
+      callCampaignTextProvider(pool, provider, job, "story_generation", primaryRequest));
+    let validation = await phase("story_validation", async () => {
+      const parsed = parseStoryOutput(result.content, storyMemoryDefaults);
+      const firstReason: "output_limit" | "invalid_json" | "invalid_schema" | "mechanics_leak" | null =
+        result.outputLimited ? "output_limit" : (!parsed.ok ? parsed.code : null);
+      const initialValidationErrors = parsed.ok ? [] : parsed.errors;
+      const initialAttemptNumber = job.attempts * 2 - 1;
       logger.info({
         event: "turn_generation_validation_completed",
         ...generationLogContext(job, workerId),
-        storyOperation: "story_recovery",
+        storyOperation: "story_generation",
         valid: parsed.ok && !result.outputLimited,
         outputLimited: result.outputLimited,
-        validationCode: result.outputLimited ? "output_limit" : (parsed.ok ? null : parsed.code),
-        validationErrorCount: parsed.ok ? 0 : parsed.errors.length,
-        attemptNumber: initialAttemptNumber + 1
+        validationCode: firstReason,
+        validationErrorCount: initialValidationErrors.length,
+        attemptNumber: initialAttemptNumber
       });
       await pool.query(
         `INSERT INTO generation_attempts (owner_user_id, generation_job_id, attempt_number, recovery_kind, request_metadata,
            response_metadata, provider_response_id, finish_reason, raw_output, validation_errors, completed_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())`,
-        [job.owner_user_id, job.id, initialAttemptNumber + 1, recoveryKind, json({ model: provider.model, providerType: provider.providerType,
-          previousResponseIdUsed: provider.providerType === "lmstudio" && firstReason !== "mechanics_leak", rejectedResponseIncluded: Boolean(rejectedResponse) }),
-          json({ usage: result.usage, outputLimited: result.outputLimited, modelInstanceId: result.modelInstanceId }), result.responseId || null,
-          result.finishReason || null, result.content || null, json(parsed.ok ? [] : parsed.errors)]
+         VALUES ($1,$2,$3,'initial',$4,$5,$6,$7,$8,$9,now())
+         ON CONFLICT (generation_job_id, attempt_number) DO UPDATE SET response_metadata = EXCLUDED.response_metadata,
+           provider_response_id = EXCLUDED.provider_response_id, finish_reason = EXCLUDED.finish_reason,
+           raw_output = EXCLUDED.raw_output, validation_errors = EXCLUDED.validation_errors, completed_at = now()`,
+        [job.owner_user_id, job.id, initialAttemptNumber,
+          json({ model: provider.model, providerType: provider.providerType, contextFingerprint, contextDiagnostics }),
+          json({ usage: result.usage, outputLimited: result.outputLimited, modelInstanceId: result.modelInstanceId }),
+          result.responseId || null, result.finishReason || null, result.content || null, json(initialValidationErrors)]
       );
+      return { parsed, firstReason, initialValidationErrors, initialAttemptNumber };
+    });
+    let { parsed, firstReason, initialValidationErrors, initialAttemptNumber } = validation;
+    if (firstReason) {
+      const recoveryReason = firstReason;
+      const recoveryKind = recoveryReason === "mechanics_leak" ? "mechanics_cleanup" : recoveryReason === "output_limit" ? "compact_completion" : "schema_repair";
+      const rejectedResponse = result.content;
+      logger.warn({
+        event: "turn_generation_recovery_started",
+        ...generationLogContext(job, workerId),
+        firstReason: recoveryReason,
+        recoveryKind,
+        initialAttemptNumber,
+        validationErrorCount: initialValidationErrors.length
+      });
+      result = await phase("story_recovery", () =>
+        callCampaignTextProvider(pool, provider, job, "story_recovery", {
+          ...baseRequest,
+          ...(provider.providerType === "lmstudio" && result.responseId && recoveryReason !== "mechanics_leak" ? { previousResponseId: result.responseId } : {}),
+          recoveryInput: recoveryPromptFromSnapshot(job, recoveryReason, initialValidationErrors, storyLength),
+          rejectedResponse
+        }));
+      validation = await phase("story_validation", async () => {
+        const recoveredParsed = parseStoryOutput(result.content, storyMemoryDefaults);
+        logger.info({
+          event: "turn_generation_validation_completed",
+          ...generationLogContext(job, workerId),
+          storyOperation: "story_recovery",
+          valid: recoveredParsed.ok && !result.outputLimited,
+          outputLimited: result.outputLimited,
+          validationCode: result.outputLimited ? "output_limit" : (recoveredParsed.ok ? null : recoveredParsed.code),
+          validationErrorCount: recoveredParsed.ok ? 0 : recoveredParsed.errors.length,
+          attemptNumber: initialAttemptNumber + 1
+        });
+        await pool.query(
+          `INSERT INTO generation_attempts (owner_user_id, generation_job_id, attempt_number, recovery_kind, request_metadata,
+             response_metadata, provider_response_id, finish_reason, raw_output, validation_errors, completed_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())`,
+          [job.owner_user_id, job.id, initialAttemptNumber + 1, recoveryKind, json({ model: provider.model, providerType: provider.providerType,
+            previousResponseIdUsed: provider.providerType === "lmstudio" && recoveryReason !== "mechanics_leak", rejectedResponseIncluded: Boolean(rejectedResponse) }),
+            json({ usage: result.usage, outputLimited: result.outputLimited, modelInstanceId: result.modelInstanceId }), result.responseId || null,
+            result.finishReason || null, result.content || null, json(recoveredParsed.ok ? [] : recoveredParsed.errors)]
+        );
+        return { parsed: recoveredParsed, firstReason: recoveryReason, initialValidationErrors, initialAttemptNumber };
+      });
+      ({ parsed, firstReason, initialValidationErrors, initialAttemptNumber } = validation);
     }
     const validationFailure = "code" in parsed ? parsed : null;
     if (result.outputLimited || validationFailure) {
@@ -1986,10 +2041,12 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
       let coverage;
       let coverageOutputLimited = true;
       try {
-        const coverageResponse = await callCampaignTextProvider(pool, provider, job, "scene_coverage_validation", {
-          systemPrompt: promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-          input: buildSceneCoveragePrompt(safeAction, parsed.story.narration)
-        });
+        const narration = parsed.story.narration;
+        const coverageResponse = await phase("scene_coverage_validation", () =>
+          callCampaignTextProvider(pool, provider, job, "scene_coverage_validation", {
+            systemPrompt: promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
+            input: buildSceneCoveragePrompt(safeAction, narration)
+          }));
         coverageOutputLimited = coverageResponse.outputLimited;
         coverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
       } catch {
@@ -2014,20 +2071,29 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
           initialAttemptNumber,
           validationErrorCount: (coverage?.missing_required_beats.length || 0) + (coverage?.contradictions.length || 0)
         });
-        result = await callCampaignTextProvider(pool, provider, job, "scene_coverage_rewrite", {
-          ...baseRequest,
-          recoveryInput: renderPromptTemplate(promptFromSnapshot(job.prompt_snapshot, "scene_coverage_rewrite"), { validation: stableStringify({ missing_required_beats: coverage?.missing_required_beats || ["Coverage could not be verified."], contradictions: coverage?.contradictions || [] }) }),
-          rejectedResponse
-        });
+        result = await phase("scene_coverage_rewrite", () =>
+          callCampaignTextProvider(pool, provider, job, "scene_coverage_rewrite", {
+            ...baseRequest,
+            recoveryInput: renderPromptTemplate(
+              promptFromSnapshot(job.prompt_snapshot, "scene_coverage_rewrite"),
+              { validation: stableStringify({
+                missing_required_beats: coverage?.missing_required_beats || ["Coverage could not be verified."],
+                contradictions: coverage?.contradictions || []
+              }) }
+            ),
+            rejectedResponse
+          }));
         parsed = parseStoryOutput(result.content, storyMemoryDefaults);
         let repairedCoverage = null;
         let repairedCoverageOutputLimited = true;
         if (parsed.ok && !result.outputLimited) {
+          const repairedNarration = parsed.story.narration;
           try {
-            const coverageResponse = await callCampaignTextProvider(pool, provider, job, "scene_coverage_validation", {
-              systemPrompt: promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-              input: buildSceneCoveragePrompt(safeAction, parsed.story.narration)
-            });
+            const coverageResponse = await phase("scene_coverage_validation", () =>
+              callCampaignTextProvider(pool, provider, job, "scene_coverage_validation", {
+                systemPrompt: promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
+                input: buildSceneCoveragePrompt(safeAction, repairedNarration)
+              }));
             repairedCoverageOutputLimited = coverageResponse.outputLimited;
             repairedCoverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
           } catch {
@@ -2077,42 +2143,46 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
     );
     assertActiveGenerationUpdate(validating, "entering validation");
     if (orchestration.afterEvents === undefined) {
-      let activated: ActivatedEvent[] = [];
-      let triggerError = "";
-      if (!inputs.suppressEventTriggers) {
-        const triggers = inputs.eventTriggers.filter((trigger) => trigger.timing === "after");
-        try {
-          activated = await evaluateTriggers(pool, provider, "after", promptContext, job, triggers, parsed.story.narration);
-        } catch (error) {
-          triggerError = error instanceof Error ? error.message : String(error);
+      await phase("after_event_evaluation", async () => {
+        let activated: ActivatedEvent[] = [];
+        let triggerError = "";
+        if (!inputs.suppressEventTriggers) {
+          const triggers = inputs.eventTriggers.filter((trigger) => trigger.timing === "after");
+          try {
+            activated = await evaluateTriggers(pool, provider, "after", promptContext, job, triggers, parsed.story.narration);
+          } catch (error) {
+            triggerError = error instanceof Error ? error.message : String(error);
+          }
         }
-      }
-      orchestration = await persistOrchestration(pool, job, {
-        afterEvents: activated,
-        ...(triggerError ? { afterTriggerError: triggerError.slice(0, 2000) } : {})
-      }, workerId);
+        orchestration = await persistOrchestration(pool, job, {
+          afterEvents: activated,
+          ...(triggerError ? { afterTriggerError: triggerError.slice(0, 2000) } : {})
+        }, workerId);
+      });
     }
     const immediateEvents = (orchestration.afterEvents || []).filter((event) => event.addTextAfter);
     if (immediateEvents.length && !orchestration.extension && !orchestration.extensionError) {
-      try {
-        const guidance = fictionGuidanceForEvents(immediateEvents);
-        if (!guidance.length) throw new Error("Activated extension instructions were not safe for a fiction prompt.");
-        const extensionResponse = await callCampaignTextProvider(pool, provider, job, "event_extension", {
-          systemPrompt: promptFromSnapshot(job.prompt_snapshot, "event_extension"),
-          input: buildEventExtensionPrompt(parsed.story.narration, guidance)
-        });
-        if (extensionResponse.outputLimited) throw new Error("The optional event extension reached its output limit.");
-        const extension = parseEventExtension(extensionResponse.content);
-        orchestration = await persistOrchestration(pool, job, {
-          extension: {
-            additionalText: extension.additional_text,
-            ...(extension.scratchpad !== undefined ? { scratchpad: extension.scratchpad } : {}),
-            trackerUpdates: extension.tracker_updates
-          }
-        }, workerId);
-      } catch (error) {
-        orchestration = await persistOrchestration(pool, job, { extensionError: (error instanceof Error ? error.message : String(error)).slice(0, 2000) }, workerId);
-      }
+      await phase("event_extension", async () => {
+        try {
+          const guidance = fictionGuidanceForEvents(immediateEvents);
+          if (!guidance.length) throw new Error("Activated extension instructions were not safe for a fiction prompt.");
+          const extensionResponse = await callCampaignTextProvider(pool, provider, job, "event_extension", {
+            systemPrompt: promptFromSnapshot(job.prompt_snapshot, "event_extension"),
+            input: buildEventExtensionPrompt(parsed.story.narration, guidance)
+          });
+          if (extensionResponse.outputLimited) throw new Error("The optional event extension reached its output limit.");
+          const extension = parseEventExtension(extensionResponse.content);
+          orchestration = await persistOrchestration(pool, job, {
+            extension: {
+              additionalText: extension.additional_text,
+              ...(extension.scratchpad !== undefined ? { scratchpad: extension.scratchpad } : {}),
+              trackerUpdates: extension.tracker_updates
+            }
+          }, workerId);
+        } catch (error) {
+          orchestration = await persistOrchestration(pool, job, { extensionError: (error instanceof Error ? error.message : String(error)).slice(0, 2000) }, workerId);
+        }
+      });
     }
     const committedStory: StoryTurnOutput = orchestration.extension ? {
       ...parsed.story,
@@ -2128,8 +2198,20 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
       [job.id, workerId]
     );
     assertActiveGenerationUpdate(committing, "entering commit");
-    const turnId = await withTransaction(pool, (client) => commitStory(client, job, committedStory, provider, result, contextFingerprint,
-      contextDiagnostics, inputs, orchestration, safeAction, workerId));
+    const turnId = await phase("turn_commit", () =>
+      withTransaction(pool, (client) => commitStory(
+        client,
+        job,
+        committedStory,
+        provider,
+        result,
+        contextFingerprint,
+        contextDiagnostics,
+        inputs,
+        orchestration,
+        safeAction,
+        workerId
+      )));
     logger.info({
       event: "turn_generation_completed",
       ...generationLogContext(job, workerId),
