@@ -1295,15 +1295,24 @@ async function loadOrchestrationInputs(pool: DatabasePool, job: ClaimedJob): Pro
   };
 }
 
+function assertActiveGenerationUpdate(result: { rows: Array<{ id: string }> }, action: string): void {
+  if (!result.rows[0]) {
+    throw Object.assign(new Error(`Generation was cancelled or its lease was lost while ${action}.`), {
+      code: "generation_cancelled"
+    });
+  }
+}
+
 async function persistOrchestration(pool: DatabasePool, job: ClaimedJob, patch: Partial<OrchestrationPrivate>, workerId: string): Promise<OrchestrationPrivate> {
   const merged = { ...(job.orchestration_private || {}), ...patch };
-  const result = await pool.query(
+  const result = await pool.query<{ id: string }>(
     `UPDATE generation_jobs SET orchestration_private = $3, updated_at = now()
       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $4
+        AND status IN ('assessing','generating','validating','committing')
       RETURNING id`,
     [job.id, job.owner_user_id, json(merged), workerId]
   );
-  if (!result.rows[0]) throw Object.assign(new Error("Generation lease was lost while persisting private orchestration."), { code: "lease_lost" });
+  assertActiveGenerationUpdate(result, "persisting private orchestration");
   job.orchestration_private = merged;
   return merged;
 }
@@ -1519,13 +1528,15 @@ async function commitStory(
     await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
   }
   await enqueueEmbeddingReindex(client, job.campaign_id);
-  await client.query(
+  const completed = await client.query<{ id: string }>(
     `UPDATE generation_jobs SET status = 'completed', result_turn_id = $3, provider_response_id = $4,
        provider_finish_reason = $5, completed_at = now(), updated_at = now(), lease_owner = NULL, lease_expires_at = NULL,
        partial_output = NULL, error_code = NULL, error_message = NULL
-     WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $6 AND status = 'committing'`,
+     WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $6 AND status = 'committing'
+     RETURNING id`,
     [job.id, job.owner_user_id, turnId, response.responseId || null, response.finishReason || null, workerId]
   );
+  assertActiveGenerationUpdate(completed, "marking the committed turn complete");
   return turnId;
 }
 
@@ -1621,7 +1632,13 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
       ...fictionGuidanceForRoll(orchestration.roll || null),
       ...fictionGuidanceForEvents(orchestration.beforeEvents || [])
     ].filter((entry) => entry && !containsMechanicsLanguage(entry));
-    await pool.query(`UPDATE generation_jobs SET status = 'generating', updated_at = now() WHERE id = $1 AND lease_owner = $2`, [job.id, workerId]);
+    const generating = await pool.query<{ id: string }>(
+      `UPDATE generation_jobs SET status = 'generating', updated_at = now()
+        WHERE id = $1 AND lease_owner = $2 AND status = 'assessing'
+        RETURNING id`,
+      [job.id, workerId]
+    );
+    assertActiveGenerationUpdate(generating, "entering generation");
     let storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength, job.resolved_input_mode);
     const removalPriority = ["chronological", "relevant", "summary_checkpoint", "recent", "open_threads"];
     while (budgetTokenEstimate(storySystemPrompt) + budgetTokenEstimate(storyInput) > inputTokenLimit && promptContext.chronicle.length) {
@@ -1689,10 +1706,11 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
         
         try {
           const partialUpdate = await pool.query<{ id: string }>(
-            `UPDATE generation_jobs SET partial_output = $2, updated_at = now() WHERE id = $1 AND lease_owner = $3 RETURNING id`,
+            `UPDATE generation_jobs SET partial_output = $2, updated_at = now()
+              WHERE id = $1 AND lease_owner = $3 AND status = 'generating' RETURNING id`,
             [job.id, accumulated, workerId]
           );
-          if (!partialUpdate.rows[0]) return;
+          assertActiveGenerationUpdate(partialUpdate, "persisting streamed output");
           if (lastStreamLogAt === 0 || now - lastStreamLogAt >= 5000 || accumulated.length - lastStreamLogChars >= 4096) {
             const narration = extractPartialNarration(accumulated);
             logger.info({
@@ -1707,6 +1725,7 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
             lastStreamLogChars = accumulated.length;
           }
         } catch (error) {
+          if (errorCodeFrom(error) === "generation_cancelled") throw error;
           if (now - lastStreamPersistWarningAt >= 5000) {
             const rawErrorCode = errorCodeFrom(error);
             const errorCode = rawErrorCode ? safeLogErrorCode(rawErrorCode) : null;
@@ -1858,11 +1877,12 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
            error_code = $5, error_message = $6, recovery_metadata = recovery_metadata || $7::jsonb,
            lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
          WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $8
+           AND status IN ('assessing','generating','validating','committing')
          RETURNING id`,
         [job.id, job.owner_user_id, result.responseId || null, result.finishReason || null, code,
           messages.join(" ").slice(0, 4000), json({ retryable: true, attemptCount: firstReason ? 2 : 1 }), workerId]
       );
-      if (!recoverable.rows[0]) throw Object.assign(new Error("Generation lease was lost before recovery state could be saved."), { code: "lease_lost" });
+      assertActiveGenerationUpdate(recoverable, "saving recovery state");
       logger.warn({
         event: "turn_generation_recoverable",
         ...generationLogContext(job, workerId),
@@ -1944,11 +1964,12 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
                error_code = 'scene_coverage', error_message = $5,
                recovery_metadata = recovery_metadata || $6::jsonb, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
              WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $7
+               AND status IN ('assessing','generating','validating','committing')
              RETURNING id`,
             [job.id, job.owner_user_id, result.responseId || null, result.finishReason || null,
               details.join(" ").slice(0, 4000), json({ retryable: true, sceneCoverageRewriteAttempted: true }), workerId]
           );
-          if (!recoverable.rows[0]) throw Object.assign(new Error("Generation lease was lost before scene recovery state could be saved."), { code: "lease_lost" });
+          assertActiveGenerationUpdate(recoverable, "saving scene recovery state");
           logger.warn({
             event: "turn_generation_recoverable",
             ...generationLogContext(job, workerId),
@@ -1960,7 +1981,13 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
         }
       }
     }
-    await pool.query(`UPDATE generation_jobs SET status = 'validating', updated_at = now() WHERE id = $1 AND lease_owner = $2`, [job.id, workerId]);
+    const validating = await pool.query<{ id: string }>(
+      `UPDATE generation_jobs SET status = 'validating', updated_at = now()
+        WHERE id = $1 AND lease_owner = $2 AND status = 'generating'
+        RETURNING id`,
+      [job.id, workerId]
+    );
+    assertActiveGenerationUpdate(validating, "entering validation");
     if (orchestration.afterEvents === undefined) {
       let activated: ActivatedEvent[] = [];
       let triggerError = "";
@@ -2006,7 +2033,13 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
       tracker_updates: [...parsed.story.tracker_updates, ...orchestration.extension.trackerUpdates]
     } : parsed.story;
     if (mechanicsLeakFields(committedStory).length) throw new Error("Mechanics validation invariant failed after event extension.");
-    await pool.query(`UPDATE generation_jobs SET status = 'committing', updated_at = now() WHERE id = $1 AND lease_owner = $2`, [job.id, workerId]);
+    const committing = await pool.query<{ id: string }>(
+      `UPDATE generation_jobs SET status = 'committing', updated_at = now()
+        WHERE id = $1 AND lease_owner = $2 AND status = 'validating'
+        RETURNING id`,
+      [job.id, workerId]
+    );
+    assertActiveGenerationUpdate(committing, "entering commit");
     const turnId = await withTransaction(pool, (client) => commitStory(client, job, committedStory, provider, result, contextFingerprint,
       contextDiagnostics, inputs, orchestration, safeAction, workerId));
     logger.info({
@@ -2027,7 +2060,8 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
       `UPDATE generation_jobs SET status = 'failed', error_code = $3, error_message = $4,
          recovery_metadata = recovery_metadata || $5::jsonb,
          lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-       WHERE id = $1 AND owner_user_id = $2 AND status <> 'completed' AND lease_owner = $6
+       WHERE id = $1 AND owner_user_id = $2
+         AND status IN ('assessing','generating','validating','committing') AND lease_owner = $6
        RETURNING id`,
       [job.id, job.owner_user_id, code, (error instanceof Error ? error.message : String(error)).slice(0, 4000),
         json(transportError ? { transportError } : {}), workerId]
