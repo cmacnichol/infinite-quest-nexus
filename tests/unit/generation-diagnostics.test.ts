@@ -128,4 +128,65 @@ describe("turn generation phase diagnostics", () => {
     expect(serialized).not.toContain("PRIVATE_PARSE_DETAILS");
     expect(serialized).not.toContain("PRIVATE_PROMPT");
   });
+
+  it("replaces syntactically valid provider-controlled failure metadata with safe fallbacks", async () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const sensitiveCode = "private_provider_token";
+    const sensitiveName = "PrivateProviderSecret";
+    const failure = Object.assign(new Error("PRIVATE_FAILURE_MESSAGE"), {
+      code: sensitiveCode,
+      name: sensitiveName
+    });
+
+    await expect(runTurnGenerationPhase({
+      logger: logger as any,
+      context,
+      phase: "story_generation",
+      generationStartedAt: 100,
+      now: () => 200
+    }, async () => { throw failure; })).rejects.toBe(failure);
+
+    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({
+      errorName: "Error",
+      errorCode: "unclassified_error"
+    }));
+    const serialized = JSON.stringify(logger.error.mock.calls);
+    expect(serialized).not.toContain(sensitiveCode);
+    expect(serialized).not.toContain(sensitiveName);
+  });
+
+  it("preserves the original failure when metadata accessors throw", async () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const failure = new Error("ORIGINAL_PRIVATE_FAILURE");
+    Object.defineProperties(failure, {
+      code: {
+        get() { throw new Error("PRIVATE_CODE_ACCESSOR_FAILURE"); }
+      },
+      name: {
+        get() { throw new Error("PRIVATE_NAME_ACCESSOR_FAILURE"); }
+      }
+    });
+
+    let caught: unknown;
+    try {
+      await runTurnGenerationPhase({
+        logger: logger as any,
+        context,
+        phase: "turn_commit",
+        generationStartedAt: 100,
+        now: () => 200
+      }, async () => { throw failure; });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught === failure).toBe(true);
+    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({
+      errorName: "Error",
+      errorCode: "unclassified_error"
+    }));
+    const serialized = JSON.stringify(logger.error.mock.calls);
+    expect(serialized).not.toContain("PRIVATE_CODE_ACCESSOR_FAILURE");
+    expect(serialized).not.toContain("PRIVATE_NAME_ACCESSOR_FAILURE");
+  });
 });

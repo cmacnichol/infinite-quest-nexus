@@ -41,10 +41,51 @@ export type TurnGenerationPhaseOptions = {
   now?: () => number;
 };
 
-function safeErrorCode(error: unknown): string | undefined {
-  if (!error || typeof error !== "object" || !("code" in error)) return undefined;
-  const code = String((error as { code?: unknown }).code || "");
-  return /^[a-z][a-z0-9_]{0,63}$/i.test(code) ? code : "unclassified_error";
+const SAFE_ERROR_CODES = new Set([
+  "active_generation_exists",
+  "context_budget_exceeded",
+  "context_budget_invalid",
+  "generation_cancelled",
+  "invalid_json",
+  "invalid_schema",
+  "lease_lost",
+  "mechanics_leak",
+  "output_limit",
+  "provider_request_timeout",
+  "provider_transport_error",
+  "replacement_work_active",
+  "scene_coverage",
+  "stale_campaign",
+  "unsafe_turn_input"
+]);
+
+function safeErrorCode(error: unknown): string {
+  try {
+    const code = typeof error === "object" && error !== null
+      ? (error as { code?: unknown }).code
+      : undefined;
+    if (typeof code === "string") {
+      const normalized = code.trim().toLowerCase();
+      if (SAFE_ERROR_CODES.has(normalized)) return normalized;
+    }
+  } catch {
+    // Provider-controlled metadata accessors must not replace the original failure.
+  }
+  return "unclassified_error";
+}
+
+function safeErrorName(error: unknown): string {
+  try {
+    if (error instanceof TypeError) return "TypeError";
+    if (error instanceof RangeError) return "RangeError";
+    if (error instanceof ReferenceError) return "ReferenceError";
+    if (error instanceof SyntaxError) return "SyntaxError";
+    if (error instanceof URIError) return "URIError";
+    if (error instanceof EvalError) return "EvalError";
+  } catch {
+    // A proxy can throw during instanceof checks; use the fixed fallback.
+  }
+  return "Error";
 }
 
 export async function runTurnGenerationPhase<T>(
@@ -86,8 +127,8 @@ export async function runTurnGenerationPhase<T>(
     options.logger.error({
       event: "turn_generation_phase_failed",
       ...base,
-      errorName: error instanceof Error ? error.name : "Error",
-      ...(errorCode ? { errorCode } : {}),
+      errorName: safeErrorName(error),
+      errorCode,
       durationMs: failedAt - phaseStartedAt,
       totalDurationMs: failedAt - options.generationStartedAt
     });
