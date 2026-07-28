@@ -1335,28 +1335,36 @@ integration("durable Story Engine integration", () => {
         "turn_generation_completed"
       ]);
 
-      const completedPhases = phaseEvents
-        .filter((event) => event.event === "turn_generation_phase_completed")
-        .map((event) => event.phase);
-      expect(completedPhases).toEqual([
-        "provider_loading",
-        "input_preparation",
-        "context_retrieval",
-        "orchestration_loading",
-        "rpg_assessment",
-        "before_event_evaluation",
-        "prompt_preparation",
-        "streaming_illustration_setup",
-        "story_generation",
-        "story_validation",
-        "story_recovery",
-        "story_validation",
-        "after_event_evaluation",
-        "turn_commit"
+      expect(phaseEvents.map((event) => ({ event: event.event, phase: event.phase }))).toEqual([
+        { event: "turn_generation_phase_started", phase: "provider_loading" },
+        { event: "turn_generation_phase_completed", phase: "provider_loading" },
+        { event: "turn_generation_phase_started", phase: "input_preparation" },
+        { event: "turn_generation_phase_completed", phase: "input_preparation" },
+        { event: "turn_generation_phase_started", phase: "context_retrieval" },
+        { event: "turn_generation_phase_completed", phase: "context_retrieval" },
+        { event: "turn_generation_phase_started", phase: "orchestration_loading" },
+        { event: "turn_generation_phase_completed", phase: "orchestration_loading" },
+        { event: "turn_generation_phase_started", phase: "rpg_assessment" },
+        { event: "turn_generation_phase_completed", phase: "rpg_assessment" },
+        { event: "turn_generation_phase_started", phase: "before_event_evaluation" },
+        { event: "turn_generation_phase_completed", phase: "before_event_evaluation" },
+        { event: "turn_generation_phase_started", phase: "prompt_preparation" },
+        { event: "turn_generation_phase_completed", phase: "prompt_preparation" },
+        { event: "turn_generation_phase_started", phase: "streaming_illustration_setup" },
+        { event: "turn_generation_phase_completed", phase: "streaming_illustration_setup" },
+        { event: "turn_generation_phase_started", phase: "story_generation" },
+        { event: "turn_generation_phase_completed", phase: "story_generation" },
+        { event: "turn_generation_phase_started", phase: "story_validation" },
+        { event: "turn_generation_phase_completed", phase: "story_validation" },
+        { event: "turn_generation_phase_started", phase: "story_recovery" },
+        { event: "turn_generation_phase_completed", phase: "story_recovery" },
+        { event: "turn_generation_phase_started", phase: "story_validation" },
+        { event: "turn_generation_phase_completed", phase: "story_validation" },
+        { event: "turn_generation_phase_started", phase: "after_event_evaluation" },
+        { event: "turn_generation_phase_completed", phase: "after_event_evaluation" },
+        { event: "turn_generation_phase_started", phase: "turn_commit" },
+        { event: "turn_generation_phase_completed", phase: "turn_commit" }
       ]);
-      expect(phaseEvents.filter((event) => event.event === "turn_generation_phase_started")).toHaveLength(completedPhases.length);
-      expect(phaseEvents.filter((event) => event.event === "turn_generation_phase_failed")).toHaveLength(0);
-      expect(phaseEvents.filter((event) => event.event === "turn_generation_phase_stalled")).toHaveLength(0);
       for (const event of phaseEvents) {
         expect(event).toMatchObject({
           generationJobId: job.id,

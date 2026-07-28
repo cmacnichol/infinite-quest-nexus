@@ -88,6 +88,14 @@ function safeErrorName(error: unknown): string {
   return "Error";
 }
 
+function emitDiagnostic(emit: () => void): void {
+  try {
+    emit();
+  } catch {
+    // Diagnostics are observational and must not alter generation behavior.
+  }
+}
+
 export async function runTurnGenerationPhase<T>(
   options: TurnGenerationPhaseOptions,
   operation: () => Promise<T>
@@ -96,42 +104,44 @@ export async function runTurnGenerationPhase<T>(
   const intervalMs = options.stallIntervalMs ?? TURN_GENERATION_STALL_INTERVAL_MS;
   const phaseStartedAt = now();
   const base = { ...options.context, phase: options.phase };
-  options.logger.info({
+  emitDiagnostic(() => options.logger.info({
     event: "turn_generation_phase_started",
     ...base,
     totalDurationMs: phaseStartedAt - options.generationStartedAt
-  });
+  }));
   const stallTimer = setInterval(() => {
-    const current = now();
-    options.logger.warn({
-      event: "turn_generation_phase_stalled",
-      ...base,
-      durationMs: current - phaseStartedAt,
-      totalDurationMs: current - options.generationStartedAt
+    emitDiagnostic(() => {
+      const current = now();
+      options.logger.warn({
+        event: "turn_generation_phase_stalled",
+        ...base,
+        durationMs: current - phaseStartedAt,
+        totalDurationMs: current - options.generationStartedAt
+      });
     });
   }, intervalMs);
   stallTimer.unref?.();
   try {
     const result = await operation();
     const completedAt = now();
-    options.logger.info({
+    emitDiagnostic(() => options.logger.info({
       event: "turn_generation_phase_completed",
       ...base,
       durationMs: completedAt - phaseStartedAt,
       totalDurationMs: completedAt - options.generationStartedAt
-    });
+    }));
     return result;
   } catch (error) {
     const failedAt = now();
     const errorCode = safeErrorCode(error);
-    options.logger.error({
+    emitDiagnostic(() => options.logger.error({
       event: "turn_generation_phase_failed",
       ...base,
       errorName: safeErrorName(error),
       errorCode,
       durationMs: failedAt - phaseStartedAt,
       totalDurationMs: failedAt - options.generationStartedAt
-    });
+    }));
     throw error;
   } finally {
     clearInterval(stallTimer);

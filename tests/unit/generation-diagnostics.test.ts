@@ -68,8 +68,8 @@ describe("turn generation phase diagnostics", () => {
 
     await vi.advanceTimersByTimeAsync(TURN_GENERATION_STALL_INTERVAL_MS * 2);
     expect(logger.warn.mock.calls).toEqual([
-      [expect.objectContaining({ event: "turn_generation_phase_stalled", ...context, phase: "story_generation", durationMs: 30_000, totalDurationMs: 30_000 })],
-      [expect.objectContaining({ event: "turn_generation_phase_stalled", ...context, phase: "story_generation", durationMs: 60_000, totalDurationMs: 60_000 })]
+      [{ event: "turn_generation_phase_stalled", ...context, phase: "story_generation", durationMs: 30_000, totalDurationMs: 30_000 }],
+      [{ event: "turn_generation_phase_stalled", ...context, phase: "story_generation", durationMs: 60_000, totalDurationMs: 60_000 }]
     ]);
 
     pending.resolve("done");
@@ -94,15 +94,15 @@ describe("turn generation phase diagnostics", () => {
       now: () => Date.now()
     }, async () => { throw failure; })).rejects.toBe(failure);
 
-    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({
+    expect(logger.error.mock.calls).toEqual([[{
       event: "turn_generation_phase_failed",
       ...context,
       phase: "turn_commit",
       errorName: "Error",
-      errorCode: "unclassified_error"
-    }));
-    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(privateMessage);
-    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("secret.example");
+      errorCode: "unclassified_error",
+      durationMs: 0,
+      totalDurationMs: 0
+    }]]);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -121,12 +121,15 @@ describe("turn generation phase diagnostics", () => {
       now: () => 200
     }, async () => { throw failure; })).rejects.toBe(failure);
 
-    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({
-      errorCode: "generation_cancelled"
-    }));
-    const serialized = JSON.stringify(logger.error.mock.calls);
-    expect(serialized).not.toContain("PRIVATE_PARSE_DETAILS");
-    expect(serialized).not.toContain("PRIVATE_PROMPT");
+    expect(logger.error.mock.calls).toEqual([[{
+      event: "turn_generation_phase_failed",
+      ...context,
+      phase: "story_validation",
+      errorName: "Error",
+      errorCode: "generation_cancelled",
+      durationMs: 0,
+      totalDurationMs: 100
+    }]]);
   });
 
   it("replaces syntactically valid provider-controlled failure metadata with safe fallbacks", async () => {
@@ -146,13 +149,15 @@ describe("turn generation phase diagnostics", () => {
       now: () => 200
     }, async () => { throw failure; })).rejects.toBe(failure);
 
-    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({
+    expect(logger.error.mock.calls).toEqual([[{
+      event: "turn_generation_phase_failed",
+      ...context,
+      phase: "story_generation",
       errorName: "Error",
-      errorCode: "unclassified_error"
-    }));
-    const serialized = JSON.stringify(logger.error.mock.calls);
-    expect(serialized).not.toContain(sensitiveCode);
-    expect(serialized).not.toContain(sensitiveName);
+      errorCode: "unclassified_error",
+      durationMs: 0,
+      totalDurationMs: 100
+    }]]);
   });
 
   it("preserves the original failure when metadata accessors throw", async () => {
@@ -181,12 +186,111 @@ describe("turn generation phase diagnostics", () => {
     }
 
     expect(caught === failure).toBe(true);
-    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({
+    expect(logger.error.mock.calls).toEqual([[{
+      event: "turn_generation_phase_failed",
+      ...context,
+      phase: "turn_commit",
       errorName: "Error",
-      errorCode: "unclassified_error"
-    }));
-    const serialized = JSON.stringify(logger.error.mock.calls);
-    expect(serialized).not.toContain("PRIVATE_CODE_ACCESSOR_FAILURE");
-    expect(serialized).not.toContain("PRIVATE_NAME_ACCESSOR_FAILURE");
+      errorCode: "unclassified_error",
+      durationMs: 0,
+      totalDurationMs: 100
+    }]]);
+  });
+
+  it("executes the operation and preserves its result when start logging throws", async () => {
+    vi.useFakeTimers();
+    const loggerFailure = new Error("synthetic start logger failure");
+    const logger = {
+      info: vi.fn()
+        .mockImplementationOnce(() => { throw loggerFailure; })
+        .mockImplementationOnce(() => undefined),
+      warn: vi.fn(),
+      error: vi.fn()
+    };
+    const operation = vi.fn(async () => "preserved result");
+
+    await expect(runTurnGenerationPhase({
+      logger: logger as any,
+      context,
+      phase: "provider_loading",
+      generationStartedAt: 100,
+      now: () => 200
+    }, operation)).resolves.toBe("preserved result");
+
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(logger.info).toHaveBeenCalledTimes(2);
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves a successful result when completion logging throws", async () => {
+    vi.useFakeTimers();
+    const loggerFailure = new Error("synthetic completion logger failure");
+    const logger = {
+      info: vi.fn()
+        .mockImplementationOnce(() => undefined)
+        .mockImplementationOnce(() => { throw loggerFailure; }),
+      warn: vi.fn(),
+      error: vi.fn()
+    };
+
+    await expect(runTurnGenerationPhase({
+      logger: logger as any,
+      context,
+      phase: "input_preparation",
+      generationStartedAt: 100,
+      now: () => 200
+    }, async () => "preserved result")).resolves.toBe("preserved result");
+
+    expect(logger.info).toHaveBeenCalledTimes(2);
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves the exact operation rejection when failure logging throws", async () => {
+    vi.useFakeTimers();
+    const originalFailure = new Error("original operation failure");
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(() => { throw new Error("synthetic error logger failure"); })
+    };
+
+    await expect(runTurnGenerationPhase({
+      logger: logger as any,
+      context,
+      phase: "turn_commit",
+      generationStartedAt: 100,
+      now: () => 200
+    }, async () => { throw originalFailure; })).rejects.toBe(originalFailure);
+
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("contains recurring warning logger failures and clears the timer after success", async () => {
+    vi.useFakeTimers();
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(() => { throw new Error("synthetic warning logger failure"); }),
+      error: vi.fn()
+    };
+    const pending = deferred<string>();
+    const result = runTurnGenerationPhase({
+      logger: logger as any,
+      context,
+      phase: "story_generation",
+      generationStartedAt: Date.now(),
+      now: () => Date.now()
+    }, () => pending.promise);
+
+    await vi.advanceTimersByTimeAsync(TURN_GENERATION_STALL_INTERVAL_MS * 2);
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+
+    pending.resolve("preserved result");
+    await expect(result).resolves.toBe("preserved result");
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(TURN_GENERATION_STALL_INTERVAL_MS);
+    expect(logger.warn).toHaveBeenCalledTimes(2);
   });
 });
