@@ -1704,6 +1704,27 @@ integration("durable Story Engine integration", () => {
            FROM generation_jobs WHERE id = $1`,
       [job.id, providerId]
     );
+    const provisionalSet = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_sets (
+         owner_user_id, campaign_id, generation_job_id, source_text_hash, segment_word_count,
+         images_per_segment, prompt_mode, status
+       ) SELECT owner_user_id, campaign_id, id, 'cancel-provisional-' || id::text, 500, 1, 'direct', 'provisional'
+           FROM generation_jobs WHERE id = $1 RETURNING id`,
+      [job.id]
+    );
+    const acceptedTurn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number DESC LIMIT 1",
+      [imported.campaignId]
+    );
+    const acceptedIllustration = await pool.query<{ id: string }>(
+      `INSERT INTO image_jobs (
+         owner_user_id, campaign_id, turn_id, provider_profile_id, requested_model, prompt, prompt_hash,
+         status, provider_type, target_type
+       ) SELECT owner_user_id, campaign_id, $2, $3, 'deterministic-mock', 'Accepted scene',
+                'cancel-accepted-' || id::text, 'queued', 'openai_compatible', 'turn_illustration'
+           FROM turns WHERE id = $2 AND campaign_id = $1 RETURNING id`,
+      [imported.campaignId, acceptedTurn.rows[0]!.id, providerId]
+    );
 
     await expect(cancelGeneration(pool, job.id)).resolves.toMatchObject({ id: job.id, status: "cancelled" });
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "cancelled", partialOutput: null });
@@ -1714,25 +1735,37 @@ integration("durable Story Engine integration", () => {
     await expect(pool.query(
       "SELECT status FROM image_jobs WHERE generation_job_id = $1", [job.id]
     )).resolves.toMatchObject({ rows: [{ status: "cancelled" }] });
+    expect(await pool.query("SELECT status FROM turn_illustration_sets WHERE id = $1", [provisionalSet.rows[0]!.id]))
+      .toMatchObject({ rows: [{ status: "orphaned" }] });
+    expect(await pool.query("SELECT status FROM image_jobs WHERE id = $1", [acceptedIllustration.rows[0]!.id]))
+      .toMatchObject({ rows: [{ status: "queued" }] });
     expect(await runGenerationJob(pool, "cancelled-worker", 30, credentialSecret)).toBe(false);
   });
 
-  it("prevents a cancelled leased generation from committing a turn, state, or Chronicle memory", async () => {
+  it("prevents an in-flight worker from committing after cancellation", async () => {
     const imported = await campaign();
-    const job = await queue(imported.campaignId, "Do not accept this leased action.");
+    const job = await queue(imported.campaignId, "Do not accept this in-flight action.");
     const beforeTurns = await pool.query("SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number", [imported.campaignId]);
     const beforeState = await pool.query("SELECT revision FROM campaign_state WHERE campaign_id = $1", [imported.campaignId]);
     const beforeMemories = await pool.query("SELECT id FROM chronicle_memories WHERE campaign_id = $1 AND ordinal = 3", [imported.campaignId]);
-    await pool.query(
-      `UPDATE generation_jobs
-          SET status = 'generating', lease_owner = 'leased-cancel-worker',
-              lease_expires_at = now() + interval '30 seconds', partial_output = 'partial preview'
-        WHERE id = $1`,
-      [job.id]
-    );
+    const streamedStory = validStory("The worker must discard this completed provider output after cancellation.");
+    const streamChunks = [streamedStory.slice(0, 160), streamedStory.slice(160)];
+    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+    try {
+      replies.push({ content: streamedStory, streamChunks, streamChunkDelayMs: 800 });
+      const inFlightWorker = runGenerationJob(pool, "in-flight-cancel-worker", 30, credentialSecret);
+      await vi.waitFor(async () => {
+        const current = await pool.query<{ partial_output: string | null }>("SELECT partial_output FROM generation_jobs WHERE id = $1", [job.id]);
+        expect(current.rows[0]?.partial_output).toContain(streamChunks[0]);
+      });
 
-    await expect(cancelGeneration(pool, job.id)).resolves.toMatchObject({ id: job.id, status: "cancelled" });
-    expect(await runGenerationJob(pool, "post-cancel-worker", 30, credentialSecret)).toBe(false);
+      await expect(cancelGeneration(pool, job.id)).resolves.toMatchObject({ id: job.id, status: "cancelled" });
+      expect(await inFlightWorker).toBe(true);
+    } finally {
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+    }
+
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "cancelled", partialOutput: null });
     await expect(pool.query("SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number", [imported.campaignId]))
       .resolves.toMatchObject({ rows: beforeTurns.rows });
     await expect(pool.query("SELECT revision FROM campaign_state WHERE campaign_id = $1", [imported.campaignId]))

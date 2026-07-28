@@ -1345,11 +1345,13 @@ async function commitStory(
   fictionAction: string,
   workerId: string
 ): Promise<string> {
-  const lease = await client.query<{ lease_owner: string | null }>(
-    `SELECT lease_owner FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
-    [job.id, job.owner_user_id]
+  const lease = await client.query<{ id: string }>(
+    `SELECT id FROM generation_jobs
+      WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'committing'
+      FOR UPDATE`,
+    [job.id, job.owner_user_id, workerId]
   );
-  if (lease.rows[0]?.lease_owner !== workerId) throw Object.assign(new Error("Generation lease was lost before commit."), { code: "lease_lost" });
+  if (!lease.rows[0]) throw Object.assign(new Error("Generation lease was lost or cancelled before commit."), { code: "lease_lost" });
   const campaignResult = await client.query<{
     active_turn_number: number;
     world_version_id: string;
@@ -1521,7 +1523,7 @@ async function commitStory(
     `UPDATE generation_jobs SET status = 'completed', result_turn_id = $3, provider_response_id = $4,
        provider_finish_reason = $5, completed_at = now(), updated_at = now(), lease_owner = NULL, lease_expires_at = NULL,
        partial_output = NULL, error_code = NULL, error_message = NULL
-     WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $6`,
+     WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $6 AND status = 'committing'`,
     [job.id, job.owner_user_id, turnId, response.responseId || null, response.finishReason || null, workerId]
   );
   return turnId;
