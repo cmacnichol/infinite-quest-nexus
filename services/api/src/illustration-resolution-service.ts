@@ -291,15 +291,18 @@ async function markResolutionFailure(pool: DatabasePool, job: ResolutionRow, wor
   const details = error as { message?: string; code?: string; permanent?: boolean };
   const terminal = details.permanent === true || job.attempts >= job.max_attempts;
   await withTransaction(pool, async (client) => {
-    await client.query(
+    if (!await lockActiveProvisionalParent(client, job)) return;
+    const failed = await client.query<{ id: string }>(
       `UPDATE illustration_resolution_jobs
           SET status = $3, reason_code = $4, lease_owner = NULL, lease_expires_at = NULL,
               next_attempt_at = now() + (LEAST(attempts, 6)::text || ' minutes')::interval,
               updated_at = now(), completed_at = CASE WHEN $3 = 'failed' THEN now() ELSE NULL END
-        WHERE id = $1 AND lease_owner = $2`,
+        WHERE id = $1 AND lease_owner = $2 AND status = 'matching'
+        RETURNING id`,
       [job.id, workerId, terminal ? "failed" : "recoverable", String(details.code || details.message || "matcher_failed").slice(0, 200)]
     );
-    if (job.segment_id && await lockActiveProvisionalParent(client, job)) {
+    if (!failed.rows[0]) return;
+    if (job.segment_id) {
       await client.query(
         `UPDATE turn_illustration_segments
             SET status = $3, updated_at = now()

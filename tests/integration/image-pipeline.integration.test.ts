@@ -304,6 +304,41 @@ integration("independent illustration pipeline", () => {
     )).resolves.toMatchObject({ rows: [] });
   });
 
+  async function installResolutionFailureBarrier(resolutionJobId: string) {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const trigger = `hold_resolution_failure_${suffix}`;
+    const classId = Number.parseInt(suffix.slice(0, 7), 16);
+    const objectId = Number.parseInt(suffix.slice(7, 14), 16);
+    const holder = await pool.connect();
+    const holderPid = (await holder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+    await holder.query("SELECT pg_advisory_lock($1::integer, $2::integer)", [classId, objectId]);
+    await pool.query(`CREATE FUNCTION ${trigger}_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        PERFORM pg_advisory_xact_lock(${classId}, ${objectId});
+        RETURN NEW;
+      END
+    $$`);
+    await pool.query(`CREATE TRIGGER ${trigger} BEFORE UPDATE OF status ON illustration_resolution_jobs
+      FOR EACH ROW WHEN (OLD.id = '${resolutionJobId}'::uuid AND OLD.status = 'matching' AND NEW.status = 'failed')
+      EXECUTE FUNCTION ${trigger}_fn()`);
+    return {
+      wait: async () => expect.poll(async () => pool.query<{ pid: number }>(
+        `SELECT activity.pid FROM pg_stat_activity activity
+         WHERE activity.datname = current_database()
+           AND activity.wait_event_type = 'Lock'
+           AND $1 = ANY(pg_blocking_pids(activity.pid))`,
+        [holderPid]
+      ).then((result) => result.rows[0]?.pid), { timeout: 5_000 }).toBeTypeOf("number"),
+      release: async () => holder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [classId, objectId]),
+      cleanup: async () => {
+        await holder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [classId, objectId]).catch(() => undefined);
+        holder.release();
+        await pool.query(`DROP TRIGGER IF EXISTS ${trigger} ON illustration_resolution_jobs`);
+        await pool.query(`DROP FUNCTION IF EXISTS ${trigger}_fn()`);
+      }
+    };
+  }
+
   async function waitForCancellationAttempt(jobId: string) {
     await expect.poll(async () => {
       const result = await pool.query<{ cancelled: boolean; waiting: boolean }>(
@@ -311,7 +346,8 @@ integration("independent illustration pipeline", () => {
                 EXISTS (
                   SELECT 1 FROM pg_stat_activity activity
                    WHERE activity.datname = current_database()
-                     AND activity.query LIKE 'UPDATE generation_jobs%'
+                     AND (activity.query LIKE 'UPDATE generation_jobs%'
+                       OR activity.query LIKE 'UPDATE illustration_resolution_jobs%')
                      AND activity.wait_event_type = 'Lock'
                 ) AS waiting
            FROM generation_jobs jobs WHERE jobs.id = $1`,
@@ -425,6 +461,27 @@ integration("independent illustration pipeline", () => {
        ) VALUES ($1,$2,$1,$3,$4,$5,'turn_illustration','A violet lantern illuminates the silent causeway')`,
       [ownerUserId, asset.rows[0]!.id, world.rows[0]!.world_id, world.rows[0]!.world_version_id, imported.campaignId]
     );
+    const acceptedSet = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_sets (
+         owner_user_id, campaign_id, turn_id, generation_job_id, source_text_hash, segment_word_count,
+         images_per_segment, prompt_mode, status, is_active, completed_at
+       ) VALUES ($1,$2,$3,$4,'accepted-library-race-set',500,1,'direct','completed',false,now()) RETURNING id`,
+      [ownerUserId, imported.campaignId, acceptedTurn.rows[0]!.id, generation.id]
+    );
+    const acceptedSegment = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_segments (
+         owner_user_id, illustration_set_id, campaign_id, turn_id, generation_job_id, ordinal,
+         start_offset, end_offset, start_word, end_word, source_text, source_text_hash,
+         direct_prompt, resolved_prompt, prompt_source, status
+       ) VALUES ($1,$2,$3,$4,$5,999,0,48,0,8,'Accepted violet lantern artwork.','accepted-library-race-segment',
+                 'Accepted violet lantern artwork.','Accepted violet lantern artwork.','direct','completed') RETURNING id`,
+      [ownerUserId, acceptedSet.rows[0]!.id, imported.campaignId, acceptedTurn.rows[0]!.id, generation.id]
+    );
+    await pool.query(
+      `INSERT INTO turn_illustration_segment_assets (segment_id, owner_user_id, asset_id, variant_index)
+       VALUES ($1,$2,$3,0)`,
+      [acceptedSegment.rows[0]!.id, ownerUserId, asset.rows[0]!.id]
+    );
     const set = await pool.query<{ id: string }>(
       `INSERT INTO turn_illustration_sets (
          owner_user_id, campaign_id, generation_job_id, source_text_hash, segment_word_count,
@@ -478,7 +535,73 @@ integration("independent illustration pipeline", () => {
       "SELECT id FROM asset_references WHERE asset_id = $1 AND turn_id = $2",
       [asset.rows[0]!.id, acceptedTurn.rows[0]!.id]
     )).toMatchObject({ rowCount: 1 });
+    expect(await pool.query(
+      "SELECT asset_id FROM turn_illustration_segment_assets WHERE segment_id = $1",
+      [acceptedSegment.rows[0]!.id]
+    )).toMatchObject({ rows: [{ asset_id: asset.rows[0]!.id }] });
+    await pool.query("DELETE FROM turn_illustration_segments WHERE id = $1", [acceptedSegment.rows[0]!.id]);
     await pool.query("DELETE FROM assets WHERE id = $1 AND owner_user_id = $2", [asset.rows[0]!.id, ownerUserId]);
+  });
+
+  it("serializes resolution failure with cancellation without reverse parent-child locking", async () => {
+    const imported = await campaign();
+    const ownerUserId = await initialOwnerId(pool);
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Race resolution failure with cancellation.", providerProfileId: textProviderId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    await pool.query("UPDATE generation_jobs SET status = 'generating' WHERE id = $1", [generation.id]);
+    const set = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_sets (
+         owner_user_id, campaign_id, generation_job_id, source_text_hash, segment_word_count,
+         images_per_segment, prompt_mode, status
+       ) VALUES ($1,$2,$3,'resolution-failure-race-set',500,1,'direct','provisional') RETURNING id`,
+      [ownerUserId, imported.campaignId, generation.id]
+    );
+    const segment = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_segments (
+         owner_user_id, illustration_set_id, campaign_id, generation_job_id, ordinal,
+         start_offset, end_offset, start_word, end_word, source_text, source_text_hash,
+         direct_prompt, resolved_prompt, prompt_source, status
+       ) VALUES ($1,$2,$3,$4,0,0,48,0,8,'Unsafe resolution failure race.','resolution-failure-race-segment',
+                 'Unsafe resolution failure race.','','direct','generating') RETURNING id`,
+      [ownerUserId, set.rows[0]!.id, imported.campaignId, generation.id]
+    );
+    const resolution = await pool.query<{ id: string }>(
+      `INSERT INTO illustration_resolution_jobs (
+         owner_user_id, campaign_id, segment_id, source_policy, matching_scope,
+         confidence_profile, repetition_window, query_context_snapshot
+       ) VALUES ($1,$2,$3,'library_only','campaign','balanced',0,'{}'::jsonb) RETURNING id`,
+      [ownerUserId, imported.campaignId, segment.rows[0]!.id]
+    );
+    const barrier = await installResolutionFailureBarrier(resolution.rows[0]!.id);
+    try {
+      const failure = runIllustrationResolutionJob(pool, `resolution-failure-race-${crypto.randomUUID()}`, 30);
+      await barrier.wait();
+      const cancellation = cancelGeneration(pool, generation.id);
+      await waitForCancellationAttempt(generation.id);
+      await barrier.release();
+      await expect(Promise.all([failure, cancellation])).resolves.toEqual([
+        true,
+        expect.objectContaining({ status: "cancelled" })
+      ]);
+    } finally {
+      await barrier.cleanup();
+    }
+    expect(await pool.query("SELECT status FROM generation_jobs WHERE id = $1", [generation.id]))
+      .toMatchObject({ rows: [{ status: "cancelled" }] });
+    expect(await pool.query("SELECT status FROM illustration_resolution_jobs WHERE id = $1", [resolution.rows[0]!.id]))
+      .toMatchObject({ rows: [{ status: "failed" }] });
+    expect(await pool.query("SELECT status FROM turn_illustration_sets WHERE id = $1", [set.rows[0]!.id]))
+      .toMatchObject({ rows: [{ status: "orphaned" }] });
+    expect(await pool.query("SELECT status FROM turn_illustration_segments WHERE id = $1", [segment.rows[0]!.id]))
+      .toMatchObject({ rows: [{ status: "failed" }] });
+    expect(await pool.query(
+      `SELECT id FROM illustration_resolution_jobs WHERE id = $1 AND status IN ('queued','matching','recoverable','generation_queued')
+       UNION ALL SELECT id FROM image_jobs WHERE generation_job_id = $2 AND status IN ('queued','generating','provider_pending','downloading','completed')
+       UNION ALL SELECT id FROM illustration_prompt_jobs WHERE generation_job_id = $2 AND status IN ('queued','refining','recoverable','fallback')`,
+      [resolution.rows[0]!.id, generation.id]
+    )).toMatchObject({ rows: [] });
   });
 
   it("prevents AI-refinement delivery from enqueueing an image after cancellation", async () => {
