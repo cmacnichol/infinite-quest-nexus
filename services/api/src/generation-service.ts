@@ -673,15 +673,43 @@ export async function cancelGeneration(pool: DatabasePool, jobId: string): Promi
       if (!existing.rows[0]) throw Object.assign(new Error("Generation job not found."), { statusCode: 404 });
       throw Object.assign(new Error("Only active generation jobs can be cancelled."), { statusCode: 409 });
     }
-    await client.query(
+    const cancelledImages = await client.query<{ id: string }>(
       `UPDATE image_jobs
-          SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL, completed_at = now(), updated_at = now()
+          SET status = 'cancelled', asset_id = NULL, lease_owner = NULL, lease_expires_at = NULL,
+              completed_at = now(), updated_at = now()
         WHERE generation_job_id = $1 AND owner_user_id = $2 AND campaign_id = $3
           AND target_type = 'streaming_illustration'
-          AND status IN ('queued', 'generating', 'provider_pending', 'downloading')`,
+          AND status IN ('queued', 'generating', 'provider_pending', 'downloading', 'completed')
+        RETURNING id`,
       [job.id, ownerUserId, job.campaignId]
     );
-    await orphanProvisionalSet(client, ownerUserId, job.id);
+    if (cancelledImages.rows.length) {
+      await client.query(
+        `DELETE FROM turn_illustration_segment_assets
+          WHERE owner_user_id = $1 AND image_job_id = ANY($2::uuid[])`,
+        [ownerUserId, cancelledImages.rows.map((image) => image.id)]
+      );
+    }
+    await client.query(
+      `UPDATE turn_illustration_segments
+          SET status = 'failed', updated_at = now()
+        WHERE generation_job_id = $1 AND owner_user_id = $2 AND turn_id IS NULL
+          AND status = 'completed'`,
+      [job.id, ownerUserId]
+    );
+    await client.query(
+      `UPDATE illustration_resolution_jobs
+          SET status = 'cancelled', reason_code = 'generation_cancelled', completed_at = now(), updated_at = now()
+        WHERE owner_user_id = $1 AND status = 'generation_queued'
+          AND image_job_id = ANY($2::uuid[])`,
+      [ownerUserId, cancelledImages.rows.map((image) => image.id)]
+    );
+    await client.query(
+      `UPDATE turn_illustration_sets SET status = 'orphaned', completed_at = NULL
+        WHERE generation_job_id = $1 AND owner_user_id = $2
+          AND turn_id IS NULL AND status <> 'orphaned'`,
+      [job.id, ownerUserId]
+    );
     return job;
   });
   logger.info({

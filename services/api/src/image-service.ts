@@ -598,6 +598,13 @@ async function completeImageJob(
   const allowPrivateHosts = provider.configuration?.allowPrivateArtifactHosts === true;
   const downloaded = await Promise.all(result.artifacts.map((artifact) => downloadArtifact(artifact, timeoutMs, allowPrivateHosts)));
   await withTransaction(pool, async (client) => {
+    if (job.generation_job_id) {
+      const parent = await client.query<{ status: string }>(
+        "SELECT status FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE",
+        [job.generation_job_id, job.owner_user_id]
+      );
+      if (!parent.rows[0] || !["assessing", "generating", "validating", "committing"].includes(parent.rows[0].status)) return;
+    }
     const lease = await client.query<{ lease_owner: string | null; status: ImageJobRow["status"] }>(
       "SELECT lease_owner, status FROM image_jobs WHERE id = $1 FOR UPDATE",
       [job.id]
@@ -645,7 +652,26 @@ async function completeImageJob(
     const providerResponseId = String(result.providerMetadata.responseId || job.remote_job_id || "");
     if (job.target_type === "world_cover") {
       await client.query("UPDATE worlds SET cover_asset_id = $3, updated_at = now() WHERE id = $1 AND owner_user_id = $2", [job.world_id, job.owner_user_id, primary.id]);
-    } else if (job.segment_id) {
+    } else if (!job.segment_id) {
+      await client.query("UPDATE turns SET image_url = $3 WHERE id = $1 AND owner_user_id = $2", [job.turn_id, job.owner_user_id, primary.publicUrl]);
+    }
+    const completed = await client.query<{ id: string }>(
+      `UPDATE image_jobs SET status = 'completed', asset_id = $3,
+         provider_response_id = COALESCE(NULLIF($10, ''), remote_job_id, provider_response_id),
+         response_metadata = $4, provider_result_metadata = $5, provider_progress = 100,
+         usage_quantity = $6, usage_unit = $7, reported_cost = $8, reported_currency = $9,
+         completed_at = now(), updated_at = now(), lease_owner = NULL, lease_expires_at = NULL,
+         next_poll_at = NULL, error_code = NULL, error_message = NULL
+       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $11 AND status = 'downloading'
+       RETURNING id`,
+      [job.id, job.owner_user_id, primary.id,
+        JSON.stringify({ usage: result.usage, provider: result.providerMetadata, mimeType: downloaded[0]!.mimeType, byteLength: downloaded[0]!.bytes.length, assetIds: assets.map((asset) => asset.id) }),
+        JSON.stringify({ ...result.providerMetadata, artifactCount: assets.length, assetIds: assets.map((asset) => asset.id) }),
+        persistedUsageQuantity, usageUnit, result.reportedCost?.amount ?? null, result.reportedCost?.currency ?? null,
+        providerResponseId, workerId]
+    );
+    if (!completed.rows[0]) return;
+    if (job.segment_id) {
       for (const [artifactIndex, asset] of assets.entries()) {
         const variantIndex = hasRequestedVariant ? requestedVariantIndex : artifactIndex;
         await client.query(
@@ -658,54 +684,23 @@ async function completeImageJob(
         );
       }
       await client.query(
-        `UPDATE turn_illustration_segments
-            SET status = 'completed', updated_at = now()
+        `UPDATE turn_illustration_segments SET status = 'completed', updated_at = now()
           WHERE id = $1 AND owner_user_id = $2`,
         [job.segment_id, job.owner_user_id]
       );
       await client.query(
         `UPDATE turn_illustration_sets sets
             SET status = CASE
-              WHEN NOT EXISTS (
-                SELECT 1 FROM turn_illustration_segments segments
-                 WHERE segments.illustration_set_id = sets.id
-                   AND segments.status <> 'completed'
-              ) THEN 'completed'
-              WHEN EXISTS (
-                SELECT 1 FROM turn_illustration_segments segments
-                 WHERE segments.illustration_set_id = sets.id
-                   AND segments.status = 'completed'
-              ) THEN 'partial'
+              WHEN NOT EXISTS (SELECT 1 FROM turn_illustration_segments segments WHERE segments.illustration_set_id = sets.id AND segments.status <> 'completed') THEN 'completed'
+              WHEN EXISTS (SELECT 1 FROM turn_illustration_segments segments WHERE segments.illustration_set_id = sets.id AND segments.status = 'completed') THEN 'partial'
               ELSE 'generating'
             END,
-            completed_at = CASE
-              WHEN NOT EXISTS (
-                SELECT 1 FROM turn_illustration_segments segments
-                 WHERE segments.illustration_set_id = sets.id
-                   AND segments.status <> 'completed'
-              ) THEN now() ELSE NULL END
-          WHERE sets.id = (
-            SELECT illustration_set_id FROM turn_illustration_segments WHERE id = $1
-          ) AND sets.owner_user_id = $2`,
+            completed_at = CASE WHEN NOT EXISTS (SELECT 1 FROM turn_illustration_segments segments WHERE segments.illustration_set_id = sets.id AND segments.status <> 'completed') THEN now() ELSE NULL END
+          WHERE sets.id = (SELECT illustration_set_id FROM turn_illustration_segments WHERE id = $1)
+            AND sets.owner_user_id = $2`,
         [job.segment_id, job.owner_user_id]
       );
-    } else {
-      await client.query("UPDATE turns SET image_url = $3 WHERE id = $1 AND owner_user_id = $2", [job.turn_id, job.owner_user_id, primary.publicUrl]);
     }
-    await client.query(
-      `UPDATE image_jobs SET status = 'completed', asset_id = $3,
-         provider_response_id = COALESCE(NULLIF($10, ''), remote_job_id, provider_response_id),
-         response_metadata = $4, provider_result_metadata = $5, provider_progress = 100,
-         usage_quantity = $6, usage_unit = $7, reported_cost = $8, reported_currency = $9,
-         completed_at = now(), updated_at = now(), lease_owner = NULL, lease_expires_at = NULL,
-         next_poll_at = NULL, error_code = NULL, error_message = NULL
-       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $11 AND status = 'downloading'`,
-      [job.id, job.owner_user_id, primary.id,
-        JSON.stringify({ usage: result.usage, provider: result.providerMetadata, mimeType: downloaded[0]!.mimeType, byteLength: downloaded[0]!.bytes.length, assetIds: assets.map((asset) => asset.id) }),
-        JSON.stringify({ ...result.providerMetadata, artifactCount: assets.length, assetIds: assets.map((asset) => asset.id) }),
-        persistedUsageQuantity, usageUnit, result.reportedCost?.amount ?? null, result.reportedCost?.currency ?? null,
-        providerResponseId, workerId]
-    );
     await client.query(
       `UPDATE illustration_resolution_jobs
           SET status = 'completed', reason_code = 'generated', completed_at = now(), updated_at = now()
@@ -911,17 +906,19 @@ export async function runImageJob(
     const retryDelayMs = Number.isFinite(requestedRetryDelay)
       ? Math.min(300_000, Math.max(1_000, Math.round(requestedRetryDelay)))
       : fallbackRetryDelay;
-    await pool.query(
+    const persistedFailure = await pool.query<{ id: string }>(
       `UPDATE image_jobs SET status = $3, next_attempt_at = CASE WHEN $3 = 'queued'
            THEN now() + ($7::text || ' milliseconds')::interval ELSE next_attempt_at END,
          next_poll_at = CASE WHEN $3 = 'provider_pending'
            THEN now() + ($7::text || ' milliseconds')::interval ELSE next_poll_at END,
          error_code = $4, error_message = $5, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
        WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $6
-         AND status IN ('generating','provider_pending','downloading')`,
+         AND status IN ('generating','provider_pending','downloading')
+       RETURNING id`,
       [job.id, job.owner_user_id, nextStatus, code,
         (error instanceof Error ? error.message : String(error)).slice(0, 4000), workerId, retryDelayMs]
     );
+    if (!persistedFailure.rows[0]) return true;
     if (job.segment_id && ["recoverable", "failed", "expired"].includes(nextStatus)) {
       await pool.query(
         `UPDATE turn_illustration_segments

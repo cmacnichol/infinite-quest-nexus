@@ -10,7 +10,7 @@ import { worldContentSchema, worldCreateSchema } from "../../packages/contracts/
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
-import { enqueueGeneration, getGenerationJob, runGenerationJob } from "../../services/api/src/generation-service.js";
+import { cancelGeneration, enqueueGeneration, getGenerationJob, runGenerationJob } from "../../services/api/src/generation-service.js";
 import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
@@ -55,6 +55,7 @@ integration("independent illustration pipeline", () => {
   let imageProviderId = "";
   let assetRoot = "";
   let failImages = false;
+  let imageResponseDelayMs = 0;
   const imageRequests: Array<Record<string, unknown>> = [];
   const refinementRequests: Array<Record<string, unknown>> = [];
   const sogniRequests: Array<{ body: Record<string, unknown>; idempotencyKey: string }> = [];
@@ -99,7 +100,9 @@ integration("independent illustration pipeline", () => {
             return;
           }
           response.writeHead(200, { "content-type": "application/json" });
-          response.end(JSON.stringify({ id: crypto.randomUUID(), data: [{ b64_json: tinyPng }], usage: { cost: 0.04 } }));
+          const body = JSON.stringify({ id: crypto.randomUUID(), data: [{ b64_json: tinyPng }], usage: { cost: 0.04 } });
+          if (imageResponseDelayMs) setTimeout(() => response.end(body), imageResponseDelayMs);
+          else response.end(body);
           return;
         }
         if (JSON.stringify(parsed).includes("expert visual translator and prompt engineer")) {
@@ -201,6 +204,96 @@ integration("independent illustration pipeline", () => {
     }
     return getImageJob(pool, jobId);
   }
+
+  it("does not complete a stale streaming image worker after parent cancellation", async () => {
+    const imported = await campaign();
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Cancel the stale streaming worker.", providerProfileId: textProviderId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const imageJob = await pool.query<{ id: string }>(
+      `INSERT INTO image_jobs (
+         owner_user_id, campaign_id, provider_profile_id, requested_model, prompt, prompt_hash,
+         status, provider_type, target_type, generation_job_id
+       ) VALUES ($1,$2,$3,'synthetic-image-model','A stale provisional scene.',
+                 'cancel-stale-image','queued','openai_compatible','streaming_illustration',$4) RETURNING id`,
+      [ownerUserId, imported.campaignId, imageProviderId, generation.id]
+    );
+    imageResponseDelayMs = 300;
+    try {
+      const worker = runImageJob(pool, "stale-streaming-image-worker", 30, credentialSecret, { root: assetRoot });
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        if ((await getImageJob(pool, imageJob.rows[0]!.id)).status === "generating") break;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+      }
+      await expect(cancelGeneration(pool, generation.id)).resolves.toMatchObject({ status: "cancelled" });
+      await expect(worker).resolves.toBe(true);
+    } finally {
+      imageResponseDelayMs = 0;
+    }
+    expect(await getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "cancelled", assetId: null });
+  });
+
+  it("cancels a streaming image completion that holds its row lock without retaining provisional artwork", async () => {
+    const imported = await campaign();
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Cancel the streaming image completion.",
+      providerProfileId: textProviderId,
+      idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const illustrationSet = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_sets (
+         owner_user_id, campaign_id, generation_job_id, source_text_hash, segment_word_count,
+         images_per_segment, prompt_mode, status
+       ) VALUES ($1,$2,$3,'cancel-completion-set',500,1,'direct','provisional') RETURNING id`,
+      [ownerUserId, imported.campaignId, generation.id]
+    );
+    const segment = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_segments (
+         owner_user_id, illustration_set_id, campaign_id, generation_job_id, ordinal,
+         start_offset, end_offset, start_word, end_word, source_text, source_text_hash,
+         direct_prompt, resolved_prompt, prompt_source, status
+       ) VALUES ($1,$2,$3,$4,0,0,64,0,12,'A provisional scene for cancellation testing.','cancel-completion-segment',
+                 'A provisional scene for cancellation testing.','A provisional scene for cancellation testing.','direct','generating') RETURNING id`,
+      [ownerUserId, illustrationSet.rows[0]!.id, imported.campaignId, generation.id]
+    );
+    const imageJob = await pool.query<{ id: string }>(
+      `INSERT INTO image_jobs (
+         owner_user_id, campaign_id, provider_profile_id, requested_model, prompt, prompt_hash,
+         status, provider_type, target_type, segment_id, generation_job_id
+       ) VALUES ($1,$2,$3,'synthetic-image-model','A provisional scene for cancellation testing.',
+                 'cancel-completion-image','queued','openai_compatible','streaming_illustration',$4,$5) RETURNING id`,
+      [ownerUserId, imported.campaignId, imageProviderId, segment.rows[0]!.id, generation.id]
+    );
+    const trigger = `hold_streaming_completion_${crypto.randomUUID().replaceAll("-", "")}`;
+    await pool.query(`CREATE FUNCTION ${trigger}_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.75); RETURN NEW; END $$`);
+    await pool.query(`CREATE TRIGGER ${trigger} BEFORE INSERT ON turn_illustration_segment_assets FOR EACH ROW EXECUTE FUNCTION ${trigger}_fn()`);
+    try {
+      const worker = runImageJob(pool, "streaming-image-cancel-worker", 30, credentialSecret, { root: assetRoot });
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const current = await getImageJob(pool, imageJob.rows[0]!.id);
+        if (current.status === "downloading") break;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+      }
+      expect(await getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "downloading" });
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 75));
+      const cancellation = cancelGeneration(pool, generation.id);
+      await expect(worker).resolves.toBe(true);
+      await expect(cancellation).resolves.toMatchObject({ status: "cancelled" });
+    } finally {
+      await pool.query(`DROP TRIGGER IF EXISTS ${trigger} ON turn_illustration_segment_assets`);
+      await pool.query(`DROP FUNCTION IF EXISTS ${trigger}_fn()`);
+    }
+
+    expect(await getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "cancelled", assetId: null });
+    expect(await pool.query("SELECT status FROM turn_illustration_sets WHERE id = $1", [illustrationSet.rows[0]!.id]))
+      .toMatchObject({ rows: [{ status: "orphaned" }] });
+    expect(await pool.query("SELECT asset_id FROM turn_illustration_segment_assets WHERE image_job_id = $1", [imageJob.rows[0]!.id]))
+      .toMatchObject({ rows: [] });
+  });
 
   it("creates historical segment jobs without changing accepted turn or Chronicle state", async () => {
     const imported = await campaign();
