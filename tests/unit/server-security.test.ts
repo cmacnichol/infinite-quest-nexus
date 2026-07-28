@@ -611,12 +611,19 @@ describe("API server security and CORS headers", () => {
       campaignId: "88888888-8888-4888-8888-888888888888",
       operationKind: "append" as const
     };
+    const transactionControls: string[] = [];
     const mockClient = {
       query: async (query: string) => {
-        if (query === "BEGIN" || query === "COMMIT") return { rows: [] };
+        if (query === "BEGIN" || query === "COMMIT" || query === "ROLLBACK") {
+          transactionControls.push(query);
+          return { rows: [] };
+        }
         if (query.includes("UPDATE generation_jobs")) return { rows: [cancelledJob] };
         if (query.includes("UPDATE image_jobs")) return { rows: [] };
+        if (query.includes("DELETE FROM asset_references")) return { rows: [] };
+        if (query.includes("DELETE FROM turn_illustration_segment_assets")) return { rows: [] };
         if (query.includes("UPDATE turn_illustration_segments")) return { rows: [] };
+        if (query.includes("UPDATE illustration_prompt_jobs")) return { rows: [] };
         if (query.includes("UPDATE illustration_resolution_jobs")) return { rows: [] };
         if (query.includes("UPDATE turn_illustration_sets")) return { rows: [] };
         throw new Error(`Unexpected transaction query: ${query}`);
@@ -637,6 +644,7 @@ describe("API server security and CORS headers", () => {
 
       expect(response.statusCode).toBe(202);
       expect(response.json()).toMatchObject(cancelledJob);
+      expect(transactionControls).toEqual(["BEGIN", "COMMIT"]);
     } finally {
       await app.close();
     }
