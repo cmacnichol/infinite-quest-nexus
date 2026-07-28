@@ -322,13 +322,29 @@ integration("independent illustration pipeline", () => {
       FOR EACH ROW WHEN (OLD.id = '${resolutionJobId}'::uuid AND OLD.status = 'matching' AND NEW.status = 'failed')
       EXECUTE FUNCTION ${trigger}_fn()`);
     return {
-      wait: async () => expect.poll(async () => pool.query<{ pid: number }>(
-        `SELECT activity.pid FROM pg_stat_activity activity
-         WHERE activity.datname = current_database()
-           AND activity.wait_event_type = 'Lock'
-           AND $1 = ANY(pg_blocking_pids(activity.pid))`,
-        [holderPid]
-      ).then((result) => result.rows[0]?.pid), { timeout: 5_000 }).toBeTypeOf("number"),
+      wait: async () => {
+        let resolutionBackendPid: number | undefined;
+        await expect.poll(async () => pool.query<{ pid: number }>(
+          `SELECT activity.pid
+             FROM pg_stat_activity activity
+             JOIN pg_locks advisory_lock ON advisory_lock.pid = activity.pid
+             JOIN pg_locks resolution_relation_lock ON resolution_relation_lock.pid = activity.pid
+            WHERE activity.datname = current_database()
+              AND activity.query LIKE 'UPDATE illustration_resolution_jobs%'
+              AND activity.wait_event_type = 'Lock' AND activity.wait_event = 'advisory'
+              AND $1 = ANY(pg_blocking_pids(activity.pid))
+              AND advisory_lock.locktype = 'advisory' AND NOT advisory_lock.granted
+              AND advisory_lock.classid = $2 AND advisory_lock.objid = $3 AND advisory_lock.objsubid = 2
+              AND resolution_relation_lock.locktype = 'relation'
+              AND resolution_relation_lock.relation = 'illustration_resolution_jobs'::regclass
+              AND resolution_relation_lock.mode = 'RowExclusiveLock' AND resolution_relation_lock.granted`,
+          [holderPid, classId, objectId]
+        ).then((result) => {
+          resolutionBackendPid = result.rows[0]?.pid;
+          return resolutionBackendPid;
+        }), { timeout: 5_000 }).toBeTypeOf("number");
+        return resolutionBackendPid!;
+      },
       release: async () => holder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [classId, objectId]),
       cleanup: async () => {
         await holder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [classId, objectId]).catch(() => undefined);
@@ -346,8 +362,7 @@ integration("independent illustration pipeline", () => {
                 EXISTS (
                   SELECT 1 FROM pg_stat_activity activity
                    WHERE activity.datname = current_database()
-                     AND (activity.query LIKE 'UPDATE generation_jobs%'
-                       OR activity.query LIKE 'UPDATE illustration_resolution_jobs%')
+                     AND activity.query LIKE 'UPDATE generation_jobs%'
                      AND activity.wait_event_type = 'Lock'
                 ) AS waiting
            FROM generation_jobs jobs WHERE jobs.id = $1`,
@@ -355,6 +370,57 @@ integration("independent illustration pipeline", () => {
       );
       return Boolean(result.rows[0]?.cancelled || result.rows[0]?.waiting);
     }, { timeout: 5_000 }).toBe(true);
+  }
+
+  async function startCancellationSession(jobId: string) {
+    const applicationName = `iq-cancel:${jobId}`;
+    const cancellationUrl = new URL(databaseUrl!);
+    cancellationUrl.searchParams.set("application_name", applicationName);
+    const cancellationPool = createDatabasePool(cancellationUrl.toString(), 1);
+    const backendPid = (await cancellationPool.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+    return {
+      applicationName,
+      backendPid,
+      cancellation: cancelGeneration(cancellationPool, jobId),
+      close: async () => cancellationPool.end()
+    };
+  }
+
+  async function waitForCancellationBlockedByResolution(input: {
+    applicationName: string;
+    cancellationBackendPid: number;
+    resolutionBackendPid: number;
+    generationJobId: string;
+    resolutionJobId: string;
+  }) {
+    await expect.poll(async () => pool.query<{ blocked: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM pg_stat_activity cancellation
+           JOIN pg_locks generation_relation_lock ON generation_relation_lock.pid = cancellation.pid
+           JOIN pg_stat_activity resolution_failure ON resolution_failure.pid = $3
+          WHERE cancellation.datname = current_database()
+            AND cancellation.pid = $1
+            AND cancellation.application_name = $2
+            AND cancellation.query LIKE 'UPDATE generation_jobs%'
+            AND cancellation.wait_event_type = 'Lock'
+            AND $3 = ANY(pg_blocking_pids(cancellation.pid))
+            AND generation_relation_lock.locktype = 'relation'
+            AND generation_relation_lock.relation = 'generation_jobs'::regclass
+            AND generation_relation_lock.mode = 'RowExclusiveLock' AND generation_relation_lock.granted
+            AND resolution_failure.datname = current_database()
+            AND resolution_failure.query LIKE 'UPDATE illustration_resolution_jobs%'
+            AND resolution_failure.wait_event_type = 'Lock' AND resolution_failure.wait_event = 'advisory'
+            AND EXISTS (
+              SELECT 1
+                FROM illustration_resolution_jobs resolution
+                JOIN turn_illustration_segments segment ON segment.id = resolution.segment_id
+               WHERE resolution.id = $4 AND segment.generation_job_id = $5
+            )
+       ) AS blocked`,
+      [input.cancellationBackendPid, input.applicationName, input.resolutionBackendPid,
+        input.resolutionJobId, input.generationJobId]
+    ).then((result) => result.rows[0]?.blocked), { timeout: 5_000 }).toBe(true);
   }
 
   it("atomically fences provisional set, segment, and direct-image creation against cancellation", async () => {
@@ -575,18 +641,29 @@ integration("independent illustration pipeline", () => {
       [ownerUserId, imported.campaignId, segment.rows[0]!.id]
     );
     const barrier = await installResolutionFailureBarrier(resolution.rows[0]!.id);
+    let cancellationSession: Awaited<ReturnType<typeof startCancellationSession>> | undefined;
     try {
       const failure = runIllustrationResolutionJob(pool, `resolution-failure-race-${crypto.randomUUID()}`, 30);
-      await barrier.wait();
-      const cancellation = cancelGeneration(pool, generation.id);
-      await waitForCancellationAttempt(generation.id);
+      const resolutionBackendPid = await barrier.wait();
+      cancellationSession = await startCancellationSession(generation.id);
+      await waitForCancellationBlockedByResolution({
+        applicationName: cancellationSession.applicationName,
+        cancellationBackendPid: cancellationSession.backendPid,
+        resolutionBackendPid,
+        generationJobId: generation.id,
+        resolutionJobId: resolution.rows[0]!.id
+      });
       await barrier.release();
-      await expect(Promise.all([failure, cancellation])).resolves.toEqual([
+      await expect(Promise.all([failure, cancellationSession.cancellation])).resolves.toEqual([
         true,
         expect.objectContaining({ status: "cancelled" })
       ]);
     } finally {
       await barrier.cleanup();
+      if (cancellationSession) {
+        await cancellationSession.cancellation.catch(() => undefined);
+        await cancellationSession.close();
+      }
     }
     expect(await pool.query("SELECT status FROM generation_jobs WHERE id = $1", [generation.id]))
       .toMatchObject({ rows: [{ status: "cancelled" }] });
