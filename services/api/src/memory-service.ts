@@ -1543,8 +1543,7 @@ export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserI
   await client.query(
     `DELETE FROM chronicle_memories
       WHERE owner_user_id = $1 AND campaign_id = $2
-        AND memory_kind IN ('campaign_summary','canonical_fact','open_thread')
-        AND metadata->>'generatedFromAcceptedTurn' = 'true'`,
+        AND memory_kind IN ('campaign_summary','canonical_fact','open_thread')`,
     [ownerUserId, campaignId]
   );
   for (const turn of turns.rows) {
