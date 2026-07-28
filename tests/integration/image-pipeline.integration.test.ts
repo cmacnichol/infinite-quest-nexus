@@ -55,7 +55,7 @@ integration("independent illustration pipeline", () => {
   let imageProviderId = "";
   let assetRoot = "";
   let failImages = false;
-  let imageResponseDelayMs = 0;
+  let imageResponseBarrier: { signalStarted: () => void; release: Promise<void> } | null = null;
   const imageRequests: Array<Record<string, unknown>> = [];
   const refinementRequests: Array<Record<string, unknown>> = [];
   const sogniRequests: Array<{ body: Record<string, unknown>; idempotencyKey: string }> = [];
@@ -101,8 +101,10 @@ integration("independent illustration pipeline", () => {
           }
           response.writeHead(200, { "content-type": "application/json" });
           const body = JSON.stringify({ id: crypto.randomUUID(), data: [{ b64_json: tinyPng }], usage: { cost: 0.04 } });
-          if (imageResponseDelayMs) setTimeout(() => response.end(body), imageResponseDelayMs);
-          else response.end(body);
+          if (imageResponseBarrier) {
+            imageResponseBarrier.signalStarted();
+            void imageResponseBarrier.release.then(() => response.end(body));
+          } else response.end(body);
           return;
         }
         if (JSON.stringify(parsed).includes("expert visual translator and prompt engineer")) {
@@ -220,17 +222,23 @@ integration("independent illustration pipeline", () => {
                  'cancel-stale-image','queued','openai_compatible','streaming_illustration',$4) RETURNING id`,
       [ownerUserId, imported.campaignId, imageProviderId, generation.id]
     );
-    imageResponseDelayMs = 300;
+    let releaseProviderResponse!: () => void;
+    const providerRequestStarted = new Promise<void>((resolveStarted) => {
+      imageResponseBarrier = {
+        signalStarted: resolveStarted,
+        release: new Promise<void>((resolveRelease) => { releaseProviderResponse = resolveRelease; })
+      };
+    });
     try {
       const worker = runImageJob(pool, "stale-streaming-image-worker", 30, credentialSecret, { root: assetRoot });
-      for (let attempt = 0; attempt < 50; attempt += 1) {
-        if ((await getImageJob(pool, imageJob.rows[0]!.id)).status === "generating") break;
-        await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
-      }
+      await providerRequestStarted;
+      await expect.poll(async () => getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "generating" });
       await expect(cancelGeneration(pool, generation.id)).resolves.toMatchObject({ status: "cancelled" });
+      releaseProviderResponse();
       await expect(worker).resolves.toBe(true);
     } finally {
-      imageResponseDelayMs = 0;
+      imageResponseBarrier = null;
+      releaseProviderResponse();
     }
     expect(await getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "cancelled", assetId: null });
   });
@@ -269,22 +277,42 @@ integration("independent illustration pipeline", () => {
       [ownerUserId, imported.campaignId, imageProviderId, segment.rows[0]!.id, generation.id]
     );
     const trigger = `hold_streaming_completion_${crypto.randomUUID().replaceAll("-", "")}`;
-    await pool.query(`CREATE FUNCTION ${trigger}_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.75); RETURN NEW; END $$`);
-    await pool.query(`CREATE TRIGGER ${trigger} BEFORE INSERT ON turn_illustration_segment_assets FOR EACH ROW EXECUTE FUNCTION ${trigger}_fn()`);
+    const advisoryLockKey = Number.parseInt(crypto.randomUUID().replaceAll("-", "").slice(0, 7), 16);
+    const lockHolder = await pool.connect();
+    await lockHolder.query("SELECT pg_advisory_lock($1)", [advisoryLockKey]);
+    await pool.query(`CREATE FUNCTION ${trigger}_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        PERFORM pg_advisory_xact_lock(${advisoryLockKey});
+        RETURN NEW;
+      END
+    $$`);
+    await pool.query(`CREATE TRIGGER ${trigger} BEFORE UPDATE OF status ON image_jobs
+      FOR EACH ROW WHEN (NEW.status = 'downloading') EXECUTE FUNCTION ${trigger}_fn()`);
     try {
       const worker = runImageJob(pool, "streaming-image-cancel-worker", 30, credentialSecret, { root: assetRoot });
-      for (let attempt = 0; attempt < 50; attempt += 1) {
-        const current = await getImageJob(pool, imageJob.rows[0]!.id);
-        if (current.status === "downloading") break;
-        await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
-      }
-      expect(await getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "downloading" });
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 75));
+      await expect.poll(async () => getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "generating" });
+      await expect.poll(async () => pool.query<{ waiting: boolean }>(
+        `SELECT EXISTS(
+           SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND wait_event_type = 'Lock' AND wait_event = 'advisory'
+         ) AS waiting`
+      ).then((result) => result.rows[0]?.waiting), { timeout: 5_000 }).toBe(true);
       const cancellation = cancelGeneration(pool, generation.id);
+      await expect.poll(async () => pool.query<{ waiting: boolean }>(
+        `SELECT EXISTS(
+           SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'
+              AND wait_event <> 'advisory' AND query LIKE 'UPDATE image_jobs%'
+         ) AS waiting`
+      ).then((result) => result.rows[0]?.waiting)).toBe(true);
+      await lockHolder.query("SELECT pg_advisory_unlock($1)", [advisoryLockKey]);
       await expect(worker).resolves.toBe(true);
       await expect(cancellation).resolves.toMatchObject({ status: "cancelled" });
     } finally {
-      await pool.query(`DROP TRIGGER IF EXISTS ${trigger} ON turn_illustration_segment_assets`);
+      await lockHolder.query("SELECT pg_advisory_unlock($1)", [advisoryLockKey]).catch(() => undefined);
+      lockHolder.release();
+      await pool.query(`DROP TRIGGER IF EXISTS ${trigger} ON image_jobs`);
       await pool.query(`DROP FUNCTION IF EXISTS ${trigger}_fn()`);
     }
 
