@@ -379,6 +379,7 @@ export async function runIllustrationResolutionJob(pool: DatabasePool, workerId:
       const imageJob = job.segment_id
         ? await enqueueSegmentProviderImage(pool, job.segment_id)
         : await enqueueIllustration(pool, job.turn_id, { replace: false });
+      if (!imageJob) return true;
       await pool.query(
         `UPDATE illustration_resolution_jobs
             SET status = 'generation_queued', image_job_id = $3, reason_code = 'generation_queued',

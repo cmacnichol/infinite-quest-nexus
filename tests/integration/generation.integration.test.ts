@@ -1727,6 +1727,7 @@ integration("durable Story Engine integration", () => {
     );
 
     await expect(cancelGeneration(pool, job.id)).resolves.toMatchObject({ id: job.id, status: "cancelled" });
+    await expect(cancelGeneration(pool, job.id)).resolves.toMatchObject({ id: job.id, status: "cancelled" });
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "cancelled", partialOutput: null });
     await expect(pool.query("SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number", [imported.campaignId]))
       .resolves.toMatchObject({ rows: beforeTurns.rows });
@@ -1774,7 +1775,7 @@ integration("durable Story Engine integration", () => {
       .resolves.toMatchObject({ rows: beforeMemories.rows });
   });
 
-  it("rejects cancellation of terminal and foreign generation jobs without changing them", async () => {
+  it("rejects cancellation of non-cancelled terminal and foreign generation jobs without changing them", async () => {
     const imported = await campaign();
     const terminalStatuses = ["completed", "failed", "discarded"] as const;
     for (const status of terminalStatuses) {

@@ -17,8 +17,11 @@ import { createProvider } from "../../services/api/src/provider-service.js";
 import { listAssets, persistOriginalImage, queryAssets, readAssetDerivative, runAssetMetadataBackfill, selectTurnIllustration, selectWorldCover, updateAssetMetadata } from "../../services/api/src/asset-service.js";
 import { getTurnIllustrationResolution, runIllustrationResolutionJob } from "../../services/api/src/illustration-resolution-service.js";
 import {
+  createProvisionalSegment,
+  createProvisionalSet,
   generateTurnIllustrationSegments,
   listCampaignIllustrationSegments,
+  loadConfig,
   previewIllustrationBackfill,
   runIllustrationPromptJob
 } from "../../services/api/src/segmented-illustration-service.js";
@@ -241,6 +244,79 @@ integration("independent illustration pipeline", () => {
       releaseProviderResponse();
     }
     expect(await getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "cancelled", assetId: null });
+  });
+
+  it("does not create provisional set or segment work after cancellation between streamed output and child delivery", async () => {
+    const imported = await campaign();
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Cancel after streamed narration before illustration delivery.",
+      providerProfileId: textProviderId,
+      idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const config = await loadConfig(pool, ownerUserId, imported.campaignId);
+
+    await expect(cancelGeneration(pool, generation.id)).resolves.toMatchObject({ status: "cancelled" });
+    await expect(createProvisionalSet(pool, ownerUserId, imported.campaignId, generation.id)).resolves.toBeNull();
+    await expect(createProvisionalSegment(
+      pool, ownerUserId, imported.campaignId, generation.id, crypto.randomUUID(),
+      { ordinal: 0, startOffset: 0, endOffset: 61, startWord: 0, endWord: 11, wordCount: 11, text: "A lantern reveals a silent causeway beneath violet clouds tonight." },
+      config
+    )).resolves.toBe(false);
+    await expect(pool.query(
+      "SELECT id FROM turn_illustration_sets WHERE generation_job_id = $1 UNION ALL SELECT id FROM turn_illustration_segments WHERE generation_job_id = $1 UNION ALL SELECT id FROM image_jobs WHERE generation_job_id = $1",
+      [generation.id]
+    )).resolves.toMatchObject({ rows: [] });
+  });
+
+  it("terminalizes provisional refinement and resolution work when cancelling a generation", async () => {
+    const imported = await campaign();
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Cancel provisional non-direct illustration work.",
+      providerProfileId: textProviderId,
+      idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const set = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_sets (
+         owner_user_id, campaign_id, generation_job_id, source_text_hash, segment_word_count,
+         images_per_segment, prompt_mode, status
+       ) VALUES ($1,$2,$3,'cancel-non-direct-set',500,1,'ai_refined','provisional') RETURNING id`,
+      [ownerUserId, imported.campaignId, generation.id]
+    );
+    const segment = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_segments (
+         owner_user_id, illustration_set_id, campaign_id, generation_job_id, ordinal,
+         start_offset, end_offset, start_word, end_word, source_text, source_text_hash,
+         direct_prompt, resolved_prompt, prompt_source, status
+       ) VALUES ($1,$2,$3,$4,0,0,65,0,12,'A violet dawn crosses the silent causeway.','cancel-non-direct-segment',
+                 'A violet dawn crosses the silent causeway.','','direct','refining') RETURNING id`,
+      [ownerUserId, set.rows[0]!.id, imported.campaignId, generation.id]
+    );
+    const prompt = await pool.query<{ id: string }>(
+      `INSERT INTO illustration_prompt_jobs (
+         owner_user_id, campaign_id, generation_job_id, segment_id, provider_profile_id, requested_model
+       ) VALUES ($1,$2,$3,$4,$5,'synthetic-text-model') RETURNING id`,
+      [ownerUserId, imported.campaignId, generation.id, segment.rows[0]!.id, textProviderId]
+    );
+    const resolution = await pool.query<{ id: string }>(
+      `INSERT INTO illustration_resolution_jobs (
+         owner_user_id, campaign_id, segment_id, source_policy, matching_scope, confidence_profile, repetition_window
+       ) VALUES ($1,$2,$3,'library_then_generate','campaign','balanced',0) RETURNING id`,
+      [ownerUserId, imported.campaignId, segment.rows[0]!.id]
+    );
+
+    await expect(cancelGeneration(pool, generation.id)).resolves.toMatchObject({ status: "cancelled" });
+    await expect(pool.query("SELECT status FROM illustration_prompt_jobs WHERE id = $1", [prompt.rows[0]!.id]))
+      .resolves.toMatchObject({ rows: [{ status: "cancelled" }] });
+    await expect(pool.query("SELECT status FROM illustration_resolution_jobs WHERE id = $1", [resolution.rows[0]!.id]))
+      .resolves.toMatchObject({ rows: [{ status: "cancelled" }] });
+    await expect(runIllustrationPromptJob(pool, "cancelled-prompt-worker", 30, credentialSecret)).resolves.toBe(false);
+    await expect(runIllustrationResolutionJob(pool, "cancelled-resolution-worker", 30)).resolves.toBe(false);
+    await expect(pool.query("SELECT id FROM image_jobs WHERE generation_job_id = $1", [generation.id]))
+      .resolves.toMatchObject({ rows: [] });
   });
 
   it("cancels a streaming image completion that holds its row lock without retaining provisional artwork", async () => {

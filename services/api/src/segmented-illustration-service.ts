@@ -107,6 +107,24 @@ function imageConfig(config: SegmentConfigRow, providerProfileId: string | null)
   };
 }
 
+async function lockActiveProvisionalGeneration(
+  client: DatabaseClient | DatabasePool,
+  ownerUserId: string,
+  campaignId: string,
+  generationJobId: string | null,
+  turnId: string | null
+): Promise<boolean> {
+  if (!generationJobId || turnId) return true;
+  const active = await client.query<{ id: string }>(
+    `SELECT id FROM generation_jobs
+      WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3
+        AND status IN ('assessing', 'generating', 'validating', 'committing')
+      FOR KEY SHARE`,
+    [generationJobId, ownerUserId, campaignId]
+  );
+  return Boolean(active.rows[0]);
+}
+
 async function queueSegmentDelivery(
   client: DatabaseClient,
   ownerUserId: string,
@@ -122,6 +140,7 @@ async function queueSegmentDelivery(
     throw Object.assign(new Error("The segment illustration prompt failed the fiction-only boundary."), { statusCode: 409 });
   }
   const providerPrompt = composeIllustrationProviderPrompt(prompt.trim(), sanitizedReference, characterReferenceTemplate);
+  if (!await lockActiveProvisionalGeneration(client, ownerUserId, segment.campaign_id, segment.generation_job_id, segment.turn_id)) return false;
   await client.query(
     `UPDATE turn_illustration_segments
         SET resolved_prompt = $3, prompt_source = $4, status = 'generating', updated_at = now()
@@ -144,7 +163,7 @@ async function queueSegmentDelivery(
         config.matching_scope, config.confidence_profile, config.repetition_window,
         JSON.stringify({ imagePrompt: providerPrompt, segmentId: segment.id, segmentTextHash: sha256(segment.source_text) })]
     );
-    return;
+    return true;
   }
   const providerProfileId = await resolveEffectiveProviderId(
     client,
@@ -164,6 +183,7 @@ async function queueSegmentDelivery(
     config: imageConfig(config, providerProfileId)
   });
   if (!job) throw Object.assign(new Error("The segment image job could not be created."), { statusCode: 409 });
+  return true;
 }
 
 export async function createProvisionalSet(
@@ -172,7 +192,8 @@ export async function createProvisionalSet(
   campaignId: string,
   generationJobId: string,
   visualReference?: string
-): Promise<string> {
+): Promise<string | null> {
+  if (!await lockActiveProvisionalGeneration(client, ownerUserId, campaignId, generationJobId, null)) return null;
   const existing = await client.query<{ id: string }>(
     `SELECT id FROM turn_illustration_sets
       WHERE generation_job_id = $1 AND owner_user_id = $2`,
@@ -210,10 +231,15 @@ export async function createProvisionalSegment(
   },
   config: SegmentConfigRow,
   visualReference?: string
-) {
+): Promise<boolean> {
+  const set = await client.query<{ turn_id: string | null }>(
+    "SELECT turn_id FROM turn_illustration_sets WHERE id = $1 AND owner_user_id = $2",
+    [setId, ownerUserId]
+  );
+  if (!set.rows[0] || !await lockActiveProvisionalGeneration(client, ownerUserId, campaignId, generationJobId, set.rows[0].turn_id)) return false;
   const promptSnapshot = await resolvePromptSnapshot(client, ownerUserId, campaignId);
   const sanitizedSegment = stripMechanicsLeakage(segmentData.text).text;
-  if (!sanitizedSegment) return; // Silent skip if no fiction text
+  if (!sanitizedSegment) return false; // Silent skip if no fiction text
 
   const directPrompt = directIllustrationPrompt(
     sanitizedSegment,
@@ -235,7 +261,7 @@ export async function createProvisionalSegment(
       config.segment_prompt_mode === "ai_refined" ? "refining" : "queued", visualReference || ""]
   );
   const segment = segmentResult.rows[0];
-  if (!segment) return; // Already exists
+  if (!segment) return true; // Already exists
 
   if (config.segment_prompt_mode === "direct") {
     const providerPrompt = composeIllustrationProviderPrompt(
@@ -282,6 +308,7 @@ export async function createProvisionalSegment(
       );
     }
   }
+  return true;
 }
 
 export async function promoteProvisionalSet(
@@ -760,6 +787,7 @@ export async function enqueueSegmentProviderImage(pool: DatabasePool, segmentId:
     );
     const segment = result.rows[0];
     if (!segment) throw Object.assign(new Error("Illustration segment not found."), { statusCode: 404 });
+    if (!await lockActiveProvisionalGeneration(client, ownerUserId, segment.campaign_id, segment.generation_job_id, segment.turn_id)) return null;
     const existing = await client.query<{ id: string }>(
       `SELECT id FROM image_jobs
         WHERE segment_id = $1 AND owner_user_id = $2
@@ -983,7 +1011,7 @@ export async function runIllustrationPromptJob(
         `UPDATE illustration_prompt_jobs
             SET status = 'completed', response_id = $3, completed_at = now(), updated_at = now(),
                 lease_owner = NULL, lease_expires_at = NULL, error_code = NULL, error_message = NULL
-          WHERE id = $1 AND lease_owner = $2`,
+          WHERE id = $1 AND lease_owner = $2 AND status = 'refining'`,
         [claimed.id, workerId, result.responseId]
       );
       await recordProfileCost(client, provider, {
@@ -1014,7 +1042,7 @@ export async function runIllustrationPromptJob(
               SET status = 'fallback', completed_at = now(), updated_at = now(),
                   error_code = 'refinement_exhausted', error_message = $3,
                   lease_owner = NULL, lease_expires_at = NULL
-            WHERE id = $1 AND lease_owner = $2`,
+            WHERE id = $1 AND lease_owner = $2 AND status = 'refining'`,
           [claimed.id, workerId, error instanceof Error ? error.message.slice(0, 4000) : String(error).slice(0, 4000)]
         );
       } else {
@@ -1023,7 +1051,7 @@ export async function runIllustrationPromptJob(
               SET status = 'recoverable', next_attempt_at = now() + interval '15 seconds',
                   error_code = 'refinement_failed', error_message = $3,
                   lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-            WHERE id = $1 AND lease_owner = $2`,
+            WHERE id = $1 AND lease_owner = $2 AND status = 'refining'`,
           [claimed.id, workerId, error instanceof Error ? error.message.slice(0, 4000) : String(error).slice(0, 4000)]
         );
       }

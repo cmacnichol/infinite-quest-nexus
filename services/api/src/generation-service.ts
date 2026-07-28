@@ -666,11 +666,26 @@ export async function cancelGeneration(pool: DatabasePool, jobId: string): Promi
     );
     const job = result.rows[0];
     if (!job) {
-      const existing = await client.query<{ id: string }>(
-        "SELECT id FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE",
+      const existing = await client.query<{
+        id: string;
+        status: string;
+        campaignId: string;
+        operationKind: "append" | "replace_latest";
+      }>(
+        `SELECT id, status, campaign_id AS "campaignId", operation_kind AS "operationKind"
+           FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
         [jobId, ownerUserId]
       );
       if (!existing.rows[0]) throw Object.assign(new Error("Generation job not found."), { statusCode: 404 });
+      if (existing.rows[0].status === "cancelled") {
+        const existingCancelled = existing.rows[0];
+        return {
+          id: existingCancelled.id,
+          status: "cancelled" as const,
+          campaignId: existingCancelled.campaignId,
+          operationKind: existingCancelled.operationKind
+        };
+      }
       throw Object.assign(new Error("Only active generation jobs can be cancelled."), { statusCode: 409 });
     }
     const cancelledImages = await client.query<{ id: string }>(
@@ -698,11 +713,27 @@ export async function cancelGeneration(pool: DatabasePool, jobId: string): Promi
       [job.id, ownerUserId]
     );
     await client.query(
-      `UPDATE illustration_resolution_jobs
-          SET status = 'cancelled', reason_code = 'generation_cancelled', completed_at = now(), updated_at = now()
-        WHERE owner_user_id = $1 AND status = 'generation_queued'
-          AND image_job_id = ANY($2::uuid[])`,
-      [ownerUserId, cancelledImages.rows.map((image) => image.id)]
+      `UPDATE illustration_prompt_jobs prompts
+          SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
+              error_code = 'generation_cancelled', error_message = 'Parent generation was cancelled.',
+              completed_at = now(), updated_at = now()
+         FROM turn_illustration_segments segments
+        WHERE prompts.segment_id = segments.id AND prompts.owner_user_id = segments.owner_user_id
+          AND segments.generation_job_id = $1 AND segments.owner_user_id = $2 AND segments.campaign_id = $3
+          AND segments.turn_id IS NULL
+          AND prompts.status IN ('queued', 'refining', 'recoverable', 'fallback')`,
+      [job.id, ownerUserId, job.campaignId]
+    );
+    await client.query(
+      `UPDATE illustration_resolution_jobs resolutions
+          SET status = 'cancelled', reason_code = 'generation_cancelled', lease_owner = NULL, lease_expires_at = NULL,
+              completed_at = now(), updated_at = now()
+         FROM turn_illustration_segments segments
+        WHERE resolutions.segment_id = segments.id AND resolutions.owner_user_id = segments.owner_user_id
+          AND segments.generation_job_id = $1 AND segments.owner_user_id = $2 AND segments.campaign_id = $3
+          AND segments.turn_id IS NULL
+          AND resolutions.status IN ('queued', 'matching', 'recoverable', 'generation_queued')`,
+      [job.id, ownerUserId, job.campaignId]
     );
     await client.query(
       `UPDATE turn_illustration_sets SET status = 'orphaned', completed_at = NULL
@@ -1775,14 +1806,18 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
               const newSegments = segmentTracker.detectNewSegments(narration);
               for (const segment of newSegments) {
                 if (!provisionalSetId) {
-                  provisionalSetId = await createProvisionalSet(
+                  const createdSetId = await createProvisionalSet(
                     pool, job.owner_user_id, job.campaign_id, job.id,
                     characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
                   );
-                  await pool.query(
-                    `UPDATE generation_jobs SET streaming_segments_state = jsonb_set(streaming_segments_state, '{provisionalSetId}', $2) WHERE id = $1`,
-                    [job.id, JSON.stringify(provisionalSetId)]
+                  if (!createdSetId) throw Object.assign(new Error("Generation was cancelled before creating provisional illustrations."), { code: "generation_cancelled" });
+                  provisionalSetId = createdSetId;
+                  const state = await pool.query<{ id: string }>(
+                    `UPDATE generation_jobs SET streaming_segments_state = jsonb_set(streaming_segments_state, '{provisionalSetId}', $2)
+                      WHERE id = $1 AND owner_user_id = $3 AND lease_owner = $4 AND status = 'generating' RETURNING id`,
+                    [job.id, JSON.stringify(provisionalSetId), job.owner_user_id, workerId]
                   );
+                  assertActiveGenerationUpdate(state, "persisting provisional illustration state");
                 }
                 await createProvisionalSegment(
                   pool, job.owner_user_id, job.campaign_id, job.id,
@@ -1795,14 +1830,18 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
                 singleSectionDetected = true;
                 if (!isIllustrationSegmentEligible({ wordCount: segmentTracker.accumulatedWordCount }, illustrationConfig.segment_word_count)) return;
                 if (!provisionalSetId) {
-                  provisionalSetId = await createProvisionalSet(
+                  const createdSetId = await createProvisionalSet(
                     pool, job.owner_user_id, job.campaign_id, job.id,
                     characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
                   );
-                  await pool.query(
-                    `UPDATE generation_jobs SET streaming_segments_state = jsonb_set(streaming_segments_state, '{provisionalSetId}', $2) WHERE id = $1`,
-                    [job.id, JSON.stringify(provisionalSetId)]
+                  if (!createdSetId) throw Object.assign(new Error("Generation was cancelled before creating provisional illustrations."), { code: "generation_cancelled" });
+                  provisionalSetId = createdSetId;
+                  const state = await pool.query<{ id: string }>(
+                    `UPDATE generation_jobs SET streaming_segments_state = jsonb_set(streaming_segments_state, '{provisionalSetId}', $2)
+                      WHERE id = $1 AND owner_user_id = $3 AND lease_owner = $4 AND status = 'generating' RETURNING id`,
+                    [job.id, JSON.stringify(provisionalSetId), job.owner_user_id, workerId]
                   );
+                  assertActiveGenerationUpdate(state, "persisting provisional illustration state");
                 }
                 await createProvisionalSegment(
                   pool, job.owner_user_id, job.campaign_id, job.id,
