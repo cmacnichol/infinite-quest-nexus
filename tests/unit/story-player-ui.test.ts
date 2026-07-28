@@ -154,6 +154,16 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('class="replacement-pending-banner"');
   });
 
+  it("cancels only an active turn generation", () => {
+    expect(storyScript).toContain('data-action="cancel-generation"');
+    expect(storyScript).toContain('async function cancelActiveGeneration()');
+    expect(storyScript).toContain('`/generation-jobs/${jobId}/cancel`');
+    expect(storyScript).toContain('state.abortController?.abort();');
+    expect(storyScript).toContain('await loadCampaign(state.campaignId');
+    expect(storyScript).toContain('if (!state.generationDisplayActive || !state.generationJobId) return;');
+    expect(storyScript).toContain('job.status === "cancelled"');
+  });
+
   it("reloads authoritative campaign state without reusing a stale pre-generation response", () => {
     expect(storyScript).toContain('fetch(url, { ...options, cache: "no-store", headers })');
     expect(storyScript).toContain('result.resultTurnId && !state.turns.some((turn) => turn.id === result.resultTurnId)');

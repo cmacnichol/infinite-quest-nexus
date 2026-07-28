@@ -54,6 +54,7 @@ const state = {
   generationDisplayActive: false,
   generationDisplayAction: "",
   generationJobId: null,
+  cancellationConfirmed: false,
   illustrationConfig: null,
   illustrationSegments: [],
   illustrationVariantIndexes: new Map(),
@@ -982,8 +983,11 @@ async function runGeneration(action, options = {}) {
     if (err.pendingGeneration) state.pendingGeneration = err.pendingGeneration;
     restoreGenerationDisplay();
     if (err.name === "AbortError") {
-      toast("Generation cancelled.");
-      recordActivity("system", "Generation cancelled");
+      if (!state.cancellationConfirmed) {
+        toast("Generation cancelled.");
+        recordActivity("system", "Generation cancelled");
+      }
+      state.cancellationConfirmed = false;
     } else {
       const preserved = options.operationKind === "replace_latest" ? " The original turn was preserved." : "";
       toast(`Generation failed: ${err.message}${preserved}`);
@@ -1017,6 +1021,7 @@ function renderStreamingPreview(narrationText, action) {
         <div class="turn-streaming-header">
           <span class="turn-streaming-badge"><span class="turn-streaming-pulse"></span> Streaming Live</span>
           <button type="button" class="streaming-follow-button hidden" data-action="follow-stream" aria-label="Resume following live narration">Follow live</button>
+          ${state.generationDisplayActive && state.generationJobId ? '<button class="small ghost" type="button" data-action="cancel-generation">Cancel generation</button>' : ""}
         </div>
         <div class="turn-meta">
           <div class="action-tag">➜ ${escapeHtml(actionText)}</div>
@@ -1025,6 +1030,15 @@ function renderStreamingPreview(narrationText, action) {
         <div class="streaming-illustrations"></div>
       </div>
     `;
+  }
+
+  const header = card.querySelector(".turn-streaming-header");
+  let cancelButton = card.querySelector('[data-action="cancel-generation"]');
+  if (state.generationDisplayActive && state.generationJobId && !cancelButton && header) {
+    header.insertAdjacentHTML("beforeend", '<button class="small ghost" type="button" data-action="cancel-generation">Cancel generation</button>');
+    cancelButton = card.querySelector('[data-action="cancel-generation"]');
+  } else if ((!state.generationDisplayActive || !state.generationJobId) && cancelButton) {
+    cancelButton.remove();
   }
 
   const narration = card.querySelector(".streaming-narration");
@@ -1072,6 +1086,7 @@ function clearStreamingPreview() {
 }
 
 function beginGenerationDisplay(action) {
+  state.cancellationConfirmed = false;
   state.generationDisplayActive = true;
   state.generationDisplayAction = action || "";
   renderTurnInput();
@@ -1095,6 +1110,42 @@ function commitGenerationDisplay() {
   state.generationDisplayAction = "";
   state.generationJobId = null;
   $("streamingPreviewCard")?.remove();
+}
+
+async function cancelActiveGeneration() {
+  if (!state.generationDisplayActive || !state.generationJobId) return;
+
+  const jobId = state.generationJobId;
+  const cancelButton = $("streamingPreviewCard")?.querySelector('[data-action="cancel-generation"]');
+  if (cancelButton) {
+    cancelButton.disabled = true;
+    cancelButton.textContent = "Cancelling turn generation…";
+  }
+  showBusy("Cancelling turn generation…");
+
+  try {
+    await api(`/generation-jobs/${jobId}/cancel`, { method: "POST", body: "{}" });
+  } catch (error) {
+    if (cancelButton) {
+      cancelButton.disabled = false;
+      cancelButton.textContent = "Cancel generation";
+    }
+    toast(`Could not cancel generation: ${error.message}`);
+    return;
+  }
+
+  clearPendingSubmission();
+  state.pendingGeneration = null;
+  state.cancellationConfirmed = true;
+  state.abortController?.abort();
+  restoreGenerationDisplay();
+  try {
+    await loadCampaign(state.campaignId, { autoScroll: false });
+    recordActivity("system", "Generation cancelled", `jobId=${jobId}`);
+    toast("Generation cancelled.");
+  } catch (error) {
+    toast(`Generation cancelled, but campaign reload failed: ${error.message}`);
+  }
 }
 
 function showGenerationRecovery(jobId, message) {
@@ -1127,7 +1178,12 @@ async function monitorRecoveryJob(retryFirst) {
     await pollGenerationJob(jobId, state.pendingGeneration?.action || "");
   } catch (error) {
     restoreGenerationDisplay();
-    toast(`Generation recovery failed: ${error.message}`);
+    if (error.name === "AbortError") {
+      toast("Generation cancelled.");
+      recordActivity("system", "Generation cancelled");
+    } else {
+      toast(`Generation recovery failed: ${error.message}`);
+    }
   } finally {
     hideBusy();
   }
@@ -1244,6 +1300,12 @@ async function pollGenerationJob(jobId, action) {
               } catch (err) {
                 reject(err);
               }
+            } else if (job.status === "cancelled") {
+              cleanup();
+              clearPendingSubmission();
+              state.pendingGeneration = null;
+              restoreGenerationDisplay();
+              reject(new DOMException("Generation cancelled.", "AbortError"));
             } else if (job.status === "failed") {
               cleanup();
               clearStreamingPreview();
@@ -1302,6 +1364,12 @@ async function pollGenerationJob(jobId, action) {
       const result = await api(`/generation-jobs/${jobId}/result`);
       await finalizeCompletedGeneration(result);
       return;
+    }
+    if (job.status === "cancelled") {
+      clearPendingSubmission();
+      state.pendingGeneration = null;
+      restoreGenerationDisplay();
+      throw new DOMException("Generation cancelled.", "AbortError");
     }
     if (job.status === "failed") {
       clearStreamingPreview();
@@ -2695,6 +2763,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!btn) return;
     if (btn.dataset.action === "follow-stream") {
       followStreamingPreview();
+      return;
+    }
+    if (btn.dataset.action === "cancel-generation") {
+      void cancelActiveGeneration();
       return;
     }
     if (btn.dataset.action === "previous-segment-image" || btn.dataset.action === "next-segment-image") {
