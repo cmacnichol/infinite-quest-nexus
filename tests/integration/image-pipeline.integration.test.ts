@@ -277,40 +277,58 @@ integration("independent illustration pipeline", () => {
       [ownerUserId, imported.campaignId, imageProviderId, segment.rows[0]!.id, generation.id]
     );
     const trigger = `hold_streaming_completion_${crypto.randomUUID().replaceAll("-", "")}`;
-    const advisoryLockKey = Number.parseInt(crypto.randomUUID().replaceAll("-", "").slice(0, 7), 16);
+    const advisoryLockClassId = Number.parseInt(crypto.randomUUID().replaceAll("-", "").slice(0, 7), 16);
+    const advisoryLockObjectId = Number.parseInt(crypto.randomUUID().replaceAll("-", "").slice(0, 7), 16);
     const lockHolder = await pool.connect();
-    await lockHolder.query("SELECT pg_advisory_lock($1)", [advisoryLockKey]);
+    await lockHolder.query("SELECT pg_advisory_lock($1::integer, $2::integer)", [advisoryLockClassId, advisoryLockObjectId]);
     await pool.query(`CREATE FUNCTION ${trigger}_fn() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
-        PERFORM pg_advisory_xact_lock(${advisoryLockKey});
+        PERFORM pg_advisory_xact_lock(${advisoryLockClassId}, ${advisoryLockObjectId});
         RETURN NEW;
       END
     $$`);
     await pool.query(`CREATE TRIGGER ${trigger} BEFORE UPDATE OF status ON image_jobs
-      FOR EACH ROW WHEN (NEW.status = 'downloading') EXECUTE FUNCTION ${trigger}_fn()`);
+      FOR EACH ROW WHEN (NEW.status = 'downloading' AND NEW.id = '${imageJob.rows[0]!.id}'::uuid) EXECUTE FUNCTION ${trigger}_fn()`);
     try {
       const worker = runImageJob(pool, "streaming-image-cancel-worker", 30, credentialSecret, { root: assetRoot });
       await expect.poll(async () => getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "generating" });
-      await expect.poll(async () => pool.query<{ waiting: boolean }>(
-        `SELECT EXISTS(
-           SELECT 1 FROM pg_stat_activity
-            WHERE datname = current_database()
-              AND wait_event_type = 'Lock' AND wait_event = 'advisory'
-         ) AS waiting`
-      ).then((result) => result.rows[0]?.waiting), { timeout: 5_000 }).toBe(true);
+      let workerBackendPid: number | undefined;
+      await expect.poll(async () => pool.query<{ pid: number }>(
+        `SELECT activity.pid
+           FROM pg_stat_activity activity
+           JOIN pg_locks advisory_lock ON advisory_lock.pid = activity.pid
+           JOIN pg_locks image_jobs_lock ON image_jobs_lock.pid = activity.pid
+          WHERE activity.datname = current_database()
+            AND activity.wait_event_type = 'Lock' AND activity.wait_event = 'advisory'
+            AND advisory_lock.locktype = 'advisory' AND NOT advisory_lock.granted
+            AND advisory_lock.classid = $1 AND advisory_lock.objid = $2 AND advisory_lock.objsubid = 2
+            AND image_jobs_lock.locktype = 'relation' AND image_jobs_lock.relation = 'image_jobs'::regclass
+            AND image_jobs_lock.mode = 'RowExclusiveLock' AND image_jobs_lock.granted`,
+        [advisoryLockClassId, advisoryLockObjectId]
+      ).then((result) => {
+        workerBackendPid = result.rows[0]?.pid;
+        return workerBackendPid;
+      }), { timeout: 5_000 }).toBeTypeOf("number");
       const cancellation = cancelGeneration(pool, generation.id);
-      await expect.poll(async () => pool.query<{ waiting: boolean }>(
-        `SELECT EXISTS(
-           SELECT 1 FROM pg_stat_activity
-            WHERE datname = current_database() AND wait_event_type = 'Lock'
-              AND wait_event <> 'advisory' AND query LIKE 'UPDATE image_jobs%'
-         ) AS waiting`
-      ).then((result) => result.rows[0]?.waiting)).toBe(true);
-      await lockHolder.query("SELECT pg_advisory_unlock($1)", [advisoryLockKey]);
+      let cancellationBackendPid: number | undefined;
+      await expect.poll(async () => pool.query<{ pid: number }>(
+        `SELECT cancellation.pid
+           FROM pg_stat_activity cancellation
+          WHERE cancellation.datname = current_database()
+            AND cancellation.wait_event_type = 'Lock'
+            AND cancellation.query LIKE 'UPDATE image_jobs%'
+            AND $1 = ANY(pg_blocking_pids(cancellation.pid))`,
+        [workerBackendPid]
+      ).then((result) => {
+        cancellationBackendPid = result.rows[0]?.pid;
+        return cancellationBackendPid;
+      })).toBeTypeOf("number");
+      expect(cancellationBackendPid).not.toBe(workerBackendPid);
+      await lockHolder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [advisoryLockClassId, advisoryLockObjectId]);
       await expect(worker).resolves.toBe(true);
       await expect(cancellation).resolves.toMatchObject({ status: "cancelled" });
     } finally {
-      await lockHolder.query("SELECT pg_advisory_unlock($1)", [advisoryLockKey]).catch(() => undefined);
+      await lockHolder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [advisoryLockClassId, advisoryLockObjectId]).catch(() => undefined);
       lockHolder.release();
       await pool.query(`DROP TRIGGER IF EXISTS ${trigger} ON image_jobs`);
       await pool.query(`DROP FUNCTION IF EXISTS ${trigger}_fn()`);
