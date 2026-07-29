@@ -19,7 +19,7 @@ import {
   type ArchiveLimits
 } from "../../services/api/src/archive-io.js";
 import { persistOriginalImage } from "../../services/api/src/asset-service.js";
-import { cleanupExpiredArchivePreviews, exportCampaign, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
+import { captureCampaignArchiveSnapshot, cleanupExpiredArchivePreviews, exportCampaign, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
 import { importCampaignArchive } from "../../services/api/src/import-service.js";
 import { buildServer } from "../../services/api/src/server.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
@@ -446,6 +446,43 @@ integration("campaign archive export", () => {
     expect(chronicle.summaries).toEqual([
       expect.objectContaining({ summary_kind: "legacy_full_history", through_turn: 1, content: { history: "Checkpoint" } })
     ]);
+  });
+
+  it("excludes turnless provisional illustrations from the portable campaign snapshot", async () => {
+    const ownerUserId = await initialOwnerId(pool);
+    const provisionalSet = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_sets (
+         owner_user_id,campaign_id,turn_id,source_text_hash,segment_word_count,images_per_segment,prompt_mode,status,is_active
+       ) VALUES ($1,$2,NULL,'provisional-archive-set',500,1,'direct','provisional',false) RETURNING id`,
+      [ownerUserId, campaignId]
+    );
+    const provisionalSetId = provisionalSet.rows[0]!.id;
+    const provisionalSegment = await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_segments (
+         owner_user_id,illustration_set_id,campaign_id,turn_id,ordinal,start_offset,end_offset,start_word,end_word,
+         source_text,source_text_hash,direct_prompt,resolved_prompt,prompt_source,status
+       ) VALUES ($1,$2,$3,NULL,0,0,20,0,3,'Provisional archive scene.','provisional-archive-segment',
+                 'A provisional scene.','A provisional scene.','direct','generating') RETURNING id`,
+      [ownerUserId, provisionalSetId, campaignId]
+    );
+    try {
+      const snapshot = await captureCampaignArchiveSnapshot(pool, campaignId);
+
+      expect(snapshot.illustrationSets).not.toContainEqual(
+        expect.objectContaining({ id: provisionalSetId })
+      );
+      expect(snapshot.illustrationSegments).not.toContainEqual(
+        expect.objectContaining({ id: provisionalSegment.rows[0]!.id })
+      );
+      expect(snapshot.illustrationSets).toEqual([
+        expect.objectContaining({ turn_id: turnId })
+      ]);
+      expect(snapshot.illustrationSegments).toEqual([
+        expect.objectContaining({ id: segmentId, turn_id: turnId })
+      ]);
+    } finally {
+      await pool.query("DELETE FROM turn_illustration_sets WHERE id=$1", [provisionalSetId]);
+    }
   });
 
   secureGeneratedStagingIt("[secure generated staging] serves campaign exports as no-store attachments and removes the response artifact", async () => {

@@ -54,6 +54,8 @@ export type ArchivePreviewCleanupResult = {
 };
 
 const migrationHistoryCompatibilityWarning = "Migration history references source world versions not included in this Campaign Archive; those audit rows will not be recreated.";
+const transientIllustrationCompatibilityWarning = (setCount: number, segmentCount: number) =>
+  `Ignored ${setCount} turnless illustration ${setCount === 1 ? "set" : "sets"} and ${segmentCount} turnless illustration ${segmentCount === 1 ? "segment" : "segments"} because provisional illustration work is not portable.`;
 
 const APPLICATION_VERSION = process.env.APP_VERSION?.trim() || process.env.npm_package_version?.trim() || "0.1.0";
 const campaignPayloadSchema = z.object({ world: z.unknown(), turns: z.array(z.unknown()) }).passthrough();
@@ -212,8 +214,17 @@ export async function captureCampaignArchiveSnapshot(pool: DatabasePool, campaig
       queryRows(client, "SELECT id,effective_turn_number,revision,state_snapshot_private,changed_fields,created_at FROM campaign_state_edits WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY revision", values),
       queryRows(client, "SELECT id,from_world_version_id,to_world_version_id,note,created_at FROM campaign_world_migrations WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY created_at,id", values),
       queryRows(client, "SELECT enabled,source_policy,matching_scope,confidence_profile,repetition_window,model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,images_per_segment,segment_prompt_mode,refinement_prompt,created_at,updated_at FROM campaign_illustration_configs WHERE owner_user_id=$1 AND campaign_id=$2", values),
-      queryRows(client, "SELECT id,turn_id,source_text_hash,segment_word_count,images_per_segment,prompt_mode,status,is_active,character_visual_reference,created_at,completed_at FROM turn_illustration_sets WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY created_at,id", values),
-      queryRows(client, "SELECT id,illustration_set_id,turn_id,ordinal,start_offset,end_offset,start_word,end_word,source_text,source_text_hash,direct_prompt,resolved_prompt,prompt_source,status,created_at,updated_at FROM turn_illustration_segments WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY illustration_set_id,ordinal", values),
+      queryRows(client, "SELECT id,turn_id,source_text_hash,segment_word_count,images_per_segment,prompt_mode,status,is_active,character_visual_reference,created_at,completed_at FROM turn_illustration_sets WHERE owner_user_id=$1 AND campaign_id=$2 AND turn_id IS NOT NULL ORDER BY created_at,id", values),
+      queryRows(client, `SELECT seg.id,seg.illustration_set_id,seg.turn_id,seg.ordinal,seg.start_offset,seg.end_offset,seg.start_word,seg.end_word,
+                               seg.source_text,seg.source_text_hash,seg.direct_prompt,seg.resolved_prompt,seg.prompt_source,seg.status,seg.created_at,seg.updated_at
+                          FROM turn_illustration_segments seg
+                          JOIN turn_illustration_sets illustration_set
+                            ON illustration_set.id=seg.illustration_set_id
+                           AND illustration_set.owner_user_id=seg.owner_user_id
+                           AND illustration_set.campaign_id=seg.campaign_id
+                           AND illustration_set.turn_id=seg.turn_id
+                         WHERE seg.owner_user_id=$1 AND seg.campaign_id=$2 AND seg.turn_id IS NOT NULL
+                         ORDER BY seg.illustration_set_id,seg.ordinal`, values),
       queryRows(client, "SELECT id,turn_id,local_call_id,provider_type,category,operation,requested_model,resolved_model,trim(trailing '.' from trim(trailing '0' from amount::text)) AS amount,currency,usage_metadata,occurred_at,created_at FROM provider_cost_events WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY occurred_at,id", values),
       queryRows(client, "SELECT id,turn_id,memory_kind,ordinal,content,token_estimate,importance,entities,entity_ids,metadata,created_at,updated_at FROM chronicle_memories WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY ordinal,id", values),
       queryRows(client, "SELECT id,summary_kind,through_turn,content,created_at FROM summary_checkpoints WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY through_turn,id", values)
@@ -491,6 +502,125 @@ function archiveObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+function assertPortableTurnReference(
+  turnIds: ReadonlySet<string>,
+  payload: "campaign" | "chronicle",
+  collection: string,
+  value: unknown,
+  nullable: boolean
+): void {
+  const row = archiveObject(value);
+  if ((nullable && row.turn_id === null) || (typeof row.turn_id === "string" && turnIds.has(row.turn_id))) return;
+  const recordId = typeof row.id === "string" ? row.id : undefined;
+  const referenceId = typeof row.turn_id === "string" ? row.turn_id : undefined;
+  throw new ArchiveError(
+    "archive-json-invalid",
+    `${payload}.${collection}${recordId ? `[${recordId}]` : ""}.turn_id references a turn not present in campaign.turns.`,
+    400,
+    {
+      payload,
+      collection,
+      field: "turn_id",
+      ...(recordId ? { recordId } : {}),
+      ...(referenceId ? { referenceId } : {})
+    }
+  );
+}
+
+function validateCampaignTurnReferences(
+  campaign: Record<string, unknown>,
+  chronicle: Record<string, unknown>,
+  records: Record<string, unknown>
+): void {
+  const turnIds = new Set(
+    (Array.isArray(campaign.turns) ? campaign.turns : [])
+      .map((turn) => archiveObject(turn).id)
+      .filter((id): id is string => typeof id === "string" && Boolean(id.trim()))
+  );
+  const collections = [
+    { payload: "campaign" as const, name: "archiveRecords.illustrationSets", values: records.illustrationSets, nullable: false },
+    { payload: "campaign" as const, name: "archiveRecords.illustrationSegments", values: records.illustrationSegments, nullable: false },
+    { payload: "campaign" as const, name: "archiveRecords.costs", values: records.costs, nullable: true },
+    { payload: "chronicle" as const, name: "memories", values: chronicle.memories, nullable: true }
+  ];
+  for (const collection of collections) {
+    for (const value of Array.isArray(collection.values) ? collection.values : []) {
+      assertPortableTurnReference(turnIds, collection.payload, collection.name, value, collection.nullable);
+    }
+  }
+  const illustrationSetTurns = new Map<string, string>();
+  for (const value of Array.isArray(records.illustrationSets) ? records.illustrationSets : []) {
+    const set = archiveObject(value);
+    if (typeof set.id === "string" && typeof set.turn_id === "string") illustrationSetTurns.set(set.id, set.turn_id);
+  }
+  for (const value of Array.isArray(records.illustrationSegments) ? records.illustrationSegments : []) {
+    const segment = archiveObject(value);
+    const recordId = typeof segment.id === "string" ? segment.id : undefined;
+    const setId = typeof segment.illustration_set_id === "string" ? segment.illustration_set_id : undefined;
+    const setTurnId = setId ? illustrationSetTurns.get(setId) : undefined;
+    if (!setTurnId) {
+      throw new ArchiveError(
+        "archive-json-invalid",
+        `campaign.archiveRecords.illustrationSegments${recordId ? `[${recordId}]` : ""}.illustration_set_id references a set not present in archiveRecords.illustrationSets.`,
+        400,
+        {
+          payload: "campaign",
+          collection: "archiveRecords.illustrationSegments",
+          field: "illustration_set_id",
+          ...(recordId ? { recordId } : {}),
+          ...(setId ? { referenceId: setId } : {})
+        }
+      );
+    }
+    if (segment.turn_id !== setTurnId) {
+      throw new ArchiveError(
+        "archive-json-invalid",
+        `campaign.archiveRecords.illustrationSegments${recordId ? `[${recordId}]` : ""}.turn_id does not match its illustration set.`,
+        400,
+        {
+          payload: "campaign",
+          collection: "archiveRecords.illustrationSegments",
+          field: "turn_id",
+          ...(recordId ? { recordId } : {}),
+          ...(typeof segment.turn_id === "string" ? { referenceId: segment.turn_id } : {}),
+          expectedReferenceId: setTurnId
+        }
+      );
+    }
+  }
+}
+
+function normalizePortableIllustrations(records: Record<string, unknown>): {
+  records: CampaignArchiveRecordsV1;
+  ignoredSetCount: number;
+  ignoredSegmentCount: number;
+} {
+  const sourceSets = Array.isArray(records.illustrationSets) ? records.illustrationSets : [];
+  const ignoredSetIds = new Set<string>();
+  const illustrationSets = sourceSets.filter((value) => {
+    const set = archiveObject(value);
+    if (set.turn_id !== null) return true;
+    if (typeof set.id === "string") ignoredSetIds.add(set.id);
+    return false;
+  });
+  const sourceSegments = Array.isArray(records.illustrationSegments) ? records.illustrationSegments : [];
+  const illustrationSegments = sourceSegments.filter((value) => {
+    const segment = archiveObject(value);
+    return segment.turn_id !== null
+      || typeof segment.illustration_set_id !== "string"
+      || !ignoredSetIds.has(segment.illustration_set_id);
+  });
+  return {
+    records: {
+      ...records,
+      illustrationSets,
+      illustrationSegments
+    } as CampaignArchiveRecordsV1,
+    ignoredSetCount: sourceSets.length - illustrationSets.length,
+    ignoredSegmentCount: sourceSegments.length - illustrationSegments.length
+  };
+}
+
 function worldTitle(content: unknown): string {
   if (!content || typeof content !== "object") return "Imported world";
   const world = (content as Record<string, unknown>).world;
@@ -543,6 +673,12 @@ async function readCampaignArchive(staged: StagedArchive, limits: ArchiveLimits)
   if (!records || typeof records !== "object" || (records as Record<string, unknown>).formatVersion !== 1) {
     throw new ArchiveError("archive-json-invalid", "The campaign archive records are invalid.", 400, { payload: "campaign" });
   }
+  const normalizedIllustrations = normalizePortableIllustrations(records as Record<string, unknown>);
+  const normalizedCampaign = {
+    ...campaign,
+    archiveRecords: normalizedIllustrations.records
+  } as PortableCampaignV3 & { archiveRecords: CampaignArchiveRecordsV1 };
+  validateCampaignTurnReferences(normalizedCampaign, chronicle, normalizedIllustrations.records);
   const worldMigrations = (records as Record<string, unknown>).worldMigrations;
   const migrationHistoryIsIncomplete = Array.isArray(worldMigrations) && worldMigrations.some((migrationValue) => {
     const migration = archiveObject(migrationValue);
@@ -552,18 +688,26 @@ async function readCampaignArchive(staged: StagedArchive, limits: ArchiveLimits)
   });
   const assets = await validateArchiveAssets(inspected.manifest, (path) => readVerifiedEntry(inspected, path, limits.maxOriginalImageBytes));
   assertDeclaredPortableAssetPointers(
-    campaign as PortableCampaignV3 & { archiveRecords: CampaignArchiveRecordsV1 },
+    normalizedCampaign,
     { ...worldPayload, content: canonicalContent } as PortableWorldPayload,
     inspected.manifest.assets
   );
   return {
     inspected,
-    campaign: campaign as PortableCampaignV3 & { archiveRecords: CampaignArchiveRecordsV1 },
+    campaign: normalizedCampaign,
     world: { ...worldPayload, content: canonicalContent } as PortableWorldPayload,
     chronicle: chronicle as PortableCampaignChronicleV1,
     assets,
     contentFingerprint: actualFingerprint,
-    warnings: migrationHistoryIsIncomplete ? [migrationHistoryCompatibilityWarning] : []
+    warnings: [
+      ...(migrationHistoryIsIncomplete ? [migrationHistoryCompatibilityWarning] : []),
+      ...(normalizedIllustrations.ignoredSetCount || normalizedIllustrations.ignoredSegmentCount
+        ? [transientIllustrationCompatibilityWarning(
+            normalizedIllustrations.ignoredSetCount,
+            normalizedIllustrations.ignoredSegmentCount
+          )]
+        : [])
+    ]
   };
 }
 
