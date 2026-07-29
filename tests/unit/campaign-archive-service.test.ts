@@ -3,12 +3,14 @@ import { mkdir, mkdtemp, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { once } from "node:events";
+import { Readable } from "node:stream";
 import { ZipArchive } from "archiver";
 import { afterEach, describe, expect, it } from "vitest";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
-import { stageArchiveUpload, type ArchiveLimits } from "../../services/api/src/archive-io.js";
-import { adaptLegacyCampaignZip, cleanupExpiredArchivePreviews, decodeCampaignArchive, portableWorldContentHash, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
+import { calculateContentFingerprint, canonicalArchiveJson, type ArchiveEntry, type ArchiveManifest } from "../../packages/contracts/src/archives.js";
+import { stageArchiveUpload, writeArchiveArtifact, type ArchiveLimits } from "../../services/api/src/archive-io.js";
+import { adaptLegacyCampaignZip, captureCampaignArchiveSnapshot, cleanupExpiredArchivePreviews, decodeCampaignArchive, portableWorldContentHash, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
 
 const temporaryRoots: string[] = [];
 const limits: ArchiveLimits = {
@@ -42,7 +44,275 @@ async function writeLegacyZip(path: string, entries: readonly { name: string; co
   await completed;
 }
 
+async function stagedCampaignArchive(
+  root: string,
+  overrides: {
+    turns?: unknown[];
+    archiveRecords?: Record<string, unknown>;
+    chronicle?: Record<string, unknown>;
+  } = {}
+) {
+  const campaignId = "11111111-1111-4111-8111-111111111111";
+  const worldId = "22222222-2222-4222-8222-222222222222";
+  const worldVersionId = "33333333-3333-4333-8333-333333333333";
+  const content = { schemaVersion: 4, world: { title: "Archive validation world" } };
+  const canonicalHash = portableWorldContentHash(content);
+  const values = [
+    ["campaign.json", "campaign", {
+      campaign: { sourceCampaignId: campaignId, title: "Archive validation campaign" },
+      world: { canonicalHash, sourceWorldId: worldId, sourceWorldVersionId: worldVersionId },
+      turns: overrides.turns ?? [{ id: "44444444-4444-4444-8444-444444444444", turnNumber: 1 }],
+      archiveRecords: {
+        formatVersion: 1,
+        characterProfileEdits: [],
+        stateEdits: [],
+        worldMigrations: [],
+        illustrationConfig: null,
+        illustrationSets: [],
+        illustrationSegments: [],
+        costs: [],
+        ...overrides.archiveRecords
+      }
+    }],
+    ["world.json", "world", {
+      canonicalHash,
+      sourceWorldId: worldId,
+      sourceWorldVersionId: worldVersionId,
+      versionNumber: 1,
+      content
+    }],
+    ["chronicle.json", "chronicle", {
+      formatVersion: 1,
+      memories: [],
+      summaries: [],
+      ...overrides.chronicle
+    }],
+    ["assets/assets.json", "assets", { formatVersion: 1, assets: [] }]
+  ] as const;
+  const artifact = await writeArchiveArtifact(
+    root,
+    values.map(([path, logicalType, value]) => ({
+      path,
+      logicalType,
+      mediaType: "application/json",
+      source: Readable.from(Buffer.from(canonicalArchiveJson(value), "utf8"))
+    })),
+    (entries: readonly ArchiveEntry[]): ArchiveManifest => ({
+      format: "infinite-quest-archive",
+      formatVersion: 1,
+      archiveType: "campaign",
+      createdAt: "2026-07-28T00:00:00.000Z",
+      contentFingerprint: calculateContentFingerprint({
+        payloadHashes: entries.map((entry) => entry.sha256),
+        originalAssetHashes: []
+      }),
+      campaignId,
+      worldId,
+      worldVersionId,
+      entries: [...entries],
+      payloads: values.map(([path, kind]) => ({
+        kind,
+        path,
+        formatVersion: kind === "campaign" ? 3 : 1
+      })),
+      assets: []
+    }),
+    limits
+  );
+  return stageArchiveUpload(createReadStream(artifact.absolutePath), root, limits);
+}
+
 describe("campaign archive preview validation", () => {
+  it("rejects a dangling illustration-set turn reference with actionable details during decode", async () => {
+    const root = await temporaryRoot();
+    const missingTurnId = "55555555-5555-4555-8555-555555555555";
+    const staged = await stagedCampaignArchive(root, {
+      archiveRecords: {
+        illustrationSets: [{
+          id: "66666666-6666-4666-8666-666666666666",
+          turn_id: missingTurnId
+        }]
+      }
+    });
+
+    await expect(decodeCampaignArchive(staged, limits)).rejects.toMatchObject({
+      code: "archive-json-invalid",
+      details: {
+        payload: "campaign",
+        collection: "archiveRecords.illustrationSets",
+        field: "turn_id",
+        recordId: "66666666-6666-4666-8666-666666666666",
+        referenceId: missingTurnId
+      }
+    });
+  });
+
+  it.each([
+    {
+      name: "Chronicle memory",
+      collection: "memories",
+      payload: "chronicle",
+      overrides: {
+        chronicle: {
+          memories: [{
+            id: "66666666-6666-4666-8666-666666666666",
+            turn_id: "55555555-5555-4555-8555-555555555555"
+          }]
+        }
+      }
+    },
+    {
+      name: "illustration segment",
+      collection: "archiveRecords.illustrationSegments",
+      payload: "campaign",
+      overrides: {
+        archiveRecords: {
+          illustrationSets: [{
+            id: "77777777-7777-4777-8777-777777777777",
+            turn_id: "44444444-4444-4444-8444-444444444444"
+          }],
+          illustrationSegments: [{
+            id: "66666666-6666-4666-8666-666666666666",
+            illustration_set_id: "77777777-7777-4777-8777-777777777777",
+            turn_id: "55555555-5555-4555-8555-555555555555"
+          }]
+        }
+      }
+    },
+    {
+      name: "provider cost",
+      collection: "archiveRecords.costs",
+      payload: "campaign",
+      overrides: {
+        archiveRecords: {
+          costs: [{
+            id: "66666666-6666-4666-8666-666666666666",
+            turn_id: "55555555-5555-4555-8555-555555555555"
+          }]
+        }
+      }
+    }
+  ])("rejects a dangling $name turn reference during decode", async ({ collection, payload, overrides }) => {
+    const root = await temporaryRoot();
+    const staged = await stagedCampaignArchive(root, overrides);
+
+    await expect(decodeCampaignArchive(staged, limits)).rejects.toMatchObject({
+      code: "archive-json-invalid",
+      details: {
+        payload,
+        collection,
+        field: "turn_id",
+        recordId: "66666666-6666-4666-8666-666666666666",
+        referenceId: "55555555-5555-4555-8555-555555555555"
+      }
+    });
+  });
+
+  it("omits legacy turnless illustration records and reports a compatibility warning", async () => {
+    const root = await temporaryRoot();
+    const acceptedTurnId = "44444444-4444-4444-8444-444444444444";
+    const acceptedSetId = "55555555-5555-4555-8555-555555555555";
+    const provisionalSetId = "66666666-6666-4666-8666-666666666666";
+    const staged = await stagedCampaignArchive(root, {
+      archiveRecords: {
+        illustrationSets: [
+          { id: acceptedSetId, turn_id: acceptedTurnId, status: "completed" },
+          { id: provisionalSetId, turn_id: null, status: "provisional" }
+        ],
+        illustrationSegments: [
+          {
+            id: "77777777-7777-4777-8777-777777777777",
+            illustration_set_id: acceptedSetId,
+            turn_id: acceptedTurnId,
+            status: "completed"
+          },
+          {
+            id: "88888888-8888-4888-8888-888888888888",
+            illustration_set_id: provisionalSetId,
+            turn_id: null,
+            status: "generating"
+          }
+        ]
+      }
+    });
+
+    const decoded = await decodeCampaignArchive(staged, limits);
+
+    expect(decoded.campaign.archiveRecords.illustrationSets).toEqual([
+      expect.objectContaining({ id: acceptedSetId, turn_id: acceptedTurnId })
+    ]);
+    expect(decoded.campaign.archiveRecords.illustrationSegments).toEqual([
+      expect.objectContaining({
+        id: "77777777-7777-4777-8777-777777777777",
+        illustration_set_id: acceptedSetId,
+        turn_id: acceptedTurnId
+      })
+    ]);
+    expect(decoded.warnings).toContain(
+      "Ignored 1 turnless illustration set and 1 turnless illustration segment because provisional illustration work is not portable."
+    );
+  });
+
+  it("rejects an illustration segment whose set is not included", async () => {
+    const root = await temporaryRoot();
+    const missingSetId = "55555555-5555-4555-8555-555555555555";
+    const staged = await stagedCampaignArchive(root, {
+      archiveRecords: {
+        illustrationSegments: [{
+          id: "66666666-6666-4666-8666-666666666666",
+          illustration_set_id: missingSetId,
+          turn_id: "44444444-4444-4444-8444-444444444444"
+        }]
+      }
+    });
+
+    await expect(decodeCampaignArchive(staged, limits)).rejects.toMatchObject({
+      code: "archive-json-invalid",
+      details: {
+        payload: "campaign",
+        collection: "archiveRecords.illustrationSegments",
+        field: "illustration_set_id",
+        recordId: "66666666-6666-4666-8666-666666666666",
+        referenceId: missingSetId
+      }
+    });
+  });
+
+  it("rejects an illustration segment assigned to a different turn than its set", async () => {
+    const root = await temporaryRoot();
+    const setId = "66666666-6666-4666-8666-666666666666";
+    const segmentId = "77777777-7777-4777-8777-777777777777";
+    const staged = await stagedCampaignArchive(root, {
+      turns: [
+        { id: "44444444-4444-4444-8444-444444444444", turnNumber: 1 },
+        { id: "55555555-5555-4555-8555-555555555555", turnNumber: 2 }
+      ],
+      archiveRecords: {
+        illustrationSets: [{
+          id: setId,
+          turn_id: "44444444-4444-4444-8444-444444444444"
+        }],
+        illustrationSegments: [{
+          id: segmentId,
+          illustration_set_id: setId,
+          turn_id: "55555555-5555-4555-8555-555555555555"
+        }]
+      }
+    });
+
+    await expect(decodeCampaignArchive(staged, limits)).rejects.toMatchObject({
+      code: "archive-json-invalid",
+      details: {
+        payload: "campaign",
+        collection: "archiveRecords.illustrationSegments",
+        field: "turn_id",
+        recordId: segmentId,
+        referenceId: "55555555-5555-4555-8555-555555555555",
+        expectedReferenceId: "44444444-4444-4444-8444-444444444444"
+      }
+    });
+  });
+
   it("returns archive-asset-invalid when duplicate manifest assets fail preview schema validation", async () => {
     const root = await temporaryRoot();
     const path = join(root, "duplicate-manifest-assets.zip");
@@ -122,6 +392,62 @@ describe("campaign archive preview validation", () => {
       "duplicate-manifest-assets.zip",
       { kind: "embedded" }
     )).rejects.toMatchObject({ code: "archive-asset-invalid" });
+  });
+});
+
+describe("campaign archive snapshot portability", () => {
+  it("excludes turnless provisional illustration records from new exports", async () => {
+    const ownerUserId = "00000000-0000-4000-8000-000000000001";
+    const campaignId = "11111111-1111-4111-8111-111111111111";
+    const turnId = "22222222-2222-4222-8222-222222222222";
+    const acceptedSet = { id: "33333333-3333-4333-8333-333333333333", turn_id: turnId };
+    const acceptedSegment = {
+      id: "55555555-5555-4555-8555-555555555555",
+      illustration_set_id: acceptedSet.id,
+      turn_id: turnId
+    };
+    const query = async (text: string) => {
+      if (text.includes("FROM users")) return { rows: [{ id: ownerUserId }], rowCount: 1 };
+      if (text.includes("FROM campaigns c")) {
+        return {
+          rows: [{
+            id: campaignId,
+            owner_user_id: ownerUserId,
+            world_id: "77777777-7777-4777-8777-777777777777",
+            world_version_id: "88888888-8888-4888-8888-888888888888",
+            version_number: 1,
+            content: { schemaVersion: 4, world: { title: "Snapshot world" } },
+            active_turn_number: 1,
+            state_revision: 0
+          }],
+          rowCount: 1
+        };
+      }
+      if (text.includes("FROM turns WHERE")) {
+        return {
+          rows: [{ id: turnId, turn_number: 1, accepted_at: new Date("2026-07-28T00:00:00.000Z") }],
+          rowCount: 1
+        };
+      }
+      if (text.includes("FROM turn_illustration_sets") && !text.includes("JOIN turn_illustration_sets")) {
+        expect(text).toContain("turn_id IS NOT NULL");
+        return { rows: [acceptedSet], rowCount: 1 };
+      }
+      if (text.includes("FROM turn_illustration_segments")) {
+        expect(text).toContain("JOIN turn_illustration_sets");
+        expect(text).toContain("seg.turn_id IS NOT NULL");
+        expect(text).toContain("illustration_set.turn_id=seg.turn_id");
+        return { rows: [acceptedSegment], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const client = { query, release: () => undefined };
+    const pool = { connect: async () => client } as unknown as DatabasePool;
+
+    const snapshot = await captureCampaignArchiveSnapshot(pool, campaignId);
+
+    expect(snapshot.illustrationSets).toEqual([acceptedSet]);
+    expect(snapshot.illustrationSegments).toEqual([acceptedSegment]);
   });
 });
 
