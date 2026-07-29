@@ -1095,10 +1095,26 @@ async function insertImportedRecords(
 
   const config = records.illustrationConfig && typeof records.illustrationConfig === "object" ? records.illustrationConfig as Record<string, unknown> : null;
   if (config) {
+    const legacyEnabled = config.enabled === true || config.enabled === "true";
+    const sourcePolicy = ["off", "library_only", "library_then_generate", "generate_only"].includes(String(config.source_policy))
+      ? String(config.source_policy)
+      : legacyEnabled ? "generate_only" : "off";
+    const matchingScope = ["campaign", "world", "owner_library", "shared"].includes(String(config.matching_scope))
+      ? String(config.matching_scope)
+      : "world";
+    const confidenceProfile = ["strict", "balanced", "broad"].includes(String(config.confidence_profile))
+      ? String(config.confidence_profile)
+      : "balanced";
+    const repetitionWindow = Number(config.repetition_window);
     await client.query(
-      `INSERT INTO campaign_illustration_configs (campaign_id,owner_user_id,enabled,model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,images_per_segment,segment_prompt_mode)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [campaignId, ownerUserId, Boolean(config.enabled), String(config.model || ""), String(config.size || "1024x1024"), String(config.aspect_ratio || "1:1"), ["auto", "low", "medium", "high"].includes(String(config.quality)) ? String(config.quality) : "auto", ["png", "jpeg", "webp"].includes(String(config.output_format)) ? String(config.output_format) : "png", Number(config.max_attempts || 3), Number(config.segment_word_count || 500), Number(config.images_per_segment || 1), ["direct", "ai_refined"].includes(String(config.segment_prompt_mode)) ? String(config.segment_prompt_mode) : "direct"]
+      `INSERT INTO campaign_illustration_configs (
+         campaign_id,owner_user_id,enabled,source_policy,matching_scope,confidence_profile,repetition_window,
+         model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,images_per_segment,
+         segment_prompt_mode,refinement_prompt
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+      [campaignId, ownerUserId, sourcePolicy !== "off", sourcePolicy, matchingScope, confidenceProfile,
+        Number.isInteger(repetitionWindow) && repetitionWindow >= 0 && repetitionWindow <= 100 ? repetitionWindow : 5,
+        String(config.model || ""), String(config.size || "1024x1024"), String(config.aspect_ratio || "1:1"), ["auto", "low", "medium", "high"].includes(String(config.quality)) ? String(config.quality) : "auto", ["png", "jpeg", "webp"].includes(String(config.output_format)) ? String(config.output_format) : "png", Number(config.max_attempts || 3), Number(config.segment_word_count || 500), Number(config.images_per_segment || 1), ["direct", "ai_refined"].includes(String(config.segment_prompt_mode)) ? String(config.segment_prompt_mode) : "direct", typeof config.refinement_prompt === "string" ? config.refinement_prompt : ""]
     );
   }
   for (const setValue of illustrationSets) {
