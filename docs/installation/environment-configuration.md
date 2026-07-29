@@ -19,7 +19,7 @@ The application supports the following runtime settings, but a deployment manife
 | `CREDENTIAL_ENCRYPTION_KEY` / `_FILE` | Empty | Provider-key encryption secret |
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated browser origins |
 | `API_DEFAULT_BODY_LIMIT_BYTES` | `1048576` | Default request-body limit in bytes |
-| `API_IMPORT_BODY_LIMIT_BYTES` | `16777216` | Import request and multipart field/file limit in bytes |
+| `API_IMPORT_BODY_LIMIT_BYTES` | `2147483648` | Import request and multipart field/file limit in bytes (2 GiB) |
 | `API_ASSET_BODY_LIMIT_BYTES` | `33554432` | Asset request-body limit in bytes |
 
 Direct secret environment values take precedence over `_FILE` values.

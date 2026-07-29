@@ -40,6 +40,7 @@ describe("runtime security configuration", () => {
     ]);
     expect(config.security.cspImageAllowedOrigins).toEqual([]);
     expect(config.security.apiDefaultBodyLimitBytes).toBe(1_048_576);
+    expect(config.security.apiImportBodyLimitBytes).toBe(2_147_483_648);
     expect(config.security.trustProxyHops).toBe(0);
   });
 

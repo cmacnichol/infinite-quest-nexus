@@ -191,7 +191,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
       providerNetworkAllowlist: parseProviderAllowlist(process.env.PROVIDER_NETWORK_ALLOWLIST),
       cspImageAllowedOrigins: parseExactOriginList(process.env.CSP_IMAGE_ALLOWED_ORIGINS, "CSP_IMAGE_ALLOWED_ORIGINS"),
       apiDefaultBodyLimitBytes: requiredIntegerSetting("API_DEFAULT_BODY_LIMIT_BYTES", 1_048_576, 65_536, 67_108_864),
-      apiImportBodyLimitBytes: requiredIntegerSetting("API_IMPORT_BODY_LIMIT_BYTES", 16_777_216, 1_048_576, 67_108_864),
+      apiImportBodyLimitBytes: requiredIntegerSetting("API_IMPORT_BODY_LIMIT_BYTES", 2_147_483_648, 1_048_576, 2_147_483_648),
       apiAssetBodyLimitBytes: requiredIntegerSetting("API_ASSET_BODY_LIMIT_BYTES", 33_554_432, 1_048_576, 67_108_864),
       apiRateLimitWindowSeconds: requiredIntegerSetting("API_RATE_LIMIT_WINDOW_SECONDS", 60, 1, 3_600),
       apiRateLimitProviderRequests: requiredIntegerSetting("API_RATE_LIMIT_PROVIDER_REQUESTS", 10, 1, 10_000),
