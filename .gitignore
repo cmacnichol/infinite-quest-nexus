@@ -1,23 +1,112 @@
+# Node.js dependencies and package-manager caches
 node_modules/
 .pnpm-store/
+.npm/
+
+# Build, test, and documentation output
 dist/
 coverage/
+.next/
+.nuxt/
+out/
+.parcel-cache/
+.eslintcache
+*.tsbuildinfo
+next-env.d.ts
 docs/.vitepress/cache/
-docs/.vitepress/dist/
+bench/results/
+tmp/
+
+# Environment files and local secrets
 .env
 .env.*
 !.env.example
 !.env.test.example
+
+# Application runtime data and local databases
 *.story
-*.log
-.DS_Store
-Thumbs.db
-compose.override.yaml
 local-data/
 data/
-docs/OPEN_ISSUES.local.md
-docs/ENHANCEMENTS.local.md
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Local LanceDB data
+lancedb/
+lancedb_data/
+*.lance
+
+# Logs
+*.log
+logs/
+
+# Local Docker Compose overrides
+compose.override.yaml
+docker-compose.override.yml
+
+# Local-only project notes
 docs/*.local.md
-/.kangentic
+
+# Repository-local development tools and worktrees
+/.kangentic/
 kangentic.json
 /.worktrees/
+/.repowise/
+.repowise-workspace/
+.repowise-workspace.yaml
+
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.uv/
+
+# Python packaging output
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+/lib/
+/lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Editors and local agent configuration
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+*~
+
+# Operating-system metadata
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+
+# Microsoft Office temporary and lock files
+~$*
