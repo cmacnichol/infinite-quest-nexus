@@ -195,8 +195,13 @@ integration("campaign archive export", () => {
       [ownerUserId, campaignId, secondVersion.rows[0]!.id, firstVersion.rows[0]!.id]
     );
     await pool.query(
-      `INSERT INTO campaign_illustration_configs (campaign_id,owner_user_id,enabled,model)
-       VALUES ($1,$2,false,'')`,
+      `INSERT INTO campaign_illustration_configs (
+         campaign_id,owner_user_id,enabled,source_policy,matching_scope,confidence_profile,repetition_window,
+         model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,images_per_segment,
+         segment_prompt_mode,refinement_prompt
+       ) VALUES ($1,$2,true,'library_then_generate','shared','broad',37,
+                 'flux1-schnell-fp8','1536x1024','3:2','high','webp',7,750,2,
+                 'ai_refined','Archive refinement instructions.')`,
       [campaignId, ownerUserId]
     );
     const set = await pool.query<{ id: string }>(
@@ -408,7 +413,23 @@ integration("campaign archive export", () => {
     expect(campaign.archiveRecords.stateEdits).toEqual([
       expect.objectContaining({ effective_turn_number: 1, revision: 1, state_snapshot_private: { scratchpad: "State edit." } })
     ]);
-    expect(campaign.archiveRecords.illustrationConfig).toMatchObject({ enabled: false, model: "", images_per_segment: 1 });
+    expect(campaign.archiveRecords.illustrationConfig).toMatchObject({
+      enabled: true,
+      source_policy: "library_then_generate",
+      matching_scope: "shared",
+      confidence_profile: "broad",
+      repetition_window: 37,
+      model: "flux1-schnell-fp8",
+      size: "1536x1024",
+      aspect_ratio: "3:2",
+      quality: "high",
+      output_format: "webp",
+      max_attempts: 7,
+      segment_word_count: 750,
+      images_per_segment: 2,
+      segment_prompt_mode: "ai_refined",
+      refinement_prompt: "Archive refinement instructions."
+    });
     expect(campaign.archiveRecords.illustrationSets).toEqual([
       expect.objectContaining({ turn_id: turnId, source_text_hash: "fixture-hash", images_per_segment: 2, prompt_mode: "direct" })
     ]);
@@ -665,6 +686,46 @@ integration("campaign archive export", () => {
     });
     expect(imported.campaignId).not.toBe(campaignId);
     expect(imported.worldVersionId).toBe(preview.destination.worldVersionId);
+    const importedIllustrationConfig = await pool.query<{
+      enabled: boolean;
+      source_policy: string;
+      matching_scope: string;
+      confidence_profile: string;
+      repetition_window: number;
+      model: string;
+      size: string;
+      aspect_ratio: string;
+      quality: string;
+      output_format: string;
+      max_attempts: number;
+      segment_word_count: number;
+      images_per_segment: number;
+      segment_prompt_mode: string;
+      refinement_prompt: string;
+    }>(
+      `SELECT enabled,source_policy,matching_scope,confidence_profile,repetition_window,
+              model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,
+              images_per_segment,segment_prompt_mode,refinement_prompt
+         FROM campaign_illustration_configs WHERE campaign_id=$1`,
+      [imported.campaignId]
+    );
+    expect(importedIllustrationConfig.rows[0]).toMatchObject({
+      enabled: true,
+      source_policy: "library_then_generate",
+      matching_scope: "shared",
+      confidence_profile: "broad",
+      repetition_window: 37,
+      model: "flux1-schnell-fp8",
+      size: "1536x1024",
+      aspect_ratio: "3:2",
+      quality: "high",
+      output_format: "webp",
+      max_attempts: 7,
+      segment_word_count: 750,
+      images_per_segment: 2,
+      segment_prompt_mode: "ai_refined",
+      refinement_prompt: "Archive refinement instructions."
+    });
     const importedTurn = await pool.query<{ id: string; image_url: string }>(
       "SELECT id,image_url FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [imported.campaignId]
     );
