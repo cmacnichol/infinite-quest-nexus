@@ -222,7 +222,7 @@ export async function captureCampaignArchiveSnapshot(pool: DatabasePool, campaig
       "SELECT content,through_turn FROM summary_checkpoints WHERE owner_user_id=$1 AND campaign_id=$2 AND summary_kind='legacy_full_history' ORDER BY through_turn DESC,created_at DESC LIMIT 1", values
     );
     const latestStateRevision = Math.max(0, ...stateEdits.map((edit) => Number((edit as { revision?: unknown }).revision || 0)));
-    if (latestStateRevision !== Number(campaign.state_revision)) {
+    if (latestStateRevision > Number(campaign.state_revision)) {
       throw exportError("Campaign state revision does not match the captured state edit ledger.");
     }
     const assets = await collectCampaignArchiveAssets(client, ownerUserId, campaignId, campaign.world_version_id, campaign.world_id);

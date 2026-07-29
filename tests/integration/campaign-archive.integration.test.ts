@@ -585,10 +585,24 @@ integration("campaign archive export", () => {
     })).rejects.toMatchObject({ code: "archive-limit-exceeded" });
   });
 
-  it("rejects a campaign state revision that does not match its edit ledger", async () => {
+  it("exports when the current state revision is ahead of the manual edit ledger", async () => {
     await pool.query("UPDATE campaign_state SET revision=2 WHERE campaign_id=$1", [campaignId]);
-    await expect(exportCampaign(pool, campaignId, null)).rejects.toMatchObject({ code: "archive-export-inconsistent" });
-    await pool.query("UPDATE campaign_state SET revision=1 WHERE campaign_id=$1", [campaignId]);
+    try {
+      await expect(exportCampaign(pool, campaignId, null)).resolves.toMatchObject({
+        campaign: { stateRevision: 2 }
+      });
+    } finally {
+      await pool.query("UPDATE campaign_state SET revision=1 WHERE campaign_id=$1", [campaignId]);
+    }
+  });
+
+  it("rejects a state edit ledger revision ahead of the current campaign state", async () => {
+    await pool.query("UPDATE campaign_state_edits SET revision=2 WHERE campaign_id=$1", [campaignId]);
+    try {
+      await expect(exportCampaign(pool, campaignId, null)).rejects.toMatchObject({ code: "archive-export-inconsistent" });
+    } finally {
+      await pool.query("UPDATE campaign_state_edits SET revision=1 WHERE campaign_id=$1", [campaignId]);
+    }
   });
 
   secureGeneratedStagingIt("[secure generated staging] fails closed when a required original is absent", async () => {
