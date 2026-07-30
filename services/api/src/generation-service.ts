@@ -70,6 +70,7 @@ import {
   estimateTokens
 } from "../../../packages/domain/src/index.js";
 import { buildScopedEntityCatalog, resolveEntityMetadata } from "../../../packages/domain/src/entity-references.js";
+import { logger } from "../../../packages/logger/src/index.js";
 import { autoEnableCampaignEmbeddingIfAvailable, buildContextPreview, enqueueEmbeddingReindex, rebuildCampaignMemories, storeDerivedTurnMemories } from "./memory-service.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
 import {
@@ -1596,21 +1597,38 @@ async function commitStory(
         json({ sanitized: memory.sanitized, removedMechanicsSegments: memory.removedMechanicsSegments, generated: true })]
     );
   }
-  const streamingState = job.streaming_segments_state as any;
-  if (streamingState?.provisionalSetId) {
-    const illustrationConfig = await loadStreamingIllustrationConfig(client, job.owner_user_id, job.campaign_id)
-      .catch(() => null);
-    if (illustrationConfig) {
-      await promoteProvisionalSet(
-        client, job.owner_user_id, job.id, turnId, job.campaign_id,
-        story.narration, illustrationConfig
-      );
+  await client.query("SAVEPOINT accepted_turn_illustration_enqueue");
+  try {
+    const streamingState = job.streaming_segments_state as any;
+    if (streamingState?.provisionalSetId) {
+      const illustrationConfig = await loadStreamingIllustrationConfig(client, job.owner_user_id, job.campaign_id)
+        .catch(() => null);
+      if (illustrationConfig) {
+        await promoteProvisionalSet(
+          client, job.owner_user_id, job.id, turnId, job.campaign_id,
+          story.narration, illustrationConfig
+        );
+      } else {
+        // Fallback
+        await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
+      }
     } else {
-      // Fallback
       await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
     }
-  } else {
-    await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
+    await client.query("RELEASE SAVEPOINT accepted_turn_illustration_enqueue");
+  } catch (error) {
+    await client.query("ROLLBACK TO SAVEPOINT accepted_turn_illustration_enqueue");
+    await client.query("RELEASE SAVEPOINT accepted_turn_illustration_enqueue");
+    logger.warn({
+      event: "accepted_turn_illustration_enqueue_failed",
+      generationJobId: job.id,
+      campaignId: job.campaign_id,
+      turnId,
+      errorCode: typeof error === "object" && error !== null && "code" in error
+        ? String((error as { code: unknown }).code)
+        : undefined,
+      errorMessage: error instanceof Error ? error.message : String(error)
+    });
   }
   await enqueueEmbeddingReindex(client, job.campaign_id);
   const completed = await client.query<{ id: string }>(

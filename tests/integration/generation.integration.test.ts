@@ -5,8 +5,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
-import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
+import { generationRequestSchema, generationRetryLatestRequestSchema, illustrationConfigSchema } from "../../packages/contracts/src/generation.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
+import { setIllustrationConfig } from "../../services/api/src/image-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { branchCampaign, cancelGeneration, enqueueGeneration, enqueueLatestReplacement, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, runGenerationJob, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
 import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/api/src/memory-service.js";
@@ -269,6 +270,70 @@ integration("durable Story Engine integration", () => {
       expect.objectContaining({ id: "Generated clue-2", name: "Generated clue", value: "found" })
     ]);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+  });
+
+  it("commits the accepted turn when illustration enqueue hits a database error", async () => {
+    const imported = await campaign();
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      sourcePolicy: "library_only",
+      matchingScope: "campaign",
+      confidenceProfile: "strict",
+      providerProfileId: null,
+      model: ""
+    }));
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const functionName = `reject_illustration_enqueue_${suffix}`;
+    const triggerName = `reject_illustration_enqueue_trigger_${suffix}`;
+    await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.campaign_id::text = '${imported.campaignId}' THEN
+          RAISE EXCEPTION 'synthetic illustration enqueue failure' USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+      END
+    $$`);
+    await pool.query(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON turn_illustration_sets
+      FOR EACH ROW EXECUTE FUNCTION ${functionName}()`);
+    try {
+      const job = await queue(imported.campaignId, "Continue into the accepted scene.");
+
+      await runGenerationJob(pool, "story-worker-illustration-enqueue-failure", 30, credentialSecret);
+
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+      const committed = await pool.query<{ id: string; narration: string; memory_kinds: string[] }>(
+        `SELECT turns.id, turns.narration,
+                array_agg(chronicle_memories.memory_kind ORDER BY chronicle_memories.memory_kind) AS memory_kinds
+           FROM turns
+           LEFT JOIN chronicle_memories ON chronicle_memories.turn_id = turns.id
+          WHERE turns.campaign_id = $1 AND turns.turn_number = 3
+          GROUP BY turns.id`,
+        [imported.campaignId]
+      );
+      expect(committed.rows).toEqual([{
+        id: expect.any(String),
+        narration: "Location Gamma opens and Marker Three becomes visible.",
+        memory_kinds: ["canonical_fact", "turn_fiction"]
+      }]);
+      expect(await pool.query(
+        `SELECT campaigns.active_turn_number, campaign_state.scratchpad_private
+           FROM campaigns
+           JOIN campaign_state ON campaign_state.campaign_id = campaigns.id
+          WHERE campaigns.id = $1`,
+        [imported.campaignId]
+      )).toMatchObject({
+        rows: [{
+          active_turn_number: 3,
+          scratchpad_private: "Private synthetic continuity marker."
+        }]
+      });
+      expect(await pool.query(
+        "SELECT id FROM turn_illustration_sets WHERE turn_id = $1",
+        [committed.rows[0]?.id]
+      )).toMatchObject({ rowCount: 0 });
+    } finally {
+      await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON turn_illustration_sets`);
+      await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+    }
   });
 
   it("stages an idempotent latest-turn replacement and swaps it only after validated commit", async () => {
