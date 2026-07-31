@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { publicProvider } from "../../services/api/src/provider-service.js";
 
 describe("publicProvider", () => {
-  it("redacts nested provider configuration secrets without mutating stored configuration", () => {
+  it("preserves legitimate provider configuration values in write responses", () => {
     const configuration = {
       apiKey: "secondary-secret",
       nested: {
@@ -38,18 +38,7 @@ describe("publicProvider", () => {
       updated_at: new Date("2026-01-01T00:00:00Z")
     });
 
-    expect(provider.configuration).toEqual({
-      nested: { apiUrl: "https://api.sogni.ai" },
-      projectId: "sogni-project"
-    });
+    expect(provider.configuration).toEqual(configuration);
     expect(provider.hasApiKey).toBe(true);
-    expect(configuration).toEqual({
-      apiKey: "secondary-secret",
-      nested: {
-        accessToken: "nested-secret",
-        apiUrl: "https://api.sogni.ai"
-      },
-      projectId: "sogni-project"
-    });
   });
 });

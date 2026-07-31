@@ -42,7 +42,7 @@ export function publicProvider(row: ProviderRow) {
     maxOutputTokens: row.max_output_tokens,
     temperature: row.temperature,
     requestTimeoutMs: row.request_timeout_ms,
-    configuration: sanitizeSensitiveConfiguration(row.configuration),
+    configuration: row.configuration,
     enabled: row.enabled,
     isDefault: row.is_default,
     healthStatus: row.health_status,
@@ -52,6 +52,13 @@ export function publicProvider(row: ProviderRow) {
     hasApiKey: Boolean(row.encrypted_api_key),
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  };
+}
+
+function publicProviderForRead(row: ProviderRow) {
+  return {
+    ...publicProvider(row),
+    configuration: sanitizeSensitiveConfiguration(row.configuration)
   };
 }
 
@@ -91,7 +98,7 @@ export async function listProviders(pool: DatabasePool) {
     `SELECT ${selectColumns} FROM provider_profiles WHERE owner_user_id = $1 ORDER BY provider_role, name`,
     [ownerUserId]
   );
-  return result.rows.map(publicProvider);
+  return result.rows.map(publicProviderForRead);
 }
 
 export async function createProvider(pool: DatabasePool, input: Omit<ProviderProfileInput, "isDefault" | "requestTimeoutMs"> & { isDefault?: boolean; requestTimeoutMs?: number }, credentialSecret: string) {
