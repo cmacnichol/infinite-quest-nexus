@@ -15,8 +15,8 @@ importers:
         specifier: ^10.1.2
         version: 10.1.2
       '@sogni-ai/sogni-client':
-        specifier: 5.1.0
-        version: 5.1.0
+        specifier: 5.2.0
+        version: 5.2.0
       '@types/archiver':
         specifier: ^8.0.0
         version: 8.0.0
@@ -924,8 +924,8 @@ packages:
   '@shikijs/vscode-textmate@10.0.2':
     resolution: {integrity: sha512-83yeghZ2xxin3Nj8z1NMd/NCuca+gsYXswywDy5bHvwlWL8tpTQmzGeUuHd9FC3E/SBEMvzJRwWEOz5gGes9Qg==}
 
-  '@sogni-ai/sogni-client@5.1.0':
-    resolution: {integrity: sha512-dbTvum7fHVYydCV6HzR7/qYbknZw2Kr0MfOTYb33nJ9dhYwd7SxK0NJRPwYLHDHGh3896qojIetGxzbDTfvPsA==}
+  '@sogni-ai/sogni-client@5.2.0':
+    resolution: {integrity: sha512-9EHCuXhbDyX7LOKgTV8CzqZ4FEOOQUCMv2P0sKNdN4pPF8NY4XVjg57XPLGjyJanNwnp5QWq1D2XNJbu0/Q6Ig==}
     engines: {node: '>=22'}
 
   '@sogni-ai/sogni-protocol@1.0.0-alpha.9':
@@ -3404,7 +3404,7 @@ snapshots:
 
   '@shikijs/vscode-textmate@10.0.2': {}
 
-  '@sogni-ai/sogni-client@5.1.0':
+  '@sogni-ai/sogni-client@5.2.0':
     dependencies:
       '@lukeed/uuid': 2.0.1
       '@sogni-ai/sogni-protocol': 1.0.0-alpha.9
