@@ -126,6 +126,31 @@ integration("World Library and campaign version integration", () => {
     expect(rows.rows[1]?.content.world).not.toHaveProperty("character");
   });
 
+  it("ignores browser-supplied world id and owner identity on creation", async () => {
+    const spoofedWorldId = crypto.randomUUID();
+    const spoofedOwner = await pool.query<{ id: string }>(
+      "INSERT INTO users (display_name, status) VALUES ($1, 'active') RETURNING id",
+      [`Spoof target ${crypto.randomUUID()}`]
+    );
+    const spoofedOwnerUserId = spoofedOwner.rows[0]!.id;
+    const created = await createWorld(pool, worldCreateSchema.parse({
+      id: spoofedWorldId,
+      ownerUserId: spoofedOwnerUserId,
+      title: `Server-owned world ${crypto.randomUUID()}`
+    }));
+    const persisted = await pool.query<{ id: string; owner_user_id: string }>(
+      "SELECT id, owner_user_id FROM worlds WHERE id = $1",
+      [created.id]
+    );
+
+    expect(created.id).not.toBe(spoofedWorldId);
+    expect(persisted.rows[0]).toEqual({
+      id: created.id,
+      owner_user_id: await initialOwnerId(pool)
+    });
+    expect(persisted.rows[0]?.owner_user_id).not.toBe(spoofedOwnerUserId);
+  });
+
   it("lists immutable published world previews without leaking newer draft edits", async () => {
     const published = await publishedWorld("Dashboard Preview");
     const detail = await getWorld(pool, published.created.id);
