@@ -140,6 +140,19 @@ describe("Prompt Library catalog", () => {
     )).toBe("SCENE=A lantern glows.\nCHARACTER=Mira wears a blue coat.");
   });
 
+  it("removes mechanics from the composed illustration provider payload", () => {
+    const providerPayload = composeIllustrationProviderPrompt(
+      "Mira raises a lantern on the rain-dark bridge. She rolls a 17 to cross the gap. Thunder breaks above the river.",
+      "Mira wears a blue coat. Her armor class is 16.",
+      "SCENE={{scene}}\nCHARACTER={{character}}"
+    );
+
+    expect(providerPayload).toBe(
+      "SCENE=Mira raises a lantern on the rain-dark bridge. Thunder breaks above the river.\nCHARACTER=Mira wears a blue coat."
+    );
+    expect(providerPayload).not.toMatch(/rolls a 17|armor class|\b16\b/i);
+  });
+
   it("routes every Infinite Worlds instruction through the effective snapshot", () => {
     const snapshot = {
       infinite_worlds_conversion: { content: "CONVERT", hash: "", source: "application" },
