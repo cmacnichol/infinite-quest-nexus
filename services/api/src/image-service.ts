@@ -4,12 +4,17 @@ import {
   type IllustrationRequest,
   type WorldCoverRequest
 } from "../../../packages/contracts/src/generation.js";
-import { isIP } from "node:net";
+import { Agent } from "undici";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import { sha256 } from "../../../packages/domain/src/text.js";
 import { characterVisualReference, composeIllustrationProviderPrompt } from "../../../packages/domain/src/index.js";
 import { logger } from "../../../packages/logger/src/index.js";
+import {
+  createProviderNetworkPolicy,
+  ProviderDestinationNotAllowedError,
+  type ProviderNetworkResolver
+} from "../../../packages/security/src/provider-network-policy.js";
 import {
   containsMechanicsLanguage,
   logProviderTransportError,
@@ -20,10 +25,12 @@ import {
   type ImageProviderResult,
   type TextProviderProfile
 } from "../../../packages/story-engine/src/index.js";
+import { pinnedConnectOptions } from "../../../packages/story-engine/src/provider-transport.js";
 import { lockOriginalImages, persistTurnImage, persistWorldCover, type FilesystemAssetStore } from "./asset-service.js";
 import { loadImageProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
 import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
+import { loadOrNotFound } from "./service-helpers.js";
 
 type IllustrationConfigRow = {
   enabled: boolean;
@@ -159,7 +166,7 @@ const jobColumns = `id, owner_user_id, campaign_id, turn_id, world_id, target_ty
 export async function getIllustrationConfig(pool: DatabasePool, campaignId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const campaign = await pool.query("SELECT id FROM campaigns WHERE id = $1 AND owner_user_id = $2", [campaignId, ownerUserId]);
-  if (!campaign.rows[0]) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+  loadOrNotFound(campaign, "Campaign");
   const result = await pool.query<IllustrationConfigRow>(
     `SELECT enabled, source_policy, matching_scope, confidence_profile, repetition_window,
             provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts,
@@ -215,8 +222,7 @@ export async function setIllustrationConfig(pool: DatabasePool, campaignId: stri
       config.aspectRatio, config.quality, config.outputFormat, config.maxAttempts,
       config.segmentWordCount, config.imagesPerSegment, config.segmentPromptMode, config.refinementPrompt]
   );
-  if (!result.rows[0]) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
-  return publicConfig(result.rows[0]);
+  return publicConfig(loadOrNotFound(result, "Campaign"));
 }
 
 export async function insertImageJob(
@@ -273,8 +279,7 @@ export async function enqueueWorldCover(pool: DatabasePool, worldId: string, req
         WHERE worlds.id = $1 AND worlds.owner_user_id = $2 FOR UPDATE OF worlds, drafts`,
       [worldId, ownerUserId]
     );
-    const world = worldResult.rows[0];
-    if (!world) throw Object.assign(new Error("World not found."), { statusCode: 404 });
+    const world = loadOrNotFound(worldResult, "World");
     if (world.status === "archived") throw Object.assign(new Error("Restore the world before generating its cover."), { statusCode: 409 });
     const existing = await client.query<ImageJobRow>(
       `SELECT ${jobColumns} FROM image_jobs
@@ -300,7 +305,7 @@ export async function enqueueWorldCover(pool: DatabasePool, worldId: string, req
       overview.genre ? `Genre: ${String(overview.genre).slice(0, 500)}.` : "",
       overview.tone ? `Tone: ${String(overview.tone).slice(0, 500)}.` : "",
       overview.premise ? `Premise: ${String(overview.premise).slice(0, 2000)}.` : "",
-      "Show only evocative diegetic scenery and characters. Do not include typography, logos, interface elements, statistics, dice, or game mechanics."
+      "Show only evocative diegetic scenery and characters. Avoid non-diegetic content, typography, logos, and interface elements."
     ].filter(Boolean).join("\n");
     const job = await insertImageJob(client, {
       ownerUserId,
@@ -380,8 +385,7 @@ export async function enqueueIllustration(pool: DatabasePool, turnId: string, re
         WHERE turns.id = $1 AND turns.owner_user_id = $2 FOR UPDATE OF turns`,
       [turnId, ownerUserId]
     );
-    const turn = turnResult.rows[0];
-    if (!turn) throw Object.assign(new Error("Accepted turn not found."), { statusCode: 404 });
+    const turn = loadOrNotFound(turnResult, "Accepted turn");
     const existing = await client.query<ImageJobRow>(
       `SELECT ${jobColumns} FROM image_jobs WHERE turn_id = $1 AND owner_user_id = $2 ORDER BY created_at DESC LIMIT 1`,
       [turnId, ownerUserId]
@@ -431,14 +435,13 @@ export async function enqueueIllustration(pool: DatabasePool, turnId: string, re
 export async function getImageJob(pool: DatabasePool, jobId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const result = await pool.query<ImageJobRow>(`SELECT ${jobColumns} FROM image_jobs WHERE id = $1 AND owner_user_id = $2`, [jobId, ownerUserId]);
-  if (!result.rows[0]) throw Object.assign(new Error("Image job not found."), { statusCode: 404 });
-  return publicJob(result.rows[0]);
+  return publicJob(loadOrNotFound(result, "Image job"));
 }
 
 export async function getLatestWorldCoverJob(pool: DatabasePool, worldId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const world = await pool.query("SELECT id FROM worlds WHERE id = $1 AND owner_user_id = $2", [worldId, ownerUserId]);
-  if (!world.rows[0]) throw Object.assign(new Error("World not found."), { statusCode: 404 });
+  loadOrNotFound(world, "World");
   const result = await pool.query<ImageJobRow>(
     `SELECT ${jobColumns} FROM image_jobs
       WHERE world_id = $1 AND owner_user_id = $2 AND target_type = 'world_cover'
@@ -514,6 +517,12 @@ async function claimImageJob(pool: DatabasePool, workerId: string, leaseSeconds:
 }
 
 const MAX_ARTIFACT_BYTES = MAX_IMAGE_ARTIFACT_BYTES;
+const MAX_ARTIFACT_REDIRECTS = 5;
+
+export type ArtifactDownloadDependencies = {
+  fetcher?: typeof fetch;
+  resolve?: ProviderNetworkResolver;
+};
 
 function numberSetting(profile: TextProviderProfile, key: string, fallback: number, minimum: number, maximum: number): number {
   const value = Number(profile.configuration?.[key]);
@@ -532,25 +541,30 @@ function artifactMimeType(bytes: Buffer, declared?: string): "image/png" | "imag
   throw Object.assign(new Error(`Provider artifact was not a supported image${declared ? ` (${declared})` : ""}.`), { code: "invalid_image_artifact", permanent: true });
 }
 
-function privateArtifactHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
-  if (isIP(host) === 4) {
-    const [first = 0, second = 0] = host.split(".").map(Number);
-    return first === 0 || first === 10 || first === 127 || first >= 224
-      || (first === 100 && second >= 64 && second <= 127)
-      || (first === 169 && second === 254)
-      || (first === 172 && second >= 16 && second <= 31)
-      || (first === 192 && second === 168);
-  }
-  if (isIP(host) === 6) {
-    return host === "::" || host === "::1" || /^f[cd]/.test(host) || /^fe[89ab]/.test(host)
-      || /^::ffff:(?:0|10|127|169\.254|172\.(?:1[6-9]|2\d|3[01])|192\.168)\./.test(host);
-  }
-  return false;
+function privateArtifactHostError(): Error {
+  return Object.assign(new Error("Provider artifact URL resolved to a private or local host."), {
+    code: "private_artifact_host",
+    permanent: true
+  });
 }
 
-async function downloadArtifact(artifact: ImageProviderArtifact, timeoutMs: number, allowPrivateHosts = false): Promise<{ bytes: Buffer; mimeType: "image/png" | "image/jpeg" | "image/webp" }> {
+function artifactRedirectTarget(location: string, currentUrl: URL): URL {
+  try {
+    return new URL(location, currentUrl);
+  } catch {
+    throw Object.assign(new Error("Provider artifact redirect returned an invalid URL."), {
+      code: "invalid_artifact_url",
+      permanent: true
+    });
+  }
+}
+
+export async function downloadArtifact(
+  artifact: ImageProviderArtifact,
+  timeoutMs: number,
+  allowPrivateHosts = false,
+  dependencies: ArtifactDownloadDependencies = {}
+): Promise<{ bytes: Buffer; mimeType: "image/png" | "image/jpeg" | "image/webp" }> {
   if (artifact.source === "base64") {
     const normalized = artifact.base64.replace(/\s+/g, "");
     if (!/^[a-z0-9+/]+={0,2}$/i.test(normalized)) throw Object.assign(new Error("Image provider returned invalid base64 data."), { code: "invalid_image_artifact", permanent: true });
@@ -558,24 +572,69 @@ async function downloadArtifact(artifact: ImageProviderArtifact, timeoutMs: numb
     if (bytes.length > MAX_ARTIFACT_BYTES) throw Object.assign(new Error("Generated image exceeded the 20 MB provider artifact limit."), { code: "image_too_large", permanent: true });
     return { bytes, mimeType: artifactMimeType(bytes, artifact.mimeType) };
   }
-  const url = new URL(artifact.url);
-  if (!(["https:", "http:"] as string[]).includes(url.protocol)) throw Object.assign(new Error("Provider artifact URL used an unsupported protocol."), { code: "invalid_artifact_url", permanent: true });
-  if (!allowPrivateHosts && privateArtifactHost(url.hostname)) throw Object.assign(new Error("Provider artifact URL resolved to a private or local host."), { code: "private_artifact_host", permanent: true });
-  const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: "follow" });
-  if (!response.ok) throw Object.assign(new Error(`Provider artifact download failed (${response.status}).`), { code: "artifact_download_failed" });
-  const declaredLength = Number(response.headers.get("content-length") || 0);
-  if (declaredLength > MAX_ARTIFACT_BYTES) throw Object.assign(new Error("Generated image exceeded the 20 MB provider artifact limit."), { code: "image_too_large", permanent: true });
-  if (!response.body) throw Object.assign(new Error("Provider artifact download returned an empty body."), { code: "artifact_download_failed" });
-  const chunks: Buffer[] = [];
-  let length = 0;
-  for await (const chunk of response.body) {
-    const bytes = Buffer.from(chunk);
-    length += bytes.length;
-    if (length > MAX_ARTIFACT_BYTES) throw Object.assign(new Error("Generated image exceeded the 20 MB provider artifact limit."), { code: "image_too_large", permanent: true });
-    chunks.push(bytes);
+  const fetcher = dependencies.fetcher ?? fetch;
+  const policy = allowPrivateHosts
+    ? null
+    : createProviderNetworkPolicy(dependencies.resolve
+      ? { allowlist: [], resolver: dependencies.resolve }
+      : { allowlist: [] });
+  const signal = AbortSignal.timeout(timeoutMs);
+  let url = new URL(artifact.url);
+  let redirects = 0;
+
+  while (true) {
+    if (!(["https:", "http:"] as string[]).includes(url.protocol)) {
+      throw Object.assign(new Error("Provider artifact URL used an unsupported protocol."), { code: "invalid_artifact_url", permanent: true });
+    }
+    let dispatcher: Agent | undefined;
+    try {
+      let requestUrl = url.toString();
+      if (policy) {
+        try {
+          const destination = await policy.approve(url, "image artifact download");
+          requestUrl = destination.url.toString();
+          dispatcher = new Agent({ connect: pinnedConnectOptions(destination) });
+        } catch (error) {
+          if (error instanceof ProviderDestinationNotAllowedError) throw privateArtifactHostError();
+          throw error;
+        }
+      }
+      const response = await fetcher(requestUrl, {
+        signal,
+        redirect: "manual",
+        ...(dispatcher ? { dispatcher } : {})
+      } as RequestInit);
+      if ([301, 302, 303, 307, 308].includes(response.status) && response.headers.has("location")) {
+        if (redirects >= MAX_ARTIFACT_REDIRECTS) {
+          await response.body?.cancel();
+          throw Object.assign(new Error(`Provider artifact exceeded the ${MAX_ARTIFACT_REDIRECTS}-redirect limit.`), {
+            code: "artifact_redirect_limit",
+            permanent: true
+          });
+        }
+        url = artifactRedirectTarget(response.headers.get("location")!, url);
+        redirects += 1;
+        await response.body?.cancel();
+        continue;
+      }
+      if (!response.ok) throw Object.assign(new Error(`Provider artifact download failed (${response.status}).`), { code: "artifact_download_failed" });
+      const declaredLength = Number(response.headers.get("content-length") || 0);
+      if (declaredLength > MAX_ARTIFACT_BYTES) throw Object.assign(new Error("Generated image exceeded the 20 MB provider artifact limit."), { code: "image_too_large", permanent: true });
+      if (!response.body) throw Object.assign(new Error("Provider artifact download returned an empty body."), { code: "artifact_download_failed" });
+      const chunks: Buffer[] = [];
+      let length = 0;
+      for await (const chunk of response.body) {
+        const bytes = Buffer.from(chunk);
+        length += bytes.length;
+        if (length > MAX_ARTIFACT_BYTES) throw Object.assign(new Error("Generated image exceeded the 20 MB provider artifact limit."), { code: "image_too_large", permanent: true });
+        chunks.push(bytes);
+      }
+      const bytes = Buffer.concat(chunks);
+      return { bytes, mimeType: artifactMimeType(bytes, artifact.mimeType || response.headers.get("content-type") || undefined) };
+    } finally {
+      await dispatcher?.close();
+    }
   }
-  const bytes = Buffer.concat(chunks);
-  return { bytes, mimeType: artifactMimeType(bytes, artifact.mimeType || response.headers.get("content-type") || undefined) };
 }
 
 async function completeImageJob(

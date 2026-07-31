@@ -21,6 +21,7 @@ type CanonicalFactRow = {
   content: string;
   source_turn_number: number;
 };
+import { loadOrNotFound } from "./service-helpers.js";
 
 function json(value: unknown): string {
   return JSON.stringify(value);
@@ -124,8 +125,7 @@ export async function getCampaignRuntimeState(pool: DatabasePool, campaignId: st
       WHERE c.id = $1 AND c.owner_user_id = $2`,
     [campaignId, ownerUserId]
   );
-  const row = result.rows[0];
-  if (!row) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+  const row = loadOrNotFound(result, "Campaign");
   const turnNumber = requestedTurnNumber === undefined ? row.active_turn_number : requestedTurnNumber;
   if (!Number.isInteger(turnNumber) || turnNumber < 0 || turnNumber > row.active_turn_number) {
     throw Object.assign(new Error(`Campaign has only ${row.active_turn_number} accepted turns.`), { statusCode: 409 });
@@ -192,8 +192,7 @@ export async function updateCampaignRuntimeState(pool: DatabasePool, campaignId:
       `SELECT active_turn_number FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
-    const campaign = campaignResult.rows[0];
-    if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    const campaign = loadOrNotFound(campaignResult, "Campaign");
     const stateResult = await client.query<{
       revision: number;
       scratchpad_private: string;

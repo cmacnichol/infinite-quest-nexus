@@ -11,6 +11,9 @@ services:
       CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/infinitequest_credential_encryption_key
       ASSET_STORAGE_DRIVER: filesystem
       ASSET_STORAGE_ROOT: /var/lib/infinitequest/assets
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      PROVIDER_NETWORK_ALLOWLIST: ${PROVIDER_NETWORK_ALLOWLIST:-}
+      CSP_IMAGE_ALLOWED_ORIGINS: ${CSP_IMAGE_ALLOWED_ORIGINS:-}
     secrets:
       - infinitequest_database_url
       - infinitequest_credential_encryption_key
@@ -69,6 +72,7 @@ services:
       ASSET_STORAGE_DRIVER: filesystem
       ASSET_STORAGE_ROOT: /var/lib/infinitequest/assets
       WORKER_POLL_INTERVAL_MS: 2000
+      PROVIDER_NETWORK_ALLOWLIST: ${PROVIDER_NETWORK_ALLOWLIST:-}
     secrets:
       - infinitequest_database_url
       - infinitequest_credential_encryption_key

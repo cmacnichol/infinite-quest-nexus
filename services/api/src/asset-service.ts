@@ -4,6 +4,7 @@ import sharp from "sharp";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import type { AssetListQuery, AssetMetadataUpdate } from "../../../packages/contracts/src/assets.js";
 import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
+import { loadOrNotFound } from "./service-helpers.js";
 
 const ALLOWED_IMAGE_TYPES = new Map([
   ["image/png", ".png"],
@@ -481,8 +482,7 @@ export async function readAsset(pool: DatabasePool, store: FilesystemAssetStore,
        FROM assets WHERE id = $1 AND owner_user_id = $2`,
     [assetId, ownerUserId]
   );
-  const asset = result.rows[0];
-  if (!asset) throw Object.assign(new Error("Asset not found."), { statusCode: 404 });
+  const asset = loadOrNotFound(result, "Asset");
   if (asset.storage_driver !== "filesystem") throw new Error(`Unsupported asset storage driver '${asset.storage_driver}'.`);
   const absolutePath = resolve(store.root, asset.storage_path);
   const rootPrefix = `${resolve(store.root)}${sep}`;
@@ -616,7 +616,12 @@ function facetRecord(rows: Array<{ value: string; count: number }>): Record<stri
   return Object.fromEntries(rows.map((row) => [row.value, Number(row.count)]));
 }
 
-export async function queryAssets(pool: DatabasePool, ownerUserId: string, query: AssetListQuery): Promise<AssetLibraryResult> {
+type AssetLibraryQueryFragment = {
+  base: string;
+  filterParams: unknown[];
+};
+
+function buildAssetLibraryQuery(ownerUserId: string, query: AssetListQuery): AssetLibraryQueryFragment {
   const params: unknown[] = [ownerUserId];
   const add = (value: unknown) => { params.push(value); return `$${params.length}`; };
   const where: string[] = ["a.owner_user_id = $1"];
@@ -669,7 +674,9 @@ export async function queryAssets(pool: DatabasePool, ownerUserId: string, query
   if (query.createdFrom) where.push(`a.created_at >= ${add(query.createdFrom)}::timestamptz`);
   if (query.createdTo) where.push(`a.created_at <= ${add(query.createdTo)}::timestamptz`);
 
-  const base = `WITH library AS (
+  return {
+    filterParams: params,
+    base: `WITH library AS (
     SELECT a.id, a.mime_type, a.byte_length::text, a.pixel_width, a.pixel_height, a.created_at, a.campaign_id, a.turn_id,
            le.title, le.caption, le.tags, le.origin, le.reuse_scope, le.automatic_reuse_enabled, le.review_status,
            le.content_categories, le.favorite, le.archived_at, le.metadata_revision,
@@ -689,27 +696,36 @@ export async function queryAssets(pool: DatabasePool, ownerUserId: string, query
          WHERE ar.asset_id = a.id AND ar.owner_user_id = a.owner_user_id
       ) usage ON true
      WHERE ${where.join(" AND ")}
-  )`;
+  )`
+  };
+}
+
+export async function queryAssets(pool: DatabasePool, ownerUserId: string, query: AssetListQuery): Promise<AssetLibraryResult> {
+  const { base, filterParams } = buildAssetLibraryQuery(ownerUserId, query);
   const fingerprint = assetQueryFingerprint(query);
   const cursor = query.cursor ? decodeCursor(query.cursor, fingerprint) : null;
+  const paginationParams = [...filterParams];
+  const addPaginationParam = (value: unknown) => {
+    paginationParams.push(value);
+    return `$${paginationParams.length}`;
+  };
   let cursorWhere = "";
   let orderBy = "created_at DESC, id DESC";
   if (query.sort === "oldest") orderBy = "created_at ASC, id ASC";
   if (query.sort === "title") orderBy = "sort_title ASC, id ASC";
   if (query.sort === "most_used") orderBy = "usage_count DESC, id DESC";
   if (cursor) {
-    if (query.sort === "newest") cursorWhere = `WHERE (created_at, id) < (${add(cursor.createdAt)}::timestamptz, ${add(cursor.id)}::uuid)`;
-    if (query.sort === "oldest") cursorWhere = `WHERE (created_at, id) > (${add(cursor.createdAt)}::timestamptz, ${add(cursor.id)}::uuid)`;
-    if (query.sort === "title") cursorWhere = `WHERE (sort_title, id) > (${add(cursor.title)}, ${add(cursor.id)}::uuid)`;
-    if (query.sort === "most_used") cursorWhere = `WHERE (usage_count, id) < (${add(cursor.usageCount)}::int, ${add(cursor.id)}::uuid)`;
+    if (query.sort === "newest") cursorWhere = `WHERE (created_at, id) < (${addPaginationParam(cursor.createdAt)}::timestamptz, ${addPaginationParam(cursor.id)}::uuid)`;
+    if (query.sort === "oldest") cursorWhere = `WHERE (created_at, id) > (${addPaginationParam(cursor.createdAt)}::timestamptz, ${addPaginationParam(cursor.id)}::uuid)`;
+    if (query.sort === "title") cursorWhere = `WHERE (sort_title, id) > (${addPaginationParam(cursor.title)}, ${addPaginationParam(cursor.id)}::uuid)`;
+    if (query.sort === "most_used") cursorWhere = `WHERE (usage_count, id) < (${addPaginationParam(cursor.usageCount)}::int, ${addPaginationParam(cursor.id)}::uuid)`;
   }
-  const limitValue = add(query.limit + 1);
+  const limitValue = addPaginationParam(query.limit + 1);
   const pageResult = await pool.query<AssetQueryRow>(`${base}
-    SELECT * FROM library ${cursorWhere} ORDER BY ${orderBy} LIMIT ${limitValue}`, params);
+    SELECT * FROM library ${cursorWhere} ORDER BY ${orderBy} LIMIT ${limitValue}`, paginationParams);
   const hasMore = pageResult.rows.length > query.limit;
   const rows = pageResult.rows.slice(0, query.limit);
 
-  const summaryParams = params.slice(0, params.length - (cursor ? 3 : 1));
   const summary = await pool.query<{
     total: number;
     origin: Array<{ value: string; count: number }>;
@@ -722,7 +738,7 @@ export async function queryAssets(pool: DatabasePool, ownerUserId: string, query
       COALESCE((SELECT jsonb_agg(jsonb_build_object('value', review_status, 'count', count)) FROM (SELECT review_status, count(*)::int AS count FROM library GROUP BY review_status ORDER BY review_status) x), '[]') AS review_status,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('value', reuse_scope, 'count', count)) FROM (SELECT reuse_scope, count(*)::int AS count FROM library GROUP BY reuse_scope ORDER BY reuse_scope) x), '[]') AS reuse_scope,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('value', tag, 'count', count)) FROM (SELECT tag, count(*)::int AS count FROM library, unnest(tags) tag GROUP BY tag ORDER BY count DESC, tag LIMIT 100) x), '[]') AS tags
-    FROM library`, summaryParams);
+    FROM library`, filterParams);
   const counts = summary.rows[0] || { total: 0, origin: [], review_status: [], reuse_scope: [], tags: [] };
   return {
     assets: rows.map(mapAssetRow),

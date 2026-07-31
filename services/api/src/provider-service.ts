@@ -1,6 +1,7 @@
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import { sogniIllustrationProviderConfigSchema, sogniSdkIllustrationProviderConfigSchema, type ProviderProfileInput, type ProviderProfileUpdate, type ProviderTextRequest } from "../../../packages/contracts/src/generation.js";
+import { sanitizeSensitiveConfiguration } from "../../../packages/domain/src/redaction.js";
 import { callTextProvider, decryptCredential, encryptCredential, discoverEmbeddingModels, discoverImageModels, discoverModels, logProviderTransportError, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
 
 type ProviderRow = {
@@ -54,6 +55,13 @@ export function publicProvider(row: ProviderRow) {
   };
 }
 
+function publicProviderForRead(row: ProviderRow) {
+  return {
+    ...publicProvider(row),
+    configuration: sanitizeSensitiveConfiguration(row.configuration)
+  };
+}
+
 const selectColumns = `id, name, provider_type, provider_role, base_url, default_model,
   context_window_tokens, max_output_tokens, temperature, request_timeout_ms, configuration, encrypted_api_key,
   credential_nonce, credential_auth_tag, credential_key_version, enabled, is_default, health_status,
@@ -90,7 +98,7 @@ export async function listProviders(pool: DatabasePool) {
     `SELECT ${selectColumns} FROM provider_profiles WHERE owner_user_id = $1 ORDER BY provider_role, name`,
     [ownerUserId]
   );
-  return result.rows.map(publicProvider);
+  return result.rows.map(publicProviderForRead);
 }
 
 export async function createProvider(pool: DatabasePool, input: Omit<ProviderProfileInput, "isDefault" | "requestTimeoutMs"> & { isDefault?: boolean; requestTimeoutMs?: number }, credentialSecret: string) {

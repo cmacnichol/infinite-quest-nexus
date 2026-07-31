@@ -16,4 +16,4 @@ Docker Desktop commonly exposes host services as `host.docker.internal`. Swarm d
 
 ## CORS
 
-The runtime default allows all origins. This is not authentication or authorization. Set a reviewed `CORS_ALLOWED_ORIGINS` value in deployment modes that explicitly inject it, and enforce the trusted-network boundary independently.
+The runtime allows local same-origin browser access by default. To serve the browser from a different reviewed origin, set `CORS_ALLOWED_ORIGINS` to an exact comma-separated allowlist; wildcard origins are rejected. This is not authentication or authorization, so enforce the trusted-network boundary independently.

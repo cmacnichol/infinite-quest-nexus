@@ -70,6 +70,7 @@ import {
   estimateTokens
 } from "../../../packages/domain/src/index.js";
 import { buildScopedEntityCatalog, resolveEntityMetadata } from "../../../packages/domain/src/entity-references.js";
+import { logger } from "../../../packages/logger/src/index.js";
 import { autoEnableCampaignEmbeddingIfAvailable, buildContextPreview, enqueueEmbeddingReindex, rebuildCampaignMemories, storeDerivedTurnMemories } from "./memory-service.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
 import {
@@ -84,12 +85,12 @@ import {
 import { attributeGenerationCostsToTurn, recordProfileCost, turnReportedCosts } from "./cost-service.js";
 import { promptFromSnapshot, promptProtocolVersion, resolvePromptSnapshot, type PromptSnapshot } from "./prompt-library-service.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
-import { logger } from "../../../packages/logger/src/index.js";
 import {
   runTurnGenerationPhase,
   type TurnGenerationDiagnosticContext,
   type TurnGenerationPhase
 } from "./generation-diagnostics.js";
+import { loadOrNotFound } from "./service-helpers.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
 
@@ -369,8 +370,7 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
       return { ...existing.rows[0], duplicate: true };
     }
     const campaign = await client.query<{ active_turn_number: number; text_provider_profile_id: string | null; story_length_profile: string; turn_control_style: string }>(`SELECT active_turn_number, text_provider_profile_id, story_length_profile, turn_control_style FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [campaignId, ownerUserId]);
-    const row = campaign.rows[0];
-    if (!row) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    const row = loadOrNotFound(campaign, "Campaign");
     const classificationId = await validateTurnInputMode(client, ownerUserId, campaignId, request, row.turn_control_style);
     const providerProfileId = await resolveEffectiveProviderId(client, ownerUserId, "text", request.providerProfileId || row.text_provider_profile_id);
     if (!providerProfileId) throw Object.assign(new Error("Select a text provider for this campaign or mark a default text provider."), { statusCode: 409 });
@@ -383,6 +383,7 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
       narrationMinWords: storyLength.minWords,
       narrationMaxWords: storyLength.maxWords
     };
+    await client.query("SAVEPOINT enqueue_generation_insert");
     try {
       const result = await client.query(
         `INSERT INTO generation_jobs (
@@ -398,6 +399,7 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
       return { ...result.rows[0], duplicate: false };
     } catch (error) {
       if (typeof error === "object" && error !== null && "code" in error && (error as { code: string }).code === "23505") {
+        await client.query("ROLLBACK TO SAVEPOINT enqueue_generation_insert");
         const active = await client.query(
           `SELECT id, status, action, operation_kind AS "operationKind", expected_turn_number AS "expectedTurnNumber"
              FROM generation_jobs WHERE campaign_id = $1 AND owner_user_id = $2
@@ -455,8 +457,7 @@ export async function enqueueLatestReplacement(pool: DatabasePool, campaignId: s
          FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
-    const campaign = campaignResult.rows[0];
-    if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    const campaign = loadOrNotFound(campaignResult, "Campaign");
     const classificationId = await validateTurnInputMode(client, ownerUserId, campaignId, request, campaign.turn_control_style);
     if (campaign.active_turn_number !== request.expectedCurrentTurnNumber) {
       throw Object.assign(
@@ -587,8 +588,7 @@ export async function getGenerationJob(pool: DatabasePool, jobId: string) {
             partial_output AS "partialOutput"
        FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`, [jobId, ownerUserId]
   );
-  const row = result.rows[0];
-  if (!row) throw Object.assign(new Error("Generation job not found."), { statusCode: 404 });
+  const row = loadOrNotFound(result, "Generation job");
   row.partialNarration = row.partialOutput ? extractPartialNarration(row.partialOutput) : null;
   return row;
 }
@@ -616,8 +616,7 @@ export async function getGenerationResult(pool: DatabasePool, jobId: string) {
       WHERE j.id = $1 AND j.owner_user_id = $2`,
     [jobId, ownerUserId]
   );
-  const row = result.rows[0];
-  if (!row) throw Object.assign(new Error("Generation job not found."), { statusCode: 404 });
+  const row = loadOrNotFound(result, "Generation job");
   if (row.status !== "completed" || !row.resultTurnId) {
     throw Object.assign(new Error(row.errorMessage || `Generation is ${row.status}.`), { statusCode: 409 });
   }
@@ -798,8 +797,7 @@ export async function syncPlayerCampaignConfig(pool: DatabasePool, campaignId: s
       `SELECT active_turn_number FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
-    const row = campaign.rows[0];
-    if (!row) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    const row = loadOrNotFound(campaign, "Campaign");
     if (row.active_turn_number !== config.expectedTurnNumber) {
       throw Object.assign(new Error(`Campaign is at turn ${row.active_turn_number}, not expected turn ${config.expectedTurnNumber}.`), { statusCode: 409 });
     }
@@ -856,8 +854,7 @@ export async function rewindCampaign(pool: DatabasePool, campaignId: string, req
         WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
-    const campaign = campaignResult.rows[0];
-    if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    const campaign = loadOrNotFound(campaignResult, "Campaign");
     if (request.expectedCurrentTurnNumber !== undefined
         && request.expectedCurrentTurnNumber !== campaign.active_turn_number) {
       throw Object.assign(
@@ -1048,8 +1045,7 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
         WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
-    const campaign = campaignResult.rows[0];
-    if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    const campaign = loadOrNotFound(campaignResult, "Campaign");
     if (request.expectedCurrentTurnNumber !== undefined
         && request.expectedCurrentTurnNumber !== campaign.active_turn_number) {
       throw Object.assign(
@@ -1596,21 +1592,38 @@ async function commitStory(
         json({ sanitized: memory.sanitized, removedMechanicsSegments: memory.removedMechanicsSegments, generated: true })]
     );
   }
-  const streamingState = job.streaming_segments_state as any;
-  if (streamingState?.provisionalSetId) {
-    const illustrationConfig = await loadStreamingIllustrationConfig(client, job.owner_user_id, job.campaign_id)
-      .catch(() => null);
-    if (illustrationConfig) {
-      await promoteProvisionalSet(
-        client, job.owner_user_id, job.id, turnId, job.campaign_id,
-        story.narration, illustrationConfig
-      );
+  await client.query("SAVEPOINT accepted_turn_illustration_enqueue");
+  try {
+    const streamingState = job.streaming_segments_state as any;
+    if (streamingState?.provisionalSetId) {
+      const illustrationConfig = await loadStreamingIllustrationConfig(client, job.owner_user_id, job.campaign_id)
+        .catch(() => null);
+      if (illustrationConfig) {
+        await promoteProvisionalSet(
+          client, job.owner_user_id, job.id, turnId, job.campaign_id,
+          story.narration, illustrationConfig
+        );
+      } else {
+        // Fallback
+        await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
+      }
     } else {
-      // Fallback
       await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
     }
-  } else {
-    await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
+    await client.query("RELEASE SAVEPOINT accepted_turn_illustration_enqueue");
+  } catch (error) {
+    await client.query("ROLLBACK TO SAVEPOINT accepted_turn_illustration_enqueue");
+    await client.query("RELEASE SAVEPOINT accepted_turn_illustration_enqueue");
+    logger.warn({
+      event: "accepted_turn_illustration_enqueue_failed",
+      generationJobId: job.id,
+      campaignId: job.campaign_id,
+      turnId,
+      errorCode: typeof error === "object" && error !== null && "code" in error
+        ? String((error as { code: unknown }).code)
+        : undefined,
+      errorMessage: error instanceof Error ? error.message : String(error)
+    });
   }
   await enqueueEmbeddingReindex(client, job.campaign_id);
   const completed = await client.query<{ id: string }>(
