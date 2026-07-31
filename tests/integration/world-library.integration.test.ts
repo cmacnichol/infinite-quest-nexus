@@ -19,6 +19,7 @@ import {
   worldVersionDeleteSchema
 } from "../../packages/contracts/src/world-library.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
+import { campaignTransferCommitRequestSchema, campaignTransferPreviewRequestSchema } from "../../packages/contracts/src/campaign-transfer.js";
 import {
   createCampaign,
   createWorld,
@@ -42,6 +43,7 @@ import {
 } from "../../services/api/src/world-service.js";
 import { buildContextPreview } from "../../services/api/src/memory-service.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
+import { previewCampaignWorldTransfer, transferCampaignWorld } from "../../services/api/src/campaign-transfer-service.js";
 import {
   getCampaignCharacterProfile,
   updateCampaignCharacterProfile
@@ -357,6 +359,111 @@ integration("World Library and campaign version integration", () => {
       world.version.worldVersionId,
       worldVersionDeleteSchema.parse({ confirmation: "DELETE", expectedVersionNumber: 1 })
     )).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("rejects deletion of a version retained by campaign transfer history", async () => {
+    const source = await publishedWorld("Delete Transfer History Source");
+    const target = await publishedWorld("Delete Transfer History Target");
+    const campaignTitle = `Synthetic Transfer Blocker ${crypto.randomUUID()}`;
+    const campaign = await createCampaign(pool, campaignCreateSchema.parse({
+      title: campaignTitle,
+      worldVersionId: source.version.worldVersionId
+    }));
+    const previewRequest = campaignTransferPreviewRequestSchema.parse({
+      targetWorldVersionId: target.version.worldVersionId
+    });
+    const preview = await previewCampaignWorldTransfer(pool, campaign.id, previewRequest);
+    const transferred = await transferCampaignWorld(pool, campaign.id, campaignTransferCommitRequestSchema.parse({
+      ...previewRequest,
+      idempotencyKey: crypto.randomUUID(),
+      expectedActiveTurnNumber: preview.expectedActiveTurnNumber,
+      expectedStateRevision: preview.expectedStateRevision,
+      sourceFingerprint: preview.sourceFingerprint
+    }));
+    const targetCampaign = await pool.query<{ title: string }>("SELECT title FROM campaigns WHERE id = $1", [transferred.targetCampaignId]);
+
+    await deleteCampaign(pool, campaign.id, resourceDeleteSchema.parse({ confirmation: "DELETE", expectedTitle: campaignTitle }));
+    await deleteCampaign(pool, transferred.targetCampaignId, resourceDeleteSchema.parse({
+      confirmation: "DELETE",
+      expectedTitle: targetCampaign.rows[0]!.title
+    }));
+
+    await expect(deleteWorldVersion(
+      pool,
+      source.created.id,
+      source.version.worldVersionId,
+      worldVersionDeleteSchema.parse({ confirmation: "DELETE", expectedVersionNumber: 1 })
+    )).rejects.toMatchObject({
+      statusCode: 409,
+      details: { blockers: { campaignTransfers: 1, currentCampaigns: 0, campaignMigrations: 0, chronicleMemories: 0, modelChains: 0 } }
+    });
+  });
+
+  it("rejects deletion of a version retained by Chronicle memory", async () => {
+    const source = await publishedWorld("Delete Chronicle Memory");
+    const target = await publishedWorld("Delete Chronicle Memory Target");
+    const campaign = await createCampaign(pool, campaignCreateSchema.parse({
+      title: `Synthetic Chronicle Blocker ${crypto.randomUUID()}`,
+      worldVersionId: source.version.worldVersionId
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const turn = await pool.query<{ id: string }>(
+      `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration)
+       VALUES ($1,$2,1,'Synthetic action','Synthetic accepted narration') RETURNING id`,
+      [ownerUserId, campaign.id]
+    );
+    await pool.query(
+      `INSERT INTO chronicle_memories (
+         owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content,
+         token_estimate, importance, entities, metadata
+       ) VALUES ($1,$2,$3,$4,'turn_fiction',1,'Synthetic accepted narration',4,0.5,ARRAY[]::text[],'{}'::jsonb)`,
+      [ownerUserId, campaign.id, source.version.worldVersionId, turn.rows[0]!.id]
+    );
+    await pool.query("UPDATE campaigns SET world_version_id = $2 WHERE id = $1", [campaign.id, target.version.worldVersionId]);
+
+    await expect(deleteWorldVersion(
+      pool,
+      source.created.id,
+      source.version.worldVersionId,
+      worldVersionDeleteSchema.parse({ confirmation: "DELETE", expectedVersionNumber: 1 })
+    )).rejects.toMatchObject({
+      statusCode: 409,
+      details: { blockers: { chronicleMemories: 1, currentCampaigns: 0, campaignMigrations: 0, campaignTransfers: 0, modelChains: 0 } }
+    });
+  });
+
+  it("rejects deletion of a version retained by a model chain", async () => {
+    const source = await publishedWorld("Delete Model Chain");
+    const target = await publishedWorld("Delete Model Chain Target");
+    const campaign = await createCampaign(pool, campaignCreateSchema.parse({
+      title: `Synthetic Model Chain Blocker ${crypto.randomUUID()}`,
+      worldVersionId: source.version.worldVersionId
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id, name, provider_type, provider_role, base_url, default_model
+       ) VALUES ($1,$2,'lmstudio','text','http://provider.invalid','synthetic-model') RETURNING id`,
+      [ownerUserId, `Synthetic deletion provider ${crypto.randomUUID()}`]
+    );
+    await pool.query(
+      `INSERT INTO model_chains (
+         owner_user_id, campaign_id, world_version_id, provider_profile_id, model,
+         endpoint_identity, prompt_protocol_version, context_fingerprint, previous_response_id
+       ) VALUES ($1,$2,$3,$4,'synthetic-model','synthetic-endpoint','synthetic-protocol','synthetic-context','synthetic-response')`,
+      [ownerUserId, campaign.id, source.version.worldVersionId, provider.rows[0]!.id]
+    );
+    await pool.query("UPDATE campaigns SET world_version_id = $2 WHERE id = $1", [campaign.id, target.version.worldVersionId]);
+
+    await expect(deleteWorldVersion(
+      pool,
+      source.created.id,
+      source.version.worldVersionId,
+      worldVersionDeleteSchema.parse({ confirmation: "DELETE", expectedVersionNumber: 1 })
+    )).rejects.toMatchObject({
+      statusCode: 409,
+      details: { blockers: { modelChains: 1, currentCampaigns: 0, campaignMigrations: 0, campaignTransfers: 0, chronicleMemories: 0 } }
+    });
   });
 
   it("detaches draft, fork, and import provenance when deleting an otherwise unused version", async () => {
