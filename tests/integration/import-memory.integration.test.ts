@@ -70,6 +70,51 @@ integration("legacy import and Chronicle integration", () => {
     expect(draft.rows[0]).toMatchObject({ revision: 1 });
   });
 
+  it("persists semantic-memory auto-enable and queues embedding work for a newly imported campaign", async () => {
+    const ownerUserId = await initialOwnerId(pool);
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id, name, provider_type, provider_role, base_url, default_model
+       ) VALUES ($1,$2,'openai_compatible','embedding','http://embedding.test','custom-nomic-v1.5')
+       RETURNING id`,
+      [ownerUserId, `Auto-enable embedding ${crypto.randomUUID()}`]
+    );
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Auto-enable semantic fixture ${crypto.randomUUID()}`;
+    const imported = await importLegacyStory(
+      pool,
+      storyImportRequestSchema.parse({ sourceName: `auto-enable-${crypto.randomUUID()}.story`, story: fixture })
+    );
+
+    const config = await pool.query<{
+      embedding_enabled: boolean;
+      embedding_provider_profile_id: string;
+      embedding_model: string;
+      embedding_batch_size: number;
+    }>(
+      `SELECT embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size
+         FROM campaign_memory_configs
+        WHERE campaign_id = $1 AND owner_user_id = $2`,
+      [imported.campaignId, ownerUserId]
+    );
+    expect(config.rows).toEqual([{
+      embedding_enabled: true,
+      embedding_provider_profile_id: provider.rows[0]!.id,
+      embedding_model: "custom-nomic-v1.5",
+      embedding_batch_size: 16
+    }]);
+
+    const jobs = await pool.query<{ job_type: string; status: string }>(
+      `SELECT job_type, status
+         FROM chronicle_jobs
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND job_type = 'embed_campaign'`,
+      [imported.campaignId, ownerUserId]
+    );
+    expect(jobs.rows).toEqual([{ job_type: "embed_campaign", status: "queued" }]);
+
+    await pool.query("UPDATE provider_profiles SET enabled = false WHERE id = $1", [provider.rows[0]!.id]);
+  });
+
   it("indexes scoped entity identities while importing turns and summaries", async () => {
     const ownerUserId = await initialOwnerId(pool);
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
