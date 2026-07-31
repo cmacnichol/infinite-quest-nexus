@@ -889,7 +889,7 @@ integration("World Library and campaign version integration", () => {
       .rejects.toMatchObject({ statusCode: 409 });
   });
 
-  it.skip("deletes campaigns before safely deleting their world", async () => {
+  it("deletes campaigns before safely deleting their world", async () => {
     const world = await publishedWorld("Delete");
     const campaignTitle = `Synthetic Delete Campaign ${crypto.randomUUID()}`;
     const campaign = await createCampaign(pool, campaignCreateSchema.parse({
