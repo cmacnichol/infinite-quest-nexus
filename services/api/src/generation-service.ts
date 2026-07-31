@@ -384,6 +384,7 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
       narrationMinWords: storyLength.minWords,
       narrationMaxWords: storyLength.maxWords
     };
+    await client.query("SAVEPOINT enqueue_generation_insert");
     try {
       const result = await client.query(
         `INSERT INTO generation_jobs (
@@ -399,6 +400,7 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
       return { ...result.rows[0], duplicate: false };
     } catch (error) {
       if (typeof error === "object" && error !== null && "code" in error && (error as { code: string }).code === "23505") {
+        await client.query("ROLLBACK TO SAVEPOINT enqueue_generation_insert");
         const active = await client.query(
           `SELECT id, status, action, operation_kind AS "operationKind", expected_turn_number AS "expectedTurnNumber"
              FROM generation_jobs WHERE campaign_id = $1 AND owner_user_id = $2

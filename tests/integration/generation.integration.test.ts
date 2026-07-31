@@ -25,6 +25,8 @@ type MockReply = {
   finishReason?: string;
   streamChunks?: string[];
   streamChunkDelayMs?: number;
+  onRequest?: () => void;
+  waitFor?: Promise<void>;
 };
 
 function validStory(narration = "Location Gamma opens and Marker Three becomes visible."): string {
@@ -68,6 +70,8 @@ integration("durable Story Engine integration", () => {
           ? replies.shift() || { content: validStory() }
           : { content: JSON.stringify({ data: [] }) };
         if (isTextGeneration) servedReplies.push(reply);
+        reply.onRequest?.();
+        await reply.waitFor;
         if (providerRequest.stream === true && reply.streamChunks) {
           response.writeHead(200, { "content-type": "text/event-stream" });
           for (const [index, chunk] of reply.streamChunks.entries()) {
@@ -270,6 +274,80 @@ integration("durable Story Engine integration", () => {
       expect.objectContaining({ id: "Generated clue-2", name: "Generated clue", value: "found" })
     ]);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+  });
+
+  it("allows exactly one concurrent generation to claim and commit a campaign turn", async () => {
+    const imported = await campaign();
+    const submissions = await Promise.allSettled([
+      queue(imported.campaignId, "Take the eastern path."),
+      queue(imported.campaignId, "Take the western path.")
+    ]);
+    const queued = submissions.filter((submission) => submission.status === "fulfilled");
+    const conflicts = submissions.filter((submission) => submission.status === "rejected");
+
+    expect(queued).toHaveLength(1);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toMatchObject({
+      reason: {
+        statusCode: 409,
+        details: { code: "active_generation_exists" }
+      }
+    });
+
+    let signalProviderRequest!: () => void;
+    const providerRequestStarted = new Promise<void>((resolveStarted) => {
+      signalProviderRequest = resolveStarted;
+    });
+    let releaseProviderResponse!: () => void;
+    const providerResponseGate = new Promise<void>((resolveResponse) => {
+      releaseProviderResponse = resolveResponse;
+    });
+    replies.push({
+      content: validStory("Only one path becomes the accepted campaign turn."),
+      onRequest: signalProviderRequest,
+      waitFor: providerResponseGate
+    });
+
+    const workerRuns = [
+      runGenerationJob(pool, "story-worker-race-a", 30, credentialSecret),
+      runGenerationJob(pool, "story-worker-race-b", 30, credentialSecret)
+    ];
+    await providerRequestStarted;
+
+    let conflictTimeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const nonClaimingWorker = await Promise.race([
+        ...workerRuns,
+        new Promise<boolean>((_resolve, reject) => {
+          conflictTimeout = setTimeout(
+            () => reject(new Error("The second worker did not observe the claimed job.")),
+            2_000
+          );
+        })
+      ]);
+      expect(nonClaimingWorker).toBe(false);
+    } finally {
+      if (conflictTimeout) clearTimeout(conflictTimeout);
+      releaseProviderResponse();
+    }
+
+    const runResults = await Promise.all(workerRuns);
+    expect(runResults.filter(Boolean)).toHaveLength(1);
+    expect(runResults.filter((result) => !result)).toHaveLength(1);
+
+    const winningSubmission = queued[0];
+    if (winningSubmission?.status !== "fulfilled") throw new Error("Expected one generation submission to be queued.");
+    expect(await getGenerationJob(pool, winningSubmission.value.id)).toMatchObject({ status: "completed" });
+    const committedTurns = await pool.query<{ turn_number: number; narration: string }>(
+      `SELECT turn_number, narration
+         FROM turns
+        WHERE campaign_id = $1 AND turn_number = 3`,
+      [imported.campaignId]
+    );
+    expect(committedTurns.rows).toEqual([{
+      turn_number: 3,
+      narration: expect.any(String)
+    }]);
   });
 
   it("commits the accepted turn when illustration enqueue hits a database error", async () => {
