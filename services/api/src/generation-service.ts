@@ -85,7 +85,6 @@ import {
 import { attributeGenerationCostsToTurn, recordProfileCost, turnReportedCosts } from "./cost-service.js";
 import { promptFromSnapshot, promptProtocolVersion, resolvePromptSnapshot, type PromptSnapshot } from "./prompt-library-service.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
-import { logger } from "../../../packages/logger/src/index.js";
 import {
   runTurnGenerationPhase,
   type TurnGenerationDiagnosticContext,

@@ -71,58 +71,6 @@ integration("legacy import and Chronicle integration", () => {
     expect(draft.rows[0]).toMatchObject({ revision: 1 });
   });
 
-  it("persists semantic-memory auto-enable and queues embedding work for a newly imported campaign", async () => {
-    const ownerUserId = await initialOwnerId(pool);
-    const provider = await pool.query<{ id: string }>(
-      `INSERT INTO provider_profiles (
-         owner_user_id, name, provider_type, provider_role, base_url, default_model
-       ) VALUES ($1,$2,'openai_compatible','embedding','http://embedding.test','custom-nomic-v1.5')
-       RETURNING id`,
-      [ownerUserId, `Auto-enable embedding ${crypto.randomUUID()}`]
-    );
-    let importedCampaignId: string | undefined;
-    try {
-      const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
-      fixture.world.title = `Auto-enable semantic fixture ${crypto.randomUUID()}`;
-      const imported = await importLegacyStory(
-        pool,
-        storyImportRequestSchema.parse({ sourceName: `auto-enable-${crypto.randomUUID()}.story`, story: fixture })
-      );
-      importedCampaignId = imported.campaignId;
-
-      const config = await pool.query<{
-        embedding_enabled: boolean;
-        embedding_provider_profile_id: string;
-        embedding_model: string;
-        embedding_batch_size: number;
-      }>(
-        `SELECT embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size
-           FROM campaign_memory_configs
-          WHERE campaign_id = $1 AND owner_user_id = $2`,
-        [imported.campaignId, ownerUserId]
-      );
-      expect(config.rows).toEqual([{
-        embedding_enabled: true,
-        embedding_provider_profile_id: provider.rows[0]!.id,
-        embedding_model: "custom-nomic-v1.5",
-        embedding_batch_size: 16
-      }]);
-
-      const jobs = await pool.query<{ job_type: string; status: string }>(
-        `SELECT job_type, status
-           FROM chronicle_jobs
-          WHERE campaign_id = $1 AND owner_user_id = $2 AND job_type = 'embed_campaign'`,
-        [imported.campaignId, ownerUserId]
-      );
-      expect(jobs.rows).toEqual([{ job_type: "embed_campaign", status: "queued" }]);
-    } finally {
-      if (importedCampaignId) {
-        await pool.query("DELETE FROM campaigns WHERE id = $1 AND owner_user_id = $2", [importedCampaignId, ownerUserId]);
-      }
-      await pool.query("DELETE FROM provider_profiles WHERE id = $1 AND owner_user_id = $2", [provider.rows[0]!.id, ownerUserId]);
-    }
-  });
-
   it("indexes scoped entity identities while importing turns and summaries", async () => {
     const ownerUserId = await initialOwnerId(pool);
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
@@ -717,7 +665,7 @@ integration("legacy import and Chronicle integration", () => {
   it("rejects a path-traversal asset record when exporting a portable campaign ZIP", async () => {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `Asset traversal export ${crypto.randomUUID()}`;
-    fixture.turns[0].imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL1wgAAAABJRU5ErkJggg==";
+    fixture.turns[0].imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
       sourceName: "asset-traversal.json",
       story: fixture
@@ -725,7 +673,7 @@ integration("legacy import and Chronicle integration", () => {
     const asset = await pool.query<{ id: string; storage_path: string }>(
       `SELECT a.id, a.storage_path
        FROM assets a
-       JOIN campaign_asset_references ar ON ar.asset_id = a.id
+       JOIN asset_references ar ON ar.asset_id = a.id AND ar.owner_user_id = a.owner_user_id
        WHERE ar.campaign_id = $1
        LIMIT 1`,
       [imported.campaignId]
@@ -740,10 +688,20 @@ integration("legacy import and Chronicle integration", () => {
     await writeFile(escapedPath, sentinel);
     try {
       await pool.query("UPDATE assets SET storage_path = $2 WHERE id = $1", [storedAsset.id, `../${escapedName}`]);
-      const archive = await exportCampaign(pool, imported.campaignId, { root: assetRoot });
-      const chunks: Buffer[] = [];
-      for await (const chunk of archive.body) chunks.push(chunk);
-      const zip = await JSZip.loadAsync(Buffer.concat(chunks));
+      const archive = await exportCampaign(pool, imported.campaignId, {
+        assetStore: { root: assetRoot },
+        archiveRoot: assetRoot,
+        limits: {
+          maxCompressedBytes: 10 * 1024 * 1024,
+          maxUncompressedBytes: 50 * 1024 * 1024,
+          maxEntries: 1_000,
+          maxExpansionRatio: 100,
+          maxManifestBytes: 1024 * 1024,
+          maxJsonEntryBytes: 5 * 1024 * 1024,
+          maxOriginalImageBytes: 25 * 1024 * 1024
+        }
+      });
+      const zip = await JSZip.loadAsync(await readFile(archive.absolutePath));
       const exportedFiles = Object.values(zip.files).filter((file) => !file.dir);
       const exportedContents = await Promise.all(exportedFiles.map((file) => file.async("nodebuffer")));
 

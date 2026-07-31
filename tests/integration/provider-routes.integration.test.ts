@@ -43,8 +43,43 @@ integration("provider route configuration redaction", () => {
       webRoot: resolve("apps/web/public"),
       assetStorageDriver: "filesystem",
       assetStorageRoot: resolve("local-data/assets"),
+      archiveStorageRoot: resolve("local-data/archives"),
+      archivePreviewTtlSeconds: 1_800,
+      systemArchiveArtifactTtlSeconds: 86_400,
+      campaignArchiveLimits: {
+        maxCompressedBytes: 2_147_483_648,
+        maxUncompressedBytes: 21_474_836_480,
+        maxEntries: 100_000,
+        maxExpansionRatio: 100,
+        maxManifestBytes: 5_242_880,
+        maxJsonEntryBytes: 1_073_741_824,
+        maxOriginalImageBytes: 26_214_400
+      },
+      systemArchiveLimits: {
+        maxCompressedBytes: 53_687_091_200,
+        maxUncompressedBytes: 214_748_364_800,
+        maxEntries: 1_000_000,
+        maxExpansionRatio: 100,
+        maxManifestBytes: 5_242_880,
+        maxJsonEntryBytes: 1_073_741_824,
+        maxOriginalImageBytes: 26_214_400
+      },
       credentialEncryptionKey: "provider-route-test-key-32-bytes",
-      corsAllowedOrigins: ["*"]
+      security: {
+        corsAllowedOrigins: [],
+        providerNetworkAllowlist: ["localhost", "127.0.0.0/8", "::1/128"],
+        cspImageAllowedOrigins: [],
+        apiDefaultBodyLimitBytes: 1_048_576,
+        apiImportBodyLimitBytes: 16_777_216,
+        apiAssetBodyLimitBytes: 33_554_432,
+        apiRateLimitWindowSeconds: 60,
+        apiRateLimitProviderRequests: 10,
+        apiRateLimitGenerationRequests: 12,
+        apiRateLimitImportRequests: 4,
+        apiConcurrencyProviderRequests: 2,
+        apiConcurrencyImportRequests: 1,
+        trustProxyHops: 0
+      }
     };
     app = await buildServer({ config, pool });
   });
@@ -55,7 +90,7 @@ integration("provider route configuration redaction", () => {
     await pool.end();
   });
 
-  it("preserves configuration values in POST responses while keeping the primary API key opaque", async () => {
+  it("preserves saved configuration values in POST responses while keeping the primary API key opaque", async () => {
     const configuration = {
       apiKey: "legitimate-secondary-value",
       nested: {
@@ -84,7 +119,7 @@ integration("provider route configuration redaction", () => {
     expect(response.json()).not.toHaveProperty("apiKey");
   });
 
-  it("preserves configuration values in PATCH responses while keeping the primary API key opaque", async () => {
+  it("preserves saved configuration values in PATCH responses while keeping the primary API key opaque", async () => {
     const created = await app.inject({
       method: "POST",
       url: "/api/v1/providers",
