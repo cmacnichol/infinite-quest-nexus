@@ -79,40 +79,47 @@ integration("legacy import and Chronicle integration", () => {
        RETURNING id`,
       [ownerUserId, `Auto-enable embedding ${crypto.randomUUID()}`]
     );
-    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
-    fixture.world.title = `Auto-enable semantic fixture ${crypto.randomUUID()}`;
-    const imported = await importLegacyStory(
-      pool,
-      storyImportRequestSchema.parse({ sourceName: `auto-enable-${crypto.randomUUID()}.story`, story: fixture })
-    );
+    let importedCampaignId: string | undefined;
+    try {
+      const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+      fixture.world.title = `Auto-enable semantic fixture ${crypto.randomUUID()}`;
+      const imported = await importLegacyStory(
+        pool,
+        storyImportRequestSchema.parse({ sourceName: `auto-enable-${crypto.randomUUID()}.story`, story: fixture })
+      );
+      importedCampaignId = imported.campaignId;
 
-    const config = await pool.query<{
-      embedding_enabled: boolean;
-      embedding_provider_profile_id: string;
-      embedding_model: string;
-      embedding_batch_size: number;
-    }>(
-      `SELECT embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size
-         FROM campaign_memory_configs
-        WHERE campaign_id = $1 AND owner_user_id = $2`,
-      [imported.campaignId, ownerUserId]
-    );
-    expect(config.rows).toEqual([{
-      embedding_enabled: true,
-      embedding_provider_profile_id: provider.rows[0]!.id,
-      embedding_model: "custom-nomic-v1.5",
-      embedding_batch_size: 16
-    }]);
+      const config = await pool.query<{
+        embedding_enabled: boolean;
+        embedding_provider_profile_id: string;
+        embedding_model: string;
+        embedding_batch_size: number;
+      }>(
+        `SELECT embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size
+           FROM campaign_memory_configs
+          WHERE campaign_id = $1 AND owner_user_id = $2`,
+        [imported.campaignId, ownerUserId]
+      );
+      expect(config.rows).toEqual([{
+        embedding_enabled: true,
+        embedding_provider_profile_id: provider.rows[0]!.id,
+        embedding_model: "custom-nomic-v1.5",
+        embedding_batch_size: 16
+      }]);
 
-    const jobs = await pool.query<{ job_type: string; status: string }>(
-      `SELECT job_type, status
-         FROM chronicle_jobs
-        WHERE campaign_id = $1 AND owner_user_id = $2 AND job_type = 'embed_campaign'`,
-      [imported.campaignId, ownerUserId]
-    );
-    expect(jobs.rows).toEqual([{ job_type: "embed_campaign", status: "queued" }]);
-
-    await pool.query("UPDATE provider_profiles SET enabled = false WHERE id = $1", [provider.rows[0]!.id]);
+      const jobs = await pool.query<{ job_type: string; status: string }>(
+        `SELECT job_type, status
+           FROM chronicle_jobs
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND job_type = 'embed_campaign'`,
+        [imported.campaignId, ownerUserId]
+      );
+      expect(jobs.rows).toEqual([{ job_type: "embed_campaign", status: "queued" }]);
+    } finally {
+      if (importedCampaignId) {
+        await pool.query("DELETE FROM campaigns WHERE id = $1 AND owner_user_id = $2", [importedCampaignId, ownerUserId]);
+      }
+      await pool.query("DELETE FROM provider_profiles WHERE id = $1 AND owner_user_id = $2", [provider.rows[0]!.id, ownerUserId]);
+    }
   });
 
   it("indexes scoped entity identities while importing turns and summaries", async () => {
