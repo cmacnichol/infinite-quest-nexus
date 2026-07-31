@@ -688,7 +688,7 @@ integration("legacy import and Chronicle integration", () => {
     await writeFile(escapedPath, sentinel);
     try {
       await pool.query("UPDATE assets SET storage_path = $2 WHERE id = $1", [storedAsset.id, `../${escapedName}`]);
-      const archive = await exportCampaign(pool, imported.campaignId, {
+      await expect(exportCampaign(pool, imported.campaignId, {
         assetStore: { root: assetRoot },
         archiveRoot: assetRoot,
         limits: {
@@ -700,13 +700,8 @@ integration("legacy import and Chronicle integration", () => {
           maxJsonEntryBytes: 5 * 1024 * 1024,
           maxOriginalImageBytes: 25 * 1024 * 1024
         }
-      });
-      const zip = await JSZip.loadAsync(await readFile(archive.absolutePath));
-      const exportedFiles = Object.values(zip.files).filter((file) => !file.dir);
-      const exportedContents = await Promise.all(exportedFiles.map((file) => file.async("nodebuffer")));
-
-      expect(zip.file(`assets/${storedAsset.id}.png`)).toBeNull();
-      expect(exportedContents.some((content) => content.includes(sentinel))).toBe(false);
+      })).rejects.toMatchObject({ code: "archive-asset-missing", assetIds: [storedAsset.id] });
+      expect(await readFile(escapedPath)).toEqual(sentinel);
     } finally {
       await pool.query("UPDATE assets SET storage_path = $2 WHERE id = $1", [storedAsset.id, storedAsset.storage_path]);
       await rm(escapedPath, { force: true });

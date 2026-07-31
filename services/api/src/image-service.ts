@@ -305,7 +305,7 @@ export async function enqueueWorldCover(pool: DatabasePool, worldId: string, req
       overview.genre ? `Genre: ${String(overview.genre).slice(0, 500)}.` : "",
       overview.tone ? `Tone: ${String(overview.tone).slice(0, 500)}.` : "",
       overview.premise ? `Premise: ${String(overview.premise).slice(0, 2000)}.` : "",
-      "Show only evocative diegetic scenery and characters. Do not include typography, logos, interface elements, statistics, dice, or game mechanics."
+      "Show only evocative diegetic scenery and characters. Avoid non-diegetic content, typography, logos, and interface elements."
     ].filter(Boolean).join("\n");
     const job = await insertImageJob(client, {
       ownerUserId,
