@@ -146,17 +146,18 @@ quick index for implementers wiring one screen at a time.
   (http/https only), defaultModel, contextWindowTokens (1024–4,000,000),
   maxOutputTokens (128–262144), temperature (0–2), requestTimeoutMs
   (5s–1h), apiKey (write-only, never returned), enabled, isDefault,
-  configuration (freeform, **returned unredacted** — see caveat below)`.
+  configuration (freeform; credential-like values are redacted from read
+  responses — see caveat below)`.
 - **Validation constraint the UI must mirror client-side** (for fast
   feedback, in addition to server enforcement): for `providerRole: text`,
   `maxOutputTokens + 512 < contextWindowTokens` (`generation.ts:32-34`,
   enforced again server-side at `provider-service.ts:180-182`).
-- Provider list response never includes `apiKey` — only `hasApiKey: boolean`
-  (`provider-service.ts:51`). **Contract caveat:** `configuration` *is*
-  returned unredacted on every read (`provider-service.ts:44,265,297,336,416`)
-  — treat any value placed there as not confidential in the current backend
-  version; don't design a UI affordance implying it's protected the same
-  way `apiKey` is.
+- Provider read responses never include `apiKey` — only `hasApiKey: boolean`
+  (`provider-service.ts:51`). Credential-like keys in `configuration` are
+  recursively redacted by `redactedProvider()` (`provider-service.ts:58-62`);
+  create and update responses preserve submitted configuration so legitimate
+  write values round-trip. The UI should still avoid logging configuration
+  values unnecessarily.
 - Health status: `unknown | healthy | degraded | unavailable`, auto-degrades
   after 3 consecutive failures (`provider-service.ts:62-85`).
 
@@ -202,6 +203,3 @@ implementers who only need the API angle:
   whether current catalog sizes make client-side substring filtering
   sufficient for the replacement UI, or whether a backend search endpoint
   should be requested as a follow-up (do not silently invent one).
-- **Q4**: `configuration` field redaction on provider reads — a backend
-  gap, tracked here because it constrains what the frontend can safely
-  display/log for that field until fixed.

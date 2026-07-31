@@ -81,10 +81,9 @@ Per the Feature Implementation Matrix: the overwhelming majority of rows are
 **Implemented and wired**. The only **Specified but not implemented** rows
 are all explicit, documented product deferrals (generation cancellation,
 campaign-card artwork, Image Library Phase 6, TXT-based campaign update) —
-none are silent gaps discovered by this audit. One backend-only gap
-(provider `configuration` field redaction) and one narrow durability gap
-(in-memory Infinite Worlds import progress) were found; both are called out
-below and are backend-owned, not frontend defects.
+none are silent gaps discovered by this audit. One narrow backend durability
+gap (in-memory Infinite Worlds import progress) was found; it is called out
+below and is not a frontend defect.
 
 ## Findings
 

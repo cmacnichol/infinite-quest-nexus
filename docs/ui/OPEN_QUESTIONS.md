@@ -105,35 +105,7 @@ deployment data (or their own usage expectations).
 
 ---
 
-### Q4 — When (if ever) will the provider `configuration` field redaction gap be fixed on the backend?
-
-**Why it matters:** `API_UI_CONTRACTS.md` and `SCREEN_INVENTORY.md`
-(NEX-PROVIDERS) note that the `configuration` field is returned unredacted
-on every provider read, unlike `apiKey`. The replacement UI needs to know
-whether to treat this field as potentially sensitive (and avoid logging/
-displaying it carelessly) indefinitely, or whether a fix is imminent and
-UI copy can eventually just say "protected."
-
-**What was searched:** `provider-service.ts:44,265,297,336,416`;
-`docs/review/2026-07-30-codebase-review.md` §6 (independent prior review
-flagging this as a Medium-severity backend finding with a recommended
-fix, not yet applied as of this audit's commit).
-
-**Current evidence:** No fix scheduled anywhere in the repository's docs
-(not in `docs/operations/deferred-improvements.md`, not in any ADR).
-
-**Recommended default assumption:** Treat `configuration` as
-not-currently-protected in UI copy/behavior (don't display it in a way
-that implies it's as safe as the encrypted `apiKey` field) until the
-backend fix ships.
-
-**Who should answer:** The backend maintainer — this is a backend fix, not
-a frontend decision, but the frontend's display treatment depends on the
-answer/timeline.
-
----
-
-### Q5 — Is retry-latest ("replace last turn") already visually distinguished from a normal new-turn generation in the current UI?
+### Q4 — Is retry-latest ("replace last turn") already visually distinguished from a normal new-turn generation in the current UI?
 
 **Why it matters:** `CURRENT_UI_AUDIT.md` UI-006 and `PRODUCT_UX.md`
 Principle 1 require this distinction in the replacement UI; this audit
@@ -156,7 +128,7 @@ retry-latest and observing the exact UI copy shown.
 
 ---
 
-### Q6 — Does a dedicated Chronicle-management screen exist in the current UI, or is Chronicle functionality distributed across other panels?
+### Q5 — Does a dedicated Chronicle-management screen exist in the current UI, or is Chronicle functionality distributed across other panels?
 
 **Why it matters:** `SCREEN_INVENTORY.md` proposes CHRONICLE-HEALTH as a
 **New** screen (elevated from what the docs describe as settings-style
@@ -186,7 +158,7 @@ detail / settings areas in the current Nexus app.
 
 ---
 
-### Q7 — Is there a cross-campaign "needs attention" indicator anywhere in the current UI (e.g., on the dashboard) for recoverable/failed jobs?
+### Q6 — Is there a cross-campaign "needs attention" indicator anywhere in the current UI (e.g., on the dashboard) for recoverable/failed jobs?
 
 **Why it matters:** `CURRENT_UI_AUDIT.md` scored "Dashboard usefulness" at
 3/5 partly because no such indicator was found in the evidence gathered.
@@ -213,7 +185,7 @@ induced `recoverable` job.
 
 ---
 
-### Q8 — What is the correct "discard"/"give up" action for a failed or recoverable image job, given no `POST /image-jobs/:jobId/discard` endpoint was found?
+### Q7 — What is the correct "discard"/"give up" action for a failed or recoverable image job, given no `POST /image-jobs/:jobId/discard` endpoint was found?
 
 **Why it matters:** `INTERACTION_FLOWS.md` Flow 8 needs a definite answer
 for the image-job recovery UI — generation jobs have both `/retry` and
@@ -241,7 +213,7 @@ added.
 
 ---
 
-### Q9 — Should the replacement UI support a light theme, or remain dark-only by design?
+### Q8 — Should the replacement UI support a light theme, or remain dark-only by design?
 
 **Why it matters:** `tokens.css:2` hardcodes `color-scheme: dark` and every
 color role is defined only for a dark surface — this is either a
@@ -264,29 +236,3 @@ decision, not an implicit requirement of this migration.
 decision, not a technical one.
 
 ---
-
-### Q10 — Are the three untested world-version-deletion blocker categories (`campaign_transfers`, `chronicle_memories`, `model_chains`) reliable enough for the replacement UI's delete-blocker messaging to trust?
-
-**Why it matters:** `FEATURE_IMPLEMENTATION_MATRIX.md` and
-`API_UI_CONTRACTS.md` both specify that the UI must render the API's
-`blockers` field specifically (not a generic "can't delete" message).
-2 of the 5 blocker categories have integration-test coverage; 3 do not
-(per `docs/review/2026-07-30-codebase-review.md` §3, §5.2) — correct "by
-code reading" per that prior review, but unverified under test.
-
-**What was searched:** `world-service.ts:795-925` (blocker-check logic,
-read and assessed as correct by the prior independent review);
-`world-library.integration.test.ts:292,307` (the 2 tested categories).
-
-**Current evidence:** Implementation appears correct by code reading; test
-coverage is incomplete for 3 of 5 categories.
-
-**Recommended default assumption:** Build the UI to render whatever the
-`blockers` field returns generically (not hardcoded to only the 2 tested
-categories) — this is the correct UI-side choice regardless of the
-backend test-coverage gap, since the UI shouldn't assume a fixed, small
-set of blocker types. Track the backend test-coverage gap itself as a
-backend follow-up, not a frontend blocker.
-
-**Who should answer:** The backend maintainer, to close the test-coverage
-gap; no frontend action is blocked on this.

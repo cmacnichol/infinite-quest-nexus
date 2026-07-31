@@ -137,7 +137,7 @@ Legend for **Disposition**: **Retained** (same concept, new implementation)
 - **API dependencies:** Full CRUD + discovery endpoints in `FEATURE_IMPLEMENTATION_MATRIX.md` §Providers.
 - **Major components:** Provider list, edit form (per-`providerType` fields, incl. Sogni-specific config), model-discovery picker, health badge.
 - **Required states:** Loading, empty (no providers configured — block downstream generation actions elsewhere with a clear link back here), error, populated, credential-saved-but-untested.
-- **Permission behavior:** None. Note: `configuration` field is returned unredacted by the API (`CURRENT_UI_AUDIT.md` UI backend note) — the UI must not add its own display/log surfaces that make this worse (e.g., don't echo `configuration` into browser console logs or error toasts).
+- **Permission behavior:** None. Provider read responses redact credential-like configuration values. The UI should still avoid echoing configuration into browser console logs or error toasts.
 - **Responsive behavior:** Provider edit form fields stack vertically; role filter remains reachable via a select on narrow viewports.
 - **Accessibility requirements:** Every field has a real label (this screen already has comparatively strong labeling per `REPOSITORY_UI_MAP.md` §8 — preserve, don't regress).
 - **Acceptance criteria:** A user can tell, without opening edit, which provider is the default for each role and its current health.
