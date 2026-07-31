@@ -7,3 +7,4 @@ export * from "./illustrations.js";
 export * from "./campaign-transfer.js";
 export * from "./entity-references.js";
 export * from "./campaign-trackers.js";
+export * from "./redaction.js";

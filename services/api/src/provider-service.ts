@@ -1,6 +1,7 @@
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import { sogniIllustrationProviderConfigSchema, sogniSdkIllustrationProviderConfigSchema, type ProviderProfileInput, type ProviderProfileUpdate, type ProviderTextRequest } from "../../../packages/contracts/src/generation.js";
+import { sanitizeSensitiveConfiguration } from "../../../packages/domain/src/redaction.js";
 import { callTextProvider, decryptCredential, encryptCredential, discoverEmbeddingModels, discoverImageModels, discoverModels, logProviderTransportError, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
 
 type ProviderRow = {
@@ -41,7 +42,7 @@ export function publicProvider(row: ProviderRow) {
     maxOutputTokens: row.max_output_tokens,
     temperature: row.temperature,
     requestTimeoutMs: row.request_timeout_ms,
-    configuration: row.configuration,
+    configuration: sanitizeSensitiveConfiguration(row.configuration),
     enabled: row.enabled,
     isDefault: row.is_default,
     healthStatus: row.health_status,
