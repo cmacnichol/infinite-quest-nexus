@@ -1,6 +1,7 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import JSZip from "jszip";
 import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
@@ -711,6 +712,47 @@ integration("legacy import and Chronicle integration", () => {
       [imported.campaignId]
     );
     expect(segAssetRes.rows[0]?.asset_id).toBeDefined();
+  });
+
+  it("rejects a path-traversal asset record when exporting a portable campaign ZIP", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Asset traversal export ${crypto.randomUUID()}`;
+    fixture.turns[0].imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL1wgAAAABJRU5ErkJggg==";
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: "asset-traversal.json",
+      story: fixture
+    }), { root: assetRoot });
+    const asset = await pool.query<{ id: string; storage_path: string }>(
+      `SELECT a.id, a.storage_path
+       FROM assets a
+       JOIN campaign_asset_references ar ON ar.asset_id = a.id
+       WHERE ar.campaign_id = $1
+       LIMIT 1`,
+      [imported.campaignId]
+    );
+    const storedAsset = asset.rows[0];
+    expect(storedAsset).toBeDefined();
+    if (!storedAsset) throw new Error("Expected imported asset for traversal test");
+
+    const escapedName = `infinitequest-export-escape-${crypto.randomUUID()}.bin`;
+    const escapedPath = resolve(assetRoot, "..", escapedName);
+    const sentinel = Buffer.from(`not-an-asset-${crypto.randomUUID()}`);
+    await writeFile(escapedPath, sentinel);
+    try {
+      await pool.query("UPDATE assets SET storage_path = $2 WHERE id = $1", [storedAsset.id, `../${escapedName}`]);
+      const archive = await exportCampaign(pool, imported.campaignId, { root: assetRoot });
+      const chunks: Buffer[] = [];
+      for await (const chunk of archive.body) chunks.push(chunk);
+      const zip = await JSZip.loadAsync(Buffer.concat(chunks));
+      const exportedFiles = Object.values(zip.files).filter((file) => !file.dir);
+      const exportedContents = await Promise.all(exportedFiles.map((file) => file.async("nodebuffer")));
+
+      expect(zip.file(`assets/${storedAsset.id}.png`)).toBeNull();
+      expect(exportedContents.some((content) => content.includes(sentinel))).toBe(false);
+    } finally {
+      await pool.query("UPDATE assets SET storage_path = $2 WHERE id = $1", [storedAsset.id, storedAsset.storage_path]);
+      await rm(escapedPath, { force: true });
+    }
   });
 
   it("deduplicates active reindex requests and lets worker replicas claim different campaigns", async () => {
