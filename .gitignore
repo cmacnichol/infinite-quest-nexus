@@ -92,6 +92,8 @@ venv/
 env/
 
 # Editors and local agent configuration
+.mcp.json
+.projectmem/
 .idea/
 .vscode/
 .claude/
