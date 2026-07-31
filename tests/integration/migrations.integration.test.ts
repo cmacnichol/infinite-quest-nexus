@@ -204,6 +204,44 @@ integration("standard database migration runner", () => {
     ]));
   });
 
+  it("bootstraps the initial owner exactly once when migrations run again", async () => {
+    const migrationName = "0001_initial_nexus";
+    const databaseName = `infinitequest_initial_owner_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-initial-owner-migration-"));
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await copyFile(
+        resolve("database/migrations/0001_initial_nexus.sql"),
+        join(migrationDirectory, "0001_initial_nexus.sql")
+      );
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([migrationName]);
+
+      const firstRun = await isolatedPool.query<{ id: string }>(
+        "SELECT id FROM users WHERE system_key = 'initial-owner'"
+      );
+      expect(firstRun.rows).toHaveLength(1);
+
+      await isolatedPool.query("DELETE FROM schema_migrations WHERE name = $1", [migrationName]);
+
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([migrationName]);
+
+      const secondRun = await isolatedPool.query<{ id: string; count: string }>(
+        `SELECT min(id::text)::uuid AS id, count(*)::text AS count
+           FROM users
+          WHERE system_key = 'initial-owner'`
+      );
+      expect(secondRun.rows).toEqual([{ id: firstRun.rows[0]!.id, count: "1" }]);
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("blocks maintenance migrations on an existing database until explicitly allowed", async () => {
     const sourceDirectory = resolve("database/migrations");
     const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-migrations-"));
