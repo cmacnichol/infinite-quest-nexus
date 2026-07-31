@@ -2,8 +2,13 @@ import { createHash } from "node:crypto";
 import { copyFile, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import type { PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { migrateDatabase, pendingDatabaseMigrations } from "../../packages/database/src/migrate.js";
+import {
+  migrateDatabase,
+  pendingDatabaseMigrations,
+  waitForDatabaseMigrations
+} from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { dropTestDatabaseWhenIdle } from "./database-test-helpers.js";
 
@@ -222,6 +227,114 @@ integration("standard database migration runner", () => {
     } finally {
       await pool.query(`DROP TABLE IF EXISTS ${tableName}`);
       await pool.query("DELETE FROM schema_migrations WHERE name = $1", [migrationName]);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes concurrent migrators while worker-only replicas wait without applying migrations", async () => {
+    const databaseName = `infinitequest_concurrent_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-concurrent-migrations-"));
+    const migrationName = "0001_concurrent_replica";
+    const gateLockId = 710_202_607;
+    const firstMigratorName = "migration-test-migrator-one";
+    const secondMigratorName = "migration-test-migrator-two";
+    const workerName = "migration-test-worker-only";
+    const connectionUrl = (applicationName: string): string => {
+      const value = new URL(databaseUrl!);
+      value.pathname = `/${databaseName}`;
+      value.searchParams.set("application_name", applicationName);
+      return value.toString();
+    };
+    let controlPool: DatabasePool | null = null;
+    let firstMigratorPool: DatabasePool | null = null;
+    let secondMigratorPool: DatabasePool | null = null;
+    let workerPool: DatabasePool | null = null;
+    let gateClient: PoolClient | null = null;
+    let gateHeld = false;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      await writeFile(
+        join(migrationDirectory, `${migrationName}.sql`),
+        `CREATE TABLE migration_application_audit (
+           application_name text PRIMARY KEY,
+           applications integer NOT NULL
+         );
+         INSERT INTO migration_application_audit (application_name, applications)
+         VALUES (current_setting('application_name'), 1);
+         SELECT pg_advisory_lock(${gateLockId});
+         SELECT pg_advisory_unlock(${gateLockId});
+        `
+      );
+
+      controlPool = createDatabasePool(connectionUrl("migration-test-control"), 2);
+      firstMigratorPool = createDatabasePool(connectionUrl(firstMigratorName), 2);
+      secondMigratorPool = createDatabasePool(connectionUrl(secondMigratorName), 2);
+      workerPool = createDatabasePool(connectionUrl(workerName), 1);
+      gateClient = await controlPool.connect();
+
+      await expect(
+        waitForDatabaseMigrations(workerPool, migrationDirectory, 100, 10)
+      ).rejects.toThrow(`Pending: ${migrationName}`);
+      await expect(controlPool.query("SELECT to_regclass('public.migration_application_audit') AS table_name"))
+        .resolves.toMatchObject({ rows: [{ table_name: null }] });
+
+      await gateClient!.query("SELECT pg_advisory_lock($1)", [gateLockId]);
+      gateHeld = true;
+
+      const firstMigration = migrateDatabase(firstMigratorPool, migrationDirectory);
+      await expect.poll(async () => {
+        const result = await controlPool!.query<{ waiting: string }>(
+          `SELECT count(*)::text AS waiting
+             FROM pg_locks locks
+             JOIN pg_stat_activity activity ON activity.pid = locks.pid
+            WHERE activity.datname = current_database()
+              AND activity.application_name = $1
+              AND locks.locktype = 'advisory'
+              AND locks.granted = false
+              AND locks.objid::bigint = $2`,
+          [firstMigratorName, gateLockId]
+        );
+        return result.rows[0]?.waiting;
+      }, { timeout: 5_000, interval: 10 }).toBe("1");
+
+      const workerWaiting = waitForDatabaseMigrations(workerPool, migrationDirectory, 5_000, 10);
+      const secondMigration = migrateDatabase(secondMigratorPool, migrationDirectory);
+      await expect.poll(async () => {
+        const result = await controlPool!.query<{ backends: string; waiting: string }>(
+          `SELECT count(*)::text AS backends,
+                  count(*) FILTER (WHERE wait_event = 'advisory')::text AS waiting
+             FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND application_name = $1`,
+          [secondMigratorName]
+        );
+        return result.rows[0];
+      }, { timeout: 5_000, interval: 10 }).toEqual({ backends: "1", waiting: "1" });
+
+      await gateClient!.query("SELECT pg_advisory_unlock($1)", [gateLockId]);
+      gateHeld = false;
+
+      await expect(firstMigration).resolves.toEqual([migrationName]);
+      await expect(secondMigration).resolves.toEqual([]);
+      await expect(workerWaiting).resolves.toBeUndefined();
+      await expect(controlPool.query(
+        "SELECT application_name, applications FROM migration_application_audit"
+      )).resolves.toMatchObject({
+        rows: [{ application_name: firstMigratorName, applications: 1 }]
+      });
+      await expect(controlPool.query<{ name: string }>(
+        "SELECT name FROM schema_migrations ORDER BY run_on, name"
+      )).resolves.toMatchObject({ rows: [{ name: migrationName }] });
+    } finally {
+      if (gateHeld && gateClient) {
+        await gateClient.query("SELECT pg_advisory_unlock($1)", [gateLockId]);
+      }
+      gateClient?.release();
+      if (workerPool) await workerPool.end();
+      if (secondMigratorPool) await secondMigratorPool.end();
+      if (firstMigratorPool) await firstMigratorPool.end();
+      if (controlPool) await controlPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
       await rm(migrationDirectory, { recursive: true, force: true });
     }
   });
