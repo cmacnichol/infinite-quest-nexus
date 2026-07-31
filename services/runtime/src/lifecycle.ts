@@ -1,5 +1,6 @@
 import type { DatabasePool, RuntimeConfig } from "../../../packages/database/src/index.js";
 import type { ProviderTransport } from "../../../packages/story-engine/src/provider-transport.js";
+import { closeDatabasePool } from "./shutdown.js";
 
 export type RuntimeLifecycleDependencies = {
   createPool(config: RuntimeConfig): DatabasePool;
@@ -23,7 +24,7 @@ export async function runRuntimeLifecycle(
     try {
       if (providerTransport) await providerTransport.close();
     } finally {
-      await pool.end();
+      await closeDatabasePool(pool);
     }
   }
 }
