@@ -91,6 +91,7 @@ import {
   type TurnGenerationDiagnosticContext,
   type TurnGenerationPhase
 } from "./generation-diagnostics.js";
+import { loadOrNotFound } from "./service-helpers.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
 
@@ -370,8 +371,7 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
       return { ...existing.rows[0], duplicate: true };
     }
     const campaign = await client.query<{ active_turn_number: number; text_provider_profile_id: string | null; story_length_profile: string; turn_control_style: string }>(`SELECT active_turn_number, text_provider_profile_id, story_length_profile, turn_control_style FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [campaignId, ownerUserId]);
-    const row = campaign.rows[0];
-    if (!row) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    const row = loadOrNotFound(campaign, "Campaign");
     const classificationId = await validateTurnInputMode(client, ownerUserId, campaignId, request, row.turn_control_style);
     const providerProfileId = await resolveEffectiveProviderId(client, ownerUserId, "text", request.providerProfileId || row.text_provider_profile_id);
     if (!providerProfileId) throw Object.assign(new Error("Select a text provider for this campaign or mark a default text provider."), { statusCode: 409 });
@@ -458,8 +458,7 @@ export async function enqueueLatestReplacement(pool: DatabasePool, campaignId: s
          FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
-    const campaign = campaignResult.rows[0];
-    if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    const campaign = loadOrNotFound(campaignResult, "Campaign");
     const classificationId = await validateTurnInputMode(client, ownerUserId, campaignId, request, campaign.turn_control_style);
     if (campaign.active_turn_number !== request.expectedCurrentTurnNumber) {
       throw Object.assign(
@@ -590,8 +589,7 @@ export async function getGenerationJob(pool: DatabasePool, jobId: string) {
             partial_output AS "partialOutput"
        FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`, [jobId, ownerUserId]
   );
-  const row = result.rows[0];
-  if (!row) throw Object.assign(new Error("Generation job not found."), { statusCode: 404 });
+  const row = loadOrNotFound(result, "Generation job");
   row.partialNarration = row.partialOutput ? extractPartialNarration(row.partialOutput) : null;
   return row;
 }
@@ -619,8 +617,7 @@ export async function getGenerationResult(pool: DatabasePool, jobId: string) {
       WHERE j.id = $1 AND j.owner_user_id = $2`,
     [jobId, ownerUserId]
   );
-  const row = result.rows[0];
-  if (!row) throw Object.assign(new Error("Generation job not found."), { statusCode: 404 });
+  const row = loadOrNotFound(result, "Generation job");
   if (row.status !== "completed" || !row.resultTurnId) {
     throw Object.assign(new Error(row.errorMessage || `Generation is ${row.status}.`), { statusCode: 409 });
   }
@@ -801,8 +798,7 @@ export async function syncPlayerCampaignConfig(pool: DatabasePool, campaignId: s
       `SELECT active_turn_number FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
-    const row = campaign.rows[0];
-    if (!row) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    const row = loadOrNotFound(campaign, "Campaign");
     if (row.active_turn_number !== config.expectedTurnNumber) {
       throw Object.assign(new Error(`Campaign is at turn ${row.active_turn_number}, not expected turn ${config.expectedTurnNumber}.`), { statusCode: 409 });
     }
@@ -859,8 +855,7 @@ export async function rewindCampaign(pool: DatabasePool, campaignId: string, req
         WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
-    const campaign = campaignResult.rows[0];
-    if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    const campaign = loadOrNotFound(campaignResult, "Campaign");
     if (request.expectedCurrentTurnNumber !== undefined
         && request.expectedCurrentTurnNumber !== campaign.active_turn_number) {
       throw Object.assign(
@@ -1051,8 +1046,7 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
         WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
-    const campaign = campaignResult.rows[0];
-    if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    const campaign = loadOrNotFound(campaignResult, "Campaign");
     if (request.expectedCurrentTurnNumber !== undefined
         && request.expectedCurrentTurnNumber !== campaign.active_turn_number) {
       throw Object.assign(

@@ -4,6 +4,7 @@ import sharp from "sharp";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import type { AssetListQuery, AssetMetadataUpdate } from "../../../packages/contracts/src/assets.js";
 import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
+import { loadOrNotFound } from "./service-helpers.js";
 
 const ALLOWED_IMAGE_TYPES = new Map([
   ["image/png", ".png"],
@@ -481,8 +482,7 @@ export async function readAsset(pool: DatabasePool, store: FilesystemAssetStore,
        FROM assets WHERE id = $1 AND owner_user_id = $2`,
     [assetId, ownerUserId]
   );
-  const asset = result.rows[0];
-  if (!asset) throw Object.assign(new Error("Asset not found."), { statusCode: 404 });
+  const asset = loadOrNotFound(result, "Asset");
   if (asset.storage_driver !== "filesystem") throw new Error(`Unsupported asset storage driver '${asset.storage_driver}'.`);
   const absolutePath = resolve(store.root, asset.storage_path);
   const rootPrefix = `${resolve(store.root)}${sep}`;

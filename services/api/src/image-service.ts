@@ -24,6 +24,7 @@ import { lockOriginalImages, persistTurnImage, persistWorldCover, type Filesyste
 import { loadImageProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
 import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
+import { loadOrNotFound } from "./service-helpers.js";
 
 type IllustrationConfigRow = {
   enabled: boolean;
@@ -159,7 +160,7 @@ const jobColumns = `id, owner_user_id, campaign_id, turn_id, world_id, target_ty
 export async function getIllustrationConfig(pool: DatabasePool, campaignId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const campaign = await pool.query("SELECT id FROM campaigns WHERE id = $1 AND owner_user_id = $2", [campaignId, ownerUserId]);
-  if (!campaign.rows[0]) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+  loadOrNotFound(campaign, "Campaign");
   const result = await pool.query<IllustrationConfigRow>(
     `SELECT enabled, source_policy, matching_scope, confidence_profile, repetition_window,
             provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts,
@@ -215,8 +216,7 @@ export async function setIllustrationConfig(pool: DatabasePool, campaignId: stri
       config.aspectRatio, config.quality, config.outputFormat, config.maxAttempts,
       config.segmentWordCount, config.imagesPerSegment, config.segmentPromptMode, config.refinementPrompt]
   );
-  if (!result.rows[0]) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
-  return publicConfig(result.rows[0]);
+  return publicConfig(loadOrNotFound(result, "Campaign"));
 }
 
 export async function insertImageJob(
@@ -273,8 +273,7 @@ export async function enqueueWorldCover(pool: DatabasePool, worldId: string, req
         WHERE worlds.id = $1 AND worlds.owner_user_id = $2 FOR UPDATE OF worlds, drafts`,
       [worldId, ownerUserId]
     );
-    const world = worldResult.rows[0];
-    if (!world) throw Object.assign(new Error("World not found."), { statusCode: 404 });
+    const world = loadOrNotFound(worldResult, "World");
     if (world.status === "archived") throw Object.assign(new Error("Restore the world before generating its cover."), { statusCode: 409 });
     const existing = await client.query<ImageJobRow>(
       `SELECT ${jobColumns} FROM image_jobs
@@ -380,8 +379,7 @@ export async function enqueueIllustration(pool: DatabasePool, turnId: string, re
         WHERE turns.id = $1 AND turns.owner_user_id = $2 FOR UPDATE OF turns`,
       [turnId, ownerUserId]
     );
-    const turn = turnResult.rows[0];
-    if (!turn) throw Object.assign(new Error("Accepted turn not found."), { statusCode: 404 });
+    const turn = loadOrNotFound(turnResult, "Accepted turn");
     const existing = await client.query<ImageJobRow>(
       `SELECT ${jobColumns} FROM image_jobs WHERE turn_id = $1 AND owner_user_id = $2 ORDER BY created_at DESC LIMIT 1`,
       [turnId, ownerUserId]
@@ -431,14 +429,13 @@ export async function enqueueIllustration(pool: DatabasePool, turnId: string, re
 export async function getImageJob(pool: DatabasePool, jobId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const result = await pool.query<ImageJobRow>(`SELECT ${jobColumns} FROM image_jobs WHERE id = $1 AND owner_user_id = $2`, [jobId, ownerUserId]);
-  if (!result.rows[0]) throw Object.assign(new Error("Image job not found."), { statusCode: 404 });
-  return publicJob(result.rows[0]);
+  return publicJob(loadOrNotFound(result, "Image job"));
 }
 
 export async function getLatestWorldCoverJob(pool: DatabasePool, worldId: string) {
   const ownerUserId = await initialOwnerId(pool);
   const world = await pool.query("SELECT id FROM worlds WHERE id = $1 AND owner_user_id = $2", [worldId, ownerUserId]);
-  if (!world.rows[0]) throw Object.assign(new Error("World not found."), { statusCode: 404 });
+  loadOrNotFound(world, "World");
   const result = await pool.query<ImageJobRow>(
     `SELECT ${jobColumns} FROM image_jobs
       WHERE world_id = $1 AND owner_user_id = $2 AND target_type = 'world_cover'
