@@ -15,7 +15,7 @@ const SENSITIVE_CONFIGURATION_KEYS = new Set([
 function sensitiveConfigurationKey(key: string): boolean {
   const normalized = key.replaceAll(/[^a-z]/gi, "").toLowerCase();
   return SENSITIVE_CONFIGURATION_KEYS.has(normalized)
-    || /(?:apikey|secret|token|password|passphrase|privatekey|credential)$/.test(normalized);
+    || /(?:apikey|secret|token|password|passphrase|privatekey|credential|credentials|secretaccesskey|accesskeyid)$/.test(normalized);
 }
 
 export function sanitizeSensitiveConfiguration(value: unknown): unknown {

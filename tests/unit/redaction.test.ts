@@ -8,12 +8,17 @@ describe("sensitive configuration redaction", () => {
       refreshToken: "refresh-token",
       privateKey: "private-key",
       credential: "credential",
+      awsCredentials: { accessKeyId: "nested-access-key", secretAccessKey: "nested-secret-key" },
+      secretAccessKey: "secret-access-key",
+      accessKeyId: "access-key-id",
       nested: {
         bearerToken: "bearer-token",
         webhookSecret: "webhook-secret",
         tokenType: "spark",
         credentialMode: "api-key",
         privateKeyAlgorithm: "ed25519",
+        awsRegion: "us-east-1",
+        accessKeyRotationDays: 30,
         modelDiscoveryEnabled: true
       }
     })).toEqual({
@@ -21,6 +26,8 @@ describe("sensitive configuration redaction", () => {
         tokenType: "spark",
         credentialMode: "api-key",
         privateKeyAlgorithm: "ed25519",
+        awsRegion: "us-east-1",
+        accessKeyRotationDays: 30,
         modelDiscoveryEnabled: true
       }
     });
