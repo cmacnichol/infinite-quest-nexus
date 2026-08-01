@@ -24,7 +24,7 @@
   "dependencies": {
     "@fastify/multipart": "^10.1.0",
     "@fastify/static": "^10.1.2",
-    "@sogni-ai/sogni-client": "5.2.0",
+    "@sogni-ai/sogni-client": "5.3.1",
     "@types/archiver": "^8.0.0",
     "archiver": "^8.0.0",
     "fastify": "^5.4.0",
