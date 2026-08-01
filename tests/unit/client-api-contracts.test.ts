@@ -5,6 +5,7 @@ import {
   campaignSyncStatusSchema,
   generationActionResponseSchema,
   generationEnqueueResponseSchema,
+  generationJobSnapshotSchema,
   generationResultSchema,
   generationStreamSnapshotSchema,
   turnListResponseSchema,
@@ -234,7 +235,7 @@ describe("client API response contracts", () => {
     expect(() => generationActionResponseSchema.parse({ id: JOB_ID, status: "completed" })).toThrow();
   });
 
-  it("derives client snapshots without exposing raw partial output", () => {
+  it("projects SSE snapshots through an explicit lease-stable allowlist", () => {
     const snapshot = {
       id: JOB_ID,
       campaignId: CAMPAIGN_ID,
@@ -253,14 +254,39 @@ describe("client API response contracts", () => {
     };
     const parsed = generationStreamSnapshotSchema.parse(snapshot);
 
-    expect(parsed).toMatchObject({ id: JOB_ID, status: "cancelled", partialNarration: "Sanitized narration" });
-    expect(parsed).not.toHaveProperty("partialOutput");
-    for (const field of ["requestedInputMode", "resolvedInputMode", "inputModeSource", "operationKind"] as const) {
-      const { [field]: _missing, ...malformed } = snapshot;
-      expect(generationStreamSnapshotSchema.safeParse(malformed).success, field).toBe(false);
-    }
+    expect(parsed).toEqual({
+      id: JOB_ID,
+      campaignId: CAMPAIGN_ID,
+      expectedTurnNumber: 3,
+      action: "Open the dome.",
+      operationKind: "append",
+      status: "cancelled",
+      attempts: 1,
+      partialNarration: "Sanitized narration"
+    });
     expect(generationStreamSnapshotSchema.safeParse({ ...snapshot, expectedTurnNumber: "3" }).success).toBe(false);
-    expect(generationStreamSnapshotSchema.safeParse({ ...snapshot, createdAt: "not-a-timestamp" }).success).toBe(false);
     expect(generationStreamSnapshotSchema.safeParse({ ...snapshot, status: "mystery" }).success).toBe(false);
+  });
+
+  it("exports the full polling snapshot while excluding raw partial output", () => {
+    const parsed = generationJobSnapshotSchema.parse({
+      id: JOB_ID,
+      campaignId: CAMPAIGN_ID,
+      expectedTurnNumber: 3,
+      action: "Open the dome.",
+      requestedInputMode: "action",
+      resolvedInputMode: "action",
+      inputModeSource: "explicit",
+      operationKind: "append",
+      status: "cancelled",
+      attempts: 1,
+      createdAt: TIMESTAMP,
+      updatedAt: TIMESTAMP,
+      partialOutput: "raw provider response",
+      partialNarration: "Sanitized narration"
+    });
+
+    expect(parsed).toMatchObject({ id: JOB_ID, createdAt: TIMESTAMP, updatedAt: TIMESTAMP });
+    expect(parsed).not.toHaveProperty("partialOutput");
   });
 });

@@ -15,6 +15,7 @@ import {
   campaignListResponseSchema,
   campaignSyncStatusSchema,
   generationEnqueueResponseSchema,
+  generationJobSnapshotSchema,
   generationResultSchema,
   generationStreamSnapshotSchema,
   turnListResponseSchema
@@ -265,7 +266,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
       url: `/api/v1/generation-jobs/${job.id}`
     });
     expect(pollResponse.statusCode).toBe(200);
-    const snapshot = generationStreamSnapshotSchema.parse(pollResponse.json());
+    const snapshot = generationJobSnapshotSchema.parse(pollResponse.json());
     expect(snapshot.status).toBe("completed");
     expect(pollResponse.json()).not.toHaveProperty("partialOutput");
 

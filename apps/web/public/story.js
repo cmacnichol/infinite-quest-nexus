@@ -1232,14 +1232,6 @@ async function pollGenerationJob(jobId, action) {
     updateGenerationProgress(job);
     if (job.partialNarration) {
       renderStreamingPreview(job.partialNarration, action || job.action);
-    } else if (job.partialOutput && typeof job.partialOutput === "string") {
-      try {
-        const match = job.partialOutput.match(/"narration"\s*:\s*"((?:[^"\\]|\\.)*)/);
-        if (match && match[1]) {
-          const unescaped = match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
-          renderStreamingPreview(unescaped, action || job.action);
-        }
-      } catch (_) {}
     }
   };
 

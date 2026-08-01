@@ -85,6 +85,37 @@ intentionally report-only until Slice 1 produces `apps/web-next/dist`; then it
 reports a 200 KiB gzip entry budget and a 100 KiB gzip lazy-chunk budget before
 the enforcement milestone makes those budgets blocking.
 
+## Task 2a stream and validation baseline amendment
+
+The client has two derived, client-safe generation responses. The polling
+response omits raw `partialOutput` but retains durable metadata, including
+timestamps. The SSE response is an explicit allowlist of `id`, `campaignId`,
+`expectedTurnNumber`, `status`, `action`, `operationKind`, `attempts`,
+`partialNarration`, `errorMessage`, `errorCode`, and `resultTurnId`. `attempts`
+is the monotonic retry-cycle marker for future stream reconciliation; timestamps
+are deliberately absent because worker lease renewal changes `updatedAt` without
+changing client-visible progress.
+
+`pnpm exec tsx scripts/benchmark-client-contracts.ts` uses a deterministic
+2,000-turn response, five warm-up parses, and 30 measured parses. The Task 2a
+run on Node 24.18.0 retained the median of three series: `turnListResponseSchema`
+p50 1.774 ms and p95 3.457 ms. It measures validation cost only, not
+database-query or full-route latency; B4 must compare its bounded route against
+this explicit pre-pagination amendment rather than charge it to the 10% C0
+budget.
+
+With the same fixture, the pre-C1 seven-field frame is 229 bytes, the C1 full
+client-safe stream frame is 492 bytes, and the Task 2a stream frame is 326
+bytes. For a generating row, a lease-only `updatedAt` renewal produces the same
+Task 2a JSON and therefore no extra SSE frame; a status transition to completed
+produces the second frame. B2 must preserve that dedupe behavior.
+
+After an initial valid SSE frame, a later job read error closes the stream
+without fabricating a `failed` frame. This distinguishes stream transport
+failure from durable generation failure. The legacy Story Player continues to
+fall back from `EventSource.onerror` to polling; Task 6 owns its executable fake
+EventSource coverage.
+
 ## Consequences
 
 The client replacement can change rendering frameworks without reimplementing

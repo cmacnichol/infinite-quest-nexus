@@ -417,8 +417,23 @@ export const generationJobStatusSchema = z.object({
   partialNarration: z.string().nullable().optional()
 });
 
-export const generationStreamSnapshotSchema = generationJobStatusSchema.omit({
+export const generationJobSnapshotSchema = generationJobStatusSchema.omit({
   partialOutput: true
+});
+
+export const generationStreamSnapshotSchema = generationJobStatusSchema.pick({
+  id: true,
+  campaignId: true,
+  expectedTurnNumber: true,
+  status: true,
+  action: true,
+  operationKind: true,
+  // Attempts is the monotonic retry-cycle marker used for stream reconciliation.
+  attempts: true,
+  partialNarration: true,
+  errorMessage: true,
+  errorCode: true,
+  resultTurnId: true
 });
 
 export type ProviderProfileInput = z.infer<typeof providerProfileInputSchema>;
@@ -456,4 +471,5 @@ export type PlayerEventTrigger = z.infer<typeof playerEventTriggerSchema>;
 export type PendingEventTrigger = z.infer<typeof pendingEventTriggerSchema>;
 export type RpgAssessmentOutput = z.infer<typeof rpgAssessmentOutputSchema>;
 export type GenerationJobStatus = z.infer<typeof generationJobStatusSchema>;
+export type GenerationJobSnapshot = z.infer<typeof generationJobSnapshotSchema>;
 export type GenerationStreamSnapshot = z.infer<typeof generationStreamSnapshotSchema>;

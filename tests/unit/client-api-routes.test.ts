@@ -10,6 +10,7 @@ import {
   campaignSyncStatusSchema,
   generationActionResponseSchema,
   generationEnqueueResponseSchema,
+  generationJobSnapshotSchema,
   generationResultSchema,
   generationStreamSnapshotSchema,
   turnListResponseSchema,
@@ -30,6 +31,8 @@ type MockPoolOptions = {
   malformedJob?: boolean;
   missingJob?: boolean;
   missingSync?: boolean;
+  streamReadFailure?: boolean;
+  streamSnapshots?: Array<Record<string, unknown>>;
 };
 
 function config(storageRoot: string): RuntimeConfig {
@@ -119,6 +122,7 @@ function jobRow(options: MockPoolOptions) {
 }
 
 function mockPool(options: MockPoolOptions = {}): DatabasePool {
+  let generationJobReads = 0;
   const query = async (queryInput: unknown, params: unknown[] = []) => {
     const sql = String(queryInput).replaceAll(/\s+/g, " ").trim();
     if (["BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT enqueue_generation_insert"].includes(sql)) return { rows: [] };
@@ -218,7 +222,11 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
     }
 
     if (sql.startsWith("SELECT id, campaign_id AS") && sql.includes("partial_output AS")) {
-      return { rows: options.missingJob ? [] : [jobRow(options)] };
+      if (options.missingJob) return { rows: [] };
+      generationJobReads += 1;
+      if (options.streamReadFailure && generationJobReads > 1) throw new Error("generation job read failed");
+      const snapshot = options.streamSnapshots?.[Math.min(generationJobReads - 1, options.streamSnapshots.length - 1)];
+      return { rows: [{ ...jobRow(options), ...snapshot }] };
     }
     if (sql.startsWith("SELECT j.id, j.status")) return { rows: [{
       id: JOB_ID,
@@ -276,11 +284,47 @@ describe("client API route contracts without PostgreSQL", () => {
       expect(campaignSyncStatusSchema.parse((await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/sync-status` })).json()).campaign.id).toBe(CAMPAIGN_ID);
       expect(turnListResponseSchema.parse((await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/turns` })).json()).turns).toHaveLength(1);
       const snapshotResponse = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}` });
-      expect(generationStreamSnapshotSchema.parse(snapshotResponse.json())).toMatchObject({ id: JOB_ID, operationKind: "append" });
+      expect(generationJobSnapshotSchema.parse(snapshotResponse.json())).toMatchObject({ id: JOB_ID, operationKind: "append", updatedAt: NOW.toISOString() });
       expect(snapshotResponse.json()).not.toHaveProperty("partialOutput");
       expect(generationResultSchema.parse((await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/result` })).json()).resultTurnId).toBe(TURN_ID);
     } finally {
       await app.close();
+    }
+  });
+
+  it("does not emit a lease-only snapshot and closes cleanly on a later read failure", async () => {
+    const leaseRenewedAt = new Date("2026-08-01T12:00:05.000Z");
+    const completedAt = new Date("2026-08-01T12:00:10.000Z");
+    const dedupeApp = await buildServer({
+      config: config(storageRoot),
+      pool: mockPool({
+        streamSnapshots: [
+          { status: "generating", updatedAt: NOW },
+          { status: "generating", updatedAt: leaseRenewedAt },
+          { status: "completed", updatedAt: completedAt }
+        ]
+      })
+    });
+    const failureApp = await buildServer({ config: config(storageRoot), pool: mockPool({
+      streamSnapshots: [{ status: "generating" }],
+      streamReadFailure: true
+    }) });
+
+    try {
+      const dedupeResponse = await dedupeApp.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
+      const frames = dedupeResponse.body.trim().split("\n\n").filter(Boolean).map((frame) => JSON.parse(frame.replace(/^data: /, "")));
+      expect(frames).toHaveLength(2);
+      expect(frames.map((frame) => generationStreamSnapshotSchema.parse(frame).status)).toEqual(["generating", "completed"]);
+      expect(frames[0]).not.toHaveProperty("updatedAt");
+
+      const failureResponse = await failureApp.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
+      const failureFrames = failureResponse.body.trim().split("\n\n").filter(Boolean).map((frame) => JSON.parse(frame.replace(/^data: /, "")));
+      expect(failureResponse.statusCode).toBe(200);
+      expect(failureFrames).toHaveLength(1);
+      expect(generationStreamSnapshotSchema.parse(failureFrames[0]).status).toBe("generating");
+      expect(failureResponse.body).not.toContain('"status":"failed"');
+    } finally {
+      await Promise.all([dedupeApp.close(), failureApp.close()]);
     }
   });
 

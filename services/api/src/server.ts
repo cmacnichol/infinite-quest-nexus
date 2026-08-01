@@ -18,7 +18,7 @@ import {
   campaignRewindSchema,
   generationRequestSchema,
   generationRetryLatestRequestSchema,
-  generationJobStatusSchema,
+  generationJobSnapshotSchema,
   generationStreamSnapshotSchema,
   illustrationConfigSchema,
   illustrationRequestSchema,
@@ -217,10 +217,11 @@ function parseResponseProjection<TSchema extends z.ZodType>(schema: TSchema, val
 }
 
 function generationSnapshot(value: unknown) {
-  return parseResponseProjection(
-    generationStreamSnapshotSchema,
-    parseResponseProjection(generationJobStatusSchema, value)
-  );
+  return parseResponseProjection(generationJobSnapshotSchema, value);
+}
+
+function generationStreamSnapshot(value: unknown) {
+  return parseResponseProjection(generationStreamSnapshotSchema, value);
 }
 
 export async function buildServer({ config, pool }: BuildServerOptions): Promise<FastifyInstance> {
@@ -763,7 +764,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     let finalStatus = "client_closed";
     let isClosed = false;
     request.raw.on("close", () => { isClosed = true; });
-    let job = generationSnapshot(await getGenerationJob(pool, jobId));
+    let job = generationStreamSnapshot(await getGenerationJob(pool, jobId));
 
     logger.info({
       event: "turn_generation_stream_connected",
@@ -789,8 +790,9 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, 350));
+        if (isClosed) break;
         try {
-          job = generationSnapshot(await getGenerationJob(pool, jobId));
+          job = generationStreamSnapshot(await getGenerationJob(pool, jobId));
         } catch (error) {
           if (isClosed) break;
           finalStatus = "stream_error";

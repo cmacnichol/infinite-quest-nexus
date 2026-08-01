@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   campaignTrackerSchema,
+  generationJobSnapshotSchema,
   generationJobStatusSchema,
   generationStreamSnapshotSchema,
   playerEventTriggerSchema,
@@ -148,7 +149,7 @@ export const generationEnqueueResponseSchema = z.object({
   recoveryMetadata: z.record(z.string(), z.unknown()).optional()
 });
 
-export { generationStreamSnapshotSchema };
+export { generationJobSnapshotSchema, generationStreamSnapshotSchema };
 
 export const generationResultSchema = z.object({
   id: z.uuid(),
