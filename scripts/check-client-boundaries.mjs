@@ -130,6 +130,7 @@ function isClientCoreImportAllowed(file, specifier) {
 }
 
 function isClientWebImportAllowed(file, specifier) {
+  if (specifier === "@infinite-quest/client-core") return true;
   const target = relativeModulePath(file, specifier);
   return target !== null && (target.startsWith("packages/client-web/") || target.startsWith("packages/client-core/") || target.startsWith("packages/contracts/"));
 }

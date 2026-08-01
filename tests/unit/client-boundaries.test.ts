@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,7 +12,46 @@ import { collectClientBoundaryViolations, isBoundarySourceFile } from "../../scr
 // @ts-expect-error JavaScript check scripts intentionally have no declaration files.
 import { formatWebBundleBudgetReport, inspectWebBundleBudget } from "../../scripts/check-web-bundle-budget.mjs";
 
+function typecheckFixture(tsconfigPath: string): { succeeded: boolean; output: string } {
+  try {
+    return {
+      succeeded: true,
+      output: execFileSync("pnpm", ["exec", "tsc", "--noEmit", "--project", tsconfigPath], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        stdio: "pipe"
+      })
+    };
+  } catch (error) {
+    const commandError = error as { stderr?: string; stdout?: string };
+    return {
+      succeeded: false,
+      output: `${commandError.stdout || ""}${commandError.stderr || ""}`
+    };
+  }
+}
+
 describe("client boundary checks", () => {
+  test("actual core compiler fixture rejects Web, Node, and framework references", () => {
+    const result = typecheckFixture("tests/fixtures/client-boundaries/core-forbidden/tsconfig.json");
+
+    expect(result.succeeded).toBe(false);
+    expect(result.output).toContain("Cannot find name 'fetch'");
+    expect(result.output).toContain("Cannot find name 'EventSource'");
+    expect(result.output).toContain("Cannot find name 'localStorage'");
+    expect(result.output).toContain("Cannot find name 'document'");
+    expect(result.output).toContain("Cannot find name 'window'");
+    expect(result.output).toContain("node:fs/promises");
+    expect(result.output).toContain("Cannot find module 'react-dom/client'");
+  });
+
+  test("actual Web compiler fixture accepts framework-free port adapters using Web APIs", () => {
+    const result = typecheckFixture("tests/fixtures/client-boundaries/web-adapter/tsconfig.json");
+
+    expect(result.succeeded).toBe(true);
+    expect(result.output).toBe("");
+  });
+
   test("rejects client-core Web, Node, and framework dependencies", () => {
     const violations = collectClientBoundaryViolations([
       {
@@ -157,6 +197,17 @@ describe("client boundary checks", () => {
           export { message };
           export type { Campaign };
         `
+      }
+    ]);
+
+    expect(violations).toEqual([]);
+  });
+
+  test("allows client-web to import client-core through its public package root", () => {
+    const violations = collectClientBoundaryViolations([
+      {
+        file: "packages/client-web/src/session.ts",
+        text: 'import type { SessionPort } from "@infinite-quest/client-core";\nexport type { SessionPort };'
       }
     ]);
 

@@ -19,5 +19,5 @@
     "tests/**/*.ts",
     "vitest*.ts"
   ],
-  "exclude": ["packages/client-core", "packages/client-web"]
+  "exclude": ["packages/client-core", "packages/client-web", "tests/fixtures/client-boundaries"]
 }

@@ -8,8 +8,8 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "check": "pnpm check:repository && tsc -p tsconfig.json --noEmit && node --check apps/web/public/nexus.js && node --check apps/web/public/story.js",
+    "build": "pnpm --filter @infinite-quest/client-core check && pnpm --filter @infinite-quest/client-web check && tsc -p tsconfig.build.json",
+    "check": "pnpm check:repository && pnpm --filter @infinite-quest/client-core check && pnpm --filter @infinite-quest/client-web check && tsc -p tsconfig.json --noEmit && node --check apps/web/public/nexus.js && node --check apps/web/public/story.js",
     "check:client-boundaries": "node scripts/check-client-boundaries.mjs",
     "check:data": "node scripts/check-repository-data.mjs",
     "check:repository": "node scripts/check-repository-boundaries.mjs && pnpm check:data",

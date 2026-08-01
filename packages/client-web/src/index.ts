@@ -1,4 +1,4 @@
-import type { SessionPort } from "../../client-core/src/ports.js";
+import type { SessionPort } from "@infinite-quest/client-core";
 
 const noOpSessionPort: SessionPort = {
   authorization: async () => ({}),

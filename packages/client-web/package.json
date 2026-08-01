@@ -6,6 +6,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "dependencies": {
+    "@infinite-quest/client-core": "workspace:*"
+  },
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit"
   }

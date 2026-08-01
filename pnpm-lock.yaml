@@ -96,7 +96,11 @@ importers:
 
   packages/client-core: {}
 
-  packages/client-web: {}
+  packages/client-web:
+    dependencies:
+      '@infinite-quest/client-core':
+        specifier: workspace:*
+        version: link:../client-core
 
 packages:
 
