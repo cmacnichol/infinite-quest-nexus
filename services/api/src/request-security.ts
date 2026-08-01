@@ -16,6 +16,7 @@ export class OriginNotAllowedError extends Error {
 export function installRequestSecurity(app: FastifyInstance, config: RuntimeConfig): void {
   const csp = buildContentSecurityPolicy(config.security.cspImageAllowedOrigins);
   app.addHook("onRequest", async (request, reply) => {
+    reply.header("x-correlation-id", request.id);
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("X-Frame-Options", "DENY");
     reply.header("Referrer-Policy", "no-referrer");

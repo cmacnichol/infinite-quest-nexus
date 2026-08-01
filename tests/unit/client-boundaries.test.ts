@@ -61,6 +61,13 @@ describe("client boundary checks", () => {
     expect(result.output).toBe("");
   });
 
+  test("client-web's public package exports compile through its public barrel", () => {
+    const result = typecheckFixture("tests/fixtures/client-boundaries/client-web-public/tsconfig.json");
+
+    expect(result.succeeded).toBe(true);
+    expect(result.output).toBe("");
+  });
+
   test("static scanner explicitly rejects client-core framework dependencies alongside Web and Node dependencies", () => {
     const violations = collectClientBoundaryViolations([
       {
@@ -244,6 +251,21 @@ describe("client boundary checks", () => {
       {
         file: "packages/client-web/src/session.ts",
         text: 'import type { SessionPort } from "@infinite-quest/client-core";\nexport type { SessionPort };'
+      }
+    ]);
+
+    expect(violations).toEqual([]);
+  });
+
+  test("allows client-web to reach its direct zod dependency and the platform-clean contracts public barrel", () => {
+    const violations = collectClientBoundaryViolations([
+      {
+        file: "packages/client-web/src/api.ts",
+        text: `
+          import { z } from "zod";
+          import { generationRequestSchema } from "../../contracts/src/index.js";
+          export const parsed = z.object({}).safeParse(generationRequestSchema.safeParse({}));
+        `
       }
     ]);
 

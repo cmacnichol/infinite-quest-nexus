@@ -114,6 +114,30 @@ describe("API server security and CORS headers", () => {
     await app.close();
   });
 
+  it("echoes a correlation ID on adopted API routes", async () => {
+    const ownerId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const pool = {
+      query: async (text: string) => text.includes("system_key = 'initial-owner'")
+        ? { rows: [{ id: ownerId }] }
+        : { rows: [] }
+    } as unknown as DatabasePool;
+    const app = await buildServer({ config: makeConfig(), pool });
+
+    const generated = await app.inject({ method: "GET", url: "/api/v1/worlds" });
+    const echoed = await app.inject({
+      method: "GET",
+      url: "/api/v1/worlds",
+      headers: { "x-correlation-id": "support-correlation-123" }
+    });
+
+    expect(generated.statusCode).toBe(200);
+    expect(generated.headers["x-correlation-id"]).toEqual(expect.any(String));
+    expect(generated.headers["x-correlation-id"]).not.toBe("");
+    expect(echoed.statusCode).toBe(200);
+    expect(echoed.headers["x-correlation-id"]).toBe("support-correlation-123");
+    await app.close();
+  });
+
   it.each(["/", "/index.html"])("redirects %s to the active Nexus client without serving legacy HTML", async (url) => {
     const config = makeConfig();
     const mockPool = { query: async () => ({ rows: [] }) } as unknown as DatabasePool;
