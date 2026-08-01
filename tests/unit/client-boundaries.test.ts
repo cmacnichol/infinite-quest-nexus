@@ -3,12 +3,89 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
+import { createNoopSessionPort } from "../../packages/client-web/src/index.js";
+import type { PendingGenerationSubmission, SessionPort } from "../../packages/client-core/src/index.js";
+import type { GenerationRequest } from "../../packages/contracts/src/generation.js";
 // @ts-expect-error JavaScript check scripts intentionally have no declaration files.
 import { collectClientBoundaryViolations, isBoundarySourceFile } from "../../scripts/check-client-boundaries.mjs";
 // @ts-expect-error JavaScript check scripts intentionally have no declaration files.
 import { formatWebBundleBudgetReport, inspectWebBundleBudget } from "../../scripts/check-web-bundle-budget.mjs";
 
 describe("client boundary checks", () => {
+  test("rejects client-core Web, Node, and framework dependencies", () => {
+    const violations = collectClientBoundaryViolations([
+      {
+        file: "packages/client-core/src/forbidden-dependencies.ts",
+        text: `
+          import { readFile } from "node:fs/promises";
+          import { createRoot } from "react-dom/client";
+          export const dependencies = [fetch, EventSource, localStorage, document, window, readFile, createRoot];
+        `
+      }
+    ]);
+
+    expect(violations).toEqual(expect.arrayContaining([
+      "packages/client-core/src/forbidden-dependencies.ts: client-core import node:fs/promises is prohibited",
+      "packages/client-core/src/forbidden-dependencies.ts: client-core import react-dom/client is a prohibited framework dependency",
+      "packages/client-core/src/forbidden-dependencies.ts: client-core must not use platform global EventSource",
+      "packages/client-core/src/forbidden-dependencies.ts: client-core must not use platform global document",
+      "packages/client-core/src/forbidden-dependencies.ts: client-core must not use platform global fetch",
+      "packages/client-core/src/forbidden-dependencies.ts: client-core must not use platform global localStorage",
+      "packages/client-core/src/forbidden-dependencies.ts: client-core must not use platform global window"
+    ]));
+  });
+
+  test("allows framework-free client-web adapters to use Web APIs behind core ports", () => {
+    const violations = collectClientBoundaryViolations([
+      {
+        file: "packages/client-web/src/adapters.ts",
+        text: `
+          import type { Clock, DelayScheduler, IdFactory, PendingSubmissionStore } from "../../client-core/src/ports.js";
+
+          export const clock: Clock = { now: () => Date.now() };
+          export const ids: IdFactory = { create: () => crypto.randomUUID() };
+          export const delays: DelayScheduler = {
+            wait: (milliseconds, signal) => new Promise((resolve) => {
+              if (signal.aborted) return resolve();
+              setTimeout(resolve, milliseconds);
+            })
+          };
+          export const pending: PendingSubmissionStore = {
+            load: (campaignId) => JSON.parse(localStorage.getItem(campaignId) || "null"),
+            save: (campaignId, submission) => localStorage.setItem(campaignId, JSON.stringify(submission)),
+            clear: (campaignId) => localStorage.removeItem(campaignId)
+          };
+          export const events = (url: string) => new EventSource(url);
+        `
+      }
+    ]);
+
+    expect(violations).toEqual([]);
+  });
+
+  test("no-op session port neither supplies credentials nor retries unauthorized responses", async () => {
+    const session: SessionPort = createNoopSessionPort();
+    const request: GenerationRequest = {
+      action: "Search the observatory for clues.",
+      requestedInputMode: "action",
+      resolvedInputMode: "action",
+      inputModeSource: "explicit",
+      idempotencyKey: "submission-key-0001",
+      context: { budgetTokens: 32000, compression: "auto", recentTurns: 8 }
+    };
+    const submission: PendingGenerationSubmission = {
+      request,
+      operationKind: "append",
+      expectedTurnNumber: 7,
+      createdAt: 1_725_000_000_000
+    };
+
+    expect(await session.authorization()).toEqual({});
+    expect(await session.onUnauthorized({ statusCode: 401 })).toBe(false);
+    expect(await session.onUnauthorized({ statusCode: 403 })).toBe(false);
+    expect(submission.request.idempotencyKey).toBe("submission-key-0001");
+  });
+
   test("reports without failing before the Slice 1 Vite output exists", () => {
     expect(inspectWebBundleBudget("/missing-vite-output")).toEqual({
       mode: "report-only",

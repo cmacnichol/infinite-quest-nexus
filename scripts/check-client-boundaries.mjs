@@ -138,6 +138,8 @@ function checkClientCore(file, sourceFile, violations) {
   for (const specifier of importedModules(sourceFile)) {
     if (specifier.startsWith("node:")) {
       violations.push(`${file}: client-core import ${specifier} is prohibited`);
+    } else if (FRAMEWORK_IMPORT_PATTERN.test(specifier)) {
+      violations.push(`${file}: client-core import ${specifier} is a prohibited framework dependency`);
     } else if (!isClientCoreImportAllowed(file, specifier)) {
       violations.push(`${file}: client-core import ${specifier} is outside client-core or contracts`);
     }
