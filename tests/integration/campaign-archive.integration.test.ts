@@ -10,7 +10,8 @@ import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
-import { calculateContentFingerprint, canonicalArchiveJson } from "../../packages/contracts/src/archives.js";
+import { canonicalArchiveJson } from "../../packages/contracts/src/archives.js";
+import { calculateContentFingerprint } from "../../packages/contracts/src/archives-node.js";
 import {
   inspectArchive,
   readVerifiedEntry,

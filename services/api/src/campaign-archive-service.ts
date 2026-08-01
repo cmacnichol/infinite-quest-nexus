@@ -8,7 +8,8 @@ import { initialOwnerId, withTransaction } from "../../../packages/database/src/
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import { canonicalizeWorldContent, WORLD_CONTENT_SCHEMA_VERSION, type WorldContent } from "../../../packages/contracts/src/world-library.js";
 import { characterLegacyText } from "../../../packages/domain/src/world-characters.js";
-import { archiveAssetRecordSchema, calculateContentFingerprint, canonicalArchiveJson, campaignArchiveDestinationSchema, campaignArchivePreviewResponseSchema, sanitizePortableMetadata, type ArchiveAssetBinding, type ArchiveAssetRecord, type ArchiveEntry, type ArchiveManifest, type CampaignArchiveDestination as ContractCampaignArchiveDestination, type CampaignArchivePreviewResponse } from "../../../packages/contracts/src/archives.js";
+import { archiveAssetRecordSchema, canonicalArchiveJson, campaignArchiveDestinationSchema, campaignArchivePreviewResponseSchema, sanitizePortableMetadata, type ArchiveAssetBinding, type ArchiveAssetRecord, type ArchiveEntry, type ArchiveManifest, type CampaignArchiveDestination as ContractCampaignArchiveDestination, type CampaignArchivePreviewResponse } from "../../../packages/contracts/src/archives.js";
+import { calculateContentFingerprint } from "../../../packages/contracts/src/archives-node.js";
 import { removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { collectCampaignArchiveAssets, validateArchiveAssets, verifyAndWriteArchiveAssets, type CampaignAssetInventory, type ValidatedArchiveAssetSet } from "./asset-archive-service.js";
 import { ArchiveError, createArchiveStagingDirectory, inspectArchive, inspectArchiveContainer, readVerifiedContainerEntry, readVerifiedEntry, removeArchivePath, writeArchiveArtifact, type ArchiveLimits, type CompletedArchiveArtifact, type InspectedArchive, type StagedArchive } from "./archive-io.js";

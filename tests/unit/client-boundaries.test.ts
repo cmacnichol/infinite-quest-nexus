@@ -42,7 +42,16 @@ describe("client boundary checks", () => {
     expect(result.output).toContain("Cannot find name 'document'");
     expect(result.output).toContain("Cannot find name 'window'");
     expect(result.output).toContain("node:fs/promises");
+    // This diagnostic proves only that React is not installed in this fixture.
+    // The static boundary scanner below enforces framework exclusion itself.
     expect(result.output).toContain("Cannot find module 'react-dom/client'");
+  });
+
+  test("actual core compiler fixture accepts value-level contracts barrel imports", () => {
+    const result = typecheckFixture("tests/fixtures/client-boundaries/core-contracts/tsconfig.json");
+
+    expect(result.succeeded).toBe(true);
+    expect(result.output).toBe("");
   });
 
   test("actual Web compiler fixture accepts framework-free port adapters using Web APIs", () => {
@@ -193,14 +202,41 @@ describe("client boundary checks", () => {
         file: "packages/client-core/src/workflow.ts",
         text: `
           import { message } from "./message.js";
-          import type { Campaign } from "../../contracts/src/index.js";
+          import type { GenerationRequest } from "../../contracts/src/index.js";
           export { message };
-          export type { Campaign };
+          export type { GenerationRequest };
         `
       }
     ]);
 
     expect(violations).toEqual([]);
+  });
+
+  test("rejects Node and framework dependencies transitively reachable from the contracts public barrel", () => {
+    const violations = collectClientBoundaryViolations([
+      {
+        file: "packages/contracts/src/index.ts",
+        text: 'export * from "./unsafe.js";'
+      },
+      {
+        file: "packages/contracts/src/unsafe.ts",
+        text: `
+          import { createHash } from "node:crypto";
+          import { createRoot } from "react-dom/client";
+          export const hash = createHash("sha256");
+          export { createRoot };
+        `
+      },
+      {
+        file: "packages/contracts/src/archives-node.ts",
+        text: 'import { createHash } from "node:crypto";\nexport const hash = createHash("sha256");'
+      }
+    ]);
+
+    expect(violations).toEqual([
+      "packages/contracts/src/unsafe.ts: contracts public barrel reaches prohibited Node dependency node:crypto",
+      "packages/contracts/src/unsafe.ts: contracts public barrel reaches prohibited framework dependency react-dom/client"
+    ]);
   });
 
   test("allows client-web to import client-core through its public package root", () => {

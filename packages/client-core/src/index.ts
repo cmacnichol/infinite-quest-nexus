@@ -5,6 +5,5 @@ export type {
   IdFactory,
   PendingGenerationSubmission,
   PendingSubmissionStore,
-  PersistedGenerationRequest,
   SessionPort
 } from "./ports.js";

@@ -54,6 +54,18 @@ database and provider adapters -> application ports
 `scripts/check-client-boundaries.mjs` uses TypeScript's AST parser, not source
 text regular expressions, to enforce client and cross-role import boundaries.
 It is run by the repository boundary check and has parser-focused unit tests.
+The contracts package keeps a lib-clean public barrel at
+`packages/contracts/src/index.ts`; Node-only helpers such as
+`archives-node.ts` remain explicit imports and are not re-exported from that
+barrel. The scanner follows the barrel's transitive import graph and rejects
+reachable Node or framework dependencies while allowing unexported platform
+helpers to remain package-local.
+
+The `client-core -> contracts` edge is verified by a package-local compiler
+fixture that imports the contracts barrel and uses a schema at runtime. Import
+specifier scanning remains an architectural guard, but is not treated as proof
+that the dependency compiles under client-core's platform-free TypeScript
+configuration.
 
 The following temporary worker-to-API imports are the complete transitional
 allowlist. New cross-role imports fail the check.

@@ -8,7 +8,8 @@ import { ZipArchive } from "archiver";
 import { afterEach, describe, expect, it } from "vitest";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
-import { calculateContentFingerprint, canonicalArchiveJson, type ArchiveEntry, type ArchiveManifest } from "../../packages/contracts/src/archives.js";
+import { canonicalArchiveJson, type ArchiveEntry, type ArchiveManifest } from "../../packages/contracts/src/archives.js";
+import { calculateContentFingerprint } from "../../packages/contracts/src/archives-node.js";
 import { stageArchiveUpload, writeArchiveArtifact, type ArchiveLimits } from "../../services/api/src/archive-io.js";
 import { adaptLegacyCampaignZip, captureCampaignArchiveSnapshot, cleanupExpiredArchivePreviews, decodeCampaignArchive, portableWorldContentHash, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
 

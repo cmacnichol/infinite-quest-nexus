@@ -154,8 +154,7 @@ export const illustrationRequestSchema = z.object({
 });
 
 export const illustrationSegmentRequestSchema = z.object({
-  mode: z.enum(["missing", "rebuild"]).default("missing"),
-  idempotencyKey: z.string().trim().min(8).max(192).default(() => crypto.randomUUID())
+  mode: z.enum(["missing", "rebuild"]).default("missing")
 });
 
 export const illustrationSegmentImageRequestSchema = z.object({

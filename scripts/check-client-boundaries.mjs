@@ -91,6 +91,31 @@ function relativeModulePath(file, specifier) {
   return path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
 }
 
+function resolvedImportedFile(file, specifier, sourceFiles) {
+  const target = relativeModulePath(file, specifier);
+  if (target === null) return null;
+
+  const extension = path.posix.extname(target);
+  const withoutExtension = extension ? target.slice(0, -extension.length) : target;
+  const candidates = [target];
+  if (extension === ".js" || extension === ".jsx") candidates.push(`${withoutExtension}.ts`, `${withoutExtension}.tsx`);
+  if (extension === ".mjs") candidates.push(`${withoutExtension}.mts`);
+  if (extension === ".cjs") candidates.push(`${withoutExtension}.cts`);
+  if (!extension) {
+    candidates.push(
+      `${target}.ts`,
+      `${target}.tsx`,
+      `${target}.mts`,
+      `${target}.cts`,
+      `${target}/index.ts`,
+      `${target}/index.tsx`,
+      `${target}/index.mts`,
+      `${target}/index.cts`
+    );
+  }
+  return candidates.find((candidate) => sourceFiles.has(candidate)) ?? null;
+}
+
 function moduleSpecifierText(node) {
   return ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text : null;
 }
@@ -197,6 +222,32 @@ function checkCrossRoleImports(file, sourceFile, violations) {
   }
 }
 
+function checkContractsPublicGraph(sourceFiles, violations) {
+  const publicIndex = "packages/contracts/src/index.ts";
+  if (!sourceFiles.has(publicIndex)) return;
+
+  const visited = new Set();
+  const pending = [publicIndex];
+  while (pending.length > 0) {
+    const file = pending.pop();
+    if (file === undefined || visited.has(file)) continue;
+    visited.add(file);
+
+    const sourceFile = sourceFiles.get(file);
+    if (!sourceFile) continue;
+    for (const specifier of importedModules(sourceFile)) {
+      if (specifier.startsWith("node:")) {
+        violations.push(`${file}: contracts public barrel reaches prohibited Node dependency ${specifier}`);
+      } else if (FRAMEWORK_IMPORT_PATTERN.test(specifier)) {
+        violations.push(`${file}: contracts public barrel reaches prohibited framework dependency ${specifier}`);
+      }
+
+      const target = resolvedImportedFile(file, specifier, sourceFiles);
+      if (target !== null && !visited.has(target)) pending.push(target);
+    }
+  }
+}
+
 export function collectClientBoundaryViolations(entries) {
   const violations = [];
   const sortedEntries = [...entries]
@@ -218,15 +269,19 @@ export function collectClientBoundaryViolations(entries) {
   });
   const snapshot = api.updateSnapshot({ openProjects: [virtualConfig] });
   const project = snapshot.getProject(virtualConfig);
+  const sourceFiles = new Map();
 
   for (const entry of sortedEntries) {
     const file = entry.file;
     const sourceFile = project?.program.getSourceFile(path.posix.join(virtualRoot, file));
     if (!sourceFile) throw new Error(`TypeScript parser did not load ${file}`);
+    sourceFiles.set(file, sourceFile);
     if (file.startsWith("packages/client-core/")) checkClientCore(file, sourceFile, violations);
     if (file.startsWith("packages/client-web/")) checkClientWeb(file, sourceFile, violations);
     checkCrossRoleImports(file, sourceFile, violations);
   }
+
+  checkContractsPublicGraph(sourceFiles, violations);
 
   api.close();
   return violations.sort();
