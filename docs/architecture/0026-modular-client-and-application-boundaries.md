@@ -104,9 +104,10 @@ database-query or full-route latency; B4 must compare its bounded route against
 this explicit pre-pagination amendment rather than charge it to the 10% C0
 budget.
 
-With the same fixture, the pre-C1 seven-field frame is 229 bytes, the C1 full
-client-safe stream frame is 492 bytes, and the Task 2a stream frame is 326
-bytes. The benchmark's deterministic `initial -> lease renewal only -> completed`
+With the same fixture, the pre-C1 seven-field JSON payload is 229 bytes, the C1
+full client-safe stream JSON payload is 492 bytes, and the Task 2a stream JSON
+payload is 326 bytes. These are serialized JSON payload bytes, not complete SSE
+wire frames. The benchmark's deterministic `initial -> lease renewal only -> completed`
 sequence emits two frames for the pre-C1 hand-built projection, three frames for
 the C1 full client-safe projection, and two frames for the Task 2a stream
 projection. For a generating row, a lease-only `updatedAt` renewal produces the

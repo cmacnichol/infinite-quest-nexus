@@ -111,7 +111,7 @@ process.stdout.write(`${JSON.stringify({
   command: "pnpm exec tsx scripts/benchmark-client-contracts.ts",
   fixture: { turns: TURN_COUNT, warmUpSamples: WARM_UP_SAMPLES, measuredSamples: MEASURED_SAMPLES },
   turnListValidation: measure(() => { turnListResponseSchema.parse({ turns }); }),
-  frameBytes: {
+  payloadBytes: {
     preC1HandBuilt: Buffer.byteLength(JSON.stringify(legacyStreamSnapshot)),
     c1Stream: Buffer.byteLength(JSON.stringify(pollingSnapshot)),
     task2aStream: Buffer.byteLength(JSON.stringify(streamSnapshot))
@@ -123,5 +123,5 @@ process.stdout.write(`${JSON.stringify({
     task2aStream: emittedFrameCount(generationSequence, generationStreamSnapshotSchema.parse)
   },
   leaseOnlySnapshotChangesFrame: JSON.stringify(streamSnapshot) !== JSON.stringify(generationStreamSnapshotSchema.parse(generationSequence[1])),
-  pollingSnapshotBytes: Buffer.byteLength(JSON.stringify(pollingSnapshot))
+  pollingPayloadBytes: Buffer.byteLength(JSON.stringify(pollingSnapshot))
 }, null, 2)}\n`);

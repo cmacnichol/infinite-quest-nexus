@@ -31,18 +31,20 @@ Playwright, and axe-core.
 
 ## Completion status
 
-Last reviewed at `ff9a420` on branch `wip/main-uncommitted`.
+Runtime implementation reviewed through `26d5890` on branch
+`wip/main-uncommitted`.
 
 | Task | Package | Status | Evidence |
 |---|---|---|---|
 | Task 1 | C0 — baseline, ADR, boundary tests | **Complete** | `04ccb6c`, `d9474f0` |
 | Task 2 | C1 — play-loop request/response contracts | **Complete** | `128cc53`, `ff9a420` |
-| Task 2a | C1a — stream projection remediation | **Complete** | focused contract/route tests; reproducible 2,000-turn validation benchmark |
+| Task 2a | C1a — stream projection remediation | **Complete** | `ca255a7`, `1fb1b30`, `26d5890`; focused contract/route lifecycle tests; reproducible 2,000-turn validation benchmark |
 | Task 3 onward | C2-C8, B1-B5, U1-U6 | Not started | — |
 
-**Verification at the time of review:** `pnpm check` passes (468 candidate
-files), `pnpm build` passes, `pnpm test:unit` passes 698/698 across 65 files,
-and `pnpm check:web-bundle-budget` correctly reports as report-only because
+**Current Task 2a verification:** runtime implementation reviewed through
+`26d5890`; `pnpm check` passes (468 candidate files), `pnpm build` passes,
+`pnpm test:unit` passes 700/700 across 65 files, and
+`pnpm check:web-bundle-budget` correctly reports as report-only because
 `apps/web-next/dist` does not yet exist.
 
 **Next step:** begin Task 3 (C2). Task 2a exists because
@@ -349,7 +351,8 @@ the product. This inflates the B2 baseline before B2 begins.
   per-frame dedupe is not a factor.
 - [x] Add a test asserting that a lease-renewal-only change produces **no** new
   SSE frame.
-- [x] Record frame size and frames-per-generation against the C0 baseline in
+- [x] Record serialized JSON payload size and frames-per-generation against the
+  C0 baseline in
   ADR 0026 with `pnpm exec tsx scripts/benchmark-client-contracts.ts`.
 
 ### P2 — the terminal error frame was removed without a decision record
@@ -364,8 +367,10 @@ schema. But it is a client-visible change made inside a contracts package, and
 nothing tests it.
 
 - [x] Confirm the new behavior is intended and record it in ADR 0026.
-- [x] Add a test: a mid-stream read failure closes the stream without emitting a
-  synthetic terminal status, and the client falls back to polling.
+- [x] Add server/route proof that a mid-stream read failure closes the stream
+  without emitting a synthetic terminal status.
+- [ ] Add Task 6 fake-EventSource browser coverage proving `EventSource.onerror`
+  falls back to polling after the clean stream closure.
 - [x] Ensure Task 11 (B2) preserves this behavior rather than reinstating a
   fabricated terminal frame.
 
