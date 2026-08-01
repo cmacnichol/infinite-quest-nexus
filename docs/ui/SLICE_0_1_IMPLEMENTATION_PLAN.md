@@ -31,7 +31,7 @@ Playwright, and axe-core.
 
 ## Completion status
 
-Runtime implementation reviewed through `f8dfe6e` on branch
+Runtime implementation reviewed through `cd43787` on branch
 `wip/main-uncommitted`. None of Track C is merged to `main` yet; `main` is at
 `ad73dc1` and does not contain this plan.
 
@@ -41,6 +41,7 @@ Runtime implementation reviewed through `f8dfe6e` on branch
 | Task 2 | C1 — play-loop request/response contracts | **Complete** | `128cc53`, `ff9a420` |
 | Task 2a | C1a — stream projection remediation | **Complete**, one item deferred to Task 6 | `ca255a7`, `1fb1b30`, `26d5890`, `fb4b5ad`; focused contract/route lifecycle tests; reproducible 2,000-turn validation benchmark |
 | Task 3 | C2 — pure and Web-platform client packages | **Complete** | `1e55517`, `f8dfe6e`; scoped implementation review and fix re-review clean |
+| Task 3a | C2a — make the declared client boundary real | **Complete** | `f8c2b3d`, `cd43787`; scoped implementation review and fix re-review clean |
 | Task 4 onward | C3-C8, B1-B5, U1-U6 | Not started | — |
 
 **Current Task 2a verification** (re-measured during the Task 2a completion
@@ -103,9 +104,23 @@ detect and repair the mismatch inside `scripts/ensure-test-database.mjs`.
 - The scoped Task 3 review found two issues; `f8dfe6e` addressed both, and the
   fix re-review found no new Critical or Important breakage.
 
-**Next step:** begin Task 4 (C3), using the Task 3 public package surfaces and
-no-op `SessionPort` to build the runtime-validating HTTP client and error
-taxonomy without changing authentication signatures later.
+**Current Task 3a verification:**
+
+- `pnpm check` and `pnpm build` pass; the repository and data-safety checks
+  cover 484 candidate files.
+- `pnpm test:unit` passes **711/711 across 66 test files**.
+- `pnpm test:integration` passes — **190 passed, 2 skipped across 17 test
+  files**.
+- A value-level compiler fixture proves pure `client-core` can import and use
+  the public contracts barrel without DOM or Node ambient types. The boundary
+  scanner separately rejects reachable Node and framework imports while
+  allowing the explicitly non-exported Node-only archive helper.
+- The scoped Task 3a review found two omissions; `cd43787` addressed both, and
+  the fix re-review found no new Critical or Important breakage.
+
+**Next step:** begin Task 4 (C3), using the now-verified `client-core ->
+contracts` boundary, public request type, and no-op `SessionPort` to build the
+runtime-validating HTTP client and error taxonomy.
 
 ---
 
@@ -595,6 +610,225 @@ storage, or redirect behavior until authentication actually lands.
 **Definition of done:** Core policy can be imported and tested in a pure Node
 test without Web-global type shims. Browser implementations are isolated behind
 ports and can be replaced without changing workflow code.
+
+---
+
+## Task 3a — C2a: Make the declared client package boundary real
+
+**Do this before Task 4.** C2's own checklist is complete and its guards are
+genuinely enforced — injecting `document`/`localStorage` into
+`packages/client-core/src/ports.ts` or `node:fs/promises` into
+`packages/client-web/src/index.ts` is rejected by both
+`scripts/check-client-boundaries.mjs` and the package-local `tsc`. The problem is
+narrower and more serious: **the one dependency edge the architecture depends on,
+`client-core -> contracts`, is declared allowed in four places and does not
+compile.** Task 4 (C3) is the first task that needs it, because
+`RequestSpec.responseSchema` is a `z.ZodType` from `packages/contracts`.
+
+Fixing this after C3/C4/C5 means unpicking whatever workaround those tasks adopt
+in the meantime. C2 already adopted one — see P2.
+
+**Files:**
+
+- Modify: `packages/contracts/src/generation.ts`
+- Modify: `packages/contracts/src/archives.ts`
+- Create: `packages/contracts/src/archives-node.ts`
+- Modify: `services/api/src/campaign-archive-service.ts`
+- Modify: `packages/client-core/src/ports.ts`
+- Modify: `packages/client-core/src/index.ts`
+- Modify: `scripts/check-client-boundaries.mjs`
+- Modify: `tests/unit/client-boundaries.test.ts`
+- Modify: `tests/unit/archive-contracts.test.ts`
+- Modify: `tests/unit/campaign-archive-service.test.ts`
+- Modify: `tests/integration/campaign-archive.integration.test.ts`
+- Create: `tests/fixtures/client-boundaries/core-contracts/src/fixture.ts`
+- Create: `tests/fixtures/client-boundaries/core-contracts/tsconfig.json`
+
+### Reproducing the failure before you start
+
+Run this first so you can see the failure you are fixing. It must fail now and
+pass when P1 is done:
+
+```bash
+cat > packages/client-core/src/__probe.ts <<'EOF'
+export type { GenerationRequest } from "../../contracts/src/index.js";
+EOF
+pnpm --filter @infinite-quest/client-core check   # expect errors
+rm -f packages/client-core/src/__probe.ts
+```
+
+Current output:
+
+```text
+../contracts/src/generation.ts(158,67): error TS2304: Cannot find name 'crypto'.
+../contracts/src/archives.ts(1,28): error TS2591: Cannot find name 'node:crypto'.
+```
+
+### P1 — `client-core -> contracts` is declared allowed but does not compile
+
+The plan's **Target dependency direction** diagram draws
+`client-core -> contracts`; its enforced rules say "`client-core -> contracts` is
+allowed"; `isClientCoreImportAllowed()` permits it; and
+`tests/unit/client-boundaries.test.ts` has a test named *"allows client-core
+imports from its own package and contracts"*. All four are wrong, because
+`packages/client-core/tsconfig.json` sets `lib: ["ES2023"]` and `types: []` and
+two contracts modules need platform globals:
+
+| Module | Line | Problem |
+|---|---|---|
+| `generation.ts` | 158 | `idempotencyKey: ....default(() => crypto.randomUUID())` needs the `crypto` global |
+| `archives.ts` | 1 | `import { createHash } from "node:crypto"` needs Node types |
+
+The boundary test passes only because `collectClientBoundaryViolations()` scans
+import *strings*. Nothing in the repository ever compiles client-core against
+contracts, so the rule was never true.
+
+`client-web` is affected too: it can deep-import `contracts/src/generation.js`
+(DOM supplies `crypto`), but importing the contracts **index** fails on
+`archives.ts`. C3 should not be forced into deep imports to work around this.
+
+- [x] **`generation.ts:156-159` — delete the `idempotencyKey` field from
+  `illustrationSegmentRequestSchema`.** It is dead. The route at
+  `services/api/src/server.ts:889` parses the body and passes the result to
+  `generateTurnIllustrationSegments`
+  (`services/api/src/segmented-illustration-service.ts:545-552`), which forwards
+  only `request.mode` to `createTurnSet`. The generated UUID is never read,
+  never persisted, and never returned. Do not confuse this with
+  `enqueueIllustrationBackfill`, which reads a real `request.idempotencyKey`
+  at `segmented-illustration-service.ts:623` and `:652` from a *different*
+  schema — leave that one alone. The schema is not `.strict()`, so a client that
+  still sends `idempotencyKey` has it silently stripped, exactly as today.
+- [x] Confirm no other contracts module calls a platform global:
+  `grep -rn "default(() =>" packages/contracts/src/*.ts` must return nothing
+  after the edit. It currently returns only line 158.
+- [x] **Move `calculateContentFingerprint` out of `archives.ts` into a new
+  `packages/contracts/src/archives-node.ts`**, which keeps the `node:crypto`
+  import and imports `canonicalArchiveJson` and `archiveSha256Schema` from
+  `./archives.js`. Leave everything else in `archives.ts`; it is schema-only
+  after the move.
+- [x] **Do not re-export `archives-node.js` from
+  `packages/contracts/src/index.ts`.** The index must stay lib-clean. This is
+  the whole point of the split — a Node-only helper may live in the contracts
+  package but must not be reachable from its public barrel.
+- [x] Update the four importer call sites (six invocations) to import from
+  `archives-node.js`:
+  `services/api/src/campaign-archive-service.ts:11` (used at `:320`, `:343`,
+  `:838`), `tests/unit/archive-contracts.test.ts:6`,
+  `tests/unit/campaign-archive-service.test.ts:11`, and
+  `tests/integration/campaign-archive.integration.test.ts:13`. Split each
+  existing import so the remaining schema imports still come from
+  `archives.js`.
+- [x] **Add a compile fixture that locks this in.** Create
+  `tests/fixtures/client-boundaries/core-contracts/` extending
+  `packages/client-core/tsconfig.json`, whose `src/fixture.ts` imports the
+  contracts index and uses a schema at the value level, not just as a type:
+
+  ```ts
+  import { generationRequestSchema } from "../../../../../packages/contracts/src/index.js";
+  export const parsed = generationRequestSchema.safeParse({});
+  ```
+
+  Add a test to `tests/unit/client-boundaries.test.ts` asserting
+  `typecheckFixture(...)` **succeeds** with empty output. A type-only import is
+  not sufficient — it would be erased and would not prove the module compiles.
+- [x] Do **not** fix this by adding `"lib": ["DOM"]`, `"types": ["node"]`, or a
+  local `declare const crypto` to `packages/client-core`. Any of those reopens
+  the boundary C2 exists to close.
+
+**If the archives split turns out to be larger than described**, the fallback is
+to keep `calculateContentFingerprint` where it is and have client packages
+deep-import the specific contracts modules they need. Record that as an explicit
+decision in ADR 0028 and remove the `client-core -> contracts` claim from the
+dependency-direction rules, because it would then be false. Do not leave the
+claim standing unbacked.
+
+### P2 — `PersistedGenerationRequest` duplicates a contract with no drift guard
+
+Because P1 was blocked, C2 hand-wrote `PersistedGenerationRequest`
+(`packages/client-core/src/ports.ts:26-41`) as a structural copy of
+`generationRequestSchema`. Its own comment says this is to keep client-core "free
+of the contracts module's runtime Web and Node globals" — i.e. it is a workaround
+for P1, not a design choice.
+
+There is no drift guard. Demonstrated: add a required field to
+`generationRequestSchema`, and the build fails at
+`tests/unit/client-boundaries.test.ts:108` — the *test's object literal*, not the
+duplicated interface. Add the field to the literal, which is the obvious next
+move, and `PersistedGenerationRequest` silently drifts with **zero** errors and
+**zero** failing tests. It is a tripwire pointing at the wrong file.
+
+This matters beyond tidiness: Task 5 (C4) and Task 6 (C5) persist and replay
+these submissions. A contracts field added later is silently dropped from every
+replayed request.
+
+- [x] Once P1 lands, **delete `PersistedGenerationRequest` and derive the type
+  from contracts**: `PendingGenerationSubmission.request` becomes
+  `GenerationRequest` imported from `packages/contracts`. This removes the
+  duplicate rather than testing it.
+- [x] The type no longer remains duplicated, so the conditional bidirectional
+  assignability guard is unnecessary.
+
+  If the type must remain duplicated for a reason discovered during P1, add
+  a real bidirectional assignability assertion instead of relying on a literal:
+
+  ```ts
+  type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+  const _drift: Exact<GenerationRequest, PersistedGenerationRequest> = true;
+  ```
+
+  Verify the guard actually works by adding a required field to
+  `generationRequestSchema`, confirming `pnpm check` fails at the assertion,
+  then reverting. A guard you have not seen fail is not a guard.
+- [x] Keep `tests/unit/client-boundaries.test.ts:108` typed as
+  `GenerationRequest`; it is still a useful tripwire, just not sufficient alone.
+
+### P3 — the boundary scanner only validates the first hop
+
+`collectClientBoundaryViolations()` checks client-core's own import specifiers
+but never what an allowed target transitively pulls in. `client-core -> contracts
+-> node:crypto` passes the scanner today; only `tsc` rejects it. After P1 makes
+the contracts index lib-clean, that compiler backstop disappears for anything
+newly added to contracts, and nothing replaces it.
+
+- [x] Extend `scripts/check-client-boundaries.mjs` so that a module reachable
+  from `packages/contracts/src/index.ts` may not import `node:*` or a framework.
+  Scanning the contracts index's transitive import graph is sufficient; a full
+  repository graph is not required.
+- [x] Add a unit test proving the new rule fires — a synthetic contracts module
+  importing `node:crypto` and re-exported from the index must produce a
+  violation.
+- [x] Keep `archives-node.ts` passing: it is a legitimate Node module inside
+  contracts that is simply not reachable from the index. The rule is about
+  reachability from the barrel, not about file location.
+
+### P4 — smaller corrections
+
+- [x] `tests/unit/client-boundaries.test.ts:196` uses
+  `import type { Campaign } from "../../contracts/src/index.js"` as its canonical
+  *allowed* example. The contracts index exports no `Campaign`. Replace it with a
+  real export so the example is not misleading.
+- [x] `tests/fixtures/client-boundaries/core-forbidden/src/fixture.ts` proves
+  framework exclusion through `Cannot find module 'react-dom/client'` — that is
+  react not being installed, not the boundary rejecting it. Note this in the test
+  so a future workspace that adds react does not mistake the resulting failure
+  for a boundary regression. The static scanner enforces the real rule, so no
+  behavior change is needed.
+- [x] Record in ADR 0028 that the contracts package is split into a lib-clean
+  public barrel and explicitly non-exported Node-only helpers, and that
+  `client-core -> contracts` is verified by a compile fixture rather than by
+  string scanning.
+
+**Complete:** `client-core` compiles against the contracts public barrel, proved
+by a value-level compile fixture rather than an import-string scan; no client
+package carries a hand-maintained copy of a contract type without a guard that
+has been observed to fail; and the boundary scanner rejects Node and framework
+dependencies reachable from the contracts index.
+
+**Verification:** `pnpm check`, `pnpm build`, `pnpm test:unit`, and
+`pnpm test:integration` all pass. If `pnpm test:integration` fails at global
+setup with `password authentication failed for user "infinitequest_test"`, see
+the recovery command under **Completion status** — that is a local environment
+drift, not a code failure.
 
 ---
 
