@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { apiTimestampSchema } from "./http.js";
 
 export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible", "sogni", "sogni_sdk"]);
 export const providerRoleSchema = z.enum(["text", "image", "embedding", "intent"]);
@@ -392,16 +393,16 @@ export const generationJobStatusSchema = z.object({
   id: z.string().uuid(),
   campaignId: z.string().uuid(),
   providerProfileId: z.string().uuid().nullable().optional(),
-  expectedTurnNumber: z.coerce.number().int().min(1),
+  expectedTurnNumber: z.number().int().min(1),
   action: z.string(),
-  requestedInputMode: turnInputSelectionSchema.default("action"),
-  resolvedInputMode: turnInputModeSchema.default("action"),
-  inputModeSource: turnInputModeSourceSchema.default("explicit"),
-  operationKind: z.enum(["append", "replace_latest"]).default("append"),
+  requestedInputMode: turnInputSelectionSchema,
+  resolvedInputMode: turnInputModeSchema,
+  inputModeSource: turnInputModeSourceSchema,
+  operationKind: z.enum(["append", "replace_latest"]),
   replacementTurnId: z.string().uuid().nullable().optional(),
-  baseTurnNumber: z.coerce.number().int().min(0).nullable().optional(),
+  baseTurnNumber: z.number().int().min(0).nullable().optional(),
   status: z.enum(["queued", "replacement_queued", "assessing", "generating", "validating", "committing", "completed", "recoverable", "failed", "discarded", "cancelled"]),
-  attempts: z.coerce.number().int().min(0),
+  attempts: z.number().int().min(0),
   requestedModel: z.string().optional(),
   providerResponseId: z.string().nullable().optional(),
   providerFinishReason: z.string().nullable().optional(),
@@ -409,9 +410,9 @@ export const generationJobStatusSchema = z.object({
   errorCode: z.string().nullable().optional(),
   errorMessage: z.string().nullable().optional(),
   recoveryMetadata: z.record(z.string(), z.unknown()).optional(),
-  createdAt: z.union([z.string(), z.date()]),
-  updatedAt: z.union([z.string(), z.date()]),
-  completedAt: z.union([z.string(), z.date()]).nullable().optional(),
+  createdAt: apiTimestampSchema,
+  updatedAt: apiTimestampSchema,
+  completedAt: apiTimestampSchema.nullable().optional(),
   partialOutput: z.string().nullable().optional(),
   partialNarration: z.string().nullable().optional()
 });

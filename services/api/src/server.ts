@@ -207,8 +207,20 @@ function errorCodeFrom(error: unknown): string | null {
     : null;
 }
 
+function parseResponseProjection<TSchema extends z.ZodType>(schema: TSchema, value: unknown): z.output<TSchema> {
+  try {
+    return schema.parse(value);
+  } catch (error) {
+    if (error instanceof z.ZodError) Object.assign(error, { statusCode: 500 });
+    throw error;
+  }
+}
+
 function generationSnapshot(value: unknown) {
-  return generationStreamSnapshotSchema.parse(generationJobStatusSchema.parse(value));
+  return parseResponseProjection(
+    generationStreamSnapshotSchema,
+    parseResponseProjection(generationJobStatusSchema, value)
+  );
 }
 
 export async function buildServer({ config, pool }: BuildServerOptions): Promise<FastifyInstance> {
@@ -401,7 +413,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     return progress;
   });
 
-  app.get("/api/v1/worlds", async () => worldListResponseSchema.parse({ worlds: await listWorlds(pool) }));
+  app.get("/api/v1/worlds", async () => parseResponseProjection(worldListResponseSchema, { worlds: await listWorlds(pool) }));
 
   app.post("/api/v1/worlds", async (request, reply) => (
     reply.code(201).send(await createWorld(pool, worldCreateSchema.parse(request.body)))
@@ -494,7 +506,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   });
 
   app.get("/api/v1/campaigns", async () => {
-    return campaignListResponseSchema.parse({ campaigns: await listCampaigns(pool) });
+    return parseResponseProjection(campaignListResponseSchema, { campaigns: await listCampaigns(pool) });
   });
 
   app.get<{ Params: { worldVersionId: string } }>("/api/v1/world-versions/:worldVersionId/playable-characters", async (request) => (
@@ -569,7 +581,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       [ownerUserId, campaignId]
     );
     const costs = await turnReportedCosts(pool, ownerUserId, result.rows.map((turn: { id: string }) => turn.id));
-    return turnListResponseSchema.parse({
+    return parseResponseProjection(turnListResponseSchema, {
       turns: result.rows.map((turn: { id: string; narration: string }) => ({
         ...turn,
         narration: formatNarrationParagraphs(turn.narration),
@@ -598,7 +610,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     getCampaignCostSummary(pool, uuidSchema.parse(request.params.campaignId))
   ));
 
-  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/sync-status", async (request, reply) => {
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/sync-status", async (request) => {
     const ownerUserId = await initialOwnerId(pool);
     const result = await pool.query(
       `SELECT c.id, c.title, c.active_turn_number AS "activeTurnNumber", c.world_version_id AS "worldVersionId",
@@ -632,7 +644,13 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       [uuidSchema.parse(request.params.campaignId), ownerUserId]
     );
     const row = result.rows[0];
-    if (!row) return reply.code(404).send({ error: "Not found", message: "Campaign not found." });
+    if (!row) {
+      throw Object.assign(new Error("Campaign not found."), {
+        name: "CampaignNotFoundError",
+        statusCode: 404,
+        details: { code: "campaign_not_found" }
+      });
+    }
     const content = typeof row.worldContent === "string" ? JSON.parse(row.worldContent) : (row.worldContent || {});
     const worldOverview = content.world || {};
     const effectiveCharacter = effectiveCampaignCharacter(row.characterProfile, row.characterSnapshot);
@@ -684,7 +702,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       createdAt: row.pendingGenerationCreatedAt,
       updatedAt: row.pendingGenerationUpdatedAt
     } : null;
-    return campaignSyncStatusSchema.parse({ ...campaign, campaign, world, playerConfig, pendingGeneration });
+    return parseResponseProjection(campaignSyncStatusSchema, { ...campaign, campaign, world, playerConfig, pendingGeneration });
   });
 
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/player-config", async (request) => (
@@ -725,13 +743,13 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations", async (request, reply) => {
     const body = generationRequestSchema.parse(request.body);
     const job = await enqueueGeneration(pool, uuidSchema.parse(request.params.campaignId), body);
-    return reply.code(job.duplicate ? 200 : 202).send(generationEnqueueResponseSchema.parse(job));
+    return reply.code(job.duplicate ? 200 : 202).send(parseResponseProjection(generationEnqueueResponseSchema, job));
   });
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations/retry-latest", async (request, reply) => {
     const body = generationRetryLatestRequestSchema.parse(request.body);
     const job = await enqueueLatestReplacement(pool, uuidSchema.parse(request.params.campaignId), body);
-    return reply.code(job.duplicate ? 200 : 202).send(generationEnqueueResponseSchema.parse(job));
+    return reply.code(job.duplicate ? 200 : 202).send(parseResponseProjection(generationEnqueueResponseSchema, job));
   });
 
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId", async (request) => (
@@ -745,6 +763,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     let finalStatus = "client_closed";
     let isClosed = false;
     request.raw.on("close", () => { isClosed = true; });
+    let job = generationSnapshot(await getGenerationJob(pool, jobId));
 
     logger.info({
       event: "turn_generation_stream_connected",
@@ -759,19 +778,19 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
       let lastSentJson = "";
       while (!isClosed) {
+        const currentJson = JSON.stringify(job);
+        if (currentJson !== lastSentJson) {
+          lastSentJson = currentJson;
+          reply.raw.write(`data: ${currentJson}\n\n`);
+          snapshotsSent += 1;
+        }
+        if (["completed", "failed", "recoverable", "discarded", "cancelled"].includes(job.status)) {
+          finalStatus = job.status;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 350));
         try {
-          const job = generationSnapshot(await getGenerationJob(pool, jobId));
-          if (isClosed) break;
-          const currentJson = JSON.stringify(job);
-          if (currentJson !== lastSentJson) {
-            lastSentJson = currentJson;
-            reply.raw.write(`data: ${currentJson}\n\n`);
-            snapshotsSent += 1;
-          }
-          if (["completed", "failed", "recoverable", "discarded", "cancelled"].includes(job.status)) {
-            finalStatus = job.status;
-            break;
-          }
+          job = generationSnapshot(await getGenerationJob(pool, jobId));
         } catch (error) {
           if (isClosed) break;
           finalStatus = "stream_error";
@@ -783,7 +802,6 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
           });
           break;
         }
-        await new Promise((resolve) => setTimeout(resolve, 350));
       }
     } finally {
       logger.info({
@@ -799,19 +817,19 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   });
 
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/result", async (request) => (
-    generationResultSchema.parse(await getGenerationResult(pool, uuidSchema.parse(request.params.jobId)))
+    parseResponseProjection(generationResultSchema, await getGenerationResult(pool, uuidSchema.parse(request.params.jobId)))
   ));
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/retry", async (request, reply) => (
-    reply.code(202).send(generationActionResponseSchema.parse(await retryGeneration(pool, uuidSchema.parse(request.params.jobId))))
+    reply.code(202).send(parseResponseProjection(generationActionResponseSchema, await retryGeneration(pool, uuidSchema.parse(request.params.jobId))))
   ));
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/cancel", async (request, reply) => (
-    reply.code(202).send(generationActionResponseSchema.parse(await cancelGeneration(pool, uuidSchema.parse(request.params.jobId))))
+    reply.code(202).send(parseResponseProjection(generationActionResponseSchema, await cancelGeneration(pool, uuidSchema.parse(request.params.jobId))))
   ));
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/discard", async (request) => (
-    generationActionResponseSchema.parse(await discardGeneration(pool, uuidSchema.parse(request.params.jobId)))
+    parseResponseProjection(generationActionResponseSchema, await discardGeneration(pool, uuidSchema.parse(request.params.jobId)))
   ));
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-config", async (request) => (

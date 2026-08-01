@@ -258,14 +258,14 @@ export const worldSummarySchema = z.object({
   forkedFromWorldVersionId: z.uuid().nullable(),
   createdAt: apiTimestampSchema,
   updatedAt: apiTimestampSchema,
-  draftRevision: z.coerce.number().int().positive().nullable(),
+  draftRevision: z.number().int().positive().nullable(),
   draftUpdatedAt: apiTimestampSchema.nullable(),
   draftPreview: worldSummaryPreviewSchema.nullable(),
   latestVersionId: z.uuid().nullable(),
-  latestVersionNumber: z.coerce.number().int().positive().nullable(),
+  latestVersionNumber: z.number().int().positive().nullable(),
   latestPublishedAt: apiTimestampSchema.nullable(),
   latestPreview: worldSummaryPreviewSchema.nullable(),
-  campaignCount: z.coerce.number().int().min(0)
+  campaignCount: z.number().int().min(0)
 });
 
 export const worldListResponseSchema = z.object({

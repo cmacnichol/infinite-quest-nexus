@@ -8,7 +8,8 @@ import {
   generationResultSchema,
   generationStreamSnapshotSchema,
   turnListResponseSchema,
-  worldListResponseSchema
+  worldListResponseSchema,
+  type GenerationActionResponse
 } from "../../packages/contracts/src/index.js";
 
 const CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
@@ -17,6 +18,10 @@ const WORLD_VERSION_ID = "33333333-3333-4333-8333-333333333333";
 const JOB_ID = "44444444-4444-4444-8444-444444444444";
 const TURN_ID = "55555555-5555-4555-8555-555555555555";
 const TIMESTAMP = "2026-08-01T12:00:00.000Z";
+
+// @ts-expect-error completed jobs are results, never generation action responses
+const invalidCompletedActionStatus: GenerationActionResponse["status"] = "completed";
+void invalidCompletedActionStatus;
 
 describe("client API response contracts", () => {
   it("keeps the transport error name separate from the domain detail code", () => {
@@ -230,21 +235,32 @@ describe("client API response contracts", () => {
   });
 
   it("derives client snapshots without exposing raw partial output", () => {
-    const parsed = generationStreamSnapshotSchema.parse({
+    const snapshot = {
       id: JOB_ID,
       campaignId: CAMPAIGN_ID,
       expectedTurnNumber: 3,
       action: "Open the dome.",
+      requestedInputMode: "action",
+      resolvedInputMode: "action",
+      inputModeSource: "explicit",
+      operationKind: "append",
       status: "cancelled",
       attempts: 1,
       createdAt: TIMESTAMP,
       updatedAt: TIMESTAMP,
       partialOutput: "raw provider response",
       partialNarration: "Sanitized narration"
-    });
+    };
+    const parsed = generationStreamSnapshotSchema.parse(snapshot);
 
     expect(parsed).toMatchObject({ id: JOB_ID, status: "cancelled", partialNarration: "Sanitized narration" });
     expect(parsed).not.toHaveProperty("partialOutput");
-    expect(() => generationStreamSnapshotSchema.parse({ id: JOB_ID, status: "mystery" })).toThrow();
+    for (const field of ["requestedInputMode", "resolvedInputMode", "inputModeSource", "operationKind"] as const) {
+      const { [field]: _missing, ...malformed } = snapshot;
+      expect(generationStreamSnapshotSchema.safeParse(malformed).success, field).toBe(false);
+    }
+    expect(generationStreamSnapshotSchema.safeParse({ ...snapshot, expectedTurnNumber: "3" }).success).toBe(false);
+    expect(generationStreamSnapshotSchema.safeParse({ ...snapshot, createdAt: "not-a-timestamp" }).success).toBe(false);
+    expect(generationStreamSnapshotSchema.safeParse({ ...snapshot, status: "mystery" }).success).toBe(false);
   });
 });

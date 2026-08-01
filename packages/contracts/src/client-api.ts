@@ -39,7 +39,7 @@ export const campaignSummarySchema = z.object({
   id: z.uuid(),
   title: z.string().trim().min(1),
   status: z.enum(["active", "archived"]),
-  activeTurnNumber: z.coerce.number().int().min(0),
+  activeTurnNumber: z.number().int().min(0),
   createdAt: apiTimestampSchema,
   updatedAt: apiTimestampSchema,
   storyLengthProfile: storyLengthProfileSchema,
@@ -51,8 +51,8 @@ export const campaignSummarySchema = z.object({
   worldVersionId: z.uuid(),
   textProviderProfileId: z.uuid().nullable(),
   imageProviderProfileId: z.uuid().nullable(),
-  worldVersionNumber: z.coerce.number().int().positive(),
-  latestWorldVersionNumber: z.coerce.number().int().positive(),
+  worldVersionNumber: z.number().int().positive(),
+  latestWorldVersionNumber: z.number().int().positive(),
   worldUpdateAvailable: z.boolean(),
   costInformation: z.array(campaignCostInformationSchema)
 });
@@ -64,7 +64,7 @@ export const campaignListResponseSchema = z.object({
 const campaignSyncCampaignSchema = z.object({
   id: z.uuid(),
   title: z.string().trim().min(1),
-  activeTurnNumber: z.coerce.number().int().min(0),
+  activeTurnNumber: z.number().int().min(0),
   worldVersionId: z.uuid(),
   storyLengthProfile: storyLengthProfileSchema,
   updatedAt: apiTimestampSchema,
@@ -72,7 +72,7 @@ const campaignSyncCampaignSchema = z.object({
   selectedCharacterName: z.string(),
   characterSnapshot: nullableObjectSchema,
   characterProfile: nullableObjectSchema,
-  characterProfileRevision: z.coerce.number().int().min(0),
+  characterProfileRevision: z.number().int().min(0),
   status: z.enum(["active", "archived"])
 });
 
@@ -81,7 +81,7 @@ const pendingGenerationSchema = z.object({
   status: generationStatusSchema,
   action: z.string(),
   operationKind: operationKindSchema,
-  expectedTurnNumber: z.coerce.number().int().min(1),
+  expectedTurnNumber: z.number().int().min(1),
   createdAt: apiTimestampSchema,
   updatedAt: apiTimestampSchema
 });
@@ -91,7 +91,7 @@ export const campaignSyncStatusSchema = campaignSyncCampaignSchema.extend({
   world: z.object({
     id: z.uuid(),
     title: z.string(),
-    versionNumber: z.coerce.number().int().positive(),
+    versionNumber: z.number().int().positive(),
     genre: z.string(),
     tone: z.string(),
     premise: z.string(),
@@ -106,7 +106,7 @@ export const campaignSyncStatusSchema = campaignSyncCampaignSchema.extend({
     selectedCharacterName: z.string(),
     characterSnapshot: nullableObjectSchema,
     characterProfile: nullableObjectSchema,
-    characterProfileRevision: z.coerce.number().int().min(0),
+    characterProfileRevision: z.number().int().min(0),
     rpgStats: z.array(playerRpgStatSchema),
     trackers: z.array(campaignTrackerSchema),
     eventTriggers: z.array(playerEventTriggerSchema),
@@ -118,7 +118,7 @@ export const campaignSyncStatusSchema = campaignSyncCampaignSchema.extend({
 
 export const turnSummarySchema = z.object({
   id: z.uuid(),
-  turnNumber: z.coerce.number().int().positive(),
+  turnNumber: z.number().int().positive(),
   action: z.string(),
   inputMode: turnInputModeSchema,
   inputModeSource: turnInputModeSourceSchema,
@@ -142,7 +142,7 @@ export const generationEnqueueResponseSchema = z.object({
   resultTurnId: z.uuid().nullable().optional(),
   action: z.string().optional(),
   operationKind: operationKindSchema.optional(),
-  expectedTurnNumber: z.coerce.number().int().min(1).optional(),
+  expectedTurnNumber: z.number().int().min(1).optional(),
   replacementTurnId: z.uuid().nullable().optional(),
   createdAt: apiTimestampSchema.optional(),
   recoveryMetadata: z.record(z.string(), z.unknown()).optional()
@@ -154,11 +154,11 @@ export const generationResultSchema = z.object({
   id: z.uuid(),
   status: z.literal("completed"),
   campaignId: z.uuid(),
-  expectedTurnNumber: z.coerce.number().int().min(1),
+  expectedTurnNumber: z.number().int().min(1),
   resultTurnId: z.uuid(),
   errorCode: z.string().nullable(),
   errorMessage: z.string().nullable(),
-  turnNumber: z.coerce.number().int().positive(),
+  turnNumber: z.number().int().positive(),
   action: z.string(),
   inputMode: turnInputModeSchema,
   inputModeSource: turnInputModeSourceSchema,
@@ -173,17 +173,20 @@ export const generationResultSchema = z.object({
   reportedCost: reportedCostSchema.nullable()
 });
 
-const generationActionStatuses = new Set(["queued", "replacement_queued", "cancelled", "discarded"]);
+const generationActionStatusSchema = generationStatusSchema.extract([
+  "queued",
+  "replacement_queued",
+  "cancelled",
+  "discarded"
+]);
 
 export const generationActionResponseSchema = generationJobStatusSchema.pick({
   id: true,
-  status: true,
   campaignId: true,
   operationKind: true
-}).partial({ campaignId: true, operationKind: true }).refine(
-  (value) => generationActionStatuses.has(value.status),
-  { path: ["status"], message: "Generation action returned an unsupported status." }
-);
+}).partial({ campaignId: true, operationKind: true }).extend({
+  status: generationActionStatusSchema
+});
 
 export type CampaignSummary = z.infer<typeof campaignSummarySchema>;
 export type CampaignListResponse = z.infer<typeof campaignListResponseSchema>;

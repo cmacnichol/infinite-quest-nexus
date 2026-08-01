@@ -766,28 +766,15 @@ describe("API server security and CORS headers", () => {
         .filter((fields) => String(fields.event || "").startsWith("turn_generation_stream_"));
       const warningLogs = loggerWarn.mock.calls.map(([fields]) => fields as Record<string, unknown>);
 
-      expect(response.statusCode).toBe(200);
-      expect(response.headers["content-type"]).toContain("text/event-stream");
-      expect(response.headers["cache-control"]).toBe("no-cache");
-      expect(lifecycleLogs).toEqual([
-        expect.objectContaining({ event: "turn_generation_stream_connected", generationJobId: jobId, correlationId: expect.any(String) }),
-        expect.objectContaining({
-          event: "turn_generation_stream_closed",
-          generationJobId: jobId,
-          correlationId: lifecycleLogs[0]?.correlationId,
-          finalStatus: "stream_error",
-          snapshotsSent: 0
-        })
-      ]);
-      expect(response.body).not.toContain("data:");
-      expect(warningLogs).toEqual([
-        expect.objectContaining({
-          correlationId: lifecycleLogs[0]?.correlationId,
-          generationJobId: jobId,
-          errorName: "Error",
-          errorCode: "unclassified_error"
-        })
-      ]);
+      expect(response.statusCode).toBe(500);
+      expect(response.headers["content-type"]).toContain("application/json");
+      expect(response.json()).toMatchObject({
+        error: "Internal server error",
+        correlationId: expect.any(String),
+        details: {}
+      });
+      expect(lifecycleLogs).toEqual([]);
+      expect(warningLogs).toEqual([]);
       const serializedLogs = JSON.stringify([...loggerInfo.mock.calls, ...loggerWarn.mock.calls]);
       expect(serializedLogs).not.toContain(sensitiveMessage);
       expect(serializedLogs).not.toContain(unsafeCode);
