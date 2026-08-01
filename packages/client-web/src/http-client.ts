@@ -50,7 +50,12 @@ export interface NexusHttpClientOptions {
 }
 
 function normalizeBasePath(basePath: string): string {
-  if (/^[a-z][a-z\d+.-]*:/i.test(basePath) || basePath.startsWith("//") || !basePath.startsWith("/")) {
+  if (
+    /^[a-z][a-z\d+.-]*:/i.test(basePath) ||
+    basePath.startsWith("//") ||
+    !basePath.startsWith("/") ||
+    /[\\\u0000-\u001F\u007F]/.test(basePath)
+  ) {
     throw new TypeError("Base path must be API-relative and begin with '/'.");
   }
   return basePath.replace(/\/+$/, "");

@@ -46,7 +46,13 @@ function session(overrides: Partial<SessionPort> = {}): SessionPort {
 }
 
 describe("createNexusHttpClient", () => {
-  it.each(["https://evil.test/api/v1", "//evil.test/api/v1", "api/v1"])("rejects unsafe base path %s before fetching or reading session authorization", (basePath) => {
+  it.each([
+    "https://evil.test/api/v1",
+    "//evil.test/api/v1",
+    "api/v1",
+    "/\\evil.test/api/v1",
+    "/\\t/evil.test/api/v1"
+  ])("rejects unsafe base path %s before fetching or reading session authorization", (basePath) => {
     const queue = fetchQueue();
     let authorizationCalls = 0;
 
