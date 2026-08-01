@@ -10,6 +10,7 @@ import { logger } from "../../packages/logger/src/index.js";
 import { parseCompleteGeneratedWorld } from "../../packages/domain/src/generated-world.js";
 import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
 import { ProviderResponseTooLargeError } from "../../packages/story-engine/src/provider-response.js";
+import { generationStreamSnapshotSchema } from "../../packages/contracts/src/generation.js";
 import {
   generatedWorldProviderError,
   incompleteGeneratedWorldError
@@ -703,6 +704,13 @@ describe("API server security and CORS headers", () => {
       expect(response.headers["cache-control"]).toBe("no-cache");
       expect(response.body.match(/^data: /gm)).toHaveLength(1);
       expect(response.body).toContain('"status":"cancelled"');
+      const snapshotPayload = JSON.parse(response.body.trim().replace(/^data: /, ""));
+      expect(generationStreamSnapshotSchema.parse(snapshotPayload)).toMatchObject({
+        id: jobId,
+        status: "cancelled",
+        partialNarration: fixturePartialNarration
+      });
+      expect(snapshotPayload).not.toHaveProperty("partialOutput");
 
       const lifecycleLogs = loggerInfo.mock.calls
         .map(([fields]) => fields as Record<string, unknown>)
@@ -768,9 +776,10 @@ describe("API server security and CORS headers", () => {
           generationJobId: jobId,
           correlationId: lifecycleLogs[0]?.correlationId,
           finalStatus: "stream_error",
-          snapshotsSent: 1
+          snapshotsSent: 0
         })
       ]);
+      expect(response.body).not.toContain("data:");
       expect(warningLogs).toEqual([
         expect.objectContaining({
           correlationId: lifecycleLogs[0]?.correlationId,

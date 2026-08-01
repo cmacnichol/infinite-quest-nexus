@@ -1,0 +1,250 @@
+import { describe, expect, it } from "vitest";
+import {
+  apiErrorEnvelopeSchema,
+  campaignListResponseSchema,
+  campaignSyncStatusSchema,
+  generationActionResponseSchema,
+  generationEnqueueResponseSchema,
+  generationResultSchema,
+  generationStreamSnapshotSchema,
+  turnListResponseSchema,
+  worldListResponseSchema
+} from "../../packages/contracts/src/index.js";
+
+const CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
+const WORLD_ID = "22222222-2222-4222-8222-222222222222";
+const WORLD_VERSION_ID = "33333333-3333-4333-8333-333333333333";
+const JOB_ID = "44444444-4444-4444-8444-444444444444";
+const TURN_ID = "55555555-5555-4555-8555-555555555555";
+const TIMESTAMP = "2026-08-01T12:00:00.000Z";
+
+describe("client API response contracts", () => {
+  it("keeps the transport error name separate from the domain detail code", () => {
+    const parsed = apiErrorEnvelopeSchema.parse({
+      error: "GenerationConflictError",
+      message: "A generation is already active.",
+      correlationId: "request-123",
+      details: {
+        code: "active_generation_exists",
+        pendingGeneration: { id: JOB_ID }
+      }
+    });
+
+    expect(parsed.error).toBe("GenerationConflictError");
+    expect(parsed.details).toMatchObject({ code: "active_generation_exists" });
+  });
+
+  it("rejects campaign list field drift", () => {
+    const validCampaign = {
+      id: CAMPAIGN_ID,
+      title: "The Observatory",
+      status: "active",
+      activeTurnNumber: 2,
+      createdAt: TIMESTAMP,
+      updatedAt: TIMESTAMP,
+      storyLengthProfile: "standard",
+      turnControlStyle: "flexible_auto",
+      selectedCharacterId: "observer",
+      selectedCharacterName: "The Observer",
+      worldId: WORLD_ID,
+      worldTitle: "Emerald Skies",
+      worldVersionId: WORLD_VERSION_ID,
+      textProviderProfileId: null,
+      imageProviderProfileId: null,
+      worldVersionNumber: 1,
+      latestWorldVersionNumber: 1,
+      worldUpdateAvailable: false,
+      costInformation: []
+    };
+
+    expect(campaignListResponseSchema.parse({ campaigns: [validCampaign] }).campaigns).toHaveLength(1);
+    const { activeTurnNumber: _removed, ...renamedCampaign } = validCampaign;
+    expect(() => campaignListResponseSchema.parse({
+      campaigns: [{ ...renamedCampaign, activeTurn: 2 }]
+    })).toThrow();
+  });
+
+  it("rejects world list field drift", () => {
+    const validWorld = {
+      id: WORLD_ID,
+      title: "Emerald Skies",
+      status: "active",
+      imageUrl: "",
+      forkedFromWorldId: null,
+      forkedFromWorldVersionId: null,
+      createdAt: TIMESTAMP,
+      updatedAt: TIMESTAMP,
+      draftRevision: 1,
+      draftUpdatedAt: TIMESTAMP,
+      draftPreview: {
+        title: "Emerald Skies",
+        genre: "Fantasy",
+        tone: "Mysterious",
+        premise: "An observatory wakes.",
+        backgroundStory: "The stars went dark.",
+        firstAction: "Open the dome."
+      },
+      latestVersionId: WORLD_VERSION_ID,
+      latestVersionNumber: 1,
+      latestPublishedAt: TIMESTAMP,
+      latestPreview: {
+        title: "Emerald Skies",
+        genre: "Fantasy",
+        tone: "Mysterious",
+        premise: "An observatory wakes.",
+        backgroundStory: "The stars went dark.",
+        firstAction: "Open the dome.",
+        rules: "Keep the stars strange."
+      },
+      campaignCount: 1
+    };
+
+    expect(worldListResponseSchema.parse({ worlds: [validWorld] }).worlds).toHaveLength(1);
+    const { latestVersionNumber: _removed, ...renamedWorld } = validWorld;
+    expect(() => worldListResponseSchema.parse({
+      worlds: [{ ...renamedWorld, latestVersion: 1 }]
+    })).toThrow();
+  });
+
+  it("validates the campaign sync projection and pending replacement status", () => {
+    const campaign = {
+      id: CAMPAIGN_ID,
+      title: "The Observatory",
+      activeTurnNumber: 2,
+      worldVersionId: WORLD_VERSION_ID,
+      storyLengthProfile: "standard",
+      updatedAt: TIMESTAMP,
+      selectedCharacterId: "observer",
+      selectedCharacterName: "The Observer",
+      characterSnapshot: { name: "The Observer" },
+      characterProfile: null,
+      characterProfileRevision: 0,
+      status: "active"
+    };
+    const parsed = campaignSyncStatusSchema.parse({
+      ...campaign,
+      campaign,
+      world: {
+        id: WORLD_ID,
+        title: "Emerald Skies",
+        versionNumber: 1,
+        genre: "Fantasy",
+        tone: "Mysterious",
+        premise: "An observatory wakes.",
+        backgroundStory: "The stars went dark.",
+        character: "The Observer",
+        firstAction: "Open the dome.",
+        rules: "Keep the stars strange.",
+        playableCharacters: []
+      },
+      playerConfig: {
+        selectedCharacterId: "observer",
+        selectedCharacterName: "The Observer",
+        characterSnapshot: { name: "The Observer" },
+        characterProfile: null,
+        characterProfileRevision: 0,
+        rpgStats: [],
+        trackers: [],
+        eventTriggers: [],
+        useRpgStats: false,
+        suppressEventTriggers: false
+      },
+      pendingGeneration: {
+        id: JOB_ID,
+        status: "replacement_queued",
+        action: "Take another path.",
+        operationKind: "replace_latest",
+        expectedTurnNumber: 2,
+        createdAt: TIMESTAMP,
+        updatedAt: TIMESTAMP
+      }
+    });
+
+    expect(parsed.pendingGeneration?.status).toBe("replacement_queued");
+    expect(() => campaignSyncStatusSchema.parse({ ...parsed, campaign: { ...campaign, activeTurnNumber: undefined } })).toThrow();
+  });
+
+  it("validates accepted turns and completed generation results", () => {
+    const turn = {
+      id: TURN_ID,
+      turnNumber: 2,
+      action: "Open the dome.",
+      inputMode: "action",
+      inputModeSource: "explicit",
+      narration: "Emerald light spills across the floor.",
+      choices: ["Look up.", "Step back.", "Call out.", "Close the dome."],
+      customActionSuggestion: "Study the constellations.",
+      imagePrompt: "An ancient observatory under emerald stars.",
+      imageUrl: null,
+      acceptedAt: TIMESTAMP,
+      reportedCost: null
+    };
+    expect(turnListResponseSchema.parse({ turns: [turn] }).turns).toHaveLength(1);
+
+    const result = generationResultSchema.parse({
+      id: JOB_ID,
+      status: "completed",
+      campaignId: CAMPAIGN_ID,
+      expectedTurnNumber: 2,
+      resultTurnId: TURN_ID,
+      errorCode: null,
+      errorMessage: null,
+      turnNumber: 2,
+      action: turn.action,
+      inputMode: turn.inputMode,
+      inputModeSource: turn.inputModeSource,
+      narration: turn.narration,
+      choices: turn.choices,
+      customActionSuggestion: turn.customActionSuggestion,
+      imagePrompt: turn.imagePrompt,
+      modelMetadata: {},
+      mechanics: {},
+      acceptedAt: TIMESTAMP,
+      stateSnapshot: {},
+      reportedCost: null
+    });
+    expect(result.resultTurnId).toBe(TURN_ID);
+    expect(() => generationResultSchema.parse({ ...result, status: "recoverable" })).toThrow();
+  });
+
+  it("accepts every enqueue and action status used by the play loop", () => {
+    expect(generationEnqueueResponseSchema.parse({
+      id: JOB_ID,
+      status: "queued",
+      expectedTurnNumber: 3,
+      createdAt: TIMESTAMP,
+      duplicate: false
+    }).status).toBe("queued");
+    expect(generationEnqueueResponseSchema.parse({
+      id: JOB_ID,
+      status: "replacement_queued",
+      operationKind: "replace_latest",
+      replacementTurnId: TURN_ID,
+      expectedTurnNumber: 2,
+      createdAt: TIMESTAMP,
+      duplicate: false
+    }).status).toBe("replacement_queued");
+    expect(generationActionResponseSchema.parse({ id: JOB_ID, status: "cancelled" }).status).toBe("cancelled");
+    expect(generationActionResponseSchema.parse({ id: JOB_ID, status: "discarded" }).status).toBe("discarded");
+    expect(() => generationActionResponseSchema.parse({ id: JOB_ID, status: "completed" })).toThrow();
+  });
+
+  it("derives client snapshots without exposing raw partial output", () => {
+    const parsed = generationStreamSnapshotSchema.parse({
+      id: JOB_ID,
+      campaignId: CAMPAIGN_ID,
+      expectedTurnNumber: 3,
+      action: "Open the dome.",
+      status: "cancelled",
+      attempts: 1,
+      createdAt: TIMESTAMP,
+      updatedAt: TIMESTAMP,
+      partialOutput: "raw provider response",
+      partialNarration: "Sanitized narration"
+    });
+
+    expect(parsed).toMatchObject({ id: JOB_ID, status: "cancelled", partialNarration: "Sanitized narration" });
+    expect(parsed).not.toHaveProperty("partialOutput");
+    expect(() => generationStreamSnapshotSchema.parse({ id: JOB_ID, status: "mystery" })).toThrow();
+  });
+});

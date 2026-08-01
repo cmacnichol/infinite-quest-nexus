@@ -18,6 +18,8 @@ import {
   campaignRewindSchema,
   generationRequestSchema,
   generationRetryLatestRequestSchema,
+  generationJobStatusSchema,
+  generationStreamSnapshotSchema,
   illustrationConfigSchema,
   illustrationRequestSchema,
   illustrationSegmentImageRequestSchema,
@@ -47,9 +49,19 @@ import {
   worldForkSchema,
   worldImportRequestSchema,
   worldPublishSchema,
+  worldListResponseSchema,
   worldVersionDeleteSchema,
   worldStatusUpdateSchema
 } from "../../../packages/contracts/src/world-library.js";
+import { apiErrorEnvelopeSchema } from "../../../packages/contracts/src/http.js";
+import {
+  campaignListResponseSchema,
+  campaignSyncStatusSchema,
+  generationActionResponseSchema,
+  generationEnqueueResponseSchema,
+  generationResultSchema,
+  turnListResponseSchema
+} from "../../../packages/contracts/src/client-api.js";
 import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
 import { formatNarrationParagraphs } from "../../../packages/story-engine/src/narration-formatting.js";
 import { userProfileUpdateSchema } from "../../../packages/contracts/src/users.js";
@@ -195,6 +207,10 @@ function errorCodeFrom(error: unknown): string | null {
     : null;
 }
 
+function generationSnapshot(value: unknown) {
+  return generationStreamSnapshotSchema.parse(generationJobStatusSchema.parse(value));
+}
+
 export async function buildServer({ config, pool }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: createLoggerOptions(),
@@ -213,7 +229,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       ? details.code
       : details.name;
     request.log.error({ err: error, code }, "request_failed");
-    void reply.code(code).send({
+    const payload = apiErrorEnvelopeSchema.parse({
       error: exposed ? (exposedError || "Provider request failed") : "Internal server error",
       message: exposed ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
       correlationId: request.id,
@@ -223,6 +239,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
         : exposed ? safeErrorDetails(details.details) : {},
       ...(details.issues === undefined ? {} : { issues: details.issues })
     });
+    void reply.code(code).send(payload);
   });
 
   installRequestSecurity(app, config);
@@ -384,7 +401,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     return progress;
   });
 
-  app.get("/api/v1/worlds", async () => ({ worlds: await listWorlds(pool) }));
+  app.get("/api/v1/worlds", async () => worldListResponseSchema.parse({ worlds: await listWorlds(pool) }));
 
   app.post("/api/v1/worlds", async (request, reply) => (
     reply.code(201).send(await createWorld(pool, worldCreateSchema.parse(request.body)))
@@ -477,7 +494,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   });
 
   app.get("/api/v1/campaigns", async () => {
-    return { campaigns: await listCampaigns(pool) };
+    return campaignListResponseSchema.parse({ campaigns: await listCampaigns(pool) });
   });
 
   app.get<{ Params: { worldVersionId: string } }>("/api/v1/world-versions/:worldVersionId/playable-characters", async (request) => (
@@ -552,13 +569,13 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       [ownerUserId, campaignId]
     );
     const costs = await turnReportedCosts(pool, ownerUserId, result.rows.map((turn: { id: string }) => turn.id));
-    return {
+    return turnListResponseSchema.parse({
       turns: result.rows.map((turn: { id: string; narration: string }) => ({
         ...turn,
         narration: formatNarrationParagraphs(turn.narration),
         reportedCost: costs.get(turn.id) || null
       }))
-    };
+    });
   });
 
   app.get<{ Params: { campaignId: string }; Querystring: { turnNumber?: string } }>("/api/v1/campaigns/:campaignId/state", async (request) => (
@@ -667,7 +684,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       createdAt: row.pendingGenerationCreatedAt,
       updatedAt: row.pendingGenerationUpdatedAt
     } : null;
-    return { ...campaign, campaign, world, playerConfig, pendingGeneration };
+    return campaignSyncStatusSchema.parse({ ...campaign, campaign, world, playerConfig, pendingGeneration });
   });
 
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/player-config", async (request) => (
@@ -708,17 +725,17 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations", async (request, reply) => {
     const body = generationRequestSchema.parse(request.body);
     const job = await enqueueGeneration(pool, uuidSchema.parse(request.params.campaignId), body);
-    return reply.code(job.duplicate ? 200 : 202).send(job);
+    return reply.code(job.duplicate ? 200 : 202).send(generationEnqueueResponseSchema.parse(job));
   });
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations/retry-latest", async (request, reply) => {
     const body = generationRetryLatestRequestSchema.parse(request.body);
     const job = await enqueueLatestReplacement(pool, uuidSchema.parse(request.params.campaignId), body);
-    return reply.code(job.duplicate ? 200 : 202).send(job);
+    return reply.code(job.duplicate ? 200 : 202).send(generationEnqueueResponseSchema.parse(job));
   });
 
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId", async (request) => (
-    getGenerationJob(pool, uuidSchema.parse(request.params.jobId))
+    generationSnapshot(await getGenerationJob(pool, uuidSchema.parse(request.params.jobId)))
   ));
 
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/stream", async (request, reply) => {
@@ -743,17 +760,9 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       let lastSentJson = "";
       while (!isClosed) {
         try {
-          const job = await getGenerationJob(pool, jobId);
+          const job = generationSnapshot(await getGenerationJob(pool, jobId));
           if (isClosed) break;
-          const currentJson = JSON.stringify({
-            id: job.id,
-            status: job.status,
-            action: job.action,
-            partialOutput: job.partialOutput || null,
-            partialNarration: job.partialNarration || null,
-            errorMessage: job.errorMessage || null,
-            errorCode: job.errorCode || null
-          });
+          const currentJson = JSON.stringify(job);
           if (currentJson !== lastSentJson) {
             lastSentJson = currentJson;
             reply.raw.write(`data: ${currentJson}\n\n`);
@@ -772,10 +781,6 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
             errorName: error instanceof Error ? error.name : "Error",
             errorCode: safeLogErrorCode(errorCodeFrom(error))
           });
-          if (!isClosed) {
-            reply.raw.write(`data: ${JSON.stringify({ status: "failed", errorMessage: error instanceof Error ? error.message : String(error) })}\n\n`);
-            snapshotsSent += 1;
-          }
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, 350));
@@ -794,19 +799,19 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   });
 
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/result", async (request) => (
-    getGenerationResult(pool, uuidSchema.parse(request.params.jobId))
+    generationResultSchema.parse(await getGenerationResult(pool, uuidSchema.parse(request.params.jobId)))
   ));
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/retry", async (request, reply) => (
-    reply.code(202).send(await retryGeneration(pool, uuidSchema.parse(request.params.jobId)))
+    reply.code(202).send(generationActionResponseSchema.parse(await retryGeneration(pool, uuidSchema.parse(request.params.jobId))))
   ));
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/cancel", async (request, reply) => (
-    reply.code(202).send(await cancelGeneration(pool, uuidSchema.parse(request.params.jobId)))
+    reply.code(202).send(generationActionResponseSchema.parse(await cancelGeneration(pool, uuidSchema.parse(request.params.jobId))))
   ));
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/discard", async (request) => (
-    discardGeneration(pool, uuidSchema.parse(request.params.jobId))
+    generationActionResponseSchema.parse(await discardGeneration(pool, uuidSchema.parse(request.params.jobId)))
   ));
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-config", async (request) => (

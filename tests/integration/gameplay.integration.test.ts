@@ -11,6 +11,15 @@ import { runImageJob } from "../../services/api/src/image-service.js";
 import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
+import {
+  campaignListResponseSchema,
+  campaignSyncStatusSchema,
+  generationEnqueueResponseSchema,
+  generationResultSchema,
+  generationStreamSnapshotSchema,
+  turnListResponseSchema
+} from "../../packages/contracts/src/client-api.js";
+import { worldListResponseSchema } from "../../packages/contracts/src/world-library.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -210,7 +219,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
       url: `/api/v1/campaigns/${campaignId}/sync-status`
     });
     expect(campaignResponse.statusCode).toBe(200);
-    const campaignData = campaignResponse.json();
+    const campaignData = campaignSyncStatusSchema.parse(campaignResponse.json());
     expect(campaignData.campaign).toMatchObject({ id: campaignId, worldVersionId });
     expect(campaignData.world).toMatchObject({ title: worldTitle });
     expect(campaignData.playerConfig).toMatchObject({
@@ -225,7 +234,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
       url: `/api/v1/campaigns/${campaignId}/turns`
     });
     expect(turnsResponse.statusCode).toBe(200);
-    const initialTurns = turnsResponse.json().turns;
+    const initialTurns = turnListResponseSchema.parse(turnsResponse.json()).turns;
     expect(initialTurns.length).toBeGreaterThan(0);
     expect(initialTurns.every((turn: { inputMode?: string }) => turn.inputMode === "action")).toBe(true);
 
@@ -242,7 +251,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
       }
     });
     expect(genResponse.statusCode).toBe(202);
-    const job = genResponse.json();
+    const job = generationEnqueueResponseSchema.parse(genResponse.json());
     expect(job.id).toBeDefined();
     expect(job.status).toBe("queued");
 
@@ -256,7 +265,20 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
       url: `/api/v1/generation-jobs/${job.id}`
     });
     expect(pollResponse.statusCode).toBe(200);
-    expect(pollResponse.json().status).toBe("completed");
+    const snapshot = generationStreamSnapshotSchema.parse(pollResponse.json());
+    expect(snapshot.status).toBe("completed");
+    expect(pollResponse.json()).not.toHaveProperty("partialOutput");
+
+    const resultResponse = await app.inject({
+      method: "GET",
+      url: `/api/v1/generation-jobs/${job.id}/result`
+    });
+    expect(resultResponse.statusCode).toBe(200);
+    expect(generationResultSchema.parse(resultResponse.json())).toMatchObject({
+      id: job.id,
+      campaignId,
+      status: "completed"
+    });
 
     // 6. Verify that the turn list now contains the generated turn with structured choices and trackers
     const turnsResponseAfter = await app.inject({
@@ -264,11 +286,24 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
       url: `/api/v1/campaigns/${campaignId}/turns`
     });
     expect(turnsResponseAfter.statusCode).toBe(200);
-    const turnsAfter = turnsResponseAfter.json().turns;
+    const turnsAfter = turnListResponseSchema.parse(turnsResponseAfter.json()).turns;
     const latestTurn = turnsAfter[turnsAfter.length - 1];
+    if (!latestTurn) throw new Error("Expected the completed generation to append a turn.");
     expect(latestTurn.narration).toContain("Ancient Observatory");
     expect(latestTurn.choices).toContain("Examine the telescope.");
     expect(latestTurn).toMatchObject({ inputMode: "action", inputModeSource: "explicit" });
+
+    const campaignList = await app.inject({ method: "GET", url: "/api/v1/campaigns" });
+    expect(campaignList.statusCode).toBe(200);
+    expect(campaignListResponseSchema.parse(campaignList.json()).campaigns).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: campaignId })])
+    );
+
+    const worldList = await app.inject({ method: "GET", url: "/api/v1/worlds" });
+    expect(worldList.statusCode).toBe(200);
+    expect(worldListResponseSchema.parse(worldList.json()).worlds).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: campaignData.world.id })])
+    );
   });
 
   it("exposes and idempotently resumes a staged latest-turn replacement through sync-status", async () => {

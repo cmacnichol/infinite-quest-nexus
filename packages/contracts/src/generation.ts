@@ -416,6 +416,10 @@ export const generationJobStatusSchema = z.object({
   partialNarration: z.string().nullable().optional()
 });
 
+export const generationStreamSnapshotSchema = generationJobStatusSchema.omit({
+  partialOutput: true
+});
+
 export type ProviderProfileInput = z.infer<typeof providerProfileInputSchema>;
 export type ProviderProfileUpdate = z.infer<typeof providerProfileUpdateSchema>;
 export type ProviderTextRequest = z.infer<typeof providerTextRequestSchema>;
@@ -451,3 +455,4 @@ export type PlayerEventTrigger = z.infer<typeof playerEventTriggerSchema>;
 export type PendingEventTrigger = z.infer<typeof pendingEventTriggerSchema>;
 export type RpgAssessmentOutput = z.infer<typeof rpgAssessmentOutputSchema>;
 export type GenerationJobStatus = z.infer<typeof generationJobStatusSchema>;
+export type GenerationStreamSnapshot = z.infer<typeof generationStreamSnapshotSchema>;
