@@ -106,9 +106,12 @@ budget.
 
 With the same fixture, the pre-C1 seven-field frame is 229 bytes, the C1 full
 client-safe stream frame is 492 bytes, and the Task 2a stream frame is 326
-bytes. For a generating row, a lease-only `updatedAt` renewal produces the same
-Task 2a JSON and therefore no extra SSE frame; a status transition to completed
-produces the second frame. B2 must preserve that dedupe behavior.
+bytes. The benchmark's deterministic `initial -> lease renewal only -> completed`
+sequence emits two frames for the pre-C1 hand-built projection, three frames for
+the C1 full client-safe projection, and two frames for the Task 2a stream
+projection. For a generating row, a lease-only `updatedAt` renewal produces the
+same Task 2a JSON and therefore no extra SSE frame; a status transition to
+completed produces the second frame. B2 must preserve that dedupe behavior.
 
 After an initial valid SSE frame, a later job read error closes the stream
 without fabricating a `failed` frame. This distinguishes stream transport

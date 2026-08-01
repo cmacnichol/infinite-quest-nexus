@@ -27,6 +27,16 @@ function measure(operation: () => void): { p50Ms: number; p95Ms: number } {
   return { p50Ms: percentile(samples, 0.5), p95Ms: percentile(samples, 0.95) };
 }
 
+function emittedFrameCount<T>(snapshots: readonly T[], projection: (snapshot: T) => unknown): number {
+  let lastFrame = "";
+  return snapshots.reduce((count, snapshot) => {
+    const frame = JSON.stringify(projection(snapshot));
+    if (frame === lastFrame) return count;
+    lastFrame = frame;
+    return count + 1;
+  }, 0);
+}
+
 const turn = {
   id: TURN_ID,
   turnNumber: 1,
@@ -76,6 +86,26 @@ const legacyStreamSnapshot = {
   errorMessage: generationJob.errorMessage,
   errorCode: generationJob.errorCode
 };
+const generationSequence = [
+  generationJob,
+  { ...generationJob, updatedAt: "2026-08-01T12:00:05.000Z" },
+  {
+    ...generationJob,
+    status: "completed",
+    resultTurnId: TURN_ID,
+    updatedAt: "2026-08-01T12:00:10.000Z",
+    completedAt: "2026-08-01T12:00:10.000Z"
+  }
+] as const;
+const legacyStreamProjection = (job: typeof generationJob) => ({
+  id: job.id,
+  status: job.status,
+  action: job.action,
+  partialOutput: job.partialOutput,
+  partialNarration: job.partialNarration,
+  errorMessage: job.errorMessage,
+  errorCode: job.errorCode
+});
 
 process.stdout.write(`${JSON.stringify({
   command: "pnpm exec tsx scripts/benchmark-client-contracts.ts",
@@ -86,9 +116,12 @@ process.stdout.write(`${JSON.stringify({
     c1Stream: Buffer.byteLength(JSON.stringify(pollingSnapshot)),
     task2aStream: Buffer.byteLength(JSON.stringify(streamSnapshot))
   },
-  leaseOnlySnapshotChangesFrame: JSON.stringify(streamSnapshot) !== JSON.stringify(generationStreamSnapshotSchema.parse({
-    ...generationJob,
-    updatedAt: "2026-08-01T12:00:05.000Z"
-  })),
+  framesPerGeneration: {
+    sequence: "initial -> lease renewal only -> completed",
+    preC1HandBuilt: emittedFrameCount(generationSequence, legacyStreamProjection),
+    c1Stream: emittedFrameCount(generationSequence, generationJobSnapshotSchema.parse),
+    task2aStream: emittedFrameCount(generationSequence, generationStreamSnapshotSchema.parse)
+  },
+  leaseOnlySnapshotChangesFrame: JSON.stringify(streamSnapshot) !== JSON.stringify(generationStreamSnapshotSchema.parse(generationSequence[1])),
   pollingSnapshotBytes: Buffer.byteLength(JSON.stringify(pollingSnapshot))
 }, null, 2)}\n`);

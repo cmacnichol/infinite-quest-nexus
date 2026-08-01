@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
+import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
@@ -31,6 +32,7 @@ type MockPoolOptions = {
   malformedJob?: boolean;
   missingJob?: boolean;
   missingSync?: boolean;
+  onGenerationJobRead?: () => void;
   streamReadFailure?: boolean;
   streamSnapshots?: Array<Record<string, unknown>>;
 };
@@ -224,6 +226,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
     if (sql.startsWith("SELECT id, campaign_id AS") && sql.includes("partial_output AS")) {
       if (options.missingJob) return { rows: [] };
       generationJobReads += 1;
+      options.onGenerationJobRead?.();
       if (options.streamReadFailure && generationJobReads > 1) throw new Error("generation job read failed");
       const snapshot = options.streamSnapshots?.[Math.min(generationJobReads - 1, options.streamSnapshots.length - 1)];
       return { rows: [{ ...jobRow(options), ...snapshot }] };
@@ -325,6 +328,36 @@ describe("client API route contracts without PostgreSQL", () => {
       expect(failureResponse.body).not.toContain('"status":"failed"');
     } finally {
       await Promise.all([dedupeApp.close(), failureApp.close()]);
+    }
+  });
+
+  it("does not query a generation job after the stream disconnects during its poll sleep", async () => {
+    let generationJobReads = 0;
+    const app = await buildServer({
+      config: config(storageRoot),
+      pool: mockPool({
+        streamSnapshots: [{ status: "generating" }],
+        onGenerationJobRead: () => { generationJobReads += 1; }
+      })
+    });
+
+    try {
+      const address = await app.listen({ host: "127.0.0.1", port: 0 });
+      await new Promise<void>((resolve, reject) => {
+        const streamRequest = request(`${address}/api/v1/generation-jobs/${JOB_ID}/stream`, (response) => {
+          response.once("data", () => {
+            response.destroy();
+            resolve();
+          });
+        });
+        streamRequest.once("error", reject);
+        streamRequest.end();
+      });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
+      expect(generationJobReads).toBe(1);
+    } finally {
+      await app.close();
     }
   });
 
