@@ -32,7 +32,7 @@ function typecheckFixture(tsconfigPath: string): { succeeded: boolean; output: s
 }
 
 describe("client boundary checks", () => {
-  test("actual core compiler fixture rejects Web, Node, and framework references", () => {
+  test("actual core compiler fixture rejects Web and Node references and reports unavailable React types", () => {
     const result = typecheckFixture("tests/fixtures/client-boundaries/core-forbidden/tsconfig.json");
 
     expect(result.succeeded).toBe(false);
@@ -61,7 +61,7 @@ describe("client boundary checks", () => {
     expect(result.output).toBe("");
   });
 
-  test("rejects client-core Web, Node, and framework dependencies", () => {
+  test("static scanner explicitly rejects client-core framework dependencies alongside Web and Node dependencies", () => {
     const violations = collectClientBoundaryViolations([
       {
         file: "packages/client-core/src/forbidden-dependencies.ts",

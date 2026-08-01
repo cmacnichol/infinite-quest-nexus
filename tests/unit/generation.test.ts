@@ -7,6 +7,7 @@ import {
   generationRequestSchema,
   illustrationConfigSchema,
   illustrationGenerationRequestSchema,
+  illustrationSegmentRequestSchema,
   sogniIllustrationProviderConfigSchema,
   sogniSdkIllustrationProviderConfigSchema,
   storyTurnOutputSchema,
@@ -14,6 +15,12 @@ import {
 } from "../../packages/contracts/src/generation.js";
 
 describe("generation contracts", () => {
+  it("accepts and strips a legacy illustration-segment idempotency key", () => {
+    expect(illustrationSegmentRequestSchema.parse({
+      idempotencyKey: "legacy-segment-request-key"
+    })).toEqual({ mode: "missing" });
+  });
+
   describe("providerProfileInputSchema", () => {
     it("accepts valid input with minimum required fields and applies defaults", () => {
       const input = {
