@@ -1,6 +1,10 @@
-# ADR 0026: Modular client and application boundaries
+# ADR 0028: Modular client and application boundaries
 
 **Status:** Accepted
+
+> Renumbered from 0026 during the Task 2a review. The original number collided
+> with `0026-durable-world-generation-progress.md`, which predates this record
+> on `main`.
 
 ## Context
 

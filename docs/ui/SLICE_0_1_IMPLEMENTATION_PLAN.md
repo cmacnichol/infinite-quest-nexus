@@ -31,21 +31,63 @@ Playwright, and axe-core.
 
 ## Completion status
 
-Runtime implementation reviewed through `26d5890` on branch
-`wip/main-uncommitted`.
+Runtime implementation reviewed through `fb4b5ad` on branch
+`wip/main-uncommitted`. None of Track C is merged to `main` yet; `main` is at
+`ad73dc1` and does not contain this plan.
 
 | Task | Package | Status | Evidence |
 |---|---|---|---|
 | Task 1 | C0 — baseline, ADR, boundary tests | **Complete** | `04ccb6c`, `d9474f0` |
 | Task 2 | C1 — play-loop request/response contracts | **Complete** | `128cc53`, `ff9a420` |
-| Task 2a | C1a — stream projection remediation | **Complete** | `ca255a7`, `1fb1b30`, `26d5890`; focused contract/route lifecycle tests; reproducible 2,000-turn validation benchmark |
+| Task 2a | C1a — stream projection remediation | **Complete**, one item deferred to Task 6 | `ca255a7`, `1fb1b30`, `26d5890`, `fb4b5ad`; focused contract/route lifecycle tests; reproducible 2,000-turn validation benchmark |
 | Task 3 onward | C2-C8, B1-B5, U1-U6 | Not started | — |
 
-**Current Task 2a verification:** runtime implementation reviewed through
-`26d5890`; `pnpm check` passes (468 candidate files), `pnpm build` passes,
-`pnpm test:unit` passes 700/700 across 65 files, and
-`pnpm check:web-bundle-budget` correctly reports as report-only because
-`apps/web-next/dist` does not yet exist.
+**Current Task 2a verification** (re-measured during the Task 2a completion
+review; the figures below replace an earlier stale count of 700 tests across 65
+files and 468 candidate files):
+
+- `pnpm check` passes — 470 candidate files for both the boundary and
+  data-safety checks.
+- `pnpm build` passes.
+- `pnpm test:unit` passes **702/702 across 66 test files**.
+- `pnpm test:integration` passes — **190 passed, 2 skipped across 17 files**.
+  This run matters to Task 2a specifically: Task 2a changed
+  `tests/integration/gameplay.integration.test.ts` to validate the polling route
+  through `generationJobSnapshotSchema` instead of the now-narrowed stream
+  schema, and that assertion was previously unverified. Confirmed passing
+  individually as well (5/5 in `gameplay.integration.test.ts`).
+- `pnpm check:web-bundle-budget` correctly reports as report-only because
+  `apps/web-next/dist` does not yet exist.
+- `pnpm exec tsx scripts/benchmark-client-contracts.ts` reproduces the figures
+  recorded in ADR 0028 exactly: 229 / 492 / 326 payload bytes, 2 / 3 / 2 frames,
+  `leaseOnlySnapshotChangesFrame: false`.
+
+**Client compatibility check.** Narrowing the stream projection to eleven fields
+does not regress the legacy Story Player: its SSE consumers
+(`handleJobUpdate`, `updateGenerationProgress`, and the `onmessage` status
+branches in `apps/web/public/story.js`) read only `status`, `partialNarration`,
+`action`, `errorMessage`, and `resultTurnId`, all of which are in the allowlist.
+
+**Known environment constraint.** The integration harness provisions
+`infinitequest-integration-postgres` from a Compose file with a persistent named
+volume, but `POSTGRES_PASSWORD` only takes effect when that volume is first
+initialized. Regenerating `.env.test.local` afterwards — which happens
+per-worktree, since the file is gitignored — permanently desynchronizes the
+stored role password from the environment file, and
+`pnpm test:integration` then fails at global setup with `password
+authentication failed for user "infinitequest_test"`. Recovery without
+destroying the volume:
+
+```bash
+PW=$(grep '^POSTGRES_PASSWORD=' .env.test.local | cut -d= -f2-)
+printf "ALTER ROLE infinitequest_test PASSWORD :'pw';\n" \
+  | docker exec -i -e PW="$PW" infinitequest-integration-postgres \
+    bash -c 'psql -U infinitequest_test -d postgres -v pw="$PW" -f -'
+```
+
+Multiple worktrees sharing one container will keep re-triggering this. Task 20
+(U6) should either pin the credentials to a committed non-secret test default or
+detect and repair the mismatch inside `scripts/ensure-test-database.mjs`.
 
 **Next step:** begin Task 3 (C2). Task 2a exists because
 C1 changed the SSE frame shape, and Task 5 (C4) will model its event stream
@@ -170,7 +212,7 @@ cause, and an explicit approved exception. Budgets are not silently weakened.
 
 **Files:**
 
-- Create: `docs/architecture/0026-modular-client-and-application-boundaries.md`
+- Create: `docs/architecture/0028-modular-client-and-application-boundaries.md`
 - Create: `scripts/check-client-boundaries.mjs`
 - Create: `scripts/check-web-bundle-budget.mjs`
 - Create: `tests/unit/client-boundaries.test.ts`
@@ -185,15 +227,15 @@ gates used by every later package.
 
 - [x] Record the dependency direction and the distinction between pure client
   workflows, Web-platform adapters, rendering, backend use cases, and backend
-  adapters. — ADR 0026 §Decision.
+  adapters. — ADR 0028 §Decision.
 - [x] Record current static asset sizes, current Story Player request cadence,
   generation fallback duration, and the existing SSE 350 ms database loop. —
-  ADR 0026 §Context, with measured byte counts. The ADR also records that
+  ADR 0028 §Context, with measured byte counts. The ADR also records that
   `POLL_INTERVAL_MS` is declared at 1,000 ms but unused; the fallback actually
   polls at 400 ms.
 - [x] Define the deterministic machine/container profile, fixture sizes, warm-up,
   sample count, and variance policy used for repeatable performance comparisons.
-  — ADR 0026 §Performance comparison profile (2 vCPU / 4 GiB, 10/200/2,000-turn
+  — ADR 0028 §Performance comparison profile (2 vCPU / 4 GiB, 10/200/2,000-turn
   fixtures, 5 warm-up + 30 measured, 5% variance re-run, median of three).
 - [x] Add import-boundary tests using the TypeScript parser rather than only
   regex matching source text. — `scripts/check-client-boundaries.mjs` uses
@@ -353,7 +395,7 @@ the product. This inflates the B2 baseline before B2 begins.
   SSE frame.
 - [x] Record serialized JSON payload size and frames-per-generation against the
   C0 baseline in
-  ADR 0026 with `pnpm exec tsx scripts/benchmark-client-contracts.ts`.
+  ADR 0028 with `pnpm exec tsx scripts/benchmark-client-contracts.ts`.
 
 ### P2 — the terminal error frame was removed without a decision record
 
@@ -366,11 +408,15 @@ not a failed generation, and the old synthetic frame could never satisfy the
 schema. But it is a client-visible change made inside a contracts package, and
 nothing tests it.
 
-- [x] Confirm the new behavior is intended and record it in ADR 0026.
+- [x] Confirm the new behavior is intended and record it in ADR 0028.
 - [x] Add server/route proof that a mid-stream read failure closes the stream
   without emitting a synthetic terminal status.
-- [ ] Add Task 6 fake-EventSource browser coverage proving `EventSource.onerror`
-  falls back to polling after the clean stream closure.
+- [ ] **Deferred to Task 6 — the only Task 2a item still open.** Add
+  fake-EventSource browser coverage proving `EventSource.onerror` falls back to
+  polling after the clean stream closure. This cannot be closed inside Task 2a:
+  it needs the Task 6 browser transport, which does not exist yet. It is
+  restated as an explicit checklist item in Task 6 (C5) so it cannot be absorbed
+  by the generic SSE-fallback item there.
 - [x] Ensure Task 11 (B2) preserves this behavior rather than reinstating a
   fabricated terminal frame.
 
@@ -401,6 +447,54 @@ at every campaign load.
 **Complete:** The SSE projection is an explicit allowlist that does not
 change on lease renewal, the error-frame behavior is intended and tested, and the
 validation cost added by C1 is measured rather than assumed.
+
+**Task 2a completion review.** Every checked item above was re-verified against
+the tree at `fb4b5ad`, not just against the commit messages:
+
+| Claim | Verified at |
+|---|---|
+| Eleven-field `.pick()` allowlist, no timestamps | `packages/contracts/src/generation.ts:424-437` |
+| Full shape retained on the polling route | `generationJobSnapshotSchema`, `services/api/src/server.ts:219-221` |
+| Lease-renewal-only change emits no frame | `tests/unit/client-api-routes.test.ts:298` — three snapshots differing only by `updatedAt` yield two frames; asserts no `updatedAt` on the frame |
+| Allowlist is contract-tested | `tests/unit/client-api-contracts.test.ts:238` |
+| Read failure closes without a synthetic terminal frame | same route test — 200, one valid frame, body never contains `"status":"failed"` |
+| Post-sleep close check restored | `services/api/src/server.ts:793`, proved by a real-socket test asserting exactly one job read after disconnect during the sleep |
+| Single Zod pass per frame | `services/api/src/server.ts:223-225` |
+| `partialOutput` branch removed | `apps/web/public/story.js` — no remaining occurrences |
+| Benchmark output shape is regression-tested | `tests/unit/benchmark-client-contracts.test.ts` |
+
+Three defects found by that review and corrected in the same pass:
+
+1. The verification figures above were stale (700/65/468 against an actual
+   702/66/470). Corrected in **Completion status**.
+2. `pnpm test:integration` had never been run against the Task 2a changes even
+   though Task 2a modified an integration test. Now run and passing; the
+   environment failure that had been silently blocking it is documented in
+   **Completion status**.
+3. This plan's ADR was filed as `0026`, colliding with the pre-existing
+   `docs/architecture/0026-durable-world-generation-progress.md` on `main`. It is
+   renumbered to **ADR 0028** and all references in this plan updated. The
+   collision had already produced one misattribution:
+   `docs/ui/FEATURE_IMPLEMENTATION_MATRIX.md` cited "ADR 0026" for campaign-state
+   optimistic concurrency, which is actually
+   `0011-editable-campaign-runtime-state.md`; that citation is corrected and now
+   cites the filename rather than the number.
+
+   Two duplicate ADR numbers remain and are **out of Task 2a's scope** because
+   both predate this work on `main`: `0011` (`editable-campaign-runtime-state`
+   vs `provider-reported-campaign-costs`) and `0024`
+   (`central-prompt-library` vs `scoped-chronicle-entity-identity`). Until they
+   are resolved, cite ADRs by filename, not number. Separately,
+   `docs/architecture/index.md` does not list ADRs 0022, 0025, 0026, or 0027;
+   only the 0028 entry added here was in scope to fix.
+
+One unrelated defect surfaced and was fixed because it made the Task 2a
+verification unreliable: `tests/unit/ensure-test-database.test.ts` failed once in
+eight full-suite runs (passing in isolation and in pairs) because it waited a
+fixed 10 ms of real time for filesystem work to complete before asserting on the
+first connection attempt. Under parallel suite load that wait is not long enough.
+It now polls the real clock for the condition instead. The file is not otherwise
+touched by Task 2a; the flake predates it and was surfaced by the larger suite.
 
 ---
 
@@ -637,6 +731,14 @@ type appears in the workflow.
 - [ ] Close EventSource deterministically on terminal state, fallback, detach,
   or consumer failure.
 - [ ] Fall back from SSE to polling once without creating overlapping watchers.
+- [ ] **Inherited from Task 2a P2.** Prove with a fake EventSource that a *clean*
+  stream closure — the server closing after a mid-stream read failure without
+  emitting a synthetic terminal `failed` frame — still reaches `onerror` and
+  falls back to polling. This is the one Task 2a acceptance item Task 2a could
+  not close, because it needs the Task 6 browser transport. Do not treat the
+  generic fallback item above as covering it: the distinguishing case is a
+  closure carrying no terminal status. See ADR 0028 §Task 2a stream and
+  validation baseline amendment.
 - [ ] Poll at 1500 ms initially, back off with jitter to 5000 ms after transport
   failures, emit degraded state after two consecutive failures, and reset after
   a successful snapshot.
