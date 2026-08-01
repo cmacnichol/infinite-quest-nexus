@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { checkClientBoundaries } from "./check-client-boundaries.mjs";
 
 const output = execFileSync(
   "git",
@@ -95,6 +96,8 @@ for (const migrationFile of LEGACY_MIGRATION_ALLOWLIST) {
     violations.push(`${migrationFile}: stale legacy-migration allowlist entry`);
   }
 }
+
+violations.push(...checkClientBoundaries());
 
 if (violations.length > 0) {
   process.stderr.write("Repository boundary check failed:\n");

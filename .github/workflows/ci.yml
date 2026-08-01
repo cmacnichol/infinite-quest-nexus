@@ -35,6 +35,9 @@ jobs:
       - name: Type check
         run: pnpm check
 
+      - name: Report web bundle budgets
+        run: pnpm check:web-bundle-budget
+
       - name: Test unit suite
         run: pnpm test:unit
 

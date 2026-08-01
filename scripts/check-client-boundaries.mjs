@@ -1,0 +1,221 @@
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { API } from "typescript/unstable/sync";
+import * as ts from "typescript/unstable/ast";
+import { createVirtualFileSystem } from "typescript/unstable/fs";
+
+const SOURCE_FILE_PATTERN = /\.(?:[cm]?js|ts)$/u;
+const CLIENT_CORE_GLOBALS = new Set([
+  "AbortController",
+  "Date",
+  "EventSource",
+  "WebSocket",
+  "XMLHttpRequest",
+  "clearInterval",
+  "clearTimeout",
+  "crypto",
+  "document",
+  "fetch",
+  "indexedDB",
+  "localStorage",
+  "navigator",
+  "performance",
+  "process",
+  "sessionStorage",
+  "setInterval",
+  "setTimeout",
+  "window"
+]);
+const FRAMEWORK_IMPORT_PATTERN = /^(?:@angular\/|@solidjs\/|@sveltejs\/|@vue\/|lit(?:\/|$)|next(?:\/|$)|preact(?:\/|$)|react(?:\/|$)|react-dom(?:\/|$)|solid-js(?:\/|$)|svelte(?:\/|$)|vue(?:\/|$))/u;
+const DOM_MANIPULATION_METHODS = new Set([
+  "after",
+  "append",
+  "appendChild",
+  "before",
+  "createElement",
+  "createTextNode",
+  "insertAdjacentElement",
+  "insertAdjacentHTML",
+  "insertAdjacentText",
+  "prepend",
+  "remove",
+  "removeChild",
+  "replaceChild",
+  "replaceChildren",
+  "replaceWith"
+]);
+
+// These worker imports predate packages/application. Each exception is narrow
+// and names the work package that removes it; new cross-role imports fail.
+const CROSS_ROLE_IMPORT_ALLOWLIST = new Map([
+  ["services/worker/src/worker.ts -> services/api/src/generation-service.js", "Task 10 (B1)"],
+  ["services/worker/src/worker.ts -> services/api/src/asset-service.js", "Task 14 (B5)"],
+  ["services/worker/src/worker.ts -> services/api/src/illustration-resolution-service.js", "Task 14 (B5)"],
+  ["services/worker/src/worker.ts -> services/api/src/image-service.js", "Task 14 (B5)"],
+  ["services/worker/src/worker.ts -> services/api/src/memory-service.js", "Task 14 (B5)"],
+  ["services/worker/src/worker.ts -> services/api/src/segmented-illustration-service.js", "Task 14 (B5)"]
+]);
+
+function normalizedPath(file) {
+  return file.replaceAll("\\", "/");
+}
+
+function relativeModulePath(file, specifier) {
+  if (!specifier.startsWith(".")) return null;
+  return path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
+}
+
+function importedModules(sourceFile) {
+  const modules = [];
+
+  function visit(node) {
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+      modules.push(node.moduleSpecifier.text);
+    }
+    if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference) && ts.isStringLiteral(node.moduleReference.expression)) {
+      modules.push(node.moduleReference.expression.text);
+    }
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments.length === 1 && ts.isStringLiteral(node.arguments[0])) {
+      modules.push(node.arguments[0].text);
+    }
+    node.forEachChild(visit);
+  }
+
+  visit(sourceFile);
+  return modules;
+}
+
+function isClientCoreImportAllowed(file, specifier) {
+  const target = relativeModulePath(file, specifier);
+  return target !== null && (target.startsWith("packages/client-core/") || target.startsWith("packages/contracts/"));
+}
+
+function isClientWebImportAllowed(file, specifier) {
+  const target = relativeModulePath(file, specifier);
+  return target !== null && (target.startsWith("packages/client-web/") || target.startsWith("packages/client-core/") || target.startsWith("packages/contracts/"));
+}
+
+function checkClientCore(file, sourceFile, violations) {
+  for (const specifier of importedModules(sourceFile)) {
+    if (specifier.startsWith("node:")) {
+      violations.push(`${file}: client-core import ${specifier} is prohibited`);
+    } else if (!isClientCoreImportAllowed(file, specifier)) {
+      violations.push(`${file}: client-core import ${specifier} is outside client-core or contracts`);
+    }
+  }
+
+  function visit(node) {
+    if (ts.isIdentifier(node) && CLIENT_CORE_GLOBALS.has(node.text)) {
+      violations.push(`${file}: client-core must not use platform global ${node.text}`);
+    }
+    if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Math" && node.name.text === "random") {
+      violations.push(`${file}: client-core must not use random-ID dependency Math.random`);
+    }
+    node.forEachChild(visit);
+  }
+
+  visit(sourceFile);
+}
+
+function checkClientWeb(file, sourceFile, violations) {
+  for (const specifier of importedModules(sourceFile)) {
+    if (FRAMEWORK_IMPORT_PATTERN.test(specifier)) {
+      violations.push(`${file}: client-web import ${specifier} is a prohibited framework dependency`);
+    } else if (!isClientWebImportAllowed(file, specifier)) {
+      violations.push(`${file}: client-web import ${specifier} is outside client-web, client-core, or contracts`);
+    }
+  }
+
+  function visit(node) {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && DOM_MANIPULATION_METHODS.has(node.expression.name.text)) {
+      const target = node.expression.expression;
+      if (ts.isIdentifier(target) && target.text === "document") {
+        violations.push(`${file}: client-web must not manipulate rendered DOM via document.${node.expression.name.text}`);
+      }
+    }
+    node.forEachChild(visit);
+  }
+
+  visit(sourceFile);
+}
+
+function checkCrossRoleImports(file, sourceFile, violations) {
+  const sourceRole = file.startsWith("services/api/") ? "api" : file.startsWith("services/worker/") ? "worker" : null;
+  if (!sourceRole) return;
+
+  for (const specifier of importedModules(sourceFile)) {
+    const target = relativeModulePath(file, specifier);
+    const targetRole = target?.startsWith("services/api/") ? "api" : target?.startsWith("services/worker/") ? "worker" : null;
+    if (!targetRole || targetRole === sourceRole) continue;
+
+    const allowlistKey = `${file} -> ${target}`;
+    if (!CROSS_ROLE_IMPORT_ALLOWLIST.has(allowlistKey)) {
+      violations.push(`${file}: cross-role import ${specifier} from ${sourceRole} to ${targetRole} is prohibited`);
+    }
+  }
+}
+
+export function collectClientBoundaryViolations(entries) {
+  const violations = [];
+  const sortedEntries = [...entries]
+    .map((entry) => ({ ...entry, file: normalizedPath(entry.file) }))
+    .sort((left, right) => left.file.localeCompare(right.file));
+  const virtualRoot = "/client-boundary-check";
+  const virtualConfig = `${virtualRoot}/tsconfig.json`;
+  const virtualFiles = Object.fromEntries(sortedEntries.map((entry) => [
+    path.posix.join(virtualRoot, entry.file),
+    entry.text
+  ]));
+  virtualFiles[virtualConfig] = JSON.stringify({
+    compilerOptions: { allowJs: true, noLib: true },
+    files: sortedEntries.map((entry) => path.posix.join(virtualRoot, entry.file))
+  });
+  const api = new API({
+    cwd: virtualRoot,
+    fs: createVirtualFileSystem(virtualFiles)
+  });
+  const snapshot = api.updateSnapshot({ openProjects: [virtualConfig] });
+  const project = snapshot.getProject(virtualConfig);
+
+  for (const entry of sortedEntries) {
+    const file = entry.file;
+    const sourceFile = project?.program.getSourceFile(path.posix.join(virtualRoot, file));
+    if (!sourceFile) throw new Error(`TypeScript parser did not load ${file}`);
+    if (file.startsWith("packages/client-core/")) checkClientCore(file, sourceFile, violations);
+    if (file.startsWith("packages/client-web/")) checkClientWeb(file, sourceFile, violations);
+    checkCrossRoleImports(file, sourceFile, violations);
+  }
+
+  api.close();
+  return violations.sort();
+}
+
+function repositoryEntries(rootDirectory) {
+  const output = execFileSync(
+    "git",
+    ["ls-files", "--cached", "--others", "--exclude-standard"],
+    { cwd: rootDirectory, encoding: "utf8" }
+  );
+
+  return [...new Set(output.split(/\r?\n/u).filter((file) => SOURCE_FILE_PATTERN.test(file)))].map((file) => ({
+    file,
+    text: readFileSync(path.join(rootDirectory, file), "utf8")
+  }));
+}
+
+export function checkClientBoundaries(rootDirectory = process.cwd()) {
+  return collectClientBoundaryViolations(repositoryEntries(rootDirectory));
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const violations = checkClientBoundaries();
+  if (violations.length > 0) {
+    process.stderr.write("Client boundary check failed:\n");
+    for (const violation of violations) process.stderr.write(`- ${violation}\n`);
+    process.exitCode = 1;
+  } else {
+    process.stdout.write("Client boundary check passed.\n");
+  }
+}
