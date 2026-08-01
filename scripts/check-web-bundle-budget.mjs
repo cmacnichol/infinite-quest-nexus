@@ -25,7 +25,7 @@ export function inspectWebBundleBudget(rootDirectory = process.cwd()) {
     .filter(([, entry]) => typeof entry === "object" && entry !== null && typeof entry.file === "string")
     .map(([source, entry]) => ({
       source,
-      entry: Boolean(entry.isEntry),
+      kind: entry.isEntry ? "entry" : entry.isDynamicEntry ? "lazy" : "shared",
       gzipBytes: gzipSize(path.join(distDirectory, entry.file))
     }))
     .sort((left, right) => left.source.localeCompare(right.source));
@@ -44,19 +44,19 @@ function formatBytes(bytes) {
   return `${(bytes / 1024).toFixed(1)} KiB`;
 }
 
-function report(result) {
+export function formatWebBundleBudgetReport(result) {
   if (result.reason) {
-    process.stdout.write(`Web bundle budget: report only (${result.reason}).\n`);
-    return;
+    return `Web bundle budget: report only (${result.reason}).\n`;
   }
 
-  process.stdout.write("Web bundle budget: report only until Slice 1 enables enforcement.\n");
+  const lines = ["Web bundle budget: report only until Slice 1 enables enforcement."];
   for (const chunk of result.chunks) {
-    const budget = chunk.entry ? result.budgets.entryGzipBytes : result.budgets.lazyChunkGzipBytes;
-    process.stdout.write(`- ${chunk.source}: ${formatBytes(chunk.gzipBytes)} gzip (budget ${formatBytes(budget)})\n`);
+    const budget = chunk.kind === "entry" ? result.budgets.entryGzipBytes : result.budgets.lazyChunkGzipBytes;
+    lines.push(`- ${chunk.source}: ${chunk.kind}, ${formatBytes(chunk.gzipBytes)} gzip (budget ${formatBytes(budget)})`);
   }
+  return `${lines.join("\n")}\n`;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  report(inspectWebBundleBudget());
+  process.stdout.write(formatWebBundleBudgetReport(inspectWebBundleBudget()));
 }

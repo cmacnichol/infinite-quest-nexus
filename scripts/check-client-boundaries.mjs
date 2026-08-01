@@ -6,13 +6,16 @@ import { API } from "typescript/unstable/sync";
 import * as ts from "typescript/unstable/ast";
 import { createVirtualFileSystem } from "typescript/unstable/fs";
 
-const SOURCE_FILE_PATTERN = /\.(?:[cm]?js|ts)$/u;
+const SOURCE_FILE_PATTERN = /\.(?:[cm]?[jt]s|[jt]sx)$/u;
 const CLIENT_CORE_GLOBALS = new Set([
   "AbortController",
+  "Buffer",
   "Date",
   "EventSource",
   "WebSocket",
   "XMLHttpRequest",
+  "__dirname",
+  "__filename",
   "clearInterval",
   "clearTimeout",
   "crypto",
@@ -20,9 +23,11 @@ const CLIENT_CORE_GLOBALS = new Set([
   "fetch",
   "indexedDB",
   "localStorage",
+  "module",
   "navigator",
   "performance",
   "process",
+  "require",
   "sessionStorage",
   "setInterval",
   "setTimeout",
@@ -46,6 +51,25 @@ const DOM_MANIPULATION_METHODS = new Set([
   "replaceChildren",
   "replaceWith"
 ]);
+const DOM_PROPERTY_WRITES = new Set(["className", "innerHTML", "innerText", "outerHTML", "textContent"]);
+const ASSIGNMENT_OPERATOR_KINDS = new Set([
+  ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+  ts.SyntaxKind.AmpersandEqualsToken,
+  ts.SyntaxKind.AsteriskAsteriskEqualsToken,
+  ts.SyntaxKind.AsteriskEqualsToken,
+  ts.SyntaxKind.BarBarEqualsToken,
+  ts.SyntaxKind.BarEqualsToken,
+  ts.SyntaxKind.CaretEqualsToken,
+  ts.SyntaxKind.EqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanEqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken,
+  ts.SyntaxKind.LessThanLessThanEqualsToken,
+  ts.SyntaxKind.MinusEqualsToken,
+  ts.SyntaxKind.PercentEqualsToken,
+  ts.SyntaxKind.PlusEqualsToken,
+  ts.SyntaxKind.QuestionQuestionEqualsToken,
+  ts.SyntaxKind.SlashEqualsToken
+]);
 
 // These worker imports predate packages/application. Each exception is narrow
 // and names the work package that removes it; new cross-role imports fail.
@@ -67,24 +91,37 @@ function relativeModulePath(file, specifier) {
   return path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
 }
 
+function moduleSpecifierText(node) {
+  return ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text : null;
+}
+
 function importedModules(sourceFile) {
   const modules = [];
 
   function visit(node) {
-    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
-      modules.push(node.moduleSpecifier.text);
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
+      const specifier = moduleSpecifierText(node.moduleSpecifier);
+      if (specifier !== null) modules.push(specifier);
     }
-    if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference) && ts.isStringLiteral(node.moduleReference.expression)) {
-      modules.push(node.moduleReference.expression.text);
+    if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+      const specifier = moduleSpecifierText(node.moduleReference.expression);
+      if (specifier !== null) modules.push(specifier);
     }
-    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments.length === 1 && ts.isStringLiteral(node.arguments[0])) {
-      modules.push(node.arguments[0].text);
+    if (ts.isImportTypeNode(node)) {
+      const specifier = moduleSpecifierText(node.argument);
+      if (specifier !== null) modules.push(specifier);
+    }
+    if (ts.isCallExpression(node) && node.arguments.length === 1) {
+      const specifier = moduleSpecifierText(node.arguments[0]);
+      if (specifier !== null && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === "require"))) {
+        modules.push(specifier);
+      }
     }
     node.forEachChild(visit);
   }
 
   visit(sourceFile);
-  return modules;
+  return [...new Set(modules)];
 }
 
 function isClientCoreImportAllowed(file, specifier) {
@@ -130,10 +167,10 @@ function checkClientWeb(file, sourceFile, violations) {
 
   function visit(node) {
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && DOM_MANIPULATION_METHODS.has(node.expression.name.text)) {
-      const target = node.expression.expression;
-      if (ts.isIdentifier(target) && target.text === "document") {
-        violations.push(`${file}: client-web must not manipulate rendered DOM via document.${node.expression.name.text}`);
-      }
+      violations.push(`${file}: client-web must not manipulate rendered DOM via ${node.expression.name.text}`);
+    }
+    if (ts.isBinaryExpression(node) && ASSIGNMENT_OPERATOR_KINDS.has(node.operatorToken.kind) && ts.isPropertyAccessExpression(node.left) && DOM_PROPERTY_WRITES.has(node.left.name.text)) {
+      violations.push(`${file}: client-web must not manipulate rendered DOM property ${node.left.name.text}`);
     }
     node.forEachChild(visit);
   }
@@ -192,6 +229,10 @@ export function collectClientBoundaryViolations(entries) {
   return violations.sort();
 }
 
+export function isBoundarySourceFile(file) {
+  return SOURCE_FILE_PATTERN.test(file);
+}
+
 function repositoryEntries(rootDirectory) {
   const output = execFileSync(
     "git",
@@ -199,7 +240,7 @@ function repositoryEntries(rootDirectory) {
     { cwd: rootDirectory, encoding: "utf8" }
   );
 
-  return [...new Set(output.split(/\r?\n/u).filter((file) => SOURCE_FILE_PATTERN.test(file)))].map((file) => ({
+  return [...new Set(output.split(/\r?\n/u).filter(isBoundarySourceFile))].map((file) => ({
     file,
     text: readFileSync(path.join(rootDirectory, file), "utf8")
   }));
