@@ -31,7 +31,7 @@ Playwright, and axe-core.
 
 ## Completion status
 
-Runtime implementation reviewed through `fb4b5ad` on branch
+Runtime implementation reviewed through `f8dfe6e` on branch
 `wip/main-uncommitted`. None of Track C is merged to `main` yet; `main` is at
 `ad73dc1` and does not contain this plan.
 
@@ -40,7 +40,8 @@ Runtime implementation reviewed through `fb4b5ad` on branch
 | Task 1 | C0 — baseline, ADR, boundary tests | **Complete** | `04ccb6c`, `d9474f0` |
 | Task 2 | C1 — play-loop request/response contracts | **Complete** | `128cc53`, `ff9a420` |
 | Task 2a | C1a — stream projection remediation | **Complete**, one item deferred to Task 6 | `ca255a7`, `1fb1b30`, `26d5890`, `fb4b5ad`; focused contract/route lifecycle tests; reproducible 2,000-turn validation benchmark |
-| Task 3 onward | C2-C8, B1-B5, U1-U6 | Not started | — |
+| Task 3 | C2 — pure and Web-platform client packages | **Complete** | `1e55517`, `f8dfe6e`; scoped implementation review and fix re-review clean |
+| Task 4 onward | C3-C8, B1-B5, U1-U6 | Not started | — |
 
 **Current Task 2a verification** (re-measured during the Task 2a completion
 review; the figures below replace an earlier stale count of 700 tests across 65
@@ -89,10 +90,22 @@ Multiple worktrees sharing one container will keep re-triggering this. Task 20
 (U6) should either pin the credentials to a committed non-secret test default or
 detect and repair the mismatch inside `scripts/ensure-test-database.mjs`.
 
-**Next step:** begin Task 3 (C2). Task 2a exists because
-C1 changed the SSE frame shape, and Task 5 (C4) will model its event stream
-directly on that projection — fixing it afterwards means rewriting the C4 event
-model and its tests.
+**Current Task 3 verification:**
+
+- `pnpm check` passes and now includes both package-local type checks — 481
+  candidate files for the repository boundary and data-safety checks.
+- `pnpm build` passes and runs the pure-core and Web-package checks before the
+  root build.
+- `pnpm test:unit` passes **708/708 across 66 test files**.
+- Real TypeScript fixture projects prove the pure-core compiler rejects Web,
+  Node, and framework dependencies while the Web adapter compiler accepts
+  framework-free implementations of core ports.
+- The scoped Task 3 review found two issues; `f8dfe6e` addressed both, and the
+  fix re-review found no new Critical or Important breakage.
+
+**Next step:** begin Task 4 (C3), using the Task 3 public package surfaces and
+no-op `SessionPort` to build the runtime-validating HTTP client and error
+taxonomy without changing authentication signatures later.
 
 ---
 
@@ -567,17 +580,17 @@ signature change rippling through every workflow, store, and API method in both
 client packages. Implement it as a no-op in C2 and do not build refresh,
 storage, or redirect behavior until authentication actually lands.
 
-- [ ] Export only deliberate public surfaces; do not create barrel exports of
+- [x] Export only deliberate public surfaces; do not create barrel exports of
   internal files.
-- [ ] Add compile-failure fixtures proving client-core cannot reference
+- [x] Add compile-failure fixtures proving client-core cannot reference
   `fetch`, `EventSource`, `localStorage`, `document`, `window`, Node modules, or
   a framework.
-- [ ] Add positive fixtures proving client-web may implement core ports with
+- [x] Add positive fixtures proving client-web may implement core ports with
   Web APIs while remaining framework-free.
-- [ ] Provide the no-op `SessionPort` implementation in client-web and thread it
-  through the HTTP client in C3, so no later package has to change call
-  signatures to introduce authentication.
-- [ ] Run package type checks and boundary tests.
+- [x] Provide the no-op `SessionPort` implementation in client-web.
+- [ ] Thread `SessionPort` through the HTTP client in C3, so no later package
+  has to change call signatures to introduce authentication.
+- [x] Run package type checks and boundary tests.
 
 **Definition of done:** Core policy can be imported and tested in a pure Node
 test without Web-global type shims. Browser implementations are isolated behind
