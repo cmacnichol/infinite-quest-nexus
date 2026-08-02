@@ -81,6 +81,8 @@ async function staticRootFixture() {
   await mkdir(legacyWebRoot, { recursive: true });
   await writeFile(join(legacyWebRoot, "index.html"), "<!doctype html><p>legacy nexus shell</p>");
   await writeFile(join(legacyWebRoot, "story.html"), "<!doctype html><p>legacy story shell</p>");
+  await writeFile(join(legacyWebRoot, "story-generation-cancellation.js"), "export const stable = true;");
+  await writeFile(join(legacyWebRoot, "image-library-browser.js"), "export const stable = true;");
   await writeFile(join(nextWebRoot, "index.html"), "<!doctype html><p>replacement app shell</p>");
   await writeFile(join(nextWebRoot, "assets/app-AbCd1234.js"), "export const built = true;");
   await writeFile(join(nextWebRoot, "assets/shell-AbCd1234.html"), "<!doctype html><title>asset</title>");
@@ -198,7 +200,7 @@ describe("API server security and CORS headers", () => {
     }
   });
 
-  it("caches only content-hashed replacement assets as immutable", async () => {
+  it("caches only generated content-hashed replacement assets as immutable", async () => {
     const fixture = await staticRootFixture();
     const app = await buildServer({ config: fixture.config, pool: mockPool });
 
@@ -209,6 +211,10 @@ describe("API server security and CORS headers", () => {
         url: "/app/assets/shell-AbCd1234.html"
       });
       const stable = await app.inject({ method: "GET", url: "/app/bootstrap.js" });
+      const legacyStableAssets = await Promise.all([
+        app.inject({ method: "GET", url: "/nexus/story-generation-cancellation.js" }),
+        app.inject({ method: "GET", url: "/nexus/image-library-browser.js" })
+      ]);
 
       expect(hashed.statusCode).toBe(200);
       expect(hashed.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
@@ -216,6 +222,10 @@ describe("API server security and CORS headers", () => {
       expect(hashShapedHtml.headers["cache-control"]).toBe("no-cache");
       expect(stable.statusCode).toBe(200);
       expect(stable.headers["cache-control"]).toBe("no-cache");
+      for (const response of legacyStableAssets) {
+        expect(response.statusCode).toBe(200);
+        expect(response.headers["cache-control"]).toBe("no-cache");
+      }
     } finally {
       await app.close();
       await fixture.cleanup();
@@ -241,6 +251,20 @@ describe("API server security and CORS headers", () => {
         expect(response.statusCode, url).toBe(404);
         expect(response.payload, url).not.toContain("replacement app shell");
         expect(response.payload, url).not.toContain("must not be served");
+      }
+
+      for (const url of [
+        "/api/v1/not-real",
+        "/health/not-real",
+        "/nexus/not-real.js",
+        "/vendor/not-real.js"
+      ]) {
+        const response = await app.inject({ method: "GET", url });
+        expect(response.json()).toEqual({
+          message: `Route GET:${url} not found`,
+          error: "Not Found",
+          statusCode: 404
+        });
       }
 
       const story = await app.inject({ method: "GET", url: "/story/not-real" });

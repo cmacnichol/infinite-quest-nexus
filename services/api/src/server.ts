@@ -147,14 +147,14 @@ type BuildServerOptions = {
 };
 
 const uuidSchema = z.uuid();
-const HASHED_STATIC_ASSET_PATTERN = /(?:^|\/)[^/]+-[A-Za-z0-9_-]{8,}\.[^/]+$/u;
+const VITE_HASHED_STATIC_ASSET_PATTERN = /(?:^|[\\/])assets[\\/][^\\/]+-[A-Za-z0-9_-]{8,}\.[^\\/]+$/u;
 let lastWorldGenerationProgressCleanupAt = 0;
 
 function setStaticCacheHeader(reply: { header(name: string, value: string): unknown }, filePath: string): void {
   const isHtml = filePath.toLowerCase().endsWith(".html");
   reply.header(
     "Cache-Control",
-    !isHtml && HASHED_STATIC_ASSET_PATTERN.test(filePath)
+    !isHtml && VITE_HASHED_STATIC_ASSET_PATTERN.test(filePath)
       ? "public, max-age=31536000, immutable"
       : "no-cache"
   );
@@ -306,13 +306,6 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     setHeaders: setStaticCacheHeader
   });
   await app.register(fastifyStatic, {
-    root: config.nextWebRoot,
-    prefix: "/app/",
-    index: ["index.html"],
-    decorateReply: false,
-    setHeaders: setStaticCacheHeader
-  });
-  await app.register(fastifyStatic, {
     root: resolve(process.cwd(), "node_modules/photoswipe/dist"),
     prefix: "/vendor/photoswipe/",
     decorateReply: false,
@@ -340,15 +333,29 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     nextHtmlCache ??= await readFile(resolve(config.nextWebRoot, "index.html"), "utf8");
     return nextHtmlCache;
   };
-  app.setNotFoundHandler(async (request, reply) => {
-    if (request.method === "GET" && isSafeAppNavigation(request.url)) {
-      return reply
-        .type("text/html; charset=utf-8")
-        .header("cache-control", "no-cache")
-        .send(await cachedNextHtml());
-    }
-    return reply.code(404).send({ error: "Not Found", message: "Route not found." });
-  });
+  await app.register(async (appScope) => {
+    appScope.setNotFoundHandler(async (request, reply) => {
+      if (request.method === "GET" && isSafeAppNavigation(request.url)) {
+        return reply
+          .type("text/html; charset=utf-8")
+          .header("cache-control", "no-cache")
+          .send(await cachedNextHtml());
+      }
+      const { method, url } = request.raw;
+      return reply.code(404).send({
+        message: `Route ${method}:${url} not found`,
+        error: "Not Found",
+        statusCode: 404
+      });
+    });
+    await appScope.register(fastifyStatic, {
+      root: config.nextWebRoot,
+      prefix: "/",
+      index: ["index.html"],
+      decorateReply: false,
+      setHeaders: setStaticCacheHeader
+    });
+  }, { prefix: "/app" });
   app.get("/health/live", async () => ({ status: "ok", role: config.role }));
   app.get("/health/ready", async (_request, reply) => {
     try {
