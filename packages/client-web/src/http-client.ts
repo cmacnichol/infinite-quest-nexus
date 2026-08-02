@@ -49,12 +49,16 @@ export interface NexusHttpClientOptions {
   fetchImpl?: typeof fetch;
 }
 
+function hasUnsafeUrlCharacters(value: string): boolean {
+  return /[\\\u0000-\u001F\u007F]/.test(value);
+}
+
 function normalizeBasePath(basePath: string): string {
   if (
     /^[a-z][a-z\d+.-]*:/i.test(basePath) ||
     basePath.startsWith("//") ||
     !basePath.startsWith("/") ||
-    /[\\\u0000-\u001F\u007F]/.test(basePath)
+    hasUnsafeUrlCharacters(basePath)
   ) {
     throw new TypeError("Base path must be API-relative and begin with '/'.");
   }
@@ -62,7 +66,7 @@ function normalizeBasePath(basePath: string): string {
 }
 
 function apiPath(basePath: string, path: string): string {
-  if (/^[a-z][a-z\d+.-]*:/i.test(path) || path.startsWith("//")) {
+  if (/^[a-z][a-z\d+.-]*:/i.test(path) || path.startsWith("//") || hasUnsafeUrlCharacters(path)) {
     throw new TypeError("Request path must be API-relative.");
   }
   if (!path.startsWith("/")) {

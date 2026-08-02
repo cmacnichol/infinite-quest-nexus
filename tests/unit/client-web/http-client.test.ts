@@ -51,7 +51,7 @@ describe("createNexusHttpClient", () => {
     "//evil.test/api/v1",
     "api/v1",
     "/\\evil.test/api/v1",
-    "/\\t/evil.test/api/v1"
+    "/\t/evil.test/api/v1"
   ])("rejects unsafe base path %s before fetching or reading session authorization", (basePath) => {
     const queue = fetchQueue();
     let authorizationCalls = 0;
@@ -65,6 +65,26 @@ describe("createNexusHttpClient", () => {
       fetchImpl: queue.fetchImpl
     })).toThrow("Base path must be API-relative");
 
+    expect(authorizationCalls).toBe(0);
+    expect(queue.urls).toEqual([]);
+  });
+
+  it.each([
+    "/\\evil.test/x",
+    "/\t/evil.test/x"
+  ])("rejects escaped request path %s before fetching or reading session authorization", async (path) => {
+    const queue = fetchQueue();
+    let authorizationCalls = 0;
+    const client = createNexusHttpClient({
+      basePath: "/",
+      session: session({ authorization: async () => {
+        authorizationCalls += 1;
+        return { authorization: "Bearer session-token" };
+      } }),
+      fetchImpl: queue.fetchImpl
+    });
+
+    await expect(client.request({ method: "GET", path, responseSchema })).rejects.toThrow("Request path must be API-relative");
     expect(authorizationCalls).toBe(0);
     expect(queue.urls).toEqual([]);
   });
