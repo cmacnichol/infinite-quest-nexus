@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { GenerationEnqueueResponse } from "../../../packages/contracts/src/index.js";
+import type { GenerationEnqueueResponse, GenerationRetryLatestRequest } from "../../../packages/contracts/src/index.js";
 import type { GenerationSubmissionInput, StoredGenerationSubmission } from "../../../packages/client-core/src/generation/types.js";
 import { createGenerationSubmissionCoordinator } from "../../../packages/client-core/src/generation/submission.js";
 
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const jobId = "22222222-2222-4222-8222-222222222222";
 
-function input(): GenerationSubmissionInput {
+type AppendGenerationSubmissionInput = Extract<GenerationSubmissionInput, { operationKind: "append" }>;
+
+function input(): AppendGenerationSubmissionInput {
   return {
     operationKind: "append",
     expectedTurnNumber: 1,
@@ -20,6 +22,19 @@ function input(): GenerationSubmissionInput {
     }
   };
 }
+
+function replacementRequest(): GenerationRetryLatestRequest {
+  return { ...input().request, idempotencyKey: "replacement-key", expectedCurrentTurnNumber: 7 };
+}
+
+// @ts-expect-error replace_latest requires the nested current turn number
+const missingReplacementTurn: GenerationSubmissionInput = { operationKind: "replace_latest", request: input().request };
+
+// @ts-expect-error replace_latest derives the stored turn number from request
+const duplicateReplacementTurn: GenerationSubmissionInput = { operationKind: "replace_latest", expectedTurnNumber: 4, request: replacementRequest() };
+
+void missingReplacementTurn;
+void duplicateReplacementTurn;
 
 function response(overrides: Partial<GenerationEnqueueResponse> = {}): GenerationEnqueueResponse {
   return { id: jobId, status: "queued", duplicate: false, ...overrides };
@@ -56,6 +71,44 @@ describe("generation submission coordinator", () => {
     expect(saved).toEqual([
       { ...input(), createdAt: 1_000 },
       { ...input(), createdAt: 1_000, jobId }
+    ]);
+  });
+
+  it("derives replacement storage turn from the request before enqueuing the intact request", async () => {
+    const saved: StoredGenerationSubmission[] = [];
+    const replacement = replacementRequest();
+    const coordinator = createGenerationSubmissionCoordinator({
+      api: {
+        async enqueue() {
+          throw new Error("unexpected append enqueue");
+        },
+        async enqueueReplacement(_campaignId, request) {
+          expect(request).toEqual(replacement);
+          expect(saved).toEqual([
+            { operationKind: "replace_latest", request: replacement, expectedTurnNumber: 7, createdAt: 1_000 }
+          ]);
+          return response();
+        }
+      },
+      clock: { now: () => 1_000 },
+      store: {
+        load: () => null,
+        save(_campaignId, submission) {
+          saved.push(submission);
+        },
+        clear: () => undefined
+      }
+    });
+
+    const forgedInput: unknown = {
+      operationKind: "replace_latest",
+      expectedTurnNumber: 4,
+      request: replacement
+    };
+    await expect(coordinator.submit(campaignId, forgedInput as GenerationSubmissionInput)).resolves.toEqual(response());
+    expect(saved).toEqual([
+      { operationKind: "replace_latest", request: replacement, expectedTurnNumber: 7, createdAt: 1_000 },
+      { operationKind: "replace_latest", request: replacement, expectedTurnNumber: 7, createdAt: 1_000, jobId }
     ]);
   });
 

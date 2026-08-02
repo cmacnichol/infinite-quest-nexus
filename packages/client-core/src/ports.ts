@@ -1,4 +1,4 @@
-import type { GenerationRequest } from "../../contracts/src/index.js";
+import type { GenerationRequest, GenerationRetryLatestRequest } from "../../contracts/src/index.js";
 import type { StoredGenerationSubmission } from "./generation/types.js";
 
 export interface Clock {
@@ -24,12 +24,14 @@ export interface DelayScheduler {
  * terminal state. The idempotency key stays in `request` so replays send the
  * original server contract without manufacturing a new request identity.
  */
-export interface PendingGenerationSubmission {
-  request: GenerationRequest;
-  operationKind: "append" | "replace_latest";
+type PendingGenerationSubmissionBase = {
   expectedTurnNumber: number;
   createdAt: number;
-}
+};
+
+export type PendingGenerationSubmission =
+  | (PendingGenerationSubmissionBase & { operationKind: "append"; request: GenerationRequest })
+  | (PendingGenerationSubmissionBase & { operationKind: "replace_latest"; request: GenerationRetryLatestRequest });
 
 export interface PendingSubmissionStore {
   load(campaignId: string): StoredGenerationSubmission | null;

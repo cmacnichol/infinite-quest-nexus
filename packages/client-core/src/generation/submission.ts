@@ -1,4 +1,4 @@
-import type { GenerationEnqueueResponse, GenerationRetryLatestRequest } from "../../../contracts/src/index.js";
+import type { GenerationEnqueueResponse } from "../../../contracts/src/index.js";
 import type { Clock, PendingSubmissionStore } from "../ports.js";
 import type { GenerationApiPort, GenerationSubmissionInput, StoredGenerationSubmission } from "./types.js";
 
@@ -21,7 +21,15 @@ export function createGenerationSubmissionCoordinator(
 ): GenerationSubmissionCoordinator {
   return {
     async submit(campaignId, input) {
-      const submission: StoredGenerationSubmission = { ...input, createdAt: dependencies.clock.now() };
+      const createdAt = dependencies.clock.now();
+      const submission: StoredGenerationSubmission = input.operationKind === "append"
+        ? { ...input, createdAt }
+        : {
+            operationKind: "replace_latest",
+            request: input.request,
+            expectedTurnNumber: input.request.expectedCurrentTurnNumber,
+            createdAt
+          };
       return enqueue(campaignId, submission, dependencies);
     },
     async replay(campaignId, submission) {
@@ -47,7 +55,7 @@ async function enqueue(
   dependencies.store.save(campaignId, submission);
   const response = submission.operationKind === "append"
     ? await dependencies.api.enqueue(campaignId, submission.request)
-    : await dependencies.api.enqueueReplacement(campaignId, submission.request as GenerationRetryLatestRequest);
+    : await dependencies.api.enqueueReplacement(campaignId, submission.request);
   dependencies.store.save(campaignId, { ...submission, jobId: response.id });
   return response;
 }

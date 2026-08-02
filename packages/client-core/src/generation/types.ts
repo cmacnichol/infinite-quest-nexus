@@ -52,11 +52,21 @@ export interface GenerationApiPort {
   discard(jobId: string): Promise<GenerationActionResponse>;
 }
 
-export interface StoredGenerationSubmission extends PendingGenerationSubmission {
-  jobId?: string;
-}
+export type StoredGenerationSubmission = PendingGenerationSubmission & { jobId?: string };
 
-export type GenerationSubmissionInput = Omit<StoredGenerationSubmission, "createdAt" | "jobId">;
+type AppendGenerationSubmissionInput = Omit<
+  Extract<StoredGenerationSubmission, { operationKind: "append" }>,
+  "createdAt" | "jobId"
+>;
+
+type ReplaceLatestGenerationSubmissionInput = Omit<
+  Extract<StoredGenerationSubmission, { operationKind: "replace_latest" }>,
+  "createdAt" | "jobId" | "expectedTurnNumber"
+>;
+
+export type GenerationSubmissionInput =
+  | AppendGenerationSubmissionInput
+  | ReplaceLatestGenerationSubmissionInput;
 
 export interface GenerationRun {
   readonly campaignId: string;
