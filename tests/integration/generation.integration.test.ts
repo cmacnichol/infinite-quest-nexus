@@ -15,6 +15,12 @@ import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
 import { logger } from "../../packages/logger/src/index.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
+import { createGenerationWorkflow } from "../../packages/client-core/src/index.js";
+import {
+  createBrowserGenerationSource,
+  createNexusApiClient,
+  createNoopSessionPort
+} from "../../packages/client-web/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -2054,5 +2060,102 @@ integration("durable Story Engine integration", () => {
     const result = await getGenerationResult(pool, job.id);
     expect(result.mechanics.roll).toEqual(persistedRoll);
     expect(requests.length - requestCount).toBe(1);
+  });
+});
+
+describe("generation HTTP route-to-workflow boundary", () => {
+  it("rejects a malformed generation snapshot before the workflow can observe it", async () => {
+    const routeCampaignId = "10000000-0000-4000-8000-000000000001";
+    const routeJobId = "20000000-0000-4000-8000-000000000001";
+    const routeRequests: string[] = [];
+    const routeServer = createServer((request, response) => {
+      routeRequests.push(`${request.method} ${request.url}`);
+      response.setHeader("content-type", "application/json");
+      if (request.method === "POST" && request.url === `/api/v1/campaigns/${routeCampaignId}/generations`) {
+        response.end(JSON.stringify({
+          id: routeJobId,
+          status: "queued",
+          duplicate: false,
+          expectedTurnNumber: 1,
+          createdAt: "2026-08-02T12:00:00.000Z"
+        }));
+        return;
+      }
+      if (request.method === "GET" && request.url === `/api/v1/generation-jobs/${routeJobId}`) {
+        response.setHeader("x-correlation-id", "malformed-snapshot-route");
+        response.end(JSON.stringify({
+          id: routeJobId,
+          campaignId: routeCampaignId,
+          expectedTurnNumber: 1,
+          action: "Open the dome.",
+          status: "generating",
+          attempts: 0,
+          createdAt: "2026-08-02T12:00:00.000Z",
+          updatedAt: "2026-08-02T12:00:00.000Z"
+        }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: "Not found" }));
+    });
+
+    await new Promise<void>((resolveListen) => routeServer.listen(0, "127.0.0.1", resolveListen));
+    try {
+      const address = routeServer.address();
+      if (!address || typeof address === "string") throw new Error("Test route did not expose a TCP address.");
+      const origin = `http://127.0.0.1:${address.port}`;
+      const session = createNoopSessionPort();
+      const api = createNexusApiClient({
+        basePath: "/api/v1",
+        session,
+        fetchImpl: (input, init) => fetch(`${origin}${String(input)}`, init)
+      });
+      const source = createBrowserGenerationSource({
+        api: api.generation,
+        basePath: "/api/v1",
+        session,
+        clock: { now: () => Date.parse("2026-08-02T12:00:00.000Z") },
+        delay: { wait: async () => { throw new Error("Malformed snapshots must not be retried."); } },
+        visibility: { isHidden: () => false, waitUntilVisible: async () => undefined },
+        eventSourceFactory: null,
+        random: () => 0.5
+      });
+      const pending = new Map<string, unknown>();
+      const workflow = createGenerationWorkflow({
+        api: api.generation,
+        source,
+        clock: { now: () => Date.parse("2026-08-02T12:00:00.000Z") },
+        pendingSubmissions: {
+          load: (campaignId) => (pending.get(campaignId) ?? null) as never,
+          save: (campaignId, value) => { pending.set(campaignId, value); },
+          clear: (campaignId) => { pending.delete(campaignId); }
+        }
+      });
+      const run = await workflow.submit(routeCampaignId, {
+        operationKind: "append",
+        expectedTurnNumber: 1,
+        request: generationRequestSchema.parse({
+          action: "Open the dome.",
+          idempotencyKey: "malformed-route-key"
+        })
+      });
+
+      const rejection = await run.watch(new AbortController().signal)[Symbol.asyncIterator]().next()
+        .catch((error: unknown) => error);
+      expect(rejection).toMatchObject({
+        name: "GenerationWorkflowProtocolError",
+        kind: "invalid_snapshot",
+        cause: {
+          name: "ApiContractError",
+          correlationId: "malformed-snapshot-route"
+        }
+      });
+      expect(routeRequests).toEqual([
+        `POST /api/v1/campaigns/${routeCampaignId}/generations`,
+        `GET /api/v1/generation-jobs/${routeJobId}`
+      ]);
+    } finally {
+      await new Promise<void>((resolveClose, reject) => routeServer.close((error) => error ? reject(error) : resolveClose()));
+    }
   });
 });

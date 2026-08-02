@@ -14,10 +14,20 @@ import {
   renderEditableStateCollection,
   saveCampaignStateFromEditor
 } from "./story-state-editor.js";
+import {
+  fetchCompletedGenerationResult,
+  generationSubmissionInput,
+  observeGenerationRunEvents,
+  presentGenerationEvents,
+  resumeActiveGenerationConflict
+} from "./story-generation-monitor.js";
 
 "use strict";
 
-(function () {
+export function startStoryPlayer(composition) {
+
+const apiClient = composition.api;
+const illustrationApi = composition.illustrations;
 
 // ── DOM Helpers ────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -37,8 +47,6 @@ const sanitizeNarration = (text) => {
 };
 
 // ── Constants ──────────────────────────────────────────────────
-const POLL_INTERVAL_MS = 1000;
-const MAX_POLLS = 900;
 const IMAGE_POLL_MS = 5000;
 const TOAST_DURATION = 3500;
 
@@ -56,9 +64,11 @@ const state = {
   providers: [],
   abortController: null,
   pendingGeneration: null,
+  generationRun: null,
   generationDisplayActive: false,
   generationDisplayAction: "",
   generationJobId: null,
+  generationRecoveryKind: null,
   cancellationConfirmed: false,
   illustrationConfig: null,
   illustrationSegments: [],
@@ -135,24 +145,6 @@ function installClickAwayModalDismissal() {
 }
 
 installClickAwayModalDismissal();
-
-// ── API Layer ──────────────────────────────────────────────────
-async function api(path, options = {}) {
-  const url = "/api/v1" + path;
-  const headers = { "Content-Type": "application/json" };
-  if (options.headers) Object.assign(headers, options.headers);
-  const response = await fetch(url, { ...options, cache: "no-store", headers });
-  if (!response.ok) {
-    let body = {};
-    try { body = await response.json(); } catch (_) { /* ignore */ }
-    const error = new Error(body.message || `Request failed (${response.status})`);
-    error.status = response.status;
-    error.body = body;
-    throw error;
-  }
-  if (response.status === 204) return null;
-  return response.json();
-}
 
 // ── Toast & Notifications ─────────────────────────────────────
 function toast(msg, duration) {
@@ -251,7 +243,7 @@ function copyActivityDiagnostics() {
 // ── Onboarding ────────────────────────────────────────────────
 async function checkOnboarding() {
   try {
-    const data = await api("/providers");
+    const data = await apiClient.providers.list();
     state.providers = data.providers || [];
     const hasText = state.providers.some(p => p.providerRole === "text" || !p.providerRole);
     if (!hasText) {
@@ -267,19 +259,19 @@ async function checkOnboarding() {
 async function loadCampaign(campaignId, options = {}) {
   showBusy("Loading campaign…");
   try {
-    const syncData = await api(`/campaigns/${campaignId}/sync-status`);
+    const syncData = await apiClient.generation.syncStatus(campaignId);
     state.campaign = syncData.campaign || syncData;
     state.world = syncData.world || state.campaign.world || null;
     state.playerConfig = syncData.playerConfig || state.campaign.playerConfig || null;
     state.pendingGeneration = syncData.pendingGeneration || null;
     syncTurnInputModeFromCampaign();
 
-    const turnData = await api(`/campaigns/${campaignId}/turns`);
+    const turnData = await apiClient.campaigns.turns(campaignId);
     state.turns = turnData.turns || [];
-    state.runtimeState = await api(`/campaigns/${campaignId}/state`);
+    state.runtimeState = await apiClient.campaigns.state(campaignId);
     try {
-      state.illustrationConfig = await api(`/campaigns/${campaignId}/illustration-config`);
-      const segmentData = await api(`/campaigns/${campaignId}/illustration-segments`);
+      state.illustrationConfig = await illustrationApi.config(campaignId);
+      const segmentData = await illustrationApi.segments(campaignId);
       state.illustrationSegments = segmentData.segments || [];
     } catch (_) {
       state.illustrationConfig = { enabled: false, sourcePolicy: "off" };
@@ -800,9 +792,9 @@ function showAmbiguousTurnIntent(action, classification) {
 
 async function classifyTurnInput(action) {
   try {
-    return await api(`/campaigns/${state.campaignId}/turn-input/classify`, {
-      method: "POST",
-      body: JSON.stringify({ text: action, preferredFallback: preferredAutoFallback() })
+    return await apiClient.campaigns.classifyTurnInput(state.campaignId, {
+      text: action,
+      preferredFallback: preferredAutoFallback()
     });
   } catch (error) {
     const resolvedMode = preferredAutoFallback();
@@ -858,92 +850,8 @@ async function submitAction(actionText, options = {}) {
 }
 
 // ── Generation Pipeline ───────────────────────────────────────
-function pendingSubmissionStorageKey() {
-  return state.campaignId ? `infiniteQuestPendingGeneration:${state.campaignId}` : "";
-}
-
-function savePendingSubmission(submission) {
-  const key = pendingSubmissionStorageKey();
-  if (key) localStorage.setItem(key, JSON.stringify(submission));
-}
-
-function loadPendingSubmission() {
-  const key = pendingSubmissionStorageKey();
-  if (!key) return null;
-  try {
-    const submission = JSON.parse(localStorage.getItem(key) || "null");
-    if (!submission || typeof submission !== "object") return null;
-    if (!Number.isFinite(Number(submission.createdAt)) || Date.now() - Number(submission.createdAt) > 15 * 60 * 1000) return null;
-    return submission;
-  } catch (_) {
-    return null;
-  }
-}
-
 function clearPendingSubmission() {
-  const key = pendingSubmissionStorageKey();
-  if (key) localStorage.removeItem(key);
-}
-
-function pendingGenerationFromError(error) {
-  return error?.body?.details?.pendingGeneration || null;
-}
-
-function pendingGenerationMatches(pending, submission) {
-  return Boolean(pending
-    && pending.action === submission.action
-    && pending.operationKind === submission.operationKind
-    && Number(pending.expectedTurnNumber) === Number(submission.expectedTurnNumber));
-}
-
-async function enqueueGenerationSubmission(submission) {
-  const endpoint = submission.operationKind === "replace_latest"
-    ? `/campaigns/${state.campaignId}/generations/retry-latest`
-    : `/campaigns/${state.campaignId}/generations`;
-  const payload = {
-    action: submission.action,
-    requestedInputMode: submission.requestedInputMode,
-    resolvedInputMode: submission.resolvedInputMode,
-    inputModeSource: submission.inputModeSource,
-    ...(submission.classificationId ? { classificationId: submission.classificationId } : {}),
-    idempotencyKey: submission.idempotencyKey,
-    context: submission.context,
-    ...(submission.operationKind === "replace_latest"
-      ? { expectedCurrentTurnNumber: submission.expectedTurnNumber }
-      : {})
-  };
-  try {
-    return await api(endpoint, {
-      method: "POST",
-      body: JSON.stringify(payload),
-      signal: state.abortController.signal
-    });
-  } catch (error) {
-    const reportedPending = pendingGenerationFromError(error);
-    if (pendingGenerationMatches(reportedPending, submission)) return reportedPending;
-    if (error.name === "AbortError") throw error;
-
-    try {
-      const syncData = await api(`/campaigns/${state.campaignId}/sync-status`);
-      if (pendingGenerationMatches(syncData.pendingGeneration, submission)) return syncData.pendingGeneration;
-      if (syncData.pendingGeneration) {
-        throw Object.assign(new Error("Another story generation is already active."), {
-          status: 409,
-          pendingGeneration: syncData.pendingGeneration
-        });
-      }
-    } catch (reconcileError) {
-      if (reconcileError.status === 409 || reconcileError.pendingGeneration) throw reconcileError;
-      if (error.status) throw error;
-    }
-
-    // Replaying the exact request is safe because the server keys it by campaign and idempotency key.
-    return api(endpoint, {
-      method: "POST",
-      body: JSON.stringify(payload),
-      signal: state.abortController.signal
-    });
-  }
+  if (state.campaignId) composition.pendingSubmissions.clear(state.campaignId);
 }
 
 async function runGeneration(action, options = {}) {
@@ -951,6 +859,7 @@ async function runGeneration(action, options = {}) {
   state.abortController = new AbortController();
   const progressEl = $("generationProgress");
   if (progressEl) progressEl.classList.remove("hidden");
+  let completeButLoading = false;
 
   try {
     const operationKind = options.operationKind || "append";
@@ -965,25 +874,45 @@ async function runGeneration(action, options = {}) {
       ...(options.classificationId ? { classificationId: options.classificationId } : {}),
       operationKind,
       expectedTurnNumber,
-      idempotencyKey: options.idempotencyKey || crypto.randomUUID(),
-      createdAt: Number(options.createdAt) || Date.now(),
+      idempotencyKey: options.idempotencyKey || composition.idFactory.create(),
+      createdAt: Number(options.createdAt) || composition.clock.now(),
       context: {
         budgetTokens: 32000,
         compression: "auto",
         recentTurns: 8
       }
     };
-    savePendingSubmission(submission);
     recordActivity("generation", "Generation queued", `Action: "${action}"`);
     beginGenerationDisplay(action);
-
-    const jobRes = await enqueueGenerationSubmission(submission);
-
-    const jobId = jobRes.id || jobRes.jobId;
-    if (!jobId) throw new Error("No job ID returned from generation request.");
-
-    state.pendingGeneration = { ...jobRes, id: jobId, action, operationKind, expectedTurnNumber };
-    await pollGenerationJob(jobId, action);
+    const request = {
+      action: submission.action,
+      requestedInputMode: submission.requestedInputMode,
+      resolvedInputMode: submission.resolvedInputMode,
+      inputModeSource: submission.inputModeSource,
+      ...(submission.classificationId ? { classificationId: submission.classificationId } : {}),
+      idempotencyKey: submission.idempotencyKey,
+      context: submission.context,
+      ...(operationKind === "replace_latest" ? { expectedCurrentTurnNumber: expectedTurnNumber } : {})
+    };
+    let run;
+    try {
+      run = await composition.workflow.submit(
+        state.campaignId,
+        generationSubmissionInput(submission, request)
+      );
+    } catch (error) {
+      const conflict = await resumeActiveGenerationConflict(error, state.campaignId, composition.workflow);
+      if (!conflict) throw error;
+      toast(conflict.message);
+      recordActivity("system", "Attached to active generation", `jobId=${conflict.pendingGeneration.id || "unknown"}`);
+      run = conflict.run;
+      state.pendingGeneration = conflict.pendingGeneration;
+    }
+    state.generationRun = run;
+    state.pendingGeneration = state.pendingGeneration?.id === run.jobId
+      ? state.pendingGeneration
+      : { id: run.jobId, action, operationKind, expectedTurnNumber };
+    completeButLoading = await observeGenerationRun(run, action) === "result_unavailable";
   } catch (err) {
     if (err.pendingGeneration) state.pendingGeneration = err.pendingGeneration;
     restoreGenerationDisplay();
@@ -999,7 +928,7 @@ async function runGeneration(action, options = {}) {
       recordActivity("error", "Generation failed", err.message);
     }
   } finally {
-    clearStreamingPreview();
+    if (!completeButLoading) clearStreamingPreview();
     if (progressEl) progressEl.classList.add("hidden");
     hideBusy();
     state.abortController = null;
@@ -1114,7 +1043,10 @@ async function cancelActiveGeneration() {
   await cancelGeneration({
     state,
     getCancelButton: () => $("streamingPreviewCard")?.querySelector('[data-action="cancel-generation"]'),
-    requestCancellation: (jobId) => api(`/generation-jobs/${jobId}/cancel`, { method: "POST", body: "{}" }),
+    requestCancellation: () => {
+      if (!state.generationRun) throw new Error("No active generation run is available to cancel.");
+      return state.generationRun.cancelGeneration();
+    },
     clearPendingSubmission,
     restoreGenerationDisplay,
     abortLocalMonitoring: () => state.abortController?.abort(),
@@ -1125,14 +1057,21 @@ async function cancelActiveGeneration() {
   });
 }
 
-function showGenerationRecovery(jobId, message) {
+function showGenerationRecovery(jobId, message, kind = "generation") {
   const panel = $("generationRecoveryPanel");
   const messageEl = $("generationRecoveryMessage");
+  const continueButton = $("btnContinueGeneration");
+  const retryButton = $("btnRetryGeneration");
+  const discardButton = $("btnDiscardGenerationRecovery");
+  state.generationRecoveryKind = kind;
   if (panel) {
     panel.dataset.jobId = jobId;
     panel.classList.remove("hidden");
   }
   if (messageEl) messageEl.textContent = message || "The durable generation needs attention.";
+  if (continueButton) continueButton.classList.toggle("hidden", kind === "result");
+  if (retryButton) retryButton.textContent = kind === "result" ? "Retry loading result" : "Retry generation job";
+  if (discardButton) discardButton.classList.toggle("hidden", kind === "result");
 }
 
 function hideGenerationRecovery() {
@@ -1141,6 +1080,7 @@ function hideGenerationRecovery() {
     panel.dataset.jobId = "";
     panel.classList.add("hidden");
   }
+  state.generationRecoveryKind = null;
 }
 
 async function monitorRecoveryJob(retryFirst) {
@@ -1150,9 +1090,11 @@ async function monitorRecoveryJob(retryFirst) {
   hideGenerationRecovery();
   showBusy(retryFirst ? "Retrying durable generation…" : "Resuming generation monitoring…");
   try {
-    if (retryFirst) await api(`/generation-jobs/${jobId}/retry`, { method: "POST", body: "{}" });
+    const run = state.generationRun || await composition.workflow.resume(state.campaignId);
+    if (!run) throw new Error("No durable generation is available to resume.");
+    state.generationRun = run;
     beginGenerationDisplay(state.pendingGeneration?.action || "");
-    await pollGenerationJob(jobId, state.pendingGeneration?.action || "");
+    await observeGenerationRun(run, state.pendingGeneration?.action || "", retryFirst);
   } catch (error) {
     restoreGenerationDisplay();
     if (error.name === "AbortError") {
@@ -1172,7 +1114,8 @@ async function discardRecoveryJob() {
   if (!jobId || state.busy) return;
   showBusy("Discarding generation job…");
   try {
-    await api(`/generation-jobs/${jobId}/discard`, { method: "POST", body: "{}" });
+    if (!state.generationRun) throw new Error("No active generation run is available to discard.");
+    await state.generationRun.discardGeneration();
     clearPendingSubmission();
     state.pendingGeneration = null;
     hideGenerationRecovery();
@@ -1180,6 +1123,34 @@ async function discardRecoveryJob() {
     toast("Generation job discarded. The accepted turn was preserved.");
   } catch (error) {
     toast(`Could not discard generation: ${error.message}`);
+  } finally {
+    hideBusy();
+  }
+}
+
+async function retryCompletedGenerationResult() {
+  if (!state.generationRun || state.busy) return;
+  showBusy("Loading the accepted turn…");
+  try {
+    await fetchCompletedGenerationResult(state.generationRun, {
+      onCompleted: async (result) => {
+        hideGenerationRecovery();
+        await finalizeCompletedGeneration(result);
+      },
+      onResultUnavailable: (jobId) => {
+        showGenerationRecovery(
+          jobId,
+          "The turn completed, but its result is still temporarily unavailable. Retry loading it.",
+          "result"
+        );
+      }
+    });
+  } catch (error) {
+    showGenerationRecovery(
+      state.generationRun.jobId,
+      `The accepted turn could not be loaded: ${error.message}`,
+      "result"
+    );
   } finally {
     hideBusy();
   }
@@ -1220,161 +1191,46 @@ async function finalizeCompletedGeneration(result) {
   if (result.resultTurnId) void pollIllustrationResolution(result.resultTurnId).catch(() => undefined);
 }
 
-async function pollGenerationJob(jobId, action) {
-  let retriesUsed = 0;
-  state.generationJobId = jobId;
+async function observeGenerationRun(run, action, retryFirst = false) {
+  state.generationJobId = run.jobId;
   if (!state.generationDisplayActive) beginGenerationDisplay(action);
   else renderStreamingPreview("", action || state.generationDisplayAction);
-  
   pollImageJobs();
-
-  const handleJobUpdate = async (job) => {
-    updateGenerationProgress(job);
-    if (job.partialNarration) {
-      renderStreamingPreview(job.partialNarration, action || job.action);
-    }
-  };
-
-  if (typeof window.EventSource === "function") {
-    try {
-      const streamCompleted = await new Promise((resolve, reject) => {
-        let isResolved = false;
-        const es = new EventSource(`/api/v1/generation-jobs/${jobId}/stream`);
-
-        const cleanup = () => {
-          if (!isResolved) {
-            isResolved = true;
-            es.close();
-          }
-        };
-
-        if (state.abortController) {
-          state.abortController.signal.addEventListener("abort", () => {
-            cleanup();
-            reject(new DOMException("Generation cancelled.", "AbortError"));
-          });
-        }
-
-        es.onmessage = async (event) => {
-          try {
-            const job = JSON.parse(event.data);
-            await handleJobUpdate(job);
-
-            if (job.status === "completed") {
-              cleanup();
-              try {
-                const result = await api(`/generation-jobs/${jobId}/result`);
-                await finalizeCompletedGeneration(result);
-                resolve(true);
-              } catch (err) {
-                reject(err);
-              }
-            } else if (job.status === "cancelled") {
-              cleanup();
-              reject(await reconcileRemoteGenerationCancellation({
-                state,
-                clearPendingSubmission,
-                restoreGenerationDisplay,
-                reloadCampaign: (campaignId) => loadCampaign(campaignId, { autoScroll: false }),
-                toast
-              }));
-            } else if (job.status === "failed") {
-              cleanup();
-              clearStreamingPreview();
-              clearPendingSubmission();
-              state.pendingGeneration = null;
-              reject(new Error(job.errorMessage || job.error || "Generation job failed."));
-            } else if (job.status === "discarded") {
-              cleanup();
-              clearStreamingPreview();
-              clearPendingSubmission();
-              state.pendingGeneration = null;
-              reject(new Error("Generation job was discarded."));
-            } else if (job.status === "recoverable") {
-              if (retriesUsed < 1) {
-                retriesUsed++;
-                showBusy("Recovery: retrying the durable job…");
-                recordActivity("system", "Auto-retrying recoverable job", `jobId=${jobId}`);
-                await api(`/generation-jobs/${jobId}/retry`, { method: "POST", body: "{}" });
-              } else {
-                cleanup();
-                clearStreamingPreview();
-                showGenerationRecovery(jobId, "Generation is recoverable but needs your direction.");
-                reject(new Error("Generation could not recover a complete story turn after retry."));
-              }
-            }
-          } catch (e) {
-            if (isResolved) return;
-            cleanup();
-            reject(e);
-          }
-        };
-
-        es.onerror = () => {
-          if (!isResolved) {
-            cleanup();
-            resolve(false);
-          }
-        };
-      });
-      if (streamCompleted) return;
-    } catch (err) {
-      clearStreamingPreview();
-      throw err;
-    }
-  }
-
-  for (let poll = 0; poll < MAX_POLLS; poll++) {
-    if (state.abortController && state.abortController.signal.aborted) {
-      clearStreamingPreview();
-      throw new DOMException("Generation cancelled.", "AbortError");
-    }
-    const job = await api(`/generation-jobs/${jobId}`);
-    await handleJobUpdate(job);
-
-    if (job.status === "completed") {
-      const result = await api(`/generation-jobs/${jobId}/result`);
-      await finalizeCompletedGeneration(result);
-      return;
-    }
-    if (job.status === "cancelled") {
-      throw await reconcileRemoteGenerationCancellation({
+  let terminalError = null;
+  let resultUnavailable = false;
+  await observeGenerationRunEvents(run, retryFirst, state, (events) => presentGenerationEvents(events, {
+    onStatus: updateGenerationProgress,
+    onNarration: (text) => renderStreamingPreview(text, action || state.generationDisplayAction),
+    onDegraded: (reason, failures) => recordActivity("system", "Generation monitoring degraded", `${reason} (${failures})`),
+    onDetached: () => recordActivity("system", "Generation monitoring detached", `jobId=${run.jobId}`),
+    onResultUnavailable: (jobId, error) => {
+      showGenerationRecovery(
+        jobId,
+        "The turn completed, but its result is temporarily unavailable. Retry loading it.",
+        "result"
+      );
+      recordActivity("system", "Completed turn result unavailable", error.message);
+      resultUnavailable = true;
+    },
+    onCompleted: finalizeCompletedGeneration,
+    onCancelled: async () => {
+      terminalError = await reconcileRemoteGenerationCancellation({
         state,
         clearPendingSubmission,
         restoreGenerationDisplay,
         reloadCampaign: (campaignId) => loadCampaign(campaignId, { autoScroll: false }),
         toast
       });
-    }
-    if (job.status === "failed") {
-      clearStreamingPreview();
+    },
+    onTerminalFailure: (error, outcome) => {
       clearPendingSubmission();
       state.pendingGeneration = null;
-      const msg = job.errorMessage || job.error || "Generation job failed.";
-      throw new Error(msg);
+      if (outcome === "unrecoverable") showGenerationRecovery(run.jobId, "Generation is recoverable but needs your direction.");
+      terminalError = error;
     }
-    if (job.status === "discarded") {
-      clearStreamingPreview();
-      clearPendingSubmission();
-      state.pendingGeneration = null;
-      throw new Error("Generation job was discarded.");
-    }
-    if (job.status === "recoverable") {
-      if (retriesUsed < 1) {
-        retriesUsed++;
-        showBusy("Recovery: retrying the durable job…");
-        recordActivity("system", "Auto-retrying recoverable job", `jobId=${jobId}`);
-        await api(`/generation-jobs/${jobId}/retry`, { method: "POST", body: "{}" });
-        continue;
-      }
-      clearStreamingPreview();
-      showGenerationRecovery(jobId, "Generation is recoverable but needs your direction.");
-      throw new Error("Generation could not recover a complete story turn after retry.");
-    }
-    await new Promise(r => setTimeout(r, 400));
-  }
-  clearStreamingPreview();
-  throw new Error("Generation timed out. Reloading this page will resume if the durable job is still running.");
+  }));
+  if (terminalError) throw terminalError;
+  return resultUnavailable ? "result_unavailable" : "settled";
 }
 
 function updateGenerationProgress(job) {
@@ -1417,44 +1273,28 @@ function updateGenerationProgress(job) {
 async function resumePendingGeneration() {
   // Check sync-status for any in-flight generation jobs
   if (!state.campaignId || !state.campaign) return false;
+  let completeButLoading = false;
   try {
-    const syncData = await api(`/campaigns/${state.campaignId}/sync-status`);
-    const pending = syncData.pendingGeneration;
-    state.pendingGeneration = pending || null;
-    if (pending?.id) {
+    const run = await composition.workflow.resume(state.campaignId);
+    if (run) {
+      state.generationRun = run;
+      state.pendingGeneration = { id: run.jobId };
       showBusy("Resuming pending generation…");
-      recordActivity("system", "Resuming pending generation", `jobId=${pending.id}`);
-      beginGenerationDisplay(pending.action || "");
+      recordActivity("system", "Resuming pending generation", `jobId=${run.jobId}`);
+      beginGenerationDisplay(state.pendingGeneration.action || "");
       const progressEl = $("generationProgress");
       if (progressEl) progressEl.classList.remove("hidden");
       try {
-        await pollGenerationJob(pending.id, pending.action || "");
+        completeButLoading = await observeGenerationRun(run, state.pendingGeneration.action || "") === "result_unavailable";
         return true;
       } catch (error) {
         restoreGenerationDisplay();
         throw error;
       } finally {
-        clearStreamingPreview();
+        if (!completeButLoading) clearStreamingPreview();
         if (progressEl) progressEl.classList.add("hidden");
         hideBusy();
       }
-    }
-    const stored = loadPendingSubmission();
-    const storedTurnStillMatches = stored?.operationKind === "replace_latest"
-      ? Number(stored.expectedTurnNumber) === state.turns.length
-      : Number(stored?.expectedTurnNumber) === state.turns.length + 1;
-    if (stored && storedTurnStillMatches) {
-      await runGeneration(stored.action, {
-        operationKind: stored.operationKind,
-        expectedCurrentTurnNumber: stored.expectedTurnNumber,
-        idempotencyKey: stored.idempotencyKey,
-        createdAt: stored.createdAt,
-        requestedInputMode: stored.requestedInputMode,
-        resolvedInputMode: stored.resolvedInputMode,
-        inputModeSource: stored.inputModeSource,
-        classificationId: stored.classificationId
-      });
-      return true;
     }
     clearPendingSubmission();
   } catch (_) { /* ignore — no pending job */ }
@@ -1512,10 +1352,7 @@ async function undoLatest() {
   if (!confirm("Undo the last turn? This rewinds the campaign and cannot be reversed.")) return;
   showBusy("Rewinding…");
   try {
-    await api(`/campaigns/${state.campaignId}/rewind`, {
-      method: "POST",
-      body: JSON.stringify({ targetTurnNumber: state.turns.length - 1 })
-    });
+    await apiClient.campaigns.rewind(state.campaignId, { targetTurnNumber: state.turns.length - 1 });
     recordActivity("system", "Turn undone", `Rewound to turn ${state.turns.length - 1}.`);
     await loadCampaign(state.campaignId);
     toast("Last turn removed.");
@@ -1596,9 +1433,9 @@ function pollImageJobs() {
 
   const poll = async () => {
     try {
-      const data = await api(`/campaigns/${state.campaignId}/image-jobs`);
+      const data = await illustrationApi.imageJobs(state.campaignId);
       const jobs = data.jobs || data || [];
-      const segmentData = await api(`/campaigns/${state.campaignId}/illustration-segments`);
+      const segmentData = await illustrationApi.segments(state.campaignId);
       const segments = segmentData.segments || [];
       let anyPending = false;
       state.illustrationSegments = segments;
@@ -1768,7 +1605,7 @@ function renderSceneImageJob(job) {
     retry.addEventListener("click", async () => {
       retry.disabled = true;
       try {
-        const queued = await api(`/image-jobs/${job.id}/retry`, { method: "POST", body: "{}" });
+        const queued = await illustrationApi.retryImageJob(job.id);
         recordImageJobActivity(queued);
         renderSceneImageJob(queued);
         pollImageJobs();
@@ -1831,10 +1668,7 @@ async function regenerateSegmentImage(segmentId, variantIndex, prompt) {
   if (!segment || !effectivePrompt) return toast("This segment does not have a valid illustration prompt.");
   try {
     showBusy(`Queueing segment ${segment.ordinal + 1}, image ${variantIndex + 1}…`);
-    const queued = await api(`/illustration-segments/${segmentId}/images`, {
-      method: "POST",
-      body: JSON.stringify({ prompt: effectivePrompt, variantIndex })
-    });
+    const queued = await illustrationApi.regenerateSegmentImage(segmentId, { prompt: effectivePrompt, variantIndex });
     recordImageJobActivity(queued);
     pollImageJobs();
     toast(`Segment ${segment.ordinal + 1}, image ${variantIndex + 1} queued.`);
@@ -1872,33 +1706,15 @@ function whySegmentImage(segmentId, variantIndex) {
   showMessage("Why this image?", details);
 }
 
-async function regenerateIllustration(turnId, prompt) {
-  try {
-    showBusy("Queueing illustration…");
-    const queued = await api(`/turns/${turnId}/illustrations`, {
-      method: "POST",
-      body: JSON.stringify({ prompt: prompt || undefined, replace: true })
-    });
-    toast("Illustration queued.");
-    recordImageJobActivity(queued);
-    pollImageJobs();
-  } catch (err) {
-    toast(`Failed to queue illustration: ${err.message}`);
-    recordActivity("error", "Illustration queue failed", err.message);
-  } finally {
-    hideBusy();
-  }
-}
-
 async function generateTurnSegments(turnId, mode = "missing") {
   if (!turnId || state.busy) return;
   showBusy(mode === "rebuild" ? "Rebuilding illustration segments…" : "Creating illustration segments…");
   try {
-    const result = await api(`/turns/${turnId}/illustration-segments`, {
-      method: "POST",
-      body: JSON.stringify({ mode, idempotencyKey: crypto.randomUUID() })
+    const result = await illustrationApi.generateTurnSegments(turnId, {
+      mode,
+      idempotencyKey: composition.idFactory.create()
     });
-    const segmentData = await api(`/campaigns/${state.campaignId}/illustration-segments`);
+    const segmentData = await illustrationApi.segments(state.campaignId);
     state.illustrationSegments = segmentData.segments || [];
     renderAllScenes({ autoScroll: false });
     pollImageJobs();
@@ -1924,7 +1740,7 @@ function showMessage(title, message) {
 
 async function whyIllustration(turnId) {
   try {
-    const resolution = await api(`/turns/${turnId}/illustration-resolution`);
+    const resolution = await illustrationApi.resolution(turnId);
     const candidate = resolution.candidates?.[0];
     const details = [
       `Outcome: ${resolution.reasonCode || resolution.status}.`,
@@ -1940,7 +1756,7 @@ async function whyIllustration(turnId) {
 
 async function pollIllustrationResolution(turnId) {
   for (let attempt = 0; attempt < 120; attempt += 1) {
-    const resolution = await api(`/turns/${turnId}/illustration-resolution`);
+    const resolution = await illustrationApi.resolution(turnId);
     if (resolution.status === "completed" && resolution.selectedAssetId) {
       updateSceneImage(turnId, `/api/v1/assets/${resolution.selectedAssetId}`, true);
       toast("Selected another library match.");
@@ -1956,23 +1772,11 @@ async function pollIllustrationResolution(turnId) {
 
 async function findAnotherLibraryMatch(turnId) {
   try {
-    await api(`/turns/${turnId}/illustration-match`, { method: "POST", body: "{}" });
+    await illustrationApi.rematch(turnId);
     toast("Searching for another retained match.");
     void pollIllustrationResolution(turnId);
   } catch (error) {
     toast(error.message || "This image was not selected by automatic library matching.");
-  }
-}
-
-async function removeIllustration(turnId) {
-  try {
-    await api(`/turns/${turnId}/illustration-asset`, { method: "PUT", body: JSON.stringify({ assetId: null }) });
-    const turn = state.turns.find((item) => (item.id || item.turnId) === turnId);
-    if (turn) { turn.imageAssetUrl = ""; turn.imageUrl = ""; }
-    renderAllScenes();
-    toast("Illustration removed. The retained asset was not deleted.");
-  } catch (error) {
-    toast(`Could not remove illustration: ${error.message}`);
   }
 }
 
@@ -1983,7 +1787,7 @@ async function openEditState() {
   const campaignId = state.campaignId;
   try {
     showBusy("Loading current state…");
-    state.runtimeState = await api(`/campaigns/${campaignId}/state`);
+    state.runtimeState = await apiClient.campaigns.state(campaignId);
     state.editStateSession = Object.freeze({
       campaignId,
       runtimeState: captureCampaignStateEditSession(state.runtimeState)
@@ -2083,7 +1887,7 @@ function addTrackerFromEditor() {
   state.runtimeState.trackers = [
     ...collectTrackerEditorValues(),
     {
-      id: globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `tracker-${Date.now()}`,
+      id: composition.idFactory.create(),
       name,
       value: $("trackerValue")?.value || "",
       rules: $("trackerRules")?.value || ""
@@ -2138,16 +1942,13 @@ async function saveUserProfile() {
   }
 
   try {
-    const res = await api("/users/me/profile", {
-      method: "PATCH",
-      body: JSON.stringify({
-        displayName,
-        settings: {
-          autoSubmitTurnChoices,
-          continuousReading,
-          defaultTurnControlStyle
-        }
-      })
+    const res = await apiClient.session.updateProfile({
+      displayName,
+      settings: {
+        autoSubmitTurnChoices,
+        continuousReading,
+        defaultTurnControlStyle
+      }
     });
     if (res && res.user) {
       state.user = res.user;
@@ -2254,7 +2055,7 @@ async function inspectTurnState(turnNumber) {
   panel.classList.remove("hidden");
   panel.innerHTML = `<p class="mini">Loading state after turn ${turnNumber}…</p>`;
   try {
-    const runtime = await api(`/campaigns/${state.campaignId}/state?turnNumber=${turnNumber}`);
+    const runtime = await apiClient.campaigns.state(state.campaignId, turnNumber);
     if (requestId !== state.historyInspectionRequestId) return;
     renderCampaignStateInspector(panel, runtime);
   } catch (err) {
@@ -2272,7 +2073,7 @@ async function saveEditState() {
   const canonicalFacts = $("editStateCanonicalFacts");
   try {
     showBusy("Saving state…");
-    await saveCampaignStateFromEditor(api, editSession.campaignId, editSession.runtimeState, {
+    await saveCampaignStateFromEditor(apiClient.campaigns.updateState, editSession.campaignId, editSession.runtimeState, {
       summary: continuitySummaryEl,
       threads: openThreads,
       facts: canonicalFacts,
@@ -2353,10 +2154,9 @@ function openWorldSetup() {
 async function exportMarkdown() {
   if (!state.campaignId) return;
   try {
-    const data = await api(`/campaigns/${state.campaignId}/export`);
-    const title = String(data.campaign?.title || state.campaign?.title || "Story").replace(/[\r\n]+/g, " ");
+    const title = String(state.campaign?.title || "Story").replace(/[\r\n]+/g, " ");
     let md = `# ${title}\n\n`;
-    (data.turns || state.turns).forEach((t, i) => {
+    state.turns.forEach((t, i) => {
       const action = String(t.action || "").replace(/[\r\n]+/g, " ");
       const turnId = t.id || t.turnId || state.turns[i]?.id || "";
       const segments = illustrationSegmentsForTurn(turnId);
@@ -2391,10 +2191,9 @@ async function exportPdfWithImages() {
   printWindow.document.write("<!doctype html><title>Preparing story…</title><p>Preparing your story for PDF export…</p>");
 
   try {
-    const data = await api(`/campaigns/${state.campaignId}/export`);
-    const titleText = data.campaign?.title || state.campaign?.title || "Infinite Quest Story";
+    const titleText = state.campaign?.title || "Infinite Quest Story";
     const title = escapeHtml(titleText);
-    const turns = (data.turns || state.turns).map((turn, index) => {
+    const turns = state.turns.map((turn, index) => {
       const action = turn.action ? `: ${escapeHtml(turn.action)}` : "";
       const turnId = turn.id || turn.turnId || state.turns[index]?.id || "";
       const segments = illustrationSegmentsForTurn(turnId);
@@ -2482,7 +2281,7 @@ function initializeNavigationMenus() {
 // ── Initialization ────────────────────────────────────────────
 async function init() {
   try {
-    const sessionRes = await api("/session");
+    const sessionRes = await apiClient.session.get();
     if (sessionRes && sessionRes.user) {
       state.user = sessionRes.user;
     }
@@ -2693,9 +2492,6 @@ document.addEventListener("DOMContentLoaded", () => {
     if (dlg && dlg._segmentId && editor) {
       regenerateSegmentImage(dlg._segmentId, dlg._variantIndex || 0, editor.value);
       if (dlg.close) dlg.close();
-    } else if (dlg && dlg._turnId && editor) {
-      regenerateIllustration(dlg._turnId, editor.value);
-      if (dlg.close) dlg.close();
     }
   });
   const btnImagePromptCancel = $("btnImagePromptCancel");
@@ -2707,10 +2503,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (result === "reset" && branchDlg._turnIndex !== undefined) {
       showBusy("Rewinding campaign…");
       try {
-        await api(`/campaigns/${state.campaignId}/rewind`, {
-          method: "POST",
-          body: JSON.stringify({ targetTurnNumber: branchDlg._turnIndex + 1 })
-        });
+        await apiClient.campaigns.rewind(state.campaignId, { targetTurnNumber: branchDlg._turnIndex + 1 });
         await loadCampaign(state.campaignId);
         navigateTo(-1);
         toast("Campaign rewound.");
@@ -2723,7 +2516,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (result === "copy" && branchDlg._turnIndex !== undefined) {
       showBusy("Creating campaign branch…");
       try {
-        await branchCampaignFromTurn(state.campaignId, branchDlg._turnIndex, api);
+        await branchCampaignFromTurn(state.campaignId, branchDlg._turnIndex, apiClient.campaigns.branch);
       } catch (err) {
         toast(`Branch failed: ${err.message}`);
       } finally {
@@ -2772,10 +2565,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (btn.dataset.action === "generate-turn-segments") generateTurnSegments(turnId, "missing");
     if (btn.dataset.action === "rebuild-turn-segments") generateTurnSegments(turnId, "rebuild");
     if (btn.dataset.action === "edit-image-prompt") openImagePromptEditor(turnId);
-    if (btn.dataset.action === "regenerate-image") regenerateIllustration(turnId);
     if (btn.dataset.action === "find-library-match") findAnotherLibraryMatch(turnId);
     if (btn.dataset.action === "why-image") whyIllustration(turnId);
-    if (btn.dataset.action === "remove-image") removeIllustration(turnId);
   };
   const storyArea = $("storyArea");
   if (storyArea) storyArea.addEventListener("click", handleStoryAction);
@@ -2826,7 +2617,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnContinueGeneration = $("btnContinueGeneration");
   if (btnContinueGeneration) btnContinueGeneration.addEventListener("click", () => monitorRecoveryJob(false));
   const btnRetryGeneration = $("btnRetryGeneration");
-  if (btnRetryGeneration) btnRetryGeneration.addEventListener("click", () => monitorRecoveryJob(true));
+  if (btnRetryGeneration) btnRetryGeneration.addEventListener("click", () => {
+    if (state.generationRecoveryKind === "result") void retryCompletedGenerationResult();
+    else void monitorRecoveryJob(true);
+  });
 
   // Edit Response dialog
   const btnEditResponse = $("btnEditResponse");
@@ -2864,8 +2658,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // Start
-  fetch("/api/v1/meta")
-    .then(response => response.ok ? response.json() : null)
+  apiClient.meta.get()
     .then(metadata => {
       const application = metadata?.application;
       if (!application?.version) return;
@@ -2891,4 +2684,4 @@ document.addEventListener("DOMContentLoaded", () => {
   init();
 });
 
-})();
+}

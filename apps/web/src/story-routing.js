@@ -6,11 +6,8 @@ export function navigateToStoryCampaign(campaignId, browserLocation = window.loc
   browserLocation.assign(storyCampaignPath(campaignId));
 }
 
-export async function branchCampaignFromTurn(campaignId, turnIndex, request, browserLocation = window.location) {
-  const newCampaign = await request(`/campaigns/${campaignId}/branch`, {
-    method: "POST",
-    body: JSON.stringify({ targetTurnNumber: turnIndex + 1 })
-  });
+export async function branchCampaignFromTurn(campaignId, turnIndex, branch, browserLocation = window.location) {
+  const newCampaign = await branch(campaignId, { targetTurnNumber: turnIndex + 1 });
   navigateToStoryCampaign(newCampaign.id, browserLocation);
   return newCampaign;
 }

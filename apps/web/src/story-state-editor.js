@@ -192,28 +192,25 @@ export function buildCampaignStateUpdate(runtimeState, editorValues) {
 }
 
 export async function submitCampaignState(
-  request,
+  updateState,
   campaignId,
   runtimeState,
   editorValues,
   onSaved
 ) {
-  const savedState = await request(`/campaigns/${campaignId}/state`, {
-    method: "PATCH",
-    body: JSON.stringify(buildCampaignStateUpdate(runtimeState, editorValues))
-  });
+  const savedState = await updateState(campaignId, buildCampaignStateUpdate(runtimeState, editorValues));
   onSaved(savedState);
   return savedState;
 }
 
 export async function saveCampaignStateFromEditor(
-  request,
+  updateState,
   campaignId,
   runtimeState,
   editor,
   onSaved
 ) {
-  return submitCampaignState(request, campaignId, runtimeState, {
+  return submitCampaignState(updateState, campaignId, runtimeState, {
     continuitySummary: editor.summary?.value || "",
     openThreads: collectOpenThreadEditorValues(editor.threads),
     canonicalFacts: collectCanonicalFactEditorValues(editor.facts),

@@ -6,11 +6,6 @@ export interface CampaignBranch {
   id: string;
 }
 
-export interface BranchRequestOptions {
-  method: string;
-  body: string;
-}
-
 export function storyCampaignPath(campaignId: string): string;
 
 export function navigateToStoryCampaign(campaignId: string, browserLocation?: StoryLocation): void;
@@ -18,6 +13,6 @@ export function navigateToStoryCampaign(campaignId: string, browserLocation?: St
 export function branchCampaignFromTurn(
   campaignId: string,
   turnIndex: number,
-  request: (path: string, options: BranchRequestOptions) => Promise<CampaignBranch>,
+  branch: (campaignId: string, request: { targetTurnNumber: number }) => Promise<CampaignBranch>,
   browserLocation?: StoryLocation
 ): Promise<CampaignBranch>;

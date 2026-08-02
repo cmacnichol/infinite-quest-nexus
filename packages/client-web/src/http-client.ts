@@ -144,7 +144,7 @@ async function parseSuccessfulResponse<TResponse>(
     });
   }
 
-  if (!("responseSchema" in spec)) {
+  if (spec.responseKind === "empty" || spec.responseKind === "blob") {
     throw new TypeError("A JSON response request requires a response schema.");
   }
   const parsed = spec.responseSchema.safeParse(body);

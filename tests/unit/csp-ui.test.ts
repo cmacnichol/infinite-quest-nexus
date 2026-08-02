@@ -5,7 +5,7 @@ const activeFiles = [
   "apps/web/public/index.html",
   "apps/web/public/story.html",
   "apps/web/public/nexus.js",
-  "apps/web/public/story.js"
+  "apps/web/src/story.js"
 ];
 
 describe("active UI CSP compatibility", () => {

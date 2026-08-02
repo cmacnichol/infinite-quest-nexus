@@ -24,12 +24,15 @@ describe("web build contract", () => {
   test("legacy build emits its HTML assets and stable compiled entry", () => {
     const distDirectory = path.join(rootDirectory, "apps/web/dist");
     const html = readFileSync(path.join(distDirectory, "index.html"), "utf8");
+    const storyHtml = readFileSync(path.join(distDirectory, "story.html"), "utf8");
 
     expect(localAssetPaths(html, "/nexus/")).not.toEqual([]);
     for (const assetPath of localAssetPaths(html, "/nexus/")) {
       expect(existsSync(path.join(distDirectory, assetPath)), assetPath).toBe(true);
     }
     expect(existsSync(path.join(distDirectory, "legacy-client.js"))).toBe(true);
+    expect(storyHtml).toContain('src="/nexus/legacy-client.js"');
+    expect(existsSync(path.join(distDirectory, "story.js"))).toBe(false);
   });
 
   test("replacement build emits HTML whose hashed assets exist", () => {

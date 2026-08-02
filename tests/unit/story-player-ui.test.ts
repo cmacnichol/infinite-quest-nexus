@@ -6,16 +6,16 @@ import {
   renderCampaignStateInspector,
   saveCampaignStateFromEditor
 // @ts-expect-error Browser JavaScript modules intentionally do not publish TypeScript declarations.
-} from "../../apps/web/public/story-state-editor.js";
+} from "../../apps/web/src/story-state-editor.js";
 import {
   cancelGeneration,
   reconcileRemoteGenerationCancellation,
   syncCancelGenerationButton
 // @ts-expect-error Browser JavaScript modules intentionally do not publish TypeScript declarations.
-} from "../../apps/web/public/story-generation-cancellation.js";
+} from "../../apps/web/src/story-generation-cancellation.js";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
-const storyScript = readFileSync("apps/web/public/story.js", "utf8");
+const storyScript = readFileSync("apps/web/src/story.js", "utf8");
 const storyCss = readFileSync("apps/web/public/story.css", "utf8");
 const tokensCss = readFileSync("apps/web/public/tokens.css", "utf8");
 const navigationCss = readFileSync("apps/web/public/navigation.css", "utf8");
@@ -136,28 +136,35 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('id="btnSubmitAsAction"');
     expect(storyHtml).toContain('id="btnSubmitAsScene"');
     expect(storyHtml).toContain('id="btnReturnToTurnEditor"');
-    expect(storyScript).toContain('/campaigns/${state.campaignId}/turn-input/classify');
-    expect(storyScript).toContain('body: JSON.stringify({ text: action, preferredFallback: preferredAutoFallback() })');
+    expect(storyScript).toContain('apiClient.campaigns.classifyTurnInput(state.campaignId, {');
+    expect(storyScript).toContain('preferredFallback: preferredAutoFallback()');
     expect(storyScript).toContain('classification.confidenceBand === "ambiguous" || classification.classification === "mixed"');
     expect(storyScript).toContain('requestedInputMode: submission.requestedInputMode');
     expect(storyScript).toContain('resolvedInputMode: submission.resolvedInputMode');
     expect(storyScript).toContain('classificationId: submission.classificationId');
   });
 
-  it("orchestrates turn generation via Nexus API polling with progress updates, crash recovery, and retry", () => {
+  it("orchestrates turn generation through the shared workflow with progress, recovery, and retry", () => {
     expect(storyScript).toContain('async function runGeneration(action, options = {})');
-    expect(storyScript).toContain('/campaigns/${state.campaignId}/generations');
-    expect(storyScript).toContain('/campaigns/${state.campaignId}/generations/retry-latest');
-    expect(storyScript).toContain('/generation-jobs/${jobId}');
-    expect(storyScript).toContain('idempotencyKey: options.idempotencyKey || crypto.randomUUID()');
-    expect(storyScript).toContain('async function enqueueGenerationSubmission(submission)');
-    expect(storyScript).toContain('pendingGenerationMatches(syncData.pendingGeneration, submission)');
+    expect(storyScript).toContain('idempotencyKey: options.idempotencyKey || composition.idFactory.create()');
+    expect(storyScript).toContain('const conflict = await resumeActiveGenerationConflict(error, state.campaignId, composition.workflow);');
+    expect(storyScript).toContain('toast(conflict.message)');
+    expect(storyScript).toContain('run = conflict.run;');
+    expect(storyScript).not.toContain('async function enqueueGenerationSubmission(submission)');
     expect(storyScript).toContain('function updateGenerationProgress(job)');
     expect(storyScript).toContain('async function resumePendingGeneration()');
-    expect(storyScript).toContain('const pending = syncData.pendingGeneration;');
-    expect(storyScript).toContain('if (job.status === "recoverable") {');
+    expect(storyScript).toContain('const run = await composition.workflow.resume(state.campaignId);');
     expect(storyScript).toContain('The original turn was preserved.');
     expect(storyScript).toContain('class="replacement-pending-banner"');
+  });
+
+  it("delegates monitoring and durable pending submissions to the injected workflow", () => {
+    expect(storyScript).toContain("composition.workflow.submit");
+    expect(storyScript).toContain("composition.workflow.resume");
+    expect(storyScript).toContain("presentGenerationEvents(events");
+    expect(storyScript).not.toContain("new EventSource(");
+    expect(storyScript).not.toContain("localStorage.setItem(key");
+    expect(storyScript).not.toContain("/campaigns/${state.campaignId}/export");
   });
 
   it("shows the cancellation control only while a durable generation job is active", () => {
@@ -275,7 +282,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   });
 
   it("reloads authoritative campaign state without reusing a stale pre-generation response", () => {
-    expect(storyScript).toContain('fetch(url, { ...options, cache: "no-store", headers })');
+    expect(storyScript).toContain('await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });');
     expect(storyScript).toContain('result.resultTurnId && !state.turns.some((turn) => turn.id === result.resultTurnId)');
     expect(storyScript).toContain('const completedTurn = { ...result, id: result.resultTurnId };');
     expect(storyScript).toContain("renderTurnInput();");
@@ -327,14 +334,15 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain("await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });");
     expect(storyScript).toContain("window.requestAnimationFrame(() => {");
     expect(storyScript).toContain('window.scrollTo({ ...viewport, behavior: "auto" });');
-    expect(storyScript.match(/await finalizeCompletedGeneration\(result\);/g)).toHaveLength(2);
+    expect(storyScript).toContain('onCompleted: finalizeCompletedGeneration');
+    expect(storyScript).toContain('await finalizeCompletedGeneration(result);');
   });
 
   it("provides history navigation with view mode toggling, undo, retry, and branch/reset handling", () => {
     expect(storyScript).toContain('function goToPrevious()');
     expect(storyScript).toContain('function goToNext()');
     expect(storyScript).toContain('async function undoLatest()');
-    expect(storyScript).toContain('/campaigns/${state.campaignId}/rewind');
+    expect(storyScript).toContain('apiClient.campaigns.rewind(state.campaignId');
     expect(storyScript).toContain('import { branchCampaignFromTurn } from "./story-routing.js";');
     expect(storyScript).not.toContain('history-branch-btn');
     expect(storyScript).not.toContain('history-state-btn');
@@ -347,7 +355,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('await runGeneration(action, {');
     expect(storyScript).not.toContain('confirm("Retry the last turn? The current outcome will be replaced.")');
     expect(storyScript).toContain('branchDlg.addEventListener("close"');
-    expect(storyScript).toContain('await branchCampaignFromTurn(state.campaignId, branchDlg._turnIndex, api);');
+    expect(storyScript).toContain('await branchCampaignFromTurn(state.campaignId, branchDlg._turnIndex, apiClient.campaigns.branch);');
     expect(storyScript).toContain('function openTurnHistoryModal()');
     expect(storyScript).toContain('el.addEventListener("click", openTurnHistoryModal);');
   });
@@ -383,12 +391,12 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('recordActivity("image", "Illustration generation progress"');
     expect(storyScript).toContain('["queued", "generating", "provider_pending", "downloading"]');
     expect(storyScript).toContain('aria-label", `Illustration generation progress');
-    expect(storyScript).toContain('/campaigns/${state.campaignId}/image-jobs');
-    expect(storyScript).toContain('/campaigns/${campaignId}/illustration-config');
+    expect(storyScript).toContain('illustrationApi.imageJobs(state.campaignId)');
+    expect(storyScript).toContain('illustrationApi.config(campaignId)');
     expect(storyScript).toContain('state.illustrationConfig?.sourcePolicy !== "off"');
     expect(storyScript).toContain('function openImagePromptEditor(turnId)');
-    expect(storyScript).toContain('async function regenerateIllustration(turnId, prompt)');
-    expect(storyScript).toContain('/turns/${turnId}/illustrations');
+    expect(storyScript).not.toContain('async function regenerateIllustration(turnId, prompt)');
+    expect(storyScript).not.toContain('/turns/${turnId}/illustrations');
     expect(storyScript).toContain('data-action="edit-segment-image-prompt"');
     expect(storyScript).toContain('data-action="regenerate-segment-image"');
     expect(storyScript).toContain('data-action="why-segment-image"');
@@ -401,7 +409,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain("async function regenerateSegmentImage(segmentId, variantIndex, prompt)");
     expect(storyScript).toContain("function whySegmentImage(segmentId, variantIndex)");
     expect(storyScript).not.toContain("async function removeSegmentImage(segmentId, variantIndex)");
-    expect(storyScript).toContain('/illustration-segments/${segmentId}/images');
+    expect(storyScript).toContain('illustrationApi.regenerateSegmentImage(segmentId');
     expect(storyScript).toContain("const isCurrentTurn = turnIndex === state.turns.length - 1;");
     expect(storyHtml).toContain('id="imagePromptDialogTitle"');
     expect(storyScript).toContain('async function pollIllustrationResolution(turnId)');
@@ -425,7 +433,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('async function openEditState()');
     expect(storyScript).toContain('function switchEditStateTab(tabName)');
     expect(storyScript).toContain('async function saveEditState()');
-    expect(storyScript).toContain('/campaigns/${state.campaignId}/state');
+    expect(storyScript).toContain('apiClient.campaigns.state(state.campaignId, turnNumber)');
     expect(storyScript).toContain('async function inspectTurnState(turnNumber)');
     expect(storyHtml).toContain('id="scratchpadEditor"');
     expect(storyHtml).toContain('id="turnHistoryStatePanel"');
@@ -457,12 +465,12 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       pendingEventTriggers: []
     };
     const response = { ...runtimeState, revision: 8 };
-    const requests: Array<{ path: string; options: { method: string; body: string } }> = [];
+    const requests: Array<{ campaignId: string; value: unknown }> = [];
     let appliedState = runtimeState;
 
     await saveCampaignStateFromEditor(
-      async (path: string, options: { method: string; body: string }) => {
-        requests.push({ path, options });
+      async (campaignId: string, value: unknown) => {
+        requests.push({ campaignId, value });
         return response;
       },
       "campaign-id",
@@ -475,10 +483,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     );
 
     expect(requests).toEqual([{
-      path: "/campaigns/campaign-id/state",
-      options: {
-        method: "PATCH",
-        body: JSON.stringify({
+      campaignId: "campaign-id",
+      value: {
           expectedTurnNumber: 4,
           expectedRevision: 7,
           continuitySummary: "Corrected summary.",
@@ -489,7 +495,6 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
           rpgStats: runtimeState.rpgStats,
           eventTriggers: [],
           pendingEventTriggers: []
-        })
       }
     }]);
     expect(appliedState).toBe(response);
@@ -568,11 +573,11 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       eventTriggers: [{ id: "gate-open", label: "Gate open" }],
       pendingEventTriggers: []
     };
-    const requests: Array<{ path: string; options: { method: string; body: string } }> = [];
+    const requests: Array<{ campaignId: string; value: unknown }> = [];
 
     await saveCampaignStateFromEditor(
-      async (path: string, options: { method: string; body: string }) => {
-        requests.push({ path, options });
+      async (campaignId: string, value: unknown) => {
+        requests.push({ campaignId, value });
         return runtimeState;
       },
       "campaign-id",
@@ -581,7 +586,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       () => {}
     );
 
-    expect(JSON.parse(requests[0]?.options.body || "{}")).toEqual({
+    expect(requests[0]?.value).toEqual({
       expectedTurnNumber: 4,
       expectedRevision: 7,
       continuitySummary: "Corrected summary.",
@@ -728,7 +733,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("implements Markdown and print-to-PDF exports with available story illustrations", () => {
     expect(storyScript).toContain('async function exportMarkdown()');
     expect(storyScript).toContain('async function exportPdfWithImages()');
-    expect(storyScript).toContain('/campaigns/${state.campaignId}/export');
+    expect(storyScript).not.toContain('/campaigns/${state.campaignId}/export');
+    expect(storyScript).toContain('state.turns.forEach((t, i) => {');
     expect(storyScript).toContain('t.imageAssetUrl || t.imageUrl');
     expect(storyScript).toContain('turn.imageAssetUrl || turn.imageUrl');
     expect(storyScript).toContain('printWindow.print()');
