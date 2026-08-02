@@ -1,4 +1,4 @@
-import type { GenerationRequest, GenerationRetryLatestRequest } from "../../contracts/src/index.js";
+import type { GenerationRequest, GenerationRetryLatestRequest } from "@infinite-quest/contracts";
 import type { StoredGenerationSubmission } from "./generation/types.js";
 
 export interface Clock {

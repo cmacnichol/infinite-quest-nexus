@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@infinite-quest/client-core": "workspace:*",
+    "@infinite-quest/contracts": "workspace:*",
     "zod": "^4.0.17"
   },
   "scripts": {

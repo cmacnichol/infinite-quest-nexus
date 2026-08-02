@@ -1,5 +1,5 @@
 {
-  "name": "@infinite-quest/client-core",
+  "name": "@infinite-quest/contracts",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,9 +7,9 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@infinite-quest/contracts": "workspace:*"
+    "zod": "^4.0.17"
   },
   "scripts": {
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p ../../tsconfig.json --noEmit"
   }
 }

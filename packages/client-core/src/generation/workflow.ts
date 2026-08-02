@@ -1,4 +1,4 @@
-import { generationStreamSnapshotSchema, type GenerationActionResponse } from "../../../contracts/src/index.js";
+import { generationStreamSnapshotSchema, type GenerationActionResponse } from "@infinite-quest/contracts";
 import { createGenerationMachine } from "./machine.js";
 import { createGenerationSubmissionCoordinator } from "./submission.js";
 import {
@@ -95,7 +95,7 @@ function createRun(
     }
   }
 
-  async function observeSnapshot(snapshot: import("../../../contracts/src/index.js").GenerationStreamSnapshot) {
+  async function observeSnapshot(snapshot: import("@infinite-quest/contracts").GenerationStreamSnapshot) {
     try {
       return machine.observe(snapshot);
     } catch (cause) {
@@ -130,7 +130,7 @@ function createRun(
       while (true) {
         let restart = false;
         let terminalAccepted = false;
-        let deferredFailedSnapshot: import("../../../contracts/src/index.js").GenerationStreamSnapshot | null = null;
+        let deferredFailedSnapshot: import("@infinite-quest/contracts").GenerationStreamSnapshot | null = null;
         const iterator = dependencies.source.watch(jobId, signal)[Symbol.asyncIterator]();
         const aborted = Symbol("aborted");
         let resolveAbort: (() => void) | undefined;

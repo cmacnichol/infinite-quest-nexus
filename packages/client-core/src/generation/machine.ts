@@ -1,4 +1,4 @@
-import type { GenerationStreamSnapshot } from "../../../contracts/src/index.js";
+import type { GenerationStreamSnapshot } from "@infinite-quest/contracts";
 import { GenerationWorkflowProtocolError } from "./types.js";
 
 type GenerationStatus = GenerationStreamSnapshot["status"];

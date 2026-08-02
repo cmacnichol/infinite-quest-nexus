@@ -1,4 +1,4 @@
-import type { GenerationEnqueueResponse } from "../../../contracts/src/index.js";
+import type { GenerationEnqueueResponse } from "@infinite-quest/contracts";
 import type { Clock, PendingSubmissionStore } from "../ports.js";
 import type { GenerationApiPort, GenerationSubmissionInput, StoredGenerationSubmission } from "./types.js";
 

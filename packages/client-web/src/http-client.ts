@@ -1,6 +1,6 @@
 import { ApiContractError, NexusApiError } from "@infinite-quest/client-core";
 import type { HttpMethod, SessionPort } from "@infinite-quest/client-core";
-import { apiErrorEnvelopeSchema } from "../../contracts/src/index.js";
+import { apiErrorEnvelopeSchema } from "@infinite-quest/contracts";
 import type { z } from "zod";
 import { apiPath, normalizeBasePath } from "./api-url.js";
 

@@ -5,7 +5,7 @@ import type {
 import {
   generationRequestSchema,
   generationRetryLatestRequestSchema
-} from "../../../contracts/src/index.js";
+} from "@infinite-quest/contracts";
 import { z } from "zod";
 
 export interface PendingSubmissionStorage {

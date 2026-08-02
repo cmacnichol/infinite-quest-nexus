@@ -4,7 +4,7 @@ import {
   NexusApiError
 } from "@infinite-quest/client-core";
 import type { AbortSignalLike } from "@infinite-quest/client-core";
-import { generationStreamSnapshotSchema } from "../../../contracts/src/index.js";
+import { generationStreamSnapshotSchema } from "@infinite-quest/contracts";
 import { toAbortSignal } from "./abort-bridge.js";
 import type {
   GenerationSourceEvent,

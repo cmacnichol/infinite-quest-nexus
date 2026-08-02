@@ -1,5 +1,5 @@
 import { GenerationWorkflowProtocolError } from "@infinite-quest/client-core";
-import { generationStreamSnapshotSchema } from "../../../contracts/src/index.js";
+import { generationStreamSnapshotSchema } from "@infinite-quest/contracts";
 import { apiPath, normalizeBasePath } from "../api-url.js";
 import type {
   EventSourceSessionExit,

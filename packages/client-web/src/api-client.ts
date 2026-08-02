@@ -10,7 +10,7 @@ import {
   generationRetryLatestRequestSchema,
   turnListResponseSchema,
   worldListResponseSchema
-} from "../../contracts/src/index.js";
+} from "@infinite-quest/contracts";
 import type {
   CampaignListResponse,
   CampaignSyncStatus,
@@ -22,7 +22,7 @@ import type {
   GenerationRetryLatestRequest,
   TurnListResponse,
   WorldListResponse
-} from "../../contracts/src/index.js";
+} from "@infinite-quest/contracts";
 import type { z } from "zod";
 import { createNexusHttpClient } from "./http-client.js";
 import type { HttpMethod, JsonRequestSpec, NexusHttpClientOptions } from "./http-client.js";

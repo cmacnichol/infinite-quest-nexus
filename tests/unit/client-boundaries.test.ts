@@ -218,13 +218,13 @@ describe("client boundary checks", () => {
     ]);
   });
 
-  test("allows client-core imports from its own package and contracts", () => {
+  test("allows client-core to import contracts through the workspace package", () => {
     const violations = collectClientBoundaryViolations([
       {
         file: "packages/client-core/src/workflow.ts",
         text: `
           import { message } from "./message.js";
-          import type { GenerationRequest } from "../../contracts/src/index.js";
+          import type { GenerationRequest } from "@infinite-quest/contracts";
           export { message };
           export type { GenerationRequest };
         `
@@ -272,13 +272,13 @@ describe("client boundary checks", () => {
     expect(violations).toEqual([]);
   });
 
-  test("allows client-web to reach its direct zod dependency and the platform-clean contracts public barrel", () => {
+  test("allows client-web to reach its direct dependencies through workspace package roots", () => {
     const violations = collectClientBoundaryViolations([
       {
         file: "packages/client-web/src/api.ts",
         text: `
           import { z } from "zod";
-          import { generationRequestSchema } from "../../contracts/src/index.js";
+          import { generationRequestSchema } from "@infinite-quest/contracts";
           export const parsed = z.object({}).safeParse(generationRequestSchema.safeParse({}));
         `
       }

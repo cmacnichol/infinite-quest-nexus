@@ -2,7 +2,7 @@ import type {
   GenerationActionResponse,
   GenerationResult,
   GenerationStreamSnapshot
-} from "../../../contracts/src/index.js";
+} from "@infinite-quest/contracts";
 import type { AbortSignalLike, Clock, PendingGenerationSubmission, PendingSubmissionStore } from "../ports.js";
 
 export type GenerationSourceEvent =
@@ -43,9 +43,9 @@ export class GenerationWorkflowProtocolError extends Error {
 }
 
 export interface GenerationApiPort {
-  enqueue(campaignId: string, request: import("../../../contracts/src/index.js").GenerationRequest): Promise<import("../../../contracts/src/index.js").GenerationEnqueueResponse>;
-  enqueueReplacement(campaignId: string, request: import("../../../contracts/src/index.js").GenerationRetryLatestRequest): Promise<import("../../../contracts/src/index.js").GenerationEnqueueResponse>;
-  syncStatus(campaignId: string): Promise<import("../../../contracts/src/index.js").CampaignSyncStatus>;
+  enqueue(campaignId: string, request: import("@infinite-quest/contracts").GenerationRequest): Promise<import("@infinite-quest/contracts").GenerationEnqueueResponse>;
+  enqueueReplacement(campaignId: string, request: import("@infinite-quest/contracts").GenerationRetryLatestRequest): Promise<import("@infinite-quest/contracts").GenerationEnqueueResponse>;
+  syncStatus(campaignId: string): Promise<import("@infinite-quest/contracts").CampaignSyncStatus>;
   result(jobId: string): Promise<GenerationResult>;
   retry(jobId: string): Promise<GenerationActionResponse>;
   cancel(jobId: string): Promise<GenerationActionResponse>;
