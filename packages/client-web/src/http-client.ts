@@ -84,7 +84,9 @@ function apiPath(basePath: string, path: string): string {
   if (!path.startsWith("/")) {
     throw new TypeError("Request path must begin with '/'.");
   }
-  if (hasDotSegment(path)) {
+  const delimiterIndex = path.search(/[?#]/);
+  const pathname = delimiterIndex === -1 ? path : path.slice(0, delimiterIndex);
+  if (hasDotSegment(pathname)) {
     throw new TypeError("Request path must not contain '.' or '..' segments.");
   }
   const joined = `${basePath}${path}`;

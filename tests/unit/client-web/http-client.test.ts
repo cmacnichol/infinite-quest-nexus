@@ -121,6 +121,19 @@ describe("createNexusHttpClient", () => {
     expect(queue.urls).toEqual(["/api/v1/worlds", "/worlds/v1.2.3"]);
   });
 
+  it("preserves query text while validating only request pathname segments", async () => {
+    const queue = fetchQueue(jsonResponse({ value: "query" }));
+    const client = createNexusHttpClient({
+      basePath: "/api/v1",
+      session: createNoopSessionPort(),
+      fetchImpl: queue.fetchImpl
+    });
+
+    await expect(client.request({ method: "GET", path: "/worlds?cursor=/..", responseSchema })).resolves.toEqual({ value: "query" });
+
+    expect(queue.urls).toEqual(["/api/v1/worlds?cursor=/.."]);
+  });
+
   it("normalizes the base path and parses every 2xx JSON response exactly once", async () => {
     const queue = fetchQueue(
       jsonResponse({ value: "first" }, 200),
