@@ -3,8 +3,7 @@ import {
   createNexusApiClient,
   createNoopSessionPort
 } from "../../../packages/client-web/src/index.js";
-import * as apiClientModule from "../../../packages/client-web/src/api-client.js";
-import type { HttpMethod } from "../../../packages/client-web/src/http-client.js";
+import { validatedRequest } from "../../../packages/client-web/src/api-client.js";
 import type {
   CampaignApi,
   GenerationApi,
@@ -38,13 +37,6 @@ const replacementRequest: GenerationRetryLatestRequest = {
   ...generationRequest,
   expectedCurrentTurnNumber: 4
 };
-
-type RequestValidator = (
-  schema: typeof generationRequestSchema,
-  value: unknown,
-  method: HttpMethod,
-  path: string
-) => GenerationRequest;
 
 function invalidResponseFetch(): { fetchImpl: typeof fetch; urls: string[]; options: RequestInit[] } {
   const urls: string[] = [];
@@ -167,14 +159,9 @@ describe("createNexusApiClient", () => {
   });
 
   it("preserves the actual method supplied for request-contract errors", () => {
-    const validator = (apiClientModule as unknown as { validatedRequest?: RequestValidator }).validatedRequest;
-
-    expect(validator).toBeTypeOf("function");
-    if (!validator) throw new Error("validatedRequest must be available for request-contract validation.");
-
     let caught: unknown;
     try {
-      validator(generationRequestSchema, { ...generationRequest, action: "" }, "PUT", "/campaigns/example/player-config");
+      validatedRequest(generationRequestSchema, { ...generationRequest, action: "" }, "PUT", "/campaigns/example/player-config");
     } catch (error) {
       caught = error;
     }
