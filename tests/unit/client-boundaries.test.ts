@@ -1,11 +1,20 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, expectTypeOf, test } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
-import { createNoopSessionPort } from "../../packages/client-web/src/index.js";
-import type { PendingGenerationSubmission, SessionPort } from "../../packages/client-core/src/index.js";
+import {
+  createBrowserGenerationSource,
+  createNoopSessionPort
+} from "../../packages/client-web/src/index.js";
+import type { GenerationApi } from "../../packages/client-web/src/index.js";
+import type {
+  GenerationSnapshotSource,
+  PendingGenerationSubmission,
+  SessionPort
+} from "../../packages/client-core/src/index.js";
+import type { GenerationApiPort } from "../../packages/client-core/src/generation/types.js";
 import type { GenerationRequest } from "../../packages/contracts/src/generation.js";
 // @ts-expect-error JavaScript check scripts intentionally have no declaration files.
 import { collectClientBoundaryViolations, isBoundarySourceFile } from "../../scripts/check-client-boundaries.mjs";
@@ -32,6 +41,12 @@ function typecheckFixture(tsconfigPath: string): { succeeded: boolean; output: s
 }
 
 describe("client boundary checks", () => {
+  test("the composed browser source and API retain the pure Task 5 port contracts", () => {
+    expectTypeOf<ReturnType<typeof createBrowserGenerationSource>>()
+      .toEqualTypeOf<GenerationSnapshotSource>();
+    expectTypeOf<GenerationApi>().toMatchTypeOf<GenerationApiPort>();
+  });
+
   test("actual core compiler fixture rejects Web and Node references and reports unavailable React types", () => {
     const result = typecheckFixture("tests/fixtures/client-boundaries/core-forbidden/tsconfig.json");
 

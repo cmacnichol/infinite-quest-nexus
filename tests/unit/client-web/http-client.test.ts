@@ -52,7 +52,9 @@ describe("createNexusHttpClient", () => {
     "api/v1",
     "/\\evil.test/api/v1",
     "/\t/evil.test/api/v1",
-    "/api/v1/.."
+    "/api/v1/..",
+    "/api/v1/%2e",
+    "/api/v1/%2E%2E"
   ])("rejects unsafe base path %s before fetching or reading session authorization", (basePath) => {
     const queue = fetchQueue();
     let authorizationCalls = 0;
@@ -168,7 +170,7 @@ describe("createNexusHttpClient", () => {
     await expect(client.request({ method: "GET", path: "campaigns", responseSchema })).rejects.toThrow("must begin with '/'");
     await expect(client.request({ method: "GET", path: "https://evil.test/campaigns", responseSchema })).rejects.toThrow("must be API-relative");
     await expect(client.request({ method: "GET", path: "//evil.test/campaigns", responseSchema })).rejects.toThrow("must be API-relative");
-    for (const path of ["/../admin", "/worlds/../../../admin", "/./worlds", "/%2e%2e/admin", "/%2E%2E/admin"]) {
+    for (const path of ["/../admin", "/worlds/../../../admin", "/./worlds", "/%2e/worlds", "/%2e%2e/admin", "/%2E%2E/admin"]) {
       await expect(client.request({ method: "GET", path, responseSchema })).rejects.toThrow("must not contain '.' or '..' segments");
     }
     expect(authorizationCalls).toBe(0);

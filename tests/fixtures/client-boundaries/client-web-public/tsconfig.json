@@ -2,6 +2,7 @@
   "extends": "../../../../packages/client-web/tsconfig.json",
   "compilerOptions": {
     "paths": {
+      "@infinite-quest/client-core": ["./../../../../packages/client-core/src/index.ts"],
       "@infinite-quest/client-web": ["./../../../../packages/client-web/src/index.ts"]
     }
   },
