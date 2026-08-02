@@ -85,6 +85,25 @@ importers:
         specifier: ^4.1.10
         version: 4.1.10(@types/node@24.13.3)(vite@7.3.6(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1))
 
+  apps/web:
+    dependencies:
+      '@infinite-quest/client-core':
+        specifier: workspace:*
+        version: link:../../packages/client-core
+      '@infinite-quest/client-web':
+        specifier: workspace:*
+        version: link:../../packages/client-web
+    devDependencies:
+      vite:
+        specifier: ^7.3.6
+        version: 7.3.6(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)
+
+  apps/web-next:
+    devDependencies:
+      vite:
+        specifier: ^7.3.6
+        version: 7.3.6(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)
+
   docs:
     devDependencies:
       mermaid:
