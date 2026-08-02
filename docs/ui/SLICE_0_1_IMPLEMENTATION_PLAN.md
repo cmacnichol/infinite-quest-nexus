@@ -31,7 +31,7 @@ Playwright, and axe-core.
 
 ## Completion status
 
-Runtime implementation reviewed through `cd43787` on branch
+Runtime implementation reviewed through `92aa9c4` on branch
 `wip/main-uncommitted`. None of Track C is merged to `main` yet; `main` is at
 `ad73dc1` and does not contain this plan.
 
@@ -42,8 +42,10 @@ Runtime implementation reviewed through `cd43787` on branch
 | Task 2a | C1a — stream projection remediation | **Complete**, one item deferred to Task 6 | `ca255a7`, `1fb1b30`, `26d5890`, `fb4b5ad`; focused contract/route lifecycle tests; reproducible 2,000-turn validation benchmark |
 | Task 3 | C2 — pure and Web-platform client packages | **Complete** | `1e55517`, `f8dfe6e`; scoped implementation review and fix re-review clean |
 | Task 3a | C2a — make the declared client boundary real | **Complete** | `f8c2b3d`, `cd43787`; scoped implementation review and fix re-review clean |
-| Task 4 onward (except Task 5) | C3, C3a, C5-C8, B1-B5, U1-U6 | Not started | — |
-| Task 5 | C4 — pure durable-generation workflow | **Complete** | This completion commit; see Current Task 5 verification below |
+| Task 4 | C3 — validating HTTP transport and typed API client | **Complete** | `2bba1a3`, `15f6454`, `996a129`, `0ad6033`; scoped review plus three fix re-reviews clean |
+| Task 4a | C3a — transport path boundary and dependency consistency | **Complete** | `7bf07fc`, `993b7b6`, `0fdcb9b`; scoped review and fix re-review clean |
+| Task 5 | C4 — pure durable-generation workflow | **Complete** | `92aa9c4`; scoped review plus two fix re-reviews clean |
+| Task 6 onward | C5-C8, B1-B5, U1-U6 | Not started | — |
 
 **Current Task 2a verification** (re-measured during the Task 2a completion
 review; the figures below replace an earlier stale count of 700 tests across 65
@@ -119,9 +121,63 @@ detect and repair the mismatch inside `scripts/ensure-test-database.mjs`.
 - The scoped Task 3a review found two omissions; `cd43787` addressed both, and
   the fix re-review found no new Critical or Important breakage.
 
-**Next step:** begin Task 4 (C3), using the now-verified `client-core ->
-contracts` boundary, public request type, and no-op `SessionPort` to build the
-runtime-validating HTTP client and error taxonomy.
+**Current Task 4 verification** (measured on `0ad6033` during the Task 4
+completion review; this block was missing when Task 4 was first marked
+complete):
+
+- `pnpm check` and `pnpm build` pass; the repository and data-safety checks
+  cover 492 candidate files.
+- `pnpm test:unit` passes **748/748 across 69 test files**.
+- `pnpm test:integration` passes — **190 passed, 2 skipped across 17 test
+  files**.
+- All eleven adopted endpoints match the scope table by method, path, and
+  shared schema; every dynamic path segment is `encodeURIComponent`-escaped;
+  request validation runs before the transport with zero fetches on failure.
+- `it.each([408, 409, 425, 429, 500])` proves each performs exactly one fetch,
+  and the authorization replay cannot exceed two.
+- `expectTypeOf` proves `NexusApiClient` exposes only the three deliberate
+  groups and that `GenerationApi` is assignable to Task 5's
+  `GenerationApiPort`.
+- The completion review found four gaps, tracked as **Task 4a**. None blocks
+  Task 5; P1 should land before Task 6 builds paths against the transport.
+
+**Current Task 4a verification** (measured on `0fdcb9b` during the Task 4a
+completion review):
+
+- `pnpm check` and `pnpm build` pass; the repository and data-safety checks
+  cover 492 candidate files.
+- `pnpm test:unit` passes **752/752 across 69 test files**.
+- `pnpm test:integration` passes — **190 passed, 2 skipped across 17 test
+  files**.
+- `pnpm install --frozen-lockfile` passes, confirming `pnpm-lock.yaml` matches
+  the client-core `package.json` after the inert `zod` dependency was removed.
+  The lockfile now records `packages/client-core: {}`.
+- P1 is verified against every dot-segment spelling the WHATWG URL parser
+  normalizes, not only the literal one: `/../admin`, `/./worlds`,
+  `/%2e%2e/admin`, `/%2E%2E/admin`, `/.%2e/admin`, `/%2e./admin`,
+  `/%2e/worlds`, `/worlds/../../../admin`, `/..?x=1`, and `/..#f` are each
+  rejected with **zero fetches and zero `SessionPort` calls**. Bad base paths
+  (`/api/v1/..`, `/api/v1/%2e%2e`, `/api/./v1`) throw at client construction.
+- The fix does not over-block. `/worlds` under both the root and nested base
+  paths, the legitimate dotted segment `/worlds/v1.2.3`, and the double-encoded
+  `/a/%252e%252e/b` all still resolve inside their base path. Double encoding is
+  correctly allowed because it produces a literal segment that does not
+  traverse.
+- `decodeURIComponent`-based segment comparison covers all four double-dot
+  spellings (`..`, `.%2e`, `%2e.`, `%2e%2e`), which is stricter than the
+  `%2e`-replacement approach the Task 4a instructions suggested.
+- Dot validation is confined to the request pathname (`0fdcb9b`), so
+  `/worlds?cursor=/..` is preserved verbatim. This was not required by the
+  Task 4a instructions and is a deliberate improvement: Task 13 (B4) needs query
+  strings for bounded reads, and the containment backstop still compares only
+  `pathname`.
+- P3 is proved with a non-POST method: the request-contract error regression
+  asserts `PUT` against `/campaigns/example/player-config`, the Task 9 route
+  that motivated the fix. `validatedRequest` is module-exported for that test
+  but is **not** re-exported from the `client-web` public barrel.
+- P2 was resolved by removing the dependency rather than widening the boundary
+  scanner; the choice is recorded in `7bf07fc`. No package now declares a
+  dependency its own boundary check rejects.
 
 **Current Task 5 verification** (measured on the Task 5 completion commit):
 
@@ -130,9 +186,13 @@ runtime-validating HTTP client and error taxonomy.
 - `pnpm test:unit` passes **783/783 across 72 test files**.
 - `pnpm test:integration` passes — the database integration suite completed
   successfully before the final pure-client test-only follow-up.
-- Focused client-core and boundary checks pass, including explicit coverage
-  for failed same-attempt retries, source-session closure, command/frame
-  races, retry transport failures, protocol mismatches, and duplicate replay.
+- Focused client-core and boundary checks pass, including explicit coverage for
+  failed same-attempt retries, source-session closure, command/frame races,
+  retry transport failures, protocol mismatches, and duplicate replay.
+
+**Next step:** **Task 6 (C5).** Task 5 established the pure durable-generation
+workflow. Task 6 now supplies its browser-only SSE, polling, persistence, clock,
+delay, and ID adapters without moving that policy back into the UI.
 
 ---
 
@@ -615,8 +675,9 @@ storage, or redirect behavior until authentication actually lands.
 - [x] Add positive fixtures proving client-web may implement core ports with
   Web APIs while remaining framework-free.
 - [x] Provide the no-op `SessionPort` implementation in client-web.
-- [ ] Thread `SessionPort` through the HTTP client in C3, so no later package
-  has to change call signatures to introduce authentication.
+- [x] Thread `SessionPort` through the HTTP client in C3, so no later package
+  has to change call signatures to introduce authentication. — completed by
+  Task 4's authorization seam and bounded refresh replay.
 - [x] Run package type checks and boundary tests.
 
 **Definition of done:** Core policy can be imported and tested in a pure Node
@@ -634,8 +695,10 @@ genuinely enforced — injecting `document`/`localStorage` into
 `scripts/check-client-boundaries.mjs` and the package-local `tsc`. The problem is
 narrower and more serious: **the one dependency edge the architecture depends on,
 `client-core -> contracts`, is declared allowed in four places and does not
-compile.** Task 4 (C3) is the first task that needs it, because
-`RequestSpec.responseSchema` is a `z.ZodType` from `packages/contracts`.
+compile.** Task 4 (C3) is the first downstream work package that consumes the
+platform-clean contracts barrel at runtime: `client-web` imports the shared Zod
+schemas used by `RequestSpec.responseSchema`, while Task 5 imports their derived
+types into pure `client-core` workflows.
 
 Fixing this after C3/C4/C5 means unpicking whatever workaround those tasks adopt
 in the meantime. C2 already adopted one — see P2.
@@ -846,33 +909,218 @@ drift, not a code failure.
 
 ## Task 4 — C3: Runtime-validating HTTP client and error taxonomy
 
+**Implementation status: Complete (2026-08-01), independently reviewed with
+three security fix rounds.** The implementation is committed as `2bba1a3`,
+`15f6454`, `996a129`, and `0ad6033`. Focused client coverage, package checks,
+boundary checks, `pnpm check`, `pnpm build`, the 69-file/748-test unit suite,
+and integration tests passed. The review found and closed off-origin credential
+leaks through unsafe configured base paths and caller-supplied request paths.
+The Task 8 contracts-package and CORS-exposure follow-ups remain intentionally
+deferred.
+
+**Pre-implementation correction status: Complete (2026-08-01), reviewed twice.**
+The first review, against the current contracts, Fastify routes, legacy browser
+helpers, package exports, and the Task 3 `SessionPort`, found that the original
+`RequestSpec` could not represent its promised response modes, the API groups
+had no method contracts, and the error and authentication behavior was
+underspecified.
+
+A second review verified the corrected scope against the running codebase rather
+than reading it for plausibility. Confirmed sound: all eleven routes exist at the
+stated methods and paths; every named schema and type is exported from the
+platform-clean contracts barrel and compiles under `client-web`'s configuration;
+the route-to-schema mapping is right, including `generationJobSnapshotSchema`
+for the polling route and the 200/202 split across `discard` and
+`retry`/`cancel`; bodyless action POSTs already work; `apiErrorEnvelopeSchema`
+supports the specified `details.code` precedence and `error` → `errorName`
+separation; `GenerationApi` is genuinely assignable to Task 5's
+`GenerationApiPort`; and every declared interface typechecks as written.
+
+That review corrected six things, all folded in below: the `x-correlation-id`
+response header did not exist, the `zod` dependency fix was partial and its
+rationale overstated, the `accept` rule contradicted itself, the `RequestSpec`
+overload design needed a rationale, the `empty`/`blob` response modes needed
+their speculation justified, and `cause` needed a note. Task 4 remained a single
+reviewable work package; the implementation and its security fix rounds are now
+complete.
+
+### Scope boundary
+
+Task 4 adopts only the HTTP endpoints whose request and response contracts were
+made authoritative in Task 2/2a and that C4-C6 need directly. It does **not**
+silently absorb the entire legacy Story Player or management API.
+
+The initial typed client covers:
+
+| API group | Method | Relative path | Request validation | Success validation |
+|---|---|---|---|---|
+| `worlds` | `GET` | `/worlds` | none | `worldListResponseSchema` |
+| `campaigns` | `GET` | `/campaigns` | none | `campaignListResponseSchema` |
+| `campaigns` | `GET` | `/campaigns/:campaignId/turns` | encoded path ID | `turnListResponseSchema` |
+| `generation` | `GET` | `/campaigns/:campaignId/sync-status` | encoded path ID | `campaignSyncStatusSchema` |
+| `generation` | `POST` | `/campaigns/:campaignId/generations` | `generationRequestSchema` | `generationEnqueueResponseSchema` |
+| `generation` | `POST` | `/campaigns/:campaignId/generations/retry-latest` | `generationRetryLatestRequestSchema` | `generationEnqueueResponseSchema` |
+| `generation` | `GET` | `/generation-jobs/:jobId` | encoded path ID | `generationJobSnapshotSchema` |
+| `generation` | `GET` | `/generation-jobs/:jobId/result` | encoded path ID | `generationResultSchema` |
+| `generation` | `POST` | `/generation-jobs/:jobId/retry` | encoded path ID; no body | `generationActionResponseSchema` |
+| `generation` | `POST` | `/generation-jobs/:jobId/cancel` | encoded path ID; no body | `generationActionResponseSchema` |
+| `generation` | `POST` | `/generation-jobs/:jobId/discard` | encoded path ID; no body | `generationActionResponseSchema` |
+
+The generation stream is excluded because Task 6 owns EventSource plus polling
+fallback. Session/meta, providers, turn-input classification, campaign state,
+player configuration, rewind, illustration, import, and export methods remain
+outside C3. Task 9 must add shared schemas, server response projection, typed
+client methods, and tests before replacing any of those additional legacy calls.
+
 **Files:**
 
 - Create: `packages/client-web/src/http-client.ts`
 - Create: `packages/client-web/src/api-client.ts`
 - Create: `packages/client-core/src/errors.ts`
+- Modify: `packages/client-core/src/index.ts`
+- Modify: `packages/client-web/src/index.ts`
+- Modify: `packages/client-core/package.json`
+- Modify: `packages/client-web/package.json`
+- Modify: `pnpm-lock.yaml`
+- Modify: `services/api/src/request-security.ts`
+- Modify: `tests/unit/server-security.test.ts`
+- Modify: `tests/unit/client-boundaries.test.ts`
 - Create: `tests/unit/client-web/http-client.test.ts`
 - Create: `tests/unit/client-web/api-client.test.ts`
 - Create: `tests/unit/client-core/errors.test.ts`
 
+`services/api/src/request-security.ts` and `tests/unit/server-security.test.ts`
+are the only server-side files in this work package. They exist solely to emit
+the `x-correlation-id` response header the client's correlation fallback
+consumes — see **Structured HTTP errors**.
+
 **Interfaces produced:**
 
 ```ts
+export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+
 export class NexusApiError extends Error {
   readonly statusCode: number;
   readonly correlationId: string | null;
   readonly errorName: string;
   readonly domainCode: string | null;
   readonly details: unknown;
+  readonly issues: unknown;
+  readonly retryAfter: string | null;
+
+  constructor(message: string, options: {
+    statusCode: number;
+    correlationId?: string | null;
+    errorName?: string;
+    domainCode?: string | null;
+    details?: unknown;
+    issues?: unknown;
+    retryAfter?: string | null;
+  });
 }
 
-export interface RequestSpec<TResponse> {
-  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+export type ApiContractErrorPhase = "request" | "response";
+export type ApiContractErrorKind =
+  | "request_schema_mismatch"
+  | "malformed_json"
+  | "response_schema_mismatch"
+  | "unexpected_empty_response";
+
+export class ApiContractError extends Error {
+  readonly phase: ApiContractErrorPhase;
+  readonly kind: ApiContractErrorKind;
+  readonly method: HttpMethod;
+  readonly path: string;
+  readonly statusCode: number | null;
+  readonly correlationId: string | null;
+  readonly issues: unknown;
+
+  constructor(message: string, options: {
+    phase: ApiContractErrorPhase;
+    kind: ApiContractErrorKind;
+    method: HttpMethod;
+    path: string;
+    statusCode?: number | null;
+    correlationId?: string | null;
+    issues?: unknown;
+    cause?: unknown;
+  });
+}
+```
+
+`cause` is deliberately absent from the readonly field list above. Pass it to
+`super(message, { cause })` and read it through the inherited `Error.cause`,
+which exists under both packages' `lib: ["ES2023"]`. Do not declare a redundant
+`readonly cause` field.
+
+```ts
+export type RequestBody =
+  | { kind: "json"; value: unknown }
+  | { kind: "form-data"; value: FormData };
+
+export interface BaseRequestSpec {
+  method: HttpMethod;
   path: string;
-  responseSchema: z.ZodType<TResponse>;
-  body?: unknown;
-  responseKind?: "json" | "empty" | "blob";
+  body?: RequestBody;
+  accept?: string;
   signal?: AbortSignal;
+}
+
+export interface JsonRequestSpec<TResponse> extends BaseRequestSpec {
+  responseKind?: "json";
+  responseSchema: z.ZodType<TResponse>;
+}
+
+export interface EmptyRequestSpec extends BaseRequestSpec {
+  responseKind: "empty";
+  responseSchema?: never;
+}
+
+export interface BlobRequestSpec extends BaseRequestSpec {
+  responseKind: "blob";
+  responseSchema?: never;
+}
+
+export type RequestSpec<TResponse = unknown> =
+  | JsonRequestSpec<TResponse>
+  | EmptyRequestSpec
+  | BlobRequestSpec;
+
+export interface NexusHttpClient {
+  request<TResponse>(spec: JsonRequestSpec<TResponse>): Promise<TResponse>;
+  request(spec: EmptyRequestSpec): Promise<void>;
+  request(spec: BlobRequestSpec): Promise<Blob>;
+}
+
+export interface NexusHttpClientOptions {
+  /** Same-origin API prefix. C3 callers use `/api/v1`. */
+  basePath: string;
+  /** Required identity seam; pass createNoopSessionPort() before auth exists. */
+  session: SessionPort;
+  /** Test seam. Production defaults to globalThis.fetch. */
+  fetchImpl?: typeof fetch;
+}
+
+export function createNexusHttpClient(options: NexusHttpClientOptions): NexusHttpClient;
+
+export interface WorldApi {
+  list(signal?: AbortSignal): Promise<WorldListResponse>;
+}
+
+export interface CampaignApi {
+  list(signal?: AbortSignal): Promise<CampaignListResponse>;
+  turns(campaignId: string, signal?: AbortSignal): Promise<TurnListResponse>;
+}
+
+export interface GenerationApi {
+  syncStatus(campaignId: string, signal?: AbortSignal): Promise<CampaignSyncStatus>;
+  enqueue(campaignId: string, request: GenerationRequest, signal?: AbortSignal): Promise<GenerationEnqueueResponse>;
+  enqueueReplacement(campaignId: string, request: GenerationRetryLatestRequest, signal?: AbortSignal): Promise<GenerationEnqueueResponse>;
+  get(jobId: string, signal?: AbortSignal): Promise<GenerationJobSnapshot>;
+  result(jobId: string, signal?: AbortSignal): Promise<GenerationResult>;
+  retry(jobId: string, signal?: AbortSignal): Promise<GenerationActionResponse>;
+  cancel(jobId: string, signal?: AbortSignal): Promise<GenerationActionResponse>;
+  discard(jobId: string, signal?: AbortSignal): Promise<GenerationActionResponse>;
 }
 
 export interface NexusApiClient {
@@ -880,31 +1128,445 @@ export interface NexusApiClient {
   generation: GenerationApi;
   worlds: WorldApi;
 }
+
+export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiClient;
 ```
 
-- [ ] Merge base-path, `no-store`, 204, correlation-ID, and structured-error
-  behavior from the existing helpers.
-- [ ] Parse every JSON response with the supplied schema and raise a distinct
-  `ApiContractError` on malformed success responses.
-- [ ] Support JSON, empty, blob, and multipart request/response modes so later
-  slices do not create parallel clients for imports and exports.
-- [ ] Do not put retry loops in the generic request function.
-- [ ] Honor abort signals and preserve AbortError semantics.
-- [ ] Test 2xx JSON, 204, blob, malformed JSON, schema mismatch, 4xx without a
-  body, structured 4xx, 429 with `Retry-After`, and 5xx.
+`GenerationApi` deliberately includes `syncStatus`, even though the URL is
+campaign-scoped, so it is structurally assignable to the Task 5
+`GenerationApiPort`. The optional Web `AbortSignal` parameters are trailing and
+do not leak into client-core; Task 5 can consume the same object through its
+narrower pure-core port. This assignability is verified: trailing optional
+parameters do not break function assignability, and `get` being absent from
+`GenerationApiPort` is fine because extra members are permitted.
+
+`NexusHttpClient.request` intentionally declares three concrete overloads rather
+than accepting `RequestSpec<TResponse>` directly, so that the response type
+follows from `responseKind` without a cast. A caller holding the bare union must
+narrow it before calling. Do not "simplify" this into a single union parameter:
+that collapses the return type to `TResponse | void | Blob` and pushes casts
+into every call site.
+
+### Transport behavior
+
+- [x] Normalize `basePath` once by removing trailing slashes. Require every
+  request `path` to begin with one `/`, reject absolute URLs and protocol-relative
+  paths, and join to `/api/v1/...` without double slashes. API methods must apply
+  `encodeURIComponent` to every dynamic path segment.
+- [x] Set `cache: "no-store"` on every request. `accept` is the **only**
+  caller-settable header on `RequestSpec`; there is no general header map.
+  Authorization comes solely from `SessionPort`, and `content-type` is chosen by
+  the transport from the request body kind.
+- [x] For `{ kind: "json" }`, serialize with `JSON.stringify` and set
+  `content-type: application/json`. For `{ kind: "form-data" }`, pass the
+  `FormData` unchanged and do **not** set `content-type`; the browser must create
+  the multipart boundary. Default JSON responses to `accept: application/json`.
+  Blob calls may provide a more specific `accept` value such as
+  `application/json, application/zip`.
+- [x] Support JSON, empty, and blob **response** modes and JSON plus FormData
+  **request** modes. There is no current multipart response endpoint, so do not
+  add a speculative `Response.formData()` branch. If a later route really
+  returns multipart, extend the discriminated union and its tests instead of
+  weakening the return type.
+
+  Be aware that **all eleven adopted endpoints return JSON** — `discard` returns
+  200 and `retry`/`cancel` return 202, and none returns 204. The `empty` and
+  `blob` modes are therefore unexercised by C3's own endpoint table, and their
+  tests are deliberately synthetic. They are specified now rather than later
+  because Task 9 adopts export (blob) and deletion (204) routes, and because
+  `unexpected_empty_response` is a real contract guard for the JSON endpoints
+  that do exist. This is a narrower bet than a multipart response branch, which
+  no planned route needs at all.
+- [x] Treat `responseKind: "empty"` as `Promise<void>` and return `undefined`
+  for a successful empty response. A 204/205 received for a JSON or blob spec is
+  contract drift and raises `ApiContractError` with
+  `kind: "unexpected_empty_response"`; it must not fabricate `null` as valid
+  domain data.
+- [x] Parse every successful JSON response exactly once. JSON decoding failure
+  raises `ApiContractError(kind: "malformed_json")`; Zod failure raises
+  `ApiContractError(kind: "response_schema_mismatch")`. Preserve method, relative
+  path, status, correlation ID, and Zod issues, but never retain or echo the raw
+  response body.
+- [x] Validate every adopted JSON request through its shared contract schema in
+  `api-client.ts` before calling the transport. A failure raises
+  `ApiContractError(phase: "request", kind: "request_schema_mismatch")` and
+  performs zero fetches. Do not add defaults, coercion, or a client-only copy of
+  any request schema.
+
+### Structured HTTP errors
+
+- [x] For non-2xx responses, attempt `apiErrorEnvelopeSchema.safeParse` after
+  decoding JSON. A valid envelope becomes `NexusApiError`; an empty, non-JSON,
+  or schema-invalid error body still becomes `NexusApiError` with the generic
+  message `Request failed with HTTP <status>.` and safe fallback fields. An HTTP
+  error body is not an `ApiContractError`, because the HTTP status remains the
+  primary failure.
+- [x] Keep JavaScript `error.name` equal to `"NexusApiError"` for stable class
+  identification and store the server's `payload.error` separately as
+  `errorName`. Map `domainCode` from `payload.details.code` first, then
+  `payload.code`, and preserve `details` and `issues` as separate untrusted
+  values.
+- [x] Use a valid envelope correlation ID first and the
+  `x-correlation-id` response header as fallback. When the two disagree, retain
+  the envelope value and do not concatenate them. Never synthesize an empty
+  string; absent correlation data is `null`.
+
+  **Before C3, the API did not emit that response header.**
+  `requestIdHeader: "x-correlation-id"` (`services/api/src/server.ts:232`) only
+  tells Fastify how to *read* a correlation ID from the request; the sole
+  response-header hook (`services/api/src/request-security.ts:18-28`) sets
+  security headers and nothing else. The header fallback covers error bodies this
+  API never produced — a gateway or proxy 502, or a truncated response — and the
+  server change below made it available on real adopted responses. Keep the
+  fallback test synthetic; do not assert a proxy response against a real route.
+- [x] **Make the fallback real.** Add `reply.header("x-correlation-id",
+  request.id)` to the existing `onRequest` hook in
+  `services/api/src/request-security.ts`, and add a unit assertion that an
+  adopted route echoes it. This is the one deliberate server-side change in an
+  otherwise client-only work package; it is one line, it makes the specified
+  client behavior reachable, and it gives support a correlation ID for
+  successful responses too, not only structured errors. Keep it in this commit
+  so the header and its consumer land together.
+- [x] Note for later, not for C3: `request-security.ts:47` allows
+  `X-Correlation-Id` as a *request* header via `Access-Control-Allow-Headers`,
+  but no `Access-Control-Expose-Headers` is set, so a cross-origin caller could
+  not read the response header. C3 is same-origin (`basePath: "/api/v1"`), so
+  this does not block Task 4. Task 8 (C7) owns the deployment contract and must
+  add the expose header if `/app/` is ever served from another origin.
+- [x] Trim and preserve a non-empty `Retry-After` header verbatim in
+  `retryAfter`; a blank or missing value becomes `null`. The generic transport
+  does not parse the value into a delay, sleep, or retry because retry timing
+  belongs to the endpoint workflow.
+- [x] Let fetch/network rejections propagate unchanged. In particular, rethrow
+  the original `AbortError` object so callers can use its identity/name and do
+  not wrap it in either custom error class. Errors from
+  `session.authorization()` or `session.onUnauthorized()` likewise propagate
+  unchanged and must not trigger another fetch.
+
+### Session and retry semantics
+
+- [x] Call `session.authorization()` immediately before each fetch attempt and
+  merge its returned headers without permitting them to replace transport-owned
+  `accept` or `content-type` values.
+- [x] On the first 401 or 403 only, call `session.onUnauthorized({ statusCode })`.
+  If it returns `true`, check the abort signal, reacquire authorization headers,
+  and repeat the same request exactly once. If it returns `false`, or if the
+  second attempt is also unauthorized, parse and throw that response as
+  `NexusApiError` without another callback.
+- [x] Treat this as an authorization refresh, not a generic status retry.
+  `SessionPort` implementations may return `true` only when the 401/403 is known
+  to reject the request before route mutation. The current no-op port always
+  returns `false`. Never retry 408, 409, 425, 429, or 5xx automatically, and
+  never use `Retry-After` as a transport retry trigger.
+- [x] Check `signal.aborted` before authorization, before fetch, and before the
+  one allowed authorization retry, using `signal.throwIfAborted()` so a caller's
+  abort reason is preserved. An abort during any fetch must keep native
+  `AbortError` semantics; no HTTP error should be manufactured from it.
+
+### Typed API methods
+
+- [x] Implement only the endpoint table above. Each method must build an
+  API-relative path, use the exact shared request/response schema, pass its
+  optional signal through, and return only parsed contract output.
+- [x] Import contract values and types through the platform-clean
+  `packages/contracts/src/index.ts` public barrel. Do not deep-import a contract
+  module or duplicate a schema inside either client package.
+- [x] Keep generation action requests bodyless. Do not preserve the legacy
+  `body: "{}"` workaround where the Fastify route accepts no request body.
+- [x] Prove at compile time in `api-client.test.ts` that `NexusApiClient` exposes
+  only deliberate group methods and that `GenerationApi` satisfies Task 5's
+  method/return contract, including `syncStatus` and the polling-only `get`
+  method needed by Task 6.
+
+### TDD and verification sequence
+
+- [x] Add failing `errors.test.ts` coverage for class identity, immutable
+  metadata, `cause`, `errorName` separation, null normalization, issues, and
+  `Retry-After` storage. Run
+  `pnpm exec vitest run tests/unit/client-core/errors.test.ts`; expect failure
+  because the classes do not exist, then implement the minimal pure-core errors
+  and rerun to green.
+- [x] Add failing `http-client.test.ts` coverage for base-path normalization,
+  absolute-path rejection, 200/201/202 JSON, explicit 204/205 empty handling,
+  unexpected empty JSON/blob responses, blob output, malformed JSON, schema
+  mismatch, request-schema-free transport behavior, JSON serialization,
+  FormData boundary ownership, `no-store`, injected fetch, and abort identity.
+  Run `pnpm exec vitest run tests/unit/client-web/http-client.test.ts` before and
+  after the minimal transport implementation.
+- [x] Extend the HTTP tests with empty and malformed 4xx bodies, valid structured
+  4xx, correlation header fallback/conflict, top-level/detail code precedence,
+  structured and unstructured 5xx, 429 `Retry-After`, and assertions that 408,
+  409, 425, 429, and 5xx each perform exactly one fetch. All of these use the
+  injected `fetchImpl`; the correlation-header cases are synthetic proxy
+  responses by design, not reproductions of a real route.
+- [x] Add the server-side assertion in `tests/unit/server-security.test.ts` that
+  an adopted route returns an `x-correlation-id` response header, and that it
+  echoes a caller-supplied `x-correlation-id` request header. This is the only
+  test in Task 4 that exercises the real Fastify app.
+- [x] Add session tests for authorization headers, no-op 401/403 behavior,
+  `onUnauthorized(false)`, exactly one `onUnauthorized(true)` replay with fresh
+  headers, a second unauthorized response, POST replay count, callback failure,
+  and abort before the replay. Assert no path can execute more than two fetches.
+- [x] Add failing `api-client.test.ts` table tests for every method/path/schema in
+  the endpoint inventory, URL-encoded IDs, no-body action requests, request
+  schema rejection before fetch, response schema rejection, and signal
+  forwarding. Run
+  `pnpm exec vitest run tests/unit/client-web/api-client.test.ts` before and after
+  implementation.
+- [x] Export `HttpMethod`, `NexusApiError`, `ApiContractError`, and their metadata
+  types from the deliberate `client-core` public entry point. Export the client
+  factories and public API/request types from the deliberate `client-web` entry
+  point without exporting internal parsing helpers.
+- [x] Declare `zod` with the repository's `^4.0.17` specifier as a direct
+  dependency of **both** `client-web` and `client-core`, and update
+  `pnpm-lock.yaml`. `client-web` needs it for `z.ZodType` in `RequestSpec`;
+  `client-core` already type-depends on it today through
+  `ports.ts -> contracts -> zod` while declaring nothing. Extend boundary
+  coverage so public-package imports compile and `client-web -> contracts`
+  remains platform-clean and framework-free.
+- [x] **Do not claim this closes the resolution gap — it does not.** Both client
+  packages reach contracts by relative path, and `packages/contracts` has no
+  `package.json` at all, so it is not a workspace package and gets no
+  `node_modules` of its own. Contracts' own `import { z } from "zod"` therefore
+  still resolves by walking up to the root install, no matter what the client
+  packages declare. Declaring `zod` locally only hardens each client package's
+  *own* `zod` imports. The durable fix is to make `packages/contracts` a real
+  workspace package with its own `zod` dependency; that is packaging work owned
+  by **Task 8 (C7)**, not C3. Record it there rather than leaving the impression
+  that C3 resolved it.
+- [x] Run focused checks:
+  `pnpm exec vitest run tests/unit/client-core/errors.test.ts tests/unit/client-web/http-client.test.ts tests/unit/client-web/api-client.test.ts tests/unit/client-boundaries.test.ts tests/unit/client-api-contracts.test.ts tests/unit/client-api-routes.test.ts`,
+  `pnpm --filter @infinite-quest/client-core check`,
+  `pnpm --filter @infinite-quest/client-web check`, and
+  `pnpm check:client-boundaries`.
+- [x] Run completion checks: `pnpm check`, `pnpm build`, `pnpm test:unit`,
+  `pnpm test:integration`, `git diff --check`, review the complete diff for
+  unrelated changes, and run `pjm precheck` before committing.
+- [x] Commit the independently reviewed Task 4 implementation with an imperative,
+  scoped summary such as `feat(client): add validating API transport`. Do not
+  mix Story Player rewiring or additional route adoption into this commit.
 
 **Definition of done:** All adopted HTTP calls use one runtime-validating client,
-and mutation retry remains an explicit workflow decision rather than an HTTP
-status side effect.
+the public package roots expose the deliberate types and factories, every JSON
+request and success response is checked by its shared contract, abort identity
+is preserved, the API emits the `x-correlation-id` response header the client's
+correlation fallback consumes, and the only transport replay is the bounded
+`SessionPort` authorization refresh described above. Mutation retry remains an
+explicit, endpoint-specific workflow decision rather than an HTTP status side
+effect.
+
+**Met**, with four gaps carried into Task 4a. The implementation’s final review
+is clean after three narrowly scoped security fix rounds. Task 8 retains the
+explicitly deferred contracts-workspace dependency and cross-origin
+correlation-header exposure work.
+
+---
+
+## Task 4a — C3a: Close the transport path boundary and dependency inconsistencies
+
+**Status: Complete (2026-08-02).** Implemented in `7bf07fc` and `993b7b6`, with
+the query-path refinement in `0fdcb9b`. The scoped implementation review found
+that dot scanning constrained query text; the fix re-review is clean. Focused
+coverage, package and boundary checks, `pnpm check`, `pnpm build`, 752 unit
+tests, and 190 integration tests passed.
+
+**Do this before Task 5.** Task 4's checklist is complete and its behavior is
+correct: all eleven endpoints match the table, request and response validation
+work, the error taxonomy maps as specified, abort identity is preserved, and the
+authorization replay is bounded to two fetches. The completion review found four
+gaps, one of which is a security boundary that Task 6 will start depending on as
+soon as it builds SSE and polling paths against the exported transport.
+
+**Files:**
+
+- Modify: `packages/client-web/src/http-client.ts`
+- Modify: `packages/client-web/src/api-client.ts`
+- Modify: `packages/client-core/package.json` **or**
+  `scripts/check-client-boundaries.mjs` (see P2 — pick one)
+- Modify: `tests/unit/client-web/http-client.test.ts`
+- Modify: `tests/unit/client-web/api-client.test.ts`
+- Modify: `tests/unit/client-boundaries.test.ts`
+
+### P1 — dot-segment paths escape the API base path
+
+`normalizeBasePath` and `apiPath` (`packages/client-web/src/http-client.ts:56-76`)
+reject URL schemes, protocol-relative paths, slashless paths, backslashes, and
+control characters across three hardening commits (`15f6454`, `996a129`,
+`0ad6033`). They do not reject `.` or `..` segments, which is the most common
+member of that same class.
+
+Reproduce with an injected `fetchImpl` and `basePath: "/api/v1"`:
+
+| `path` argument | URL sent to fetch | Browser resolves to |
+|---|---|---|
+| `/../admin` | `/api/v1/../admin` | `/api/admin` |
+| `/worlds/../../../admin` | `/api/v1/worlds/../../../admin` | `/admin` |
+
+`basePath: "/api/v1/.."` is accepted as well, silently re-rooting every request.
+
+**Scope this correctly before you start.** The typed `NexusApiClient` methods are
+**not** affected: `encodeURIComponent` leaves `.` unescaped but does escape `/`
+as `%2F`, so `generation.get("../../campaigns")` produces the single inert
+segment `..%2F..%2Fcampaigns`. This is a defense-in-depth gap in the exported
+`createNexusHttpClient`, not a live traversal through today's API surface. It
+matters because the transport is public and Tasks 6 and 9 will hand it
+constructed paths. Do not describe it as an exploited vulnerability in the
+commit message.
+
+- [x] Add a `hasDotSegment(value)` helper that splits on `/` and rejects any
+  segment equal to `.` or `..` **after** decoding `%2e`/`%2E`. Percent-encoded
+  dots normalize to real dot segments during URL resolution, so a check that
+  only looks at literal `.` is insufficient.
+- [x] Reject dot segments in `normalizeBasePath` alongside the existing
+  conditions, so a bad `basePath` fails at client construction rather than on
+  first request.
+- [x] Reject dot segments in `apiPath` after the existing leading-slash check,
+  with a distinct message such as
+  `Request path must not contain '.' or '..' segments.`
+- [x] Add a containment backstop after the dot-segment check, so anything the
+  segment scan misses still fails closed:
+
+  ```ts
+  const joined = `${basePath}${path}`;
+  const prefix = basePath === "" ? "/" : `${basePath}/`;
+  if (!new URL(joined, "https://boundary.invalid").pathname.startsWith(prefix)) {
+    throw new TypeError("Request path must stay within the API base path.");
+  }
+  ```
+
+  Compare only `pathname`, not the whole URL, so this does not constrain query
+  strings that Task 13 (B4) may later add for bounded reads. The synthetic origin
+  is never fetched; it exists only to run the platform's own normalization.
+- [x] Extend the existing
+  `rejects non-relative, protocol-relative, and slashless request paths` test
+  rather than adding a parallel one. Cover `/../admin`,
+  `/worlds/../../../admin`, `/./worlds`, `/%2e%2e/admin`, and `/%2E%2E/admin`,
+  asserting each rejects **and performs zero fetches**.
+- [x] Add a construction-time test that `basePath: "/api/v1/.."` throws.
+- [x] Add regression coverage that ordinary paths still work: `/worlds` under
+  both `/api/v1` and the root `/` base path, and a dotted-but-legitimate segment
+  such as `/worlds/v1.2.3`, which must **not** be rejected. A fix that blocks
+  every `.` breaks real identifiers.
+
+This fix has been validated in place: the full unit suite passes with it
+applied, so no existing expectation depends on dot segments being accepted.
+
+### P2 — `client-core` declares a `zod` dependency the boundary scanner forbids
+
+Task 4 added `zod` to both client packages. `isClientWebImportAllowed`
+(`scripts/check-client-boundaries.mjs:157`) was updated to allow the bare `zod`
+specifier; `isClientCoreImportAllowed` was not. Adding
+`import type { z } from "zod"` to any client-core module therefore fails
+`pnpm check` with
+`client-core import zod is outside client-core or contracts`.
+
+So the client-core declaration is inert and unusable: client-core has no direct
+`zod` import, and the `contracts -> zod` hop resolves from contracts' own
+location regardless of what client-core declares. The original instruction to
+declare it in both packages was wrong on that point — a package declaration
+cannot fix a transitive resolution that happens in another package.
+
+Pick one and record which in the commit message:
+
+- [x] **Either** remove `zod` from `packages/client-core/package.json` and
+  refresh `pnpm-lock.yaml`, on the grounds that client-core has no direct zod
+  import and the boundary forbids adding one;
+- [ ] **or** allow the bare `zod` specifier in `isClientCoreImportAllowed` the
+  same way `isClientWebImportAllowed` does, keep the declaration, and add a
+  boundary test asserting client-core may import `zod` while still being
+  rejected for Node, DOM, and framework specifiers.
+- [x] Do not do both halves of one option and neither of the other. The failure
+  state to avoid is a declared dependency the boundary check rejects.
+- [x] Neither option changes the Task 8 item that makes `packages/contracts` a
+  real workspace package. That remains the durable fix and is unaffected.
+
+### P3 — `validatedRequest` hardcodes the request method
+
+`validatedRequest` (`packages/client-web/src/api-client.ts:60-76`) always
+constructs its `ApiContractError` with `method: "POST"`. Both current callers are
+POSTs, so it is correct today, but the spec requires the error to preserve the
+real method, and Task 9 adopts body-carrying routes that are not POST — for
+example `PUT /api/v1/campaigns/:campaignId/player-config`. Those would report the
+wrong method in their contract errors.
+
+- [x] Add an `HttpMethod` parameter to `validatedRequest` and pass the caller's
+  method through. Do not infer it from the path.
+- [x] Assert the reported `method` in the existing
+  `rejects invalid shared generation requests before the transport fetches`
+  test.
+
+### P4 — the Task 4 verification block was never recorded
+
+Tasks 2a, 3, and 3a each record their measured verification figures under
+**Completion status**; Task 4's row was marked complete without one. The figures
+were measured on the tree at `0ad6033` and are recorded there now, so this
+item needs no further work — it is listed only so the omission is not repeated.
+
+It was repeated once: Task 4a's own row was first marked complete without a
+verification block, and the Task 4a completion review added one measured on
+`0fdcb9b`. **From Task 5 onward, marking a task Complete under Completion
+status requires a `Current Task N verification` block in the same commit,
+recording the commit it was measured on, the `pnpm check` candidate-file count,
+and the unit and integration totals.** Tasks 1 and 2 predate this convention and
+are not retroactively deficient; do not backfill them.
+
+**Complete:** the exported transport cannot address anything outside its base
+path by any spelling of a dot segment, no package declares a dependency its own
+boundary check rejects, contract errors report the method that actually failed,
+and each completed task carries a measured verification block.
+
+**Verification:** `pnpm check`, `pnpm build`, `pnpm test:unit`, and
+`pnpm test:integration` all pass, plus
+`pnpm exec vitest run tests/unit/client-web/http-client.test.ts tests/unit/client-web/api-client.test.ts tests/unit/client-boundaries.test.ts`.
+
+**Met.** P2 chose the removal option; the alternate boundary-relaxation item is
+intentionally not selected. Task 8's contracts-workspace work remains deferred.
 
 ---
 
 ## Task 5 — C4: Pure durable-generation workflow
 
+**Pre-implementation correction status: Revised (2026-08-01), reviewed three
+times.** The original scope was reviewed against the current contracts, the
+Task 2a stream projection, the Task 4 API client, and the Task 6 checklist. The
+earlier C1–C7 corrections remain in force. A second review found that the
+rank-only duplicate rule would discard both progressive narration and legitimate
+post-retry snapshots, and that the workflow did not define its public handle,
+watcher restart, or durable result-recovery lifecycle; C3, C6, and the new
+C8–C10 sections resolve those.
+
+A third review re-validated the revised text against the running codebase and
+compiled the complete declared public surface — both unions, `GenerationRun`
+including its `Extract<>` return type, the dependencies, and the extended
+submission — clean under `lib: ["ES2023"]` with `types: []`. It confirmed the
+load-bearing premises directly: `retryGeneration` resets status without
+incrementing `attempts` (`generation-service.ts:634-638`) while only the worker
+claim increments it (`:1279`), the SSE loop closes on `recoverable`
+(`server.ts:788`), and `pendingGeneration` excludes completed and failed jobs
+(`server.ts:641`) — which is exactly why C6 needs its own `jobId`. That review
+made three corrections: `submit()` now stamps `createdAt` from the injected
+clock instead of trusting the caller, `StoredGenerationSubmission` is named and
+its `exactOptionalPropertyTypes` behavior documented, and C8's restart
+requirement is attributed to the server rather than to Task 6 policy.
+
+**Implementation status: Complete (2026-08-01).** The checked work is committed
+as `92aa9c4`; focused tests, full build/check/unit verification, and a scoped
+review plus two fix re-reviews are clean. The detailed checklist remains the
+acceptance record for the completed implementation.
+
 This work package extracts the complete generation behavior, not only the
 terminal-status switch. It includes submission persistence, idempotent enqueue,
 conflict reconciliation, resume, retry, result fetch, detach, and explicit
 remote cancellation.
+
+### Scope boundary
+
+Task 5 is **pure policy**. It owns the state machine, the event sequence,
+submission expiry policy, reconciliation strategy, and the single auto-retry
+decision. It does **not** own EventSource, polling cadence, backoff, jitter,
+visibility handling, or durable storage — Task 6 (C5) owns all of those behind
+the ports below. Task 5 must compile and be fully tested under
+`packages/client-core/tsconfig.json` with `lib: ["ES2023"]` and `types: []`.
 
 **Files:**
 
@@ -912,9 +1574,16 @@ remote cancellation.
 - Create: `packages/client-core/src/generation/machine.ts`
 - Create: `packages/client-core/src/generation/workflow.ts`
 - Create: `packages/client-core/src/generation/submission.ts`
+- Modify: `packages/client-core/src/ports.ts`
+- Modify: `packages/client-core/src/index.ts`
 - Create: `tests/unit/client-core/generation-machine.test.ts`
 - Create: `tests/unit/client-core/generation-workflow.test.ts`
 - Create: `tests/unit/client-core/generation-submission.test.ts`
+
+`packages/client-core/src/index.ts` was missing from the original file list.
+Tasks 6 and 7 consume this workflow through the deliberate public entry point,
+so the new types and factories must be exported there — and only the deliberate
+ones, per the Task 3 rule against barrel-exporting internal modules.
 
 **Ports consumed:**
 
@@ -929,8 +1598,18 @@ export interface GenerationApiPort {
   discard(jobId: string): Promise<GenerationActionResponse>;
 }
 
+/**
+ * The source yields a discriminated union, not bare snapshots. A transport is
+ * the only layer that knows whether a failure was a lost stream or a failed
+ * poll, and it is the layer that counts consecutive failures across reconnects.
+ * Core forwards these; it never classifies or counts them itself.
+ */
+export type GenerationSourceEvent =
+  | { kind: "snapshot"; snapshot: GenerationStreamSnapshot }
+  | { kind: "degraded"; reason: "stream_lost" | "poll_failed"; consecutiveFailures: number };
+
 export interface GenerationSnapshotSource {
-  watch(jobId: string, signal: AbortSignalLike): AsyncIterable<GenerationStreamSnapshot>;
+  watch(jobId: string, signal: AbortSignalLike): AsyncIterable<GenerationSourceEvent>;
 }
 ```
 
@@ -942,32 +1621,389 @@ export type GenerationEvent =
   | { type: "narration"; text: string }
   | { type: "degraded"; reason: "stream_lost" | "poll_failed"; consecutiveFailures: number }
   | { type: "detached"; jobId: string }
+  | { type: "result_unavailable"; jobId: string; error: Error }
   | { type: "settled"; outcome: "completed"; result: GenerationResult }
   | { type: "settled"; outcome: "failed" | "cancelled" | "discarded" | "unrecoverable"; error: Error };
 ```
 
-- [ ] Derive status types from `packages/contracts`; do not redeclare the union.
-- [ ] Accept repeated snapshots and skipped observable stages. Reject malformed
-  statuses, not legitimate polling gaps.
+**Public workflow surface and cancellation ownership:**
+
+```ts
+export interface GenerationRun {
+  readonly campaignId: string;
+  readonly jobId: string;
+  watch(signal: AbortSignalLike): AsyncIterable<GenerationEvent>;
+  retryGeneration(signal: AbortSignalLike): AsyncIterable<GenerationEvent>;
+  cancelGeneration(): Promise<GenerationActionResponse>;
+  discardGeneration(): Promise<GenerationActionResponse>;
+  fetchResult(): Promise<
+    | Extract<GenerationEvent, { type: "settled"; outcome: "completed" }>
+    | Extract<GenerationEvent, { type: "result_unavailable" }>
+  >;
+}
+
+/**
+ * The stored envelope, extended by C6 with local durable-recovery metadata.
+ */
+export interface StoredGenerationSubmission extends PendingGenerationSubmission {
+  jobId?: string;
+}
+
+/**
+ * What a caller supplies. `createdAt` and `jobId` are stamped by the workflow,
+ * never by the caller — see the clock-ownership rule below.
+ */
+export type GenerationSubmissionInput =
+  Omit<StoredGenerationSubmission, "createdAt" | "jobId">;
+
+export interface GenerationWorkflow {
+  submit(campaignId: string, submission: GenerationSubmissionInput): Promise<GenerationRun>;
+  resume(campaignId: string): Promise<GenerationRun | null>;
+}
+
+export interface GenerationWorkflowDependencies {
+  api: GenerationApiPort;
+  source: GenerationSnapshotSource;
+  clock: Clock;
+  pendingSubmissions: PendingSubmissionStore;
+}
+
+export function createGenerationWorkflow(
+  dependencies: GenerationWorkflowDependencies
+): GenerationWorkflow;
+```
+
+- [ ] `submit()` persists the supplied exact envelope, enqueues it, records the
+  returned durable `jobId`, and returns a run. It does not begin browser work.
+  The UI owns the `AbortController`; client-core only receives its
+  `AbortSignalLike` through `watch()` or `retryGeneration()`.
+- [ ] **One clock owns the expiry window.** `submit()` takes
+  `GenerationSubmissionInput` and stamps `createdAt` itself from the injected
+  `Clock`; the caller must not supply it. C6 enforces the 15-minute window by
+  comparing `Clock.now()` against that same `createdAt`, so both ends of the
+  comparison must come from the same clock. If the caller stamped it with
+  `Date.now()` while core read an injected fake, the boundary test the TDD
+  sequence requires would pass without measuring anything — production would
+  agree by coincidence and tests would be meaningless.
+- [ ] `jobId` is likewise workflow-owned: written after enqueue resolves, never
+  accepted from a caller. `Omit<..., "createdAt" | "jobId">` makes both rules
+  compile-enforced rather than conventions.
+- [ ] A `GenerationRun` permits exactly one live source iterator. A second
+  `watch()` or `retryGeneration()` while one is live throws a typed
+  `GenerationWorkflowProtocolError("watch_already_active")`; a completed or
+  detached iterator releases that slot. This prevents a retry or a UI rerender
+  from creating overlapping watchers for one durable job.
+- [ ] `cancelGeneration()` and `discardGeneration()` issue only their matching
+  remote command and **never** abort the consumer-owned signal. The active
+  watcher observes the authoritative terminal snapshot and emits `settled`.
+  `retryGeneration(signal)` issues `api.retry(jobId)` and then starts a fresh
+  source session for that same job ID; it is available only after the prior
+  iterator has ended.
+- [ ] `fetchResult()` returns either `settled/completed` or
+  `result_unavailable`, never an untyped transport rejection. A successful
+  later call therefore gives Task 7 the same event shape as an initially
+  successful result fetch.
+- [ ] Export exactly `GenerationWorkflow`, `GenerationRun`,
+  `GenerationWorkflowDependencies`, `GenerationSubmissionInput`,
+  `StoredGenerationSubmission`, `GenerationEvent`, `GenerationSourceEvent`,
+  `GenerationSnapshotSource`, `GenerationWorkflowProtocolError`, and
+  `createGenerationWorkflow` from the client-core barrel. Keep machine and
+  submission helpers internal. `GenerationSubmissionInput` must be exported
+  because callers construct it; `StoredGenerationSubmission` must be exported
+  because Task 6 serializes it.
+
+### C1 — the snapshot source must carry degradation
+
+The original port yielded `AsyncIterable<GenerationStreamSnapshot>` while the
+event union required core to emit
+`{ type: "degraded"; reason; consecutiveFailures }`. Core cannot produce either
+field from a stream of snapshots: `reason` is transport identity, which the port
+deliberately hides, and `consecutiveFailures` is counted across reconnects
+inside the source. Task 6 separately claimed to "emit degraded state after two
+consecutive failures", so the same event had two owners and no viable carrier.
+
+- [ ] Consume `AsyncIterable<GenerationSourceEvent>` as declared above.
+- [ ] On `{ kind: "degraded" }`, forward it as a `degraded` **without** altering
+  the state machine's high-water mark, without resetting narration, and without
+  counting anything. Degradation is transport health, not job progress.
+- [ ] Do not re-derive, re-count, or second-guess `consecutiveFailures`. Task 6
+  owns the counter and the reset-on-success rule.
+- [ ] Task 6's matching checklist item has been updated to yield this union.
+
+### C2 — parse every incoming snapshot with the contract schema
+
+`GenerationJobSnapshot` (the polling response, ~24 fields including
+`createdAt`, `updatedAt`, and `completedAt`) is **structurally assignable** to
+`GenerationStreamSnapshot` (11 fields). Verified: assigning one to the other
+compiles with no error. So a poll source that forwards `GenerationApi.get()`
+output unprojected would silently reintroduce exactly the timestamps Task 2a
+removed, and no type check would catch it. A changing `updatedAt` is what
+defeated change detection in the first place.
+
+- [ ] Parse every inbound `{ kind: "snapshot" }` payload with
+  `generationStreamSnapshotSchema` before it reaches the state machine. This is
+  the load-bearing guard: it cannot be bypassed by a careless transport.
+- [ ] Rely on the parse to strip excess keys. Verified: parsing a full
+  `GenerationJobSnapshot` through `generationStreamSnapshotSchema` yields
+  exactly the eleven allowlisted keys, and `"updatedAt" in parsed` is `false`.
+- [ ] This same parse satisfies "reject malformed statuses" — a status outside
+  the contract enum fails the parse. Reject the **snapshot**; do not reject a
+  legitimate polling gap, which is an absent stage, not an invalid one.
+- [ ] Add a test feeding a full `GenerationJobSnapshot` through the source and
+  asserting no timestamp key reaches any emitted `status` event.
+- [ ] Task 6's checklist has been updated to project the polling path through
+  the same schema. Both layers do it; core's is the guarantee.
+
+### C3 — define staleness before testing it
+
+The original checklist required testing a "stale snapshot", but
+`GenerationStreamSnapshot` carries **no timestamp** — Task 2a removed all three
+deliberately, and a type-level check confirms `"updatedAt" extends keyof
+GenerationStreamSnapshot` is `false`. There is no clock in the frame to compare.
+
+Staleness is therefore an ordering over the two monotonic fields the projection
+does carry. ADR 0028 names `attempts` "the monotonic retry-cycle marker used for
+stream reconciliation"; this is what it is for.
+
+- [ ] Rank statuses within one attempt:
+  `queued`/`replacement_queued` = 0, `assessing` = 1, `generating` = 2,
+  `validating` = 3, `committing` = 4, and every attempt-terminal status
+  (`completed`, `failed`, `discarded`, `cancelled`, `recoverable`) = 5.
+- [ ] Track a high-water mark of `(attempts, rank)` compared
+  lexicographically. A snapshot strictly below the mark is stale and emits
+  nothing, **except** for the acknowledged retry transition below. A tuple that
+  skips ranks is a legitimate polling gap: accept it and advance.
+- [ ] An equal tuple is a duplicate only when all eleven allowlisted snapshot
+  fields are unchanged. Equal `(attempts, rank)` snapshots with changed
+  `partialNarration`, `errorCode`, `errorMessage`, `resultTurnId`, or terminal
+  `status` are meaningful updates: emit the projected `status` event. Emit a
+  `narration` event when `partialNarration` changes, with `text` equal to the
+  full current sanitized narration; when it changes from a string to `null`,
+  emit `{ type: "narration", text: "" }` once to clear the preview. Never
+  concatenate or derive narration from any other field.
+- [ ] The server's retry endpoint changes `recoverable` or `failed` to
+  `queued`/`replacement_queued` **without** incrementing `attempts`; the worker
+  increments it only when it next claims the job. After this run has received a
+  successful `api.retry(jobId)` response, allow exactly the matching
+  same-attempt queue snapshot to begin a new observation cycle, then require
+  normal monotonic ordering again. Do not generally allow rank regressions.
+- [ ] A same-rank terminal transition such as `failed -> discarded` is accepted
+  only after the matching successful run command. It is not a duplicate merely
+  because both statuses rank 5. An unsolicited conflicting terminal transition
+  is a protocol error, not a reason to silently overwrite the prior terminal
+  meaning.
+
+### C4 — a completed generation whose result cannot be fetched
+
+`{ outcome: "completed"; result: GenerationResult }` requires a successful
+`result(jobId)` call, yet the test list demanded "result-fetch failure"
+coverage. The only shape available was `settled/unrecoverable`, which would
+report a **successful** generation as unrecoverable — and the same checklist
+forbids mutating accepted campaign state on that path.
+
+- [ ] Emit the new non-terminal `{ type: "result_unavailable"; jobId; error }`
+  when a job reaches `completed` but `result(jobId)` rejects. The generation
+  succeeded durably; only the client's fetch failed.
+- [ ] Do **not** emit `settled` for this case, and do not treat it as
+  `unrecoverable`. The workflow stays open so a consumer can request the result
+  again.
+- [ ] Expose an explicit `fetchResult()` operation so a consumer can retry after
+  `result_unavailable` without re-enqueueing anything.
+
+### C5 — reconciliation: what `syncStatus` can and cannot decide
+
+`pendingGenerationSchema` carries `id`, `status`, `action`, `operationKind`,
+`expectedTurnNumber`, `createdAt`, and `updatedAt` — **no idempotency key**. So
+`syncStatus` alone cannot prove an in-flight job is the one this client
+submitted; the same action submitted twice, or a submission from another tab,
+is indistinguishable. The original instruction implied `syncStatus` decides
+whether to replay. It cannot.
+
+- [ ] Use `syncStatus` for one purpose: detecting that *a* generation is in
+  flight, so the workflow attaches to `pendingGeneration.id` and watches it
+  rather than enqueueing again. This is also the reload-resume path.
+- [ ] Resolve genuine ambiguity by replaying the enqueue with the **same
+  idempotency key** and trusting the server. `generationEnqueueResponseSchema`
+  returns `duplicate: boolean`; `duplicate: true` means the original submission
+  was already accepted, and the returned `id` is the durable job to watch.
+- [ ] Never mint a new idempotency key during reconciliation. The key lives in
+  the persisted submission precisely so a replay is provably the same request.
+- [ ] Do not match a pending job to a local submission by comparing `action`,
+  `operationKind`, or `expectedTurnNumber`. Those collide legitimately.
+
+### C6 — expiry policy is core's; storage is Task 6's
+
+Task 5 said core expires submissions "using the injected clock" while Task 6
+said it implements "the 15-minute pending-submission store". `PendingSubmission
+Store` takes no TTL argument and `PendingGenerationSubmission.createdAt` is a
+number, so core can and should own the decision.
+
+- [ ] Extend `PendingGenerationSubmission` with an optional `jobId?: string`,
+  declared as `StoredGenerationSubmission` above. The request envelope remains
+  exact and immutable; `jobId` is local durable recovery metadata written
+  immediately after enqueue accepts or duplicates the request. Task 6 must
+  round-trip both the new field and pre-existing records that do not contain it.
+- [ ] **`exactOptionalPropertyTypes: true` is set for client-core**, so
+  `jobId?: string` permits *omitting* the key but forbids assigning `undefined`
+  to it. Round-tripping through `JSON.parse` is fine because an absent key stays
+  absent, but the natural `{ ...submission, jobId: undefined }` spread fails to
+  compile with `TS2375`. Build the record without the key when there is no job
+  ID; do not widen the field to `string | undefined` to dodge the error, because
+  that would let "no job" and "job unknown" become indistinguishable in the
+  stored record.
+- [ ] Core owns expiry policy: compare `Clock.now()` against
+  `submission.createdAt` and treat anything older than 15 minutes as absent,
+  clearing it through `PendingSubmissionStore.clear`.
+- [ ] Task 6 owns durable storage only: serialization, defensive JSON parsing,
+  and campaign-scoped keys. It must not implement a second expiry rule.
+- [ ] Persist the exact submission **before** calling `enqueue`, so an
+  interrupted enqueue is still replayable. Once enqueue resolves, save the same
+  envelope with its returned `jobId` before beginning observation.
+- [ ] `resume()` first removes an expired record, then obtains `syncStatus`.
+  If `pendingGeneration` exists, attach to that server-authoritative ID and
+  clear any campaign-scoped local submission, because one local slot cannot
+  safely distinguish an in-flight request from another tab. Never compare
+  action, operation kind, or expected turn to claim identity.
+- [ ] If no pending job exists and the unexpired record has `jobId`, return a
+  run for that ID. This preserves manual retry of a failed job and
+  `result_unavailable` recovery after reload, even though `syncStatus` exposes
+  neither completed nor failed jobs. If it has no `jobId`, replay exactly the
+  original request and idempotency key.
+- [ ] Clear the saved record only after `settled/completed` with a retrieved
+  result, or after authoritative `cancelled` or `discarded`. Retain it for
+  `failed`, `recoverable`, `unrecoverable`, and `result_unavailable`, so the
+  user can resume, retry, discard, or fetch the already accepted result.
+
+### C7 — remaining behavior (unchanged in intent, retained here)
+
+- [ ] Derive the status union from `packages/contracts`; do not redeclare it.
+  There is no exported named type for the union — `generationStatusSchema` is
+  module-private in `client-api.ts` — so index the projection type:
+  `type GenerationStatus = GenerationStreamSnapshot["status"]`. Verified to
+  accept all eleven members. Use `generationStreamSnapshotSchema` for the
+  runtime check, per C2.
 - [ ] Model retry loops `recoverable -> queued|replacement_queued -> ...` on the
-  same durable job ID.
-- [ ] Persist the exact idempotent submission before enqueue and expire it after
-  the existing 15-minute window using the injected clock.
-- [ ] On ambiguous enqueue failure, reconcile through `syncStatus`; replay only
-  the exact request with the same idempotency key.
-- [ ] Emit narration only from `partialNarration`. Ignore `partialOutput` even if
-  a transport includes it.
-- [ ] Treat watcher abort as detach. Call the remote cancel endpoint only through
-  an explicit `cancelGeneration()` operation.
-- [ ] Auto-retry one recoverable job, then emit `unrecoverable` without mutating
-  accepted campaign state.
-- [ ] Test every terminal state, retry loop, reload resume, conflict, replay,
-  expiry, detach, cancellation, duplicate snapshot, skipped stage, stale
-  snapshot, and result-fetch failure.
+  same durable job ID. The queue snapshot initially retains its former
+  `attempts` value and the next `assessing` snapshot increments it; implement
+  the C3 acknowledged-retry exception rather than assuming the queue transition
+  itself increments attempts. `generationActionResponseSchema` constrains
+  `retry`/`cancel`/`discard` to exactly
+  `queued`/`replacement_queued`/`cancelled`/`discarded`, which matches.
+- [ ] Emit narration only from `partialNarration`. Ignore `partialOutput` even
+  if a transport includes it; note that C2's parse already strips it, so this
+  is defence in depth rather than the primary guard.
+- [ ] Treat watcher abort as detach and emit `detached`. Call the remote cancel
+  endpoint only through an explicit `cancelGeneration()` operation.
+- [ ] Auto-retry at most once per durable job, not once per page load. The first
+  recoverable snapshot after the job's first claimed attempt may auto-retry;
+  a recoverable snapshot after a retried attempt must emit
+  `settled/unrecoverable` without mutating accepted campaign state. Derive the
+  decision from the server's monotonic `attempts` lifecycle and test a reload
+  between the two recoverable snapshots.
+
+### C8 — watcher sessions must restart deliberately and end unambiguously
+
+This is forced by the API, not chosen by the client. The server's SSE loop
+breaks on any of `completed`, `failed`, `recoverable`, `discarded`, or
+`cancelled` (`services/api/src/server.ts:788`) and then ends the response, so
+the stream is already closed by the time a retry is issued. Task 6 closes its
+EventSource on the same set. A retry therefore cannot rely on the original
+iterator to observe the next queue cycle — no Task 6 implementation choice can
+change that, and a fresh source session is mandatory rather than preferable.
+
+- [ ] `watch(signal)` loops through sequential source sessions for one job. On
+  the first recoverable status it waits for the successful retry action, closes
+  the completed source session, and opens a fresh `source.watch(jobId, signal)`.
+  There must never be two live iterators for that job.
+- [ ] A source may complete normally only after core has accepted an authoritative
+  terminal snapshot or the supplied signal is aborted. If it completes while
+  the latest accepted snapshot is non-terminal, throw
+  `GenerationWorkflowProtocolError("source_ended_before_terminal")`; do not
+  emit `settled`, do not clear persistence, and leave the durable job resumable.
+- [ ] If contract parsing of a source snapshot fails, throw
+  `GenerationWorkflowProtocolError("invalid_snapshot", { cause })` with the
+  same no-settlement and no-clear rule. A malformed source is not a durable job
+  failure and must not be relabeled as `unrecoverable`.
+- [ ] If the signal is already aborted or becomes aborted while iterating, close
+  the iterator, emit exactly one `detached` event, and retain the saved record.
+  An abort must not call any remote action.
+
+### C9 — action, stream, and terminal races have one owner
+
+- [ ] Route auto-retry through the same internal retry transition used by
+  `GenerationRun.retryGeneration()`. Mark the transition acknowledged only
+  after `api.retry(jobId)` resolves with the matching job ID and a queue status;
+  a rejection leaves the durable job recoverable and emits the documented
+  `settled/unrecoverable` error without clearing persistence.
+- [ ] For explicit cancel and discard, keep the watcher active until it observes
+  the authoritative terminal snapshot. If the command resolves after an
+  independently received terminal snapshot, emit settlement once only and make
+  later duplicate source frames no-ops.
+- [ ] If a command response names a different job ID or an impossible status,
+  throw `GenerationWorkflowProtocolError("action_response_mismatch")`, retain
+  persistence, and do not synthesize a status frame from the partial action
+  response.
+
+### C10 — test the revised observable contract, not only status ranks
+
+- [ ] Add `GenerationWorkflowProtocolError` to `generation/types.ts` with
+  `kind` limited to `"watch_already_active"`, `"invalid_snapshot"`,
+  `"source_ended_before_terminal"`, and `"action_response_mismatch"`. Export
+  the type and class through the deliberate client-core public surface.
+- [ ] Keep all parsing and protocol errors free of DOM, EventSource, fetch,
+  database, and framework types. Test them with plain async-iterable fakes and
+  the existing `AbortSignalLike` test double.
+
+### TDD and verification sequence
+
+- [ ] Write `generation-machine.test.ts` first, covering the `(attempts, rank)`
+  ordering from C3: an exact duplicate, two `generating` frames with different
+  `partialNarration`, a `partialNarration` clear, skipped stages, a stale
+  snapshot, `recoverable(1) -> queued(1) -> assessing(2)` after acknowledged
+  retry, `failed -> discarded` after explicit discard, and every terminal
+  status. Run
+  `pnpm exec vitest run tests/unit/client-core/generation-machine.test.ts`,
+  expect failure, then implement `machine.ts`.
+- [ ] Write `generation-submission.test.ts` for persist-before-enqueue, saving
+  the returned `jobId` after enqueue, the 15-minute expiry boundary against a
+  fake `Clock` (just inside and just outside — the fake clock must be the only
+  source of both the stamped `createdAt` and the comparison, or the test proves
+  nothing), key stability across a replay,
+  resume from a saved failed/completed job ID, and the explicit clearing rules
+  for completed, cancelled, discarded, and another-tab pending generation. Run
+  it red, then implement `submission.ts`.
+- [ ] Write `generation-workflow.test.ts` for the exported workflow/handle
+  surface, reload resume via `pendingGeneration.id`, ambiguous-enqueue replay
+  with `duplicate: true`, one auto-retry across a fresh source session, reload
+  after that retry without a second automatic retry, detach, explicit
+  cancellation and discard races, `result_unavailable` followed after reload by
+  a successful `fetchResult()`, degraded forwarding, timestamp stripping, a
+  malformed snapshot, a non-terminal source completion, and no-duplicate-watch
+  enforcement. Run it red, then implement `workflow.ts`.
+- [ ] Export the deliberate public surface from
+  `packages/client-core/src/index.ts` and confirm no internal module is
+  barrel-exported.
+- [ ] Run focused checks:
+  `pnpm exec vitest run tests/unit/client-core/ tests/unit/client-boundaries.test.ts`,
+  `pnpm --filter @infinite-quest/client-core check`, and
+  `pnpm check:client-boundaries`.
+- [ ] Run completion checks: `pnpm check`, `pnpm build`, `pnpm test:unit`,
+  `pnpm test:integration`, `git diff --check`, review the complete diff for
+  unrelated changes, and run `pjm precheck` before committing.
+- [ ] Record a **Current Task 5 verification** block under **Completion status**
+  in the same commit that marks Task 5 complete, per the rule in Task 4a P4.
+- [ ] Commit with an imperative scoped summary such as
+  `feat(client): add pure generation workflow`. Do not mix Task 6 transports or
+  Story Player rewiring into this commit.
 
 **Definition of done:** The same event sequence is produced for identical job
-snapshots regardless of transport. No framework, browser, network, or database
-type appears in the workflow.
+snapshots regardless of transport, including progressive narration at an equal
+status rank and the server's same-attempt queue frame after retry. No timestamp
+from any transport can reach the state machine. A completed generation is never
+reported as unrecoverable because its result fetch failed, and that result can
+be recovered after reload. Exactly one watcher observes a durable job at a time;
+all ambiguous source failures leave it resumable. No framework, browser,
+network, or database type appears in the workflow.
 
 ---
 
@@ -985,8 +2021,19 @@ type appears in the workflow.
 - Create: `tests/unit/client-web/generation-sources.test.ts`
 - Create: `tests/unit/client-web/pending-submissions.test.ts`
 
-- [ ] Parse every SSE frame with `generationStreamSnapshotSchema` before yielding
-  it to client-core.
+- [ ] Parse **every** inbound payload with `generationStreamSnapshotSchema`
+  before yielding it to client-core — the SSE frame path **and the polling
+  path**. `GenerationApi.get()` returns `GenerationJobSnapshot`, which carries
+  `createdAt`, `updatedAt`, and `completedAt` and is structurally assignable to
+  `GenerationStreamSnapshot`, so an unprojected poll result compiles cleanly and
+  silently reintroduces the timestamps Task 2a removed. Task 5 C2 parses
+  defensively as well; do not treat that as licence to skip it here.
+- [ ] **Yield `GenerationSourceEvent`, not bare snapshots.** Task 5 declares
+  `AsyncIterable<{ kind: "snapshot"; snapshot } | { kind: "degraded"; reason;
+  consecutiveFailures }>`. The transport is the only layer that knows whether a
+  failure was `stream_lost` or `poll_failed` and the only layer that can count
+  consecutive failures across reconnects, so this task owns both fields. Core
+  forwards them without re-counting.
 - [ ] Close EventSource deterministically on terminal state, fallback, detach,
   or consumer failure.
 - [ ] Fall back from SSE to polling once without creating overlapping watchers.
@@ -999,16 +2046,22 @@ type appears in the workflow.
   closure carrying no terminal status. See ADR 0028 §Task 2a stream and
   validation baseline amendment.
 - [ ] Poll at 1500 ms initially, back off with jitter to 5000 ms after transport
-  failures, emit degraded state after two consecutive failures, and reset after
-  a successful snapshot.
+  failures, emit a `{ kind: "degraded" }` source event after two consecutive
+  failures, and reset the counter after a successful snapshot. This counter is
+  owned here and nowhere else — Task 5 C1 forwards it verbatim.
 - [ ] Use elapsed time and explicit detach rather than a `900 attempts` timeout.
   The durable job remains resumable after local monitoring stops.
 - [ ] Pause non-essential polling while the document is hidden; generation
   monitoring may reduce cadence but must preserve resume/reconciliation.
-- [ ] Implement the 15-minute pending-submission store with defensive JSON
-  parsing and campaign-scoped keys.
+- [ ] Implement the pending-submission **storage** with defensive JSON parsing
+  and campaign-scoped keys. Do **not** implement an expiry rule here: Task 5 C6
+  owns the 15-minute policy, comparing `Clock.now()` against
+  `submission.createdAt`. Two expiry implementations would drift. Preserve the
+  optional Task 5 `submission.jobId` when serializing and loading; records made
+  before this field existed remain valid with `jobId` absent.
 - [ ] Test fake EventSource, fake fetch, fake clock, visibility changes, abort at
-  each stage, stream loss, malformed frames, and no-duplicate-watcher behavior.
+  each stage, stream loss, malformed frames, no-duplicate-watcher behavior, and
+  pending-submission round trips both with and without `jobId`.
 
 **Definition of done:** Browser transport failures are visible and recoverable,
 no watcher leaks after navigation, and core tests remain independent of Web APIs.
@@ -1036,10 +2089,25 @@ export interface Store<T> {
   subscribe(listener: (state: Readonly<T>) => void): () => void;
 }
 
-export interface JobSnapshotSource<TSnapshot> {
-  watch(jobId: string, signal: AbortSignalLike): AsyncIterable<TSnapshot>;
+/**
+ * The generic form of Task 5's `GenerationSourceEvent`. A source that yields
+ * bare snapshots cannot express degradation, which is why Task 5 C1 corrected
+ * its own port; the generic watcher inherits that correction rather than
+ * reintroducing the defect.
+ */
+export type JobSourceEvent<TSnapshot, TReason extends string = string> =
+  | { kind: "snapshot"; snapshot: TSnapshot }
+  | { kind: "degraded"; reason: TReason; consecutiveFailures: number };
+
+export interface JobSnapshotSource<TSnapshot, TReason extends string = string> {
+  watch(jobId: string, signal: AbortSignalLike): AsyncIterable<JobSourceEvent<TSnapshot, TReason>>;
 }
 ```
+
+`GenerationSnapshotSource` from Task 5 must remain assignable to
+`JobSnapshotSource<GenerationStreamSnapshot, "stream_lost" | "poll_failed">`.
+Generalizing here must not widen or re-declare Task 5's narrower `reason` union;
+each job family keeps its own typed reasons.
 
 - [ ] Store only campaign/world projections, accepted turns, selected domain
   options, and durable-job references.
@@ -1049,8 +2117,19 @@ export interface JobSnapshotSource<TSnapshot> {
   do not force unlike payloads into one underspecified status-only type.
 - [ ] Make the generic watcher responsible only for scheduling, error/degraded
   events, detach, and terminal detection supplied by the family adapter.
+- [ ] **Handle the full Task 5 `GenerationEvent` union — including
+  `result_unavailable` — without collapsing it.** That event means the
+  generation succeeded durably but the client could not fetch its result. The
+  store must not record it as a failure, must not clear the durable-job
+  reference, and must not mark the job settled; the workflow is still open and a
+  consumer may call `fetchResult()` again. A store that treats any non-`status`
+  event as terminal will silently lose a completed turn.
+- [ ] Model `degraded` as transport health on the job reference, separate from
+  job status. It must not overwrite the last known snapshot or reset narration.
 - [ ] Add family-specific tests for `expired`, `partial`, `recoverable`, and
-  provider-progress behavior.
+  provider-progress behavior, plus a generation-family test asserting that
+  `result_unavailable` leaves the job watchable and a later successful
+  `fetchResult()` settles it as completed.
 
 **Definition of done:** Framework adapters can subscribe to stable domain
 projections, while family-specific job semantics remain typed and testable.
@@ -1095,6 +2174,22 @@ during feature implementation.
   Swarm use the same artifact layout.
 - [ ] Add server tests for `/app/`, deep-link fallback, cache headers, CSP, old
   routes, and missing-asset behavior.
+- [ ] **Inherited from the Task 4 review — make `packages/contracts` a real
+  workspace package.** It currently has no `package.json`, so it is not a
+  workspace member, gets no `node_modules`, and its own `import { z } from
+  "zod"` resolves only by walking up to the root install. Every consumer reaches
+  it by relative path. Give it a `package.json` with a name, `exports`, a
+  `check` script, and its own `zod` dependency; then convert the client packages'
+  relative contract imports to the package name and update
+  `scripts/check-client-boundaries.mjs` to accept it. Task 4 declares `zod`
+  locally in both client packages, which hardens their own imports but cannot
+  fix the contracts hop — do not treat that as having resolved this.
+- [ ] **Inherited from the Task 4 review — CORS exposure for the correlation
+  header.** Task 4 makes the API emit `x-correlation-id` on responses, and
+  `services/api/src/request-security.ts:47` already allows it as a *request*
+  header. No `Access-Control-Expose-Headers` is set, so a cross-origin caller
+  cannot read it back. Add that header if, and only if, `/app/` is served from
+  an origin other than the API's. Same-origin deployments need no change.
 - [ ] Run `pnpm check`, `pnpm build`, container build, and rendered Compose/Swarm
   configuration checks.
 
@@ -1114,6 +2209,20 @@ management routes or remove every current network call in one pass.
 - Modify: `apps/web/public/story.js`
 - Modify: `apps/web/public/story-generation-cancellation.js`
 - Modify: `apps/web/public/story.html`
+- Modify: `packages/contracts/src/client-api.ts` — add schemas for every
+  Story Player endpoint adopted beyond the Task 4 table.
+- Modify: `packages/contracts/src/index.ts` — expose only those new public
+  contracts.
+- Modify: `packages/client-web/src/api-client.ts` — add the corresponding typed
+  methods; keep the generic request function private to client-web.
+- Modify: `services/api/src/server.ts` — project the corresponding success
+  responses through the shared schemas before sending them.
+- Modify: `tests/unit/client-api-contracts.test.ts` — reject malformed request
+  and response fixtures for every added contract.
+- Modify: `tests/unit/client-api-routes.test.ts` — prove the real route/status
+  shapes parse through those contracts.
+- Modify: `tests/unit/client-web/api-client.test.ts` — prove method/path/schema
+  mappings for the added client surface.
 - Modify: `tests/unit/story-player-ui.test.ts`
 - Modify: `tests/unit/csp-ui.test.ts`
 - Test: new client-core/client-web tests from C3-C6
@@ -1125,6 +2234,18 @@ needed to preserve the existing play loop. The implementation must inventory the
 actual calls in `story.js`; the shorter historical endpoint table is not complete
 enough to guarantee behavior parity.
 
+Task 4 initially adopts only its explicit C1 endpoint table. Before Task 9
+replaces any additional raw Story Player call, Task 9 must add one shared request
+schema where applicable, one shared response schema, server-side response
+projection through that schema, one typed `NexusApiClient` method, and focused
+contract/route/client tests. Do not expose the generic HTTP request method to the
+Story Player as an escape hatch, and do not call an unvalidated route through a
+cast. C8 therefore has two mandatory internal review gates: first land and
+review the contract/server/client extensions as a focused prerequisite commit,
+then land and review the Story Player rewire as the single revertible C8 commit
+described below. Do not combine the two gates into one opaque diff, and do not
+declare C8 complete until both have passed their focused and full verification.
+
 - [ ] Replace the Story Player's API helper for adopted endpoints with
   `NexusApiClient` methods.
 - [ ] Replace duplicated SSE/poll terminal branches with the shared workflow.
@@ -1133,6 +2254,21 @@ enough to guarantee behavior parity.
   inside the legacy app.
 - [ ] Preserve exact user-visible behavior for submit, retry-latest, resume,
   streamed narration, recoverable, cancel, discard, and completed result.
+- [ ] **Render `result_unavailable` as a recoverable fetch problem, never as a
+  failed generation.** The turn was accepted server-side; only the client's
+  result fetch failed. This corrects a real current defect: at
+  `story.js:1263-1269` a failed `/generation-jobs/:id/result` call rejects out of
+  `pollGenerationJob`, and the caller at `story.js:998` toasts
+  `Generation failed: <message>` for a turn that actually succeeded. The
+  mismatch is then invisible until the user reloads — `sync-status` restricts
+  `pendingGeneration` to non-terminal statuses (`server.ts:641`), so a completed
+  job never reappears as pending, and the turn simply shows up in the accepted
+  turns list as though nothing went wrong. The rewired client must keep the
+  generation displayed as complete-but-loading, offer a retry that calls
+  `fetchResult()` only, and must not re-enqueue, retry, or discard the durable
+  job.
+- [ ] Do not let `degraded` surface as a generation failure either. It is
+  transport health; the durable job is unaffected and remains resumable.
 - [ ] Remove only source-string assertions whose behavior is now covered by
   client-core/client-web tests. Keep presentation assertions until replacement
   components exist.
