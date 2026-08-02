@@ -55,12 +55,23 @@ import {
 } from "../../../packages/contracts/src/world-library.js";
 import { apiErrorEnvelopeSchema } from "../../../packages/contracts/src/http.js";
 import {
+  campaignBranchResponseSchema,
+  campaignCreateResponseSchema,
   campaignListResponseSchema,
+  campaignRewindResponseSchema,
+  campaignRuntimeStateResponseSchema,
   campaignSyncStatusSchema,
   generationActionResponseSchema,
   generationEnqueueResponseSchema,
   generationResultSchema,
-  turnListResponseSchema
+  metaResponseSchema,
+  playableCharacterListResponseSchema,
+  providerListResponseSchema,
+  sessionResponseSchema,
+  turnInputClassificationResponseSchema,
+  turnListResponseSchema,
+  userProfileResponseSchema,
+  worldCreateResponseSchema
 } from "../../../packages/contracts/src/client-api.js";
 import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
 import { formatNarrationParagraphs } from "../../../packages/story-engine/src/narration-formatting.js";
@@ -373,19 +384,19 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     }
   });
 
-  app.get("/api/v1/meta", async () => ({ application: applicationMetadata() }));
+  app.get("/api/v1/meta", async () => parseResponseProjection(metaResponseSchema, { application: applicationMetadata() }));
 
   app.get("/api/v1/dashboard/stats", async () => getDashboardStats(pool));
 
   app.get("/api/v1/session", async () => {
     const user = await getSessionUserProfile(pool);
-    return { user, authentication: "deferred" };
+    return parseResponseProjection(sessionResponseSchema, { user, authentication: "deferred" });
   });
 
   app.get("/api/v1/users/me", async () => ({ user: await getSessionUserProfile(pool) }));
   app.get("/api/v1/user/profile", async () => ({ user: await getSessionUserProfile(pool) }));
 
-  app.patch("/api/v1/users/me/profile", async (request) => ({
+  app.patch("/api/v1/users/me/profile", async (request) => parseResponseProjection(userProfileResponseSchema, {
     user: await updateSessionUserProfile(pool, userProfileUpdateSchema.parse(request.body))
   }));
   app.put("/api/v1/users/me/profile", async (request) => ({
@@ -406,7 +417,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.delete("/api/v1/prompt-library/overrides", async (request) => ({ library: await resetPromptOverride(pool, request.body) }));
   app.post("/api/v1/prompt-library/preview", async (request) => previewPromptTemplate(request.body));
 
-  app.get("/api/v1/providers", async () => ({ providers: await listProviders(pool) }));
+  app.get("/api/v1/providers", async () => parseResponseProjection(providerListResponseSchema, { providers: await listProviders(pool) }));
 
   app.post("/api/v1/providers", async (request, reply) => {
     const input = providerProfileInputSchema.parse(request.body);
@@ -475,7 +486,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.get("/api/v1/worlds", async () => parseResponseProjection(worldListResponseSchema, { worlds: await listWorlds(pool) }));
 
   app.post("/api/v1/worlds", async (request, reply) => (
-    reply.code(201).send(await createWorld(pool, worldCreateSchema.parse(request.body)))
+    reply.code(201).send(parseResponseProjection(worldCreateResponseSchema, await createWorld(pool, worldCreateSchema.parse(request.body))))
   ));
 
   app.post("/api/v1/worlds/generate-preview", async (request) => (
@@ -569,11 +580,11 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   });
 
   app.get<{ Params: { worldVersionId: string } }>("/api/v1/world-versions/:worldVersionId/playable-characters", async (request) => (
-    getWorldVersionPlayableCharacterSummary(pool, uuidSchema.parse(request.params.worldVersionId))
+    parseResponseProjection(playableCharacterListResponseSchema, await getWorldVersionPlayableCharacterSummary(pool, uuidSchema.parse(request.params.worldVersionId)))
   ));
 
   app.post("/api/v1/campaigns", async (request, reply) => (
-    reply.code(201).send(await createCampaign(pool, campaignCreateSchema.parse(request.body)))
+    reply.code(201).send(parseResponseProjection(campaignCreateResponseSchema, await createCampaign(pool, campaignCreateSchema.parse(request.body))))
   ));
 
   app.patch<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId", async (request) => (
@@ -650,19 +661,19 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   });
 
   app.get<{ Params: { campaignId: string }; Querystring: { turnNumber?: string } }>("/api/v1/campaigns/:campaignId/state", async (request) => (
-    getCampaignRuntimeState(
+    parseResponseProjection(campaignRuntimeStateResponseSchema, await getCampaignRuntimeState(
       pool,
       uuidSchema.parse(request.params.campaignId),
       request.query.turnNumber === undefined ? undefined : z.coerce.number().int().min(0).parse(request.query.turnNumber)
-    )
+    ))
   ));
 
   app.patch<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/state", async (request) => (
-    updateCampaignRuntimeState(
+    parseResponseProjection(campaignRuntimeStateResponseSchema, await updateCampaignRuntimeState(
       pool,
       uuidSchema.parse(request.params.campaignId),
       campaignRuntimeStateUpdateSchema.parse(request.body)
-    )
+    ))
   ));
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/cost-summary", async (request) => (
@@ -773,30 +784,30 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   ));
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/rewind", async (request) => (
-    rewindCampaign(
+    parseResponseProjection(campaignRewindResponseSchema, await rewindCampaign(
       pool,
       uuidSchema.parse(request.params.campaignId),
       campaignRewindSchema.parse(request.body)
-    )
+    ))
   ));
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/branch", async (request, reply) => (
     reply.code(201).send(
-      await branchCampaign(
+      parseResponseProjection(campaignBranchResponseSchema, await branchCampaign(
         pool,
         uuidSchema.parse(request.params.campaignId),
         campaignBranchSchema.parse(request.body)
-      )
+      ))
     )
   ));
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/turn-input/classify", async (request) => (
-    classifyTurnInput(
+    parseResponseProjection(turnInputClassificationResponseSchema, await classifyTurnInput(
       pool,
       uuidSchema.parse(request.params.campaignId),
       turnInputClassificationRequestSchema.parse(request.body),
       config.credentialEncryptionKey
-    )
+    ))
   ));
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations", async (request, reply) => {

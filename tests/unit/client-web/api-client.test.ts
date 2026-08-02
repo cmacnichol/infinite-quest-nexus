@@ -76,9 +76,11 @@ describe("createNexusApiClient", () => {
     const generation: GenerationApiPort = client.generation;
 
     expect(generation).toBe(client.generation);
-    expect(Object.keys(client).sort()).toEqual(["campaigns", "generation", "worlds"]);
-    expect(Object.keys(client.worlds).sort()).toEqual(["list"]);
-    expect(Object.keys(client.campaigns).sort()).toEqual(["list", "turns"]);
+    expect(Object.keys(client).sort()).toEqual(["campaigns", "generation", "meta", "providers", "session", "worlds"]);
+    expect(Object.keys(client.worlds).sort()).toEqual(["create", "list", "playableCharacters"]);
+    expect(Object.keys(client.campaigns).sort()).toEqual([
+      "branch", "classifyTurnInput", "create", "list", "rewind", "state", "turns", "updateState"
+    ]);
     expect(Object.keys(client.generation).sort()).toEqual([
       "cancel",
       "discard",
@@ -92,6 +94,22 @@ describe("createNexusApiClient", () => {
     expectTypeOf<NexusApiClient["worlds"]>().toEqualTypeOf<WorldApi>();
     expectTypeOf<NexusApiClient["campaigns"]>().toEqualTypeOf<CampaignApi>();
     expectTypeOf<NexusApiClient["generation"]>().toEqualTypeOf<GenerationApi>();
+  });
+
+  it("exposes the typed Story Player projection and action surface instead of a generic request escape hatch", () => {
+    const queue = invalidResponseFetch();
+    const client = createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort(), fetchImpl: queue.fetchImpl });
+    const campaigns = client.campaigns as unknown as Record<string, unknown>;
+    const shell = client as unknown as Record<string, unknown>;
+
+    expect(typeof campaigns.state).toBe("function");
+    expect(typeof campaigns.updateState).toBe("function");
+    expect(typeof campaigns.classifyTurnInput).toBe("function");
+    expect(typeof campaigns.rewind).toBe("function");
+    expect(typeof campaigns.branch).toBe("function");
+    expect(typeof shell.session).toBe("object");
+    expect(typeof shell.meta).toBe("object");
+    expect("request" in client).toBe(false);
   });
 
   it("maps every adopted method to its API-relative endpoint and validates successful response schemas", async () => {

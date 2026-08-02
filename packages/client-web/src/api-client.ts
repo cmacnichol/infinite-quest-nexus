@@ -1,6 +1,14 @@
 import { ApiContractError } from "@infinite-quest/client-core";
 import {
   campaignListResponseSchema,
+  campaignBranchSchema,
+  campaignBranchResponseSchema,
+  campaignCreateSchema,
+  campaignCreateResponseSchema,
+  campaignRewindResponseSchema,
+  campaignRewindSchema,
+  campaignRuntimeStateResponseSchema,
+  campaignRuntimeStateUpdateRequestSchema,
   campaignSyncStatusSchema,
   generationActionResponseSchema,
   generationEnqueueResponseSchema,
@@ -8,11 +16,29 @@ import {
   generationRequestSchema,
   generationResultSchema,
   generationRetryLatestRequestSchema,
+  metaResponseSchema,
+  playableCharacterListResponseSchema,
+  providerListResponseSchema,
+  sessionResponseSchema,
+  turnInputClassificationRequestSchema,
+  turnInputClassificationResponseSchema,
   turnListResponseSchema,
+  userProfileResponseSchema,
+  userProfileUpdateSchema,
+  worldCreateResponseSchema,
+  worldCreateSchema,
   worldListResponseSchema
 } from "@infinite-quest/contracts";
 import type {
+  CampaignBranchRequest,
+  CampaignBranchResponse,
+  CampaignCreateRequest,
+  CampaignCreateResponse,
   CampaignListResponse,
+  CampaignRewindRequest,
+  CampaignRewindResponse,
+  CampaignRuntimeStateResponse,
+  CampaignRuntimeStateUpdate,
   CampaignSyncStatus,
   GenerationActionResponse,
   GenerationEnqueueResponse,
@@ -20,7 +46,17 @@ import type {
   GenerationRequest,
   GenerationResult,
   GenerationRetryLatestRequest,
+  MetaResponse,
+  PlayableCharacterListResponse,
+  ProviderListResponse,
+  SessionResponse,
+  TurnInputClassificationRequest,
+  TurnInputClassificationResponse,
   TurnListResponse,
+  UserProfileResponse,
+  UserProfileUpdate,
+  WorldCreateRequest,
+  WorldCreateResponse,
   WorldListResponse
 } from "@infinite-quest/contracts";
 import type { z } from "zod";
@@ -29,11 +65,32 @@ import type { HttpMethod, JsonRequestSpec, NexusHttpClientOptions } from "./http
 
 export interface WorldApi {
   list(signal?: AbortSignal): Promise<WorldListResponse>;
+  create(request: WorldCreateRequest, signal?: AbortSignal): Promise<WorldCreateResponse>;
+  playableCharacters(worldVersionId: string, signal?: AbortSignal): Promise<PlayableCharacterListResponse>;
 }
 
 export interface CampaignApi {
   list(signal?: AbortSignal): Promise<CampaignListResponse>;
   turns(campaignId: string, signal?: AbortSignal): Promise<TurnListResponse>;
+  state(campaignId: string, turnNumber?: number, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
+  updateState(campaignId: string, request: CampaignRuntimeStateUpdate, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
+  classifyTurnInput(campaignId: string, request: TurnInputClassificationRequest, signal?: AbortSignal): Promise<TurnInputClassificationResponse>;
+  rewind(campaignId: string, request: CampaignRewindRequest, signal?: AbortSignal): Promise<CampaignRewindResponse>;
+  branch(campaignId: string, request: CampaignBranchRequest, signal?: AbortSignal): Promise<CampaignBranchResponse>;
+  create(request: CampaignCreateRequest, signal?: AbortSignal): Promise<CampaignCreateResponse>;
+}
+
+export interface ShellApi {
+  get(signal?: AbortSignal): Promise<MetaResponse>;
+}
+
+export interface SessionApi {
+  get(signal?: AbortSignal): Promise<SessionResponse>;
+  updateProfile(request: UserProfileUpdate, signal?: AbortSignal): Promise<UserProfileResponse>;
+}
+
+export interface ProviderApi {
+  list(signal?: AbortSignal): Promise<ProviderListResponse>;
 }
 
 export interface GenerationApi {
@@ -51,6 +108,9 @@ export interface NexusApiClient {
   campaigns: CampaignApi;
   generation: GenerationApi;
   worlds: WorldApi;
+  meta: ShellApi;
+  session: SessionApi;
+  providers: ProviderApi;
 }
 
 function encodedPathSegment(value: string): string {
@@ -87,7 +147,18 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
   const http = createNexusHttpClient(options);
 
   const worlds: WorldApi = {
-    list: (signal) => http.request(withSignal({ method: "GET", path: "/worlds", responseSchema: worldListResponseSchema }, signal))
+    list: (signal) => http.request(withSignal({ method: "GET", path: "/worlds", responseSchema: worldListResponseSchema }, signal)),
+    async create(request, signal) {
+      const method: HttpMethod = "POST";
+      const path = "/worlds";
+      const body = validatedRequest(worldCreateSchema, request, method, path);
+      return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: worldCreateResponseSchema }, signal));
+    },
+    playableCharacters: (worldVersionId, signal) => http.request(withSignal({
+      method: "GET",
+      path: `/world-versions/${encodedPathSegment(worldVersionId)}/playable-characters`,
+      responseSchema: playableCharacterListResponseSchema
+    }, signal))
   };
   const campaigns: CampaignApi = {
     list: (signal) => http.request(withSignal({ method: "GET", path: "/campaigns", responseSchema: campaignListResponseSchema }, signal)),
@@ -95,7 +166,42 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
       method: "GET",
       path: `/campaigns/${encodedPathSegment(campaignId)}/turns`,
       responseSchema: turnListResponseSchema
-    }, signal))
+    }, signal)),
+    state: (campaignId, turnNumber, signal) => http.request(withSignal({
+      method: "GET",
+      path: `/campaigns/${encodedPathSegment(campaignId)}/state${turnNumber === undefined ? "" : `?turnNumber=${encodeURIComponent(String(turnNumber))}`}`,
+      responseSchema: campaignRuntimeStateResponseSchema
+    }, signal)),
+    async updateState(campaignId, request, signal) {
+      const method: HttpMethod = "PATCH";
+      const path = `/campaigns/${encodedPathSegment(campaignId)}/state`;
+      const body = validatedRequest(campaignRuntimeStateUpdateRequestSchema, request, method, path);
+      return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: campaignRuntimeStateResponseSchema }, signal));
+    },
+    async classifyTurnInput(campaignId, request, signal) {
+      const method: HttpMethod = "POST";
+      const path = `/campaigns/${encodedPathSegment(campaignId)}/turn-input/classify`;
+      const body = validatedRequest(turnInputClassificationRequestSchema, request, method, path);
+      return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: turnInputClassificationResponseSchema }, signal));
+    },
+    async rewind(campaignId, request, signal) {
+      const method: HttpMethod = "POST";
+      const path = `/campaigns/${encodedPathSegment(campaignId)}/rewind`;
+      const body = validatedRequest(campaignRewindSchema, request, method, path);
+      return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: campaignRewindResponseSchema }, signal));
+    },
+    async branch(campaignId, request, signal) {
+      const method: HttpMethod = "POST";
+      const path = `/campaigns/${encodedPathSegment(campaignId)}/branch`;
+      const body = validatedRequest(campaignBranchSchema, request, method, path);
+      return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: campaignBranchResponseSchema }, signal));
+    },
+    async create(request, signal) {
+      const method: HttpMethod = "POST";
+      const path = "/campaigns";
+      const body = validatedRequest(campaignCreateSchema, request, method, path);
+      return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: campaignCreateResponseSchema }, signal));
+    }
   };
   const generation: GenerationApi = {
     syncStatus: (campaignId, signal) => http.request(withSignal({
@@ -142,5 +248,21 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
     }, signal))
   };
 
-  return { campaigns, generation, worlds };
+  const meta: ShellApi = {
+    get: (signal) => http.request(withSignal({ method: "GET", path: "/meta", responseSchema: metaResponseSchema }, signal))
+  };
+  const session: SessionApi = {
+    get: (signal) => http.request(withSignal({ method: "GET", path: "/session", responseSchema: sessionResponseSchema }, signal)),
+    async updateProfile(request, signal) {
+      const method: HttpMethod = "PATCH";
+      const path = "/users/me/profile";
+      const body = validatedRequest(userProfileUpdateSchema, request, method, path);
+      return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: userProfileResponseSchema }, signal));
+    }
+  };
+  const providers: ProviderApi = {
+    list: (signal) => http.request(withSignal({ method: "GET", path: "/providers", responseSchema: providerListResponseSchema }, signal))
+  };
+
+  return { campaigns, generation, worlds, meta, session, providers };
 }

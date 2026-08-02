@@ -20,6 +20,9 @@ export type {
   CampaignApi,
   GenerationApi,
   NexusApiClient,
+  ProviderApi,
+  SessionApi,
+  ShellApi,
   WorldApi
 } from "./api-client.js";
 export {
