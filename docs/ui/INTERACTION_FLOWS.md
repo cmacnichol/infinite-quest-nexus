@@ -7,6 +7,10 @@ analog in Infinite Quest Nexus and are marked **Not applicable** below
 rather than forced. All flows use the screen IDs from `SCREEN_INVENTORY.md`
 and endpoints from `API_UI_CONTRACTS.md`.
 
+Generation is the first job family moved behind the headless client-core
+workflow and client-web browser adapters. The generic watcher for image,
+Chronicle, world-cover, and import jobs remains deferred.
+
 ## Shared reference: generation-job status flow
 
 Every "AI analysis"-shaped flow below (turn generation, illustration,
@@ -52,13 +56,13 @@ stateDiagram-v2
 ## Flow 2 — Start AI-assisted generation (template: "start AI analysis")
 
 - **Preconditions:** Campaign exists, pinned to a published world version; at least one enabled text provider configured (default or explicit).
-- **Main path:** STORY-PLAYER → choose input mode (Action/Scene/Auto) → submit → `POST /campaigns/:id/generations` → job enters the shared state machine above → SSE stream (or poll fallback) updates progress copy per stage → `completed` → narration/choices render, turn appended to history.
+- **Main path:** STORY-PLAYER → choose input mode (Action/Scene/Auto) → submit → `POST /campaigns/:id/generations` → `GenerationWorkflow` watches through the client-web SSE/poll source → typed status and `GenerationEvent.narration` updates render → `completed` → validated narration/choices replace the preview atomically and the turn is appended to history.
 - **Alternate paths:** **Retry-latest** ("replace" variant) — same flow via `POST .../generations/retry-latest`, must be visually distinguished per `PRODUCT_UX.md` Principle 1 and `CURRENT_UI_AUDIT.md` UI-006 (staged replacement of already-accepted content, ADR 0017).
-- **Error paths:** `recoverable` → present retry/discard with plain-language reason (see Flow 8). `failed` → same, error-styled. Submission conflict (another job already active for this campaign) → surfaced as a specific "a turn is already generating" state, not a generic error.
+- **Error paths:** `recoverable` → present retry/discard with plain-language reason (see Flow 8). `failed` → same, error-styled. A structured active-job 409 attaches/resumes `details.pendingGeneration`, shows exactly "a turn is already generating", and does not submit a second idempotency key. If a completed result fetch is temporarily unavailable, keep the accepted preview visible and retry `GenerationRun.fetchResult()` only.
 - **Completion state:** New turn appended to the accepted-turn ledger; campaign state updated transactionally.
 - **APIs:** `POST /generations`(`/retry-latest`), `GET .../generation-jobs/:id`(`/stream`,`/result`).
 - **Screens:** STORY-PLAYER.
-- **Current implementation status:** Implemented and wired; see `API_UI_CONTRACTS.md` Q1 on whether progressive narration text is actually rendered from the stream today.
+- **Current implementation status:** Implemented and wired. Q1 is resolved: progressive narration is visible through the workflow's typed narration event, never by reading raw transport fields in the app. Q4 remains preserved: replacement jobs are visually distinct and state that the accepted turn remains until validation.
 
 ## Flow 3 — Analyze/generate for a selected scope (template: "analyze a selection")
 
@@ -108,13 +112,13 @@ campaign's world pinning before committing.
 ## Flow 6 — Track analysis (generation) progress
 
 - **Preconditions:** A job is `queued` or later, not yet terminal.
-- **Main path:** STORY-PLAYER opens an `EventSource` to `/generation-jobs/:jobId/stream`; UI renders staged progress copy per status; on terminal status, stream closes and UI transitions to result/recovery view.
-- **Alternate path:** `EventSource` unsupported/errors → fall back to polling `GET /generation-jobs/:jobId` (up to 900 attempts).
+- **Main path:** STORY-PLAYER observes the active `GenerationRun`; the client-web source opens SSE and the headless workflow emits validated status/narration events. On terminal status, the run transitions to result/recovery without an app-owned transport branch.
+- **Alternate path:** SSE unsupported, authenticated with non-query headers, or lost → the client-web source degrades visibly and falls back to bounded polling of `GET /generation-jobs/:jobId`.
 - **Error paths:** Stream/poll itself fails (network) → distinct "can't check progress" state, not silence (generalizes the fix for `CURRENT_UI_AUDIT.md` UI-003 to this flow too).
 - **Completion state:** Terminal status reached and rendered.
 - **APIs:** `GET .../generation-jobs/:jobId/stream`, `GET .../generation-jobs/:jobId`.
 - **Screens:** STORY-PLAYER.
-- **Current implementation status:** Implemented and wired.
+- **Current implementation status:** Implemented and wired; the former raw EventSource/poll/timeout monitor was deleted.
 
 ## Flow 7 — Review outcomes (template: "review findings")
 
@@ -133,10 +137,11 @@ Closest analog: reviewing the accepted-turn ledger / recent job outcomes for a c
 
 - **Preconditions:** A job is `recoverable` or `failed`.
 - **Main path:** Recovery panel shows plain-language reason (`errorMessage`) → user chooses **Retry** (`POST .../retry`) → job re-enters `queued`/`replacement_queued` → Flow 2/6 resume. Or user chooses **Discard** (`POST .../discard`) → job becomes `discarded`, no turn is created, accepted history is untouched.
+- **Active-job cancel path:** User chooses **Cancel** → the active run sends `POST .../cancel` and the server job becomes `cancelled`. This durable action is distinct from abort/navigation, which only detaches the local watcher and leaves the server job running.
 - **Alternate paths:** Same pattern for image jobs (`POST /image-jobs/:jobId/retry`) — no discard endpoint for image jobs was found; confirm whether "remove" (variant deletion) is the equivalent discard action (`OPEN_QUESTIONS.md`).
 - **Error paths:** Retry/discard itself fails (rare) → standard error envelope handling.
 - **Completion state:** Job is either back in progress (retry) or terminally discarded.
-- **APIs:** `POST .../generation-jobs/:jobId/retry`, `POST .../discard`; `POST /image-jobs/:jobId/retry`.
+- **APIs:** `POST .../generation-jobs/:jobId/retry`, `POST .../cancel`, `POST .../discard`; `POST /image-jobs/:jobId/retry`.
 - **Screens:** STORY-PLAYER.
 - **Current implementation status:** Implemented and wired (generation jobs); Implemented and wired for retry, discard action unconfirmed for image jobs (`OPEN_QUESTIONS.md`).
 
@@ -160,7 +165,7 @@ exists beyond these two.
 ## Flow 11 — Resume interrupted work
 
 - **Preconditions:** User returns to a campaign (fresh page load, tab reopen) that had an in-flight generation job or an in-progress import.
-- **Main path (campaign):** STORY-PLAYER boot → `GET .../sync-status` → if `pendingGeneration` present, reconnect (SSE) or resume polling for that job's `id`; local `infiniteQuestPendingGeneration:${campaignId}` cache used as a fast local hint (15-minute staleness check) before the network call confirms.
+- **Main path (campaign):** STORY-PLAYER boot → `GenerationWorkflow.resume()` checks `GET .../sync-status`; `pendingGeneration` from the server is authoritative and creates the run for that exact job. The local pending-submission record is only an idempotent replay hint when the server has no active snapshot.
 - **Alternate path (Infinite Worlds import):** `GET /imports/progress?key=...` — **not durable** across an API restart (`CURRENT_UI_AUDIT.md` UI-004); the UI must disclose this rather than imply guaranteed resumability.
 - **Error paths:** Sync-status shows no pending job but the user expected one (e.g., it completed/failed while away) → reconcile by also checking recent turn history / job history, not just assuming nothing happened.
 - **Completion state:** UI state matches server state; no orphaned "still generating" UI after the job has actually finished.

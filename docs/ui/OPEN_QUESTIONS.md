@@ -5,6 +5,14 @@ specification, code, tests, API definitions, or existing documentation.
 Each includes a recommended default so implementation isn't blocked while
 waiting for an answer.
 
+**C8 resolution ledger (2026-08-02):** Q1 and Q4 are closed implementation
+contracts, not open design questions. Progressive narration is retained only
+through typed `GenerationEvent.narration`; retry-latest remains visibly distinct
+from append. Explicit server cancellation exists and is distinct from local
+watcher detach. HTTP/Web adapters live in `packages/client-web`, endpoint
+adoption is incremental, and a generic watcher for non-generation jobs remains
+deferred.
+
 ---
 
 ### Q1 — Does the Story Player actually render streamed partial narration text today, or only use the SSE stream for job status?
@@ -46,6 +54,24 @@ and watching Story Player during a real generation, or by reading
 `story.js:1188-1230` line-by-line to confirm what the SSE `onmessage`
 handler actually writes to the DOM.
 
+**RESOLVED (2026-07-31):** Streaming narration text is real and rendered
+today — this reverses the recommended default. `server.ts:753` sends
+`partialNarration` on every SSE tick, populated in
+`generation-service.ts:1850/1880` via `extractPartialNarration(accumulated)`
+as tokens stream in. `story.js:1233-1234` reads `job.partialNarration` and
+calls `renderStreamingPreview()`, which (`story.js:1009-1054`) writes the
+text directly into a `.streaming-narration` DOM node with a "Streaming
+Live" badge, pulsing cursor, and auto-scroll-follow behavior. The two
+docs previously trusted (`capabilities.md`, `deferred-improvements.md`)
+are stale. **Action:** the replacement Story Player's generation-progress
+UI should show live streaming narration text, not staged status copy.
+
+**IMPLEMENTED CONTRACT (C8, 2026-08-02):** Progressive narration remains
+visible, but the app no longer reads raw `partialNarration` or owns the
+EventSource/poll monitor. `packages/client-web` validates transport snapshots,
+`GenerationWorkflow` emits `GenerationEvent.narration`, and the Story Player
+renders that typed text. Raw `partialOutput` is never parsed or rendered.
+
 ---
 
 ### Q2 — Is the legacy single-image illustration path still reachable from the current frontend, or is it vestigial backend surface?
@@ -73,6 +99,21 @@ ADR 0025/0033); do not build UI for the legacy single-image path unless a
 runtime/grep pass confirms it's still called from `story.js`.
 
 **Who should answer:** The maintainer, via `grep -n "illustration-asset\|/illustrations\"" apps/web/public/story.js`.
+
+**RESOLVED (2026-07-31):** Vestigial — the legacy path is not reachable
+from the UI. `story.js` still defines `regenerateIllustration()` (calls
+`POST /turns/:turnId/illustrations`) and `removeIllustration()` (calls
+`PUT /turns/:turnId/illustration-asset`), wired to click-handlers for
+`data-action="regenerate-image"`/`"remove-image"` at `story.js:2783,2786`.
+But no button anywhere in the render templates
+(`renderScene`, `segmentIllustrationMarkup`, `renderStoryIllustration`)
+ever emits those `data-action` values — only segmented-model actions
+(`regenerate-segment-image`, `edit-segment-image-prompt`,
+`why-segment-image`, `rebuild-turn-segments`, `generate-turn-segments`)
+are rendered. The handlers are orphaned dead code. **Action:** proceed
+with the segmented illustration model only, as recommended; the legacy
+endpoints are backend-only surface (candidates for a separate cleanup,
+not something the replacement UI needs to support).
 
 ---
 
@@ -125,6 +166,21 @@ it already exists, the replacement just preserves it more clearly).
 
 **Who should answer:** The maintainer, via a runtime pass triggering
 retry-latest and observing the exact UI copy shown.
+
+**RESOLVED (2026-07-31):** Yes, it's already differentiated — this
+reverses the recommended default. `story.js:388-394` (`renderScene`):
+when `state.pendingGeneration?.operationKind === "replace_latest"`, the
+affected scene renders a dedicated banner — "Replacement in progress" /
+"The accepted turn is preserved until its replacement is validated." On
+failure, `story.js:997` appends "The original turn was preserved." to the
+failure toast for the same `operationKind`. **Action:** the replacement
+UI should preserve and clarify this existing pattern rather than invent
+differentiation from scratch.
+
+**IMPLEMENTED CONTRACT (C8, 2026-08-02):** The typed workflow rewire preserves
+the replacement banner and original-turn-preserved failure copy. A structured
+active-job 409 resumes the authoritative job and cannot turn a replacement into
+an append or mint a second idempotency key.
 
 ---
 

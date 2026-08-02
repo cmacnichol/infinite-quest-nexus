@@ -7,14 +7,25 @@ import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import {
   apiErrorEnvelopeSchema,
+  campaignBranchResponseSchema,
+  campaignCreateResponseSchema,
   campaignListResponseSchema,
+  campaignRewindResponseSchema,
+  campaignRuntimeStateResponseSchema,
   campaignSyncStatusSchema,
   generationActionResponseSchema,
   generationEnqueueResponseSchema,
   generationJobSnapshotSchema,
   generationResultSchema,
   generationStreamSnapshotSchema,
+  metaResponseSchema,
+  playableCharacterListResponseSchema,
+  providerListResponseSchema,
+  sessionResponseSchema,
+  turnInputClassificationResponseSchema,
   turnListResponseSchema,
+  userProfileResponseSchema,
+  worldCreateResponseSchema,
   worldListResponseSchema
 } from "../../packages/contracts/src/index.js";
 import { buildServer } from "../../services/api/src/server.js";
@@ -26,7 +37,39 @@ const WORLD_VERSION_ID = "33333333-3333-4333-8333-333333333333";
 const JOB_ID = "44444444-4444-4444-8444-444444444444";
 const TURN_ID = "55555555-5555-4555-8555-555555555555";
 const PROVIDER_ID = "66666666-6666-4666-8666-666666666666";
+const BRANCH_ID = "77777777-7777-4777-8777-777777777777";
+const CLASSIFICATION_ID = "88888888-8888-4888-8888-888888888888";
 const NOW = new Date("2026-08-01T12:00:00.000Z");
+const RUNTIME_STATE = {
+  continuitySummary: "The observatory is awake.",
+  openThreads: ["Read the constellations."],
+  canonicalFacts: [],
+  scratchpad: "Keep the dome open.",
+  trackers: [],
+  rpgStats: [],
+  eventTriggers: [],
+  pendingEventTriggers: []
+};
+const WORLD_CONTENT = {
+  world: {
+    title: "Emerald Skies",
+    genre: "Fantasy",
+    tone: "Mysterious",
+    premise: "Stars wake.",
+    backgroundStory: "Stars slept.",
+    firstAction: "Open the dome.",
+    rules: "Stay curious."
+  },
+  playableCharacters: [{
+    id: "observer",
+    name: "The Observer",
+    characterText: "A patient observer.",
+    rpgStats: [],
+    defaultTriggers: []
+  }],
+  eventTriggers: [],
+  defaults: { trackers: [] }
+};
 
 type MockPoolOptions = {
   malformedJob?: boolean;
@@ -126,10 +169,148 @@ function jobRow(options: MockPoolOptions) {
 
 function mockPool(options: MockPoolOptions = {}): DatabasePool {
   let generationJobReads = 0;
+  let userDisplayName = "Initial Owner";
   const query = async (queryInput: unknown, params: unknown[] = []) => {
     const sql = String(queryInput).replaceAll(/\s+/g, " ").trim();
     if (["BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT enqueue_generation_insert"].includes(sql)) return { rows: [] };
     if (sql.startsWith("SELECT id FROM users")) return { rows: [{ id: OWNER_ID }] };
+    if (sql.startsWith('SELECT id, system_key AS "systemKey"')) return { rows: [{
+      id: OWNER_ID,
+      systemKey: "initial-owner",
+      displayName: userDisplayName,
+      settings: {}
+    }] };
+    if (sql.startsWith("UPDATE users SET")) {
+      userDisplayName = String(params[0]);
+      return { rows: [] };
+    }
+    if (sql.includes("FROM provider_profiles WHERE owner_user_id") && sql.includes("ORDER BY provider_role, name")) return { rows: [{
+      id: PROVIDER_ID,
+      name: "Route Text Provider",
+      provider_type: "lmstudio",
+      provider_role: "text",
+      base_url: "http://localhost:1234",
+      default_model: "route-model",
+      context_window_tokens: 32_768,
+      max_output_tokens: 4_096,
+      temperature: 0.8,
+      request_timeout_ms: 300_000,
+      configuration: {},
+      encrypted_api_key: null,
+      credential_nonce: null,
+      credential_auth_tag: null,
+      credential_key_version: null,
+      enabled: true,
+      is_default: true,
+      health_status: "healthy",
+      consecutive_failures: 0,
+      last_health_check_at: NOW,
+      last_health_error: null,
+      created_at: NOW,
+      updated_at: NOW
+    }] };
+
+    if (sql.startsWith("SELECT c.active_turn_number, cs.scratchpad_private")) return { rows: [{
+      active_turn_number: 2,
+      scratchpad_private: RUNTIME_STATE.scratchpad,
+      trackers: RUNTIME_STATE.trackers,
+      rpg_stats: RUNTIME_STATE.rpgStats,
+      event_triggers: RUNTIME_STATE.eventTriggers,
+      pending_event_triggers: RUNTIME_STATE.pendingEventTriggers,
+      initial_state_snapshot: RUNTIME_STATE,
+      revision: 1,
+      updated_at: NOW
+    }] };
+    if (sql.startsWith("SELECT id, revision, effective_turn_number, state_snapshot_private")) return { rows: [] };
+    if (sql.startsWith("SELECT id, content, source_turn_number") && sql.includes("FROM campaign_canonical_facts")) return { rows: [] };
+    if (sql.startsWith("SELECT active_turn_number FROM campaigns") && sql.endsWith("FOR UPDATE")) return { rows: [{ active_turn_number: 2 }] };
+    if (sql.startsWith("SELECT revision, scratchpad_private") && sql.includes("FROM campaign_state")) return { rows: [{
+      revision: 1,
+      scratchpad_private: RUNTIME_STATE.scratchpad,
+      trackers: RUNTIME_STATE.trackers,
+      rpg_stats: RUNTIME_STATE.rpgStats,
+      event_triggers: RUNTIME_STATE.eventTriggers,
+      pending_event_triggers: RUNTIME_STATE.pendingEventTriggers,
+      initial_state_snapshot: RUNTIME_STATE
+    }] };
+    if (sql.startsWith("SELECT id FROM generation_jobs") && sql.includes("status IN")) return { rows: [] };
+    if (sql.startsWith("SELECT state_snapshot_private FROM turns")) return { rows: [{ state_snapshot_private: RUNTIME_STATE }] };
+    if (sql.startsWith("SELECT state_snapshot_private, accepted_at FROM turns")) return { rows: [{
+      state_snapshot_private: RUNTIME_STATE,
+      accepted_at: NOW
+    }] };
+    if (sql.startsWith("SELECT turn_control_style, text_provider_profile_id")) return { rows: [{
+      turn_control_style: "action_only",
+      text_provider_profile_id: null
+    }] };
+    if (sql.startsWith("SELECT prompt_key, content, campaign_id, updated_at")) return { rows: [] };
+    if (sql.startsWith("INSERT INTO turn_input_classifications")) return { rows: [{
+      id: CLASSIFICATION_ID,
+      expires_at: new Date("2026-08-01T12:05:00.000Z")
+    }] };
+    if (sql.startsWith("SELECT state_snapshot_private, model_metadata FROM turns")) return { rows: [{
+      state_snapshot_private: RUNTIME_STATE,
+      model_metadata: { promptProtocolVersion: "v1" }
+    }] };
+    if (sql.startsWith("SELECT state_snapshot_private FROM campaign_state_edits")) return { rows: [] };
+    if (sql.startsWith("SELECT active_turn_number, world_version_id, title")) return { rows: [{
+      active_turn_number: 2,
+      world_version_id: WORLD_VERSION_ID,
+      title: "The Observatory",
+      story_length_profile: "standard",
+      turn_control_style: "flexible_auto",
+      selected_character_id: "observer",
+      character_snapshot: { name: "The Observer", characterText: "A patient observer." },
+      character_profile: null,
+      character_profile_revision: 0,
+      legacy_settings: {},
+      text_provider_profile_id: null,
+      image_provider_profile_id: null
+    }] };
+    if (sql.startsWith("SELECT default_triggers, initial_state_snapshot FROM campaign_state")) return { rows: [{
+      default_triggers: [],
+      initial_state_snapshot: RUNTIME_STATE
+    }] };
+    if (sql.startsWith("INSERT INTO campaigns") && sql.includes("'active'")) return { rows: [{ id: BRANCH_ID }] };
+    if (sql.startsWith("SELECT content, world_id, version_number FROM world_versions")) return { rows: [{
+      content: WORLD_CONTENT,
+      world_id: WORLD_ID,
+      version_number: 1
+    }] };
+    if (sql.startsWith("SELECT content FROM world_versions")) return { rows: [{ content: WORLD_CONTENT }] };
+    if (sql.startsWith("SELECT id FROM provider_profiles") && sql.includes("provider_role = 'embedding'")) return { rows: [] };
+    if (sql.startsWith("SELECT text_provider_profile_id FROM campaigns")) return { rows: [{ text_provider_profile_id: null }] };
+    if (sql.startsWith("SELECT id, is_default FROM provider_profiles")) return { rows: [] };
+    if (sql.startsWith("SELECT embedding_enabled, embedding_provider_profile_id") && sql.includes("FROM campaign_memory_configs")) return { rows: [] };
+    if (sql.startsWith("SELECT c.id, c.title, c.active_turn_number, c.world_version_id")) return { rows: [{
+      id: BRANCH_ID,
+      title: "The Grounded Observatory",
+      active_turn_number: 0,
+      world_version_id: WORLD_VERSION_ID,
+      selected_character_id: "observer",
+      character_snapshot: { name: "The Observer", characterText: "A patient observer." },
+      character_profile: null,
+      character_profile_revision: 0,
+      world_content: WORLD_CONTENT,
+      scratchpad_private: RUNTIME_STATE.scratchpad,
+      scratchpad_safe_for_prompt: true,
+      trackers: []
+    }] };
+    if (sql.startsWith("SELECT id, turn_number, action, narration, state_snapshot_private")) return { rows: [] };
+    if (sql.startsWith("SELECT id, effective_turn_number, state_snapshot_private") && sql.includes("FROM campaign_state_edits")) return { rows: [] };
+    if (sql.startsWith("INSERT INTO campaigns")) return { rows: [{ id: CAMPAIGN_ID }] };
+    if (sql.startsWith("INSERT INTO worlds")) return { rows: [{ id: WORLD_ID }] };
+    if (sql.startsWith("SELECT w.id, w.title, w.status") && sql.includes('wd.content AS "draftContent"')) return { rows: [{
+      id: WORLD_ID,
+      title: "Route World",
+      status: "draft",
+      imageUrl: "",
+      draftRevision: 1,
+      draftContent: { ...WORLD_CONTENT, world: { ...WORLD_CONTENT.world, title: "Route World" } },
+      draftBasedOnWorldVersionId: null,
+      createdAt: NOW,
+      updatedAt: NOW
+    }] };
 
     if (sql.startsWith("SELECT w.id, w.title, w.status")) return { rows: [{
       id: WORLD_ID,
@@ -258,6 +439,13 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
     if (sql.startsWith("UPDATE generation_jobs SET status = CASE")) return { rows: [{ id: JOB_ID, status: "queued" }] };
     if (sql.startsWith("UPDATE generation_jobs SET status = 'discarded'")) return { rows: [{ id: JOB_ID, status: "discarded", campaignId: CAMPAIGN_ID, operationKind: "append" }] };
     if (sql.startsWith("UPDATE generation_jobs SET status = 'cancelled'")) return { rows: [{ id: JOB_ID, status: "cancelled", campaignId: CAMPAIGN_ID, operationKind: "append" }] };
+    if (sql.startsWith("INSERT INTO campaign_state")
+        || sql.startsWith("INSERT INTO campaign_illustration_configs")
+        || sql.startsWith("INSERT INTO campaign_memory_configs")
+        || sql.startsWith("INSERT INTO asset_references")
+        || sql.startsWith("INSERT INTO activity_events")
+        || sql.startsWith("INSERT INTO chronicle_jobs")
+        || sql.startsWith("INSERT INTO world_drafts")) return { rows: [] };
     if (sql.startsWith("UPDATE") || sql.startsWith("DELETE")) return { rows: [] };
 
     throw new Error(`Unexpected client API route query: ${sql}`);
@@ -291,6 +479,171 @@ describe("client API route contracts without PostgreSQL", () => {
       expect(generationJobSnapshotSchema.parse(snapshotResponse.json())).toMatchObject({ id: JOB_ID, operationKind: "append", updatedAt: NOW.toISOString() });
       expect(snapshotResponse.json()).not.toHaveProperty("partialOutput");
       expect(generationResultSchema.parse((await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/result` })).json()).resultTurnId).toBe(TURN_ID);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("serves metadata without accepting caller identity as application identity", async () => {
+    const app = await buildServer({ config: config(storageRoot), pool: mockPool() });
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/meta",
+        headers: {
+          "x-correlation-id": "meta-route-correlation",
+          "x-user-id": "99999999-9999-4999-8999-999999999999"
+        }
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["x-correlation-id"]).toBe("meta-route-correlation");
+      expect(metaResponseSchema.parse(response.json()).application.name).toBe("Infinite Quest Nexus");
+      expect(response.body).not.toContain("99999999-9999-4999-8999-999999999999");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("serializes every remaining adopted success route through its shared response schema", async () => {
+    const app = await buildServer({ config: config(storageRoot), pool: mockPool() });
+    const runtimeStateUpdate = {
+      expectedTurnNumber: 2,
+      expectedRevision: 1,
+      ...RUNTIME_STATE
+    };
+    try {
+      const session = await app.inject({ method: "GET", url: "/api/v1/session" });
+      expect(session.statusCode).toBe(200);
+      expect(sessionResponseSchema.parse(session.json()).user.id).toBe(OWNER_ID);
+
+      const profile = await app.inject({
+        method: "PATCH",
+        url: "/api/v1/users/me/profile",
+        payload: { displayName: "Route Owner" }
+      });
+      expect(profile.statusCode).toBe(200);
+      expect(userProfileResponseSchema.parse(profile.json()).user.displayName).toBe("Route Owner");
+
+      const providers = await app.inject({ method: "GET", url: "/api/v1/providers" });
+      expect(providers.statusCode).toBe(200);
+      expect(providerListResponseSchema.parse(providers.json()).providers[0]?.id).toBe(PROVIDER_ID);
+
+      const currentState = await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/state?turnNumber=0` });
+      expect(currentState.statusCode).toBe(200);
+      expect(campaignRuntimeStateResponseSchema.parse(currentState.json())).toMatchObject({
+        campaignId: CAMPAIGN_ID,
+        viewedTurnNumber: 0
+      });
+
+      const updatedState = await app.inject({
+        method: "PATCH",
+        url: `/api/v1/campaigns/${CAMPAIGN_ID}/state`,
+        payload: runtimeStateUpdate
+      });
+      expect(updatedState.statusCode).toBe(200);
+      expect(campaignRuntimeStateResponseSchema.parse(updatedState.json())).toMatchObject({
+        campaignId: CAMPAIGN_ID,
+        revision: 1
+      });
+
+      const classification = await app.inject({
+        method: "POST",
+        url: `/api/v1/campaigns/${CAMPAIGN_ID}/turn-input/classify`,
+        payload: { text: "Open the dome.", preferredFallback: "action" }
+      });
+      expect(classification.statusCode).toBe(200);
+      expect(turnInputClassificationResponseSchema.parse(classification.json())).toMatchObject({
+        classification: "action",
+        resolvedMode: "action"
+      });
+
+      const rewind = await app.inject({
+        method: "POST",
+        url: `/api/v1/campaigns/${CAMPAIGN_ID}/rewind`,
+        payload: { targetTurnNumber: 2, expectedCurrentTurnNumber: 2 }
+      });
+      expect(rewind.statusCode).toBe(200);
+      expect(campaignRewindResponseSchema.parse(rewind.json())).toMatchObject({
+        campaignId: CAMPAIGN_ID,
+        activeTurnNumber: 2,
+        discardedTurnCount: 0
+      });
+
+      const branch = await app.inject({
+        method: "POST",
+        url: `/api/v1/campaigns/${CAMPAIGN_ID}/branch`,
+        payload: { targetTurnNumber: 0, expectedCurrentTurnNumber: 2, title: "The Grounded Observatory" }
+      });
+      expect(branch.statusCode).toBe(201);
+      expect(campaignBranchResponseSchema.parse(branch.json())).toMatchObject({
+        title: "The Grounded Observatory",
+        activeTurnNumber: 0,
+        worldVersionId: WORLD_VERSION_ID
+      });
+
+      const world = await app.inject({
+        method: "POST",
+        url: "/api/v1/worlds",
+        payload: { title: "Route World" }
+      });
+      expect(world.statusCode).toBe(201);
+      expect(worldCreateResponseSchema.parse(world.json())).toMatchObject({ id: WORLD_ID, status: "draft" });
+
+      const campaign = await app.inject({
+        method: "POST",
+        url: "/api/v1/campaigns",
+        payload: {
+          worldVersionId: WORLD_VERSION_ID,
+          title: "Route Campaign",
+          selectedCharacterId: "observer",
+          storyLengthProfile: "standard",
+          turnControlStyle: "flexible_auto"
+        }
+      });
+      expect(campaign.statusCode).toBe(201);
+      expect(campaignCreateResponseSchema.parse(campaign.json())).toMatchObject({
+        id: CAMPAIGN_ID,
+        selectedCharacterId: "observer"
+      });
+
+      const characters = await app.inject({
+        method: "GET",
+        url: `/api/v1/world-versions/${WORLD_VERSION_ID}/playable-characters`
+      });
+      expect(characters.statusCode).toBe(200);
+      expect(playableCharacterListResponseSchema.parse(characters.json()).characters).toEqual([{
+        id: "observer",
+        name: "The Observer",
+        rpgStatCount: 0,
+        defaultTriggerCount: 0
+      }]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([
+    ["PATCH", "/api/v1/users/me/profile"],
+    ["POST", "/api/v1/worlds"],
+    ["POST", "/api/v1/campaigns"],
+    ["PATCH", `/api/v1/campaigns/${CAMPAIGN_ID}/state`],
+    ["POST", `/api/v1/campaigns/${CAMPAIGN_ID}/turn-input/classify`],
+    ["POST", `/api/v1/campaigns/${CAMPAIGN_ID}/rewind`],
+    ["POST", `/api/v1/campaigns/${CAMPAIGN_ID}/branch`]
+  ] as const)("returns a correlated contract error for malformed %s %s input", async (method, url) => {
+    const app = await buildServer({ config: config(storageRoot), pool: mockPool() });
+    try {
+      const response = await app.inject({
+        method,
+        url,
+        headers: { "x-correlation-id": `invalid-${method.toLowerCase()}` },
+        payload: {}
+      });
+      expect(response.statusCode).toBe(400);
+      expect(apiErrorEnvelopeSchema.parse(response.json())).toMatchObject({
+        correlationId: `invalid-${method.toLowerCase()}`,
+        details: {}
+      });
     } finally {
       await app.close();
     }

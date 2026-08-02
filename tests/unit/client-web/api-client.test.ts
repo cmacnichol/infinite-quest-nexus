@@ -23,6 +23,7 @@ import { generationRequestSchema } from "../../../packages/contracts/src/index.j
 
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const jobId = "22222222-2222-4222-8222-222222222222";
+const worldVersionId = "33333333-3333-4333-8333-333333333333";
 
 const generationRequest: GenerationRequest = {
   action: "Search the observatory.",
@@ -118,8 +119,34 @@ describe("createNexusApiClient", () => {
     const signal = new AbortController().signal;
     const calls = [
       () => client.worlds.list(signal),
+      () => client.worlds.create({ title: "A New World" }, signal),
+      () => client.worlds.playableCharacters("version / id", signal),
       () => client.campaigns.list(signal),
+      () => client.campaigns.create({
+        worldVersionId,
+        title: "A New Campaign",
+        selectedCharacterId: "observer",
+        storyLengthProfile: "standard",
+        turnControlStyle: "flexible_auto"
+      }, signal),
       () => client.campaigns.turns("campaign / id", signal),
+      () => client.campaigns.state("campaign / id", undefined, signal),
+      () => client.campaigns.state("campaign / id", 3, signal),
+      () => client.campaigns.updateState(campaignId, {
+        expectedTurnNumber: 3,
+        expectedRevision: 2,
+        continuitySummary: "",
+        openThreads: [],
+        canonicalFacts: [],
+        scratchpad: "",
+        trackers: [],
+        rpgStats: [],
+        eventTriggers: [],
+        pendingEventTriggers: []
+      }, signal),
+      () => client.campaigns.classifyTurnInput(campaignId, { text: "Open the dome.", preferredFallback: "action" }, signal),
+      () => client.campaigns.rewind(campaignId, { targetTurnNumber: 2 }, signal),
+      () => client.campaigns.branch(campaignId, { targetTurnNumber: 2 }, signal),
       () => client.generation.syncStatus("campaign / id", signal),
       () => client.generation.enqueue(campaignId, generationRequest, signal),
       () => client.generation.enqueueReplacement(campaignId, replacementRequest, signal),
@@ -127,15 +154,28 @@ describe("createNexusApiClient", () => {
       () => client.generation.result("job / id", signal),
       () => client.generation.retry("job / id", signal),
       () => client.generation.cancel("job / id", signal),
-      () => client.generation.discard("job / id", signal)
+      () => client.generation.discard("job / id", signal),
+      () => client.meta.get(signal),
+      () => client.session.get(signal),
+      () => client.session.updateProfile({ displayName: "Initial Owner" }, signal),
+      () => client.providers.list(signal)
     ];
 
     for (const call of calls) expectResponseSchemaError(await call().catch((error: unknown) => error));
 
     expect(queue.urls).toEqual([
       "/api/v1/worlds",
+      "/api/v1/worlds",
+      "/api/v1/world-versions/version%20%2F%20id/playable-characters",
+      "/api/v1/campaigns",
       "/api/v1/campaigns",
       "/api/v1/campaigns/campaign%20%2F%20id/turns",
+      "/api/v1/campaigns/campaign%20%2F%20id/state",
+      "/api/v1/campaigns/campaign%20%2F%20id/state?turnNumber=3",
+      `/api/v1/campaigns/${campaignId}/state`,
+      `/api/v1/campaigns/${campaignId}/turn-input/classify`,
+      `/api/v1/campaigns/${campaignId}/rewind`,
+      `/api/v1/campaigns/${campaignId}/branch`,
       "/api/v1/campaigns/campaign%20%2F%20id/sync-status",
       `/api/v1/campaigns/${campaignId}/generations`,
       `/api/v1/campaigns/${campaignId}/generations/retry-latest`,
@@ -143,15 +183,44 @@ describe("createNexusApiClient", () => {
       "/api/v1/generation-jobs/job%20%2F%20id/result",
       "/api/v1/generation-jobs/job%20%2F%20id/retry",
       "/api/v1/generation-jobs/job%20%2F%20id/cancel",
-      "/api/v1/generation-jobs/job%20%2F%20id/discard"
+      "/api/v1/generation-jobs/job%20%2F%20id/discard",
+      "/api/v1/meta",
+      "/api/v1/session",
+      "/api/v1/users/me/profile",
+      "/api/v1/providers"
     ]);
     expect(queue.options.map((option) => option.method)).toEqual([
-      "GET", "GET", "GET", "GET", "POST", "POST", "GET", "GET", "POST", "POST", "POST"
+      "GET", "POST", "GET", "GET", "POST", "GET", "GET", "GET", "PATCH", "POST", "POST", "POST",
+      "GET", "POST", "POST", "GET", "GET", "POST", "POST", "POST", "GET", "GET", "PATCH", "GET"
     ]);
-    expect(queue.options[4]?.body).toBe(JSON.stringify(generationRequest));
-    expect(queue.options[5]?.body).toBe(JSON.stringify(replacementRequest));
-    expect(queue.options.slice(8).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
+    expect(queue.options[13]?.body).toBe(JSON.stringify(generationRequest));
+    expect(queue.options[14]?.body).toBe(JSON.stringify(replacementRequest));
+    expect(queue.options.slice(17, 20).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
     expect(queue.options.every((option) => option.signal === signal)).toBe(true);
+  });
+
+  it("strips caller-supplied identity fields and never invents identity headers", async () => {
+    const queue = invalidResponseFetch();
+    const client = createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort(), fetchImpl: queue.fetchImpl });
+
+    await client.worlds.create({ title: "Owned by the server", user_id: "spoofed" } as never).catch(() => undefined);
+    await client.campaigns.create({
+      worldVersionId,
+      title: "Owned by the server",
+      selectedCharacterId: "observer",
+      storyLengthProfile: "standard",
+      turnControlStyle: "flexible_auto",
+      user_id: "spoofed"
+    } as never).catch(() => undefined);
+    await client.session.updateProfile({ displayName: "Initial Owner", user_id: "spoofed" } as never).catch(() => undefined);
+
+    expect(queue.options).toHaveLength(3);
+    for (const option of queue.options) {
+      const headers = new Headers(option.headers);
+      expect(headers.has("x-user-id")).toBe(false);
+      expect(headers.has("user_id")).toBe(false);
+      expect(JSON.parse(String(option.body))).not.toHaveProperty("user_id");
+    }
   });
 
   it("rejects invalid shared generation requests before the transport fetches", async () => {

@@ -39,13 +39,18 @@ Runtime implementation reviewed through `92aa9c4` on branch
 |---|---|---|---|
 | Task 1 | C0 — baseline, ADR, boundary tests | **Complete** | `04ccb6c`, `d9474f0` |
 | Task 2 | C1 — play-loop request/response contracts | **Complete** | `128cc53`, `ff9a420` |
-| Task 2a | C1a — stream projection remediation | **Complete**, one item deferred to Task 6 | `ca255a7`, `1fb1b30`, `26d5890`, `fb4b5ad`; focused contract/route lifecycle tests; reproducible 2,000-turn validation benchmark |
+| Task 2a | C1a — stream projection remediation | **Complete** | `ca255a7`, `1fb1b30`, `26d5890`, `fb4b5ad`; focused contract/route lifecycle tests; reproducible 2,000-turn validation benchmark; Task 6 clean-stream-closure fallback regression |
 | Task 3 | C2 — pure and Web-platform client packages | **Complete** | `1e55517`, `f8dfe6e`; scoped implementation review and fix re-review clean |
 | Task 3a | C2a — make the declared client boundary real | **Complete** | `f8c2b3d`, `cd43787`; scoped implementation review and fix re-review clean |
 | Task 4 | C3 — validating HTTP transport and typed API client | **Complete** | `2bba1a3`, `15f6454`, `996a129`, `0ad6033`; scoped review plus three fix re-reviews clean |
 | Task 4a | C3a — transport path boundary and dependency consistency | **Complete** | `7bf07fc`, `993b7b6`, `0fdcb9b`; scoped review and fix re-review clean |
 | Task 5 | C4 — pure durable-generation workflow | **Complete** | `92aa9c4`; scoped review plus two fix re-reviews clean |
-| Task 6 onward | C5-C8, B1-B5, U1-U6 | Not started | — |
+| Task 5a | C4a — discriminate and canonicalize pending submissions | **Complete** | `0904291`; scoped implementation review clean |
+| Task 6 | C5 — browser transports, persistence, and adaptive polling | **Complete** | `89915f3`, `ba9ea90`; scoped review, final review, and focused fix re-review clean |
+| Task 7 | C6 — framework-ready campaign store | Not started | — |
+| Task 8 | C7 — static build and deployment contract | **Complete** | `175a854`, `d48e70a`, `3364bd0`, `05d89c3`, `afdc1c0`, `cb45bcc`; scoped reviews and final fix re-review clean |
+| Task 9 | C8 — current Story Player boundary proof | **Complete** | `docs/review/2026-08-02-task-9-c8-completion.md`; focused and full verification; clean Gate 2 revert rehearsal |
+| Task 10 onward | B1-B5, U1-U6 | Not started | — |
 
 **Current Task 2a verification** (re-measured during the Task 2a completion
 review; the figures below replace an earlier stale count of 700 tests across 65
@@ -190,9 +195,9 @@ completion review):
   failed same-attempt retries, source-session closure, command/frame races,
   retry transport failures, protocol mismatches, and duplicate replay.
 
-**Next step:** **Task 6 (C5).** Task 5 established the pure durable-generation
-workflow. Task 6 now supplies its browser-only SSE, polling, persistence, clock,
-delay, and ID adapters without moving that policy back into the UI.
+**Next step:** **Task 13a (B4a)** for the client-facing cursor contracts, then
+Task 7 (C6). Task 10 (B1) may proceed in parallel with that client lane; Task 12
+(B3) follows B1 and must finish before U1.
 
 ---
 
@@ -2204,17 +2209,69 @@ new server or deployment mechanism.
 Slice 0 proves the complete generation vertical slice. It does not migrate all
 management routes or remove every current network call in one pass.
 
+**Status: Complete (2026-08-02).** The focused contract/client prerequisite and
+the single revertible Story Player rewire both landed with their intended gate
+ownership. Verification and rollback evidence is recorded in
+`docs/review/2026-08-02-task-9-c8-completion.md`.
+
+**Pre-implementation correction status: Complete (2026-08-02, corrected again
+before implementation).** Reviewed against
+the shipped Tasks 4-6 and the now-complete Task 8. The endpoint inventory below
+was checked route by route against `services/api/src/server.ts` and is accurate,
+including its two subtle entries — `/meta` really is a raw
+`fetch("/api/v1/meta")` at `story.js:2867`, and the branch call really is
+helper-injected through `story-routing.js:10`. Four corrections were applied:
+the C7 prerequisite note had gone stale, the composition root had no owning
+item, the raw `story.js` copy keeps shipping after the entry switch, and the
+rollback scope conflicted with the file list. The final implementation-readiness
+pass also corrected the full Story module move graph, the ZIP-vs-JSON export
+contract mismatch, the illustration adapter allowlist, the moved-module test
+inventory, the explicit composition bootstrap seam, and root typecheck path.
+
+**Task 8 (C7) is a satisfied prerequisite.** This task makes `story.js` import
+`@infinite-quest/client-web` and `@infinite-quest/client-core`, which needs a
+bundler. C7 has landed (`175a854`, `d48e70a`, `3364bd0`, `05d89c3`, `afdc1c0`,
+`cb45bcc`) and supplies one: `apps/web/vite.config.ts` builds
+`apps/web/src/legacy-client-entry.ts` to `dist/legacy-client.js`, and the API
+serves the built root. An earlier revision of this paragraph said no bundler
+existed and told the reader to wait for C7; that was true when written and is
+not now.
+
+What C7 did **not** do is switch the page over. `legacy-client-entry.ts` is a
+single line — `import "../public/story.js"` — and no HTML references the bundle:
+`story.html:522` still loads `/nexus/story.js` directly, so `legacy-client.js`
+is built today and never executed. Wiring that switch is C8's job and has its
+own item below.
+
 **Files:**
 
-- Modify: `apps/web/public/story.js`
-- Modify: `apps/web/public/story-generation-cancellation.js`
-- Modify: `apps/web/public/story.html`
+- Move + modify: `apps/web/public/story.js` -> `apps/web/src/story.js`
+- Move: `apps/web/public/story-routing.js` (and its `.d.ts`) -> `apps/web/src/`
+- Move + modify: `apps/web/public/story-generation-cancellation.js` ->
+  `apps/web/src/`
+- Move: `apps/web/public/story-state-editor.js` -> `apps/web/src/` (there is no
+  existing `.d.ts` for this module; do not claim or move a nonexistent one)
+- Modify: `apps/web/public/story.html` — point the module script at the compiled
+  entry instead of `/nexus/story.js`
+- Modify: `apps/web/src/legacy-client-entry.ts` — it currently imports
+  `../public/story.js`; update the path and host the composition root
+- Create: `apps/web/src/composition.ts` — constructs the shared `SessionPort`,
+  `Clock`, delay, visibility, ID factory, API client, pending store, source, and
+  workflow, and is the only place those singletons are created
+- Modify: `package.json` — move the root `node --check` target from the old
+  public path to `apps/web/src/story.js`
+- Modify: `tests/unit/web-build-contract.test.ts` — assert the compiled entry is
+  referenced by `story.html` and that `dist/story.js` no longer exists
+- Create: `apps/web/src/legacy-illustration-api.ts` — the only named C8
+  transitional HTTP adapter for illustration routes not adopted in Slice 1.
 - Modify: `packages/contracts/src/client-api.ts` — add schemas for every
   Story Player endpoint adopted beyond the Task 4 table.
 - Modify: `packages/contracts/src/index.ts` — expose only those new public
   contracts.
 - Modify: `packages/client-web/src/api-client.ts` — add the corresponding typed
   methods; keep the generic request function private to client-web.
+- Modify: `packages/client-web/src/index.ts` — expose any added public client
+  interface types used by composition, and no generic request escape hatch.
 - Modify: `services/api/src/server.ts` — project the corresponding success
   responses through the shared schemas before sending them.
 - Modify: `tests/unit/client-api-contracts.test.ts` — reject malformed request
@@ -2224,15 +2281,72 @@ management routes or remove every current network call in one pass.
 - Modify: `tests/unit/client-web/api-client.test.ts` — prove method/path/schema
   mappings for the added client surface.
 - Modify: `tests/unit/story-player-ui.test.ts`
+- Modify: `tests/unit/story-state-editor.test.ts`
+- Modify: `tests/unit/story-routing.test.ts`
+- Modify: `tests/unit/story-settings.test.ts`
+- Modify: `tests/unit/management-ui.test.ts`
+- Create: `tests/unit/legacy-illustration-api.test.ts`
 - Modify: `tests/unit/csp-ui.test.ts`
+- Review/modify as needed: `tests/unit/server-security.test.ts` — static module
+  fixture assumptions must still match the post-move asset surface
+- Modify: `tests/integration/generation.integration.test.ts` — own the
+  malformed-generation-snapshot route-to-workflow rejection regression
+- Modify: `docs/ui/CLIENT_CORE_BOUNDARY.md`
+- Modify: `docs/ui/API_UI_CONTRACTS.md`
+- Modify: `docs/ui/FEATURE_IMPLEMENTATION_MATRIX.md`
+- Modify: `docs/ui/INTERACTION_FLOWS.md`
+- Modify: `docs/ui/OPEN_QUESTIONS.md`
 - Test: new client-core/client-web tests from C3-C6
 
-**Endpoint scope:** session/meta needed by the shell, campaign sync and turns,
-turn-input classification, generation enqueue/retry-latest, generation
-get/stream/result/retry/cancel/discard, and the campaign state/config calls
-needed to preserve the existing play loop. The implementation must inventory the
-actual calls in `story.js`; the shorter historical endpoint table is not complete
-enough to guarantee behavior parity.
+**Endpoint scope has two explicit inventories.** The C8 legacy-parity inventory
+is every non-illustration call actually used by `story.js` and its imported
+helpers:
+
+| Concern | Methods and paths to contract/adopt |
+|---|---|
+| Shell/readiness | `GET /meta`, `GET /session`, `GET /providers`, `PATCH /users/me/profile` |
+| Campaign projection | `GET /campaigns/:id/sync-status`, `GET /campaigns/:id/turns`, `GET /campaigns/:id/state` including historical `turnNumber` query, `PATCH /campaigns/:id/state` |
+| Generation | `POST /campaigns/:id/turn-input/classify`, `POST /campaigns/:id/generations`, `POST /campaigns/:id/generations/retry-latest`, `GET /generation-jobs/:jobId`, `GET /generation-jobs/:jobId/stream`, `GET /generation-jobs/:jobId/result`, `POST /generation-jobs/:jobId/retry`, `POST /generation-jobs/:jobId/cancel`, `POST /generation-jobs/:jobId/discard` |
+| Existing non-generation Story Player actions | `POST /campaigns/:id/rewind`, `POST /campaigns/:id/branch` |
+
+`playerConfig` remains part of the validated sync projection rather than a
+fictional extra HTTP call. Direct `/meta` `fetch()` and helper-injected state/
+branch requests count as raw Story Player calls and must not escape the
+inventory. `GET /campaigns/:id/export` is deliberately **not** in this JSON
+adoption inventory: `archive-routes.ts` returns an `application/zip` stream,
+whereas the legacy Markdown/PDF buttons need campaign/turn data. Generate those
+formats from the already validated loaded projection and illustration data; do
+not parse the archive response as JSON or introduce a false JSON projection.
+If a later UI needs archive download, add an explicit typed blob/download method
+and its own behavior rather than reusing the projection path. Illustration routes
+may remain on the named legacy adapter because illustrations are a Slice 2
+feature, but they may not leak into client-core or bypass CSP/error handling.
+The adapter's complete allowlist is: `GET /campaigns/:id/illustration-config`,
+`GET /campaigns/:id/illustration-segments`, `GET /campaigns/:id/image-jobs`,
+`POST /image-jobs/:id/retry`, `POST /illustration-segments/:id/images`, `POST
+/turns/:id/illustration-segments`, `GET /turns/:id/illustration-resolution`, and
+`POST /turns/:id/illustration-match`. It validates each successful response with
+a named schema as well as the standard error envelope, preserves correlation
+IDs, sends no text-provider credential, and is covered by the transitional
+boundary scanner; it is not a generic public `request(path)` escape hatch.
+Remove the orphaned `regenerateIllustration`/`removeIllustration` legacy
+single-image UI functions and their handlers; Q2 establishes their endpoints
+are backend-only and they are explicitly excluded from the allowlist.
+
+The C8 **Slice 1 prerequisite inventory** also adopts the methods U3/U4 need but
+the Story Player does not call: minimal draft-world creation, campaign creation
+(`campaignCreateSchema` plus a shared success projection), and listing playable
+characters for a selected immutable world version. `GET /worlds` and
+`GET /campaigns` already shipped in C3. U3 does not adopt full authoring or
+publication here. If a create response is identical to an existing summary,
+reuse that schema; otherwise name one new response schema rather than casting.
+This inventory closes before U1 so Slice 1 feature commits do not need server
+response changes.
+
+Expand the table with the exact request schema, response schema, typed client
+method, and consumer during the first C8 gate; add the three Slice 1 prerequisite
+routes beside it. The shorter historical endpoint table is not complete enough
+to guarantee behavior parity.
 
 Task 4 initially adopts only its explicit C1 endpoint table. Before Task 9
 replaces any additional raw Story Player call, Task 9 must add one shared request
@@ -2246,15 +2360,66 @@ then land and review the Story Player rewire as the single revertible C8 commit
 described below. Do not combine the two gates into one opaque diff, and do not
 declare C8 complete until both have passed their focused and full verification.
 
-- [ ] Replace the Story Player's API helper for adopted endpoints with
+- [x] Replace the Story Player's API helper for adopted endpoints with
   `NexusApiClient` methods.
-- [ ] Replace duplicated SSE/poll terminal branches with the shared workflow.
-- [ ] Replace local pending-submission functions with the injected browser store.
-- [ ] Keep DOM rendering, scrolling, toasts, focus, modals, and illustration UI
+- [x] **Build the composition root, and share the singletons.** This instruction
+  previously lived only in Task 6's *Public surface produced* note, where an
+  implementer working from this checklist would not see it. Construct one
+  `SessionPort`, `Clock`, `DelayScheduler`, `VisibilitySource`, `IdFactory`,
+  `NexusApiClient`, pending-submission store, and browser generation source, then
+  pass them to `createGenerationWorkflow`. **The same `SessionPort` instance goes
+  to the API client and the source, and the same `Clock` instance goes to the
+  source and the Task 5 workflow.** A split clock is not cosmetic: Task 5 C6
+  stamps `createdAt` for the 15-minute expiry window from its injected clock
+  while Task 6 S7 does `Retry-After` HTTP-date math from its own, so two clocks
+  desynchronise submission expiry from transport backoff. Assert the sharing in
+  a test rather than relying on construction order.
+- [x] **Make initialization explicit.** `composition.ts` exports a typed factory
+  for those dependencies; `story.js` exports an explicit
+  `startStoryPlayer(composition)` initializer and has no top-level boot side
+  effect; `legacy-client-entry.ts` creates the composition once and invokes that
+  initializer once. Do not use global dependency injection or import a hidden
+  singleton into `story.js`; assert the bootstrap and singleton-sharing contract
+  in a focused test.
+- [x] Make `story.html` load Task 8's compiled legacy entry. Bare workspace
+  package imports must be resolved by Vite and must not appear in a raw browser-
+  served `story.js`; add a production-build smoke assertion for this wiring.
+- [x] **Stop publishing the raw `story.js` once it carries bare imports.**
+  `apps/web/vite.config.ts` sets `copyPublicDir: true`, so `dist/` currently
+  ships both the verbatim `public/story.js` and the separate
+  `legacy-client.js`. After this task adds workspace imports to `story.js`, that
+  copied file becomes a reachable URL serving a script that throws on load at
+  `/nexus/story.js`. Move `story.js` and its sibling module graph —
+  `story-routing.js`, `story-generation-cancellation.js`, and
+  `story-state-editor.js` — its complete sibling module graph — out of
+  `publicDir` into `apps/web/src/`, leaving `publicDir` for genuine static
+  assets. `story.html` and `index.html` stay in `publicDir`.
+  Assert in the build-contract test that `dist/story.js` no longer exists.
+- [x] Replace duplicated SSE/poll terminal branches with the shared workflow.
+- [x] Replace local pending-submission functions with the injected browser store.
+- [x] Generate Markdown/PDF exports from the current validated campaign, turn,
+  and illustration projections. Remove the JSON `GET /campaigns/:id/export`
+  request from those paths; the ZIP archive route remains a separate download
+  concern.
+- [x] Keep DOM rendering, scrolling, toasts, focus, modals, and illustration UI
   inside the legacy app.
-- [ ] Preserve exact user-visible behavior for submit, retry-latest, resume,
+- [x] Preserve exact user-visible behavior for submit, retry-latest, resume,
   streamed narration, recoverable, cancel, discard, and completed result.
-- [ ] **Render `result_unavailable` as a recoverable fetch problem, never as a
+- [x] Preserve **progressive narration as visible text**, not only staged status
+  copy. Render only `GenerationEvent.narration`, keep its live badge/cursor and
+  scroll-follow behavior app-owned, and replace it atomically with the validated
+  accepted result. No raw `partialOutput` reaches the client packages or DOM.
+- [x] Preserve the resolved-Q4 retry-latest treatment: while a replacement runs,
+  state that the accepted turn remains until validation; on failure, state that
+  the original was preserved. A replacement request cannot look like an append.
+- [x] Preserve Auto classification behavior and display the resolved Action or
+  Scene mode before/with submission. If the input changes while classification
+  is pending, discard the stale classification and require review rather than
+  submitting it.
+- [x] Surface the unique active-generation conflict as "a turn is already
+  generating" and attach/resume the authoritative job where possible; never
+  reduce it to a generic toast or submit a second idempotency key.
+- [x] **Render `result_unavailable` as a recoverable fetch problem, never as a
   failed generation.** The turn was accepted server-side; only the client's
   result fetch failed. This corrects a real current defect: at
   `story.js:1263-1269` a failed `/generation-jobs/:id/result` call rejects out of
@@ -2267,30 +2432,51 @@ declare C8 complete until both have passed their focused and full verification.
   generation displayed as complete-but-loading, offer a retry that calls
   `fetchResult()` only, and must not re-enqueue, retry, or discard the durable
   job.
-- [ ] Do not let `degraded` surface as a generation failure either. It is
+- [x] Do not let `degraded` surface as a generation failure either. It is
   transport health; the durable job is unaffected and remains resumable.
-- [ ] Remove only source-string assertions whose behavior is now covered by
+- [x] Remove only source-string assertions whose behavior is now covered by
   client-core/client-web tests. Keep presentation assertions until replacement
   components exist.
-- [ ] Add a route-level integration test proving malformed generation snapshots
-  are rejected before reaching the workflow.
-- [ ] Run focused tests, all unit tests, integration tests, and the manual current
-  Story Player checklist.
+- [x] Add a route-level integration test proving malformed generation snapshots
+  are rejected before reaching the workflow in
+  `tests/integration/generation.integration.test.ts`.
+- [x] Add contract/client tests proving the Slice 1 prerequisite methods exist,
+  caller-supplied `user_id`/`X-User-Id` is never synthesized from session data,
+  and correlation IDs survive every adopted error path.
+- [x] Reconcile the stale UI documents in the file list: Q1 narration and Q4
+  replacement are resolved; explicit cancel now exists and remains distinct from
+  detach; HTTP/Web adapters live in client-web; endpoint adoption is incremental;
+  and the generic non-generation watcher remains deferred. Close any projectmem
+  issue whose only blocker was those now-recorded resolutions.
+- [x] Run focused tests, all unit tests, integration tests, and the current Story
+  Player behavior checklist. The completion report distinguishes the automated
+  evidence from the manual source/behavior review; no browser E2E exists before
+  U6.
 
 **Rollback boundary (required before merge).** C8 rewires the *live* Story
 Player — the highest-stakes path in the product — and this codebase has no
 feature-flag mechanism (`REPOSITORY_UI_MAP.md` §11). Recovery must therefore be
 planned rather than improvised:
 
-- [ ] Land C8 as a single revertible commit touching only the Story Player and
-  its tests. No unrelated refactors ride along; `git revert` must restore the
-  previous working client without conflict resolution.
-- [ ] Verify the revert on a branch before merging C8 — actually run it, do not
+- [x] Land C8 as a single revertible commit scoped to the **client rewire**:
+  `story.js` and its sibling modules, `story.html`, `legacy-illustration-api.ts`,
+  the composition root, and their tests. No unrelated refactors ride along;
+  `git revert` must restore the previous working client without conflict
+  resolution.
+- [x] **Gate ownership, so "revertible" stays true.** Gate 1 takes the contract,
+  server-projection, and typed-client extensions plus their contract/route/client
+  tests. Gate 2 takes the client rewire above. The five `docs/ui/*`
+  reconciliations belong to **gate 1**, not the revertible commit — reverting the
+  rewire must not also revert documentation that describes contracts which remain
+  in place. The earlier wording said "touching only the Story Player and its
+  tests", which no achievable gate-2 diff satisfies once `story.html`, the
+  illustration adapter, and the composition root are counted.
+- [x] Verify the revert on a branch before merging C8 — actually run it, do not
   assume it applies cleanly.
-- [ ] Record the manual play-loop checklist result (submit, streamed narration,
+- [x] Record the play-loop checklist result (submit, streamed narration,
   recoverable retry, cancel, discard, completed, reload-resume) in the PR, since
   no automated E2E covers the legacy client until U6.
-- [ ] Name the observable regression signals that should trigger the revert:
+- [x] Name the observable regression signals that should trigger the revert:
   `turn_generation_stream_connected` without a matching
   `turn_generation_stream_closed`, a rise in generation jobs settling as
   `failed`/`recoverable`, or duplicate submissions for one campaign.
@@ -2705,23 +2891,39 @@ behavior once the corresponding replacement behavior exists.
 ## Dependency graph
 
 ```text
-[C0 done] -> [C1 done] -> C1a -> C2 -> C3 -> C4 -> C5 -> C8 -> [Track C complete] -> U1 -> U2
-                            \                    -> C6 -/                            |      \
-                             \-> C7 -------------------------------------------------/       -> U3/U4 -> U5 -> U6
-
-[C0 done] -> B1 -> B2
-              |
-              +-> B3
-              +-> B4 -----------------------------------------> U5
-              +-> B5 (domain-by-domain after generation)
+[C0-C5 done] -> C7 -> C8 -> B4a -> C6 -> [Track C complete] ----+
+                                                                |
+[C0 done] -> B1 -> B3 ------------------------------------------+-> U1 -> U2 -> U3 -> U4 -> U5 -> U6
+              |                                                                      ^
+              +-> B2 (parallel; required for Track B, not Slice 1)                   |
+              +-> B4b (after B4a) ---------------------------------------------------+
+              +-> B5 (domain-by-domain; not a Slice 1 gate)
 ```
 
-C1a is complete and C2 is next. C1a gates C2 because C4 models its event stream on the C1 stream projection;
-correcting that projection after C4 exists means rewriting the event model and
-its tests. C7 can proceed in parallel from C1a onward. B1 can proceed alongside
-C2-C6 now that C1 contracts have stabilized. B2, B3, and B4 are independent
-after B1, except that B4 must coordinate its cursor schemas with C1 and land
-before U5. B2 must preserve the error-frame behavior confirmed in C1a.
+**C0 through C5 and C7 through C8 are complete** (Tasks 1-6, 8, and 9,
+including C1a, C2a, C3a, and C4a). The client lane is **B4a (Task 13a) next**,
+then C6 (Task 7). B1 (Task 10) may start in parallel now; B3 (Task 12) follows
+B1 and both Track C plus B3 gate U1. B4b (Task 13b) follows B4a and B1 and must
+finish before U5.
+
+**C6 does not gate C8 — this was previously drawn as `C6 -> C8` and is
+corrected.** Task 9 never consumes the C6 stores or selectors. C6's consumers
+are U2-U5, and it is sequenced after C8 and B4a so it is built once against the
+rewired Story Player and final bounded history/sync contracts.
+
+**C7 gated C8 — this was previously drawn as parallel and is corrected here.**
+C7 supplied `apps/web/src/legacy-client-entry.ts` and the Vite build; completed
+C8 now compiles the Story Player's client-package imports through that entry and
+no longer publishes the raw imported module graph from `publicDir`.
+
+C1a gated C2 because C4 models its event stream on the C1 stream projection;
+correcting that projection after C4 exists would have meant rewriting the event
+model and its tests. B1 can proceed alongside C7-C8/B4a/C6 now that C1 contracts
+have stabilized. B2 preserves C1a's error-frame behavior and can run after B1
+without delaying the UI. B3 is different: it is the parent plan's pre-exposure
+throughput gate and therefore finishes before U1. B4 was split because its public
+cursor/sync shapes must land before C6, while measured query/index optimization
+can follow B1 but must finish before the long-campaign U5 implementation.
 
 ---
 

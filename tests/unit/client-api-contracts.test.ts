@@ -1,14 +1,32 @@
 import { describe, expect, it } from "vitest";
 import {
   apiErrorEnvelopeSchema,
+  campaignBranchResponseSchema,
+  campaignBranchSchema,
+  campaignCreateResponseSchema,
+  campaignCreateSchema,
   campaignListResponseSchema,
+  campaignRewindResponseSchema,
+  campaignRewindSchema,
+  campaignRuntimeStateResponseSchema,
+  campaignRuntimeStateUpdateRequestSchema,
   campaignSyncStatusSchema,
   generationActionResponseSchema,
   generationEnqueueResponseSchema,
   generationJobSnapshotSchema,
   generationResultSchema,
   generationStreamSnapshotSchema,
+  metaResponseSchema,
+  playableCharacterListResponseSchema,
+  providerListResponseSchema,
+  sessionResponseSchema,
+  turnInputClassificationRequestSchema,
+  turnInputClassificationResponseSchema,
   turnListResponseSchema,
+  userProfileResponseSchema,
+  userProfileUpdateSchema,
+  worldCreateResponseSchema,
+  worldCreateSchema,
   worldListResponseSchema,
   type GenerationActionResponse
 } from "../../packages/contracts/src/index.js";
@@ -25,6 +43,34 @@ const invalidCompletedActionStatus: GenerationActionResponse["status"] = "comple
 void invalidCompletedActionStatus;
 
 describe("client API response contracts", () => {
+  it.each([
+    ["meta response", metaResponseSchema],
+    ["session response", sessionResponseSchema],
+    ["profile response", userProfileResponseSchema],
+    ["provider list response", providerListResponseSchema],
+    ["runtime state response", campaignRuntimeStateResponseSchema],
+    ["classification response", turnInputClassificationResponseSchema],
+    ["rewind response", campaignRewindResponseSchema],
+    ["branch response", campaignBranchResponseSchema],
+    ["world creation response", worldCreateResponseSchema],
+    ["campaign creation response", campaignCreateResponseSchema],
+    ["playable-character response", playableCharacterListResponseSchema]
+  ])("rejects a malformed %s", (_name, schema) => {
+    expect(schema.safeParse({}).success).toBe(false);
+  });
+
+  it.each([
+    ["profile update", userProfileUpdateSchema],
+    ["runtime state update", campaignRuntimeStateUpdateRequestSchema],
+    ["turn classification", turnInputClassificationRequestSchema],
+    ["rewind", campaignRewindSchema],
+    ["branch", campaignBranchSchema],
+    ["world creation", worldCreateSchema],
+    ["campaign creation", campaignCreateSchema]
+  ])("rejects a malformed %s request", (_name, schema) => {
+    expect(schema.safeParse({}).success).toBe(false);
+  });
+
   it("keeps the transport error name separate from the domain detail code", () => {
     const parsed = apiErrorEnvelopeSchema.parse({
       error: "GenerationConflictError",
