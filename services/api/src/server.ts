@@ -170,6 +170,7 @@ function isSafeAppNavigation(url: string): boolean {
     return false;
   }
   if (pathname.includes("\\") || pathname.includes("\0")) return false;
+  if (pathname === "/app/assets" || pathname.startsWith("/app/assets/")) return false;
   const segments = pathname.split("/");
   if (segments.some((segment) => segment === "." || segment === "..")) return false;
   const finalSegment = segments.at(-1) ?? "";

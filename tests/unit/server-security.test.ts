@@ -239,6 +239,8 @@ describe("API server security and CORS headers", () => {
     try {
       for (const url of [
         "/app/assets/missing.js",
+        "/app/assets/missing",
+        "/app/assets/missing/",
         "/app/missing.svg",
         "/app/%2e%2e/secret.txt",
         "/app/..%2fsecret.txt",
