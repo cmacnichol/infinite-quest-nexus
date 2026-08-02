@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { resolve } from "node:path";
 import { loadRuntimeConfig } from "../../packages/database/src/config.js";
 
 const originalEnvironment = { ...process.env };
@@ -15,7 +16,9 @@ const securitySettingNames = [
   "API_RATE_LIMIT_IMPORT_REQUESTS",
   "API_CONCURRENCY_PROVIDER_REQUESTS",
   "API_CONCURRENCY_IMPORT_REQUESTS",
-  "TRUST_PROXY_HOPS"
+  "TRUST_PROXY_HOPS",
+  "LEGACY_WEB_ROOT",
+  "NEXT_WEB_ROOT"
 ] as const;
 
 afterEach(() => {
@@ -42,6 +45,19 @@ describe("runtime security configuration", () => {
     expect(config.security.apiDefaultBodyLimitBytes).toBe(1_048_576);
     expect(config.security.apiImportBodyLimitBytes).toBe(2_147_483_648);
     expect(config.security.trustProxyHops).toBe(0);
+    expect(config.legacyWebRoot).toBe(resolve("apps/web/dist"));
+    expect(config.nextWebRoot).toBe(resolve("apps/web-next/dist"));
+  });
+
+  it("resolves explicit legacy and replacement web roots", () => {
+    minimumEnvironment();
+    process.env.LEGACY_WEB_ROOT = "tmp/legacy-web";
+    process.env.NEXT_WEB_ROOT = "tmp/next-web";
+
+    const config = loadRuntimeConfig();
+
+    expect(config.legacyWebRoot).toBe(resolve("tmp/legacy-web"));
+    expect(config.nextWebRoot).toBe(resolve("tmp/next-web"));
   });
 
   it("rejects wildcard and path-bearing origins", () => {

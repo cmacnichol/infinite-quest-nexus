@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { z } from "zod";
@@ -28,7 +28,8 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
     allowMaintenanceMigrations: false,
     workerPollIntervalMs: 1000,
     workerLeaseSeconds: 60,
-    webRoot: resolve("apps/web/public"),
+    legacyWebRoot: resolve("apps/web/public"),
+    nextWebRoot: resolve("apps/web-next"),
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve("local-data/assets"),
     archiveStorageRoot: resolve("local-data/archives"),
@@ -69,6 +70,25 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
       trustProxyHops: 0
     },
     ...overrides
+  };
+}
+
+async function staticRootFixture() {
+  const root = await mkdtemp(join(tmpdir(), "infinitequest-static-"));
+  const legacyWebRoot = join(root, "legacy");
+  const nextWebRoot = join(root, "next");
+  await mkdir(join(nextWebRoot, "assets"), { recursive: true });
+  await mkdir(legacyWebRoot, { recursive: true });
+  await writeFile(join(legacyWebRoot, "index.html"), "<!doctype html><p>legacy nexus shell</p>");
+  await writeFile(join(legacyWebRoot, "story.html"), "<!doctype html><p>legacy story shell</p>");
+  await writeFile(join(nextWebRoot, "index.html"), "<!doctype html><p>replacement app shell</p>");
+  await writeFile(join(nextWebRoot, "assets/app-AbCd1234.js"), "export const built = true;");
+  await writeFile(join(nextWebRoot, "assets/shell-AbCd1234.html"), "<!doctype html><title>asset</title>");
+  await writeFile(join(nextWebRoot, "bootstrap.js"), "export const preview = true;");
+  await writeFile(join(root, "secret.txt"), "must not be served");
+  return {
+    config: makeConfig({ legacyWebRoot, nextWebRoot }),
+    cleanup: () => rm(root, { force: true, recursive: true })
   };
 }
 
@@ -151,6 +171,109 @@ describe("API server security and CORS headers", () => {
     expect(response.payload).not.toContain("<!DOCTYPE html>");
 
     await app.close();
+  });
+
+  it("serves the replacement app root and extensionless deep links with HTML no-cache", async () => {
+    const fixture = await staticRootFixture();
+    const app = await buildServer({ config: fixture.config, pool: mockPool });
+
+    try {
+      const redirect = await app.inject({ method: "GET", url: "/app" });
+      expect(redirect.statusCode).toBe(308);
+      expect(redirect.headers.location).toBe("/app/");
+
+      for (const url of ["/app/", "/app/campaigns/example/play"]) {
+        const response = await app.inject({ method: "GET", url });
+        expect(response.statusCode).toBe(200);
+        expect(response.payload).toContain("replacement app shell");
+        expect(response.headers["cache-control"]).toBe("no-cache");
+        expect(response.headers["content-security-policy"]).toContain("script-src 'self'");
+        expect(response.headers["content-security-policy"]).toContain("style-src 'self'");
+        expect(response.headers["content-security-policy"]).toContain("connect-src 'self'");
+        expect(response.headers["content-security-policy"]).not.toContain("unsafe-inline");
+      }
+    } finally {
+      await app.close();
+      await fixture.cleanup();
+    }
+  });
+
+  it("caches only content-hashed replacement assets as immutable", async () => {
+    const fixture = await staticRootFixture();
+    const app = await buildServer({ config: fixture.config, pool: mockPool });
+
+    try {
+      const hashed = await app.inject({ method: "GET", url: "/app/assets/app-AbCd1234.js" });
+      const hashShapedHtml = await app.inject({
+        method: "GET",
+        url: "/app/assets/shell-AbCd1234.html"
+      });
+      const stable = await app.inject({ method: "GET", url: "/app/bootstrap.js" });
+
+      expect(hashed.statusCode).toBe(200);
+      expect(hashed.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+      expect(hashShapedHtml.statusCode).toBe(200);
+      expect(hashShapedHtml.headers["cache-control"]).toBe("no-cache");
+      expect(stable.statusCode).toBe(200);
+      expect(stable.headers["cache-control"]).toBe("no-cache");
+    } finally {
+      await app.close();
+      await fixture.cleanup();
+    }
+  });
+
+  it("keeps missing assets, reserved routes, and traversal attempts out of app fallback", async () => {
+    const fixture = await staticRootFixture();
+    const app = await buildServer({ config: fixture.config, pool: mockPool });
+
+    try {
+      for (const url of [
+        "/app/assets/missing.js",
+        "/app/missing.svg",
+        "/app/%2e%2e/secret.txt",
+        "/app/..%2fsecret.txt",
+        "/api/v1/not-real",
+        "/health/not-real",
+        "/nexus/not-real.js",
+        "/vendor/not-real.js"
+      ]) {
+        const response = await app.inject({ method: "GET", url });
+        expect(response.statusCode, url).toBe(404);
+        expect(response.payload, url).not.toContain("replacement app shell");
+        expect(response.payload, url).not.toContain("must not be served");
+      }
+
+      const story = await app.inject({ method: "GET", url: "/story/not-real" });
+      expect(story.statusCode).toBe(200);
+      expect(story.payload).toContain("legacy story shell");
+      expect(story.payload).not.toContain("replacement app shell");
+
+      const api = await app.inject({ method: "GET", url: "/api/v1/not-real" });
+      expect(api.headers["cache-control"]).toBe("no-store");
+    } finally {
+      await app.close();
+      await fixture.cleanup();
+    }
+  });
+
+  it("keeps legacy Nexus and Story routes on the explicit legacy root", async () => {
+    const fixture = await staticRootFixture();
+    const app = await buildServer({ config: fixture.config, pool: mockPool });
+
+    try {
+      const nexus = await app.inject({ method: "GET", url: "/nexus/" });
+      const story = await app.inject({ method: "GET", url: "/story" });
+
+      expect(nexus.statusCode).toBe(200);
+      expect(nexus.payload).toContain("legacy nexus shell");
+      expect(nexus.headers["cache-control"]).toBe("no-cache");
+      expect(story.statusCode).toBe(200);
+      expect(story.payload).toContain("legacy story shell");
+      expect(story.headers["cache-control"]).toBe("no-cache");
+    } finally {
+      await app.close();
+      await fixture.cleanup();
+    }
   });
 
   it("allows origin-less and exact same-origin requests", async () => {

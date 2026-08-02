@@ -28,4 +28,33 @@ describe("deployment security configuration", () => {
 
     expect(environment).toContain("PROVIDER_NETWORK_ALLOWLIST: ${PROVIDER_NETWORK_ALLOWLIST:-}");
   });
+
+  it.each([
+    ["Compose combined app", "compose.yaml", "infinitequest-app"],
+    ["Swarm API", "deploy/swarm/stack.yaml", "infinitequest-api"]
+  ])("uses the built legacy and replacement web roots in the %s service", (_name, path, service) => {
+    const environment = serviceEnvironment(readFileSync(path, "utf8"), service);
+
+    expect(environment).toContain("LEGACY_WEB_ROOT: /app/apps/web/dist");
+    expect(environment).toContain("NEXT_WEB_ROOT: /app/apps/web-next/dist");
+  });
+
+  it("copies both built web roots into the runtime image", () => {
+    const dockerfile = readFileSync("Dockerfile", "utf8");
+
+    expect(dockerfile).toContain("COPY scripts ./scripts");
+    expect(dockerfile).toContain("RUN CI=true pnpm prune --prod");
+    expect(dockerfile).toContain("LEGACY_WEB_ROOT=/app/apps/web/dist");
+    expect(dockerfile).toContain("NEXT_WEB_ROOT=/app/apps/web-next/dist");
+    expect(dockerfile).toContain("/app/apps/web/dist ./apps/web/dist");
+    expect(dockerfile).toContain("/app/apps/web-next/dist ./apps/web-next/dist");
+  });
+
+  it("documents both built web roots in the example environment", () => {
+    const environment = readFileSync(".env.example", "utf8");
+
+    expect(environment).toContain("LEGACY_WEB_ROOT=/app/apps/web/dist");
+    expect(environment).toContain("NEXT_WEB_ROOT=/app/apps/web-next/dist");
+    expect(environment).not.toMatch(/^WEB_ROOT=/mu);
+  });
 });

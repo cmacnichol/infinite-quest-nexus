@@ -99,6 +99,11 @@ pnpm test
 pnpm build
 ```
 
+For replacement UI development, keep Fastify running on port 8080 with
+`pnpm dev`, then run `pnpm dev:web` in a second terminal. Vite serves the local
+UI and proxies `/api`, `/health`, and the required application asset paths to
+Fastify, preserving same-origin browser behavior.
+
 Integration tests automatically provision a dedicated local PostgreSQL 18/pgvector container through Docker Engine. The generated test-only credentials remain in the ignored `.env.test.local` file. See [the integration test database guide](docs/contributing/integration-test-database.md) for the local endpoint, inspection command, and targeted reset procedure. The application and documentation have separate CI build checks.
 
 The active code is organized under:

@@ -56,3 +56,9 @@ jobs:
 
       - name: Build container image
         run: docker build --tag infinitequest-nexus:ci .
+
+      - name: Verify container web artifacts
+        run: >-
+          docker run --rm --entrypoint sh infinitequest-nexus:ci -c
+          'test -f /app/apps/web/dist/index.html &&
+          test -f /app/apps/web-next/dist/index.html'

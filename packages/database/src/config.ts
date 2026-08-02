@@ -40,7 +40,8 @@ export type RuntimeConfig = {
   allowMaintenanceMigrations: boolean;
   workerPollIntervalMs: number;
   workerLeaseSeconds: number;
-  webRoot: string;
+  legacyWebRoot: string;
+  nextWebRoot: string;
   assetStorageDriver: "filesystem";
   assetStorageRoot: string;
   archiveStorageRoot: string;
@@ -169,7 +170,8 @@ export function loadRuntimeConfig(): RuntimeConfig {
     allowMaintenanceMigrations: booleanSetting("ALLOW_MAINTENANCE_MIGRATIONS", false),
     workerPollIntervalMs: integerSetting("WORKER_POLL_INTERVAL_MS", 2000, 250, 60000),
     workerLeaseSeconds: integerSetting("WORKER_LEASE_SECONDS", 60, 15, 3600),
-    webRoot: resolve(process.env.WEB_ROOT?.trim() || "apps/web/public"),
+    legacyWebRoot: resolve(process.env.LEGACY_WEB_ROOT?.trim() || "apps/web/dist"),
+    nextWebRoot: resolve(process.env.NEXT_WEB_ROOT?.trim() || "apps/web-next/dist"),
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve(process.env.ASSET_STORAGE_ROOT?.trim() || "local-data/assets"),
     archiveStorageRoot: resolve(process.env.ARCHIVE_STORAGE_ROOT?.trim() || "local-data/archives"),

@@ -9,6 +9,8 @@ services:
       APP_PORT: 8080
       DATABASE_URL_FILE: /run/secrets/infinitequest_database_url
       CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/infinitequest_credential_encryption_key
+      LEGACY_WEB_ROOT: /app/apps/web/dist
+      NEXT_WEB_ROOT: /app/apps/web-next/dist
       ASSET_STORAGE_DRIVER: filesystem
       ASSET_STORAGE_ROOT: /var/lib/infinitequest/assets
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}

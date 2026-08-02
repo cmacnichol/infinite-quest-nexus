@@ -27,6 +27,8 @@ services:
       APP_ROLE: all
       APP_PORT: 8080
       DATABASE_URL: postgresql://infinitequest:${POSTGRES_PASSWORD}@postgres:5432/infinitequest
+      LEGACY_WEB_ROOT: /app/apps/web/dist
+      NEXT_WEB_ROOT: /app/apps/web-next/dist
       ASSET_STORAGE_DRIVER: filesystem
       ASSET_STORAGE_ROOT: /var/lib/infinitequest/assets
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}

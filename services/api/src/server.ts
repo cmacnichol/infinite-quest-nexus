@@ -147,7 +147,34 @@ type BuildServerOptions = {
 };
 
 const uuidSchema = z.uuid();
+const HASHED_STATIC_ASSET_PATTERN = /(?:^|\/)[^/]+-[A-Za-z0-9_-]{8,}\.[^/]+$/u;
 let lastWorldGenerationProgressCleanupAt = 0;
+
+function setStaticCacheHeader(reply: { header(name: string, value: string): unknown }, filePath: string): void {
+  const isHtml = filePath.toLowerCase().endsWith(".html");
+  reply.header(
+    "Cache-Control",
+    !isHtml && HASHED_STATIC_ASSET_PATTERN.test(filePath)
+      ? "public, max-age=31536000, immutable"
+      : "no-cache"
+  );
+}
+
+function isSafeAppNavigation(url: string): boolean {
+  const rawPath = url.split(/[?#]/u, 1)[0] ?? "";
+  if (!rawPath.startsWith("/app/")) return false;
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(rawPath);
+  } catch {
+    return false;
+  }
+  if (pathname.includes("\\") || pathname.includes("\0")) return false;
+  const segments = pathname.split("/");
+  if (segments.some((segment) => segment === "." || segment === "..")) return false;
+  const finalSegment = segments.at(-1) ?? "";
+  return finalSegment === "" || !finalSegment.includes(".");
+}
 
 function statusCode(error: unknown): number {
   if (typeof error === "object" && error !== null && "statusCode" in error) {
@@ -272,10 +299,18 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   });
   await app.register(registerArchiveRoutes, { pool, config, assetStore });
   await app.register(fastifyStatic, {
-    root: config.webRoot,
+    root: config.legacyWebRoot,
     prefix: "/nexus/",
     index: ["index.html"],
-    decorateReply: true
+    decorateReply: true,
+    setHeaders: setStaticCacheHeader
+  });
+  await app.register(fastifyStatic, {
+    root: config.nextWebRoot,
+    prefix: "/app/",
+    index: ["index.html"],
+    decorateReply: false,
+    setHeaders: setStaticCacheHeader
   });
   await app.register(fastifyStatic, {
     root: resolve(process.cwd(), "node_modules/photoswipe/dist"),
@@ -287,18 +322,33 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.get("/", async (_request, reply) => reply.redirect("/nexus/", 308));
   app.get("/index.html", async (_request, reply) => reply.redirect("/nexus/", 308));
+  app.get("/app", async (_request, reply) => reply.redirect("/app/", 308));
 
   // Story Player — clean URL for campaign gameplay
   const storyHtml = async () => {
-    return readFile(resolve(config.webRoot, "story.html"), "utf8");
+    return readFile(resolve(config.legacyWebRoot, "story.html"), "utf8");
   };
   let storyHtmlCache: string | null = null;
   const cachedStoryHtml = async () => {
     storyHtmlCache ??= await storyHtml();
     return storyHtmlCache;
   };
-  app.get("/story", async (_request, reply) => reply.type("text/html; charset=utf-8").send(await cachedStoryHtml()));
-  app.get("/story/:campaignId", async (_request, reply) => reply.type("text/html; charset=utf-8").send(await cachedStoryHtml()));
+  app.get("/story", async (_request, reply) => reply.type("text/html; charset=utf-8").header("cache-control", "no-cache").send(await cachedStoryHtml()));
+  app.get("/story/:campaignId", async (_request, reply) => reply.type("text/html; charset=utf-8").header("cache-control", "no-cache").send(await cachedStoryHtml()));
+  let nextHtmlCache: string | null = null;
+  const cachedNextHtml = async () => {
+    nextHtmlCache ??= await readFile(resolve(config.nextWebRoot, "index.html"), "utf8");
+    return nextHtmlCache;
+  };
+  app.setNotFoundHandler(async (request, reply) => {
+    if (request.method === "GET" && isSafeAppNavigation(request.url)) {
+      return reply
+        .type("text/html; charset=utf-8")
+        .header("cache-control", "no-cache")
+        .send(await cachedNextHtml());
+    }
+    return reply.code(404).send({ error: "Not Found", message: "Route not found." });
+  });
   app.get("/health/live", async () => ({ status: "ok", role: config.role }));
   app.get("/health/ready", async (_request, reply) => {
     try {

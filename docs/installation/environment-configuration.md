@@ -14,7 +14,8 @@ The application supports the following runtime settings, but a deployment manife
 | `ALLOW_MAINTENANCE_MIGRATIONS` | `false` | Existing-database maintenance opt-in |
 | `WORKER_POLL_INTERVAL_MS` | `2000` | Durable queue polling interval |
 | `WORKER_LEASE_SECONDS` | `60` | Job lease duration |
-| `WEB_ROOT` | `apps/web/public` | Active web assets |
+| `LEGACY_WEB_ROOT` | `apps/web/dist` | Built Nexus and Story Player assets served under `/nexus/` and `/story` |
+| `NEXT_WEB_ROOT` | `apps/web-next/dist` | Built replacement application assets served under `/app/` |
 | `ASSET_STORAGE_ROOT` | `local-data/assets` | Filesystem asset root |
 | `CREDENTIAL_ENCRYPTION_KEY` / `_FILE` | Empty | Provider-key encryption secret |
 | `CORS_ALLOWED_ORIGINS` | Empty | Comma-separated exact browser origins; empty permits local same-origin access only |
