@@ -1,4 +1,5 @@
 import type { GenerationRequest } from "../../contracts/src/index.js";
+import type { StoredGenerationSubmission } from "./generation/types.js";
 
 export interface Clock {
   now(): number;
@@ -31,8 +32,8 @@ export interface PendingGenerationSubmission {
 }
 
 export interface PendingSubmissionStore {
-  load(campaignId: string): PendingGenerationSubmission | null;
-  save(campaignId: string, submission: PendingGenerationSubmission): void;
+  load(campaignId: string): StoredGenerationSubmission | null;
+  save(campaignId: string, submission: StoredGenerationSubmission): void;
   clear(campaignId: string): void;
 }
 

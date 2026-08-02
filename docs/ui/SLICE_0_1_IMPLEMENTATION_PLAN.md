@@ -42,7 +42,8 @@ Runtime implementation reviewed through `cd43787` on branch
 | Task 2a | C1a — stream projection remediation | **Complete**, one item deferred to Task 6 | `ca255a7`, `1fb1b30`, `26d5890`, `fb4b5ad`; focused contract/route lifecycle tests; reproducible 2,000-turn validation benchmark |
 | Task 3 | C2 — pure and Web-platform client packages | **Complete** | `1e55517`, `f8dfe6e`; scoped implementation review and fix re-review clean |
 | Task 3a | C2a — make the declared client boundary real | **Complete** | `f8c2b3d`, `cd43787`; scoped implementation review and fix re-review clean |
-| Task 4 onward | C3-C8, B1-B5, U1-U6 | Not started | — |
+| Task 4 onward (except Task 5) | C3, C3a, C5-C8, B1-B5, U1-U6 | Not started | — |
+| Task 5 | C4 — pure durable-generation workflow | **Complete** | This completion commit; see Current Task 5 verification below |
 
 **Current Task 2a verification** (re-measured during the Task 2a completion
 review; the figures below replace an earlier stale count of 700 tests across 65
@@ -121,6 +122,17 @@ detect and repair the mismatch inside `scripts/ensure-test-database.mjs`.
 **Next step:** begin Task 4 (C3), using the now-verified `client-core ->
 contracts` boundary, public request type, and no-op `SessionPort` to build the
 runtime-validating HTTP client and error taxonomy.
+
+**Current Task 5 verification** (measured on the Task 5 completion commit):
+
+- `pnpm check` and `pnpm build` pass; repository boundary and data-safety
+  checks cover 499 candidate files.
+- `pnpm test:unit` passes **783/783 across 72 test files**.
+- `pnpm test:integration` passes — the database integration suite completed
+  successfully before the final pure-client test-only follow-up.
+- Focused client-core and boundary checks pass, including explicit coverage
+  for failed same-attempt retries, source-session closure, command/frame
+  races, retry transport failures, protocol mismatches, and duplicate replay.
 
 ---
 
