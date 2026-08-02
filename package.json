@@ -42,7 +42,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
-    "@types/pg": "^8.15.5",
+    "@types/pg": "^8.20.3",
     "@types/unzipper": "0.10.11",
     "linkedom": "0.18.13",
     "tsx": "^4.20.5",
