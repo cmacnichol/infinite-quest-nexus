@@ -234,6 +234,19 @@ describe("client boundary checks", () => {
     expect(violations).toEqual([]);
   });
 
+  test("rejects client-core source-relative imports that bypass the contracts package", () => {
+    const violations = collectClientBoundaryViolations([
+      {
+        file: "packages/client-core/src/workflow.ts",
+        text: 'import type { GenerationRequest } from "../../contracts/src/index.js";'
+      }
+    ]);
+
+    expect(violations).toEqual([
+      "packages/client-core/src/workflow.ts: client-core import ../../contracts/src/index.js is outside client-core or contracts"
+    ]);
+  });
+
   test("rejects Node and framework dependencies transitively reachable from the contracts public barrel", () => {
     const violations = collectClientBoundaryViolations([
       {
@@ -285,6 +298,19 @@ describe("client boundary checks", () => {
     ]);
 
     expect(violations).toEqual([]);
+  });
+
+  test("rejects client-web source-relative imports that bypass the contracts package", () => {
+    const violations = collectClientBoundaryViolations([
+      {
+        file: "packages/client-web/src/api.ts",
+        text: 'import { generationRequestSchema } from "../../contracts/src/index.js";'
+      }
+    ]);
+
+    expect(violations).toEqual([
+      "packages/client-web/src/api.ts: client-web import ../../contracts/src/index.js is outside client-web, client-core, or contracts"
+    ]);
   });
 
   test("rejects client-core imports outside its pure dependency boundary", () => {

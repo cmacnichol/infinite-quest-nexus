@@ -1,9 +1,4 @@
 {
   "extends": "../../../../packages/client-core/tsconfig.json",
-  "compilerOptions": {
-    "paths": {
-      "@infinite-quest/contracts": ["./../../../../packages/contracts/src/index.ts"]
-    }
-  },
   "include": ["src/**/*.ts"]
 }
