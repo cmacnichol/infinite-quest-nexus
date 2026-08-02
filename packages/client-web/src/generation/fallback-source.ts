@@ -10,17 +10,18 @@ import type {
 export function createBrowserGenerationSource(
   options: BrowserGenerationSourceOptions
 ): GenerationSnapshotSource {
-  normalizeBasePath(options.basePath);
+  const basePath = normalizeBasePath(options.basePath);
 
   return {
     watch(jobId, signal): AsyncIterable<GenerationSourceEvent> {
-      return watchGeneration(options, jobId, signal);
+      return watchGeneration(options, basePath, jobId, signal);
     }
   };
 }
 
 async function* watchGeneration(
   options: BrowserGenerationSourceOptions,
+  basePath: string,
   jobId: string,
   signal: Parameters<GenerationSnapshotSource["watch"]>[1]
 ): AsyncGenerator<GenerationSourceEvent, void, void> {
@@ -38,7 +39,7 @@ async function* watchGeneration(
   }
 
   const session = createEventSourceSession({
-    url: generationStreamUrl(options.basePath, jobId),
+    url: generationStreamUrl(basePath, jobId),
     signal,
     eventSourceFactory: options.eventSourceFactory
   });

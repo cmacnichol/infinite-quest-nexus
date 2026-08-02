@@ -30,22 +30,34 @@ export function createPollSession(
 ): AsyncGenerator<GenerationSourceEvent, void, void> {
   const controller = new AbortController();
   const onAbort = () => controller.abort();
-  if (signal.aborted) controller.abort();
-  signal.addEventListener("abort", onAbort, { once: true });
+  let listening = false;
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    controller.abort();
+    if (listening) {
+      signal.removeEventListener("abort", onAbort);
+      listening = false;
+    }
+  };
 
   async function* session(): AsyncGenerator<GenerationSourceEvent, void, void> {
+    if (signal.aborted) return;
+    signal.addEventListener("abort", onAbort, { once: true });
+    listening = true;
     try {
+      if (signal.aborted) return;
       yield* runPollSession(options, jobId, controller.signal);
     } finally {
-      controller.abort();
-      signal.removeEventListener("abort", onAbort);
+      cleanup();
     }
   }
 
   const iterator = session();
   const originalReturn = iterator.return.bind(iterator);
   iterator.return = async (value: void) => {
-    controller.abort();
+    cleanup();
     return originalReturn(value);
   };
   return iterator;

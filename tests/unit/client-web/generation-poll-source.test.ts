@@ -340,6 +340,17 @@ describe("generation polling session", () => {
     expect(abortSignal.listenerCount()).toBe(0);
   });
 
+  it("removes the parent abort listener when returned before iteration starts", async () => {
+    const abortSignal = signal();
+    const api = apiQueue(snapshot());
+    const iterator = createPollSession(options({ api }), jobId, abortSignal);
+
+    expect(abortSignal.listenerCount()).toBe(0);
+    await expect(iterator.return(undefined)).resolves.toEqual({ done: true, value: undefined });
+    expect(abortSignal.listenerCount()).toBe(0);
+    expect(api.calls).toBe(0);
+  });
+
   it("ends without degradation when aborted during a pending request", async () => {
     const abortSignal = signal();
     let requestStarted!: () => void;

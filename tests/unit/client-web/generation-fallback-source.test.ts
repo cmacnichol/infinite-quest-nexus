@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createGenerationWorkflow,
   GenerationWorkflowProtocolError
@@ -66,17 +66,27 @@ function streamSnapshot(overrides: Partial<GenerationStreamSnapshot> = {}): Gene
   };
 }
 
-function signal(initiallyAborted = false): AbortSignalLike & { abort(): void } {
+function signal(initiallyAborted = false): AbortSignalLike & {
+  abort(): void;
+  listenerCount(): number;
+  maximumListenerCount(): number;
+} {
   let aborted = initiallyAborted;
   const listeners = new Set<() => void>();
+  let maximumListeners = 0;
   return {
     get aborted() { return aborted; },
-    addEventListener(_type, listener) { listeners.add(listener); },
+    addEventListener(_type, listener) {
+      listeners.add(listener);
+      maximumListeners = Math.max(maximumListeners, listeners.size);
+    },
     removeEventListener(_type, listener) { listeners.delete(listener); },
     abort() {
       aborted = true;
       for (const listener of [...listeners]) listener();
-    }
+    },
+    listenerCount() { return listeners.size; },
+    maximumListenerCount() { return maximumListeners; }
   };
 }
 
@@ -160,15 +170,32 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
 describe("browser generation fallback source", () => {
   it("rejects an unsafe base path before consulting authorization", () => {
     let authorizationCalls = 0;
+    const events = eventSources();
     expect(() => createBrowserGenerationSource(options({
       basePath: "//evil.test/api/v1",
       session: { authorization: async () => {
         authorizationCalls += 1;
         return { authorization: "Bearer secret" };
       } },
-      eventSourceFactory: eventSources().factory
+      eventSourceFactory: events.factory
     }))).toThrow("Base path must be API-relative");
     expect(authorizationCalls).toBe(0);
+    expect(events.sources).toEqual([]);
+  });
+
+  it("keeps the validated base path when mutable options are later corrupted", async () => {
+    const events = eventSources();
+    const sourceOptions = options({ eventSourceFactory: events.factory });
+    const source = createBrowserGenerationSource(sourceOptions);
+    sourceOptions.basePath = "//evil.test/api/v1";
+    const iterator = source.watch(jobId, signal())[Symbol.asyncIterator]();
+    const terminal = iterator.next();
+    await Promise.resolve();
+
+    expect(events.urls).toEqual(["/api/v1/generation-jobs/22222222-2222-4222-8222-222222222222/stream"]);
+    events.sources[0]?.message(streamSnapshot({ status: "completed" }));
+    await expect(terminal).resolves.toMatchObject({ done: false, value: { kind: "snapshot" } });
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
   });
 
   it("polls immediately without degradation when EventSource capability is unavailable", async () => {
@@ -326,5 +353,67 @@ describe("browser generation fallback source", () => {
     const workflowEvents = await watched;
     expect(workflowEvents).toContainEqual({ type: "degraded", reason: "stream_lost", consecutiveFailures: 1 });
     expect(workflowEvents.at(-1)).toEqual({ type: "settled", outcome: "completed", result });
+  });
+
+  it("opens a bounded second browser session on the same signal after Task 5 retries recoverable work", async () => {
+    const events = eventSources();
+    const browserApi = apiQueue(events.sources);
+    const source = createBrowserGenerationSource(options({ api: browserApi, eventSourceFactory: events.factory }));
+    const pendingStore: PendingSubmissionStore = {
+      load: () => null,
+      save: () => undefined,
+      clear: () => undefined
+    };
+    const result = { id: jobId, status: "completed" } as GenerationResult;
+    const retry = vi.fn(async () => ({ id: jobId, status: "queued" } as GenerationActionResponse));
+    const workflow = createGenerationWorkflow({
+      api: {
+        enqueue: async () => ({ id: jobId, status: "queued", duplicate: false }),
+        enqueueReplacement: async () => ({ id: jobId, status: "replacement_queued", duplicate: false }),
+        syncStatus: async () => ({ pendingGeneration: null } as CampaignSyncStatus),
+        result: async () => result,
+        retry,
+        cancel: async () => ({ id: jobId, status: "cancelled" } as GenerationActionResponse),
+        discard: async () => ({ id: jobId, status: "discarded" } as GenerationActionResponse)
+      },
+      source,
+      clock: { now: () => 1_000 },
+      pendingSubmissions: pendingStore
+    });
+    const run = await workflow.submit(campaignId, {
+      operationKind: "append",
+      expectedTurnNumber: 1,
+      request: {
+        action: "Open the gate",
+        requestedInputMode: "action",
+        resolvedInputMode: "action",
+        inputModeSource: "explicit",
+        idempotencyKey: "retry-session-key",
+        context: { budgetTokens: 32000, compression: "auto", recentTurns: 8 }
+      }
+    });
+    const abortSignal = signal();
+    const watched = collect(run.watch(abortSignal));
+    await vi.waitFor(() => expect(events.sources).toHaveLength(1));
+    expect(abortSignal.listenerCount()).toBe(2);
+
+    events.sources[0]?.message(streamSnapshot({ status: "recoverable", attempts: 1 }));
+    await vi.waitFor(() => {
+      expect(retry).toHaveBeenCalledTimes(1);
+      expect(events.sources[0]?.closed).toBe(true);
+      expect(events.sources).toHaveLength(2);
+    });
+    expect(abortSignal.listenerCount()).toBe(2);
+    expect(abortSignal.maximumListenerCount()).toBe(2);
+
+    events.sources[1]?.message(streamSnapshot({ status: "queued", attempts: 1 }));
+    events.sources[1]?.message(streamSnapshot({ status: "completed", attempts: 1 }));
+
+    const workflowEvents = await watched;
+    expect(workflowEvents.at(-1)).toEqual({ type: "settled", outcome: "completed", result });
+    expect(events.sources[0]?.closeCalls).toBe(1);
+    expect(events.sources[1]?.closeCalls).toBe(1);
+    expect(abortSignal.listenerCount()).toBe(0);
+    expect(abortSignal.maximumListenerCount()).toBe(2);
   });
 });
