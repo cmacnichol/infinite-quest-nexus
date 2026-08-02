@@ -51,7 +51,8 @@ describe("createNexusHttpClient", () => {
     "//evil.test/api/v1",
     "api/v1",
     "/\\evil.test/api/v1",
-    "/\t/evil.test/api/v1"
+    "/\t/evil.test/api/v1",
+    "/api/v1/.."
   ])("rejects unsafe base path %s before fetching or reading session authorization", (basePath) => {
     const queue = fetchQueue();
     let authorizationCalls = 0;
@@ -101,6 +102,25 @@ describe("createNexusHttpClient", () => {
     expect(queue.urls).toEqual(["/worlds"]);
   });
 
+  it("keeps ordinary and dotted path segments within root and nested API bases", async () => {
+    const queue = fetchQueue(jsonResponse({ value: "nested" }), jsonResponse({ value: "dotted" }));
+    const nested = createNexusHttpClient({
+      basePath: "/api/v1",
+      session: createNoopSessionPort(),
+      fetchImpl: queue.fetchImpl
+    });
+    const root = createNexusHttpClient({
+      basePath: "/",
+      session: createNoopSessionPort(),
+      fetchImpl: queue.fetchImpl
+    });
+
+    await expect(nested.request({ method: "GET", path: "/worlds", responseSchema })).resolves.toEqual({ value: "nested" });
+    await expect(root.request({ method: "GET", path: "/worlds/v1.2.3", responseSchema })).resolves.toEqual({ value: "dotted" });
+
+    expect(queue.urls).toEqual(["/api/v1/worlds", "/worlds/v1.2.3"]);
+  });
+
   it("normalizes the base path and parses every 2xx JSON response exactly once", async () => {
     const queue = fetchQueue(
       jsonResponse({ value: "first" }, 200),
@@ -120,13 +140,25 @@ describe("createNexusHttpClient", () => {
     expect(queue.urls).toEqual(["/api/v1/first", "/api/v1/second", "/api/v1/third"]);
   });
 
-  it("rejects non-relative, protocol-relative, and slashless request paths before fetching", async () => {
+  it("rejects non-relative, protocol-relative, slashless, and dot-segment request paths before fetching", async () => {
     const queue = fetchQueue(jsonResponse({ value: "unused" }));
-    const client = createNexusHttpClient({ basePath: "/api/v1", session: createNoopSessionPort(), fetchImpl: queue.fetchImpl });
+    let authorizationCalls = 0;
+    const client = createNexusHttpClient({
+      basePath: "/api/v1",
+      session: session({ authorization: async () => {
+        authorizationCalls += 1;
+        return {};
+      } }),
+      fetchImpl: queue.fetchImpl
+    });
 
     await expect(client.request({ method: "GET", path: "campaigns", responseSchema })).rejects.toThrow("must begin with '/'");
     await expect(client.request({ method: "GET", path: "https://evil.test/campaigns", responseSchema })).rejects.toThrow("must be API-relative");
     await expect(client.request({ method: "GET", path: "//evil.test/campaigns", responseSchema })).rejects.toThrow("must be API-relative");
+    for (const path of ["/../admin", "/worlds/../../../admin", "/./worlds", "/%2e%2e/admin", "/%2E%2E/admin"]) {
+      await expect(client.request({ method: "GET", path, responseSchema })).rejects.toThrow("must not contain '.' or '..' segments");
+    }
+    expect(authorizationCalls).toBe(0);
     expect(queue.urls).toEqual([]);
   });
 

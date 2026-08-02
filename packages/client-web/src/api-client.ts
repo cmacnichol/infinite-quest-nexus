@@ -25,7 +25,7 @@ import type {
 } from "../../contracts/src/index.js";
 import type { z } from "zod";
 import { createNexusHttpClient } from "./http-client.js";
-import type { JsonRequestSpec, NexusHttpClientOptions } from "./http-client.js";
+import type { HttpMethod, JsonRequestSpec, NexusHttpClientOptions } from "./http-client.js";
 
 export interface WorldApi {
   list(signal?: AbortSignal): Promise<WorldListResponse>;
@@ -57,9 +57,10 @@ function encodedPathSegment(value: string): string {
   return encodeURIComponent(value);
 }
 
-function validatedRequest<T>(
+export function validatedRequest<T>(
   schema: z.ZodType<T>,
   value: unknown,
+  method: HttpMethod,
   path: string
 ): T {
   const parsed = schema.safeParse(value);
@@ -67,7 +68,7 @@ function validatedRequest<T>(
     throw new ApiContractError("The request does not match its contract.", {
       phase: "request",
       kind: "request_schema_mismatch",
-      method: "POST",
+      method,
       path,
       issues: parsed.error.issues
     });
@@ -103,14 +104,16 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
       responseSchema: campaignSyncStatusSchema
     }, signal)),
     async enqueue(campaignId, request, signal) {
+      const method: HttpMethod = "POST";
       const path = `/campaigns/${encodedPathSegment(campaignId)}/generations`;
-      const body = validatedRequest(generationRequestSchema, request, path);
-      return http.request(withSignal({ method: "POST", path, body: { kind: "json", value: body }, responseSchema: generationEnqueueResponseSchema }, signal));
+      const body = validatedRequest(generationRequestSchema, request, method, path);
+      return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: generationEnqueueResponseSchema }, signal));
     },
     async enqueueReplacement(campaignId, request, signal) {
+      const method: HttpMethod = "POST";
       const path = `/campaigns/${encodedPathSegment(campaignId)}/generations/retry-latest`;
-      const body = validatedRequest(generationRetryLatestRequestSchema, request, path);
-      return http.request(withSignal({ method: "POST", path, body: { kind: "json", value: body }, responseSchema: generationEnqueueResponseSchema }, signal));
+      const body = validatedRequest(generationRetryLatestRequestSchema, request, method, path);
+      return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: generationEnqueueResponseSchema }, signal));
     },
     get: (jobId, signal) => http.request(withSignal({
       method: "GET",

@@ -3,6 +3,8 @@ import {
   createNexusApiClient,
   createNoopSessionPort
 } from "../../../packages/client-web/src/index.js";
+import * as apiClientModule from "../../../packages/client-web/src/api-client.js";
+import type { HttpMethod } from "../../../packages/client-web/src/http-client.js";
 import type {
   CampaignApi,
   GenerationApi,
@@ -18,6 +20,7 @@ import type {
   GenerationRetryLatestRequest,
   GenerationJobSnapshot
 } from "../../../packages/contracts/src/index.js";
+import { generationRequestSchema } from "../../../packages/contracts/src/index.js";
 
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const jobId = "22222222-2222-4222-8222-222222222222";
@@ -35,6 +38,13 @@ const replacementRequest: GenerationRetryLatestRequest = {
   ...generationRequest,
   expectedCurrentTurnNumber: 4
 };
+
+type RequestValidator = (
+  schema: typeof generationRequestSchema,
+  value: unknown,
+  method: HttpMethod,
+  path: string
+) => GenerationRequest;
 
 function invalidResponseFetch(): { fetchImpl: typeof fetch; urls: string[]; options: RequestInit[] } {
   const urls: string[] = [];
@@ -154,6 +164,27 @@ describe("createNexusApiClient", () => {
       path: `/campaigns/${campaignId}/generations/retry-latest`
     });
     expect(queue.urls).toEqual([]);
+  });
+
+  it("preserves the actual method supplied for request-contract errors", () => {
+    const validator = (apiClientModule as unknown as { validatedRequest?: RequestValidator }).validatedRequest;
+
+    expect(validator).toBeTypeOf("function");
+    if (!validator) throw new Error("validatedRequest must be available for request-contract validation.");
+
+    let caught: unknown;
+    try {
+      validator(generationRequestSchema, { ...generationRequest, action: "" }, "PUT", "/campaigns/example/player-config");
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      phase: "request",
+      kind: "request_schema_mismatch",
+      method: "PUT",
+      path: "/campaigns/example/player-config"
+    });
   });
 
   it("returns validated action responses for the bodyless generation actions", async () => {
