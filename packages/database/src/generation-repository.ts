@@ -220,7 +220,10 @@ async function validateTurnInputMode(
   if (classification.resolved_mode !== request.resolvedInputMode) {
     throw new GenerationApplicationError("conflict", { reason: "classification_mode_mismatch" });
   }
-  await client.query("UPDATE turn_input_classifications SET consumed_at = now() WHERE id = $1", [classification.id]);
+  await client.query(
+    "UPDATE turn_input_classifications SET consumed_at = now() WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3",
+    [classification.id, ownerUserId, campaignId]
+  );
   return classification.id;
 }
 
@@ -350,6 +353,7 @@ export function createPostgresGenerationCommandRepository(
 
     async enqueueReplacement(scope, request) {
       return withTransaction(pool, async (client) => {
+        const requestFingerprint = sha256(stableStringify(request));
         const existing = await client.query<EnqueueRow & { recoveryMetadata: Record<string, unknown> }>(
           `SELECT id, status, result_turn_id AS "resultTurnId", action, operation_kind AS "operationKind",
                   replacement_turn_id AS "replacementTurnId", expected_turn_number AS "expectedTurnNumber",
@@ -360,7 +364,6 @@ export function createPostgresGenerationCommandRepository(
         );
         const existingJob = existing.rows[0];
         if (existingJob) {
-          const requestFingerprint = sha256(stableStringify(request));
           if (existingJob.action !== request.action || existingJob.operationKind !== "replace_latest"
               || existingJob.expectedTurnNumber !== request.expectedCurrentTurnNumber
               || (existingJob.recoveryMetadata.requestFingerprint && existingJob.recoveryMetadata.requestFingerprint !== requestFingerprint)) {
@@ -461,7 +464,7 @@ export function createPostgresGenerationCommandRepository(
             [scope.ownerUserId, scope.campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number,
               request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
               request.model || "", json(contextSnapshot), dependencies.promptProtocolVersion(promptSnapshot),
-              json({ requestFingerprint: sha256(stableStringify(request)) }), json(promptSnapshot), replacementTurnId,
+              json({ requestFingerprint }), json(promptSnapshot), replacementTurnId,
               baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt]
           );
           await client.query("RELEASE SAVEPOINT enqueue_replacement_insert");
@@ -470,6 +473,22 @@ export function createPostgresGenerationCommandRepository(
           if (sqlState(error) === "23505") {
             await client.query("ROLLBACK TO SAVEPOINT enqueue_replacement_insert");
             await client.query("RELEASE SAVEPOINT enqueue_replacement_insert");
+            const replay = await client.query<EnqueueRow & { recoveryMetadata: Record<string, unknown> }>(
+              `SELECT id, status, result_turn_id AS "resultTurnId", action, operation_kind AS "operationKind",
+                      replacement_turn_id AS "replacementTurnId", expected_turn_number AS "expectedTurnNumber",
+                      recovery_metadata AS "recoveryMetadata", created_at AS "createdAt"
+                 FROM generation_jobs
+                WHERE campaign_id = $1 AND idempotency_key = $2 AND owner_user_id = $3`,
+              [scope.campaignId, request.idempotencyKey, scope.ownerUserId]
+            );
+            const replayJob = replay.rows[0];
+            if (replayJob
+                && replayJob.action === request.action
+                && replayJob.operationKind === "replace_latest"
+                && replayJob.expectedTurnNumber === request.expectedCurrentTurnNumber
+                && replayJob.recoveryMetadata.requestFingerprint === requestFingerprint) {
+              return enqueueResult(replayJob, true);
+            }
             return activeGenerationConflict(client, scope.ownerUserId, scope.campaignId);
           }
           throw error;

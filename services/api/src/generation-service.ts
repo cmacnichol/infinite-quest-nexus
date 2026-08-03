@@ -91,6 +91,7 @@ import {
   safeTurnInput
 } from "./generation-command-compatibility.js";
 import type { PromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
+import type { GenerationResult } from "../../../packages/contracts/src/client-api.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import {
   runTurnGenerationPhase,
@@ -338,7 +339,7 @@ export async function getGenerationJob(pool: DatabasePool, jobId: string) {
   return generationCommandCompatibility(pool).getGenerationJob(jobId);
 }
 
-export async function getGenerationResult(pool: DatabasePool, jobId: string): Promise<any> {
+export async function getGenerationResult(pool: DatabasePool, jobId: string): Promise<GenerationResult> {
   return generationCommandCompatibility(pool).getGenerationResult(jobId);
 }
 

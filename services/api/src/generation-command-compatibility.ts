@@ -17,15 +17,13 @@ type LegacyGenerationError = Error & {
   details?: unknown;
 };
 
-type RequeuedGeneration = GenerationMutationResult & Readonly<{
+type GenerationLifecycleLogContext = Readonly<{
+  generationJobId: string;
   campaignId: string;
   providerProfileId: string;
   expectedTurnNumber: number;
-  attempts: number;
-}>;
-
-type CancelledGeneration = GenerationMutationResult & Readonly<{
-  campaignId: string;
+  operationKind: "append" | "replace_latest";
+  jobAttempt: number;
 }>;
 
 export type GenerationCommandCompatibilityDependencies = Readonly<{
@@ -50,6 +48,20 @@ function publicMutationResult(result: GenerationMutationResult): GenerationMutat
       operationKind: "replace_latest",
       replacementTurnId: result.replacementTurnId
     };
+}
+
+async function generationLifecycleLogContext(
+  pool: DatabasePool,
+  ownerUserId: string,
+  generationJobId: string
+): Promise<GenerationLifecycleLogContext | null> {
+  const result = await pool.query<GenerationLifecycleLogContext>(
+    `SELECT id AS "generationJobId", campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
+            expected_turn_number AS "expectedTurnNumber", operation_kind AS "operationKind", attempts AS "jobAttempt"
+       FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`,
+    [generationJobId, ownerUserId]
+  );
+  return result.rows[0] || null;
 }
 
 export function safeTurnInput(value: string): string {
@@ -152,27 +164,28 @@ export function createGenerationCommandCompatibility({
     getGenerationJob: (jobId: string) => withOwner((ownerUserId) => repository.getJob({ ownerUserId, jobId })),
     getGenerationResult: (jobId: string) => withOwner((ownerUserId) => repository.getResult({ ownerUserId, jobId })),
     retryGeneration: async (jobId: string) => {
-      const requeued = await withOwner((ownerUserId) => repository.retry({ ownerUserId, jobId })) as RequeuedGeneration;
-      logger.info({
-        event: "turn_generation_requeued",
-        generationJobId: requeued.id,
-        campaignId: requeued.campaignId,
-        providerProfileId: requeued.providerProfileId,
-        expectedTurnNumber: requeued.expectedTurnNumber,
-        operationKind: requeued.operationKind,
-        jobAttempt: requeued.attempts
+      return withOwner(async (ownerUserId) => {
+        const requeued = await repository.retry({ ownerUserId, jobId });
+        const context = await generationLifecycleLogContext(pool, ownerUserId, requeued.id);
+        if (context) logger.info({
+          event: "turn_generation_requeued",
+          ...context
+        });
+        return publicMutationResult(requeued);
       });
-      return publicMutationResult(requeued);
     },
     cancelGeneration: async (jobId: string) => {
-      const cancelled = await withOwner((ownerUserId) => repository.cancel({ ownerUserId, jobId })) as CancelledGeneration;
-      logger.info({
-        event: "turn_generation_cancelled",
-        generationJobId: cancelled.id,
-        campaignId: cancelled.campaignId,
-        operationKind: cancelled.operationKind
+      return withOwner(async (ownerUserId) => {
+        const cancelled = await repository.cancel({ ownerUserId, jobId });
+        const context = await generationLifecycleLogContext(pool, ownerUserId, cancelled.id);
+        if (context) logger.info({
+          event: "turn_generation_cancelled",
+          generationJobId: context.generationJobId,
+          campaignId: context.campaignId,
+          operationKind: context.operationKind
+        });
+        return publicMutationResult(cancelled);
       });
-      return publicMutationResult(cancelled);
     },
     discardGeneration: (jobId: string) => withOwner((ownerUserId) => repository.discard({ ownerUserId, jobId }))
   };

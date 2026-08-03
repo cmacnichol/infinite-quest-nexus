@@ -455,6 +455,15 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       reportedCost: null
     }] };
 
+    if (sql.startsWith("SELECT id AS \"generationJobId\", campaign_id AS \"campaignId\"")) return { rows: [{
+      generationJobId: JOB_ID,
+      campaignId: CAMPAIGN_ID,
+      providerProfileId: PROVIDER_ID,
+      expectedTurnNumber: 3,
+      operationKind: "append",
+      jobAttempt: 1
+    }] };
+
     if (sql.startsWith("WITH source AS ( SELECT id, status, campaign_id AS \"campaignId\"")) return { rows: [{
       id: JOB_ID,
       status: "queued",

@@ -28,6 +28,21 @@ const replacementRequest = {
   expectedCurrentTurnNumber: 3
 } as GenerationRetryLatestRequest;
 
+function lifecyclePool() {
+  return {
+    query: vi.fn(async () => ({
+      rows: [{
+        generationJobId: jobId,
+        campaignId,
+        providerProfileId: "44444444-4444-4444-8444-444444444444",
+        expectedTurnNumber: 4,
+        operationKind: "append",
+        jobAttempt: 2
+      }]
+    }))
+  } as unknown as DatabasePool;
+}
+
 function commandRepository(calls: Array<{ method: string; scope: unknown; request?: unknown }>): GenerationCommandRepository {
   const enqueue = {
     id: jobId,
@@ -53,7 +68,7 @@ function commandRepository(calls: Array<{ method: string; scope: unknown; reques
 describe("generation command compatibility", () => {
   test("resolves the server owner and preserves all seven legacy delegate shapes", async () => {
     const calls: Array<{ method: string; scope: unknown; request?: unknown }> = [];
-    const pool = {} as DatabasePool;
+    const pool = lifecyclePool();
     const compatibility = createGenerationCommandCompatibility({
       pool,
       repository: commandRepository(calls),
@@ -139,21 +154,17 @@ describe("generation command compatibility", () => {
       id: jobId,
       status: "queued" as const,
       operationKind: "append" as const,
-      replacementTurnId: null,
-      campaignId,
-      providerProfileId: "44444444-4444-4444-8444-444444444444",
-      expectedTurnNumber: 4,
-      attempts: 2
+      replacementTurnId: null
     });
     repository.cancel = async () => ({
       id: jobId,
       status: "cancelled" as const,
       operationKind: "append" as const,
-      replacementTurnId: null,
-      campaignId
+      replacementTurnId: null
     });
+    const pool = lifecyclePool();
     const compatibility = createGenerationCommandCompatibility({
-      pool: {} as DatabasePool,
+      pool,
       repository,
       initialOwnerId: async () => ownerUserId
     });
@@ -190,6 +201,7 @@ describe("generation command compatibility", () => {
       campaignId,
       operationKind: "append"
     });
+    expect(pool.query).toHaveBeenCalledTimes(2);
     infoLog.mockRestore();
   });
 

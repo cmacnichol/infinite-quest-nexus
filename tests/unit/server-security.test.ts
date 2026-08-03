@@ -808,6 +808,14 @@ describe("API server security and CORS headers", () => {
     const mockPool = {
       query: async (query: string) => {
         if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
+        if (query.startsWith("SELECT id AS \"generationJobId\", campaign_id AS \"campaignId\"")) return { rows: [{
+          generationJobId: jobId,
+          campaignId: cancelledJob.campaignId,
+          providerProfileId: "77777777-7777-4777-8777-777777777777",
+          expectedTurnNumber: 3,
+          operationKind: "append",
+          jobAttempt: 1
+        }] };
         throw new Error(`Unexpected query: ${query}`);
       },
       connect: async () => mockClient

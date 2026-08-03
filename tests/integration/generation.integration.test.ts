@@ -1338,7 +1338,7 @@ integration("durable Story Engine integration", () => {
     await runGenerationJob(pool, "story-worker-guidance", 30, credentialSecret);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
     const turnResult = await getGenerationResult(pool, job.id);
-    expect(turnResult.mechanics.roll).toMatchObject({ statId: "test_stat", target: 99 });
+    expect(turnResult.mechanics).toMatchObject({ roll: { statId: "test_stat", target: 99 } });
     const storyRequest = requests.slice(requestOffset).find((request) => JSON.stringify(request).includes("fiction writer for Infinite Quest"));
     const storyUserMessage = storyRequest?.messages?.find((message: any) => message.role === "user");
     const storyPayload = JSON.parse(storyUserMessage?.content || "{}");
@@ -1371,10 +1371,24 @@ integration("durable Story Engine integration", () => {
     const job = await queue(imported.campaignId);
     await runGenerationJob(pool, "story-worker-triggers", 30, credentialSecret);
     const result = await getGenerationResult(pool, job.id);
-    expect(result.mechanics.beforeEvents).toHaveLength(1);
-    expect(result.mechanics.afterEvents).toHaveLength(1);
-    expect(result.stateSnapshot.pendingEventTriggers).toHaveLength(1);
-    expect(result.stateSnapshot.eventTriggers.every((trigger: any) => trigger.triggeredCount === 1)).toBe(true);
+    const beforeEvents = result.mechanics?.beforeEvents;
+    const afterEvents = result.mechanics?.afterEvents;
+    const pendingEventTriggers = result.stateSnapshot.pendingEventTriggers;
+    const eventTriggers = result.stateSnapshot.eventTriggers;
+    expect(Array.isArray(beforeEvents)).toBe(true);
+    expect(Array.isArray(afterEvents)).toBe(true);
+    expect(Array.isArray(pendingEventTriggers)).toBe(true);
+    expect(Array.isArray(eventTriggers)).toBe(true);
+    if (!Array.isArray(beforeEvents) || !Array.isArray(afterEvents)
+        || !Array.isArray(pendingEventTriggers) || !Array.isArray(eventTriggers)) {
+      throw new Error("Expected completed generation result to include trigger arrays.");
+    }
+    expect(beforeEvents).toHaveLength(1);
+    expect(afterEvents).toHaveLength(1);
+    expect(pendingEventTriggers).toHaveLength(1);
+    expect(eventTriggers.every((trigger) => (
+      typeof trigger === "object" && trigger !== null && "triggeredCount" in trigger && trigger.triggeredCount === 1
+    ))).toBe(true);
     const storyRequest = requests.slice(requestOffset).find((request) => JSON.stringify(request).includes("fiction writer for Infinite Quest"));
     expect(JSON.stringify(storyRequest)).toContain("Marker Four becomes active");
     expect(JSON.stringify(storyRequest)).not.toContain("activation_reason");
@@ -2058,7 +2072,7 @@ integration("durable Story Engine integration", () => {
     replies.push({ content: validStory("The same resolved attempt now returns a complete scene.") });
     await runGenerationJob(pool, "story-worker-reroll-b", 30, credentialSecret);
     const result = await getGenerationResult(pool, job.id);
-    expect(result.mechanics.roll).toEqual(persistedRoll);
+    expect(result.mechanics).toMatchObject({ roll: persistedRoll });
     expect(requests.length - requestCount).toBe(1);
   });
 });
