@@ -22,13 +22,14 @@ function snapshot(overrides: Partial<GenerationStreamSnapshot> = {}): Generation
     status: "queued",
     action: "Open the gate",
     operationKind: "append",
+    replacementTurnId: null,
     attempts: 1,
     partialNarration: null,
     errorCode: null,
     errorMessage: null,
     resultTurnId: null,
     ...overrides
-  };
+  } as GenerationStreamSnapshot;
 }
 
 function signal(initiallyAborted = false): AbortSignalLike & {

@@ -5,6 +5,7 @@ import {
   providerProfileUpdateSchema,
   providerTextRequestSchema,
   generationRequestSchema,
+  generationStreamSnapshotSchema,
   illustrationConfigSchema,
   illustrationGenerationRequestSchema,
   illustrationSegmentRequestSchema,
@@ -15,6 +16,28 @@ import {
 } from "../../packages/contracts/src/generation.js";
 
 describe("generation contracts", () => {
+  it("requires operation-matched replacement provenance in stream snapshots", () => {
+    const common = {
+      id: "11111111-1111-4111-8111-111111111111",
+      campaignId: "22222222-2222-4222-8222-222222222222",
+      expectedTurnNumber: 2,
+      status: "generating" as const,
+      action: "Open the gate",
+      attempts: 1,
+      partialNarration: null,
+      errorCode: null,
+      errorMessage: null,
+      resultTurnId: null
+    };
+
+    expect(generationStreamSnapshotSchema.parse({ ...common, operationKind: "append", replacementTurnId: null }))
+      .toMatchObject({ operationKind: "append", replacementTurnId: null });
+    expect(generationStreamSnapshotSchema.parse({ ...common, operationKind: "replace_latest", replacementTurnId: "33333333-3333-4333-8333-333333333333" }))
+      .toMatchObject({ operationKind: "replace_latest", replacementTurnId: "33333333-3333-4333-8333-333333333333" });
+    expect(generationStreamSnapshotSchema.safeParse({ ...common, operationKind: "append", replacementTurnId: "33333333-3333-4333-8333-333333333333" }).success).toBe(false);
+    expect(generationStreamSnapshotSchema.safeParse({ ...common, operationKind: "replace_latest", replacementTurnId: null }).success).toBe(false);
+  });
+
   it("accepts and strips a legacy illustration-segment idempotency key", () => {
     expect(illustrationSegmentRequestSchema.parse({
       idempotencyKey: "legacy-segment-request-key"

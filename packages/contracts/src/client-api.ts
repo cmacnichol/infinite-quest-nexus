@@ -178,15 +178,34 @@ const campaignSyncCampaignSchema = z.object({
   status: z.enum(["active", "archived"])
 });
 
-const pendingGenerationSchema = z.object({
+const activeGenerationStatusSchema = generationStatusSchema.extract([
+  "queued",
+  "replacement_queued",
+  "assessing",
+  "generating",
+  "validating",
+  "committing"
+]);
+
+const pendingGenerationBaseSchema = z.object({
   id: z.uuid(),
-  status: generationStatusSchema,
+  status: activeGenerationStatusSchema,
   action: z.string(),
-  operationKind: operationKindSchema,
   expectedTurnNumber: z.number().int().min(1),
   createdAt: apiTimestampSchema,
   updatedAt: apiTimestampSchema
 });
+
+const pendingGenerationSchema = z.discriminatedUnion("operationKind", [
+  pendingGenerationBaseSchema.extend({
+    operationKind: z.literal("append"),
+    replacementTurnId: z.null()
+  }),
+  pendingGenerationBaseSchema.extend({
+    operationKind: z.literal("replace_latest"),
+    replacementTurnId: z.uuid()
+  })
+]);
 
 const generationRecoveryBaseSchema = z.object({
   id: z.uuid(),
@@ -282,18 +301,27 @@ export const campaignSyncStatusSchema = z.discriminatedUnion("turnWindowMode", [
   })
 ]);
 
-export const generationEnqueueResponseSchema = z.object({
+const generationEnqueueResponseBaseSchema = z.object({
   id: z.uuid(),
   status: generationStatusSchema,
   duplicate: z.boolean(),
   resultTurnId: z.uuid().nullable().optional(),
   action: z.string().optional(),
-  operationKind: operationKindSchema.optional(),
   expectedTurnNumber: z.number().int().min(1).optional(),
-  replacementTurnId: z.uuid().nullable().optional(),
   createdAt: apiTimestampSchema.optional(),
   recoveryMetadata: z.record(z.string(), z.unknown()).optional()
 });
+
+export const generationEnqueueResponseSchema = z.discriminatedUnion("operationKind", [
+  generationEnqueueResponseBaseSchema.extend({
+    operationKind: z.literal("append"),
+    replacementTurnId: z.null()
+  }),
+  generationEnqueueResponseBaseSchema.extend({
+    operationKind: z.literal("replace_latest"),
+    replacementTurnId: z.uuid()
+  })
+]);
 
 export { generationJobSnapshotSchema, generationStreamSnapshotSchema };
 
@@ -327,13 +355,22 @@ const generationActionStatusSchema = generationStatusSchema.extract([
   "discarded"
 ]);
 
-export const generationActionResponseSchema = generationJobStatusSchema.pick({
-  id: true,
-  campaignId: true,
-  operationKind: true
-}).partial({ campaignId: true, operationKind: true }).extend({
+const generationActionResponseBaseSchema = generationJobStatusSchema.pick({
+  id: true
+}).extend({
   status: generationActionStatusSchema
 });
+
+export const generationActionResponseSchema = z.discriminatedUnion("operationKind", [
+  generationActionResponseBaseSchema.extend({
+    operationKind: z.literal("append"),
+    replacementTurnId: z.null()
+  }),
+  generationActionResponseBaseSchema.extend({
+    operationKind: z.literal("replace_latest"),
+    replacementTurnId: z.uuid()
+  })
+]);
 
 export type CampaignSummary = z.infer<typeof campaignSummarySchema>;
 export type CampaignListResponse = z.infer<typeof campaignListResponseSchema>;

@@ -360,7 +360,7 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
   const ownerUserId = await initialOwnerId(pool);
   return withTransaction(pool, async (client) => {
     const requestFingerprint = sha256(stableStringify(request));
-    const existing = await client.query(`SELECT id, status, result_turn_id AS "resultTurnId", action, operation_kind AS "operationKind", recovery_metadata AS "recoveryMetadata" FROM generation_jobs WHERE campaign_id = $1 AND idempotency_key = $2 AND owner_user_id = $3`, [campaignId, request.idempotencyKey, ownerUserId]);
+    const existing = await client.query(`SELECT id, status, result_turn_id AS "resultTurnId", action, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", expected_turn_number AS "expectedTurnNumber", recovery_metadata AS "recoveryMetadata" FROM generation_jobs WHERE campaign_id = $1 AND idempotency_key = $2 AND owner_user_id = $3`, [campaignId, request.idempotencyKey, ownerUserId]);
     if (existing.rows[0]) {
       const savedFingerprint = existing.rows[0].recoveryMetadata?.requestFingerprint;
       if (existing.rows[0].action !== request.action || existing.rows[0].operationKind !== "append"
@@ -391,7 +391,7 @@ export async function enqueueGeneration(pool: DatabasePool, campaignId: string, 
            action, requested_input_mode, resolved_input_mode, input_mode_source, turn_input_classification_id,
            requested_model, context_options, prompt_protocol_version, recovery_metadata, prompt_snapshot
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-         RETURNING id, status, expected_turn_number AS "expectedTurnNumber", created_at AS "createdAt"`,
+         RETURNING id, status, action, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", expected_turn_number AS "expectedTurnNumber", created_at AS "createdAt"`,
         [ownerUserId, campaignId, providerProfileId, request.idempotencyKey, row.active_turn_number + 1,
           request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
           request.model || "", json(contextSnapshot), promptProtocolVersion(promptSnapshot), json({ requestFingerprint }), json(promptSnapshot)]
@@ -427,10 +427,11 @@ export async function enqueueLatestReplacement(pool: DatabasePool, campaignId: s
       action: string;
       operationKind: string;
       expectedTurnNumber: number;
+      replacementTurnId: string | null;
       recoveryMetadata: Record<string, unknown>;
     }>(
       `SELECT id, status, result_turn_id AS "resultTurnId", action,
-              operation_kind AS "operationKind", expected_turn_number AS "expectedTurnNumber",
+              operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", expected_turn_number AS "expectedTurnNumber",
               recovery_metadata AS "recoveryMetadata"
          FROM generation_jobs
         WHERE campaign_id = $1 AND idempotency_key = $2 AND owner_user_id = $3`,
@@ -546,7 +547,7 @@ export async function enqueueLatestReplacement(pool: DatabasePool, campaignId: s
            requested_model, context_options, prompt_protocol_version, recovery_metadata, prompt_snapshot,
            operation_kind, replacement_turn_id, base_turn_number, base_state_private, base_scratchpad_safe_for_prompt, status
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'replace_latest',$16,$17,$18,$19,'replacement_queued')
-         RETURNING id, status, expected_turn_number AS "expectedTurnNumber",
+        RETURNING id, status, action, expected_turn_number AS "expectedTurnNumber",
                    operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", created_at AS "createdAt"`,
         [ownerUserId, campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number,
           request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
@@ -635,7 +636,7 @@ export async function retryGeneration(pool: DatabasePool, jobId: string) {
             lease_owner = NULL, lease_expires_at = NULL,
             error_code = NULL, error_message = NULL, prompt_protocol_version = $3, updated_at = now()
       WHERE id = $1 AND owner_user_id = $2 AND status IN ('recoverable', 'failed')
-      RETURNING id, status, campaign_id, provider_profile_id, expected_turn_number, operation_kind, attempts`, [jobId, ownerUserId, STORY_PROMPT_PROTOCOL_VERSION]
+      RETURNING id, status, campaign_id, provider_profile_id, expected_turn_number, operation_kind, replacement_turn_id AS "replacementTurnId", attempts`, [jobId, ownerUserId, STORY_PROMPT_PROTOCOL_VERSION]
   );
   const requeued = result.rows[0];
   if (!requeued) throw Object.assign(new Error("Only recoverable or failed generation jobs can be retried."), { statusCode: 409 });
@@ -643,7 +644,7 @@ export async function retryGeneration(pool: DatabasePool, jobId: string) {
     event: "turn_generation_requeued",
     ...generationLogContext(requeued)
   });
-  return { id: requeued.id, status: requeued.status };
+  return { id: requeued.id, status: requeued.status, operationKind: requeued.operation_kind, replacementTurnId: requeued.replacementTurnId };
 }
 
 export async function cancelGeneration(pool: DatabasePool, jobId: string): Promise<{
@@ -665,7 +666,7 @@ export async function cancelGeneration(pool: DatabasePool, jobId: string): Promi
               error_code = 'cancelled_by_player', error_message = 'Cancelled by player.', updated_at = now()
         WHERE id = $1 AND owner_user_id = $2
           AND status IN ('queued', 'replacement_queued', 'assessing', 'generating', 'validating', 'committing')
-        RETURNING id, status, campaign_id AS "campaignId", operation_kind AS "operationKind"`,
+        RETURNING id, status, campaign_id AS "campaignId", operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
       [jobId, ownerUserId]
     );
     const job = result.rows[0];
@@ -675,8 +676,9 @@ export async function cancelGeneration(pool: DatabasePool, jobId: string): Promi
         status: string;
         campaignId: string;
         operationKind: "append" | "replace_latest";
+        replacementTurnId: string | null;
       }>(
-        `SELECT id, status, campaign_id AS "campaignId", operation_kind AS "operationKind"
+        `SELECT id, status, campaign_id AS "campaignId", operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"
            FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
         [jobId, ownerUserId]
       );
@@ -687,7 +689,8 @@ export async function cancelGeneration(pool: DatabasePool, jobId: string): Promi
           id: existingCancelled.id,
           status: "cancelled" as const,
           campaignId: existingCancelled.campaignId,
-          operationKind: existingCancelled.operationKind
+          operationKind: existingCancelled.operationKind,
+          replacementTurnId: existingCancelled.replacementTurnId
         };
       }
       throw Object.assign(new Error("Only active generation jobs can be cancelled."), { statusCode: 409 });
@@ -783,7 +786,7 @@ export async function discardGeneration(pool: DatabasePool, jobId: string) {
     `UPDATE generation_jobs SET status = 'discarded', lease_owner = NULL, lease_expires_at = NULL,
             partial_output = NULL, updated_at = now()
       WHERE id = $1 AND owner_user_id = $2 AND status IN ('recoverable', 'failed')
-      RETURNING id, status, campaign_id AS "campaignId", operation_kind AS "operationKind"`,
+      RETURNING id, status, campaign_id AS "campaignId", operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
     [jobId, ownerUserId]
   );
   if (!result.rows[0]) throw Object.assign(new Error("Only recoverable or failed generation jobs can be discarded."), { statusCode: 409 });

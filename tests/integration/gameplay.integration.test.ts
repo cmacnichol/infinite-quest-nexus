@@ -509,6 +509,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(pending.json().pendingGeneration).toMatchObject({
       id: queued.json().id,
       operationKind: "replace_latest",
+      replacementTurnId: originalLatest.id,
       action: payload.action,
       expectedTurnNumber: beforeTurns.length
     });

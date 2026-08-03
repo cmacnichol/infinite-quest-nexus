@@ -71,6 +71,8 @@ export type GenerationSubmissionInput =
 export interface GenerationRun {
   readonly campaignId: string;
   readonly jobId: string;
+  readonly operationKind: GenerationStreamSnapshot["operationKind"];
+  readonly replacementTurnId: GenerationStreamSnapshot["replacementTurnId"];
   watch(signal: AbortSignalLike): AsyncIterable<GenerationEvent>;
   retryGeneration(signal: AbortSignalLike): AsyncIterable<GenerationEvent>;
   cancelGeneration(): Promise<GenerationActionResponse>;

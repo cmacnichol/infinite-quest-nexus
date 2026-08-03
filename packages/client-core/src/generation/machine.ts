@@ -30,6 +30,7 @@ function isSameSnapshot(left: GenerationStreamSnapshot, right: GenerationStreamS
     && left.status === right.status
     && left.action === right.action
     && left.operationKind === right.operationKind
+    && left.replacementTurnId === right.replacementTurnId
     && left.attempts === right.attempts
     && left.partialNarration === right.partialNarration
     && left.errorCode === right.errorCode

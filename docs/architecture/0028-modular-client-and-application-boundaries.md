@@ -106,27 +106,31 @@ the enforcement milestone makes those budgets blocking.
 The client has two derived, client-safe generation responses. The polling
 response omits raw `partialOutput` but retains durable metadata, including
 timestamps. The SSE response is an explicit allowlist of `id`, `campaignId`,
-`expectedTurnNumber`, `status`, `action`, `operationKind`, `attempts`,
-`partialNarration`, `errorMessage`, `errorCode`, and `resultTurnId`. `attempts`
-is the monotonic retry-cycle marker for future stream reconciliation; timestamps
-are deliberately absent because worker lease renewal changes `updatedAt` without
-changing client-visible progress.
+`expectedTurnNumber`, `status`, `action`, `operationKind`, `replacementTurnId`,
+`attempts`, `partialNarration`, `errorMessage`, `errorCode`, and `resultTurnId`.
+Both projections discriminate operation provenance: `append` always has
+`replacementTurnId: null`, while `replace_latest` always has the immutable UUID
+of the replaced turn. `attempts` is the monotonic retry-cycle marker for future
+stream reconciliation; timestamps are deliberately absent because worker lease
+renewal changes `updatedAt` without changing client-visible progress. Recovery
+metadata and recovery-only raw errors are not stream fields.
 
 `pnpm exec tsx scripts/benchmark-client-contracts.ts` uses a deterministic
 2,000-turn response, five warm-up parses, and 30 measured parses. The Task 2a
-run on Node 24.18.0 retained the median of three series: `turnListResponseSchema`
-p50 1.774 ms and p95 3.457 ms. It measures validation cost only, not
+run on Node 24.18.0 retained the median of three Task 7P series:
+`turnListResponseSchema` p50 1.480 ms and p95 2.281 ms. It measures validation cost only, not
 database-query or full-route latency; B4 must compare its bounded route against
 this explicit pre-pagination amendment rather than charge it to the 10% C0
 budget.
 
 With the same fixture, the pre-C1 seven-field JSON payload is 229 bytes, the C1
-full client-safe stream JSON payload is 492 bytes, and the Task 2a stream JSON
-payload is 326 bytes. These are serialized JSON payload bytes, not complete SSE
+full client-safe polling JSON payload is 517 bytes, and the Task 7P SSE stream JSON
+payload is 351 bytes. These are serialized JSON payload bytes, not complete SSE
 wire frames. The benchmark's deterministic `initial -> lease renewal only -> completed`
 sequence emits two frames for the pre-C1 hand-built projection, three frames for
 the C1 full client-safe projection, and two frames for the Task 2a stream
-projection. For a generating row, a lease-only `updatedAt` renewal produces the
+projection. `scripts/benchmark-client-contracts.ts` validates its exact SSE
+allowlist at runtime and its unit test fails if that contract drifts. For a generating row, a lease-only `updatedAt` renewal produces the
 same Task 2a JSON and therefore no extra SSE frame; a status transition to
 completed produces the second frame. B2 must preserve that dedupe behavior.
 

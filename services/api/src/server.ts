@@ -696,6 +696,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
               pending.requested_input_mode AS "pendingRequestedInputMode",
               pending.resolved_input_mode AS "pendingResolvedInputMode", pending.input_mode_source AS "pendingInputModeSource",
               pending.expected_turn_number AS "pendingGenerationExpectedTurnNumber",
+              pending.replacement_turn_id AS "pendingGenerationReplacementTurnId",
               pending.created_at AS "pendingGenerationCreatedAt", pending.updated_at AS "pendingGenerationUpdatedAt",
               recovery.id AS "recoveryId", recovery.status AS "recoveryStatus", recovery.operation_kind AS "recoveryOperationKind",
               recovery.expected_turn_number AS "recoveryExpectedTurnNumber", recovery.attempts AS "recoveryAttempts",
@@ -706,7 +707,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
          JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
          LEFT JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
          LEFT JOIN LATERAL (
-           SELECT id, status, action, operation_kind, requested_input_mode, resolved_input_mode, input_mode_source,
+           SELECT id, status, action, operation_kind, replacement_turn_id, requested_input_mode, resolved_input_mode, input_mode_source,
                   expected_turn_number, created_at, updated_at
              FROM generation_jobs
             WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
@@ -778,6 +779,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       status: row.pendingGenerationStatus,
       action: row.pendingGenerationAction,
       operationKind: row.pendingGenerationOperationKind,
+      replacementTurnId: row.pendingGenerationReplacementTurnId,
       expectedTurnNumber: row.pendingGenerationExpectedTurnNumber,
       createdAt: row.pendingGenerationCreatedAt,
       updatedAt: row.pendingGenerationUpdatedAt

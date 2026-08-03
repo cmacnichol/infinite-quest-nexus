@@ -196,7 +196,7 @@ describe("pending generation submission storage", () => {
       api: {
         enqueue: async () => {
           enqueueCalls += 1;
-          return { id: jobId, status: "queued", duplicate: false };
+          return { id: jobId, status: "queued", duplicate: false, operationKind: "append", replacementTurnId: null };
         },
         enqueueReplacement: async () => {
           throw new Error("Unexpected replacement enqueue.");
@@ -225,7 +225,7 @@ describe("pending generation submission storage", () => {
     const store = createPendingSubmissionStore(storage);
     const coordinator = createGenerationSubmissionCoordinator({
       api: {
-        enqueue: async () => ({ id: jobId, status: "queued", duplicate: false }),
+        enqueue: async () => ({ id: jobId, status: "queued", duplicate: false, operationKind: "append", replacementTurnId: null }),
         enqueueReplacement: async () => {
           throw new Error("Unexpected replacement enqueue.");
         }

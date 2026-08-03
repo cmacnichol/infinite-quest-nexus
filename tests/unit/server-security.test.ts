@@ -783,7 +783,8 @@ describe("API server security and CORS headers", () => {
       id: jobId,
       status: "cancelled" as const,
       campaignId: "88888888-8888-4888-8888-888888888888",
-      operationKind: "append" as const
+      operationKind: "append" as const,
+      replacementTurnId: null
     };
     const transactionControls: string[] = [];
     const mockClient = {
@@ -817,7 +818,12 @@ describe("API server security and CORS headers", () => {
       const response = await app.inject({ method: "POST", url: `/api/v1/generation-jobs/${jobId}/cancel` });
 
       expect(response.statusCode).toBe(202);
-      expect(response.json()).toMatchObject(cancelledJob);
+      expect(response.json()).toMatchObject({
+        id: jobId,
+        status: "cancelled",
+        operationKind: "append",
+        replacementTurnId: null
+      });
       expect(transactionControls).toEqual(["BEGIN", "COMMIT"]);
     } finally {
       await app.close();

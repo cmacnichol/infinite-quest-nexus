@@ -37,6 +37,7 @@ function snapshot(overrides: Partial<GenerationJobSnapshot> = {}): GenerationJob
     resolvedInputMode: "action",
     inputModeSource: "explicit",
     operationKind: "append",
+    replacementTurnId: null,
     attempts: 1,
     partialNarration: null,
     errorCode: null,
@@ -46,7 +47,7 @@ function snapshot(overrides: Partial<GenerationJobSnapshot> = {}): GenerationJob
     updatedAt: "2026-08-02T00:00:01.000Z",
     completedAt: null,
     ...overrides
-  };
+  } as GenerationJobSnapshot;
 }
 
 function streamSnapshot(overrides: Partial<GenerationStreamSnapshot> = {}): GenerationStreamSnapshot {
@@ -58,12 +59,13 @@ function streamSnapshot(overrides: Partial<GenerationStreamSnapshot> = {}): Gene
     status: full.status,
     action: full.action,
     operationKind: full.operationKind,
+    replacementTurnId: full.replacementTurnId,
     attempts: full.attempts,
     partialNarration: full.partialNarration,
     errorCode: full.errorCode,
     errorMessage: full.errorMessage,
     resultTurnId: full.resultTurnId
-  };
+  } as GenerationStreamSnapshot;
 }
 
 function signal(initiallyAborted = false): AbortSignalLike & {
@@ -253,7 +255,9 @@ describe("browser generation fallback source", () => {
 
   it("closes lost SSE before one degradation event and immediate polling reconciliation", async () => {
     const events = eventSources();
-    const api = apiQueue(events.sources, snapshot(), snapshot({ status: "completed" }));
+    const replacementTurnId = "33333333-3333-4333-8333-333333333333";
+    const replacement = snapshot({ operationKind: "replace_latest", replacementTurnId });
+    const api = apiQueue(events.sources, replacement, { ...replacement, status: "completed" });
     const source = createBrowserGenerationSource(options({ api, eventSourceFactory: events.factory }));
     const iterator = source.watch(jobId, signal())[Symbol.asyncIterator]();
     const degraded = iterator.next();
@@ -266,11 +270,11 @@ describe("browser generation fallback source", () => {
     });
     await expect(iterator.next()).resolves.toEqual({
       done: false,
-      value: { kind: "snapshot", snapshot: streamSnapshot() }
+      value: { kind: "snapshot", snapshot: streamSnapshot({ operationKind: "replace_latest", replacementTurnId }) }
     });
     await expect(iterator.next()).resolves.toEqual({
       done: false,
-      value: { kind: "snapshot", snapshot: streamSnapshot({ status: "completed" }) }
+      value: { kind: "snapshot", snapshot: streamSnapshot({ operationKind: "replace_latest", replacementTurnId, status: "completed" }) }
     });
     await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
     expect(events.sources).toHaveLength(1);
@@ -320,13 +324,13 @@ describe("browser generation fallback source", () => {
     };
     const result = { id: jobId, status: "completed" } as GenerationResult;
     const workflowApi: GenerationApiPort = {
-      enqueue: async () => ({ id: jobId, status: "queued", duplicate: false }),
-      enqueueReplacement: async () => ({ id: jobId, status: "replacement_queued", duplicate: false }),
+      enqueue: async () => ({ id: jobId, status: "queued", duplicate: false, operationKind: "append", replacementTurnId: null }),
+      enqueueReplacement: async () => ({ id: jobId, status: "replacement_queued", duplicate: false, operationKind: "replace_latest", replacementTurnId: "33333333-3333-4333-8333-333333333333" }),
       syncStatus: async () => ({ pendingGeneration: null } as CampaignSyncStatus),
       result: async () => result,
-      retry: async () => ({ id: jobId, status: "queued" } as GenerationActionResponse),
-      cancel: async () => ({ id: jobId, status: "cancelled" } as GenerationActionResponse),
-      discard: async () => ({ id: jobId, status: "discarded" } as GenerationActionResponse)
+      retry: async () => ({ id: jobId, status: "queued", operationKind: "append", replacementTurnId: null } as GenerationActionResponse),
+      cancel: async () => ({ id: jobId, status: "cancelled", operationKind: "append", replacementTurnId: null } as GenerationActionResponse),
+      discard: async () => ({ id: jobId, status: "discarded", operationKind: "append", replacementTurnId: null } as GenerationActionResponse)
     };
     const workflow = createGenerationWorkflow({
       api: workflowApi,
@@ -365,16 +369,16 @@ describe("browser generation fallback source", () => {
       clear: () => undefined
     };
     const result = { id: jobId, status: "completed" } as GenerationResult;
-    const retry = vi.fn(async () => ({ id: jobId, status: "queued" } as GenerationActionResponse));
+    const retry = vi.fn(async () => ({ id: jobId, status: "queued", operationKind: "append", replacementTurnId: null } as GenerationActionResponse));
     const workflow = createGenerationWorkflow({
       api: {
-        enqueue: async () => ({ id: jobId, status: "queued", duplicate: false }),
-        enqueueReplacement: async () => ({ id: jobId, status: "replacement_queued", duplicate: false }),
+        enqueue: async () => ({ id: jobId, status: "queued", duplicate: false, operationKind: "append", replacementTurnId: null }),
+        enqueueReplacement: async () => ({ id: jobId, status: "replacement_queued", duplicate: false, operationKind: "replace_latest", replacementTurnId: "33333333-3333-4333-8333-333333333333" }),
         syncStatus: async () => ({ pendingGeneration: null } as CampaignSyncStatus),
         result: async () => result,
         retry,
-        cancel: async () => ({ id: jobId, status: "cancelled" } as GenerationActionResponse),
-        discard: async () => ({ id: jobId, status: "discarded" } as GenerationActionResponse)
+        cancel: async () => ({ id: jobId, status: "cancelled", operationKind: "append", replacementTurnId: null } as GenerationActionResponse),
+        discard: async () => ({ id: jobId, status: "discarded", operationKind: "append", replacementTurnId: null } as GenerationActionResponse)
       },
       source,
       clock: { now: () => 1_000 },

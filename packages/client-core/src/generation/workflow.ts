@@ -20,13 +20,13 @@ export function createGenerationWorkflow(dependencies: GenerationWorkflowDepende
   return {
     async submit(campaignId, submission) {
       const response = await submissions.submit(campaignId, submission);
-      return createRun(campaignId, response.id, dependencies);
+      return createRun(campaignId, response.id, response.operationKind, response.replacementTurnId, dependencies);
     },
     async resume(campaignId) {
       const sync = await dependencies.api.syncStatus(campaignId);
       if (sync.pendingGeneration) {
         dependencies.pendingSubmissions.clear(campaignId);
-        return createRun(campaignId, sync.pendingGeneration.id, dependencies);
+        return createRun(campaignId, sync.pendingGeneration.id, sync.pendingGeneration.operationKind, sync.pendingGeneration.replacementTurnId, dependencies);
       }
       const recovery = sync.generationRecovery;
       const completedTurnAlreadyLoaded = recovery?.status === "completed"
@@ -34,13 +34,16 @@ export function createGenerationWorkflow(dependencies: GenerationWorkflowDepende
         && sync.turns?.turns.some((turn) => turn.id === recovery.resultTurnId);
       if (recovery && !completedTurnAlreadyLoaded) {
         dependencies.pendingSubmissions.clear(campaignId);
-        return createRun(campaignId, recovery.id, dependencies);
+        return createRun(campaignId, recovery.id, recovery.operationKind, recovery.replacementTurnId, dependencies);
       }
       const submission = submissions.load(campaignId);
       if (!submission) return null;
-      if (submission.jobId) return createRun(campaignId, submission.jobId, dependencies);
+      if (submission.jobId) {
+        if (submission.operationKind !== "append") return null;
+        return createRun(campaignId, submission.jobId, "append", null, dependencies);
+      }
       const response = await submissions.replay(campaignId, submission);
-      return createRun(campaignId, response.id, dependencies);
+      return createRun(campaignId, response.id, response.operationKind, response.replacementTurnId, dependencies);
     }
   };
 }
@@ -48,6 +51,8 @@ export function createGenerationWorkflow(dependencies: GenerationWorkflowDepende
 function createRun(
   campaignId: string,
   jobId: string,
+  operationKind: import("@infinite-quest/contracts").GenerationStreamSnapshot["operationKind"],
+  replacementTurnId: import("@infinite-quest/contracts").GenerationStreamSnapshot["replacementTurnId"],
   dependencies: GenerationWorkflowDependencies
 ): GenerationRun {
   const machine = createGenerationMachine();
@@ -258,6 +263,8 @@ function createRun(
   return {
     campaignId,
     jobId,
+    operationKind,
+    replacementTurnId,
     watch(signal) {
       return observe(signal, false);
     },

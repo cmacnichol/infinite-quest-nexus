@@ -411,6 +411,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
         resultTurnId: null,
         action: replacement ? "Take another route." : "Open the dome.",
         operationKind: replacement ? "replace_latest" : "append",
+        replacementTurnId: replacement ? TURN_ID : null,
         expectedTurnNumber: 2,
         recoveryMetadata: {}
       }] };
@@ -447,9 +448,9 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       reportedCost: null
     }] };
 
-    if (sql.startsWith("UPDATE generation_jobs SET status = CASE")) return { rows: [{ id: JOB_ID, status: "queued" }] };
-    if (sql.startsWith("UPDATE generation_jobs SET status = 'discarded'")) return { rows: [{ id: JOB_ID, status: "discarded", campaignId: CAMPAIGN_ID, operationKind: "append" }] };
-    if (sql.startsWith("UPDATE generation_jobs SET status = 'cancelled'")) return { rows: [{ id: JOB_ID, status: "cancelled", campaignId: CAMPAIGN_ID, operationKind: "append" }] };
+    if (sql.startsWith("UPDATE generation_jobs SET status = CASE")) return { rows: [{ id: JOB_ID, status: "queued", operation_kind: "append", replacementTurnId: null }] };
+    if (sql.startsWith("UPDATE generation_jobs SET status = 'discarded'")) return { rows: [{ id: JOB_ID, status: "discarded", campaignId: CAMPAIGN_ID, operationKind: "append", replacementTurnId: null }] };
+    if (sql.startsWith("UPDATE generation_jobs SET status = 'cancelled'")) return { rows: [{ id: JOB_ID, status: "cancelled", campaignId: CAMPAIGN_ID, operationKind: "append", replacementTurnId: null }] };
     if (sql.startsWith("INSERT INTO campaign_state")
         || sql.startsWith("INSERT INTO campaign_illustration_configs")
         || sql.startsWith("INSERT INTO campaign_memory_configs")

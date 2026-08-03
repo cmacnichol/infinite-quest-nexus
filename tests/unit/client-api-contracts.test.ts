@@ -137,6 +137,35 @@ describe("client API response contracts", () => {
     expect(campaignSyncStatusSchema.parse({ ...sync, turnWindowMode: "replace", turns: page }).turns).toEqual(page);
     expect(campaignSyncStatusSchema.safeParse({ ...sync, turnWindowMode: "unchanged", turns: page }).success).toBe(false);
     expect(campaignSyncStatusSchema.safeParse({ ...sync, turnWindowMode: "replace", turns: null }).success).toBe(false);
+
+    const activeGeneration = {
+      id: JOB_ID,
+      status: "generating" as const,
+      action: "Open the gate",
+      expectedTurnNumber: 2,
+      createdAt: TIMESTAMP,
+      updatedAt: TIMESTAMP
+    };
+    expect(campaignSyncStatusSchema.parse({
+      ...sync,
+      pendingGeneration: { ...activeGeneration, operationKind: "append", replacementTurnId: null }
+    }).pendingGeneration).toMatchObject({ operationKind: "append", replacementTurnId: null });
+    expect(campaignSyncStatusSchema.parse({
+      ...sync,
+      pendingGeneration: { ...activeGeneration, operationKind: "replace_latest", replacementTurnId: TURN_ID }
+    }).pendingGeneration).toMatchObject({ operationKind: "replace_latest", replacementTurnId: TURN_ID });
+    expect(campaignSyncStatusSchema.safeParse({
+      ...sync,
+      pendingGeneration: { ...activeGeneration, operationKind: "append", replacementTurnId: TURN_ID }
+    }).success).toBe(false);
+    expect(campaignSyncStatusSchema.safeParse({
+      ...sync,
+      pendingGeneration: { ...activeGeneration, operationKind: "replace_latest", replacementTurnId: null }
+    }).success).toBe(false);
+    expect(campaignSyncStatusSchema.safeParse({
+      ...sync,
+      pendingGeneration: { ...activeGeneration, status: "completed", operationKind: "append", replacementTurnId: null }
+    }).success).toBe(false);
   });
 
   it("requires recovery replacement targets to match the operation kind", () => {
@@ -283,6 +312,7 @@ describe("client API response contracts", () => {
         status: "replacement_queued",
         action: "Take another path.",
         operationKind: "replace_latest",
+        replacementTurnId: TURN_ID,
         expectedTurnNumber: 2,
         createdAt: TIMESTAMP,
         updatedAt: TIMESTAMP
@@ -345,6 +375,8 @@ describe("client API response contracts", () => {
     expect(generationEnqueueResponseSchema.parse({
       id: JOB_ID,
       status: "queued",
+      operationKind: "append",
+      replacementTurnId: null,
       expectedTurnNumber: 3,
       createdAt: TIMESTAMP,
       duplicate: false
@@ -358,8 +390,11 @@ describe("client API response contracts", () => {
       createdAt: TIMESTAMP,
       duplicate: false
     }).status).toBe("replacement_queued");
-    expect(generationActionResponseSchema.parse({ id: JOB_ID, status: "cancelled" }).status).toBe("cancelled");
-    expect(generationActionResponseSchema.parse({ id: JOB_ID, status: "discarded" }).status).toBe("discarded");
+    expect(generationActionResponseSchema.parse({ id: JOB_ID, status: "cancelled", operationKind: "append", replacementTurnId: null }))
+      .toMatchObject({ operationKind: "append", replacementTurnId: null });
+    expect(generationActionResponseSchema.parse({ id: JOB_ID, status: "discarded", operationKind: "replace_latest", replacementTurnId: TURN_ID }))
+      .toMatchObject({ operationKind: "replace_latest", replacementTurnId: TURN_ID });
+    expect(generationActionResponseSchema.safeParse({ id: JOB_ID, status: "cancelled", operationKind: "append", replacementTurnId: TURN_ID }).success).toBe(false);
     expect(() => generationActionResponseSchema.parse({ id: JOB_ID, status: "completed" })).toThrow();
   });
 
@@ -373,6 +408,7 @@ describe("client API response contracts", () => {
       resolvedInputMode: "action",
       inputModeSource: "explicit",
       operationKind: "append",
+      replacementTurnId: null,
       status: "cancelled",
       attempts: 1,
       createdAt: TIMESTAMP,
@@ -388,6 +424,7 @@ describe("client API response contracts", () => {
       expectedTurnNumber: 3,
       action: "Open the dome.",
       operationKind: "append",
+      replacementTurnId: null,
       status: "cancelled",
       attempts: 1,
       partialNarration: "Sanitized narration"
@@ -406,6 +443,7 @@ describe("client API response contracts", () => {
       resolvedInputMode: "action",
       inputModeSource: "explicit",
       operationKind: "append",
+      replacementTurnId: null,
       status: "cancelled",
       attempts: 1,
       createdAt: TIMESTAMP,

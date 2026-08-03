@@ -12,6 +12,7 @@ import type {
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const jobId = "22222222-2222-4222-8222-222222222222";
 const otherJobId = "33333333-3333-4333-8333-333333333333";
+const replacementTurnId = "44444444-4444-4444-8444-444444444444";
 
 function snapshot(overrides: Partial<GenerationStreamSnapshot> = {}): GenerationStreamSnapshot {
   return {
@@ -21,13 +22,14 @@ function snapshot(overrides: Partial<GenerationStreamSnapshot> = {}): Generation
     status: "queued",
     action: "Open the gate",
     operationKind: "append",
+    replacementTurnId: null,
     attempts: 1,
     partialNarration: null,
     errorCode: null,
     errorMessage: null,
     resultTurnId: null,
     ...overrides
-  };
+  } as GenerationStreamSnapshot;
 }
 
 function submission() {
@@ -46,11 +48,11 @@ function submission() {
 }
 
 function enqueueResponse(id = jobId, status: GenerationEnqueueResponse["status"] = "queued"): GenerationEnqueueResponse {
-  return { id, status, duplicate: false };
+  return { id, status, duplicate: false, operationKind: "append", replacementTurnId: null };
 }
 
 function actionResponse(status: GenerationActionResponse["status"], id = jobId): GenerationActionResponse {
-  return { id, status };
+  return { id, status, operationKind: "append", replacementTurnId: null };
 }
 
 function completedResult(): GenerationResult {
@@ -58,7 +60,7 @@ function completedResult(): GenerationResult {
 }
 
 function sync(pendingId: string | null = null): CampaignSyncStatus {
-  return { pendingGeneration: pendingId ? { id: pendingId } : null } as CampaignSyncStatus;
+  return { pendingGeneration: pendingId ? { id: pendingId, operationKind: "append", replacementTurnId: null } : null } as CampaignSyncStatus;
 }
 
 function store(initial: StoredGenerationSubmission | null = null): PendingSubmissionStore & { value: StoredGenerationSubmission | null } {
@@ -115,6 +117,43 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
 }
 
 describe("generation workflow", () => {
+  it("exposes replacement provenance before watching and preserves it through completion", async () => {
+    const replacementSnapshot = snapshot({
+      operationKind: "replace_latest",
+      replacementTurnId,
+      status: "replacement_queued"
+    });
+    const workflow = createGenerationWorkflow({
+      api: api({
+        enqueueReplacement: async () => ({
+          id: jobId,
+          status: "replacement_queued",
+          duplicate: false,
+          operationKind: "replace_latest",
+          replacementTurnId
+        } as GenerationEnqueueResponse)
+      }),
+      source: sourceFromSessions([[
+        { kind: "snapshot", snapshot: replacementSnapshot },
+        { kind: "snapshot", snapshot: { ...replacementSnapshot, status: "completed", resultTurnId: otherJobId } }
+      ]]),
+      clock: { now: () => 1_000 },
+      pendingSubmissions: store()
+    });
+
+    const run = await workflow.submit(campaignId, {
+      operationKind: "replace_latest",
+      request: { ...submission().request, expectedCurrentTurnNumber: 1 }
+    });
+
+    expect(run).toMatchObject({ operationKind: "replace_latest", replacementTurnId });
+    const events = await collect(run.watch(signal()));
+    expect(events.filter((event) => event.type === "status")).toMatchObject([
+      { snapshot: { operationKind: "replace_latest", replacementTurnId } },
+      { snapshot: { operationKind: "replace_latest", replacementTurnId } }
+    ]);
+  });
+
   it("exports a submit handle without starting browser work and resumes an ambiguous server-pending job", async () => {
     const pending = store();
     const source = sourceFromSessions([]);
@@ -144,6 +183,7 @@ describe("generation workflow", () => {
           id: otherJobId,
           status: "recoverable",
           operationKind: "append",
+          replacementTurnId: null,
           expectedTurnNumber: 1,
           attempts: 1,
           errorCode: "provider_unavailable",
@@ -172,6 +212,7 @@ describe("generation workflow", () => {
           id: otherJobId,
           status: "completed",
           operationKind: "append",
+          replacementTurnId: null,
           expectedTurnNumber: 51,
           attempts: 1,
           errorCode: null,

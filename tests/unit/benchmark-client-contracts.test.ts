@@ -13,5 +13,21 @@ describe("client-contract benchmark", () => {
     expect(result).toHaveProperty("payloadBytes");
     expect(result).not.toHaveProperty("frameBytes");
     expect(result).toHaveProperty("pollingPayloadBytes");
+    expect(result).toMatchObject({
+      streamAllowlist: [
+        "id",
+        "campaignId",
+        "expectedTurnNumber",
+        "status",
+        "action",
+        "operationKind",
+        "replacementTurnId",
+        "attempts",
+        "partialNarration",
+        "errorMessage",
+        "errorCode",
+        "resultTurnId"
+      ]
+    });
   });
 });

@@ -11,6 +11,20 @@ const CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
 const JOB_ID = "44444444-4444-4444-8444-444444444444";
 const TURN_ID = "55555555-5555-4555-8555-555555555555";
 const TIMESTAMP = "2026-08-01T12:00:00.000Z";
+const STREAM_ALLOWLIST = [
+  "id",
+  "campaignId",
+  "expectedTurnNumber",
+  "status",
+  "action",
+  "operationKind",
+  "replacementTurnId",
+  "attempts",
+  "partialNarration",
+  "errorMessage",
+  "errorCode",
+  "resultTurnId"
+] as const;
 
 function percentile(values: number[], percentileValue: number): number {
   const index = Math.ceil((values.length - 1) * percentileValue);
@@ -65,6 +79,7 @@ const generationJob = {
   resolvedInputMode: "action",
   inputModeSource: "explicit",
   operationKind: "append",
+  replacementTurnId: null,
   status: "generating",
   attempts: 1,
   resultTurnId: null,
@@ -77,6 +92,9 @@ const generationJob = {
 } as const;
 const pollingSnapshot = generationJobSnapshotSchema.parse(generationJob);
 const streamSnapshot = generationStreamSnapshotSchema.parse(generationJob);
+if (JSON.stringify(Object.keys(streamSnapshot).toSorted()) !== JSON.stringify([...STREAM_ALLOWLIST].toSorted())) {
+  throw new Error("Generation stream snapshot allowlist drifted from the Task 7P benchmark contract.");
+}
 const legacyStreamSnapshot = {
   id: generationJob.id,
   status: generationJob.status,
@@ -116,6 +134,7 @@ process.stdout.write(`${JSON.stringify({
     c1Stream: Buffer.byteLength(JSON.stringify(pollingSnapshot)),
     task2aStream: Buffer.byteLength(JSON.stringify(streamSnapshot))
   },
+  streamAllowlist: STREAM_ALLOWLIST,
   framesPerGeneration: {
     sequence: "initial -> lease renewal only -> completed",
     preC1HandBuilt: emittedFrameCount(generationSequence, legacyStreamProjection),

@@ -367,7 +367,7 @@ describe("createNexusApiClient", () => {
       fetchImpl: async (input: RequestInfo | URL) => {
         queue.urls.push(String(input));
         const status = responses.shift();
-        return new Response(JSON.stringify({ id: jobId, status }), { status: 202, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify({ id: jobId, status, operationKind: "append", replacementTurnId: null }), { status: 202, headers: { "content-type": "application/json" } });
       }
     };
     const client = createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort(), fetchImpl: queue.fetchImpl });

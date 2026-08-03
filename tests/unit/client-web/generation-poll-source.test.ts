@@ -33,6 +33,7 @@ function snapshot(overrides: Partial<GenerationJobSnapshot> = {}): GenerationJob
     resolvedInputMode: "action",
     inputModeSource: "explicit",
     operationKind: "append",
+    replacementTurnId: null,
     attempts: 1,
     partialNarration: null,
     errorCode: null,
@@ -42,7 +43,7 @@ function snapshot(overrides: Partial<GenerationJobSnapshot> = {}): GenerationJob
     updatedAt: "2026-08-02T00:00:01.000Z",
     completedAt: null,
     ...overrides
-  };
+  } as GenerationJobSnapshot;
 }
 
 function projected(overrides: Partial<GenerationStreamSnapshot> = {}): GenerationStreamSnapshot {
@@ -53,13 +54,14 @@ function projected(overrides: Partial<GenerationStreamSnapshot> = {}): Generatio
     status: "queued",
     action: "Open the gate",
     operationKind: "append",
+    replacementTurnId: null,
     attempts: 1,
     partialNarration: null,
     errorCode: null,
     errorMessage: null,
     resultTurnId: null,
     ...overrides
-  };
+  } as GenerationStreamSnapshot;
 }
 
 function signal(initiallyAborted = false): AbortSignalLike & {

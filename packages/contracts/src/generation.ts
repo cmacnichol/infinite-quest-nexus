@@ -416,17 +416,29 @@ export const generationJobStatusSchema = z.object({
   partialNarration: z.string().nullable().optional()
 });
 
-export const generationJobSnapshotSchema = generationJobStatusSchema.omit({
+const generationJobSnapshotBaseSchema = generationJobStatusSchema.omit({
+  operationKind: true,
+  replacementTurnId: true,
   partialOutput: true
 });
 
-export const generationStreamSnapshotSchema = generationJobStatusSchema.pick({
+export const generationJobSnapshotSchema = z.discriminatedUnion("operationKind", [
+  generationJobSnapshotBaseSchema.extend({
+    operationKind: z.literal("append"),
+    replacementTurnId: z.null()
+  }),
+  generationJobSnapshotBaseSchema.extend({
+    operationKind: z.literal("replace_latest"),
+    replacementTurnId: z.uuid()
+  })
+]);
+
+const generationStreamSnapshotBaseSchema = generationJobStatusSchema.pick({
   id: true,
   campaignId: true,
   expectedTurnNumber: true,
   status: true,
   action: true,
-  operationKind: true,
   // Attempts is the monotonic retry-cycle marker used for stream reconciliation.
   attempts: true,
   partialNarration: true,
@@ -434,6 +446,17 @@ export const generationStreamSnapshotSchema = generationJobStatusSchema.pick({
   errorCode: true,
   resultTurnId: true
 });
+
+export const generationStreamSnapshotSchema = z.discriminatedUnion("operationKind", [
+  generationStreamSnapshotBaseSchema.extend({
+    operationKind: z.literal("append"),
+    replacementTurnId: z.null()
+  }),
+  generationStreamSnapshotBaseSchema.extend({
+    operationKind: z.literal("replace_latest"),
+    replacementTurnId: z.uuid()
+  })
+]);
 
 export type ProviderProfileInput = z.infer<typeof providerProfileInputSchema>;
 export type ProviderProfileUpdate = z.infer<typeof providerProfileUpdateSchema>;
