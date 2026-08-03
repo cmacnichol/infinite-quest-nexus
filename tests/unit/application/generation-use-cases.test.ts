@@ -6,7 +6,8 @@ import {
   type ClaimedGeneration,
   type GenerationClaimRepository,
   type GenerationCommandRepository,
-  type GenerationExecutor
+  type GenerationExecutor,
+  type GenerationApplicationErrorDetails
 } from "../../../packages/application/src/index.js";
 import type {
   GenerationActionResponse,
@@ -48,6 +49,33 @@ void invalidAppendClaim;
 void invalidReplacementClaim;
 
 describe("generation application use cases", () => {
+  test("keeps command error reasons and their safe details typed and readonly", () => {
+    const pendingGeneration = {
+      id: jobId,
+      status: "queued",
+      action: "Open the observatory",
+      operationKind: "append",
+      expectedTurnNumber: 4
+    } as const;
+    const details = {
+      reason: "active_generation",
+      pendingGeneration,
+      expectedTurnNumber: 4,
+      actualTurnNumber: 3,
+      generationStatus: "queued"
+    } satisfies GenerationApplicationErrorDetails;
+
+    const error = new GenerationApplicationError("active_job", details);
+    expect(error.details).toEqual(details);
+    if (false) {
+      // @ts-expect-error Error details are immutable application data.
+      details.pendingGeneration.status = "completed";
+      // @ts-expect-error Error detail reasons remain a closed discriminated union.
+      const invalid: GenerationApplicationErrorDetails = { reason: "provider_error" };
+      void invalid;
+    }
+  });
+
   test("forwards all command and query calls to the command repository without mutation", async () => {
     const enqueueResult = { id: jobId, status: "queued", duplicate: false, operationKind: "append", replacementTurnId: null } as GenerationEnqueueResponse;
     const job = { id: jobId } as GenerationJobStatus;
