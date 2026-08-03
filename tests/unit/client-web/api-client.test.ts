@@ -203,6 +203,23 @@ describe("createNexusApiClient", () => {
     expect(queue.options.every((option) => option.signal === signal)).toBe(true);
   });
 
+  it("rejects an unscoped turn page projection at the browser boundary", async () => {
+    const client = createNexusApiClient({
+      basePath: "/api/v1",
+      session: createNoopSessionPort(),
+      fetchImpl: async () => new Response(JSON.stringify({ turns: [], nextCursor: null }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    });
+
+    await expect(client.campaigns.turns(campaignId)).rejects.toMatchObject({
+      phase: "response",
+      kind: "response_schema_mismatch",
+      path: `/campaigns/${campaignId}/turns`
+    });
+  });
+
   it("strips caller-supplied identity fields and never invents identity headers", async () => {
     const queue = invalidResponseFetch();
     const client = createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort(), fetchImpl: queue.fetchImpl });

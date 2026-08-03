@@ -374,7 +374,16 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       rpgStats: [],
       eventTriggers: [],
       trackers: [],
-      pendingGenerationId: null
+      pendingGenerationId: null,
+      recoveryId: JOB_ID,
+      recoveryStatus: "completed",
+      recoveryOperationKind: "replace_latest",
+      recoveryExpectedTurnNumber: 2,
+      recoveryAttempts: 1,
+      recoveryErrorCode: null,
+      recoveryErrorMessage: null,
+      recoveryResultTurnId: "99999999-9999-4999-8999-999999999999",
+      recoveryReplacementTurnId: TURN_ID
     }] };
 
     if (sql.includes('AS "historyVersion"') && sql.includes("FROM turns")) return { rows: [{ historyVersion: `1:2:${TURN_ID}` }] };
@@ -478,8 +487,14 @@ describe("client API route contracts without PostgreSQL", () => {
       const sync = campaignSyncStatusSchema.parse((await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/sync-status` })).json());
       expect(sync.campaign.id).toBe(CAMPAIGN_ID);
       expect(sync.turnWindowMode).toBe("replace");
+      expect(sync.turns?.campaignId).toBe(CAMPAIGN_ID);
       expect(sync.turns?.nextCursor).toBeNull();
+      expect(sync.generationRecovery).toMatchObject({
+        operationKind: "replace_latest",
+        replacementTurnId: TURN_ID
+      });
       const turns = turnListResponseSchema.parse((await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/turns?limit=50` })).json());
+      expect(turns.campaignId).toBe(CAMPAIGN_ID);
       expect(turns.turns).toHaveLength(1);
       expect(turns.nextCursor).toBeNull();
       const snapshotResponse = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}` });

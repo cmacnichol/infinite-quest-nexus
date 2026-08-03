@@ -188,16 +188,26 @@ const pendingGenerationSchema = z.object({
   updatedAt: apiTimestampSchema
 });
 
-export const generationRecoverySchema = z.object({
+const generationRecoveryBaseSchema = z.object({
   id: z.uuid(),
   status: z.enum(["recoverable", "failed", "completed"]),
-  operationKind: operationKindSchema,
   expectedTurnNumber: z.number().int().min(1),
   attempts: z.number().int().min(0),
   errorCode: z.string().nullable(),
   errorMessage: z.string().nullable(),
   resultTurnId: z.uuid().nullable()
 });
+
+export const generationRecoverySchema = z.discriminatedUnion("operationKind", [
+  generationRecoveryBaseSchema.extend({
+    operationKind: z.literal("append"),
+    replacementTurnId: z.null()
+  }),
+  generationRecoveryBaseSchema.extend({
+    operationKind: z.literal("replace_latest"),
+    replacementTurnId: z.uuid()
+  })
+]);
 
 const campaignSyncStatusBaseSchema = campaignSyncCampaignSchema.extend({
   campaign: campaignSyncCampaignSchema,
@@ -247,6 +257,7 @@ export const turnSummarySchema = z.object({
 });
 
 export const turnListResponseSchema = z.object({
+  campaignId: z.uuid(),
   turns: z.array(turnSummarySchema),
   nextCursor: z.string().min(1).nullable()
 });

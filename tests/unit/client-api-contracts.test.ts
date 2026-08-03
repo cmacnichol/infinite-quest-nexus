@@ -13,6 +13,7 @@ import {
   campaignSyncStatusSchema,
   generationActionResponseSchema,
   generationEnqueueResponseSchema,
+  generationRecoverySchema,
   generationJobSnapshotSchema,
   generationResultSchema,
   generationStreamSnapshotSchema,
@@ -130,8 +131,36 @@ describe("client API response contracts", () => {
       generationRecovery: null
     });
     expect(sync.turnWindowMode).toBe("unchanged");
-    expect(campaignSyncStatusSchema.safeParse({ ...sync, turnWindowMode: "unchanged", turns: { turns: [], nextCursor: null } }).success).toBe(false);
+    const page = { campaignId: CAMPAIGN_ID, turns: [], nextCursor: null };
+    expect(turnListResponseSchema.parse(page)).toEqual(page);
+    expect(turnListResponseSchema.safeParse({ turns: [], nextCursor: null }).success).toBe(false);
+    expect(campaignSyncStatusSchema.parse({ ...sync, turnWindowMode: "replace", turns: page }).turns).toEqual(page);
+    expect(campaignSyncStatusSchema.safeParse({ ...sync, turnWindowMode: "unchanged", turns: page }).success).toBe(false);
     expect(campaignSyncStatusSchema.safeParse({ ...sync, turnWindowMode: "replace", turns: null }).success).toBe(false);
+  });
+
+  it("requires recovery replacement targets to match the operation kind", () => {
+    const common = {
+      id: JOB_ID,
+      status: "completed" as const,
+      expectedTurnNumber: 2,
+      attempts: 1,
+      errorCode: null,
+      errorMessage: null,
+      resultTurnId: TURN_ID
+    };
+
+    expect(generationRecoverySchema.parse({ ...common, operationKind: "append", replacementTurnId: null })).toMatchObject({
+      operationKind: "append",
+      replacementTurnId: null
+    });
+    expect(generationRecoverySchema.parse({ ...common, operationKind: "replace_latest", replacementTurnId: TURN_ID })).toMatchObject({
+      operationKind: "replace_latest",
+      replacementTurnId: TURN_ID
+    });
+    expect(generationRecoverySchema.safeParse({ ...common, operationKind: "append", replacementTurnId: TURN_ID }).success).toBe(false);
+    expect(generationRecoverySchema.safeParse({ ...common, operationKind: "replace_latest", replacementTurnId: null }).success).toBe(false);
+    expect(generationRecoverySchema.safeParse({ ...common, operationKind: "replace_latest", replacementTurnId: "not-a-uuid" }).success).toBe(false);
   });
 
   it("rejects campaign list field drift", () => {
@@ -260,7 +289,7 @@ describe("client API response contracts", () => {
       },
       syncToken: "sync-token",
       turnWindowMode: "replace",
-      turns: { turns: [], nextCursor: null },
+      turns: { campaignId: CAMPAIGN_ID, turns: [], nextCursor: null },
       generationRecovery: null
     });
 
@@ -283,8 +312,8 @@ describe("client API response contracts", () => {
       acceptedAt: TIMESTAMP,
       reportedCost: null
     };
-    expect(turnListResponseSchema.parse({ turns: [turn], nextCursor: null }).turns).toHaveLength(1);
-    expect(() => turnListResponseSchema.parse({ turns: [turn] })).toThrow();
+    expect(turnListResponseSchema.parse({ campaignId: CAMPAIGN_ID, turns: [turn], nextCursor: null }).turns).toHaveLength(1);
+    expect(() => turnListResponseSchema.parse({ campaignId: CAMPAIGN_ID, turns: [turn] })).toThrow();
 
     const result = generationResultSchema.parse({
       id: JOB_ID,

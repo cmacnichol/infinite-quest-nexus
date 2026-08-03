@@ -648,6 +648,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     const page = await readTurnPage(pool, ownerUserId, campaignId, pageRequest.before, pageRequest.limit ?? 50);
     const costs = await turnReportedCosts(pool, ownerUserId, page.turns.map((turn) => turn.id));
     return parseResponseProjection(turnListResponseSchema, {
+      campaignId,
       turns: page.turns.map((turn) => ({
         ...turn,
         narration: formatNarrationParagraphs(turn.narration),
@@ -698,7 +699,8 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
               pending.created_at AS "pendingGenerationCreatedAt", pending.updated_at AS "pendingGenerationUpdatedAt",
               recovery.id AS "recoveryId", recovery.status AS "recoveryStatus", recovery.operation_kind AS "recoveryOperationKind",
               recovery.expected_turn_number AS "recoveryExpectedTurnNumber", recovery.attempts AS "recoveryAttempts",
-              recovery.error_code AS "recoveryErrorCode", recovery.error_message AS "recoveryErrorMessage", recovery.result_turn_id AS "recoveryResultTurnId"
+              recovery.error_code AS "recoveryErrorCode", recovery.error_message AS "recoveryErrorMessage", recovery.result_turn_id AS "recoveryResultTurnId",
+              recovery.replacement_turn_id AS "recoveryReplacementTurnId"
          FROM campaigns c
          JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
          JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
@@ -712,7 +714,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
             ORDER BY created_at DESC LIMIT 1
          ) pending ON true
          LEFT JOIN LATERAL (
-           SELECT id, status, operation_kind, expected_turn_number, attempts, error_code, error_message, result_turn_id
+           SELECT id, status, operation_kind, expected_turn_number, attempts, error_code, error_message, result_turn_id, replacement_turn_id
              FROM generation_jobs
             WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
               AND status IN ('recoverable','failed','completed')
@@ -783,6 +785,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     const turnPage = await readTurnPage(pool, ownerUserId, campaign.id, undefined, 50);
     const costs = await turnReportedCosts(pool, ownerUserId, turnPage.turns.map((turn) => turn.id));
     const turns = {
+      campaignId: campaign.id,
       turns: turnPage.turns.map((turn) => ({ ...turn, narration: formatNarrationParagraphs(turn.narration), reportedCost: costs.get(turn.id) || null })),
       nextCursor: turnPage.nextCursor
     };
@@ -794,7 +797,8 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       attempts: row.recoveryAttempts,
       errorCode: row.recoveryErrorCode,
       errorMessage: row.recoveryErrorMessage,
-      resultTurnId: row.recoveryResultTurnId
+      resultTurnId: row.recoveryResultTurnId,
+      replacementTurnId: row.recoveryReplacementTurnId
     } : null;
     const syncToken = sha256(stableStringify({
       ownerUserId, campaign, world, playerConfig,
@@ -802,7 +806,8 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       pendingGenerationId: pendingGeneration?.id ?? null, pendingGenerationStatus: pendingGeneration?.status ?? null,
       pendingGenerationUpdatedAt: pendingGeneration?.updatedAt ?? null,
       recoveryId: generationRecovery?.id ?? null, recoveryStatus: generationRecovery?.status ?? null,
-      recoveryAttempts: generationRecovery?.attempts ?? null
+      recoveryAttempts: generationRecovery?.attempts ?? null,
+      recoveryReplacementTurnId: generationRecovery?.replacementTurnId ?? null
     }));
     const unchanged = syncRequest.since === syncToken;
     return parseResponseProjection(campaignSyncStatusSchema, {
