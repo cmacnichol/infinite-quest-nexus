@@ -4961,10 +4961,21 @@ concurrency-sensitive SQL before route adaptation.
 **Files:**
 
 - Create: `packages/database/src/generation-repository.ts`
+- Create: `services/api/src/generation-command-compatibility.ts`
 - Create: `tests/integration/generation-repository.integration.test.ts`
+- Create: `tests/unit/generation-command-compatibility.test.ts`
+- Modify: `packages/application/src/generation/errors.ts` — narrowly extend the
+  frozen 10a error detail contract only where the existing command behavior
+  cannot otherwise retain its HTTP semantics; do not change the command port
+  method signatures or add execution/claim methods
+- Modify: `tests/unit/application/generation-use-cases.test.ts` — compile-time
+  and forwarding coverage for the corrected typed-error details
 - Modify: `packages/database/src/index.ts`
 - Modify: `services/api/src/generation-service.ts`
+- Test: `tests/unit/generation-input.test.ts`
 - Test: `tests/integration/generation.integration.test.ts`
+- Test: `tests/integration/gameplay.integration.test.ts`
+- Test: `tests/integration/image-pipeline.integration.test.ts`
 
 **Scope:** move or delegate only these current behaviors:
 
@@ -4983,61 +4994,252 @@ helpers, claim/execution, and other campaign operations are not silently pulled
 into this checkpoint. They remain in place until their owning checkpoint or
 Task 14 domain extraction.
 
+**Required construction and compatibility design:**
+
+`packages/database` is a source package rather than an independently installed
+workspace package, and the repository root does not resolve
+`@infinite-quest/application` at runtime. The PostgreSQL adapter therefore
+imports the application public barrel by a relative `.js` specifier and uses a
+type-only import wherever possible. It must not introduce a root dependency,
+workspace package manifest, path alias, or runtime import that would make the
+compiled `dist/` layout resolve TypeScript source through Node.
+
+Export this exact construction API from
+`packages/database/src/generation-repository.ts` and the database barrel:
+
+```ts
+export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
+  resolvePromptSnapshot: (
+    client: DatabaseClient,
+    ownerUserId: string,
+    campaignId: string,
+  ) => Promise<PromptSnapshot>;
+  promptProtocolVersion: (snapshot: PromptSnapshot) => string;
+  readTurnReportedCosts: (
+    ownerUserId: string,
+    turnIds: readonly string[],
+  ) => Promise<ReadonlyMap<string, GenerationResult["reportedCost"]>>;
+}>;
+
+export function createPostgresGenerationCommandRepository(
+  pool: DatabasePool,
+  dependencies: PostgresGenerationCommandRepositoryDependencies,
+): GenerationCommandRepository;
+```
+
+The dependency object is deliberate inversion of control, not a generic
+service locator. `generation-repository.ts` may call only the three named
+functions above. The temporary API compatibility module supplies
+`resolvePromptSnapshot`, `promptProtocolVersion`, and `turnReportedCosts` from
+the existing API helpers. The PostgreSQL module must never import
+`services/api/**`, and the injected callbacks must never receive an HTTP
+request, Fastify object, credential secret, or unscoped `user_id`.
+
+The repository owns the text-provider selection query, turn-input
+classification transaction, row mapping, SQLSTATE mapping, and every command
+transaction. It may directly import pure domain/story-engine helpers needed for
+request fingerprinting, narration formatting, or partial-narration extraction.
+It must not duplicate the API helper SQL for prompt snapshots or reported costs,
+and it must not call an API helper that performs an ownership lookup or starts
+its own transaction.
+
+`generation-command-compatibility.ts` is the only temporary bridge. Export a
+factory that receives `{ pool, repository, initialOwnerId }`, resolves the
+server-side initial owner for each legacy call, calls the repository with an
+explicit `OwnerScope`, and exposes the seven legacy function shapes used by
+`generation-service.ts`. `enqueueGeneration` and
+`enqueueLatestReplacement` retain the existing `safeTurnInput` preflight in
+this bridge; this lexical browser-input validation is intentionally not moved
+into the database adapter during 10b. The bridge catches only
+`GenerationApplicationError`, maps it to the current safe HTTP-facing
+`Error` shape, and rethrows unknown errors unchanged. Do not instantiate a
+repository in a route or inside an individual delegate. Task 10c reuses this
+single mapping table while moving construction to the API composition root;
+it must not create a second, divergent error mapper.
+
+Before moving SQL, make the minimal 10a error-contract correction necessary to
+represent the existing command outcomes without attaching HTTP fields to
+`GenerationApplicationError`. Add a closed, safe `reason` discriminator to
+`GenerationApplicationErrorDetails` for:
+
+```text
+idempotency_mismatch
+explicit_input_mode_mismatch         classification_id_forbidden
+classification_missing_or_expired    classification_mode_mismatch
+selected_provider_unavailable        no_text_provider
+stale_current_turn                   missing_latest_turn
+active_generation                    active_illustration
+result_not_completed                 retry_source_state
+cancel_source_state                  discard_source_state
+```
+
+Also add only the safe payload fields needed by the existing response behavior:
+`pendingGeneration`, `expectedTurnNumber`, `actualTurnNumber`, and
+`generationStatus`. `pendingGeneration` is not an enqueue response; define it
+as exactly `Readonly<{ id: string; status: GenerationJobStatus["status"]; action:
+string; operationKind: "append" | "replace_latest"; expectedTurnNumber: number
+}>`, matching the active-job lookup without exposing its replacement target,
+provider, timestamps, recovery metadata, or error fields. Do not place an HTTP
+status, raw `Error`, SQLSTATE, stored provider error text, prompt content, or
+query row in the typed error. The application use-case tests must prove that the
+additional fields remain readonly and that unknown adapter errors are still
+re-thrown unchanged. This is a focused 10a contract correction committed as the
+first 10b commit; record its base/head and review it before moving SQL.
+
+The compatibility mapper must preserve these legacy outcomes until 10c adopts
+the same table: unsafe input, action-only campaigns, an Auto classification ID
+on an explicit request, explicit input-mode mismatch, a missing Auto
+classification ID, and selected-provider validation return 400; missing
+campaign/job/latest turn returns 404; missing/expired/consumed or input-hash
+incompatible Auto classifications, Auto classification mode mismatch, stale
+turn, idempotency mismatch, missing default provider, active generation, active
+illustration, incomplete result, and invalid retry/cancel/discard source states
+return 409. Preserve the existing `active_generation_exists` safe details with
+the pending job projection. For a failed, recoverable, cancelled, or discarded
+result, use the fixed public generation-failure message rather than forwarding
+`generation_jobs.error_message`. The test fixture must assert the status,
+message, and safe detail object for every reason above before and after
+delegation.
+
 **Repository requirements:**
 
-- [ ] Implement every `GenerationCommandRepository` method and no claim or
+- [x] Implement every `GenerationCommandRepository` method and no claim or
   execution method. The adapter must satisfy the frozen interface without a
   throwing placeholder for `claimNext`; Task 10d owns the separate
   `GenerationClaimRepository`.
-- [ ] Accept an explicit `ownerUserId` on every API-facing method. Remove
+- [x] Accept an explicit `ownerUserId` on every API-facing method. Remove
   `initialOwnerId(pool)` from repository code; the adapter never chooses an
-  identity.
-- [ ] Preserve the append enqueue transaction, campaign `FOR UPDATE`, request
+  identity. The compatibility bridge—not the repository—performs the current
+  initial-owner lookup until Task 10c injects server authority directly.
+- [x] Preserve the append enqueue transaction, campaign `FOR UPDATE`, request
   fingerprint, savepoint/rollback around the unique insert, active-job lookup,
   and exact idempotency conflict behavior. Never query inside a transaction
   left aborted by SQLSTATE `23505`.
-- [ ] Preserve replacement enqueue's campaign and latest-turn locks, immutable
+- [x] Preserve replacement enqueue's campaign and latest-turn locks, immutable
   `replacementTurnId`, current-turn guard, base state/edit selection, prompt
   snapshot, queued-image cleanup, active-image conflict, and
-  `replacement_queued` state.
-- [ ] Preserve job/result projections, partial narration derivation, formatted
-  narration, reported-cost lookup, and completed-result guard. Raw
-  `partialOutput` and raw stored errors must not become new public fields.
-- [ ] Preserve retry's prompt-protocol refresh and append/replacement requeue
-  state; cancellation idempotency and provisional illustration cleanup; and
-  discard's allowed source states.
-- [ ] Keep all joins and writes owner-scoped. A known job UUID owned by another
+  `replacement_queued` state. Before its `INSERT INTO generation_jobs`, create
+  `SAVEPOINT enqueue_replacement_insert`; on SQLSTATE `23505`, execute
+  `ROLLBACK TO SAVEPOINT enqueue_replacement_insert` before reading the active
+  job and raising the typed active-job conflict. Release the savepoint on the
+  success path and after rollback. This fixes the existing replacement path's
+  aborted-transaction (`25P02`) hazard without changing its observable conflict
+  response.
+- [x] Preserve job/result projections, partial narration derivation, formatted
+  narration, reported-cost lookup, and completed-result guard. The repository
+  continues to return the frozen internal `GenerationJobStatus`, including
+  `partialOutput`, only to the server-side compatibility bridge. The existing
+  `generationSnapshot` and `generationStreamSnapshot` projections remain the
+  sole public boundary and must continue to omit raw `partialOutput` and raw
+  stored errors; no new field is added to either wire response.
+- [x] Preserve retry's prompt-protocol refresh and append/replacement requeue
+  state exactly as the legacy method does: set `prompt_protocol_version` to
+  `STORY_PROMPT_PROTOCOL_VERSION`, do not refresh `prompt_snapshot` in 10b, and
+  do not change the requested model or idempotency data. Preserve cancellation
+  idempotency and provisional illustration cleanup, plus discard's allowed
+  source states.
+- [x] Keep all joins and writes owner-scoped. A known job UUID owned by another
   user must behave as not found and must not reveal campaign, state, turn,
   provider, illustration, or error metadata.
-- [ ] Translate database rows and SQLSTATE values into application types/errors
+- [x] Translate database rows and SQLSTATE values into application types/errors
   at this boundary. Do not leak `pg` result types, snake-case rows, SQLSTATE, or
   mutable query objects into `packages/application`.
-- [ ] Introduce no schema migration and no rewritten query solely for style.
+- [x] Introduce no schema migration and no rewritten query solely for style.
   If an unavoidable query change is required, record the old/new statement,
   query plan, locking impact, and rollback in the checkpoint evidence.
 
 **Required integration cases:**
 
-- [ ] Append and replacement happy paths, duplicate replay, mismatched
-  idempotency fingerprint, and two concurrent enqueue attempts for one campaign.
-- [ ] Stale replacement turn, missing latest turn, active illustration, and
+- [x] Append and replacement happy paths, duplicate replay, mismatched
+  idempotency fingerprint, and two concurrent append attempts for one campaign.
+- [x] Two concurrent replacement attempts with different idempotency keys reach
+  one durable replacement job and one typed active-job conflict, never SQLSTATE
+  `25P02`. Repeat the test with the same idempotency key and prove its replay
+  result remains deterministic. Assert that the failed contender leaves no
+  queued-image cleanup or other partial mutation after its outer transaction
+  rolls back.
+- [x] Stale replacement turn, missing latest turn, active illustration, and
   queued-image cleanup.
-- [ ] Owner A cannot read, retrieve a result for, retry, cancel, or discard
-  Owner B's job; the same isolation applies across campaigns owned by one user.
-- [ ] Retry, repeated cancellation, cancellation during each cancellable phase,
-  discard, and invalid terminal-state mutations preserve existing results and
-  error projection.
-- [ ] Each atomic command retains its original repository-owned transaction;
+- [x] Build two active user fixtures without swapping either user's
+  `initial-owner` system key. Invoke the repository directly with explicit
+  scopes and prove Owner A cannot read, retrieve a result for, retry, cancel,
+  or discard Owner B's known job UUID; repeat for two campaigns owned by A. All
+  foreign/mismatched-scope cases must return the typed not-found condition and
+  leave the target row unchanged.
+- [x] Retry, repeated cancellation, cancellation from `queued`,
+  `replacement_queued`, `assessing`, `generating`, `validating`, and
+  `committing`, discard, and invalid terminal-state mutations preserve accepted
+  turns, campaign state, Chronicle memory, valid result data, and safe error
+  projection. Include provisional image jobs, segment assets, prompt jobs,
+  resolution jobs, and sets so the cancellation cleanup remains complete and
+  idempotent.
+- [x] Direct repository tests cover all seven methods; compatibility tests cover
+  the legacy function signatures, initial-owner lookup, every typed-error
+  reason, unknown-error pass-through, and unchanged HTTP-safe error shape.
+  Re-run `generation-input.test.ts`, `generation.integration.test.ts`,
+  `gameplay.integration.test.ts`, and `image-pipeline.integration.test.ts`;
+  those suites currently import the temporary delegates and prove that 10b did
+  not move claim/execution or illustration behavior by accident.
+- [x] Each atomic command retains its original repository-owned transaction;
   read-only queries do not create unnecessary transactions, and no method
-  commits or rolls back outside the unit of work it owns.
+  commits or rolls back outside the unit of work it owns. Instrument the
+  repository test pool or inspect recorded SQL to prove `getJob` and `getResult`
+  do not issue `BEGIN`, append and replacement use one outer transaction plus
+  their insert savepoint, cancellation uses one outer transaction, and retry /
+  discard retain their single-statement behavior.
 
 Keep temporary compatibility exports in `generation-service.ts` only as thin
-delegates needed to keep existing callers green through 10b. Mark their removal
-owner as 10c/10e; do not duplicate SQL between the facade and repository.
+delegates imported from `generation-command-compatibility.ts`; remove the seven
+command/query SQL implementations from that file. `runGenerationJob`, claim,
+execution, `syncPlayerCampaignConfig`, rewind, branch, and prompt/context
+helpers remain in place. Mark command/query delegate removal owner as 10c and
+the execution/claim removal owner as 10e; do not duplicate SQL or typed-error
+mapping between the facade and repository.
 
 **10b review gate:** SQL, locks, savepoints, ownership predicates, public
-projections, and error semantics match the pre-10b generation integration
-baseline. No route or worker import has changed yet.
+projections, error semantics, and safe error payloads match the pre-10b
+generation integration baseline, except that replacement unique-conflict
+recovery now deterministically returns its existing 409 rather than leaking
+`25P02`. No route or worker import has changed yet. The reviewer must inspect
+the full 10b range, confirm the PostgreSQL adapter has no `services/api/**`
+import, and verify the compatibility mapper is the only temporary legacy-error
+translation point.
+
+**10b evidence (audited 2026-08-03).** Implementation landed in `3ee033d` with
+corrections in `93113bc`, `7933c3a`, `2e6901e`, and `bb29eeb` (base `e199f47`).
+Re-measured on `bb29eeb`: `pnpm check` **561 candidate files**, `pnpm build`
+clean, `pnpm test:unit` **1040/1040 across 88 files**, `pnpm test:integration`
+**211 passed, 2 skipped across 18 files**.
+
+Verified against the shipped code rather than the commit messages:
+
+- All seven behaviors are on `packages/database/src/generation-repository.ts`,
+  and `initialOwnerId` appears **zero** times in it — the adapter never chooses
+  an identity. The five remaining occurrences in `generation-service.ts` are on
+  the facade path that 10c removes.
+- Append and replacement both use `SAVEPOINT` with `ROLLBACK TO SAVEPOINT` on
+  SQLSTATE `23505`, so no query runs inside an aborted transaction. Five
+  `FOR UPDATE` locks are retained.
+- No SQLSTATE, `pg` type, or snake-case row reaches `packages/application`.
+- **The 10b gate holds:** `services/api/src/server.ts`, `services/worker/**`,
+  and `services/runtime/**` are untouched in this range, and no migration was
+  added.
+- `partialOutput` remains an internal field of the pre-existing
+  `GenerationJobStatus` projection with `partialNarration` derived from it; it
+  is not a *new* public field, and the API-layer projections still strip it.
+- Every required integration case is covered, including three whose test names
+  do not use the specification's words: mismatched idempotency fingerprint
+  (`idempotency_mismatch`), repeated cancellation (two consecutive `cancel`
+  calls on one job), and cancellation in each of the six cancellable phases
+  (`it.each([...])`).
+
+**Carried into 10c — the compatibility bridge has no removal owner.** 10b
+introduced `services/api/src/generation-command-compatibility.ts` and its
+224-line test as the temporary facade. The 10b specification requires marking
+"their removal owner as 10c/10e", and that marking had not been made; 10c's file
+list and requirements now name it. Left unowned, the bridge would survive as a
+permanent shadow layer between routes and the repository, which is exactly what
+10c's own "do not leave two callable implementations" rule forbids.
 
 ### Task 10c — B1c: Convert Fastify generation routes to application adapters
 
@@ -5049,6 +5251,10 @@ not contain generation state-machine or SQL policy.
 
 - Create: `services/api/src/generation-application-adapter.ts`
 - Create: `tests/unit/generation-application-adapter.test.ts`
+- Delete: `services/api/src/generation-command-compatibility.ts` — the temporary
+  10b facade; 10c is its named removal owner
+- Delete: `tests/unit/generation-command-compatibility.test.ts` — after
+  re-homing its `safeTurnInput` and logging-context coverage
 - Modify: `services/api/src/server.ts`
 - Modify: `services/api/src/generation-service.ts`
 - Modify: `services/runtime/src/main.ts`
@@ -5086,6 +5292,23 @@ not contain generation state-machine or SQL policy.
   `generation-service.ts` after all route consumers use the application. Keep
   only explicitly out-of-scope campaign and execution code; do not leave two
   callable implementations.
+- [ ] **Delete the 10b compatibility bridge.** `services/api/src/generation-command-compatibility.ts`
+  and `tests/unit/generation-command-compatibility.test.ts` were introduced by
+  10b as an explicitly temporary facade, and 10c is their named removal owner.
+  Once routes call `GenerationApplication` directly, the bridge has no consumer;
+  leaving it in place would be the "two callable implementations" the item above
+  forbids, just relocated to its own file.
+- [ ] Move what the bridge legitimately owns rather than deleting it wholesale.
+  It currently holds an owner-scoped `generationLifecycleLogContext` read used
+  for structured logging and the `safeTurnInput` mechanics-language guard.
+  Re-home both — logging context to the API adapter, input validation to
+  wherever route-level request validation lives — and prove by test that the
+  existing log fields and the 400 rejection message are unchanged. Do not drop
+  them silently along with the facade.
+- [ ] The five remaining `initialOwnerId` call sites in `generation-service.ts`
+  are on this facade path. After the bridge is deleted and routes resolve owner
+  scope at composition, confirm the count is zero for generation commands;
+  10b deliberately left them because routes had not yet been converted.
 
 **Required tests:**
 
