@@ -12,7 +12,8 @@ import type { GenerationApi } from "../../packages/client-web/src/index.js";
 import type {
   GenerationSnapshotSource,
   PendingGenerationSubmission,
-  SessionPort
+  SessionPort,
+  Store
 } from "../../packages/client-core/src/index.js";
 import type { GenerationApiPort } from "../../packages/client-core/src/generation/types.js";
 import type { GenerationRequest } from "../../packages/contracts/src/generation.js";
@@ -67,6 +68,18 @@ describe("client boundary checks", () => {
 
     expect(result.succeeded).toBe(true);
     expect(result.output).toBe("");
+  });
+
+  test("client-core public barrel exposes read-only stores without generic mutability", async () => {
+    const core = await import("../../packages/client-core/src/index.js");
+    const readOnly: Store<number> = {
+      get: () => 1,
+      subscribe: () => () => undefined
+    };
+
+    expect(readOnly.get()).toBe(1);
+    expect("WritableStore" in core).toBe(false);
+    expect("createWritableStore" in core).toBe(false);
   });
 
   test("actual Web compiler fixture accepts framework-free port adapters using Web APIs", () => {

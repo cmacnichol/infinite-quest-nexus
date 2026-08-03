@@ -7,6 +7,7 @@ export type {
   PendingSubmissionStore,
   SessionPort
 } from "./ports.js";
+export type { Immutable, Store } from "./store.js";
 export {
   ApiContractError,
   NexusApiError
