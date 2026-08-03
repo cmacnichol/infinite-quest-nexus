@@ -702,7 +702,7 @@ describe("campaign store generation projection", () => {
     }
   });
 
-  it("accepts completed recovery outside a bounded historical window without inventing a disconnected turn", () => {
+  it("preserves the server-projected campaign position for completed recovery outside a bounded historical window", () => {
     const controller = createCampaignStore();
     controller.load(sync());
     const session = controller.attachGeneration(replacementRun(turnThreeId));
@@ -710,6 +710,7 @@ describe("campaign store generation projection", () => {
     session.apply({ type: "settled", outcome: "completed", result: result({ expectedTurnNumber: 0, turnNumber: 0, resultTurnId: turnThreeId }) });
 
     expect(controller.store.get()).toMatchObject({
+      campaign: { activeTurnNumber: 2 },
       turns: [{ turnNumber: 1 }, { turnNumber: 2 }],
       nextTurnsCursor: "older-1",
       syncToken: "sync-1",

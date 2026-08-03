@@ -381,8 +381,9 @@ export function createCampaignStore(): CampaignStoreController {
       locallyChanged = true;
     }
 
-    const campaign = clone(previous.campaign) as CampaignSyncStatus["campaign"];
-    campaign.activeTurnNumber = accepted.turnNumber;
+    const campaign = locallyChanged
+      ? clone({ ...previous.campaign, activeTurnNumber: accepted.turnNumber }) as CampaignSyncStatus["campaign"]
+      : previous.campaign;
     liveGeneration = null;
     writable.set({
       ...previous,
