@@ -333,13 +333,14 @@ describe("client boundary checks", () => {
           /// <reference types="node" />
           /// <reference lib="dom" />
           /// <reference path="../../../../services/api/src/server.ts" />
+          /// <reference path="..\\..\\..\\services\\api\\src\\server.ts" />
           export const forbidden = true;
         `
       },
       {
         file: "packages/application/src/generation/local-reference.ts",
         text: `
-          /// <reference path="./local-reference-target.ts" />
+          /// <reference path="local-reference-target.ts" />
           export const local = true;
         `
       },
@@ -352,6 +353,7 @@ describe("client boundary checks", () => {
     expect(violations).toEqual([
       "packages/application/src/generation/forbidden-references.ts: application reference lib dom is prohibited",
       "packages/application/src/generation/forbidden-references.ts: application reference path ../../../../services/api/src/server.ts is outside packages/application",
+      "packages/application/src/generation/forbidden-references.ts: application reference path ..\\..\\..\\services\\api\\src\\server.ts is outside packages/application",
       "packages/application/src/generation/forbidden-references.ts: application reference types node is prohibited"
     ]);
   });

@@ -101,6 +101,12 @@ function relativeModulePath(file, specifier) {
   return path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
 }
 
+function relativeReferencePath(file, reference) {
+  const normalizedReference = reference.replaceAll("\\", "/");
+  if (normalizedReference.startsWith("/") || /^[A-Za-z]:\//u.test(normalizedReference)) return null;
+  return path.posix.normalize(path.posix.join(path.posix.dirname(file), normalizedReference));
+}
+
 function resolvedImportedFile(file, specifier, sourceFiles) {
   const target = relativeModulePath(file, specifier);
   if (target === null) return null;
@@ -245,7 +251,7 @@ function checkApplication(file, sourceFile, violations) {
     }
   }
   for (const reference of sourceFile.referencedFiles) {
-    const target = relativeModulePath(file, reference.fileName);
+    const target = relativeReferencePath(file, reference.fileName);
     if (target === null || !target.startsWith("packages/application/")) {
       violations.push(`${file}: application reference path ${reference.fileName} is outside packages/application`);
     }
