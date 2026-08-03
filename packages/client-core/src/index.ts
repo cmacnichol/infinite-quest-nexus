@@ -9,6 +9,30 @@ export type {
 } from "./ports.js";
 export type { Immutable, Store } from "./store.js";
 export {
+  CampaignProjectionProtocolError,
+  createCampaignStore
+} from "./campaign-store.js";
+export type {
+  CampaignStoreController,
+  GenerationProjectionSession
+} from "./campaign-store.js";
+export type {
+  CampaignProjection,
+  GenerationJobProjection,
+  GenerationOperationProjection,
+  GenerationResultState,
+  GenerationTransportHealth,
+  HydratedGenerationProjection
+} from "./campaign-projection.js";
+export {
+  selectGeneration,
+  selectHistorySyncRequired,
+  selectLatestAcceptedTurn,
+  selectLatestAcceptedTurnNumber,
+  selectRequestedTurnInputMode,
+  selectRuntimeState
+} from "./selectors.js";
+export {
   ApiContractError,
   NexusApiError
 } from "./errors.js";
