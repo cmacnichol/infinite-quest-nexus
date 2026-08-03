@@ -50,26 +50,25 @@ void invalidReplacementClaim;
 
 describe("generation application use cases", () => {
   test("keeps command error reasons and their safe details typed and readonly", () => {
-    const pendingGeneration = {
-      id: jobId,
-      status: "queued",
-      action: "Open the observatory",
-      operationKind: "append",
-      expectedTurnNumber: 4
-    } as const;
-    const details = {
+    const details: GenerationApplicationErrorDetails = {
       reason: "active_generation",
-      pendingGeneration,
+      pendingGeneration: {
+        id: jobId,
+        status: "queued",
+        action: "Open the observatory",
+        operationKind: "append",
+        expectedTurnNumber: 4
+      },
       expectedTurnNumber: 4,
       actualTurnNumber: 3,
       generationStatus: "queued"
-    } satisfies GenerationApplicationErrorDetails;
+    };
 
     const error = new GenerationApplicationError("active_job", details);
     expect(error.details).toEqual(details);
     if (false) {
       // @ts-expect-error Error details are immutable application data.
-      details.pendingGeneration.status = "completed";
+      details.pendingGeneration!.status = "completed";
       // @ts-expect-error Error detail reasons remain a closed discriminated union.
       const invalid: GenerationApplicationErrorDetails = { reason: "provider_error" };
       void invalid;

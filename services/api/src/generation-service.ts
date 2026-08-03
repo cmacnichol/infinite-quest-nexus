@@ -1,5 +1,6 @@
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
+import { createPostgresGenerationCommandRepository } from "../../../packages/database/src/generation-repository.js";
 import {
   pendingEventTriggerSchema,
   playerEventTriggerSchema,
@@ -42,7 +43,6 @@ import {
   formatNarrationParagraphs,
   localRpgAssessment,
   logProviderTransportError,
-  mechanicsLanguageMatches,
   mechanicsLeakFields,
   parseEventExtension,
   parseRpgAssessment,
@@ -74,7 +74,7 @@ import {
 import { buildScopedEntityCatalog, resolveEntityMetadata } from "../../../packages/domain/src/entity-references.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { autoEnableCampaignEmbeddingIfAvailable, buildContextPreview, enqueueEmbeddingReindex, rebuildCampaignMemories, storeDerivedTurnMemories } from "./memory-service.js";
-import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
+import { loadTextProvider } from "./provider-service.js";
 import {
   enqueueAcceptedTurnIllustrationSegments,
   loadConfig as loadStreamingIllustrationConfig,
@@ -86,6 +86,10 @@ import {
 } from "./segmented-illustration-service.js";
 import { attributeGenerationCostsToTurn, recordProfileCost, turnReportedCosts } from "./cost-service.js";
 import { promptFromSnapshot, promptProtocolVersion, resolvePromptSnapshot } from "./prompt-library-service.js";
+import {
+  createGenerationCommandCompatibility,
+  safeTurnInput
+} from "./generation-command-compatibility.js";
 import type { PromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import {
@@ -96,6 +100,23 @@ import {
 import { loadOrNotFound } from "./service-helpers.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
+
+const generationCommandCompatibilities = new WeakMap<DatabasePool, ReturnType<typeof createGenerationCommandCompatibility>>();
+
+function generationCommandCompatibility(pool: DatabasePool) {
+  const existing = generationCommandCompatibilities.get(pool);
+  if (existing) return existing;
+  const repository = createPostgresGenerationCommandRepository(pool, {
+    resolvePromptSnapshot,
+    promptProtocolVersion,
+    readTurnReportedCosts: (ownerUserId, turnIds) => turnReportedCosts(pool, ownerUserId, [...turnIds])
+  });
+  const compatibility = createGenerationCommandCompatibility({ pool, repository, initialOwnerId });
+  generationCommandCompatibilities.set(pool, compatibility);
+  return compatibility;
+}
+
+export { safeTurnInput };
 
 function budgetTokenEstimate(text: string): number {
   return Math.max(estimateTokens(text), Math.ceil(text.length / 3));
@@ -192,60 +213,6 @@ function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): stri
   if (typeof value !== "string") return fallback;
   const normalized = value.trim().toLowerCase();
   return /^[a-z][a-z0-9_]{0,63}$/.test(normalized) ? normalized : fallback;
-}
-
-export function safeTurnInput(value: string): string {
-  const trimmed = value.trim();
-  const matches = mechanicsLanguageMatches(trimmed);
-  if (!trimmed || matches.length) {
-    const findings = matches.map((match) => ({
-      category: match.category,
-      text: match.text,
-      index: match.index
-    }));
-    const findingSummary = findings.length
-      ? ` Blocked ${findings.length === 1 ? "fragment" : "fragments"}: ${findings.map((finding) => `"${finding.text}" (${finding.category.replaceAll("_", " ")})`).join(", ")}.`
-      : " The input was empty after trimming whitespace.";
-    throw Object.assign(new Error(`The turn input contains game-mechanics or engine language that cannot be sent to story generation.${findingSummary} Edit the input and retry; no part of it was silently removed.`), {
-      statusCode: 400,
-      code: "unsafe_turn_input",
-      details: { code: "unsafe_turn_input", findings }
-    });
-  }
-  return trimmed;
-}
-
-async function validateTurnInputMode(
-  client: DatabaseClient,
-  ownerUserId: string,
-  campaignId: string,
-  request: GenerationRequest,
-  turnControlStyle: string
-) {
-  if (turnControlStyle === "action_only" && request.resolvedInputMode !== "action") {
-    throw Object.assign(new Error("This campaign accepts player actions only."), { statusCode: 400 });
-  }
-  if (request.requestedInputMode !== "auto") {
-    if (request.classificationId) throw Object.assign(new Error("Classification IDs are valid only for Auto input."), { statusCode: 400 });
-    if (request.requestedInputMode !== request.resolvedInputMode) {
-      throw Object.assign(new Error("Explicit turn input mode does not match the resolved mode."), { statusCode: 400 });
-    }
-    return null;
-  }
-  if (!request.classificationId) throw Object.assign(new Error("Auto input requires a current classification."), { statusCode: 400 });
-  const result = await client.query<{ id: string; resolved_mode: "action" | "scene" }>(
-    `SELECT id, resolved_mode FROM turn_input_classifications
-      WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3 AND input_hash = $4
-        AND consumed_at IS NULL AND expires_at > now() FOR UPDATE`,
-    [request.classificationId, ownerUserId, campaignId, sha256(request.action)]
-  );
-  const classification = result.rows[0];
-  if (!classification) throw Object.assign(new Error("The Auto classification is missing, expired, consumed, or does not match this input."), { statusCode: 409 });
-  if (classification.resolved_mode !== request.resolvedInputMode) {
-    throw Object.assign(new Error("The submitted turn mode does not match the Auto classification."), { statusCode: 409 });
-  }
-  await client.query("UPDATE turn_input_classifications SET consumed_at = now() WHERE id = $1", [classification.id]);
-  return classification.id;
 }
 
 type StoryCostOperation = "rpg_assessment" | "event_trigger_before" | "story_generation"
@@ -358,442 +325,33 @@ export type OrchestrationInputs = {
   characterSnapshot: Record<string, unknown> | null;
 };
 
+// Task 10c moves these legacy delegates to API composition; Task 10e owns claim/execution removal.
 export async function enqueueGeneration(pool: DatabasePool, campaignId: string, request: GenerationRequest) {
-  safeTurnInput(request.action);
-  const ownerUserId = await initialOwnerId(pool);
-  return withTransaction(pool, async (client) => {
-    const requestFingerprint = sha256(stableStringify(request));
-    const existing = await client.query(`SELECT id, status, result_turn_id AS "resultTurnId", action, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", expected_turn_number AS "expectedTurnNumber", recovery_metadata AS "recoveryMetadata" FROM generation_jobs WHERE campaign_id = $1 AND idempotency_key = $2 AND owner_user_id = $3`, [campaignId, request.idempotencyKey, ownerUserId]);
-    if (existing.rows[0]) {
-      const savedFingerprint = existing.rows[0].recoveryMetadata?.requestFingerprint;
-      if (existing.rows[0].action !== request.action || existing.rows[0].operationKind !== "append"
-          || (savedFingerprint && savedFingerprint !== requestFingerprint)) {
-        throw Object.assign(new Error("The idempotency key was already used for a different generation request."), { statusCode: 409 });
-      }
-      return { ...existing.rows[0], duplicate: true };
-    }
-    const campaign = await client.query<{ active_turn_number: number; text_provider_profile_id: string | null; story_length_profile: string; turn_control_style: string }>(`SELECT active_turn_number, text_provider_profile_id, story_length_profile, turn_control_style FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [campaignId, ownerUserId]);
-    const row = loadOrNotFound(campaign, "Campaign");
-    const classificationId = await validateTurnInputMode(client, ownerUserId, campaignId, request, row.turn_control_style);
-    const providerProfileId = await resolveEffectiveProviderId(client, ownerUserId, "text", request.providerProfileId || row.text_provider_profile_id);
-    if (!providerProfileId) throw Object.assign(new Error("Select a text provider for this campaign or mark a default text provider."), { statusCode: 409 });
-    const storyLengthProfile = storyLengthProfileFromUnknown(row.story_length_profile);
-    const storyLength = storyLengthWordRange(storyLengthProfile);
-    const promptSnapshot = await resolvePromptSnapshot(client, ownerUserId, campaignId);
-    const contextSnapshot = {
-      ...request.context,
-      storyLengthProfile,
-      narrationMinWords: storyLength.minWords,
-      narrationMaxWords: storyLength.maxWords
-    };
-    await client.query("SAVEPOINT enqueue_generation_insert");
-    try {
-      const result = await client.query(
-        `INSERT INTO generation_jobs (
-           owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
-           action, requested_input_mode, resolved_input_mode, input_mode_source, turn_input_classification_id,
-           requested_model, context_options, prompt_protocol_version, recovery_metadata, prompt_snapshot
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-         RETURNING id, status, action, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", expected_turn_number AS "expectedTurnNumber", created_at AS "createdAt"`,
-        [ownerUserId, campaignId, providerProfileId, request.idempotencyKey, row.active_turn_number + 1,
-          request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
-          request.model || "", json(contextSnapshot), promptProtocolVersion(promptSnapshot), json({ requestFingerprint }), json(promptSnapshot)]
-      );
-      return { ...result.rows[0], duplicate: false };
-    } catch (error) {
-      if (typeof error === "object" && error !== null && "code" in error && (error as { code: string }).code === "23505") {
-        await client.query("ROLLBACK TO SAVEPOINT enqueue_generation_insert");
-        const active = await client.query(
-          `SELECT id, status, action, operation_kind AS "operationKind", expected_turn_number AS "expectedTurnNumber"
-             FROM generation_jobs WHERE campaign_id = $1 AND owner_user_id = $2
-              AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`,
-          [campaignId, ownerUserId]
-        );
-        throw Object.assign(new Error("This campaign already has an active story generation."), {
-          statusCode: 409,
-          details: { code: "active_generation_exists", pendingGeneration: active.rows[0] || null }
-        });
-      }
-      throw error;
-    }
-  });
+  return generationCommandCompatibility(pool).enqueueGeneration(campaignId, request);
 }
 
 export async function enqueueLatestReplacement(pool: DatabasePool, campaignId: string, request: GenerationRetryLatestRequest) {
-  safeTurnInput(request.action);
-  const ownerUserId = await initialOwnerId(pool);
-  return withTransaction(pool, async (client) => {
-    const existing = await client.query<{
-      id: string;
-      status: string;
-      resultTurnId: string | null;
-      action: string;
-      operationKind: string;
-      expectedTurnNumber: number;
-      replacementTurnId: string | null;
-      recoveryMetadata: Record<string, unknown>;
-    }>(
-      `SELECT id, status, result_turn_id AS "resultTurnId", action,
-              operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", expected_turn_number AS "expectedTurnNumber",
-              recovery_metadata AS "recoveryMetadata"
-         FROM generation_jobs
-        WHERE campaign_id = $1 AND idempotency_key = $2 AND owner_user_id = $3`,
-      [campaignId, request.idempotencyKey, ownerUserId]
-    );
-    if (existing.rows[0]) {
-      const job = existing.rows[0];
-      const requestFingerprint = sha256(stableStringify(request));
-      if (job.action !== request.action || job.operationKind !== "replace_latest"
-          || job.expectedTurnNumber !== request.expectedCurrentTurnNumber
-          || (job.recoveryMetadata?.requestFingerprint && job.recoveryMetadata.requestFingerprint !== requestFingerprint)) {
-        throw Object.assign(new Error("The idempotency key was already used for a different generation request."), { statusCode: 409 });
-      }
-      return { ...job, duplicate: true };
-    }
-
-    const campaignResult = await client.query<{
-      active_turn_number: number;
-      text_provider_profile_id: string | null;
-      story_length_profile: string;
-      turn_control_style: string;
-    }>(
-      `SELECT active_turn_number, text_provider_profile_id, story_length_profile, turn_control_style
-         FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
-      [campaignId, ownerUserId]
-    );
-    const campaign = loadOrNotFound(campaignResult, "Campaign");
-    const classificationId = await validateTurnInputMode(client, ownerUserId, campaignId, request, campaign.turn_control_style);
-    if (campaign.active_turn_number !== request.expectedCurrentTurnNumber) {
-      throw Object.assign(
-        new Error(`Campaign is at turn ${campaign.active_turn_number}, not ${request.expectedCurrentTurnNumber}.`),
-        { statusCode: 409 }
-      );
-    }
-
-    const replacement = await client.query<{ id: string }>(
-      `SELECT id FROM turns
-        WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number = $3 FOR UPDATE`,
-      [campaignId, ownerUserId, campaign.active_turn_number]
-    );
-    const replacementTurnId = replacement.rows[0]?.id;
-    if (!replacementTurnId) throw Object.assign(new Error("The latest accepted turn was not found."), { statusCode: 404 });
-
-    const activeImage = await client.query(
-      `SELECT id FROM image_jobs
-        WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_id = $3
-          AND status = 'generating' LIMIT 1`,
-      [campaignId, ownerUserId, replacementTurnId]
-    );
-    if (activeImage.rows[0]) {
-      throw Object.assign(new Error("Wait for the latest turn illustration to finish before retrying the turn."), { statusCode: 409 });
-    }
-    await client.query(
-      `DELETE FROM image_jobs
-        WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_id = $3 AND status = 'queued'`,
-      [campaignId, ownerUserId, replacementTurnId]
-    );
-
-    const providerProfileId = await resolveEffectiveProviderId(
-      client,
-      ownerUserId,
-      "text",
-      request.providerProfileId || campaign.text_provider_profile_id
-    );
-    if (!providerProfileId) {
-      throw Object.assign(new Error("Select a text provider for this campaign or mark a default text provider."), { statusCode: 409 });
-    }
-
-    const baseTurnNumber = campaign.active_turn_number - 1;
-    let baseState: Record<string, unknown> = {};
-    let baseScratchpadSafeForPrompt = false;
-    if (baseTurnNumber === 0) {
-      const initial = await client.query<{ initial_state_snapshot: Record<string, unknown> }>(
-        `SELECT initial_state_snapshot FROM campaign_state
-          WHERE campaign_id = $1 AND owner_user_id = $2`,
-        [campaignId, ownerUserId]
-      );
-      baseState = initial.rows[0]?.initial_state_snapshot || {};
-    } else {
-      const baseTurn = await client.query<{ state_snapshot_private: Record<string, unknown>; model_metadata: Record<string, unknown> }>(
-        `SELECT state_snapshot_private, model_metadata FROM turns
-          WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number = $3`,
-        [campaignId, ownerUserId, baseTurnNumber]
-      );
-      if (!baseTurn.rows[0]) throw new Error("The replacement base turn was not found.");
-      baseState = baseTurn.rows[0].state_snapshot_private || {};
-      baseScratchpadSafeForPrompt = typeof baseTurn.rows[0].model_metadata?.promptProtocolVersion === "string";
-    }
-    const baseEdit = await client.query<{ state_snapshot_private: Record<string, unknown> }>(
-      `SELECT state_snapshot_private FROM campaign_state_edits
-        WHERE campaign_id = $1 AND owner_user_id = $2 AND effective_turn_number = $3
-        ORDER BY revision DESC LIMIT 1`,
-      [campaignId, ownerUserId, baseTurnNumber]
-    );
-    if (baseEdit.rows[0]) {
-      baseState = baseEdit.rows[0].state_snapshot_private || baseState;
-      baseScratchpadSafeForPrompt = true;
-    }
-
-    const storyLength = storyLengthWordRange(storyLengthProfileFromUnknown(campaign.story_length_profile));
-    const promptSnapshot = await resolvePromptSnapshot(client, ownerUserId, campaignId);
-    const contextSnapshot = {
-      ...request.context,
-      storyLengthProfile: storyLength.profile,
-      narrationMinWords: storyLength.minWords,
-      narrationMaxWords: storyLength.maxWords
-    };
-    try {
-      const inserted = await client.query(
-        `INSERT INTO generation_jobs (
-           owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
-           action, requested_input_mode, resolved_input_mode, input_mode_source, turn_input_classification_id,
-           requested_model, context_options, prompt_protocol_version, recovery_metadata, prompt_snapshot,
-           operation_kind, replacement_turn_id, base_turn_number, base_state_private, base_scratchpad_safe_for_prompt, status
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'replace_latest',$16,$17,$18,$19,'replacement_queued')
-        RETURNING id, status, action, expected_turn_number AS "expectedTurnNumber",
-                   operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", created_at AS "createdAt"`,
-        [ownerUserId, campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number,
-          request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
-          request.model || "", json(contextSnapshot), promptProtocolVersion(promptSnapshot),
-          json({ requestFingerprint: sha256(stableStringify(request)) }), json(promptSnapshot), replacementTurnId, baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt]
-      );
-      return { ...inserted.rows[0], duplicate: false };
-    } catch (error) {
-      if (typeof error === "object" && error !== null && "code" in error && (error as { code: string }).code === "23505") {
-        const active = await client.query(
-          `SELECT id, status, action, operation_kind AS "operationKind", expected_turn_number AS "expectedTurnNumber"
-             FROM generation_jobs WHERE campaign_id = $1 AND owner_user_id = $2
-              AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`,
-          [campaignId, ownerUserId]
-        );
-        throw Object.assign(new Error("This campaign already has an active story generation."), {
-          statusCode: 409,
-          details: { code: "active_generation_exists", pendingGeneration: active.rows[0] || null }
-        });
-      }
-      throw error;
-    }
-  });
+  return generationCommandCompatibility(pool).enqueueLatestReplacement(campaignId, request);
 }
 
 export async function getGenerationJob(pool: DatabasePool, jobId: string) {
-  const ownerUserId = await initialOwnerId(pool);
-  const result = await pool.query(
-    `SELECT id, campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
-            expected_turn_number AS "expectedTurnNumber", action, status, attempts,
-            requested_input_mode AS "requestedInputMode", resolved_input_mode AS "resolvedInputMode",
-            input_mode_source AS "inputModeSource",
-            operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId",
-            base_turn_number AS "baseTurnNumber",
-            requested_model AS "requestedModel", provider_response_id AS "providerResponseId",
-            provider_finish_reason AS "providerFinishReason", result_turn_id AS "resultTurnId",
-            error_code AS "errorCode", error_message AS "errorMessage", recovery_metadata AS "recoveryMetadata",
-            created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt",
-            partial_output AS "partialOutput"
-       FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`, [jobId, ownerUserId]
-  );
-  const row = loadOrNotFound(result, "Generation job");
-  row.partialNarration = row.partialOutput ? extractPartialNarration(row.partialOutput) : null;
-  return row;
+  return generationCommandCompatibility(pool).getGenerationJob(jobId);
 }
 
-export async function getGenerationResult(pool: DatabasePool, jobId: string) {
-  const ownerUserId = await initialOwnerId(pool);
-  const result = await pool.query(
-    `SELECT j.id, j.status, j.campaign_id AS "campaignId", j.expected_turn_number AS "expectedTurnNumber",
-            j.result_turn_id AS "resultTurnId", j.error_code AS "errorCode", j.error_message AS "errorMessage",
-            t.turn_number AS "turnNumber", t.action, COALESCE(t.input_mode, 'action') AS "inputMode",
-            COALESCE(t.input_mode_source, 'explicit') AS "inputModeSource", t.narration, t.choices,
-            t.custom_action_suggestion AS "customActionSuggestion", t.image_prompt AS "imagePrompt",
-            t.model_metadata AS "modelMetadata", t.mechanics_private AS mechanics,
-            t.accepted_at AS "acceptedAt",
-            jsonb_build_object(
-              'scratchpad', cs.scratchpad_private,
-              'trackers', cs.trackers,
-              'eventTriggers', cs.event_triggers,
-              'pendingEventTriggers', cs.pending_event_triggers,
-              'rpgStats', cs.rpg_stats
-            ) AS "stateSnapshot"
-       FROM generation_jobs j
-       LEFT JOIN turns t ON t.id = j.result_turn_id AND t.owner_user_id = j.owner_user_id
-       LEFT JOIN campaign_state cs ON cs.campaign_id = j.campaign_id AND cs.owner_user_id = j.owner_user_id
-      WHERE j.id = $1 AND j.owner_user_id = $2`,
-    [jobId, ownerUserId]
-  );
-  const row = loadOrNotFound(result, "Generation job");
-  if (row.status !== "completed" || !row.resultTurnId) {
-    throw Object.assign(new Error(row.errorMessage || `Generation is ${row.status}.`), { statusCode: 409 });
-  }
-  const costs = await turnReportedCosts(pool, ownerUserId, [row.resultTurnId]);
-  return {
-    ...row,
-    narration: formatNarrationParagraphs(String(row.narration || "")),
-    reportedCost: costs.get(row.resultTurnId) || null
-  };
+export async function getGenerationResult(pool: DatabasePool, jobId: string): Promise<any> {
+  return generationCommandCompatibility(pool).getGenerationResult(jobId);
 }
 
 export async function retryGeneration(pool: DatabasePool, jobId: string) {
-  const ownerUserId = await initialOwnerId(pool);
-  const result = await pool.query(
-    `UPDATE generation_jobs SET status = CASE WHEN operation_kind = 'replace_latest' THEN 'replacement_queued' ELSE 'queued' END,
-            lease_owner = NULL, lease_expires_at = NULL,
-            error_code = NULL, error_message = NULL, prompt_protocol_version = $3, updated_at = now()
-      WHERE id = $1 AND owner_user_id = $2 AND status IN ('recoverable', 'failed')
-      RETURNING id, status, campaign_id, provider_profile_id, expected_turn_number, operation_kind, replacement_turn_id AS "replacementTurnId", attempts`, [jobId, ownerUserId, STORY_PROMPT_PROTOCOL_VERSION]
-  );
-  const requeued = result.rows[0];
-  if (!requeued) throw Object.assign(new Error("Only recoverable or failed generation jobs can be retried."), { statusCode: 409 });
-  logger.info({
-    event: "turn_generation_requeued",
-    ...generationLogContext(requeued)
-  });
-  return { id: requeued.id, status: requeued.status, operationKind: requeued.operation_kind, replacementTurnId: requeued.replacementTurnId };
+  return generationCommandCompatibility(pool).retryGeneration(jobId);
 }
 
-export async function cancelGeneration(pool: DatabasePool, jobId: string): Promise<{
-  id: string;
-  status: "cancelled";
-  campaignId: string;
-  operationKind: "append" | "replace_latest";
-}> {
-  const ownerUserId = await initialOwnerId(pool);
-  const cancelled = await withTransaction(pool, async (client) => {
-    const result = await client.query<{
-      id: string;
-      status: "cancelled";
-      campaignId: string;
-      operationKind: "append" | "replace_latest";
-    }>(
-      `UPDATE generation_jobs
-          SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL, partial_output = NULL,
-              error_code = 'cancelled_by_player', error_message = 'Cancelled by player.', updated_at = now()
-        WHERE id = $1 AND owner_user_id = $2
-          AND status IN ('queued', 'replacement_queued', 'assessing', 'generating', 'validating', 'committing')
-        RETURNING id, status, campaign_id AS "campaignId", operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
-      [jobId, ownerUserId]
-    );
-    const job = result.rows[0];
-    if (!job) {
-      const existing = await client.query<{
-        id: string;
-        status: string;
-        campaignId: string;
-        operationKind: "append" | "replace_latest";
-        replacementTurnId: string | null;
-      }>(
-        `SELECT id, status, campaign_id AS "campaignId", operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"
-           FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
-        [jobId, ownerUserId]
-      );
-      if (!existing.rows[0]) throw Object.assign(new Error("Generation job not found."), { statusCode: 404 });
-      if (existing.rows[0].status === "cancelled") {
-        const existingCancelled = existing.rows[0];
-        return {
-          id: existingCancelled.id,
-          status: "cancelled" as const,
-          campaignId: existingCancelled.campaignId,
-          operationKind: existingCancelled.operationKind,
-          replacementTurnId: existingCancelled.replacementTurnId
-        };
-      }
-      throw Object.assign(new Error("Only active generation jobs can be cancelled."), { statusCode: 409 });
-    }
-    const cancelledImages = await client.query<{ id: string }>(
-      `UPDATE image_jobs
-          SET status = 'cancelled', asset_id = NULL, lease_owner = NULL, lease_expires_at = NULL,
-              completed_at = now(), updated_at = now()
-        WHERE generation_job_id = $1 AND owner_user_id = $2 AND campaign_id = $3
-          AND target_type = 'streaming_illustration'
-          AND status IN ('queued', 'generating', 'provider_pending', 'downloading', 'completed')
-        RETURNING id`,
-      [job.id, ownerUserId, job.campaignId]
-    );
-    if (cancelledImages.rows.length) {
-      await client.query(
-        `DELETE FROM turn_illustration_segment_assets
-          WHERE owner_user_id = $1 AND image_job_id = ANY($2::uuid[])`,
-        [ownerUserId, cancelledImages.rows.map((image) => image.id)]
-      );
-    }
-    await client.query(
-      `DELETE FROM asset_references refs
-        USING illustration_resolution_jobs resolutions, turn_illustration_segments segments
-        WHERE resolutions.segment_id = segments.id
-          AND segments.generation_job_id = $1 AND segments.owner_user_id = $2
-          AND segments.campaign_id = $3 AND segments.turn_id IS NULL
-          AND refs.owner_user_id = segments.owner_user_id
-          AND refs.campaign_id = segments.campaign_id
-          AND refs.asset_id = resolutions.selected_asset_id
-          AND refs.turn_id IS NOT DISTINCT FROM resolutions.turn_id
-          AND refs.asset_role = 'turn_illustration'`,
-      [job.id, ownerUserId, job.campaignId]
-    );
-    await client.query(
-      `DELETE FROM turn_illustration_segment_assets assets
-        USING turn_illustration_segments segments
-        WHERE assets.segment_id = segments.id AND assets.owner_user_id = segments.owner_user_id
-          AND segments.generation_job_id = $1 AND segments.owner_user_id = $2
-          AND segments.campaign_id = $3 AND segments.turn_id IS NULL`,
-      [job.id, ownerUserId, job.campaignId]
-    );
-    await client.query(
-      `UPDATE turn_illustration_segments
-          SET status = 'failed', updated_at = now()
-        WHERE generation_job_id = $1 AND owner_user_id = $2 AND turn_id IS NULL
-          AND status = 'completed'`,
-      [job.id, ownerUserId]
-    );
-    await client.query(
-      `UPDATE illustration_prompt_jobs prompts
-          SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
-              error_code = 'generation_cancelled', error_message = 'Parent generation was cancelled.',
-              completed_at = now(), updated_at = now()
-         FROM turn_illustration_segments segments
-        WHERE prompts.segment_id = segments.id AND prompts.owner_user_id = segments.owner_user_id
-          AND segments.generation_job_id = $1 AND segments.owner_user_id = $2 AND segments.campaign_id = $3
-          AND segments.turn_id IS NULL
-          AND prompts.status IN ('queued', 'refining', 'recoverable', 'fallback')`,
-      [job.id, ownerUserId, job.campaignId]
-    );
-    await client.query(
-      `UPDATE illustration_resolution_jobs resolutions
-          SET status = 'cancelled', reason_code = 'generation_cancelled', lease_owner = NULL, lease_expires_at = NULL,
-              completed_at = now(), updated_at = now()
-         FROM turn_illustration_segments segments
-        WHERE resolutions.segment_id = segments.id AND resolutions.owner_user_id = segments.owner_user_id
-          AND segments.generation_job_id = $1 AND segments.owner_user_id = $2 AND segments.campaign_id = $3
-          AND segments.turn_id IS NULL
-          AND resolutions.status IN ('queued', 'matching', 'recoverable', 'generation_queued')`,
-      [job.id, ownerUserId, job.campaignId]
-    );
-    await client.query(
-      `UPDATE turn_illustration_sets SET status = 'orphaned', completed_at = NULL
-        WHERE generation_job_id = $1 AND owner_user_id = $2
-          AND turn_id IS NULL AND status <> 'orphaned'`,
-      [job.id, ownerUserId]
-    );
-    return job;
-  });
-  logger.info({
-    event: "turn_generation_cancelled",
-    generationJobId: cancelled.id,
-    campaignId: cancelled.campaignId,
-    operationKind: cancelled.operationKind
-  });
-  return cancelled;
+export async function cancelGeneration(pool: DatabasePool, jobId: string) {
+  return generationCommandCompatibility(pool).cancelGeneration(jobId);
 }
 
 export async function discardGeneration(pool: DatabasePool, jobId: string) {
-  const ownerUserId = await initialOwnerId(pool);
-  const result = await pool.query(
-    `UPDATE generation_jobs SET status = 'discarded', lease_owner = NULL, lease_expires_at = NULL,
-            partial_output = NULL, updated_at = now()
-      WHERE id = $1 AND owner_user_id = $2 AND status IN ('recoverable', 'failed')
-      RETURNING id, status, campaign_id AS "campaignId", operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
-    [jobId, ownerUserId]
-  );
-  if (!result.rows[0]) throw Object.assign(new Error("Only recoverable or failed generation jobs can be discarded."), { statusCode: 409 });
-  return result.rows[0];
+  return generationCommandCompatibility(pool).discardGeneration(jobId);
 }
 
 export async function syncPlayerCampaignConfig(pool: DatabasePool, campaignId: string, config: PlayerCampaignConfig) {
