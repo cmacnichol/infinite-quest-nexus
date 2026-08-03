@@ -5205,12 +5205,32 @@ the full 10b range, confirm the PostgreSQL adapter has no `services/api/**`
 import, and verify the compatibility mapper is the only temporary legacy-error
 translation point.
 
-**10b evidence (audited 2026-08-03).** Implementation landed in `3ee033d` with
-corrections in `93113bc`, `7933c3a`, `2e6901e`, `bb29eeb`, and `d778043` (base
-`e199f47`). The original correction review found two Important defects, and a
-later stricter review expanded the needed proof. The completed correction-round-2
-coverage below passed a fresh scoped review. The older measurement remains
-historical evidence, not the sole basis for approval.
+**10b evidence (audited 2026-08-03, re-measured after correction round 2).**
+Implementation landed in `3ee033d` with corrections in `93113bc`, `7933c3a`,
+`2e6901e`, `bb29eeb`, `d778043`, and `29f0376` (base `e199f47`). The original
+correction review found two Important defects, and a later stricter review
+expanded the needed proof. The completed correction-round-2 coverage below
+passed a fresh scoped review.
+
+Final measurement on `29f0376`: `pnpm check` **561 candidate files**,
+`pnpm build` clean, `pnpm test:unit` **1076/1076 across 88 test files**,
+`pnpm test:integration` **214 passed, 2 skipped across 18 test files**. An
+earlier audit of this substage recorded 1040/1040 and 211/2 at `bb29eeb`; those
+figures are historical and were superseded by the correction rounds, which added
+36 unit and 3 integration tests.
+
+**The correction that mattered most.** Replacement enqueue originally performed
+its unique-conflict replay read *inside* the still-open transaction, after
+`ROLLBACK TO SAVEPOINT`. That transaction still held the campaign and
+latest-turn `FOR UPDATE` locks, and the competing winner's committed row was not
+reliably visible from inside it. `d778043` throws a `ReplacementInsertUniqueConflict`
+sentinel instead, lets the transaction close, and replays against the pool.
+`29f0376` then added the proof that a losing replacement's pre-insert
+side effects — queued-image cleanup and Auto-classification consumption — roll
+back rather than persisting. An earlier audit of this substage confirmed the
+savepoint existed and that no query ran inside an *aborted* transaction, which
+was true and insufficient: the transaction here was recovered, not aborted, and
+the defect was lock-scope and visibility rather than abort state.
 
 Verified against the shipped code rather than the commit messages:
 
