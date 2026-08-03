@@ -27,11 +27,36 @@ Playwright, and axe-core.
 
 **Grounded at:** commit `ad73dc1`
 
+### Authority and specification reconciliation
+
+This is the controlling execution plan for Slice 0/1. The parent documents
+remain the product and migration specification, but several implementation
+details in them predate direct verification of the current repository. Where
+they conflict, use these reviewed corrections and update the parent documents
+in the owning task rather than reintroducing a known defect:
+
+| Older statement | Controlling requirement in this plan |
+|---|---|
+| HTTP/API behavior lives in pure `client-core` | Pure policy stays in `client-core`; Fetch, EventSource, storage, timers, and runtime Zod response parsing live in framework-free `client-web` |
+| Slice 0 adopts all routes and removes every app-level `fetch()` | Endpoint adoption is incremental and schema-first; C8 adopts the complete legacy play-loop and Slice 1 surface, while management routes move in their owning later slice |
+| Build one generic watcher for generation, image, Chronicle, and world-cover jobs | C6 reduces the shipped `GenerationEvent` family only; a generic watcher waits until two families have shared schemas, typed clients, terminal predicates, and browser sources |
+| Lift the legacy Story Player state object largely as-is | C6 stores only authoritative, contract-validated projections; DOM, view, timer, modal, and cancellation state remains app-owned |
+| Rewrite both `story.js` and `nexus.js` before framework work | C8 proves the generation boundary against `story.js`; the management client remains on its named transitional allowlist until its replacement slices |
+| Streaming narration is deferred | `OPEN_QUESTIONS.md` Q1 is resolved: `partialNarration` is rendered today and must remain progressively, safely rendered |
+| Active generation cancellation is unimplemented | The current API and typed client expose explicit durable `/cancel`; local watcher detach remains a separate, non-cancelling action |
+| Dark-only is the default design-system scope | `OPEN_QUESTIONS.md` Q8 requires dark and light color roles from the first replacement token layer; U1/U2 decide and test the user-facing selection behavior |
+| Worker concurrency is merely a later optimization | The parent boundary document names it as a UI prerequisite, and the backend-first policy now makes B1/B2/B3/B4b/B5 plus the backend audit one hard gate before U1 |
+
+The implementation task that resolves a stale statement must update every
+affected UI document named under **Documentation alignment**, not only this
+plan. A checked task may not leave its governing specification knowingly
+contradictory.
+
 ---
 
 ## Completion status
 
-Runtime implementation reviewed through `92aa9c4` on branch
+Runtime implementation reviewed through `1ae0dd1` on branch
 `wip/main-uncommitted`. None of Track C is merged to `main` yet; `main` is at
 `ad73dc1` and does not contain this plan.
 
@@ -47,10 +72,22 @@ Runtime implementation reviewed through `92aa9c4` on branch
 | Task 5 | C4 — pure durable-generation workflow | **Complete** | `92aa9c4`; scoped review plus two fix re-reviews clean |
 | Task 5a | C4a — discriminate and canonicalize pending submissions | **Complete** | `0904291`; scoped implementation review clean |
 | Task 6 | C5 — browser transports, persistence, and adaptive polling | **Complete** | `89915f3`, `ba9ea90`; scoped review, final review, and focused fix re-review clean |
-| Task 7 | C6 — framework-ready campaign store | Not started | — |
+| Task 7P | C6 prerequisite — live replacement provenance and hydration contract | **Complete** | `20f13b9`, `cc79906`; discriminated stream/pending provenance carried through enqueue, retry, SSE, polling, and fallback |
+| Task 7a | C6 stage 1 — store primitive | **Complete** | `cc79906`; `Object.is` identity, deep-readonly `Immutable<T>`, package-internal writable handle |
+| Task 7b | C6 stage 2 — campaign/runtime projection and selectors | **Complete** | `9773cd5`, `3a6411d`; all six campaign protocol guards; 813-line campaign-store suite |
+| Task 7c | C6 stage 3 — generation projection and event reduction | **Complete** | `aef77d9`, `b3b7844`, `9e8d5f1`; all five generation protocol guards; every `GenerationEvent` reduced |
+| Task 7d | C6 stage 4 — Track C exit audit | **Complete** | `4206316`, `7c95432`; `docs/review/2026-08-03-task-7d-track-c-exit-audit.md` |
 | Task 8 | C7 — static build and deployment contract | **Complete** | `175a854`, `d48e70a`, `3364bd0`, `05d89c3`, `afdc1c0`, `cb45bcc`; scoped reviews and final fix re-review clean |
-| Task 9 | C8 — current Story Player boundary proof | **Complete** | `docs/review/2026-08-02-task-9-c8-completion.md`; focused and full verification; clean Gate 2 revert rehearsal |
-| Task 10 onward | B1-B5, U1-U6 | Not started | — |
+| Task 9 | C8 — current Story Player boundary proof | **Complete** | Gate 1 `9cca4e7`, `cac241a`; Gate 2 `4bcd3de`; focused and full verification; clean Gate 2 revert rehearsal; detail in `docs/review/2026-08-02-task-9-c8-completion.md` |
+| Task 13a | B4a — bounded history and authoritative resume contracts | **Complete** | `b70844c`, `26cd735`, `6e5753d`; two scoped fix re-reviews clean; real-PostgreSQL 55-turn, recovery, and snapshot-race coverage |
+| Task 13a-R | B4a corrective gate — scoped pages and replacement recovery | **Complete** | `5f156ac`, `1ae0dd1`; migration 0051; full check/build/unit/integration; scoped review/re-review clean |
+| Task 10 | B1 — generation application boundary | Not started | — |
+| Task 11 | B2 — notification-backed SSE delivery | Not started | — |
+| Task 12 | B3 — worker concurrency and fair lanes | Not started | — |
+| Task 13b | B4b — play-loop read profiling/optimization | Not started | — |
+| Task 14a-14e | B5a-B5e — backend domain modularization | Not started | — |
+| Task 14f | Backend completion audit / UI authorization | Not started | — |
+| Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
 **Current Task 2a verification** (re-measured during the Task 2a completion
 review; the figures below replace an earlier stale count of 700 tests across 65
@@ -75,7 +112,7 @@ files and 468 candidate files):
 **Client compatibility check.** Narrowing the stream projection to eleven fields
 does not regress the legacy Story Player: its SSE consumers
 (`handleJobUpdate`, `updateGenerationProgress`, and the `onmessage` status
-branches in `apps/web/public/story.js`) read only `status`, `partialNarration`,
+branches in `apps/web/src/story.js`) read only `status`, `partialNarration`,
 `action`, `errorMessage`, and `resultTurnId`, all of which are in the allowlist.
 
 **Known environment constraint.** The integration harness provisions
@@ -173,7 +210,7 @@ completion review):
   `%2e`-replacement approach the Task 4a instructions suggested.
 - Dot validation is confined to the request pathname (`0fdcb9b`), so
   `/worlds?cursor=/..` is preserved verbatim. This was not required by the
-  Task 4a instructions and is a deliberate improvement: Task 13 (B4) needs query
+  Task 4a instructions and is a deliberate improvement: Task 13a (B4a) needs query
   strings for bounded reads, and the containment backstop still compares only
   `pathname`.
 - P3 is proved with a non-POST method: the request-contract error regression
@@ -184,20 +221,344 @@ completion review):
   scanner; the choice is recorded in `7bf07fc`. No package now declares a
   dependency its own boundary check rejects.
 
-**Current Task 5 verification** (measured on the Task 5 completion commit):
+**Current Task 5 verification** (re-measured on `92aa9c4`, the Task 5 code
+commit, during the Task 6 review; the figures below replace an earlier count of
+783 unit tests and an unqualified integration note):
 
 - `pnpm check` and `pnpm build` pass; repository boundary and data-safety
   checks cover 499 candidate files.
-- `pnpm test:unit` passes **783/783 across 72 test files**.
-- `pnpm test:integration` passes — the database integration suite completed
-  successfully before the final pure-client test-only follow-up.
+- `pnpm test:unit` passes **784/784 across 72 test files**, stable across
+  repeated runs.
+- `pnpm test:integration` passes — **190 passed, 2 skipped across 17 test
+  files**, measured on this tree. The earlier note deferred to "the final
+  pure-client test-only follow-up"; no such commit exists. `92aa9c4` is the last
+  commit touching code, and `3f04efb` after it is documentation only.
 - Focused client-core and boundary checks pass, including explicit coverage for
   failed same-attempt retries, source-session closure, command/frame races,
   retry transport failures, protocol mismatches, and duplicate replay.
+- Cross-checked against Task 4 during the Task 6 review: `client.generation`
+  satisfies the shipped `GenerationApiPort` with no adapter, assigning directly
+  into `GenerationWorkflowDependencies`.
 
-**Next step:** **Task 13a (B4a)** for the client-facing cursor contracts, then
-Task 7 (C6). Task 10 (B1) may proceed in parallel with that client lane; Task 12
-(B3) follows B1 and must finish before U1.
+**Current Task 5a verification** (completed in `0904291`):
+
+- `pnpm check` and `pnpm build` pass; repository boundary and data-safety
+  checks covered 499 candidate files at the implementation commit.
+- The focused client-core submission and boundary tests pass (58 tests), and
+  `pnpm test:unit` passes **785/785 across 72 test files**.
+- `pnpm test:integration` passes — **190 passed, 2 skipped across 17 test
+  files**. The scoped implementation review found no remaining issue.
+
+**Current Task 6 verification** (implemented in `89915f3` and finalized in
+`ba9ea90`):
+
+- `pnpm check` passes on the final tree; repository boundary and data-safety
+  checks cover **515 candidate files**. `pnpm build` also passes.
+- `pnpm test:unit` passes **875/875 across 77 test files**. The focused
+  client-web/client-core/boundary gate passes (63 tests after the final fix).
+- `pnpm test:integration` passes — **190 passed, 2 skipped across 17 test
+  files** — and the frozen-lockfile installation check passes.
+- A scoped review and independent final review identified three lifecycle
+  follow-ups; `ba9ea90` captures the safe base path at source construction,
+  cleans up a poll iterator returned before its first read, and adds the real
+  retry-created second composed-session regression. The focused fix re-review
+  confirmed all three findings addressed.
+
+**Current Task 8 verification** (implemented across `175a854`, `d48e70a`,
+`3364bd0`, `05d89c3`, `afdc1c0`, and finalized in `cb45bcc`):
+
+- `pnpm install --frozen-lockfile`, `pnpm check`, and `pnpm build` pass on the
+  final tree. The boundary and data-safety checks cover **524 candidate files**.
+- `pnpm test:unit` passes **888/888 across 78 test files**;
+  `pnpm test:integration` passes **190 passed, 2 skipped across 17 test files**.
+- The rendered Compose and Swarm configurations validate. A production image
+  built from the final tree and served `/nexus/`, `/story`, `/app/`, an
+  extensionless `/app/` deep link, and a generated hashed asset successfully.
+  The same smoke run verified HTML/stable-asset `no-cache`, hashed-asset
+  immutable caching, CSP, and 404 separation for missing assets and API routes.
+- Production and development remain same-origin from the browser's perspective:
+  Fastify serves both production roots and Vite proxies backend paths in
+  development. Task 8 therefore does **not** add
+  `Access-Control-Expose-Headers` or widen CORS.
+- C7a, C7b, and C7c each passed scoped review. The follow-up commits close the
+  package-export bypass, TypeScript source-fixture invocation, Fastify static
+  header API, hash-cache classification, unrelated-route 404, and extensionless
+  `/app/assets/` fallback findings. The final focused fix re-review confirmed
+  the asset-namespace finding addressed.
+
+**Current Task 9 verification** (re-measured on `4bcd3de` during the Task 9
+completion review; this block was missing when Task 9 was first marked
+complete, which is the third recurrence of the Task 4a P4 defect):
+
+- `pnpm check` and `pnpm build` pass; the boundary and data-safety checks cover
+  **533 candidate files**. The build includes both Vite applications.
+- `pnpm test:unit` passes **939/939 across 81 test files**.
+- `pnpm test:integration` passes — **191 passed, 2 skipped across 17 test
+  files**.
+- Gate structure held. Gate 1 is `9cca4e7` (contracts, server projection, typed
+  client) plus `cac241a` (the contract/route/client test gate and four of the
+  five `docs/ui/*` reconciliations). Gate 2 is `4bcd3de`, the client rewire, and
+  it contains **zero documentation files** — verified — so the revertible commit
+  stays revertible.
+- The four pre-implementation corrections were each confirmed against the
+  shipped tree rather than the review document:
+  - `story.html:522` loads `/nexus/legacy-client.js`, and the Story Player
+    module graph moved out of `publicDir` into `apps/web/src/` — `story.js`,
+    `story-routing.js`, `story-generation-cancellation.js`, and
+    `story-state-editor.js`. `nexus.js` correctly stays raw; C8 covers the Story
+    Player only.
+  - `apps/web/dist/story.js` no longer exists after a real build, and
+    `web-build-contract.test.ts` pins both halves — that `story.html` references
+    the compiled entry and that `dist/story.js` is absent.
+  - `apps/web/src/composition.ts` passes one `session` to `createApi`,
+    `createSource`, and `createIllustrations`, and one `clock` to `createSource`
+    and `createWorkflow`. `story-player-composition.test.ts` asserts those
+    identities through `toHaveBeenCalledWith` and requires every factory to be
+    called exactly once — a stronger check than the plan asked for.
+- Note the completion review document records two figure sets: 935/935 before a
+  correction round and 939/939 after. The later set is authoritative and matches
+  this re-measurement.
+
+**Loose end — one doc reconciliation is uncommitted.** `docs/ui/API_UI_CONTRACTS.md`
+carries Task 9's Q2 resolution (the legacy single-image illustration endpoints
+are a backend-only vestigial surface) but is still a working-tree modification.
+Four of the five reconciliations landed in gate 1; this one did not. Commit it
+to the gate-1 lane, not to gate 2 — a documentation change must not enter the
+revertible rewire commit.
+
+**Current Task 13a verification** (`b70844c`, `26cd735`, `6e5753d`): no figures
+were recorded when this task was marked complete, and they are **not
+reconstructed here** — the tree moved on immediately with the 13a-R corrective
+gate, so any number measured now describes 13a-R's tree, not 13a's. What 13a is
+evidenced by is its own commits, its two scoped fix re-reviews, and its
+real-PostgreSQL 55-turn, recovery, and snapshot-race coverage, all of which the
+13a-R work exercised again. Treat the 13a-R block below as the authoritative
+measured state of the B4a lane.
+
+**Current Task 13a-R verification** (measured on `1ae0dd1` during the Task 13a-R
+completion review):
+
+- `pnpm check` and `pnpm build` pass; the boundary and data-safety checks cover
+  **539 candidate files**.
+- `pnpm test:unit` passes **949/949 across 83 test files**.
+- `pnpm test:integration` passes — **193 passed, 2 skipped across 17 test
+  files** — and migration `0051_preserve_replacement_turn_provenance` applies
+  cleanly on every test-database provision.
+- Both contract corrections match the specification exactly.
+  `turnListResponseSchema` carries `campaignId: z.uuid()`, supplied server-side
+  from the campaign record (`campaignId: campaign.id`) rather than from a cursor
+  or the request. `generationRecoverySchema` is a real
+  `z.discriminatedUnion("operationKind", …)` with `append -> z.null()` and
+  `replace_latest -> z.uuid()`, not the loose nullable the specification warned
+  against.
+- **Migration 0051 was checked for effectiveness, not just presence.**
+  `DROP CONSTRAINT IF EXISTS` silently no-ops on a wrong name, which would leave
+  the defect in place while every test still passed. The dropped name
+  `generation_jobs_replacement_turn_owner_fk` matches exactly what migration
+  0023 created with its `ON DELETE SET NULL (replacement_turn_id)` clause.
+- **The provenance is proved to survive deletion, not merely projected.**
+  `tests/integration/gameplay.integration.test.ts` creates a `replace_latest`
+  job, explicitly runs `DELETE FROM turns` against the replacement target
+  (`:341`), then asserts the recovery still carries `replacementTurnId`
+  (`:395`). That mirrors production, where committing a replacement deletes the
+  old turn at `generation-service.ts:1530`. Before 0051 the foreign key would
+  have nulled the value and this assertion would fail.
+
+**Convention note.** Task 13a-R records a "Completion evidence" paragraph inside
+its own section. That is useful narrative, but the Completion-status table points
+here, so measured figures belong in a `Current Task N verification` block. Keep
+the in-section paragraph for the red-test narrative and do not duplicate numbers
+between the two. This was the fourth recurrence of the missing-block defect; the
+checklist half of the Task 4a P4 rule is now holding — 13a is 6/6 and 13a-R is
+4/4 — while the block half is not.
+
+**Current Task 7P / 7a / 7b / 7c / 7d verification** (all five stages
+re-measured together on `9e8d5f1` during the Task 7 completion review, because
+the plan status for the whole C6 package was reconciled in one pass — see the
+reconciliation note below for why the stages could not record their own blocks
+as they landed):
+
+- `pnpm check` and `pnpm build` pass; the boundary and data-safety checks cover
+  **548 candidate files**.
+- `pnpm test:unit` passes **1010/1010 across 86 test files**.
+- `pnpm test:integration` passes — **193 passed, 2 skipped across 17 test
+  files**.
+- **7P** (`20f13b9`, `cc79906`): `generationStreamSnapshotSchema` and
+  `pendingGenerationSchema` are both `z.discriminatedUnion("operationKind", …)`
+  with `append -> replacementTurnId: z.null()` and
+  `replace_latest -> z.uuid()`. The pending status union is active-only via
+  `activeGenerationStatusSchema`, leaving terminal jobs to `generationRecovery`.
+  The sync query carries `pending.replacement_turn_id`
+  (`server.ts:711`) and maps it at `:794` — never reconstructed from
+  `expectedTurnNumber` or the latest turn. Snapshot equality includes the pair
+  (`machine.ts:32-33`), so a target change is observable even when status and
+  narration are unchanged. `GenerationRun` carries the immutable operation/target
+  pair (`generation/types.ts:95-96`), available at `attachGeneration` before the
+  first frame.
+- **7a** (`cc79906`): `store.ts` commits with `Object.is` (`:91`), notifies from
+  a copied listener set (`:94`), and returns an unsubscribe closure (`:101`).
+  `Immutable<T>` was independently stress-tested: discriminated unions still
+  narrow through it, arrays become deeply readonly with `push` rejected, and
+  nullable branches and `Date` survive.
+- **7b** (`9773cd5`, `3a6411d`): all six campaign protocol guards are
+  implemented — `campaign_not_loaded`, `campaign_mismatch`,
+  `page_campaign_mismatch`, `unchanged_window_without_baseline`,
+  `duplicate_turn_id`, `duplicate_turn_number` — backed by an 813-line
+  `campaign-store.test.ts`. The `page_campaign_mismatch` guard is what Task
+  13a-R's `TurnListResponse.campaignId` exists to make possible.
+- **7c** (`aef77d9`, `b3b7844`, `9e8d5f1`): all five generation protocol guards
+  are implemented — `job_mismatch`, `result_turn_mismatch`,
+  `replacement_target_missing`, `replacement_target_mismatch`,
+  `result_retry_not_available`. Together with 7b that is the complete
+  eleven-kind `CampaignProjectionProtocolError` union from S3, split exactly
+  along the two lanes the stage decomposition defined.
+- **7d** (`4206316`, `7c95432`): the four governing C6 documents are reconciled
+  and `docs/review/2026-08-03-task-7d-track-c-exit-audit.md` records the exit
+  audit. Its own report measured 959 tests across 83 files at `4206316`; three
+  commits landed after it, so **1010 across 86** is the figure for HEAD. The
+  earlier number is not wrong, only superseded.
+
+**Plan reconciliation note (2026-08-03).** All five stages shipped green while
+every table row still read "Not started" with 0 of 63 items ticked and no
+verification blocks. **This was not the recurring bookkeeping defect.** The Task
+7d report records the actual cause: this plan already carried inherited,
+uncommitted Task 7 sequencing and decomposition edits, so a stage could not
+commit its own status line without also staging changes it did not own. The
+implementing agent correctly declined to do that and escalated instead. The
+reconciliation performed here commits that inherited hunk, ticks all 74 items
+(11 in 7P, 63 across 7a-7d) against the shipped code, and records the block
+above. The lesson for future multi-stage packages: land the plan's structural
+edits **before** starting the first stage, so each stage can own its own status
+line. All three were marked complete with every
+checkbox still unticked — the mirror of the Task 4a P4 problem, where the boxes
+were ticked but the verification block was missing. Task 5's own 58 items were
+in the same state and were discovered only while auditing 5a and 6. All **131**
+items (58 + 17 + 56) were then individually verified against the shipped code
+and ticked. Spot-verified for Task 5: the `(attempts, rank)` table with
+`queued`/`replacement_queued` at rank 0, the `retryAcknowledged` gate that
+admits the same-attempt queue frame only after a successful retry, narration
+sourced solely from `partialNarration` with no `partialOutput` reference
+anywhere, and `resume()`'s exact ordering — load, `syncStatus`, attach to
+`pendingGeneration.id` while clearing the local record, else return a run for a
+stored `jobId`, else replay.
+
+The behaviors that had been the blocking spec defects were confirmed by
+**running the shipped code**, not by reading it:
+
+- A polling 404 rejects with `NexusApiError` after exactly one call and emits
+  nothing, closing the degrade-forever hole that motivated S6's classification
+  table.
+- An SSE failure yields one `degraded: stream_lost` and then continues polling
+  **inside the same iterable** through to a terminal snapshot, so S1's
+  `source_ended_before_terminal` cannot fire on the fallback path.
+- Legacy flat records in the exact shape `story.js:960-975` writes migrate for
+  **both** operation kinds, preserving the idempotency key, with
+  `expectedCurrentTurnNumber` derived from the flat `expectedTurnNumber` for
+  replacements. No in-flight submission is lost at cutover.
+- Task 5a's canonicalization was verified against a deliberately forged input
+  carrying a mismatched `expectedTurnNumber`; the coordinator rewrites it from
+  `request.expectedCurrentTurnNumber` rather than trusting the caller.
+
+One item was checked specifically because it looked wrong and was not:
+`storage.setItem` appears inside a `try`/`catch` in `pending-submissions.ts`,
+but only via `writeBestEffort`, which serves the migration write inside
+`load()`. `save()` calls `setItem` directly and propagates, exactly as S9
+requires.
+
+**Convention reminder for Task 7 onward:** tick the checklist in the same commit
+that marks a task complete, alongside the verification block. A completed task
+whose boxes are all unticked leaves no per-requirement record of what was
+consciously satisfied, and a verification block alone cannot supply it.
+
+**Next step — pick-up instructions.** **Track C is complete.** Tasks 1-6, 7P,
+7a-7d, 8, 9, 13a, and 13a-R are done, and the ten Track C exit criteria were
+audited and met on 2026-08-03. The client packages now own transport, workflow,
+persistence, projection, and selectors, and the live Story Player runs on them.
+
+**UI work is still blocked.** Track C being met authorizes the backend sequence
+only. No `apps/web-next` framework, route, component, styling, or UI test
+implementation begins until the backend completion gate at Task 14f.
+
+Work the following order:
+
+1. **Task 10 (B1)** — extract the generation application boundary. This is the
+   head of the backend lane and unblocks B2/B3/B4b/B5.
+2. **Task 12 (B3)** — configurable worker concurrency and fair job lanes.
+   Follows B1 and must finish before U1.
+3. **Task 11 (B2)** — replace SSE database polling with a notification port.
+   Independent after B1; must preserve the C1a error-frame behavior.
+4. **Task 13b (B4b)** — profiling, query/index optimization, and load evidence.
+   Must finish before U5.
+5. **Task 14a-14e (B5 by domain)**, then the **Task 14f** backend completion
+   audit, which is the gate that authorizes Track U.
+
+Two documentation items remain carried and unowned; neither blocks B1:
+
+- `docs/ui/API_UI_CONTRACTS.md` still holds Task 9's uncommitted Q2 hunk. Task
+  7d deliberately left it unstaged for the same ownership reason that blocked
+  the Task 7 status lines. Commit it as a focused documentation change.
+- The remaining uncommitted working-tree docs (`AGENTS.md`,
+  `docs/architecture/index.md`, `docs/reference/capabilities.md`,
+  `docs/operations/deferred-improvements.md`,
+  `docs/review/2026-07-30-implementation-plan.md`,
+  `docs/ui/FRONTEND_IMPLEMENTATION_PLAN.md`, `docs/ui/OPEN_QUESTIONS.md`)
+  predate this plan's Track C work and are not part of it. Triage them
+  separately rather than folding them into a backend commit.
+
+The 7P/7a/7b/7c/7d checkpoint model worked: each stage landed as its own commit
+with its own scoped review, and the eleven-kind protocol-error union split
+cleanly along the two lanes the decomposition predicted. Its one failure mode is
+recorded in the **Plan reconciliation note** above — a stage cannot own its
+status line while the plan still carries someone else's uncommitted structural
+edits. Land structural plan changes before starting stage one.
+
+Two Task 9 review follow-ups remain, but neither blocks B4a: commit the stranded
+`docs/ui/API_UI_CONTRACTS.md` reconciliation as a focused documentation change
+once its user-owned hunk can be isolated, and retain the C8 evidence in its
+completion report. The final Track C exit audit belongs after C6, because C6 is
+the last remaining Track C package; its C8-specific criteria (3, 6, 8, and 9)
+are already evidenced by the Task 9 report and must be rechecked only as part of
+that final audit.
+
+Context carried forward: Task 5a established the replacement submission
+invariant before storage validation; Task 6 supplied the browser-only SSE,
+polling, persistence, clock, delay, and ID adapters without moving workflow
+policy back into the UI; and Task 9 proved the whole vertical slice against the
+live Story Player behind a rehearsed revert.
+
+Two sequencing corrections, both from reviews against the shipped code rather
+than the plan's own diagram:
+
+- **Task 8 must land before Task 9.** Task 9 rewires `story.js` to import the
+  client packages, and nothing in the repository can resolve those imports until
+  Task 8 introduces the legacy client entry and its Vite build.
+- **Task 7 does not gate Task 9** and is sequenced after it. Task 9 never
+  consumes its stores or selectors, and no Track C exit criterion mentions them;
+  they are Slice 1 groundwork for U2, U4, and U5. Task 7 keeps its number for
+  cross-reference stability — roughly forty references across the document
+  depend on the current numbering — so read the sequence from here and from the
+  dependency graph, not from the section order.
+- **Task 13a-R now gates Task 7.** Task 13's original cursor work changed turn
+  history and incremental sync only after C6 had frozen its campaign projection,
+  forcing C6 and U4/U5 to be rewritten. B4 is split: B4a lands the bounded
+  browser/API contracts and compatibility implementation immediately after C8;
+  B4b retains profiling, query/index optimization, and load evidence. C6 is
+  implemented against B4a's final page/sync types once.
+- **The entire remaining backend track gates U1.** The backend-first delivery
+  policy is stricter than the minimum technical dependency graph: B1, B2, B3,
+  B4b, every B5 domain extraction, and the backend completion audit all finish
+  before any replacement-UI implementation. B2's transport abstraction and
+  B5's domain independence no longer make either package parallel with UI work.
+
+**Plan-wide validity review (2026-08-02): Complete.** The current worktree,
+repository/deployment/testing architecture, all UI specifications named in the
+traceability table, resolved Q1-Q8 decisions, and the unfinished Task 7-20
+sequence were reviewed together. The review corrected the C7/C8/B4a/C6 order,
+restored and expanded the backend-first U1 gate, split public read contracts from later optimization,
+added missing build entries and Slice 1 endpoints, fixed retry-latest store
+reconciliation, made pre-auth identity/provider separation explicit, and turned
+U1-U6 into spec-verifiable work packages. This completion marks the **plan
+review**, not any unchecked implementation task.
 
 ---
 
@@ -230,6 +591,36 @@ Task 7 (C6). Task 10 (B1) may proceed in parallel with that client lane; Task 12
 
 ---
 
+## Specification traceability for remaining work
+
+This table is the audit index for incomplete tasks. The implementation review
+for each row must cite the named evidence; "covered elsewhere" is not a passing
+answer.
+
+| Requirement | Governing specification | Owning incomplete work |
+|---|---|---|
+| One same-image Compose/Swarm artifact, same-origin static UI, health/caching/CSP behavior | `repository-overview.md`, `runbooks/deployment.md`, frontend migration approach | C7 (Task 8) |
+| Complete typed legacy play-loop seam, progressive narration, explicit cancel vs detach, retry-latest preservation, result-fetch recovery | `CLIENT_CORE_BOUNDARY.md`, Q1/Q4, Flows 2/6/8/9/11 | C8 (Task 9) |
+| Slice 1 shell/world/campaign endpoints exist before feature code | `API_UI_CONTRACTS.md`, `SCREEN_INVENTORY.md` | C8 contract prerequisite, verified again by U3/U4 |
+| Bounded turn history and incremental resume do not change underneath stores/components | performance budget, Flow 7/11, U4/U5 | B4a (Task 13a plus Task 13a-R) before C6; B4b before any UI implementation under the backend-first gate |
+| Framework-neutral immutable campaign projection with no browser lifecycle ownership | client boundary and repository authority rules | C6 (Task 7) |
+| API/worker generation behavior shares application ports without changing transaction or ownership boundaries | target architecture and generation-integrity rules | B1 (Task 10) |
+| SSE notifications are hints, campaign/user scoped, and do not consume one pool connection per viewer | deployment replica rules and generation monitoring budget | B2 (Task 11) |
+| Configurable fair worker lanes preserve campaign exclusivity and illustration independence | parent backend prerequisite, generation-integrity and provider-independence rules | B3 (Task 12), before U1 |
+| WCAG 2.2 AA, one heading/landmarks, focus return, labels, throttled announcements, 320px reflow, 200% zoom, reduced motion | `ACCESSIBILITY_SPEC.md` | U1/U2/U5 implementation; U6 automated and manual gates |
+| Dark and light token roles, status never color-only, narrative measure, common breakpoints/focus/motion tokens | `DESIGN_SYSTEM.md`, resolved Q8 | U1 tokens, U2 control/shell, U6 contrast/visual coverage |
+| Minimal draft-world creation/published-version selection, campaign creation/resume, and Story Player including Auto resolution and replacement distinction | Slice 1, screens `NEX-WORLDS`, `NEX-CAMPAIGNS`, `STORY-PLAYER`; Flows 1/2/6/7/8/9/11 | C8 prerequisite contracts; U3, U4, U5 |
+| No login or caller-authoritative UUID; correlation IDs remain visible | identity rules and `API_UI_CONTRACTS.md` | C8 typed session surface, U1/U2, U6 spoofing/error tests |
+| Initial-user bootstrap/import ownership stay intact; future OIDC links to the existing internal UUID rather than claiming legacy data | identity rules; authentication explicitly deferred | Re-run existing migration/import/isolation suites in B1/U6; require a separate auth task and its mandated OIDC-link tests before any interactive login ships |
+| Component, contract, real-database integration, Compose E2E, accessibility, visual, responsive, and performance evidence | `workflows/testing.md`, frontend testing strategy | every task's focused tests; U6 aggregate release gate |
+
+Slice 1 intentionally excludes full world authoring, illustration controls,
+Chronicle management, provider management, imports/exports, and campaign-detail
+depth. Those requirements remain assigned to Slices 2–4 in
+`FRONTEND_IMPLEMENTATION_PLAN.md`; they are not silently deleted by this plan.
+
+---
+
 ## Why the plan is split into tracks
 
 The replacement UI and backend modularization share contracts and job semantics,
@@ -244,17 +635,20 @@ three coordinated tracks:
 3. **Track U — replacement UI:** build the new framework application only after
    the client seam is proven and the static build/deployment contract exists.
 
-Track C gates Slice 1. Track B1 gates the claim that the generation backend is
-modular. B2 and B3 may land before or after the new UI because the contract and
-client watcher hide their implementation. B4's bounded read contracts must land
-before U5 adopts long campaign histories.
+Track C and the complete Track B both gate Slice 1. B4a's bounded read
+contracts, including Task 13a-R, land before C6 because they define its public
+shape. After the Track C exit audit, backend work proceeds in the deterministic
+order B1, B2, B3, B4b, and B5a-B5e, followed by a backend completion audit.
+Only that audit authorizes U1. This sequencing intentionally removes earlier
+parallel/non-gating language even where HTTP/client abstractions would have
+allowed implementation overlap.
 
 ---
 
 ## Target dependency direction
 
 ```text
-apps/web/public legacy adapters       apps/web-next rendering
+apps/web/src legacy adapters          apps/web-next rendering
                 \                         /
                  ---> packages/client-web
                           |
@@ -299,7 +693,7 @@ The first package records the baseline and installs the following budgets:
 | Core Web Vitals | LCP <= 2.5 s, INP <= 200 ms, CLS <= 0.1 at p75 in the Playwright profile | Lighthouse/Playwright measurement artifact |
 | Story render | 200-turn fixture becomes interactive without a main-thread task over 50 ms | Playwright performance assertion |
 | Generation monitoring | At most one live SSE or polling watcher per job in one browser tab | Client-web unit test with fake transports |
-| Poll fallback | Starts at 1500 ms, uses jittered backoff capped at 5000 ms, and exposes degraded state after two consecutive failures | Fake-clock tests |
+| Poll fallback | Starts at 1500 ms, uses jittered transport backoff capped at 5000 ms, exposes `poll_failed` after two consecutive polling failures, and honors explicit server `Retry-After` up to 60 seconds | Fake-clock tests |
 | Non-durable progress polling | No interval below 2000 ms; pauses while the document is hidden | Browser-adapter tests |
 | SSE database activity | No fixed 350 ms query loop after B2; notification delivery p95 <= 500 ms with a bounded reconciliation read | Integration test and structured timing logs |
 | Generation throughput | Scales with configured per-replica concurrency while preserving one active job per campaign | Real-PostgreSQL concurrency tests |
@@ -394,7 +788,8 @@ generation schemas in the tree at the end of C1.
 - Create: `tests/unit/client-api-contracts.test.ts`
 - Modify: `packages/contracts/src/generation.ts`
 - Modify: `packages/contracts/src/world-library.ts`
-- Modify: `packages/contracts/src/index.ts`
+- Review: `packages/contracts/src/index.ts` (the existing public barrel already
+  re-exports the complete client-contract module)
 - Modify: `services/api/src/server.ts`
 - Test: focused route tests under `tests/integration/`
 
@@ -537,14 +932,14 @@ nothing tests it.
 - [x] Remove the now-unreachable `partialOutput` branch at `story.js:1235-1243`
   so it does not mislead the Task 9 (C8) migration.
 
-### P4 — measure response-validation cost on unbounded reads
+### P4 — measure response-validation cost before bounded reads
 
 `turnListResponseSchema` validates every turn on every call, and the turns route
-still has no `LIMIT` because Task 13 (B4) has not landed. On the plan's own
+still has no `LIMIT` because Task 13a (B4a) has not landed. On the plan's own
 2,000-turn fixture that is 2,000 object validations per request, on a route hit
 at every campaign load.
 
-- [x] Measure the 2,000-turn response validation now, before B4, so B4's
+- [x] Measure the 2,000-turn response validation now, before B4a, so B4a's
   comparison is not made against an already-degraded number.
 - [x] Record the result as an explicit baseline amendment rather than silently
   absorbing it into the 10% regression budget.
@@ -1440,7 +1835,7 @@ commit message.
   ```
 
   Compare only `pathname`, not the whole URL, so this does not constrain query
-  strings that Task 13 (B4) may later add for bounded reads. The synthetic origin
+  strings that Task 13a (B4a) later adds for bounded reads. The synthetic origin
   is never fetched; it exists only to run the platform's own normalization.
 - [x] Extend the existing
   `rejects non-relative, protocol-relative, and slashless request paths` test
@@ -1678,11 +2073,11 @@ export function createGenerationWorkflow(
 ): GenerationWorkflow;
 ```
 
-- [ ] `submit()` persists the supplied exact envelope, enqueues it, records the
+- [x] `submit()` persists the supplied exact envelope, enqueues it, records the
   returned durable `jobId`, and returns a run. It does not begin browser work.
   The UI owns the `AbortController`; client-core only receives its
   `AbortSignalLike` through `watch()` or `retryGeneration()`.
-- [ ] **One clock owns the expiry window.** `submit()` takes
+- [x] **One clock owns the expiry window.** `submit()` takes
   `GenerationSubmissionInput` and stamps `createdAt` itself from the injected
   `Clock`; the caller must not supply it. C6 enforces the 15-minute window by
   comparing `Clock.now()` against that same `createdAt`, so both ends of the
@@ -1690,25 +2085,25 @@ export function createGenerationWorkflow(
   `Date.now()` while core read an injected fake, the boundary test the TDD
   sequence requires would pass without measuring anything — production would
   agree by coincidence and tests would be meaningless.
-- [ ] `jobId` is likewise workflow-owned: written after enqueue resolves, never
+- [x] `jobId` is likewise workflow-owned: written after enqueue resolves, never
   accepted from a caller. `Omit<..., "createdAt" | "jobId">` makes both rules
   compile-enforced rather than conventions.
-- [ ] A `GenerationRun` permits exactly one live source iterator. A second
+- [x] A `GenerationRun` permits exactly one live source iterator. A second
   `watch()` or `retryGeneration()` while one is live throws a typed
   `GenerationWorkflowProtocolError("watch_already_active")`; a completed or
   detached iterator releases that slot. This prevents a retry or a UI rerender
   from creating overlapping watchers for one durable job.
-- [ ] `cancelGeneration()` and `discardGeneration()` issue only their matching
+- [x] `cancelGeneration()` and `discardGeneration()` issue only their matching
   remote command and **never** abort the consumer-owned signal. The active
   watcher observes the authoritative terminal snapshot and emits `settled`.
   `retryGeneration(signal)` issues `api.retry(jobId)` and then starts a fresh
   source session for that same job ID; it is available only after the prior
   iterator has ended.
-- [ ] `fetchResult()` returns either `settled/completed` or
+- [x] `fetchResult()` returns either `settled/completed` or
   `result_unavailable`, never an untyped transport rejection. A successful
   later call therefore gives Task 7 the same event shape as an initially
   successful result fetch.
-- [ ] Export exactly `GenerationWorkflow`, `GenerationRun`,
+- [x] Export exactly `GenerationWorkflow`, `GenerationRun`,
   `GenerationWorkflowDependencies`, `GenerationSubmissionInput`,
   `StoredGenerationSubmission`, `GenerationEvent`, `GenerationSourceEvent`,
   `GenerationSnapshotSource`, `GenerationWorkflowProtocolError`, and
@@ -1727,13 +2122,13 @@ deliberately hides, and `consecutiveFailures` is counted across reconnects
 inside the source. Task 6 separately claimed to "emit degraded state after two
 consecutive failures", so the same event had two owners and no viable carrier.
 
-- [ ] Consume `AsyncIterable<GenerationSourceEvent>` as declared above.
-- [ ] On `{ kind: "degraded" }`, forward it as a `degraded` **without** altering
+- [x] Consume `AsyncIterable<GenerationSourceEvent>` as declared above.
+- [x] On `{ kind: "degraded" }`, forward it as a `degraded` **without** altering
   the state machine's high-water mark, without resetting narration, and without
   counting anything. Degradation is transport health, not job progress.
-- [ ] Do not re-derive, re-count, or second-guess `consecutiveFailures`. Task 6
+- [x] Do not re-derive, re-count, or second-guess `consecutiveFailures`. Task 6
   owns the counter and the reset-on-success rule.
-- [ ] Task 6's matching checklist item has been updated to yield this union.
+- [x] Task 6's matching checklist item has been updated to yield this union.
 
 ### C2 — parse every incoming snapshot with the contract schema
 
@@ -1745,18 +2140,18 @@ output unprojected would silently reintroduce exactly the timestamps Task 2a
 removed, and no type check would catch it. A changing `updatedAt` is what
 defeated change detection in the first place.
 
-- [ ] Parse every inbound `{ kind: "snapshot" }` payload with
+- [x] Parse every inbound `{ kind: "snapshot" }` payload with
   `generationStreamSnapshotSchema` before it reaches the state machine. This is
   the load-bearing guard: it cannot be bypassed by a careless transport.
-- [ ] Rely on the parse to strip excess keys. Verified: parsing a full
+- [x] Rely on the parse to strip excess keys. Verified: parsing a full
   `GenerationJobSnapshot` through `generationStreamSnapshotSchema` yields
   exactly the eleven allowlisted keys, and `"updatedAt" in parsed` is `false`.
-- [ ] This same parse satisfies "reject malformed statuses" — a status outside
+- [x] This same parse satisfies "reject malformed statuses" — a status outside
   the contract enum fails the parse. Reject the **snapshot**; do not reject a
   legitimate polling gap, which is an absent stage, not an invalid one.
-- [ ] Add a test feeding a full `GenerationJobSnapshot` through the source and
+- [x] Add a test feeding a full `GenerationJobSnapshot` through the source and
   asserting no timestamp key reaches any emitted `status` event.
-- [ ] Task 6's checklist has been updated to project the polling path through
+- [x] Task 6's checklist has been updated to project the polling path through
   the same schema. Both layers do it; core's is the guarantee.
 
 ### C3 — define staleness before testing it
@@ -1770,15 +2165,15 @@ Staleness is therefore an ordering over the two monotonic fields the projection
 does carry. ADR 0028 names `attempts` "the monotonic retry-cycle marker used for
 stream reconciliation"; this is what it is for.
 
-- [ ] Rank statuses within one attempt:
+- [x] Rank statuses within one attempt:
   `queued`/`replacement_queued` = 0, `assessing` = 1, `generating` = 2,
   `validating` = 3, `committing` = 4, and every attempt-terminal status
   (`completed`, `failed`, `discarded`, `cancelled`, `recoverable`) = 5.
-- [ ] Track a high-water mark of `(attempts, rank)` compared
+- [x] Track a high-water mark of `(attempts, rank)` compared
   lexicographically. A snapshot strictly below the mark is stale and emits
   nothing, **except** for the acknowledged retry transition below. A tuple that
   skips ranks is a legitimate polling gap: accept it and advance.
-- [ ] An equal tuple is a duplicate only when all eleven allowlisted snapshot
+- [x] An equal tuple is a duplicate only when all eleven allowlisted snapshot
   fields are unchanged. Equal `(attempts, rank)` snapshots with changed
   `partialNarration`, `errorCode`, `errorMessage`, `resultTurnId`, or terminal
   `status` are meaningful updates: emit the projected `status` event. Emit a
@@ -1786,13 +2181,13 @@ stream reconciliation"; this is what it is for.
   full current sanitized narration; when it changes from a string to `null`,
   emit `{ type: "narration", text: "" }` once to clear the preview. Never
   concatenate or derive narration from any other field.
-- [ ] The server's retry endpoint changes `recoverable` or `failed` to
+- [x] The server's retry endpoint changes `recoverable` or `failed` to
   `queued`/`replacement_queued` **without** incrementing `attempts`; the worker
   increments it only when it next claims the job. After this run has received a
   successful `api.retry(jobId)` response, allow exactly the matching
   same-attempt queue snapshot to begin a new observation cycle, then require
   normal monotonic ordering again. Do not generally allow rank regressions.
-- [ ] A same-rank terminal transition such as `failed -> discarded` is accepted
+- [x] A same-rank terminal transition such as `failed -> discarded` is accepted
   only after the matching successful run command. It is not a duplicate merely
   because both statuses rank 5. An unsolicited conflicting terminal transition
   is a protocol error, not a reason to silently overwrite the prior terminal
@@ -1806,13 +2201,13 @@ coverage. The only shape available was `settled/unrecoverable`, which would
 report a **successful** generation as unrecoverable — and the same checklist
 forbids mutating accepted campaign state on that path.
 
-- [ ] Emit the new non-terminal `{ type: "result_unavailable"; jobId; error }`
+- [x] Emit the new non-terminal `{ type: "result_unavailable"; jobId; error }`
   when a job reaches `completed` but `result(jobId)` rejects. The generation
   succeeded durably; only the client's fetch failed.
-- [ ] Do **not** emit `settled` for this case, and do not treat it as
+- [x] Do **not** emit `settled` for this case, and do not treat it as
   `unrecoverable`. The workflow stays open so a consumer can request the result
   again.
-- [ ] Expose an explicit `fetchResult()` operation so a consumer can retry after
+- [x] Expose an explicit `fetchResult()` operation so a consumer can retry after
   `result_unavailable` without re-enqueueing anything.
 
 ### C5 — reconciliation: what `syncStatus` can and cannot decide
@@ -1824,16 +2219,16 @@ submitted; the same action submitted twice, or a submission from another tab,
 is indistinguishable. The original instruction implied `syncStatus` decides
 whether to replay. It cannot.
 
-- [ ] Use `syncStatus` for one purpose: detecting that *a* generation is in
+- [x] Use `syncStatus` for one purpose: detecting that *a* generation is in
   flight, so the workflow attaches to `pendingGeneration.id` and watches it
   rather than enqueueing again. This is also the reload-resume path.
-- [ ] Resolve genuine ambiguity by replaying the enqueue with the **same
+- [x] Resolve genuine ambiguity by replaying the enqueue with the **same
   idempotency key** and trusting the server. `generationEnqueueResponseSchema`
   returns `duplicate: boolean`; `duplicate: true` means the original submission
   was already accepted, and the returned `id` is the durable job to watch.
-- [ ] Never mint a new idempotency key during reconciliation. The key lives in
+- [x] Never mint a new idempotency key during reconciliation. The key lives in
   the persisted submission precisely so a replay is provably the same request.
-- [ ] Do not match a pending job to a local submission by comparing `action`,
+- [x] Do not match a pending job to a local submission by comparing `action`,
   `operationKind`, or `expectedTurnNumber`. Those collide legitimately.
 
 ### C6 — expiry policy is core's; storage is Task 6's
@@ -1843,12 +2238,12 @@ said it implements "the 15-minute pending-submission store". `PendingSubmission
 Store` takes no TTL argument and `PendingGenerationSubmission.createdAt` is a
 number, so core can and should own the decision.
 
-- [ ] Extend `PendingGenerationSubmission` with an optional `jobId?: string`,
+- [x] Extend `PendingGenerationSubmission` with an optional `jobId?: string`,
   declared as `StoredGenerationSubmission` above. The request envelope remains
   exact and immutable; `jobId` is local durable recovery metadata written
   immediately after enqueue accepts or duplicates the request. Task 6 must
   round-trip both the new field and pre-existing records that do not contain it.
-- [ ] **`exactOptionalPropertyTypes: true` is set for client-core**, so
+- [x] **`exactOptionalPropertyTypes: true` is set for client-core**, so
   `jobId?: string` permits *omitting* the key but forbids assigning `undefined`
   to it. Round-tripping through `JSON.parse` is fine because an absent key stays
   absent, but the natural `{ ...submission, jobId: undefined }` spread fails to
@@ -1856,50 +2251,50 @@ number, so core can and should own the decision.
   ID; do not widen the field to `string | undefined` to dodge the error, because
   that would let "no job" and "job unknown" become indistinguishable in the
   stored record.
-- [ ] Core owns expiry policy: compare `Clock.now()` against
+- [x] Core owns expiry policy: compare `Clock.now()` against
   `submission.createdAt` and treat anything older than 15 minutes as absent,
   clearing it through `PendingSubmissionStore.clear`.
-- [ ] Task 6 owns durable storage only: serialization, defensive JSON parsing,
+- [x] Task 6 owns durable storage only: serialization, defensive JSON parsing,
   and campaign-scoped keys. It must not implement a second expiry rule.
-- [ ] Persist the exact submission **before** calling `enqueue`, so an
+- [x] Persist the exact submission **before** calling `enqueue`, so an
   interrupted enqueue is still replayable. Once enqueue resolves, save the same
   envelope with its returned `jobId` before beginning observation.
-- [ ] `resume()` first removes an expired record, then obtains `syncStatus`.
+- [x] `resume()` first removes an expired record, then obtains `syncStatus`.
   If `pendingGeneration` exists, attach to that server-authoritative ID and
   clear any campaign-scoped local submission, because one local slot cannot
   safely distinguish an in-flight request from another tab. Never compare
   action, operation kind, or expected turn to claim identity.
-- [ ] If no pending job exists and the unexpired record has `jobId`, return a
+- [x] If no pending job exists and the unexpired record has `jobId`, return a
   run for that ID. This preserves manual retry of a failed job and
   `result_unavailable` recovery after reload, even though `syncStatus` exposes
   neither completed nor failed jobs. If it has no `jobId`, replay exactly the
   original request and idempotency key.
-- [ ] Clear the saved record only after `settled/completed` with a retrieved
+- [x] Clear the saved record only after `settled/completed` with a retrieved
   result, or after authoritative `cancelled` or `discarded`. Retain it for
   `failed`, `recoverable`, `unrecoverable`, and `result_unavailable`, so the
   user can resume, retry, discard, or fetch the already accepted result.
 
 ### C7 — remaining behavior (unchanged in intent, retained here)
 
-- [ ] Derive the status union from `packages/contracts`; do not redeclare it.
+- [x] Derive the status union from `packages/contracts`; do not redeclare it.
   There is no exported named type for the union — `generationStatusSchema` is
   module-private in `client-api.ts` — so index the projection type:
   `type GenerationStatus = GenerationStreamSnapshot["status"]`. Verified to
   accept all eleven members. Use `generationStreamSnapshotSchema` for the
   runtime check, per C2.
-- [ ] Model retry loops `recoverable -> queued|replacement_queued -> ...` on the
+- [x] Model retry loops `recoverable -> queued|replacement_queued -> ...` on the
   same durable job ID. The queue snapshot initially retains its former
   `attempts` value and the next `assessing` snapshot increments it; implement
   the C3 acknowledged-retry exception rather than assuming the queue transition
   itself increments attempts. `generationActionResponseSchema` constrains
   `retry`/`cancel`/`discard` to exactly
   `queued`/`replacement_queued`/`cancelled`/`discarded`, which matches.
-- [ ] Emit narration only from `partialNarration`. Ignore `partialOutput` even
+- [x] Emit narration only from `partialNarration`. Ignore `partialOutput` even
   if a transport includes it; note that C2's parse already strips it, so this
   is defence in depth rather than the primary guard.
-- [ ] Treat watcher abort as detach and emit `detached`. Call the remote cancel
+- [x] Treat watcher abort as detach and emit `detached`. Call the remote cancel
   endpoint only through an explicit `cancelGeneration()` operation.
-- [ ] Auto-retry at most once per durable job, not once per page load. The first
+- [x] Auto-retry at most once per durable job, not once per page load. The first
   recoverable snapshot after the job's first claimed attempt may auto-retry;
   a recoverable snapshot after a retried attempt must emit
   `settled/unrecoverable` without mutating accepted campaign state. Derive the
@@ -1916,52 +2311,52 @@ EventSource on the same set. A retry therefore cannot rely on the original
 iterator to observe the next queue cycle — no Task 6 implementation choice can
 change that, and a fresh source session is mandatory rather than preferable.
 
-- [ ] `watch(signal)` loops through sequential source sessions for one job. On
+- [x] `watch(signal)` loops through sequential source sessions for one job. On
   the first recoverable status it waits for the successful retry action, closes
   the completed source session, and opens a fresh `source.watch(jobId, signal)`.
   There must never be two live iterators for that job.
-- [ ] A source may complete normally only after core has accepted an authoritative
+- [x] A source may complete normally only after core has accepted an authoritative
   terminal snapshot or the supplied signal is aborted. If it completes while
   the latest accepted snapshot is non-terminal, throw
   `GenerationWorkflowProtocolError("source_ended_before_terminal")`; do not
   emit `settled`, do not clear persistence, and leave the durable job resumable.
-- [ ] If contract parsing of a source snapshot fails, throw
+- [x] If contract parsing of a source snapshot fails, throw
   `GenerationWorkflowProtocolError("invalid_snapshot", { cause })` with the
   same no-settlement and no-clear rule. A malformed source is not a durable job
   failure and must not be relabeled as `unrecoverable`.
-- [ ] If the signal is already aborted or becomes aborted while iterating, close
+- [x] If the signal is already aborted or becomes aborted while iterating, close
   the iterator, emit exactly one `detached` event, and retain the saved record.
   An abort must not call any remote action.
 
 ### C9 — action, stream, and terminal races have one owner
 
-- [ ] Route auto-retry through the same internal retry transition used by
+- [x] Route auto-retry through the same internal retry transition used by
   `GenerationRun.retryGeneration()`. Mark the transition acknowledged only
   after `api.retry(jobId)` resolves with the matching job ID and a queue status;
   a rejection leaves the durable job recoverable and emits the documented
   `settled/unrecoverable` error without clearing persistence.
-- [ ] For explicit cancel and discard, keep the watcher active until it observes
+- [x] For explicit cancel and discard, keep the watcher active until it observes
   the authoritative terminal snapshot. If the command resolves after an
   independently received terminal snapshot, emit settlement once only and make
   later duplicate source frames no-ops.
-- [ ] If a command response names a different job ID or an impossible status,
+- [x] If a command response names a different job ID or an impossible status,
   throw `GenerationWorkflowProtocolError("action_response_mismatch")`, retain
   persistence, and do not synthesize a status frame from the partial action
   response.
 
 ### C10 — test the revised observable contract, not only status ranks
 
-- [ ] Add `GenerationWorkflowProtocolError` to `generation/types.ts` with
+- [x] Add `GenerationWorkflowProtocolError` to `generation/types.ts` with
   `kind` limited to `"watch_already_active"`, `"invalid_snapshot"`,
   `"source_ended_before_terminal"`, and `"action_response_mismatch"`. Export
   the type and class through the deliberate client-core public surface.
-- [ ] Keep all parsing and protocol errors free of DOM, EventSource, fetch,
+- [x] Keep all parsing and protocol errors free of DOM, EventSource, fetch,
   database, and framework types. Test them with plain async-iterable fakes and
   the existing `AbortSignalLike` test double.
 
 ### TDD and verification sequence
 
-- [ ] Write `generation-machine.test.ts` first, covering the `(attempts, rank)`
+- [x] Write `generation-machine.test.ts` first, covering the `(attempts, rank)`
   ordering from C3: an exact duplicate, two `generating` frames with different
   `partialNarration`, a `partialNarration` clear, skipped stages, a stale
   snapshot, `recoverable(1) -> queued(1) -> assessing(2)` after acknowledged
@@ -1969,7 +2364,7 @@ change that, and a fresh source session is mandatory rather than preferable.
   status. Run
   `pnpm exec vitest run tests/unit/client-core/generation-machine.test.ts`,
   expect failure, then implement `machine.ts`.
-- [ ] Write `generation-submission.test.ts` for persist-before-enqueue, saving
+- [x] Write `generation-submission.test.ts` for persist-before-enqueue, saving
   the returned `jobId` after enqueue, the 15-minute expiry boundary against a
   fake `Clock` (just inside and just outside — the fake clock must be the only
   source of both the stamped `createdAt` and the comparison, or the test proves
@@ -1977,7 +2372,7 @@ change that, and a fresh source session is mandatory rather than preferable.
   resume from a saved failed/completed job ID, and the explicit clearing rules
   for completed, cancelled, discarded, and another-tab pending generation. Run
   it red, then implement `submission.ts`.
-- [ ] Write `generation-workflow.test.ts` for the exported workflow/handle
+- [x] Write `generation-workflow.test.ts` for the exported workflow/handle
   surface, reload resume via `pendingGeneration.id`, ambiguous-enqueue replay
   with `duplicate: true`, one auto-retry across a fresh source session, reload
   after that retry without a second automatic retry, detach, explicit
@@ -1985,19 +2380,19 @@ change that, and a fresh source session is mandatory rather than preferable.
   a successful `fetchResult()`, degraded forwarding, timestamp stripping, a
   malformed snapshot, a non-terminal source completion, and no-duplicate-watch
   enforcement. Run it red, then implement `workflow.ts`.
-- [ ] Export the deliberate public surface from
+- [x] Export the deliberate public surface from
   `packages/client-core/src/index.ts` and confirm no internal module is
   barrel-exported.
-- [ ] Run focused checks:
+- [x] Run focused checks:
   `pnpm exec vitest run tests/unit/client-core/ tests/unit/client-boundaries.test.ts`,
   `pnpm --filter @infinite-quest/client-core check`, and
   `pnpm check:client-boundaries`.
-- [ ] Run completion checks: `pnpm check`, `pnpm build`, `pnpm test:unit`,
+- [x] Run completion checks: `pnpm check`, `pnpm build`, `pnpm test:unit`,
   `pnpm test:integration`, `git diff --check`, review the complete diff for
   unrelated changes, and run `pjm precheck` before committing.
-- [ ] Record a **Current Task 5 verification** block under **Completion status**
+- [x] Record a **Current Task 5 verification** block under **Completion status**
   in the same commit that marks Task 5 complete, per the rule in Task 4a P4.
-- [ ] Commit with an imperative scoped summary such as
+- [x] Commit with an imperative scoped summary such as
   `feat(client): add pure generation workflow`. Do not mix Task 6 transports or
   Story Player rewiring into this commit.
 
@@ -2012,132 +2407,1678 @@ network, or database type appears in the workflow.
 
 ---
 
+## Task 5a — C4a: Discriminate and canonicalize pending submissions
+
+**Do this before Task 6.** Task 6's S9 requires the storage layer to parse a
+`replace_latest` record with `generationRetryLatestRequestSchema` and refine
+`request.expectedCurrentTurnNumber === expectedTurnNumber`. Task 5's types
+currently express neither the replacement request shape nor that cross-field
+invariant, so as things stand Task 6 would be enforcing on read something the
+write path never established.
+
+**Files:**
+
+- Modify: `packages/client-core/src/ports.ts`
+- Modify: `packages/client-core/src/generation/types.ts`
+- Modify: `packages/client-core/src/generation/submission.ts`
+- Modify: `tests/unit/client-core/generation-submission.test.ts`
+
+### This changes already-shipped work
+
+Task 5a edits types that Task 5 shipped and marked complete in `92aa9c4`.
+
+- [x] Land it as its **own reviewable commit**, not folded into Task 6. A change
+  to completed work should be revertible on its own, and mixing it into the
+  transport work would hide a client-core type change inside a client-web diff.
+- [x] Expect the change to be source-compatible for `append` submissions. Every
+  existing call site constructs one, so the union's `append` branch matches what
+  is already written. There is no existing client-core replacement caller to
+  preserve; Task 5a deliberately defines that public input shape before Task 9
+  adopts it.
+- [x] **No existing test needs repair, because no existing test exercises the
+  replacement path at all.** Verified: nothing under `tests/unit/client-core/`
+  constructs a submission with `operationKind: "replace_latest"`, and
+  `enqueueReplacement` appears there only as an unexercised stub on the fake
+  API port. `tests/unit/client-core/generation-submission.test.ts` is in the
+  file list to **add** that coverage, not to fix fixtures.
+- [x] Treat that coverage gap as part of the defect. The cast at
+  `submission.ts:50` sits on a branch no test has ever run, which is why a
+  type-level hole survived Task 5's review. Add a runtime test that a
+  `replace_latest` submission reaches `enqueueReplacement` with its
+  `expectedCurrentTurnNumber` intact, alongside the `@ts-expect-error`
+  compile-level assertions below.
+
+### The defect
+
+`PendingGenerationSubmission.request` is typed `GenerationRequest`, which has no
+`expectedCurrentTurnNumber`. A `replace_latest` submission therefore cannot be
+represented correctly, and `submission.ts:50` papers over it with an unguarded
+cast:
+
+```ts
+: await dependencies.api.enqueueReplacement(campaignId, submission.request as GenerationRetryLatestRequest);
+```
+
+The resulting write/read asymmetry is the real problem. `submit()` accepts a
+replacement whose request lacks the field — it compiles, and `enqueue()` calls
+`store.save()` **before** the API call, so the invalid record reaches disk. Task
+4's client then rejects the request with `ApiContractError`. After a reload,
+Task 6's strict `load()` would reject that same stored record and silently drop
+a pending submission the user believes is queued.
+
+Presence alone is not sufficient. A discriminated union can require both
+numbers, but TypeScript cannot express that two arbitrary `number` properties
+have the same runtime value. This object would still satisfy a union that merely
+changes the replacement request type:
+
+```ts
+{
+  operationKind: "replace_latest",
+  expectedTurnNumber: 8,
+  request: { ...replacementRequest, expectedCurrentTurnNumber: 7 }
+}
+```
+
+Persisting that object would leave the same asymmetry: Task 6 must reject it on
+load. The trusted submission input therefore must not expose two independently
+settable replacement turn numbers.
+
+### The fix
+
+- [x] In `ports.ts`, import both `GenerationRequest` and
+  `GenerationRetryLatestRequest`, then replace the interface with a
+  discriminated persisted union:
+
+  ```ts
+  type PendingGenerationSubmissionBase = { expectedTurnNumber: number; createdAt: number };
+  export type PendingGenerationSubmission =
+    | (PendingGenerationSubmissionBase & { operationKind: "append"; request: GenerationRequest })
+    | (PendingGenerationSubmissionBase & { operationKind: "replace_latest"; request: GenerationRetryLatestRequest });
+  ```
+
+- [x] `StoredGenerationSubmission` must become an intersection, not an
+  `interface … extends`: an interface cannot extend a union type.
+
+  ```ts
+  export type StoredGenerationSubmission = PendingGenerationSubmission & { jobId?: string };
+  ```
+
+- [x] **`Omit` does not distribute over unions** — verified. A naive
+  `Omit<StoredGenerationSubmission, "createdAt" | "jobId">` collapses both
+  branches into one object type whose `request` widens back to
+  `GenerationRequest`, silently undoing the whole change while still compiling.
+  Apply `Omit` separately to each extracted branch. Keep
+  `expectedTurnNumber` on append input, but omit it from replacement input so
+  the nested request is the only caller-supplied replacement turn number:
+
+  ```ts
+  type AppendGenerationSubmissionInput = Omit<
+    Extract<StoredGenerationSubmission, { operationKind: "append" }>,
+    "createdAt" | "jobId"
+  >;
+
+  type ReplaceLatestGenerationSubmissionInput = Omit<
+    Extract<StoredGenerationSubmission, { operationKind: "replace_latest" }>,
+    "createdAt" | "jobId" | "expectedTurnNumber"
+  >;
+
+  export type GenerationSubmissionInput =
+    | AppendGenerationSubmissionInput
+    | ReplaceLatestGenerationSubmissionInput;
+  ```
+
+  Do not export the two branch helpers; callers consume the deliberate union.
+- [x] In `submission.ts`, branch while constructing the stored record. Append
+  retains the caller's `expectedTurnNumber`; replacement derives it from
+  `request.expectedCurrentTurnNumber`. Construct the replacement record
+  explicitly so an unexpected extra top-level property from an untyped caller
+  cannot override the canonical value:
+
+  ```ts
+  const createdAt = dependencies.clock.now();
+  const submission: StoredGenerationSubmission = input.operationKind === "append"
+    ? { ...input, createdAt }
+    : {
+        operationKind: "replace_latest",
+        request: input.request,
+        expectedTurnNumber: input.request.expectedCurrentTurnNumber,
+        createdAt
+      };
+  ```
+
+  This is construction, not storage-boundary validation. Task 6 still owns
+  runtime parsing and equality refinement for records read from untrusted Web
+  Storage.
+- [x] Delete the cast at `submission.ts:50`. Narrowing on
+  `submission.operationKind === "replace_latest"` now gives
+  `GenerationRetryLatestRequest` directly — verified. If the cast is still
+  needed after the change, the union was not applied correctly. Remove the
+  now-unused `GenerationRetryLatestRequest` import from `submission.ts`.
+- [x] Add a compile-level test asserting that a `replace_latest` submission
+  whose `request` lacks `expectedCurrentTurnNumber` is **rejected**, using
+  `@ts-expect-error`. Add a second compile-level assertion that replacement
+  `GenerationSubmissionInput` rejects a caller-supplied top-level
+  `expectedTurnNumber`; this prevents the duplicate source of truth from
+  returning later. Keep each deliberately invalid object on one line after its
+  directive so the directive can suppress only the intended assignment error:
+
+  ```ts
+  // @ts-expect-error replace_latest requires the nested current turn number
+  const missingReplacementTurn: GenerationSubmissionInput = { operationKind: "replace_latest", request: input().request };
+
+  // @ts-expect-error replace_latest derives the stored turn number from request
+  const duplicateReplacementTurn: GenerationSubmissionInput = { operationKind: "replace_latest", expectedTurnNumber: 4, request: replacementRequest() };
+  ```
+
+  Reference both constants in a no-op expression such as `void
+  missingReplacementTurn; void duplicateReplacementTurn;` if the compiler's
+  unused-local settings require it; do not weaken the type or cast the objects.
+- [x] Add a runtime replacement test that verifies the complete durable order:
+  the first saved record contains the request's exact idempotency key and a
+  top-level `expectedTurnNumber` derived from
+  `request.expectedCurrentTurnNumber`; `enqueueReplacement()` receives the
+  intact request; and the second save adds only the returned `jobId`. Include a
+  coerced untyped input carrying a conflicting extra `expectedTurnNumber` and
+  prove it cannot override the derived stored value.
+- [x] Do not add a second equality **parser** in client-core. Task 6 S9 owns that
+  check when an untrusted stored record is loaded. Client-core establishes the
+  invariant for its trusted write path by construction; Task 6 validates it at
+  the persistence boundary.
+
+### TDD and completion sequence
+
+- [x] Add the two compile-level assertions and the runtime replacement case
+  before changing production code. Run `pnpm --filter
+  @infinite-quest/client-core check`; expect both `@ts-expect-error` directives
+  to be reported as unused against the current broad input type. Run `pnpm exec vitest run
+  tests/unit/client-core/generation-submission.test.ts`; expect the replacement
+  case to fail because the current spread preserves the forged conflicting
+  top-level turn number instead of deriving it from the replacement request.
+- [x] Implement the persisted union, branch-specific input types, canonical
+  replacement construction, import cleanup, and cast removal. Rerun both red
+  commands and require them to pass.
+- [x] Run `pnpm exec vitest run tests/unit/client-core/
+  tests/unit/client-boundaries.test.ts` to prove append compatibility, workflow
+  behavior, and the deliberate public barrel remain intact.
+- [x] Run `pnpm check`, `pnpm build`, `pnpm test:unit`, and
+  `pnpm test:integration`; then run `git diff --check`, review the complete diff
+  for unrelated changes, and run `pjm precheck` for every changed path.
+- [x] Update Task 5a's completion row and add the measured **Current Task 5a
+  verification** block in the same commit, recording the implementation commit,
+  the `pnpm check` candidate-file count, and unit/integration totals. Commit only
+  Task 5a source, tests, and its plan status before beginning Task 6.
+
+**Complete:** a `replace_latest` input cannot be constructed without its nested
+`expectedCurrentTurnNumber` or with a second caller-controlled top-level turn
+number; client-core derives and persists the top-level value before enqueue;
+`submission.ts` contains no cast; and Task 6 S9 defensively validates the same
+invariant when reading untrusted storage.
+
+**Verification:** `pnpm check`, `pnpm build`, `pnpm test:unit`,
+`pnpm test:integration`, plus
+`pnpm exec vitest run tests/unit/client-core/ tests/unit/client-boundaries.test.ts`.
+Record a **Current Task 5a verification** block in the same commit, per the rule
+in Task 4a P4.
+
+---
+
 ## Task 6 — C5: Browser transports, persistence, and adaptive polling
+
+**Pre-implementation correction status: Complete (2026-08-02), reviewed twice.**
+The first review checked the **shipped** Task 5 code in `92aa9c4` rather than its
+design sketch and proved that Task 4's `client.generation` satisfies Task 5's
+`GenerationApiPort` without an adapter. The second review checked the proposed
+browser layer against the live HTTP path guard, native EventSource constraints,
+the legacy pending-submission format, Task 5's protocol errors, and the public
+compiler fixture. The eleven correction areas S1–S11 below are the complete
+implementation contract; do not implement only the original transport bullets.
 
 **Files:**
 
 - Create: `packages/client-web/src/generation/event-source.ts`
 - Create: `packages/client-web/src/generation/poll-source.ts`
 - Create: `packages/client-web/src/generation/fallback-source.ts`
+- Create: `packages/client-web/src/generation/abort-bridge.ts`
+- Create: `packages/client-web/src/generation/types.ts`
+- Create: `packages/client-web/src/api-url.ts`
 - Create: `packages/client-web/src/storage/pending-submissions.ts`
 - Create: `packages/client-web/src/platform/clock.ts`
 - Create: `packages/client-web/src/platform/delay.ts`
 - Create: `packages/client-web/src/platform/ids.ts`
-- Create: `tests/unit/client-web/generation-sources.test.ts`
+- Create: `packages/client-web/src/platform/visibility.ts`
+- Modify: `packages/client-web/src/http-client.ts`
+- Modify: `packages/client-web/src/index.ts`
+- Modify: `tests/unit/client-web/http-client.test.ts`
+- Modify: `tests/unit/client-boundaries.test.ts`
+- Modify: `tests/fixtures/client-boundaries/client-web-public/src/fixture.ts`
+- Create: `tests/unit/client-web/generation-event-source.test.ts`
+- Create: `tests/unit/client-web/generation-poll-source.test.ts`
+- Create: `tests/unit/client-web/generation-fallback-source.test.ts`
 - Create: `tests/unit/client-web/pending-submissions.test.ts`
+- Create: `tests/unit/client-web/platform-adapters.test.ts`
 
-- [ ] Parse **every** inbound payload with `generationStreamSnapshotSchema`
-  before yielding it to client-core — the SSE frame path **and the polling
-  path**. `GenerationApi.get()` returns `GenerationJobSnapshot`, which carries
-  `createdAt`, `updatedAt`, and `completedAt` and is structurally assignable to
-  `GenerationStreamSnapshot`, so an unprojected poll result compiles cleanly and
-  silently reintroduces the timestamps Task 2a removed. Task 5 C2 parses
-  defensively as well; do not treat that as licence to skip it here.
-- [ ] **Yield `GenerationSourceEvent`, not bare snapshots.** Task 5 declares
-  `AsyncIterable<{ kind: "snapshot"; snapshot } | { kind: "degraded"; reason;
-  consecutiveFailures }>`. The transport is the only layer that knows whether a
-  failure was `stream_lost` or `poll_failed` and the only layer that can count
-  consecutive failures across reconnects, so this task owns both fields. Core
-  forwards them without re-counting.
-- [ ] Close EventSource deterministically on terminal state, fallback, detach,
-  or consumer failure.
-- [ ] Fall back from SSE to polling once without creating overlapping watchers.
-- [ ] **Inherited from Task 2a P2.** Prove with a fake EventSource that a *clean*
-  stream closure — the server closing after a mid-stream read failure without
-  emitting a synthetic terminal `failed` frame — still reaches `onerror` and
-  falls back to polling. This is the one Task 2a acceptance item Task 2a could
-  not close, because it needs the Task 6 browser transport. Do not treat the
-  generic fallback item above as covering it: the distinguishing case is a
-  closure carrying no terminal status. See ADR 0028 §Task 2a stream and
-  validation baseline amendment.
-- [ ] Poll at 1500 ms initially, back off with jitter to 5000 ms after transport
-  failures, emit a `{ kind: "degraded" }` source event after two consecutive
-  failures, and reset the counter after a successful snapshot. This counter is
-  owned here and nowhere else — Task 5 C1 forwards it verbatim.
-- [ ] Use elapsed time and explicit detach rather than a `900 attempts` timeout.
-  The durable job remains resumable after local monitoring stops.
-- [ ] Pause non-essential polling while the document is hidden; generation
-  monitoring may reduce cadence but must preserve resume/reconciliation.
-- [ ] Implement the pending-submission **storage** with defensive JSON parsing
-  and campaign-scoped keys. Do **not** implement an expiry rule here: Task 5 C6
-  owns the 15-minute policy, comparing `Clock.now()` against
-  `submission.createdAt`. Two expiry implementations would drift. Preserve the
-  optional Task 5 `submission.jobId` when serializing and loading; records made
-  before this field existed remain valid with `jobId` absent.
-- [ ] Test fake EventSource, fake fetch, fake clock, visibility changes, abort at
-  each stage, stream loss, malformed frames, no-duplicate-watcher behavior, and
-  pending-submission round trips both with and without `jobId`.
+`packages/client-web/src/index.ts` was missing from the original list — the same
+omission Task 5 had. Export only the composed browser generation source, its
+public option types, the pending-submission store, and the clock, delay, ID, and
+visibility adapters. Keep raw EventSource/poll factories, the abort bridge, URL
+resolver, storage schemas, error classifiers, and parsing helpers internal. A raw
+SSE source cannot satisfy Task 5 by itself because a stream loss must switch to
+polling without ending the iterable; exporting it as `GenerationSnapshotSource`
+would create a public footgun.
 
-**Definition of done:** Browser transport failures are visible and recoverable,
-no watcher leaks after navigation, and core tests remain independent of Web APIs.
+### Public surface produced
+
+Define these names before writing the transports so Task 9 does not invent a
+second composition API:
+
+```ts
+export interface EventSourceLike {
+  onmessage: ((event: MessageEvent<string>) => void) | null;
+  onerror: ((event: Event) => void) | null;
+  close(): void;
+}
+
+export type EventSourceFactory = (url: string) => EventSourceLike;
+
+export interface VisibilitySource {
+  isHidden(): boolean;
+  waitUntilVisible(signal: AbortSignalLike): Promise<void>;
+}
+
+export interface BrowserGenerationSourceOptions {
+  api: Pick<GenerationApi, "get">;
+  basePath: string;
+  session: Pick<SessionPort, "authorization">;
+  clock: Clock;
+  delay: DelayScheduler;
+  visibility: VisibilitySource;
+  eventSourceFactory: EventSourceFactory | null;
+  random: () => number;
+}
+
+export function createBrowserGenerationSource(
+  options: BrowserGenerationSourceOptions
+): GenerationSnapshotSource;
+
+export interface PendingSubmissionStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+export function createPendingSubmissionStore(
+  storage: PendingSubmissionStorage
+): PendingSubmissionStore;
+
+export function createBrowserClock(): Clock;
+export function createBrowserDelayScheduler(): DelayScheduler;
+export function createBrowserIdFactory(): IdFactory;
+export function createDocumentVisibilitySource(document: Document): VisibilitySource;
+```
+
+Task 9 constructs one `SessionPort`, `Clock`, delay scheduler, visibility source,
+ID factory, `NexusApiClient`, pending store, and browser generation source. It
+passes the same `SessionPort` to the API client and source and the same `Clock`
+to the source and Task 5 workflow. Tests pass fakes explicitly; production code
+passes `globalThis.EventSource` through a factory only when it exists.
+
+The internal modules use these exact contracts; they are defined in
+`generation/types.ts` but are not re-exported from the package barrel:
+
+```ts
+type SnapshotSourceEvent = Extract<GenerationSourceEvent, { kind: "snapshot" }>;
+type EventSourceSessionExit = "terminal" | "stream_lost" | "aborted";
+
+interface EventSourceSessionOptions {
+  url: string;
+  signal: AbortSignalLike;
+  eventSourceFactory: EventSourceFactory;
+}
+
+function createEventSourceSession(
+  options: EventSourceSessionOptions
+): AsyncGenerator<SnapshotSourceEvent, EventSourceSessionExit, void>;
+
+interface PollSessionOptions {
+  api: Pick<GenerationApi, "get">;
+  clock: Clock;
+  delay: DelayScheduler;
+  visibility: VisibilitySource;
+  random: () => number;
+}
+
+function createPollSession(
+  options: PollSessionOptions,
+  jobId: string,
+  signal: AbortSignalLike
+): AsyncGenerator<GenerationSourceEvent, void, void>;
+```
+
+`fallback-source.ts` manually advances the EventSource generator so it can read
+its final `EventSourceSessionExit`. It returns on `terminal`/`aborted`; on
+`stream_lost` it emits the one degradation event and delegates to exactly one
+poll session. Protocol errors are thrown by either session and are never turned
+into an exit reason.
+
+### S1 — the source must not end before a terminal snapshot
+
+Task 5 enforces this at runtime. `workflow.ts:242` throws
+`GenerationWorkflowProtocolError("source_ended_before_terminal")` when a source
+iterable completes while the latest accepted snapshot is non-terminal. The
+workflow re-enters `source.watch()` **only** on its own auto-retry restart
+(`workflow.ts:193`), never because a source finished early.
+
+The practical consequence is a design constraint on fallback, which the original
+checklist did not state: **SSE-to-polling fallback must happen inside a single
+`watch()` call.** If the SSE source ends its iterable so the workflow
+re-subscribes, every fallback throws a protocol error and the run dies.
+`fallback-source.ts` exists to compose `event-source.ts` and `poll-source.ts`
+behind one iterable — that is its whole purpose.
+
+- [x] `fallback-source.ts` owns one `AsyncIterable` per `watch()` call and
+  switches its internal transport without completing. The public source starts
+  polling directly, without a degradation event, when EventSource is unavailable
+  by capability. After an EventSource was opened, its loss emits exactly one
+  `{ kind: "degraded", reason: "stream_lost", consecutiveFailures: 1 }`
+  before the source performs an immediate reconciliation poll.
+- [x] A source iterable may complete normally **only** after yielding a snapshot
+  whose status is terminal (`completed`, `failed`, `discarded`, `cancelled`, or
+  `recoverable`), or after the supplied signal aborts. There is no third
+  legitimate reason to finish.
+- [x] Never end the iterable on transport failure. Emit `{ kind: "degraded" }`
+  according to S7 and keep trying only for classified transient failures; ending
+  is how a recoverable network blip becomes a thrown protocol error. Contract,
+  authorization, and other non-retryable errors are thrown instead of being
+  mislabeled as transport degradation.
+- [x] Test it directly: a source that returns after a non-terminal snapshot must
+  cause `source_ended_before_terminal`, and the fallback path must **not**
+  trigger it. Assert both, so the constraint is pinned rather than assumed.
+- [x] `recoverable` is terminal for a source session. The server closes its SSE
+  loop on it (`services/api/src/server.ts:788`), and Task 5 opens a fresh
+  session after a successful retry. Do not try to keep one stream alive across a
+  retry cycle.
+
+### S2 — bridge fetch cancellation; close EventSource directly
+
+Task 5 forwards the consumer's `AbortSignalLike` straight into
+`source.watch(jobId, signal)`. That type is the pure-core structural minimum and
+is **not** an `AbortSignal`: passing it to `fetch` fails to compile with
+`TS2739 — missing onabort, reason, throwIfAborted, dispatchEvent`. Native
+EventSource does not accept any signal parameter at all. Use the bridge only for
+`GenerationApi.get(jobId, signal)`; the EventSource adapter subscribes to the
+original `AbortSignalLike` and calls `close()` itself.
+
+Bridge it in `abort-bridge.ts`; this shape is verified to compile:
+
+```ts
+export function toAbortSignal(signal: AbortSignalLike): {
+  signal: AbortSignal;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  if (signal.aborted) controller.abort();
+  const onAbort = () => controller.abort();
+  signal.addEventListener("abort", onAbort, { once: true });
+  return { signal: controller.signal, dispose: () => signal.removeEventListener("abort", onAbort) };
+}
+```
+
+- [x] Check `signal.aborted` **before** subscribing. A signal aborted before
+  `watch()` is called never fires `abort` again, and without this check the
+  request proceeds against an already-cancelled operation.
+- [x] Always `dispose()` in a `finally`. Task 5 restarts sources across retry
+  cycles on the same consumer signal, so a bridge that forgets
+  `removeEventListener` leaks a listener per session — directly contradicting
+  this task's "no watcher leaks after navigation" definition of done.
+- [x] In `event-source.ts`, install a separate listener that closes the native
+  source and resolves any pending iterator read when the pure signal aborts.
+  Remove that listener and null `onmessage`/`onerror` in the iterator's
+  `finally`, including when client-core calls `iterator.return()`.
+- [x] In `poll-source.ts`, check the original pure signal before classifying a
+  rejected API call. If it is aborted, end normally so Task 5 emits `detached`;
+  never increment failure counters or emit `poll_failed` for cancellation.
+- [x] Do not widen `AbortSignalLike` in client-core to make this easier. The
+  narrow port is what keeps client-core free of DOM types; the bridge belongs
+  here.
+- [x] Test already-aborted EventSource and polling starts, abort during a pending
+  API request, abort during delay/visibility waits, `iterator.return()`, and the
+  removal of every bridge/EventSource listener.
+
+### S3 — name the consumers of the platform adapters
+
+`GenerationWorkflowDependencies` is `{ api, source, clock, pendingSubmissions }`.
+It consumes neither `DelayScheduler` nor `IdFactory`, so `platform/delay.ts` and
+`platform/ids.ts` read as dead code unless their consumers are stated.
+
+- [x] `platform/clock.ts` implements `Clock` and is injected into the Task 5
+  workflow, where it stamps `createdAt` and enforces the 15-minute expiry.
+- [x] `platform/delay.ts` implements `DelayScheduler` and is consumed **inside
+  `poll-source.ts`** for its own cadence and backoff. It is not a workflow
+  dependency.
+- [x] `platform/ids.ts` implements `IdFactory` and is consumed by whoever
+  constructs a `GenerationSubmissionInput` — Task 9's UI — to mint
+  `request.idempotencyKey`. The workflow receives the key already embedded and
+  never generates one.
+- [x] `createBrowserIdFactory()` uses `globalThis.crypto.randomUUID()` and throws
+  before submission construction if secure UUID generation is unavailable. Do
+  not add a `Math.random()` identifier fallback.
+- [x] Production adapters use `Date.now`, `setTimeout`, and `crypto.randomUUID`;
+  consumers accept their `Clock`, `DelayScheduler`, and `IdFactory` interfaces so
+  tests inject fakes and never touch real time or randomness. Poll jitter is a
+  separate injected `random: () => number` dependency on
+  `BrowserGenerationSourceOptions`; do not misuse `IdFactory` for jitter.
+- [x] `DelayScheduler.wait()` settles promptly when its pure signal aborts and
+  clears both the timeout and abort listener exactly once. Resolve on abort,
+  then let the poll loop inspect `signal.aborted`; do not manufacture a DOM
+  `AbortError` inside the generic scheduler.
+
+### S4 — the store's element type changed
+
+`PendingSubmissionStore` now loads and saves `StoredGenerationSubmission`, not
+`PendingGenerationSubmission` (`packages/client-core/src/ports.ts`, changed in
+`92aa9c4`). Implement against the current type.
+
+### S5 — share the guarded API URL resolver and define SSE authentication
+
+Task 4's `normalizeBasePath()` and `apiPath()` are private to
+`http-client.ts`. Reimplementing their behavior in `event-source.ts` would create
+a second path policy and could reintroduce the off-origin credential/path escapes
+closed by Task 4a.
+
+- [x] Move the two path functions and their private helpers to
+  `packages/client-web/src/api-url.ts`. Keep them package-internal and have both
+  `http-client.ts` and `event-source.ts` call the same implementation. This is a
+  mechanical extraction: every existing Task 4/4a path test must remain green.
+- [x] Construct exactly
+  `/generation-jobs/${encodeURIComponent(jobId)}/stream` under the validated
+  `basePath`. Reject absolute, protocol-relative, backslash/control-character,
+  and dot-segment base paths before consulting `SessionPort` or constructing an
+  EventSource. Never put credentials, tokens, or session identifiers in the URL
+  or query string.
+- [x] Native EventSource cannot attach the headers returned by
+  `SessionPort.authorization()`. Before each source session, call
+  `authorization()`: when it returns an empty record, SSE is allowed and uses
+  the same-origin guarded URL; when it returns any header, skip EventSource and
+  begin authenticated `GenerationApi.get()` polling. This preserves future
+  header-based OIDC without leaking a bearer token or silently bypassing the
+  session seam. Same-origin cookie authentication remains compatible because it
+  requires no explicit header.
+- [x] If `authorization()` rejects, surface that error. Do not classify it as a
+  stream loss and do not start unauthenticated SSE. An EventSource that later
+  receives an opaque HTTP/auth failure closes and falls back to the typed API,
+  whose existing 401/403 refresh path owns reconciliation.
+- [x] Add EventSource URL regressions matching Task 4a's unsafe base-path cases,
+  an encoded job-ID assertion, an empty-authorization SSE case, and a non-empty
+  authorization case proving zero EventSource constructions and one polling
+  request.
+
+### S6 — parsing and error classification must preserve the core contract
+
+Both transport adapters validate data, and Task 5 validates again as the final
+pure-core boundary. The first validation must not change which public error the
+workflow exposes.
+
+- [x] In the EventSource adapter, `JSON.parse(event.data)` and then parse with
+  `generationStreamSnapshotSchema`. Map malformed JSON or a schema mismatch to
+  `new GenerationWorkflowProtocolError("invalid_snapshot", { cause })` and
+  reject the iterator. Do not fall back to polling after a protocol-invalid SSE
+  frame; another transport cannot make an invalid server contract valid.
+- [x] In the polling adapter, call `GenerationApi.get(jobId, bridgedSignal)` and
+  parse the returned full `GenerationJobSnapshot` through
+  `generationStreamSnapshotSchema` before yielding. This strips `createdAt`,
+  `updatedAt`, and `completedAt`. Map `ApiContractError` and any projection
+  failure to the same `GenerationWorkflowProtocolError("invalid_snapshot")`.
+- [x] Treat only network `TypeError`, `NexusApiError` status 408, 425, 429, and
+  500–599 as transient polling failures. Re-throw 400/401/403/404/409 and other
+  non-retryable statuses immediately, after Task 4's one allowed authorization
+  refresh. Unknown exceptions are programming errors and are re-thrown.
+- [x] When a poll rejects, inspect the original `AbortSignalLike` first. An
+  abort ends the adapter normally; it never becomes `poll_failed`. Re-throw an
+  existing `GenerationWorkflowProtocolError` unchanged so it is not wrapped a
+  second time.
+- [x] Parse a valid terminal SSE frame before reacting to the server's normal
+  EOF/error callback. Close and finish after yielding that terminal snapshot so
+  the normal close cannot emit `stream_lost` or start polling. Make message,
+  error, abort, and iterator-return settlement idempotent.
+
+### S7 — define one deterministic fallback and backoff sequence
+
+Use these exact observable rules so fake-clock tests and Task 7 stores do not
+have to guess what `consecutiveFailures` means:
+
+- [x] If EventSource capability is absent, start with an immediate poll and emit
+  no `stream_lost`; missing capability is not a runtime failure. If SSE was
+  constructed and then errors before a terminal frame, close it first, emit
+  `{ kind: "degraded", reason: "stream_lost", consecutiveFailures: 1 }` once,
+  and perform one immediate reconciliation poll. Never promote polling back to
+  SSE during that `watch()` call.
+- [x] A successful poll yields one projected snapshot, resets the poll-failure
+  counter to zero, and schedules the next poll after exactly 1500 ms while the
+  document is visible. Duplicate snapshots may be yielded; Task 5's high-water
+  machine owns deduplication.
+- [x] On transient poll failure `n`, do not yield anything for `n = 1`. For
+  `n >= 2`, yield `{ kind: "degraded", reason: "poll_failed",
+  consecutiveFailures: n }` for each failure until a success resets the counter.
+  The immediate `stream_lost` event has its own fixed count and does not seed the
+  poll-failure counter.
+- [x] After transient poll failure `n`, calculate
+  `base = min(5000, 1500 * 2 ** (n - 1))` and
+  `delay = min(5000, base + floor(base * 0.2 * random()))`. Require every random
+  result to be finite and in `[0, 1)`; otherwise throw `RangeError`. This gives
+  deterministic 1500–1799 ms, 3000–3599 ms, then capped 5000 ms backoff.
+- [x] For a valid `Retry-After` delta-seconds or HTTP-date on a retryable
+  `NexusApiError`, use the greater of the calculated delay and Retry-After. An
+  explicit server throttle may exceed the ordinary 5000 ms transport-backoff
+  cap; clamp it to 60 seconds to keep the local scheduler bounded. Use the
+  injected `Clock` for HTTP-date math and document this server-directed
+  exception beside the 5000 ms performance budget. Ignore malformed or past
+  values. Do not retry a mutating request; this policy applies only to
+  `GenerationApi.get()`.
+- [x] Poll sequentially. For one job there may be at most one in-flight
+  `GenerationApi.get()` at a time, and at most one live transport — an
+  EventSource or a poll loop, never both. Tests track maximum concurrent reads
+  and prove the EventSource is closed before the first poll begins.
+
+  This constrains **reads and transports**, not timers. S8 deliberately races a
+  backoff delay against `waitUntilVisible(signal)`, so a delay and a visibility
+  wait are pending together by design; that is not a violation. Do not serialize
+  those two to satisfy this rule — doing so loses S8's immediate reconciliation
+  poll when the document becomes visible again.
+
+### S8 — detach and visibility own lifecycle; there is no local timeout
+
+The earlier `900 attempts` loop timed out after roughly six minutes. That is
+incompatible with S1: a browser source cannot end non-terminal without making
+Task 5 throw `source_ended_before_terminal`, and it cannot abort the
+consumer-owned signal to synthesize detach.
+
+- [x] Do not implement a maximum poll count or elapsed-time cutoff. Monitoring
+  continues until a terminal snapshot, a non-retryable/protocol error, or caller
+  abort. Only caller abort produces Task 5's `detached` event, and it never calls
+  a remote cancellation endpoint.
+- [x] Generation monitoring is essential while hidden, so do not pause it
+  indefinitely. While `VisibilitySource.isHidden()` is true, use 5000 ms as the
+  minimum interval. Race that delay with `waitUntilVisible(signal)`; visibility
+  restoration cancels the remaining hidden wait and triggers one immediate
+  reconciliation poll. There must not be a second timer or overlapping fetch.
+- [x] `createDocumentVisibilitySource(document)` reads `document.hidden`,
+  subscribes only while waiting, resolves immediately when already visible or
+  aborted, and removes `visibilitychange` and abort listeners in every exit
+  path. It does not manipulate DOM or own presentation state.
+- [x] Generator `finally` blocks close EventSource, abort/finish a bridged poll,
+  clear timers, resolve pending iterator reads, and remove all abort/visibility
+  listeners. Test natural terminal completion, protocol failure, consumer
+  `return()`, abort during every stage, and Task 5's retry-created second source
+  session on the same pure signal.
+
+### S9 — version, validate, and migrate pending-submission storage
+
+The current legacy Story Player writes a flat record under
+`infiniteQuestPendingGeneration:${campaignId}`. The new
+`StoredGenerationSubmission` nests the exact server request under `request`.
+Accepting only a nested record with optional `jobId` would lose a saved request
+created immediately before cutover.
+
+- [x] Store the new format under
+  `infiniteQuestPendingGeneration:v2:${encodeURIComponent(campaignId)}` as
+  `{ version: 2, submission }`. Never include a user-supplied owner ID; the
+  campaign UUID scopes this pre-auth projection and server authorization remains
+  authoritative.
+- [x] Build an internal strict Zod schema discriminated by `operationKind`.
+  Both branches require `expectedTurnNumber` as an integer >= 1,
+  `createdAt` as a finite non-negative number, and optional UUID `jobId`.
+  `append` parses `request` with `generationRequestSchema`;
+  `replace_latest` parses with `generationRetryLatestRequestSchema` and refines
+  `request.expectedCurrentTurnNumber === expectedTurnNumber`. Preserve the
+  exact parsed request and idempotency key; never mint a replacement key while
+  loading or migrating.
+- [x] `load(campaignId)` checks the v2 envelope first, then accepts an
+  unversioned nested `StoredGenerationSubmission` made before `jobId` existed,
+  and finally checks the actual flat legacy key. Convert legacy fields
+  `action`, input modes, optional classification/provider/model fields,
+  `idempotencyKey`, `context`, `operationKind`, `expectedTurnNumber`, and
+  `createdAt` into the nested request; add `expectedCurrentTurnNumber` only for
+  `replace_latest`. Validate the converted record, write v2, then best-effort
+  remove the legacy key.
+- [x] Invalid JSON, a wrong version, schema failure, or inconsistent replacement
+  turn numbers returns `null` and best-effort removes the bad key so every load
+  does not repeat the same failure. Storage parsing never implements expiry;
+  Task 5 remains the only 15-minute policy owner.
+- [x] Web Storage access can throw. `save()` propagates `setItem` failure, which
+  makes Task 5 stop before enqueue; if the second save containing `jobId` fails,
+  the first exact envelope remains replayable. `load()` treats inaccessible
+  storage as absent so `resume()` can still call server `syncStatus()`. `clear()`
+  and corrupt-record cleanup are best-effort and never throw, preventing a
+  successful result/cancel/discard from being relabeled as a workflow failure.
+- [x] Tests cover v2 with/without `jobId`, unversioned nested input, both legacy
+  operation kinds, migration preserving the exact idempotency key, corrupt and
+  inconsistent records, quota/security exceptions for each operation, campaign
+  key isolation, and the exact 15-minute boundary through Task 5's injected
+  clock rather than the storage adapter.
+
+### S10 — lock down the deliberate package surface
+
+- [x] Export `createBrowserGenerationSource`,
+  `BrowserGenerationSourceOptions`, `EventSourceFactory`, `EventSourceLike`,
+  `VisibilitySource`, `createPendingSubmissionStore`,
+  `PendingSubmissionStorage`, and the four platform factories from
+  `packages/client-web/src/index.ts`. Do not export raw source factories,
+  `toAbortSignal`, URL helpers, storage schemas, or classifiers.
+- [x] Extend the `client-web-public` compiler fixture to construct or type-check
+  every new public factory using only `@infinite-quest/client-web` and
+  `@infinite-quest/client-core`. Add `expectTypeOf` coverage proving the composed
+  result is `GenerationSnapshotSource` and `GenerationApi` remains assignable to
+  Task 5's `GenerationApiPort`.
+- [x] Keep client-web framework-free and free of rendered-DOM writes. Web APIs
+  (`EventSource`, `Storage`, `Document`, `AbortController`, timers, and crypto)
+  remain allowed only in this package. No new runtime dependency or lockfile
+  change is needed; use the existing `zod` and client-core dependencies.
+
+### S11 — TDD, integration, and completion sequence
+
+Keep Task 6 as one reviewable package, but build it in the following red/green
+order. Each test names observable behavior rather than private implementation.
+
+- [x] **API URL extraction first.** Extend `http-client.test.ts` with an import-
+  invisible regression proving the HTTP client still rejects every Task 4a
+  unsafe base/request path after its resolver is extracted. Add the corresponding
+  EventSource URL tests in `generation-event-source.test.ts`; run both and expect
+  the EventSource test to fail because the module does not exist. Implement
+  `api-url.ts` and switch `http-client.ts` to it, then rerun:
+
+  ```bash
+  pnpm exec vitest run tests/unit/client-web/http-client.test.ts \
+    tests/unit/client-web/generation-event-source.test.ts
+  ```
+
+- [x] **EventSource adapter second.** Before implementation, add cases for a
+  valid progressive frame, every terminal status, malformed JSON, schema drift,
+  clean non-terminal closure, abort before construction, abort after
+  construction, `iterator.return()`, terminal-message/onerror ordering, encoded
+  job ID, and exact listener/`close()` counts. Expect the missing factory red;
+  implement the smallest internal adapter and rerun to green.
+
+- [x] **Polling adapter third.** Add fake-clock/API tests for immediate first
+  read, timestamp stripping, sequential reads, 1500 ms success cadence, exact
+  jitter/backoff values at random `0` and just below `1`, 5000 ms cap,
+  Retry-After parsing, reset after success, `poll_failed` beginning at failure
+  two, abort during fetch and delay, visible/hidden cadence, immediate wake on
+  visibility restore, and every retryable/non-retryable error class. Expect red,
+  implement `abort-bridge.ts`, `poll-source.ts`, delay/visibility adapters and
+  classifiers, then rerun:
+
+  ```bash
+  pnpm exec vitest run tests/unit/client-web/generation-poll-source.test.ts \
+    tests/unit/client-web/platform-adapters.test.ts
+  ```
+
+- [x] **Fallback composition fourth.** Test EventSource unavailable, empty vs
+  non-empty session authorization, one `stream_lost` event, clean-close fallback
+  inherited from Task 2a P2, EventSource closed before the immediate poll, no
+  SSE promotion, no overlapping transports, terminal completion, non-terminal
+  source continuity, and a Task 5 workflow consuming the composed source without
+  `source_ended_before_terminal`. Expect red, implement
+  `fallback-source.ts`/the public factory, and rerun:
+
+  ```bash
+  pnpm exec vitest run tests/unit/client-web/generation-fallback-source.test.ts \
+    tests/unit/client-core/generation-workflow.test.ts
+  ```
+
+- [x] **Persistence fifth.** Write all v2, unversioned, flat-legacy, cross-field,
+  exception, isolation, and expiry-boundary cases from S9. Expect red, implement
+  the store, and rerun:
+
+  ```bash
+  pnpm exec vitest run tests/unit/client-web/pending-submissions.test.ts \
+    tests/unit/client-core/generation-submission.test.ts
+  ```
+
+- [x] **Public surface last.** Update the compiler fixture and boundary tests
+  before exporting. The fixture must fail while the names are absent, then pass
+  after `index.ts` exports exactly S10's surface. Add standalone clock/delay/ID/
+  visibility cases, including unavailable secure UUID generation. Run:
+
+  ```bash
+  pnpm exec vitest run tests/unit/client-boundaries.test.ts \
+    tests/unit/client-web/platform-adapters.test.ts
+  pnpm --filter @infinite-quest/client-web check
+  pnpm check:client-boundaries
+  ```
+
+- [x] Run the focused package gate:
+
+  ```bash
+  pnpm exec vitest run tests/unit/client-web/ tests/unit/client-core/ \
+    tests/unit/client-boundaries.test.ts
+  pnpm --filter @infinite-quest/client-core check
+  pnpm --filter @infinite-quest/client-web check
+  ```
+
+- [x] Run completion checks: `pnpm check`, `pnpm build`, `pnpm test:unit`,
+  `pnpm test:integration`, and `pnpm install --frozen-lockfile`; then run
+  `git diff --check`, review the complete diff for unrelated files, and run
+  `pjm precheck` for every changed path. No server behavior changes are expected,
+  but the full integration suite protects the SSE endpoint contract consumed by
+  this task.
+- [x] Record a **Current Task 6 verification** block under **Completion status**
+  and change Task 6's row to complete in the same implementation commit. Also
+  remove Task 2a's “one item deferred to Task 6” qualifier and cite the clean-
+  stream-closure fallback regression as its closing evidence; do not change any
+  other task status.
+- [x] Commit only Task 6 source, tests, and plan status with an imperative scoped
+  summary such as `feat(client): add browser generation transports`. Do not mix
+  Task 7 stores or Task 9 Story Player rewiring into this commit. Submit the
+  result for the plan-required scoped review before starting the next task in
+  the corrected sequence (Task 8).
+
+**Definition of done:** The exported composed source produces the same typed
+snapshot/degradation sequence regardless of SSE availability, never exposes an
+off-origin or credential-bearing EventSource URL, never overlaps transports,
+and remains alive until terminal state or caller detach. Polling is deterministic
+under injected time/random/visibility, malformed data retains Task 5's typed
+protocol error, legacy and v2 submissions resume with the exact idempotency key,
+storage cleanup cannot relabel a completed job, and every Web listener, timer,
+request bridge, iterator, and EventSource is released on all exit paths.
 
 ---
 
-## Task 7 — C6: Focused stores, selectors, and generic job watching
+## Task 13a-R — B4a corrective gate: scope pages and recover replacements
+
+**Runs after Task 13a and before Task 7.** Task 13a correctly made history
+pages bounded, versioned, and snapshot-consistent, but its public projections
+omit two identities that C6 must validate rather than infer. This is a narrow
+contract correction, not B4b profiling work and not an implementation of the
+campaign store.
+
+**Issue being corrected:**
+
+- A `TurnListResponse` has no `campaignId`. A store that receives a previously
+  validated page cannot prove that it belongs to its loaded campaign before
+  prepending it; page turn IDs and turn numbers alone are not campaign scope.
+- `generationRecovery` has `operationKind` but omits `replacementTurnId`. A
+  completed `replace_latest` recovery reloaded outside the current 50-turn
+  window therefore cannot verify the intended old turn before atomically
+  replacing it. `GenerationResult` does not supply that target either.
+
+**Files:**
+
+- Modify: `packages/contracts/src/client-api.ts`
+- Modify: `services/api/src/server.ts`
+- Modify: `tests/unit/client-api-contracts.test.ts`
+- Modify: `tests/unit/client-api-routes.test.ts`
+- Modify: `tests/unit/client-web/api-client.test.ts`
+- Modify: `tests/integration/gameplay.integration.test.ts`
+- Add: `database/migrations/0051_preserve_replacement_turn_provenance.sql`
+- Modify: `docs/ui/SLICE_0_1_IMPLEMENTATION_PLAN.md` (Task 13a-R completion
+  evidence and Task 7 prerequisite status only)
+
+**Corrected contract:**
+
+- `TurnListResponse` gains `campaignId: UUID`. The direct
+  `GET /campaigns/:campaignId/turns` response and the nested `turns` value of a
+  `sync-status` response must both return the route/canonical campaign ID. The
+  server, not a cursor or the browser, supplies that value. A client may use it
+  only to reject a mismatched page; it is never authorization.
+- `generationRecovery` gains `replacementTurnId`, expressed as an
+  `operationKind` discriminated union: `append` requires
+  `replacementTurnId: null`; `replace_latest` requires a UUID. The recovery
+  projection therefore carries the exact target needed by C6's completed-result
+  reducer. Do not make this a loose nullable field that lets an invalid
+  replacement recovery cross the API boundary.
+- Migration 0051 removes the delete-time foreign key on
+  `generation_jobs.replacement_turn_id`: replacement target IDs are durable
+  provenance, while creation-time ownership and scope validation remains in the
+  generation workflow. This is forward-only; existing completed replacements
+  whose targets were already nulled cannot be reconstructed.
+- Extend the existing sync query with
+  `recovery.replacement_turn_id AS "recoveryReplacementTurnId"`, map that value
+  into the sanitized recovery projection, and include it in the sync-token
+  fingerprint. No raw provider/model payload, mechanics, stack, or rejected
+  output may enter either new field.
+- The existing `turnPageRequestSchema`, `syncStatusRequestSchema`, bounded page
+  limits, opaque cursor validation, and read-only repeatable-read page snapshot
+  remain unchanged. Do not widen page size, bypass runtime response parsing, or
+  introduce a second read repository.
+
+**TDD and verification sequence:**
+
+- [x] Add contract red tests showing that a page without `campaignId`, an
+  append recovery with a non-null target, and a replacement recovery with a
+  null/malformed target are rejected. Add matching success cases for direct and
+  sync-nested pages plus both recovery operation kinds. Implement the shared
+  discriminated schemas only after the failures are observed.
+- [x] Add route/client red tests proving that the direct page and replacement
+  sync response include the canonical campaign ID and replacement target, and
+  that the typed browser client still rejects malformed projections at runtime.
+  Implement only the server-query, response-map, and fixture changes needed to
+  make them pass.
+- [x] Add a real-PostgreSQL regression that creates a `replace_latest` job whose
+  accepted result is outside the latest bounded window, obtains `sync-status`,
+  and asserts the recovery carries the exact replacement turn ID. Also assert an
+  older-page response carries the queried campaign ID and cannot be confused
+  with a second campaign's page. Preserve Task 13a's existing cursor snapshot
+  race coverage.
+- [x] Run focused contract/route/client tests and the gameplay integration test,
+  then `pnpm check`, `pnpm build`, `pnpm test:unit`, `pnpm test:integration`,
+  `git diff --check`, complete-diff review, and `pjm precheck`. Record the
+  commands/results in the Task 13a-R completion note and submit this correction
+  to its own scoped review before starting C6.
+
+**Completion evidence (2026-08-02):** Contract tests were first observed red
+(four failures), then passed after the discriminated schema and server response
+projection changes. The PostgreSQL regression initially exposed that the old
+delete-time foreign key erased `replacement_turn_id`; migration 0051 preserves
+new durable replacement provenance after the target turn is removed. Focused
+contract/route/client tests, focused gameplay integration, `pnpm check`,
+`pnpm build`, `pnpm test:unit` (83 files, 949 tests), `pnpm test:integration`,
+`git diff --check`, and `pjm precheck` all passed. The detailed command output
+and self-review are recorded in
+`.superpowers/sdd/SLICE_0_1_IMPLEMENTATION_PLAN/task-13a-r-report.md`.
+Scoped source/test commits: `5f156ac` (`fix(api): scope turn pages and recovery`)
+and `1ae0dd1` (`test(client): reject malformed sync recovery`).
+
+**Definition of done:** Every bounded page is self-identifying and every
+completed replacement recovery carries a validated replacement target. C6 can
+reject cross-campaign pages and reconcile a recovered replacement without
+guessing from a window index, response order, or browser storage.
+
+---
+
+## Task 7P — C6 prerequisite: live replacement provenance and hydration contract
+
+**Runs after Task 13a-R and before Task 7a.** Task 13a-R made replacement
+recovery authoritative after reload, but the live stream and pending-generation
+summary still cannot identify the replaced turn. Freezing the C6 projection
+before fixing those ingress contracts would force the reducer either to guess
+from the bounded turn window or to maintain two incompatible replacement paths.
+
+This prerequisite changes only contracts, API projections, workflow comparison,
+tests, and their governing ADR. It does not create a store or UI behavior.
+
+### 7P.1 — Make operation provenance discriminated and allowlisted
+
+- [x] Change `generationStreamSnapshotSchema` into an operation-discriminated
+  projection: `append` requires `replacementTurnId: null`, while
+  `replace_latest` requires a UUID `replacementTurnId`. Keep the projection an
+  explicit allowlist; do not expose `recoveryMetadata`, database rows, raw model
+  data, or any other internal job field.
+- [x] Change `pendingGenerationSchema` to the same operation/target invariant.
+  Its status union is active-only: `queued`, `replacement_queued`, `assessing`,
+  `generating`, `validating`, or `committing`. Terminal jobs belong exclusively
+  to the discriminated `generationRecovery` contract.
+- [x] Update the pending-generation database selection and API mapping to carry
+  `replacement_turn_id`; never reconstruct it from `expectedTurnNumber`, the
+  current latest turn, or client storage.
+- [x] Include `operationKind` and `replacementTurnId` in generation snapshot
+  equality. A target change is observable even when durable status and
+  narration are unchanged.
+- [x] Ensure every live `GenerationWorkflow` `status` event retains the exact
+  replacement target through enqueue, retry, SSE, polling, and fallback. The
+  event must not be cleared or narrowed before the completed result is reduced.
+- [x] Add the same immutable operation/target pair to `GenerationRun`. The
+  controller needs it immediately at `attachGeneration(run)`, before the first
+  status frame arrives; do not make C6 infer it from a later event.
+
+### 7P.2 — Files and tests
+
+**Modify:**
+
+- `packages/contracts/src/generation.ts`
+- `packages/contracts/src/client-api.ts`
+- `services/api/src/server.ts`
+- `packages/client-core/src/generation/machine.ts`
+- `packages/client-core/src/generation/types.ts` and
+  `packages/client-core/src/generation/workflow.ts` if required to preserve the
+  discriminant without widening the public event
+- `scripts/benchmark-client-contracts.ts`
+- `docs/architecture/0028-modular-client-and-application-boundaries.md`
+- the affected contract, route, API-client, generation-machine, workflow,
+  SSE/poll/fallback-source, and gameplay integration tests
+
+- [x] Start with red contract tests proving valid append/null and
+  replace/UUID pairs parse; malformed pairs and terminal pending statuses fail.
+- [x] Prove the pending route, polling snapshot, SSE snapshot, and fallback path
+  preserve the same target and do not leak non-allowlisted fields.
+- [x] Prove a real replacement `GenerationWorkflow` emits a status with the old
+  turn ID and carries that identity until its completed event.
+- [x] Re-run `scripts/benchmark-client-contracts.ts`, update ADR 0028's exact
+  stream allowlist and measured payload/frame evidence, and fail the benchmark
+  if the contract drifts again.
+- [x] Run focused tests, then `pnpm check`, `pnpm build`, `pnpm test:unit`,
+  `pnpm test:integration`, `git diff --check`, complete-diff review, and
+  `pjm precheck`. Record a `Current Task 7P verification` block and obtain a
+  scoped review before Task 7a.
+
+**Definition of done:** Pending sync, SSE, polling, fallback, and the live
+workflow all carry one validated operation/target pair. C6 can reduce live and
+hydrated replacements by identity without reading an internal job row or
+guessing from a 50-turn window.
+
+---
+
+## Task 7 — C6: Focused stores and selectors
+
+**Pre-implementation correction status: Applied (2026-08-02).** Reviewed
+against the shipped Tasks 5/5a/6, the legacy `story.js` state object, the current
+typed API surface, and Task 9's actual requirements. The review found that the
+original generic source event could not carry Task 5's workflow outcomes, that
+pure client-core had no writable cancellation primitive with which to own a
+watcher's lifetime, and that image, Chronicle, and world-cover jobs have no
+shared client contracts or browser sources. The corrected task therefore owns
+only an immutable campaign projection and generation-event reducer. It does not
+own transport iteration, cancellation, or speculative multi-family adapters.
+
+**Prerequisite status:** Task 13a-R is review-clean; Task 7P remains open. C6
+needs self-identifying turn pages to reject cross-campaign loads and prepends,
+the discriminated recovery target to validate reload recovery, and Task 7P's
+matching live/pending target to validate an in-flight `replace_latest`. None may
+be guessed from a bounded window, cursor, response order, or browser state.
+
+**Sequenced after Task 9 (C8), Task 13a (B4a), and Task 13a-R, despite its
+number.** Nothing in Track C consumes this task: Task 9 never references these
+stores — its only "store" mention is Task 6's pending-submission store — and
+none of the ten Track C exit criteria mentions stores, selectors, or job
+watching. The real consumers are U2, U4, and U5. The dependency graph previously
+drew `C6 -> C8`; that edge was unverified and is corrected. Run this strictly
+after C8, B4a, Task 13a-R, and Task 7P so its projection types are based on the
+final bounded history/sync and replacement-provenance contracts; it is not a
+C8 blocker.
 
 Do not lift the current `story.js` state object as-is. It mixes authoritative
 projections with presentation details such as toast timers, scroll-follow state,
 modal selections, and DOM cancellation controls.
 
-**Files:**
+### Scope boundary
+
+This task owns a **pure, generation-family** campaign projection: an internal
+store primitive, a campaign controller that reduces already-validated Task 5
+`GenerationEvent` values, and selectors over that projection. The caller owns
+`GenerationRun.watch(signal)` iteration and the `AbortController`; the campaign
+controller never opens a source, creates a timer, aborts a signal, or calls a
+remote cancellation endpoint. It must compile and be fully tested under
+`packages/client-core/tsconfig.json` with `lib: ["ES2023"]` and `types: []`,
+with no DOM, Node, network, storage, clock, timer, random-ID, or framework type
+reachable from any of its modules.
+
+### Delivery stages and checkpoints
+
+C6 is a multi-stage package across five specification sections, and unlike
+Tasks 4-6 it has no application consumer in-tree yet. Its consumers are U2,
+U4, and U5. It is therefore delivered as **three implementation checkpoints
+plus one exit audit**, each landing as its own commit and scoped review.
+
+S1-S5 below remain **one specification** and are not split. The controller
+interface, the `CampaignProjectionProtocolError` kind union, and the hydration
+rule genuinely span both the campaign and generation lanes; declaring them
+across two documents would make the contract worse, not clearer. What splits is
+the **work**, along the lanes the TDD sequence already stages.
+
+| Stage | Implements | Approx. items | Unblocks |
+|---|---|---|---|
+| **7a — store primitive** | S1 | 5 | nothing directly; reviewed foundation |
+| **7b — campaign/runtime projection** | S2, S3's campaign items (`load`, `loadRuntimeState`, `turnWindowMode`, turn normalization, `prependOlderTurns`, `setTurnInput`), and campaign selectors from S5 | review by behavior, not item count | **U4 resume foundation** |
+| **7c — generation projection** | S3's generation items (`attachGeneration`, session identity, snapshot validation, watch-loop ownership, `retryResult`), all of S4, generation selectors, and the real workflow/store composition test | review by behavior, not item count | **U2**, **U4**, **U5** |
+| **7d — Track C exit audit** | governing-document reconciliation, all ten exit criteria, final evidence and review | audit | authorizes the backend sequence; no UI work |
+
+- [x] **7b declares the complete `CampaignProjection` type, including
+  `generation: GenerationJobProjection | null`, and leaves that field
+  permanently null.** 7c adds only behavior and never widens the shape. Do not
+  ship 7b with the field omitted and add it in 7c: a projection type that
+  changes between checkpoints is exactly the failure that forced Task 13a-R and
+  the C6 resequencing.
+- [x] **Do not split 7c further.** S4's reducers write the state S3's attach
+  establishes; a checkpoint between them would leave a projection that is
+  attached but that nothing ever updates. Treat it as one behavior unit.
+- [x] Keep 7a separate from 7b. The public read-only type and internal writable
+  primitive are foundational enough to require their own compile-time fixture,
+  verification block, commit, and scoped review before projection work starts.
+- [x] Each of 7a, 7b, 7c, and 7d is a checkpoint and must end green and
+  coherent: its own items
+  ticked, `pnpm check`, `pnpm build`, `pnpm test:unit`, and
+  `pnpm test:integration` passing, a deliberate `index.ts` export surface with
+  no partially-exported module, the `core-contracts` boundary fixture updated
+  for the surface it adds, and a `Current Task 7a/7b/7c/7d verification` block
+  recorded in the same commit per the Task 4a P4 rule.
+- [x] Do not start any UI task after these checkpoints alone. The backend-first
+  gate also requires Tasks 10, 11, 12, 13b, 14a-14e, and the backend completion
+  audit. Within dependency analysis, 7b supplies U4's resume foundation; 7c
+  supplies U2/U4/U5 generation behavior.
+
+**Files by stage:**
+
+*7a — store primitive*
 
 - Create: `packages/client-core/src/store.ts`
+- Create: `tests/unit/client-core/store.test.ts`
+- Modify: `packages/client-core/src/index.ts`
+- Modify: `tests/fixtures/client-boundaries/core-contracts/src/fixture.ts`
+- Modify: `tests/unit/client-boundaries.test.ts`
+
+*7b — campaign/runtime projection*
+
+- Create: `packages/client-core/src/campaign-projection.ts` (public projection
+  and sanitized hydration types; no controller implementation)
 - Create: `packages/client-core/src/campaign-store.ts`
-- Create: `packages/client-core/src/selectors.ts`
-- Create: `packages/client-core/src/jobs.ts`
+- Create: `packages/client-core/src/selectors.ts` (campaign selectors only)
 - Create: `tests/unit/client-core/campaign-store.test.ts`
-- Create: `tests/unit/client-core/jobs.test.ts`
+- Create: `tests/unit/client-core/selectors.test.ts`
+- Modify: `packages/client-core/src/index.ts`
+- Modify: `tests/fixtures/client-boundaries/core-contracts/src/fixture.ts`
+- Modify: `tests/unit/client-boundaries.test.ts`
+
+*7c — generation projection*
+
+- Create: `packages/client-core/src/generation/projection.ts`
+- Create: `tests/unit/client-core/generation-projection.test.ts`
+- Create: `tests/unit/client-core/campaign-generation-composition.test.ts`
+- Modify: `packages/client-core/src/campaign-store.ts` (attach/session wiring)
+- Modify: `packages/client-core/src/selectors.ts` (generation selectors)
+- Modify: `packages/client-core/src/index.ts`
+- Modify: `tests/unit/client-core/selectors.test.ts`
+- Modify: `tests/fixtures/client-boundaries/core-contracts/src/fixture.ts`
+- Modify: `tests/unit/client-boundaries.test.ts`
+
+*7d — Track C exit audit*
+
+- Modify: `docs/ui/CLIENT_CORE_BOUNDARY.md`
+- Modify: `docs/ui/API_UI_CONTRACTS.md`
+- Modify: `docs/ui/INTERACTION_FLOWS.md`
+- Modify: `docs/ui/FEATURE_IMPLEMENTATION_MATRIX.md`
+- Modify: `docs/ui/SLICE_0_1_IMPLEMENTATION_PLAN.md`
+- Review ADR 0028 and the architecture index for links or claims changed by 7P
+
+`jobs.ts` and `tests/unit/client-core/jobs.test.ts` are deliberately removed
+from this task — see **Deferred** below. Do not place their abandoned generic
+source types in `store.ts`; Task 5 already owns the only implemented source
+contract.
+
+`packages/client-core/src/index.ts` was missing from the original list — the
+third recurrence of an omission already corrected in Tasks 5 and 6. Slice 1
+consumers import these stores through the deliberate barrel, so export the
+read-only `Immutable`/`Store` types, campaign projection/controller types, the
+campaign-store factory, and selectors. `WritableStore` and
+`createWritableStore` are exported from `store.ts` so sibling modules can use
+them, but are not re-exported from the package barrel; keep the live run
+registry and event reducers module-private. Because Task 8 lands first, import all
+shared contract types through `@infinite-quest/contracts`; do not reintroduce the
+relative `../../../contracts/src` path that Task 8 removes.
+
+### S1 — define the store primitive precisely
 
 ```ts
+type DateMutator =
+  | "setDate"
+  | "setFullYear"
+  | "setHours"
+  | "setMilliseconds"
+  | "setMinutes"
+  | "setMonth"
+  | "setSeconds"
+  | "setTime"
+  | "setUTCDate"
+  | "setUTCFullYear"
+  | "setUTCHours"
+  | "setUTCMilliseconds"
+  | "setUTCMinutes"
+  | "setUTCMonth"
+  | "setUTCSeconds"
+  | "setYear";
+
+export type Immutable<T> =
+  T extends Date
+    ? Omit<Date, DateMutator>
+    : T extends (...args: never[]) => unknown
+      ? T
+      : T extends readonly (infer Item)[]
+        ? readonly Immutable<Item>[]
+        : T extends object
+          ? { readonly [Key in keyof T]: Immutable<T[Key]> }
+          : T;
+
 export interface Store<T> {
-  get(): Readonly<T>;
-  subscribe(listener: (state: Readonly<T>) => void): () => void;
+  get(): Immutable<T>;
+  subscribe(listener: (state: Immutable<T>) => void): () => void;
 }
 
-/**
- * The generic form of Task 5's `GenerationSourceEvent`. A source that yields
- * bare snapshots cannot express degradation, which is why Task 5 C1 corrected
- * its own port; the generic watcher inherits that correction rather than
- * reintroducing the defect.
- */
-export type JobSourceEvent<TSnapshot, TReason extends string = string> =
-  | { kind: "snapshot"; snapshot: TSnapshot }
-  | { kind: "degraded"; reason: TReason; consecutiveFailures: number };
+export interface WritableStore<T> extends Store<T> {
+  set(next: T): void;
+  update(reduce: (current: Immutable<T>) => T): void;
+}
 
-export interface JobSnapshotSource<TSnapshot, TReason extends string = string> {
-  watch(jobId: string, signal: AbortSignalLike): AsyncIterable<JobSourceEvent<TSnapshot, TReason>>;
+export function createWritableStore<T>(initial: T): WritableStore<T>;
+```
+
+- [x] `WritableStore` and `createWritableStore` are module exports for sibling
+  implementation modules, but package-internal at the public boundary. Public
+  consumers receive only `Store<T>` and domain-named controller methods; do not
+  barrel-export a generic `set` or `update` escape hatch.
+- [x] `set` compares with `Object.is`. Committing the identical reference is a
+  no-op; committing a different reference replaces state before notifying each
+  listener once.
+- [x] Notify a snapshot of listeners synchronously in subscription order.
+  Subscription or unsubscription during a callback affects the next update,
+  not the current listener snapshot. The returned unsubscribe function is
+  idempotent. `subscribe` does not invoke the listener immediately; framework
+  adapters read the current value through `get()` and receive notifications only
+  after a distinct reference is committed.
+- [x] A listener exception does not roll back the already-committed state. It is
+  a caller error and may propagate, ending that notification pass before later
+  listeners run; do not catch it and synthesize domain state.
+- [x] `Readonly<T>` is shallow and is insufficient here. Use the recursive
+  compile-time `Immutable<T>` view for reads. Its `Date` branch must omit every
+  mutator while retaining read/format methods; a mapped `Date` is not immutable.
+  Clone dates, arrays, and records at every
+  campaign-controller ingress, and use copy-on-write reducers. Tests must prove
+  mutation of caller-owned campaign, turn, snapshot, and result inputs after a
+  command cannot mutate stored state. `Immutable<T>` is a type guarantee, not a
+  runtime freeze; do not claim generic `createWritableStore` clones or
+  deep-freezes arbitrary values.
+
+### S2 — scope the campaign projection to contracted data
+
+Do not move the legacy fields from `apps/web/src/story.js` into a global
+store. Task 7 has contracts today for campaign sync, accepted turns, generation
+snapshots/results, turn-input choices, and editable campaign runtime state.
+Provider inventory, user profile, and illustration configuration also have
+typed contracts, but they are separate feature/shell domains; placing them in a
+campaign store would create the wrong ownership boundary rather than improve
+type safety.
+
+Define the public projection from existing contract types:
+
+```ts
+export type GenerationTransportHealth =
+  | { readonly state: "unobserved" }
+  | { readonly state: "healthy" }
+  | {
+      readonly state: "degraded";
+      readonly reason: "stream_lost" | "poll_failed";
+      readonly consecutiveFailures: number;
+    };
+
+export type GenerationResultState =
+  | { readonly state: "pending" }
+  | { readonly state: "unavailable"; readonly message: string; readonly correlationId: string | null }
+  | { readonly state: "failed"; readonly outcome: "failed" | "unrecoverable"; readonly message: string };
+
+export type GenerationOperationProjection =
+  | { readonly operationKind: "append"; readonly replacementTurnId: null }
+  | { readonly operationKind: "replace_latest"; readonly replacementTurnId: string };
+
+export interface HydratedGenerationProjection {
+  readonly source: "pending" | "recovery";
+  readonly id: string;
+  readonly status: string;
+  readonly action: string | null;
+  readonly expectedTurnNumber: number;
+  readonly attempts: number | null;
+  readonly resultTurnId: string | null;
+  readonly operation: GenerationOperationProjection;
+}
+
+export interface GenerationJobProjection {
+  readonly campaignId: string;
+  readonly jobId: string;
+  readonly origin: "live" | "hydrated_pending" | "hydrated_recovery";
+  readonly operation: GenerationOperationProjection;
+  readonly monitoring: "attached" | "detached";
+  readonly hydratedGeneration: Immutable<HydratedGenerationProjection> | null;
+  readonly snapshot: Immutable<GenerationStreamSnapshot> | null;
+  readonly narration: string;
+  readonly transport: GenerationTransportHealth;
+  readonly result: GenerationResultState;
+}
+
+export interface CampaignProjection {
+  readonly campaign: Immutable<CampaignSyncStatus["campaign"]> | null;
+  readonly world: Immutable<CampaignSyncStatus["world"]> | null;
+  readonly playerConfig: Immutable<CampaignSyncStatus["playerConfig"]> | null;
+  readonly turns: readonly Immutable<TurnSummary>[];
+  readonly nextTurnsCursor: string | null;
+  readonly syncToken: string | null;
+  readonly historySyncRequired: boolean;
+  readonly runtimeState: Immutable<CampaignRuntimeStateResponse> | null;
+  readonly latestStateSnapshot: Immutable<Record<string, unknown>> | null;
+  readonly requestedTurnInputMode: TurnInputSelection;
+  readonly nextTurnInputModeSource: TurnInputModeSource | null;
+  readonly generation: GenerationJobProjection | null;
 }
 ```
 
-`GenerationSnapshotSource` from Task 5 must remain assignable to
-`JobSnapshotSource<GenerationStreamSnapshot, "stream_lost" | "poll_failed">`.
-Generalizing here must not widen or re-declare Task 5's narrower `reason` union;
-each job family keeps its own typed reasons.
+- [x] The initial projection has null server projections, an empty readonly turn
+  window, null `nextTurnsCursor`/`syncToken`, `historySyncRequired: false`, null
+  runtime state and state snapshot, requested
+  input selection `"action"` (the shared generation-request default), null
+  next-mode source, and no generation. Use
+  `TurnInputSelection`, not `TurnInputMode`: the former preserves the UI's
+  `"auto" | "action" | "scene"` request while the latter is only the resolved
+  `"action" | "scene"` result. Campaign control-style policy remains in the app
+  until C8 adopts its typed campaign-config contract.
+- [x] Browser identity values are never inputs to this store. When Slice 1 adds
+  a user/profile store, its UUID and system key remain display projections and
+  must never become authorization headers or request ownership fields.
+- [x] Store only sanitized `partialNarration` from `GenerationEvent`; never add
+  `partialOutput`, raw model output, parser diagnostics, mechanics scratchpads,
+  or an `Error.cause`/stack to the projection.
+- [x] Keep scrolling, focus, modal state, toast/activity timers, view/history
+  selection, DOM nodes, edit sessions, and `AbortController` instances in
+  `apps/`.
 
-- [ ] Store only campaign/world projections, accepted turns, selected domain
-  options, and durable-job references.
-- [ ] Keep scrolling, focus, modals, toast timers, DOM nodes, and rendering flags
-  in `apps/`.
-- [ ] Define job-family adapters for image, Chronicle, and world-cover statuses;
-  do not force unlike payloads into one underspecified status-only type.
-- [ ] Make the generic watcher responsible only for scheduling, error/degraded
-  events, detach, and terminal detection supplied by the family adapter.
-- [ ] **Handle the full Task 5 `GenerationEvent` union — including
-  `result_unavailable` — without collapsing it.** That event means the
-  generation succeeded durably but the client could not fetch its result. The
-  store must not record it as a failure, must not clear the durable-job
-  reference, and must not mark the job settled; the workflow is still open and a
-  consumer may call `fetchResult()` again. A store that treats any non-`status`
-  event as terminal will silently lose a completed turn.
-- [ ] Model `degraded` as transport health on the job reference, separate from
-  job status. It must not overwrite the last known snapshot or reset narration.
-- [ ] Add family-specific tests for `expired`, `partial`, `recoverable`, and
-  provider-progress behavior, plus a generation-family test asserting that
-  `result_unavailable` leaves the job watchable and a later successful
-  `fetchResult()` settles it as completed.
+The legacy-field disposition is therefore:
 
-**Definition of done:** Framework adapters can subscribe to stable domain
-projections, while family-specific job semantics remain typed and testable.
+| Field | Home | Why |
+|---|---|---|
+| `campaignId`, `campaign`, `world`, `playerConfig` | **store now** | fields validated by the current campaign-sync contract |
+| `runtimeState` | **store now** | C8 adopted validated GET/PATCH campaign-state responses; load the GET response through a dedicated controller command and keep it distinct from generation `latestStateSnapshot` |
+| `turns` | **store** | accepted-turn ledger |
+| `historyNextCursor` | **store** | represented by `nextTurnsCursor`; local accepted-result projection also raises `historySyncRequired` so the next sync deliberately replaces the bounded window |
+| `turnInputMode`, `nextTurnInputModeSource` | **store** | these become the `requestedInputMode` and `inputModeSource` fields of a generation request; they are contract inputs, not display state |
+| `pendingGeneration`, `generationJobId` | **store projection** | represented by `GenerationJobProjection`; the live `GenerationRun` remains private controller state |
+| `generationRun` | **private controller state** | command/watch handle; never serialized or exposed through selectors |
+| `generationRecoveryKind` | **derived store projection** | represented by `origin`, sanitized hydration source/status, and result state; do not preserve the legacy display flag as a second authority |
+| `providers`, `illustrationConfig`, `illustrationSegments`, `user` | **later typed feature/shell stores** | typed contracts exist, but their lifetimes and ownership are not campaign-ledger state |
+| `viewIndex`, `historySelectedIndex`, `historyInspectionRequestId` | `apps/` | which turn is on screen |
+| `busy`, `generationDisplayActive`, `generationDisplayAction` | `apps/` | in-flight rendering flags |
+| `streamingAutoFollow`, `streamingExpectedScrollY` | `apps/` | scroll behavior |
+| `toastTimer`, `imagePollTimer` | `apps/` | timers |
+| `editStateSession` | `apps/` | modal editing session |
+| `illustrationVariantIndexes`, `illustrationSegmentActivity`, `imageJobActivity`, `imageActivityInitialized` | `apps/` | per-view display bookkeeping |
+| `activityLog` | `apps/` | rendered directly into the DOM; not a server projection |
+| `pendingIntentDecision` | `apps/` | an `{ action, classification }` pair held awaiting a user modal decision |
+| `cancellationConfirmed` | `apps/` | transient confirmation flag |
+| `abortController` | **neither** | Task 5 requires the UI to own the `AbortController`; it must not enter client-core in any form |
+
+- [x] Load `runtimeState` only from the validated
+  `CampaignRuntimeStateResponse`; recursively copy it and reject a campaign-ID
+  mismatch before mutation. Keep it separate from `latestStateSnapshot`, which
+  is the narrower generation-result projection. A completed generation clears
+  `runtimeState` to null because the result does not carry the full editable
+  response/revision contract; the application must refetch runtime state before
+  opening its editor. Never type-cast the legacy object into this model.
+- [x] `hydratedGeneration` is an allowlisted public summary, not a defensive
+  copy of the complete pending/recovery response. Never expose recovery
+  `errorCode`, `errorMessage`, or an unreviewed future field through the store.
+- [x] If implementation needs a field not listed above, update this table and
+  name the shared schema that validates it in the same commit. Do not silently
+  widen the projection.
+
+### S3 — separate projection state from the live `GenerationRun`
+
+`GenerationRun` is a live command handle with `watch`, `retryGeneration`,
+`cancelGeneration`, `discardGeneration`, and `fetchResult`. It is not durable,
+serializable state. `campaign-store.ts` keeps at most one live run in a private
+slot while exposing only its IDs and reduced state as `GenerationJobProjection`.
+
+```ts
+export interface GenerationProjectionSession {
+  readonly campaignId: string;
+  readonly jobId: string;
+  apply(event: GenerationEvent): void;
+  retryResult(): Promise<void>;
+}
+
+export interface CampaignStoreController {
+  readonly store: Store<CampaignProjection>;
+  load(sync: CampaignSyncStatus): void;
+  loadRuntimeState(runtime: CampaignRuntimeStateResponse): void;
+  prependOlderTurns(page: TurnListResponse): void;
+  setTurnInput(mode: TurnInputSelection, source: TurnInputModeSource | null): void;
+  attachGeneration(run: GenerationRun): GenerationProjectionSession;
+}
+
+export function createCampaignStore(): CampaignStoreController;
+
+export type CampaignProjectionProtocolErrorKind =
+  | "campaign_not_loaded"
+  | "campaign_mismatch"
+  | "page_campaign_mismatch"
+  | "runtime_state_campaign_mismatch"
+  | "unchanged_window_without_baseline"
+  | "job_mismatch"
+  | "duplicate_turn_id"
+  | "duplicate_turn_number"
+  | "result_turn_mismatch"
+  | "replacement_target_missing"
+  | "replacement_target_mismatch"
+  | "result_retry_not_available";
+
+export class CampaignProjectionProtocolError extends Error {
+  readonly kind: CampaignProjectionProtocolErrorKind;
+  constructor(kind: CampaignProjectionProtocolErrorKind);
+}
+```
+
+- [x] `load` treats nested `sync.campaign` as the canonical campaign projection
+  and rejects a mismatch between its ID and the duplicated top-level sync ID
+  before mutation. When `turnWindowMode` is `replace`, also require the nested
+  turn page's `campaignId` to match both IDs; reject a cross-campaign page before
+  sorting or copying. Recursively copy the adopted campaign/world/player-config
+  records and their nested arrays/records without relying on DOM
+  `structuredClone`; client-core must remain valid with `lib: ["ES2023"]`.
+- [x] A `turnWindowMode: "unchanged"` sync is valid only for the currently
+  loaded same campaign with a non-null existing `syncToken`. Otherwise throw
+  `CampaignProjectionProtocolError("unchanged_window_without_baseline")` before
+  mutation; a fresh, switched, or cleared store must request/receive a
+  replacement window rather than treating null turn data as an empty ledger. For
+  a valid unchanged sync, preserve the existing turns and cursor but refresh all
+  copied campaign/world/player-config projections and assign the returned
+  `syncToken`.
+- [x] `loadRuntimeState` requires a loaded matching campaign, validates the
+  response campaign ID, recursively copies all dates/arrays/records, and throws
+  `runtime_state_campaign_mismatch` without partial mutation otherwise.
+- [x] Normalize every incoming turn window/page to ascending `turnNumber` order and
+  reject duplicate turn IDs or duplicate turn numbers atomically. `load` and
+  `prependOlderTurns` share this path so a caller-owned array or nested `choices`
+  array cannot mutate stored state after the command returns. A sync
+  `turnWindowMode: "replace"` replaces the bounded window and cursor;
+  `"unchanged"` preserves both. Older pages prepend without changing newer turn
+  references and update `nextTurnsCursor`.
+- [x] `prependOlderTurns` requires a loaded campaign and otherwise throws
+  `CampaignProjectionProtocolError("campaign_not_loaded")`. Task 13a-R makes
+  each page self-identifying: before sorting, copying, or merging it, require
+  `page.campaignId === current.campaign.id` or throw
+  `CampaignProjectionProtocolError("page_campaign_mismatch")` with no partial
+  mutation. Never infer ownership from a turn number, opaque cursor, or caller
+  argument.
+- [x] Hydration is campaign- and job-aware. Loading a different campaign clears
+  the private run, invalidates all sessions, and replaces the projection. For a
+  same-campaign load, a non-null active `pendingGeneration` takes precedence;
+  otherwise exhaustively reduce `generationRecovery`. A matching job may retain
+  compatible richer narration/snapshot data and its live run, but the newly
+  loaded authoritative status/result state always wins — especially terminal
+  recovery. A different authoritative job invalidates the old session/run and
+  creates a detached projection.
+- [x] Build `hydratedGeneration` by copying only its declared allowlist. Preserve
+  action, operation/target, expected turn, attempts, result ID, and status; never
+  copy recovery `errorMessage`, `errorCode`, or arbitrary future response fields.
+  Map active pending and recoverable recovery to `pending`. Map failed recovery
+  to `failed` with the fixed message `"Generation could not complete."`. Map
+  completed recovery whose accepted result is not already represented to
+  `unavailable` with the fixed message `"Accepted result is ready to load."`
+  and null correlation metadata.
+- [x] If the completed recovery result ID already exists in the loaded turn
+  window, do not create a generation projection. If both pending and recovery
+  are null, clear a detached/stale hydration projection. Preserve only a
+  matching private live run whose accepted result is not yet represented,
+  because sync can race its iterator; once the result appears in the current or
+  incoming window, clear the generation projection, run, and session.
+
+- [x] `attachGeneration` requires a loaded campaign whose ID equals
+  `run.campaignId`; otherwise throw a typed
+  `CampaignProjectionProtocolError("campaign_mismatch")` before changing state.
+  When the job ID matches a detached hydration projection, change monitoring to
+  attached while preserving its snapshot/narration/result state. Otherwise
+  create a fresh attached job projection and invalidate the previous projection
+  session. Attaching never aborts the previous run; the app must abort its old
+  caller-owned signal before attaching another run.
+- [x] A session is the identity token for narration events, which carry no job
+  or campaign ID. Once superseded, completed, cancelled, discarded, or
+  invalidated by a campaign change, calls to that stale session's `apply` and
+  `retryResult` are no-ops. Failed and unrecoverable sessions remain active so a
+  later `retryGeneration()` status/event sequence can update the same job. This
+  prevents a late iterator result from mutating a newly selected campaign
+  without disabling explicit retry controls.
+- [x] For the active session, validate every `status` snapshot's `id` and
+  `campaignId`; each `detached`/`result_unavailable` event's `jobId`; and every
+  completed result's generation `id` and `campaignId` against the session before
+  mutation. Throw
+  `CampaignProjectionProtocolError("job_mismatch" | "campaign_mismatch")` on a
+  live-session mismatch and leave the prior projection unchanged.
+- [x] The app owns the watch loop:
+
+  ```ts
+  const session = campaignStore.attachGeneration(run);
+  for await (const event of run.watch(signal)) session.apply(event);
+  ```
+
+  Task 7 must not wrap that loop in a second scheduler or catch protocol errors
+  as degraded transport state. Task 5/6 remain the sole owners of generation
+  transitions, retry policy, SSE/poll fallback, and detach semantics.
+- [x] `retryResult()` calls `run.fetchResult()` only and applies the returned
+  event. It never calls enqueue, `retryGeneration`, or a transport source. It is
+  valid only while the active result state is `unavailable`; other states are a
+  typed `result_retry_not_available` protocol error.
+
+### S4 — define every `GenerationEvent` reduction
+
+- [x] `status` replaces the latest snapshot, sets transport health to healthy,
+  resets result state to `pending` (so `retryGeneration()` leaves a retained
+  failed/unrecoverable projection), and leaves narration unchanged unless a
+  separate `narration` event follows. It clears `hydratedGeneration` because the
+  allowlisted stream snapshot is now authoritative. Recursively copy only that
+  snapshot's declared fields, including its discriminated operation/target;
+  `recoveryMetadata` and raw internal job fields are never part of the stream or
+  store contract.
+- [x] `narration` replaces only the sanitized narration string.
+- [x] `degraded` replaces only transport health. It never overwrites the latest
+  snapshot, resets narration, changes durable job status, or settles the job.
+- [x] `detached` sets `monitoring: "detached"` and retains the job projection and
+  private run. Local detach never calls remote cancel or clears resumable state.
+- [x] `result_unavailable` sets result state to `unavailable`, retains the job
+  projection and private run, and stores only safe message/correlation metadata
+  — never the raw `Error`, cause, or stack. For an existing `NexusApiError` or
+  `ApiContractError`, copy its message and correlation ID; for every other
+  `Error`, store the fixed message "Accepted result is temporarily unavailable.
+  Try loading it again." and null correlation. Do not probe arbitrary
+  `Error.cause` objects for
+  look-alike fields. A later `retryResult()` can settle the same job without a
+  new submission.
+- [x] `settled/failed` and `settled/unrecoverable` retain the job/run so the UI
+  can expose the existing explicit retry/discard controls. Record the outcome
+  separately from transport health. Copy `error.message` only from a
+  `NexusApiError` or `ApiContractError`; otherwise store the fixed message
+  `"Generation could not complete."` so a transport/model error cannot enter the
+  projection.
+- [x] `settled/cancelled` and `settled/discarded` clear the matching projection
+  and private run. These events carry no job ID, so only the active session token
+  may apply them; a stale session cannot clear the active job.
+- [x] `settled/completed` first validates the result atomically: require matching
+  campaign/job IDs and `expectedTurnNumber === turnNumber`; obtain the
+  authoritative operation/target from the run/status or sanitized hydration;
+  convert `resultTurnId` into the accepted turn ID; and recursively copy arrays,
+  nested cost data, and `stateSnapshot`. A turn-number mismatch,
+  missing/mismatched replacement target, or append collision throws its typed
+  protocol error with no partial mutation.
+- [x] For a result inside the loaded bounded window, append or replace by exact
+  identity. An append rejects a different turn at the number. A replacement
+  requires the target ID at that number and atomically substitutes the result.
+  If sync already loaded the same result ID/number, treat it as idempotent and
+  preserve the richer authoritative `TurnSummary` (for example, a non-null
+  image URL or cost metadata) instead of rejecting or downgrading it. A later
+  page may similarly upgrade an exactly matching projected turn; only conflicting
+  IDs or numbers are protocol errors.
+- [x] A completed recovery may refer to a turn outside the latest 50-turn
+  window. When its number is older than the earliest loaded turn and
+  `nextTurnsCursor` is non-null, validate campaign/job/result and replacement
+  provenance, update `latestStateSnapshot`, clear generation/run/session, and
+  leave the non-contiguous turn window, cursor, and token unchanged. Do not
+  insert a disconnected turn or require the deleted replacement target to be in
+  memory. If the complete ledger is loaded (`nextTurnsCursor` is null) and the
+  required target/result is absent, throw the appropriate protocol error.
+- [x] When a live completed result is projected into the local ledger, set
+  `historySyncRequired: true` and invalidate `syncToken` and
+  `nextTurnsCursor` to null. The next application sync must omit `since` and
+  request a replacement window; a successful replace/unchanged load resets the
+  flag. If a racing sync already supplied the same result, preserve its richer
+  representation and do not invalidate pagination. Update/retain
+  `campaign.activeTurnNumber`, set `latestStateSnapshot`, clear `runtimeState`
+  for an authoritative refetch, then clear the projection/private run.
+
+This reduction order makes the database result authoritative and prevents a
+duplicate accepted turn when a completion event races a campaign refresh.
+
+### S5 — keep selectors pure and allocation-free
+
+- [x] Export pure selectors that accept `Immutable<CampaignProjection>`:
+  `selectLatestAcceptedTurn`, `selectLatestAcceptedTurnNumber`,
+  `selectGeneration`, `selectIsGenerationInFlight`,
+  `selectRequestedTurnInputMode`, `selectRuntimeState`, and
+  `selectHistorySyncRequired`.
+- [x] `selectLatestAcceptedTurn` returns the existing turn reference or null;
+  `selectGeneration` returns the existing projection reference or null. Do not
+  allocate wrapper objects or arrays inside selectors and do not add memoization
+  for scalar/property reads.
+- [x] `selectIsGenerationInFlight` is true only while a generation projection
+  exists with `result.state === "pending"` and its latest snapshot is absent or
+  nonterminal. It remains true when monitoring is detached and for the workflow's
+  automatic `recoverable` cycle, but becomes false after a completed/failed/
+  cancelled/discarded snapshot and for `unavailable`, `failed`, or
+  `unrecoverable` result states. Those states require result recovery or an
+  explicit job action, not an in-flight indicator.
+- [x] There is no `selectCurrentTurn`: `viewIndex` remains app-owned. A view may
+  combine its local index with the stored ledger without moving navigation state
+  into client-core.
+- [x] No selector may reach the network, clock, storage, live `GenerationRun`,
+  or mutable controller. Selectors operate on plain projection values.
+
+### Deferred — generic multi-family job watching
+
+The original scope required typed adapters for image, Chronicle, and
+world-cover job families. **None of the three has a shared client contract**, and
+the routes return unprojected rows: `GET /campaigns/:id/image-jobs`
+(`server.ts:864`), `GET /worlds/:worldId/cover-job` (`server.ts:846`), and
+`GET /api/v1/jobs/:jobId` for Chronicle (`server.ts:1016`, which also returns a
+`{ error, message }` 404 that does not satisfy `apiErrorEnvelopeSchema`). Task 9
+contracts only the additional Story Player endpoints it actually adopts; it does
+not implicitly adopt these three job families. A pure generic watcher would also
+need per-family browser sources, which no task creates — Task 6 built only
+`createBrowserGenerationSource`.
+
+- [x] Do **not** build `jobs.ts` or the generic watcher in this task. Ship the
+  generation family only.
+- [x] Do not declare unused generic `JobSourceEvent` or `JobSnapshotSource`
+  types. Task 5's shipped `GenerationSnapshotSource` remains the concrete source
+  contract until a second contracted family proves the common shape.
+- [x] Task 19 (U5) may extract a generic watcher only after at least two job
+  families have shared response schemas, typed client methods, family-specific
+  terminal predicates, and browser sources. Until then, keep image, Chronicle,
+  and world-cover polling in their owning feature adapters.
+
+### TDD and verification sequence
+
+- [x] **Store primitive first.** Add red cases for `Object.is` no-op behavior,
+  ordered single notification, idempotent unsubscribe, subscription mutation
+  during notification, and committed state after a listener throws. Add
+  compile-time fixture assertions that array mutation and every `Date` setter
+  are rejected while date read/format methods remain usable. Do not claim the
+  generic store clones values; caller-owned ingress isolation belongs to 7b's
+  campaign controller. Implement the writable primitive and rerun:
+
+  ```bash
+  pnpm exec vitest run tests/unit/client-core/store.test.ts
+  ```
+
+- [x] **Campaign hydration second.** Add red cases for initial state, canonical
+  nested-campaign loading, top-level/nested and nested-turn-page ID mismatch,
+  validated runtime-state loading/mismatch, recursively copied
+  ingress records and `choices`, sorted turn-window replacement, unchanged sync,
+  valid same-campaign unchanged sync, and rejected fresh/switching unchanged
+  sync with no baseline. Add an older-page prepend whose `campaignId` matches,
+  then a mismatched page that throws `page_campaign_mismatch` and leaves the
+  projection byte-for-byte unchanged. Cover cursor/token updates, duplicate turn
+  ID/number rejection across page boundaries without partial mutation,
+  turn-input `"auto"` retention, and rejection of a run for another campaign.
+  Cover pending-over-recovery precedence; same-campaign refresh with matching,
+  different, terminal, and null summaries; safe fixed failed/completed recovery
+  copy; no raw recovery error fields; a result already in the window; completed
+  append recovery; completed `replace_latest` recovery inside and outside the
+  50-turn window; plus a campaign switch that invalidates the old session.
+  Implement
+  `campaign-store.ts` only far enough to make those cases pass.
+- [x] **Generation projection third.** Add a table-driven test covering every
+  `GenerationEvent` variant, plus active ID/campaign mismatch, superseded-session
+  no-op, degraded preservation, local detach, failed/unrecoverable retention,
+  retry status resetting the retained failure to pending without invalidating
+  the session, cancelled/discarded
+  clearing, and `result_unavailable -> retryResult -> completed`. Mutate
+  caller-owned snapshots/results after `apply` and prove the projection is
+  isolated. Make completion race a preloaded accepted turn and
+  prove no duplicate or `imageUrl` regression; prove an exactly matching later
+  page upgrades a locally projected turn; add mismatched expected/actual
+  turn numbers, append same-number/different-ID conflicts, successful
+  retry-latest replacement, missing/mismatched replacement targets, and prove
+  atomic failure. Assert live local completion invalidates token/cursor, sets
+  `historySyncRequired`, clears stale runtime state, and forces a replacement
+  sync, while a sync-race result already present does not. Pass an arbitrary
+  `Error` containing a distinctive secret-like
+  message to each failed/unrecoverable/result-unavailable path and assert that
+  none of that message reaches the projection; separately prove structured
+  `NexusApiError` and `ApiContractError` retain only their message and
+  correlation ID where the public projection supports it.
+  Implement
+  `generation/projection.ts` and its private integration with the controller.
+- [x] **Real composition before selectors.** Drive a real
+  `GenerationWorkflow` replacement run through `attachGeneration`, apply its
+  emitted events, and prove the campaign store replaces the exact target. This
+  test must exercise workflow-to-store composition rather than hand-constructing
+  every event shape.
+- [x] **Selectors fourth.** Write selector tests against plain projection
+  objects, including null/empty state and reference identity. Run red, then
+  implement allocation-free selectors.
+- [x] **Public surface last.** Export only S1-S5's deliberate read/controller
+  types, factory, error, and selectors from `packages/client-core/src/index.ts`.
+  Extend the core compiler fixture to construct a store through the public
+  barrel, and assert the boundary scanner still rejects Web/Node/framework
+  imports. Do not export `WritableStore`, the live run slot, or reducer helpers.
+The five TDD phases above map onto the delivery sub-tasks: *store primitive* is
+**7a**; *campaign hydration* plus the campaign half of *selectors* is **7b**;
+*generation projection*, the generation half of *selectors*, and *public
+surface* complete in **7c**. Each of 7a and 7b still exports a coherent barrel
+for the surface it adds — "public surface last" means the final shape is settled
+in 7c, not that the earlier stages ship unexported modules.
+
+- [x] Run focused checks **at every stage**, not only at the end:
+  `pnpm exec vitest run tests/unit/client-core/ tests/unit/client-boundaries.test.ts`,
+  `pnpm --filter @infinite-quest/client-core check`, and
+  `pnpm check:client-boundaries`.
+- [x] Run completion checks at every stage: `pnpm check`, `pnpm build`,
+  `pnpm test:unit`, `pnpm test:integration`, review the complete diff, and run
+  `pjm precheck`.
+- [x] Tick that stage's items and record a **Current Task 7a / 7b / 7c
+  verification** block under **Completion status** in the same commit that marks
+  each stage complete, per the rule in Task 4a P4. Three stages means three
+  blocks; do not defer them all to the end of 7c.
+
+### 7d — Track C exit audit and documentation reconciliation
+
+Task 7c completing is not, by itself, evidence that Track C is coherent. Before
+starting B1, reconcile every governing document against the shipped C0-C8
+surface and produce a named audit artifact.
+
+- [x] Update `CLIENT_CORE_BOUNDARY.md` to the final C6 ownership split,
+  operation provenance, runtime-state projection, session lifecycle, and bounded
+  history rules. Remove the stale generic-watcher and older hydration language.
+- [x] Update `API_UI_CONTRACTS.md` to the final page/sync/recovery schemas,
+  active-only pending summary, and stream replacement target.
+- [x] Update Interaction Flows 7 and 11 plus the feature matrix so reload/resume,
+  completed recovery, retry, and out-of-window replacement behavior agree with
+  Tasks 13a-R, 7P, and 7c.
+- [x] Recheck all ten Track C exit criteria against actual package exports,
+  boundary fixtures, the legacy Story Player proof, build/deployment behavior,
+  benchmarks, and tests. Record an evidence link or exact command/result for
+  every criterion; an unnamed final review is not an exit gate.
+- [x] Run `pnpm check`, `pnpm build`, `pnpm test:unit`,
+  `pnpm test:integration`, the client contract benchmark, `git diff --check`,
+  complete-diff review, and `pjm precheck`. Record a `Current Task 7d
+  verification` block and a scoped review report. Do not change
+  `apps/web-next` UI implementation in this audit.
+
+**7d exit condition:** All Track C implementation and governing documentation
+describe the same public surface, every exit criterion has current evidence,
+and the backend sequence is authorized. Track U remains blocked until the
+separate backend completion audit after Task 14e.
+
+**Definition of done:** Framework adapters can subscribe to a stable campaign
+projection through a read-only `Store`; external arrays cannot mutate it;
+selectors are pure and allocation-free; stale or cross-campaign events cannot
+change the active projection; every Task 5 event has one tested reduction; and
+the generation job survives degraded, detached, failed, unrecoverable, and
+`result_unavailable` states until the authoritative completed/cancelled/
+discarded outcome clears it. The bounded accepted-turn window can be replaced
+or extended without duplicates while its cursor and sync token remain coherent.
+No watcher, abort controller, generic job family, or uncontracted server record
+enters client-core.
 
 ---
 
@@ -2153,6 +4094,8 @@ during feature implementation.
 - Create: `apps/web/src/legacy-client-entry.ts`
 - Create: `apps/web-next/package.json`
 - Create: `apps/web-next/vite.config.ts`
+- Create: `apps/web-next/index.html`
+- Create: `apps/web-next/src/bootstrap.ts`
 - Modify: `package.json`
 - Modify: `pnpm-lock.yaml`
 - Modify: `services/api/src/server.ts`
@@ -2162,41 +4105,93 @@ during feature implementation.
 - Modify: `deploy/swarm/stack.yaml`
 - Modify: `.github/workflows/ci.yml`
 - Test: `tests/unit/server-security.test.ts`
+- Create: `tests/unit/web-build-contract.test.ts`
 
-- [ ] Define reproducible `build:web:legacy`, `build:web:next`, `dev:web`, and
-  `check:web` scripts.
-- [ ] Build current public assets plus a compiled legacy client entry into a
-  generated directory; do not commit generated bundles.
-- [ ] Serve the replacement app at `/app/` with history fallback while `/nexus/`
+**Review gates and commit boundaries:**
+
+1. **C7a — contracts workspace packaging.** Create the contracts package,
+   convert imports, and pass client/compiler boundary tests. Commit and review it
+   independently before adding Vite.
+2. **C7b — reproducible browser builds.** Add the two Vite packages, the
+   framework-free `/app/` bootstrap shell, root scripts, build contract tests,
+   and lockfile changes. Commit and review it independently.
+3. **C7c — static serving and deployment.** Add the two runtime roots, route and
+   cache/CSP tests, image copies, Compose/Swarm configuration, CI, and a container
+   smoke test. Do not mark Task 8 complete until all three gates pass together.
+
+- [x] Define reproducible `build:web:legacy`, `build:web:next`, `dev:web`, and
+  `check:web` scripts and make the root `build`, `check`, and CI paths call them.
+  Declare Vite in the package(s) that execute it rather than relying on a root
+  transitive install.
+- [x] Build current public assets plus a compiled legacy client entry into a
+  generated `apps/web/dist/` directory; do not commit generated bundles. Copy
+  `public/` through Vite, emit the legacy Story Player entry at a stable
+  no-cache filename (its imported chunks/assets remain content-hashed), and
+  reserve Task 9's `story.html` change to point at that entry.
+- [x] Make `apps/web-next` buildable **before** a framework is selected. Its
+  `index.html` loads `src/bootstrap.ts`, which renders a CSP-safe internal-
+  preview shell stating that Slice 1 is not installed yet. U1 replaces that
+  bootstrap after recording the framework ADR. Task 8 may not claim `/app/`
+  support with an empty package or a build that has no HTML entry.
+- [x] Serve the replacement app at `/app/` with history fallback while `/nexus/`
   and `/story` remain unchanged and default.
-- [ ] Set Vite base paths explicitly so chunks and assets resolve behind the
-  Fastify prefix.
-- [ ] Give hashed assets immutable long-lived caching; keep HTML `no-cache` and
+- [x] Set Vite base paths explicitly so chunks and assets resolve behind the
+  Fastify prefixes (`/nexus/` for the compiled legacy entry and `/app/` for the
+  replacement shell). `dev:web` must proxy `/api`, `/health`, and required asset
+  paths back to Fastify so the browser remains same-origin from the application's
+  perspective; do not widen production CORS for Vite development.
+- [x] Replace the single ambiguous runtime web root with explicit
+  `legacyWebRoot`/`LEGACY_WEB_ROOT` and `nextWebRoot`/`NEXT_WEB_ROOT` settings,
+  defaulting to the two generated dist directories. Keep path resolution in
+  configuration, not route handlers. Update every runtime-config test fixture.
+- [x] Register `/app/` without allowing SPA fallback to mask missing static
+  assets or API paths: known asset/chunk requests return 404, while extensionless
+  `/app/*` navigation returns the replacement `index.html`. `/api/*`, `/health/*`,
+  `/nexus/*`, `/story*`, and `/vendor/*` never enter the fallback.
+- [x] Give hashed assets immutable long-lived caching; keep HTML `no-cache` and
   preserve API `no-store`.
-- [ ] Keep CSP at `script-src 'self'`, `style-src 'self'`, and `connect-src
+- [x] Keep CSP at `script-src 'self'`, `style-src 'self'`, and `connect-src
   'self'`; do not introduce inline-script exceptions.
-- [ ] Copy both built static roots into the runtime image and verify Compose and
+- [x] Copy both built static roots into the runtime image and verify Compose and
   Swarm use the same artifact layout.
-- [ ] Add server tests for `/app/`, deep-link fallback, cache headers, CSP, old
-  routes, and missing-asset behavior.
-- [ ] **Inherited from the Task 4 review — make `packages/contracts` a real
+- [x] Add server tests for `/app/`, deep-link fallback, cache headers, CSP, old
+  routes, traversal attempts, API/fallback separation, and missing-asset
+  behavior. Add a build-contract test that checks both HTML entries and their
+  referenced assets exist after `pnpm build` without snapshotting hash values.
+- [x] **Inherited from the Task 4 review — make `packages/contracts` a real
   workspace package.** It currently has no `package.json`, so it is not a
   workspace member, gets no `node_modules`, and its own `import { z } from
   "zod"` resolves only by walking up to the root install. Every consumer reaches
   it by relative path. Give it a `package.json` with a name, `exports`, a
-  `check` script, and its own `zod` dependency; then convert the client packages'
-  relative contract imports to the package name and update
-  `scripts/check-client-boundaries.mjs` to accept it. Task 4 declares `zod`
-  locally in both client packages, which hardens their own imports but cannot
-  fix the contracts hop — do not treat that as having resolved this.
-- [ ] **Inherited from the Task 4 review — CORS exposure for the correlation
-  header.** Task 4 makes the API emit `x-correlation-id` on responses, and
-  `services/api/src/request-security.ts:47` already allows it as a *request*
-  header. No `Access-Control-Expose-Headers` is set, so a cross-origin caller
-  cannot read it back. Add that header if, and only if, `/app/` is served from
-  an origin other than the API's. Same-origin deployments need no change.
-- [ ] Run `pnpm check`, `pnpm build`, container build, and rendered Compose/Swarm
-  configuration checks.
+  `check` script, and its own `zod` dependency; then convert the client
+  packages' relative contract imports to the package name and update
+  `scripts/check-client-boundaries.mjs` to accept it.
+
+  **`zod` is declared only in `client-web`, not in both client packages.** Task
+  4 added it to both, and Task 4a P2 then removed it from `client-core` because
+  the boundary scanner rejected a bare `zod` import there and the declaration
+  was inert. Do not go looking for a client-core declaration; it is deliberately
+  absent. Neither declaration fixes the contracts hop, which is what this item
+  is for.
+
+  This item touches files beyond the list above: create
+  `packages/contracts/package.json`, modify `scripts/check-client-boundaries.mjs`
+  and `tests/unit/client-boundaries.test.ts`, and rewrite the relative contract
+  imports across `packages/client-core/src/**` and `packages/client-web/src/**`
+  — `ports.ts`, `generation/types.ts`, `generation/workflow.ts`,
+  `generation/submission.ts`, `api-client.ts`, `http-client.ts`, and the
+  storage and generation modules all import contracts by relative path today.
+  Land it as its own commit, separate from the build and deployment work.
+- [x] **Close the inherited correlation-header question by decision, not a
+  conditional implementation.** Production `/app/` and the API are same-origin,
+  and the Vite dev server proxies the API, so do not add
+  `Access-Control-Expose-Headers`. Record this in the Task 8 verification. If a
+  future deployment deliberately separates origins, that deployment change must
+  add and test the exposure then.
+- [x] Run `pnpm check`, `pnpm build`, container build, and rendered Compose/Swarm
+  configuration checks. Start the built container (or the existing Compose smoke
+  harness), wait for readiness, and fetch `/nexus/`, `/story`, `/app/`, one
+  `/app/` deep link, and one hashed asset from the runtime image.
 
 **Definition of done:** A production image serves both UIs from deterministic
 build output, local development has one documented command, and Slice 1 needs no
@@ -2494,6 +4489,17 @@ verified rollback path exists.
 
 ## Track C exit criteria
 
+**Status: audited and met (2026-08-03).** Task 7d reconciled all ten criteria
+against the shipped tree and recorded the result in
+`docs/review/2026-08-03-task-7d-track-c-exit-audit.md`. Re-measured during the
+Task 7 completion review on `9e8d5f1`: `pnpm check` 548 candidate files,
+`pnpm build` clean, `pnpm test:unit` 1010/1010 across 86 files,
+`pnpm test:integration` 193 passed / 2 skipped across 17 files.
+
+Track C being met authorizes the **backend sequence**, not UI work. The audit is
+explicit that UI remains blocked until Task 14f; do not read "Track C complete"
+as permission to begin the U-track.
+
 1. `packages/client-core` compiles with `lib: ["ES2023"]`, `types: []`, and no
    transitional boundary allowlist.
 2. Client-web transport, storage, clock, delay, and ID adapters are framework-free.
@@ -2564,11 +4570,21 @@ export interface GenerationExecutor {
 - [ ] Separate use-case decisions from PostgreSQL query implementation.
 - [ ] Keep transactions and ownership/campaign scoping explicit in repository
   adapters.
+- [ ] Resolve the pre-auth `initial-owner` at the API/worker composition root
+  and pass its UUID into application commands. Never accept `user_id`, an
+  identity header, email, display name, or provider subject as application
+  authority. Keep every repository query owner-scoped even while one user
+  exists.
 - [ ] Change Fastify handlers into request/response adapters around use cases.
 - [ ] Change worker code into claim/execute adapters around the same package.
 - [ ] Enforce no `services/** -> services/**` cross-role imports.
 - [ ] Re-run generation integrity, cross-campaign isolation, cancellation,
   recovery, and idempotency integration suites.
+- [ ] Add explicit invariants for the architectural spec: rejected or incomplete
+  generations do not append turns, mutate campaign state, or write Chronicle
+  memory; one campaign's state/turns/memory never enter another campaign's
+  prompt; and illustration disabled, endpoint unavailable, or image-job failure
+  cannot roll back an accepted story turn.
 
 **Definition of done:** API and worker generation code depend on
 `packages/application`; shared application tests run without Fastify; PostgreSQL
@@ -2577,6 +4593,10 @@ integration tests prove no behavior or transaction boundary changed.
 ---
 
 ## Task 11 — B2: Replace SSE database polling with a notification port
+
+**Runs after B1 and gates all UI work under the backend-first policy.** The
+wire contract remains unchanged, but B2 must be implemented and measured before
+B3 so worker/load benchmarks use the final event-delivery topology.
 
 **Files:**
 
@@ -2589,7 +4609,10 @@ integration tests prove no behavior or transaction boundary changed.
 
 ```ts
 export interface GenerationEventSource {
-  subscribe(jobId: string, signal: AbortSignal): AsyncIterable<GenerationChanged>;
+  subscribe(
+    scope: { ownerUserId: string; campaignId: string; jobId: string },
+    signal: AbortSignal,
+  ): AsyncIterable<GenerationChanged>;
 }
 
 export interface GenerationEventPublisher {
@@ -2602,7 +4625,10 @@ export interface GenerationEventPublisher {
   transaction so PostgreSQL delivers it only on commit and no post-commit crash
   can lose the wake-up.
 - [ ] Use PostgreSQL `LISTEN/NOTIFY` as a wake-up hint, not authoritative state.
-  Read the job row after each notification.
+  Validate a small notification payload (`jobId` plus a transition/version
+  hint), then read the job row after each notification through the full
+  owner/campaign/job scope. A notification payload never establishes ownership
+  and never becomes an SSE response directly.
 - [ ] **Use exactly one dedicated, long-lived listener connection per API
   process and fan out to subscribers in memory.** A `LISTEN` connection must be
   checked out and held for its lifetime; taking one per SSE subscriber from the
@@ -2617,6 +4643,10 @@ export interface GenerationEventPublisher {
   reconciliation read so dropped notifications cannot strand a client.
 - [ ] Preserve SSE frame schema, terminal closure, cancellation, ownership, and
   structured logging.
+- [ ] Perform the initial ownership-scoped read before registering the in-memory
+  subscriber, close the subscription when that read is unauthorized/not found,
+  and ensure fan-out keys cannot deliver a same-ID event across campaign or
+  owner scope.
 - [ ] Test notification-before-subscribe races, reconnect, dropped notification,
   duplicate notification, API restart, terminal transition, and client close.
 - [ ] Record query counts and verify the fixed 350 ms loop is gone.
@@ -2628,6 +4658,11 @@ meets the 500 ms budget.
 ---
 
 ## Task 12 — B3: Configurable worker concurrency and fair job lanes
+
+**Runs after B2 and gates all UI work.** The replacement UI must not broaden access to a
+single-slot worker whose queueing and optional-image work can starve the core
+story path. The deterministic backend sequence keeps B2 before B3 so connection
+and notification load are included in concurrency evidence.
 
 **Files:**
 
@@ -2648,9 +4683,17 @@ meets the 500 ms budget.
 - [ ] Keep illustration, Chronicle, and asset work in independently bounded lanes
   so generation load cannot starve optional work and optional work cannot block
   story acceptance.
+- [ ] Keep story-text and illustration execution as separate provider concerns:
+  separate endpoint/profile credentials, model compatibility checks, health,
+  retry limits, and per-lane concurrency. Never fall back from a missing image
+  profile to the text provider or expose either provider's credential to the
+  other lane.
 - [ ] Drain all active work on shutdown within the existing bounded lifecycle.
 - [ ] Add tests for slot refill, fair lanes, campaign exclusivity, abort, drain,
   lease expiry, and multiple worker replicas.
+- [ ] Add tests proving story completion with images disabled, image endpoint
+  unavailable, incompatible image models, exhausted image retries, and image
+  failure after story validation. Image retry must not re-enqueue narration.
 - [ ] Benchmark concurrency 1, 2, and 4 against the test database and record
   throughput, queue latency, database utilization, and provider limits.
 
@@ -2660,7 +4703,107 @@ coupling.
 
 ---
 
-## Task 13 — B4: Bound and profile play-loop read paths
+## Task 13a — B4a: Stabilize bounded history and authoritative resume contracts
+
+**Runs after C8 and before C6.** This is the client-facing contract half of the
+old B4 task. It does not wait for B1 because delaying these response shapes until
+after C6 would force the campaign projection and U4/U5 to be rewritten.
+
+**Files:**
+
+- Modify: `packages/contracts/src/client-api.ts`
+- Review: `packages/contracts/src/index.ts` (the existing public barrel already
+  re-exports the complete client-contract module)
+- Modify: `packages/client-web/src/api-client.ts`
+- Modify: `packages/client-core/src/generation/workflow.ts`
+- Modify: `services/api/src/server.ts`
+- Create: `packages/database/src/play-loop-read-repository.ts`
+- Modify: `apps/web/src/story.js`
+- Review: `apps/web/src/story-generation-monitor.js` (the existing monitor
+  already delegates recovery presentation to `GenerationWorkflow.resume()`)
+- Modify: `tests/unit/client-api-contracts.test.ts`
+- Modify: `tests/unit/client-api-routes.test.ts`
+- Modify: `tests/unit/client-web/api-client.test.ts`
+- Modify: `tests/unit/client-core/generation-workflow.test.ts`
+- Modify: `tests/unit/story-player-ui.test.ts`
+- Review: `tests/unit/story-generation-monitor.test.ts` (existing coverage
+  already exercises the `GenerationWorkflow.resume()` presentation handoff)
+- Test: `tests/integration/gameplay.integration.test.ts`
+
+**Contract produced:**
+
+- `GET /campaigns/:id/turns` accepts an optional opaque `before` cursor and a
+  bounded `limit` (default 50, maximum 200). It returns the selected turns in
+  ascending display order plus `nextCursor: string | null`; the cursor itself
+  represents the earliest `(turn_number, id)` boundary in the page and is bound
+  to the route campaign. The server parses it as untrusted input and never uses
+  cursor-contained ownership as authorization.
+- `GET /campaigns/:id/sync-status` accepts an optional opaque `since` token and
+  returns a new `syncToken`, `turnWindowMode: "unchanged" | "replace"`, a
+  bounded latest turn page when replacement is required, and null turn data when
+  unchanged. The token is a server-computed fingerprint of the current
+  owner/campaign projection, latest accepted-turn identity, and latest generation
+  identity/status; it is an equality hint, not authorization or authoritative
+  state.
+- Sync status adds one sanitized `generationRecovery` summary for the latest
+  actionable/result-recovery job (`recoverable | failed | completed`) when its
+  outcome is not already represented by the returned accepted-turn window. It
+  contains IDs, operation kind, expected turn, attempts, status, safe error
+  metadata, and `resultTurnId`, never `partialOutput`, model response, mechanics,
+  or provider credentials. A completed summary permits `fetchResult()` recovery;
+  a recoverable/failed summary enters the existing workflow, which alone decides
+  retry/discard versus the derived client-only `unrecoverable` outcome.
+
+**Implementation status (2026-08-03):** Implemented bounded, history-versioned
+cursor pages; discriminated sync windows; authoritative recovery precedence; and
+C8 Story Player older-page loading with absolute turn-number commands. Real
+PostgreSQL coverage records a 55-turn initial sync payload of 17,883 B and an
+unchanged response of 3,042 B, alongside first/middle/last, exact-boundary,
+empty-page, malformed, cross-campaign, replacement, rewind, and
+completed-recovery checks.
+
+- [x] Preserve the existing unparameterized route during this compatibility
+  change, but make its response bounded to the latest page. Update the C8 Story
+  Player adapter in `apps/web/src/story.js` in the same commit to request older
+  pages on history demand; verify `story-generation-monitor.js` continues to
+  delegate the authoritative recovery handoff to the workflow. Never ship a
+  server response change that silently truncates the live client. Keep both
+  modules inside the compiled Task 9 source graph; do not revive
+  `apps/web/public/story.js`.
+- [x] Cursor ordering is deterministic at duplicate timestamps and replacement
+  boundaries. Add first/middle/last page, exact-boundary, empty-page, malformed,
+  cross-campaign replay, rewind, and retry-latest replacement tests proving no
+  duplicate or skipped turn.
+- [x] `syncToken` changes for accepted completion, retry-latest replacement,
+  rewind, campaign/world/config changes, and actionable generation transitions.
+  An unchanged token suppresses turn transfer but never suppresses the current
+  ownership-scoped campaign/world/player configuration.
+- [x] Extend `GenerationWorkflow.resume()` to prefer current pending generation,
+  then the sanitized authoritative recovery summary, then the validated local
+  submission record. Ignore a completed recovery whose `resultTurnId` is already
+  present in the returned turn window. Preserve the exact idempotency key and do
+  not replay a submission merely because local storage expired.
+- [x] Keep the complete accepted-turn ledger and generation rows authoritative in
+  PostgreSQL. Cursors/tokens and client windows are rebuildable projections and
+  never authorize a campaign, hide a server conflict, or become required to
+  recover after browser data loss.
+- [x] Run focused contract/client/workflow/Story Player tests, real-PostgreSQL
+  boundary-page and recovery tests, then the full check/build/unit/integration
+  gates. Record payload sizes for initial and unchanged resume responses.
+
+**Definition of done:** C6 receives final bounded turn-window and sync/recovery
+types; reload can recover actionable or completed work without depending on
+unexpired browser storage; the live legacy client remains compatible; and every
+cursor/token is validated and campaign-scoped.
+
+---
+
+## Task 13b — B4b: Profile and optimize play-loop read paths
+
+**Runs after B3 and Task 13a-R (the corrected B4a surface) and gates all UI
+work.** B4a
+fixes public cursor/sync semantics; B4b measures and tunes their implementation
+without changing those contracts.
 
 **Files:**
 
@@ -2679,11 +4822,10 @@ coupling.
   store summarized evidence, not environment-specific raw database dumps.
 - [ ] Add owner- and campaign-scoped indexes only where measured plans justify
   them. Verify write amplification and migration rollback implications.
-- [ ] Replace unbounded turn and job-history reads with stable cursor pagination.
-  Preserve compatibility during migration and define ordering/tie-break rules in
-  shared schemas.
-- [ ] Add an incremental campaign-sync cursor so resume normally transfers only
-  accepted turns and job changes after the client's last authoritative version.
+- [ ] Verify B4a's bounded turn/history and incremental-sync queries under the
+  seeded long-campaign profile; tune their page/window defaults only with
+  recorded payload, query-count, and render evidence. Do not change their public
+  cursor semantics in this task.
 - [ ] Remove measured N+1 reads and avoid returning columns or nested records the
   play loop does not consume.
 - [ ] **Memoize the owner-identity lookup.** `initialOwnerId`
@@ -2696,9 +4838,12 @@ coupling.
   and invalidate on nothing (a restart is the only lifecycle event that matters
   pre-authentication). This is the cheapest measurable win in the track; do it
   before chasing index changes.
-- [ ] Re-verify the memoization holds once `SessionPort`-backed authentication
-  exists — a per-request identity makes a process-wide cache invalid, so the
-  cache must be keyed by resolved identity at that point, not removed.
+- [ ] Keep this cache explicitly limited to lookup of the stable
+  `initial-owner` bridge. When interactive authentication arrives, request
+  handlers receive the session-resolved internal `user_id` and must stop calling
+  `initialOwnerId()` for authority; do not turn this cache into a map of
+  caller-supplied identities. Bootstrap/administrative code that genuinely still
+  needs the initial owner may retain the stable cache.
 - [ ] Add query-count assertions for deterministic routes and a seeded-data load
   profile that reports p50, p95, payload bytes, and error rate.
 - [ ] Treat the 10% regression budget as a guardrail, not proof of speed: record
@@ -2707,25 +4852,47 @@ coupling.
 
 **Definition of done:** Long campaigns hydrate incrementally, list/history APIs
 are bounded, hot-route query counts are protected, and measured p95 latency and
-payload size improve without changing ownership or campaign isolation.
+payload size improve without changing ownership or campaign isolation. U5's
+200-turn rendering and payload budgets have recorded backend evidence rather
+than an unverified assumption.
 
 ---
 
 ## Task 14 — B5: Continue backend modularization by domain
 
-B1 establishes the pattern. Apply it incrementally after the generation vertical
-slice, one independently deployable domain at a time:
+B1 establishes the pattern. Apply it after B4b, one independently deployable
+domain at a time. These are named backend checkpoints, not optional follow-up
+ideas, and all five gate the backend completion audit:
 
-1. Illustration and image jobs.
-2. Chronicle memory and embedding jobs.
-3. Worlds, immutable versions, and campaign management.
-4. Providers and prompt configuration.
-5. Imports, exports, archives, and assets.
+1. **Task 14a — B5a:** Illustration and image jobs.
+2. **Task 14b — B5b:** Chronicle memory and embedding jobs.
+3. **Task 14c — B5c:** Worlds, immutable versions, and campaign management.
+4. **Task 14d — B5d:** Providers and prompt configuration.
+5. **Task 14e — B5e:** Imports, exports, archives, and assets.
 
 Each domain gets application ports, concrete database/provider adapters, API and
 worker adapters, boundary checks, and existing integration coverage. Do not
 create one generic repository or god service. Shared abstractions are promoted
 only after two real domains prove the same shape.
+
+- [ ] Treat each numbered domain as a separately planned/reviewed task and
+  commit series. Before its implementation, inventory its routes, worker entry
+  points, database transactions, ownership scope, tests, and UI slice consumer;
+  replace generic “applicable files” with exact paths.
+- [ ] Illustration extraction preserves the independent image provider profile,
+  credential/model/health/retry lane and the rule that image failure cannot
+  affect accepted narration.
+- [ ] Chronicle extraction keeps accepted turns/campaign state authoritative,
+  keeps summaries/embeddings rebuildable and campaign-scoped, and prevents any
+  prompt/retrieval cross-campaign access.
+- [ ] World/campaign extraction preserves immutable world-version pins, explicit
+  migration/promotion, non-null owner scope, and append-only accepted turns.
+- [ ] Provider extraction never shares text/image secrets or silently falls back
+  between roles. Import/export extraction assigns imports to the server-resolved
+  user and treats portable source IDs as provenance only, never authorization.
+- [ ] Every domain adds pure use-case tests, adapter contract tests, real-
+  PostgreSQL transaction/isolation tests where applicable, and no-cross-role
+  import assertions before the previous service implementation is removed.
 
 **Backend modularity completion criteria:**
 
@@ -2740,64 +4907,226 @@ only after two real domains prove the same shape.
 
 ---
 
+## Task 14f — Backend completion audit and UI authorization gate
+
+**Runs after Task 14e.** This is the only task that may authorize Task 15/U1.
+It audits the complete backend result; it does not implement framework routes,
+components, styles, browser visual tests, or any other `apps/web-next` UI work.
+
+- [ ] Verify API and worker roles have no implementation imports from one
+  another across every extracted domain; record the exact boundary command and
+  reviewed exceptions (normally none).
+- [ ] Re-run all pure application, adapter contract, real-PostgreSQL,
+  ownership/isolation, generation-integrity, image-independence, import
+  ownership, migration, and deployment smoke suites required by the repository
+  specification.
+- [ ] Re-run and record B2 notification query/latency evidence, B3 concurrency
+  1/2/4 throughput and fairness evidence, and B4b query-plan/payload/p95 evidence
+  on the documented test profile. Do not authorize UI work from unit tests alone.
+- [ ] Review each B5a-B5e completion report for exact route/worker/transaction/
+  ownership coverage and confirm old cross-role implementations were removed
+  only after replacements passed.
+- [ ] Reconcile architecture, deployment, operations, configuration/secrets,
+  migration/rollback, and testing documentation with the shipped backend. Keep
+  text/image provider secrets and runtime settings independent in all manifests.
+- [ ] Run `pnpm check`, `pnpm build`, `pnpm test:unit`,
+  `pnpm test:integration`, `git diff --check`, complete-diff review, and
+  `pjm precheck`; record a named backend audit report with command results,
+  benchmark links, known limitations, and scoped review approval.
+
+**Definition of done:** Tasks 10, 11, 12, 13b, and 14a-14e are complete and
+reviewed; all backend architecture, correctness, isolation, performance,
+deployment, and rollback gates have current evidence; and the audit explicitly
+marks Task 15/U1 authorized. Until then, every Track U task remains blocked.
+
+---
+
 # Track U — Slice 1 replacement UI
 
-**Depends on:** C0-C8 complete. B1 is required for the modular-backend claim.
-B2 and B3 are recommended before broad user exposure but do not block UI
-development. B4's cursor contracts must stabilize before U5 implements history
-loading and incremental resume.
+**Depends on:** Track C complete through Task 7d and Track B complete through
+Task 14f. The backend-first policy is a hard delivery gate: no Task 15-20
+implementation begins while Task 10, 11, 12, 13b, 14a-14e, or the backend
+completion audit remains open. This is intentionally stricter than the minimum
+runtime dependency graph and prevents UI work from hiding unfinished backend
+modularity, delivery, throughput, or long-campaign risks.
 
 **Screens:** `NEX-WORLDS` (minimal), `NEX-CAMPAIGNS` (minimal), and
-`STORY-PLAYER`.
+`STORY-PLAYER`, plus the shell-level `SYS-ERROR` state.
 
-**Flows:** 1, 2, 6, and 7 from `INTERACTION_FLOWS.md`.
+**Flows:** The minimal create/select branch of Flow 1 and Flows 2, 6, 7, 8, 9,
+and 11 from `INTERACTION_FLOWS.md`. Recovery, retry-latest, and authoritative
+resume are included here even though the older frontend roadmap grouped some of
+them under Slice 2: exposing generation without those already-shipped safety
+paths would regress the current Story Player and violate the generation
+integrity requirements.
 
-**Non-goals:** Full world authoring, campaign configuration depth,
+**Non-goals:** Full world authoring and publication, campaign configuration depth,
 illustrations, providers, prompt library, imports, and global removal of the
 legacy management client. Those land in later slices through the same client
-and application boundaries.
+and application boundaries. U3 may create a minimal draft, but editing and
+publishing that draft remain in the legacy `/nexus/` UI until the world-
+management slice. A pre-published world fixture is used for Slice 1 E2E.
 
 ## Task 15 — U1: Framework app scaffold
 
 **Files:**
 
 - Modify: `apps/web-next/package.json`
-- Create: framework entry, router, and root component under `apps/web-next/src/`
+- Replace: `apps/web-next/src/bootstrap.ts` with the selected framework entry
+- Create: router, route-error boundary, root component, and route placeholders
+  for `/worlds`, `/campaigns`, and `/play/:campaignId` under
+  `apps/web-next/src/`
 - Create: `apps/web-next/src/client.ts`
 - Create: `apps/web-next/src/styles/tokens.css`
+- Create: `apps/web-next/src/styles/base.css`
+- Create: `tests/unit/web-next/app-scaffold.test.tsx` (or the selected
+  framework's equivalent DOM test extension)
+- Create: `tests/unit/web-next/tokens.test.ts`
+- Create: `docs/architecture/adr-00xx-replacement-ui-framework.md`
+- Modify: `.github/workflows/ci.yml`
 - Modify: root scripts and `pnpm-lock.yaml`
 
 - [ ] Select the framework and record it in an ADR with bundle, accessibility,
-  team-familiarity, and long-term maintenance trade-offs.
+  SSR/static-SPA fit, routing, test tooling, team-familiarity, dependency health,
+  and long-term maintenance trade-offs. Record the exact production and test
+  entry files selected by the framework.
+- [ ] **Mandatory plan-refinement gate:** after the ADR and before U2 code,
+  replace Tasks 16-20's framework-neutral file descriptions with exact component,
+  route, test, and fixture paths and confirm that no chosen library changes the
+  client-core/client-web boundary. Review that plan-only diff before continuing.
 - [ ] Import client behavior only through public `client-core`/`client-web`
   surfaces.
-- [ ] Lazy-load routes outside the core play loop.
+- [ ] Create real `/worlds`, `/campaigns`, and `/play/:campaignId` routes with a
+  direct-load/deep-link test; lazy-load management routes while keeping the core
+  play-loop bundle within the approved budget.
 - [ ] Install error boundaries and a global unavailable state without hiding
-  correlation IDs.
-- [ ] Run type checks, bundle budgets, and an empty-shell accessibility test.
+  correlation IDs or swallowing schema failures.
+- [ ] Define one token contract for typography (including narrative measure),
+  spacing, shared breakpoints, surface/elevation, focus, status, motion, and
+  **both dark and light color roles**. Ship `dark | light | system` preference in
+  Slice 1, default to system when no local preference exists, apply it before
+  first paint without inline script/CSP exceptions, and store only the theme
+  preference—not identity or authoritative data—in browser storage.
+- [ ] Add global `prefers-reduced-motion` handling and token-level contrast tests
+  for both themes, including status text/fill and focus-ring/surface pairs.
+- [ ] Run type checks, production build/deep-link smoke, bundle budgets, token
+  tests, and an empty-shell axe/keyboard test in CI.
+
+**Definition of done:** The Task 8 preview is replaced by a routed, CSP-safe,
+framework app; the framework decision and exact remaining file plan are
+reviewed; both themes and accessibility primitives exist before feature styling;
+and the shell cannot import backend/service implementation modules.
 
 ## Task 16 — U2: App shell
 
-Persistent navigation, breadcrumb region, toast/notification system,
-active-job indicator, skip links, focus restoration, and responsive layout per
-`DESIGN_SYSTEM.md` and `ACCESSIBILITY_SPEC.md`.
+**Framework-neutral file scope (made exact by U1's refinement gate):** root
+layout, primary navigation, breadcrumb, user-context/profile control, theme
+control, toast region, active-generation indicator, error/unavailable view,
+dialog/drawer primitives, shell styles, and their component/accessibility tests.
+
+- [ ] Build persistent navigation with a real `<nav>`, a
+  `<nav aria-label="Breadcrumb">`, one `<main>`/one page `<h1>`, and a first-
+  focusable skip link. Show the current world version/campaign context in
+  programmatically available page structure, not only visual chrome.
+- [ ] Preserve a shell-level profile/settings entry and display the server-
+  resolved user projection without turning its UUID/system key into an auth
+  header, request field, or browser authority.
+- [ ] Add one `aria-live="polite"` toast/status region, an assertive alert path
+  for failures needing immediate attention, and a persistent active-generation
+  indicator that survives route navigation through the campaign store.
+- [ ] On SPA navigation move focus to the new page heading/skip target. Dialogs
+  and drawers have accessible names, trap/contain focus, close with Escape where
+  appropriate, and return focus to their opener.
+- [ ] Use native controls wherever possible; every custom control supports Tab,
+  Shift+Tab, Enter, and Space as applicable and has a visible token-driven
+  `:focus-visible` ring.
+- [ ] Implement responsive shell reflow with no page-level horizontal scroll at
+  320 CSS px and no clipping at 200% zoom. Honor reduced motion globally.
+- [ ] Render `SYS-ERROR` only for shell-wide health/unavailable failures; retain
+  safe correlation IDs and a retry action, while route-local errors stay local.
+- [ ] Component tests cover keyboard navigation, route focus, dialog focus
+  return, live-region behavior, active-job persistence, error boundaries, theme
+  persistence/system changes, 320 px reflow, and 200% zoom assertions.
 
 Presentation code may branch on `GenerationEvent.type`; it may not interpret raw
 job statuses or implement retry/cancellation policy.
 
+**Definition of done:** All Slice 1 routes share one accessible, responsive
+shell and notification/error model, and navigation cannot lose or duplicate an
+active generation projection.
+
 ## Task 17 — U3: World selection
 
-Read-only published-world list and selection through the typed client. Keep
-filtering client-side for current list sizes, debounce input rendering, and use
-stable keys/selectors so a store update does not rerender every card.
+**Framework-neutral file scope (made exact by U1):** worlds route, world list and
+card components, search/status filter, minimal-create form/dialog, loading/empty/
+error states, route/component tests, and typed fixture builders.
+
+- [ ] Load worlds through the typed client, distinguish draft/published/archived
+  state in text and icon as well as color, and select an immutable published
+  version for campaign creation. Keep filtering client-side for current list
+  sizes; debounce only expensive filtering/render work, never the input's visible
+  value, and use stable keys/selectors so unrelated store updates do not rerender
+  every card.
+- [ ] Implement the Slice 1 **minimal world-create branch** with the C8-adopted
+  `POST /worlds` contract and field-associated validation errors. It creates a
+  draft only. After creation, explain that publishing/full authoring remains in
+  legacy Nexus and provide an explicit same-origin `/nexus/` continuation link;
+  do not pretend a draft can start a campaign.
+- [ ] Distinguish loading, fetch error with retry, no worlds, no published worlds,
+  no search matches, and populated results. A zero-world user gets a create
+  action; a draft-only user gets precise publication guidance rather than an
+  empty campaign form.
+- [ ] Give search and create fields real labels, associate validation issues via
+  `aria-describedby`, and support complete keyboard selection at 320 px/200%.
+- [ ] Tests cover each state, draft creation, published-version selection,
+  archived exclusion/filtering, stale selection after refetch, malformed server
+  payload, no identity spoof fields/headers, and the legacy-authoring handoff.
+
+**Definition of done:** A user can create a minimal draft or select a published
+world version through validated contracts; the UI never confuses mutable draft
+content with campaign-pinned immutable canon.
 
 ## Task 18 — U4: Campaign creation and resume
 
-List campaigns, create from a selected immutable world version, and resume.
-Always call `syncStatus` before starting a watcher. If a durable pending job
-exists, attach to it rather than submitting a second turn.
+**Framework-neutral file scope (made exact by U1):** campaigns route, list/card,
+create form, playable-character picker, resume controller/view, empty/error
+states, component tests, and test fixtures.
+
+- [ ] List and search campaigns through the typed client and show campaign,
+  world, immutable world-version, status, and last-played context. Distinguish
+  loading, error, no published worlds, no campaigns, and no search matches.
+- [ ] Create a campaign only from the selected published world version through
+  C8's shared create schema. Load playable characters through its shared schema,
+  preserve the selected character snapshot contract, map validation issues to
+  fields, and never send caller-supplied `user_id` or identity headers.
+- [ ] On resume, call `syncStatus` before opening a watcher. Reconcile in this
+  order: authoritative pending job, authoritative recovery summary, validated
+  local pending-submission hint. Attach the matching job; never submit a second
+  generation merely because local storage is missing or expired.
+- [ ] If the sync token is unchanged retain the current window; if replacement
+  is required atomically replace it; expose older-history loading via the opaque
+  cursor without treating cursor contents as authority.
+- [ ] Surface an active-generation conflict as a campaign-specific attach/resume
+  path. A completed recovery not represented in the window fetches its accepted
+  result; a failed/recoverable summary exposes existing retry/discard actions.
+- [ ] Tests cover create success/validation/conflict, character selection,
+  immutable-version display, all three empty states, pending/recovery/completed
+  resume, expired/malformed local hints, unchanged/replaced windows, campaign
+  switch cancellation, reload without duplicate submission, and cross-campaign/
+  cross-user isolation.
+
+**Definition of done:** Campaign creation is schema-validated and owner-scoped;
+reload/resume always converges on authoritative server state before any watch or
+submission begins.
 
 ## Task 19 — U5: Story Player
+
+**Hard prerequisites:** B4b performance evidence and U4 authoritative resume.
+
+**Framework-neutral file scope (made exact by U1):** player route, narrative
+reader, generation progress/recovery panel, Action/Scene/Auto composer,
+replacement banner, choices, paged history drawer, route controller, styles,
+component tests, visual fixtures, and performance harness.
 
 Consumes `GenerationEvent` and store selectors:
 
@@ -2807,6 +5136,7 @@ Consumes `GenerationEvent` and store selectors:
 | `narration` | Incremental, safely rendered narration |
 | `degraded` | Visible reconnect/polling state |
 | `detached` | Explain that the durable job continues and can be resumed |
+| `result_unavailable` | Keep the completed job visible and retry `fetchResult()` only; never resubmit generation |
 | `settled/completed` | Append authoritative result and reconcile campaign |
 | Other settled outcomes | Error/recovery/cancel/discard affordance |
 
@@ -2816,21 +5146,95 @@ the latest accepted window immediately available. Rendering must stay responsive
 with the 200-turn fixture; defer offscreen turn rendering or virtualize only if
 the measured 50 ms task budget is exceeded.
 
+- [ ] Render progressive **sanitized narration** from `narration` events as
+  selectable text, with app-owned cursor/live badge and scroll-follow behavior;
+  never render `partialOutput`, mechanics, parser diagnostics, rejected text, or
+  HTML from the model. Atomically replace the preview with the validated accepted
+  result.
+- [ ] Show meaningful stage transitions through one throttled polite live region,
+  not one announcement per SSE frame. Announce failed/action-required states
+  assertively, while degraded transport remains distinct from generation failure.
+- [ ] Keep Action, Scene direction, and Auto explicit. For Auto, display the
+  resolved Action/Scene mode before submission; discard a classification result
+  if the input/mode changed while classification was pending.
+- [ ] Visually and textually distinguish retry-latest from append: state that the
+  accepted turn remains until replacement validation, keep it visible while the
+  replacement runs, and confirm preservation after replacement failure.
+- [ ] Expose explicit remote cancel separately from local detach/navigation.
+  Preserve retry/discard for recoverable/failed/unrecoverable outcomes. Treat
+  `result_unavailable` as accepted-but-not-yet-fetched and retry `fetchResult()`
+  only; never re-enqueue narration.
+- [ ] Handle the unique active-generation conflict by attaching/resuming the
+  authoritative job. Render generated choices as native buttons that populate
+  or submit through the same validated path, and cover the brand-new campaign/
+  first-turn state.
+- [ ] Prepend older history pages without duplicates, preserve current reading
+  position/focus, and provide an accessible history drawer with focus return.
+- [ ] Narrative content meets the narrative measure/line-height tokens, remains
+  fully usable at 390×844, reflows at 320 CSS px, and has no clipping/content loss
+  at 200% zoom. All fields have real labels and all status/control meaning is
+  text/icon plus color.
+- [ ] Component/visual tests cover every event row above, progressive-to-final
+  replacement, Auto stale-result rejection, retry-latest success/failure,
+  conflict attach, cancel versus detach, result fetch retry, first turn, choices,
+  multi-page history, route leave/return, both themes, reduced motion, keyboard,
+  live-region throttling, 320/390 px layouts, and 200% zoom.
+
+Do not generalize image, Chronicle, and world-cover monitoring merely because
+they all have a status field. A generic watcher may be extracted into
+client-core/client-web during U5 only after at least two families have shared
+runtime response schemas, typed API methods, explicit terminal predicates, and
+browser sources. Until those prerequisites exist, use family-specific adapters
+and keep their payloads distinct.
+
 ## Task 20 — U6: Slice 1 testing
 
-- Client-core tests cover workflow policy and are not duplicated in components.
-- Component tests cover idle, enqueue, streaming, degraded, detached,
-  recoverable, completed, cancelled, and malformed-contract UI states using
-  synthetic typed events.
-- Contract tests verify the real Fastify API satisfies client schemas.
-- Playwright covers world selection -> campaign creation -> submission ->
-  streaming -> completed result against the test Compose stack.
-- Reload E2E coverage verifies durable-job resume without duplicate submission.
-- Axe-core runs in component tests; keyboard and screen-reader passes complete
-  before Slice 2.
-- Visual regression covers idle, generating, degraded, recoverable, and
-  completed states.
-- Performance tests enforce bundle and runtime budgets.
+**Files:** exact Playwright/axe/visual harness, Compose fixtures, framework test
+setup, CI jobs, and screenshot locations are named by U1's refinement gate;
+modify `docs/workflows/testing.md` with commands, environment requirements,
+budgets, and failure triage before this task closes.
+
+- [ ] Keep workflow policy in client-core tests and rendering behavior in
+  component tests. Cover idle, enqueue, classification, streaming, degraded,
+  detached, recoverable, failed, unrecoverable, result-unavailable, completed,
+  cancelled, discarded, conflict, and malformed-contract states with synthetic
+  typed events.
+- [ ] Run contract tests against real Fastify route projections and integration
+  tests against PostgreSQL plus deterministic text/image provider fakes. Prove
+  rejected/incomplete generation does not mutate state/memory, prompts never
+  cross campaign/owner scope, and story completion survives disabled,
+  unavailable, incompatible, retried, or failed illustration work.
+- [ ] Re-run initial-owner bootstrap idempotency, pre-auth automatic ownership,
+  import ownership, caller-identity spoof rejection, and cross-user isolation
+  suites. Interactive OIDC remains out of Slice 1; do not add a first-login
+  ownership shortcut. Its future implementation must test explicit
+  `(issuer, subject)` linking to the existing initial user's unchanged UUID.
+- [ ] Playwright against the test Compose stack covers: create a minimal draft;
+  select a seeded published world; create a campaign and choose a playable
+  character; submit Action and Auto turns; observe progressive narration and
+  completion; page older history; and reload/resume without duplicate
+  submission.
+- [ ] Add E2E variants for retry-latest preserving the accepted turn until
+  validation, active-job conflict attach, degraded SSE-to-poll fallback,
+  recoverable retry/discard, result-unavailable fetch retry, terminal failure,
+  cancellation, browser-storage expiry, and API restart during an active job.
+- [ ] Axe runs against every route and material state in both themes. Complete
+  keyboard-only and NVDA or VoiceOver passes for the vertical slice, including
+  dialog/drawer focus containment and return, route focus, form errors, and
+  throttled progress announcements.
+- [ ] Visual regression covers loading/empty/error/populated lists plus idle,
+  generating, degraded, recoverable, replacement, completed, and `SYS-ERROR`
+  at desktop, 390×844, and 320 px in dark/light themes and reduced motion.
+- [ ] Verify 200% zoom/reflow, token contrast, focus visibility, bundle budgets,
+  route chunking, 200-turn long-task/render budgets, initial and unchanged sync
+  payload budgets, and container deep-link/static-cache behavior.
+- [ ] Run `pnpm check`, `pnpm build`, unit, integration, E2E, visual,
+  accessibility, container/Compose smoke, `git diff --check`, complete-diff
+  review, and `pjm precheck`; record commands/results in the completion block.
+
+**Definition of done:** Slice 1 has automated and manual evidence for the
+specified happy, recovery, accessibility, responsive, identity-isolation, and
+generation-integrity paths; no waived gate is hidden as a generic follow-up.
 
 ## Slice 1 exit criteria
 
@@ -2843,9 +5247,12 @@ the measured 50 ms task budget is exceeded.
 4. All adopted API responses are runtime-validated.
 5. Streaming degradation and local detach are visible and distinct from remote
    cancellation.
-6. Accessibility, visual, contract, E2E, bundle, and runtime performance gates
+6. Retry-latest, authoritative resume, active-job conflict, recovery, and
+   result-fetch failure preserve accepted turns and never duplicate submission.
+7. WCAG 2.2 AA, keyboard/screen-reader, dark/light, 320 px/200% reflow,
+   reduced-motion, visual, contract, E2E, bundle, and runtime performance gates
    pass.
-7. Slice 1 feature code is confined to `apps/web-next` and public client-package
+8. Slice 1 feature code is confined to `apps/web-next` and public client-package
    extensions. Root lockfile/build metadata changes are allowed and reviewed;
    backend behavior changes are not.
 
@@ -2876,11 +5283,22 @@ behavior once the corresponding replacement behavior exists.
   Web-platform adapters and to replace “all routes in Slice 0” with incremental
   endpoint adoption.
 - Update `API_UI_CONTRACTS.md` to state that progressive `partialNarration` is
-  currently rendered and client code must not parse `partialOutput`.
-- Keep `OPEN_QUESTIONS.md` Q1 resolved; remove work items that imply it remains
-  open.
+  currently rendered, client code must not parse `partialOutput`, cancellation
+  is an active endpoint, and B4a's cursor/sync/recovery shapes supersede the
+  unbounded response descriptions.
+- Update `FEATURE_IMPLEMENTATION_MATRIX.md` and `INTERACTION_FLOWS.md` so active
+  cancellation, progressive narration, Auto resolution, retry-latest
+  replacement, and completed-result recovery match the implemented contracts.
+- Keep `OPEN_QUESTIONS.md` Q1-Q8 resolutions authoritative; remove work items
+  that imply Q1/Q2 remain open and carry Q8's dark/light decision into
+  `DESIGN_SYSTEM.md` and the U1 tokens.
 - Update `FRONTEND_IMPLEMENTATION_PLAN.md` so source-string tests retire by
-  replacement slice and `/app/` build/serve plumbing lands before Slice 1.
+  replacement slice, `/app/` build/serve plumbing lands before Slice 1, and the
+  safety-critical recovery/resume behaviors absorbed by this Slice 1 plan are no
+  longer described as absent until Slice 2.
+- Update `PRODUCT_UX.md` and `SCREEN_INVENTORY.md` only where the minimal Slice 1
+  draft-create/published-world selection boundary or shell `SYS-ERROR` scope
+  would otherwise imply full world authoring in U3.
 - Record backend application boundaries and notification/concurrency choices in
   ADRs before their implementation merges.
 - Document performance commands, budgets, and exceptions in the contributor and
@@ -2891,24 +5309,28 @@ behavior once the corresponding replacement behavior exists.
 ## Dependency graph
 
 ```text
-[C0-C5 done] -> C7 -> C8 -> B4a -> C6 -> [Track C complete] ----+
-                                                                |
-[C0 done] -> B1 -> B3 ------------------------------------------+-> U1 -> U2 -> U3 -> U4 -> U5 -> U6
-              |                                                                      ^
-              +-> B2 (parallel; required for Track B, not Slice 1)                   |
-              +-> B4b (after B4a) ---------------------------------------------------+
-              +-> B5 (domain-by-domain; not a Slice 1 gate)
+[C0-C5 done] -> C7 -> C8 -> B4a -> B4a-R -> 7P -> 7a -> 7b -> 7c -> 7d
+                                                                         |
+                                                                         v
+                      B1 -> B2 -> B3 -> B4b -> B5a -> B5b -> B5c -> B5d -> B5e
+                                                                                 |
+                                                                                 v
+                                                               backend audit (14f)
+                                                                                 |
+                                                                                 v
+                                                       UI authorized -> U1 -> U2 -> U3 -> U4 -> U5 -> U6
 ```
 
 **C0 through C5 and C7 through C8 are complete** (Tasks 1-6, 8, and 9,
-including C1a, C2a, C3a, and C4a). The client lane is **B4a (Task 13a) next**,
-then C6 (Task 7). B1 (Task 10) may start in parallel now; B3 (Task 12) follows
-B1 and both Track C plus B3 gate U1. B4b (Task 13b) follows B4a and B1 and must
-finish before U5.
+including C1a, C2a, C3a, and C4a); B4a and B4a-R are also complete. The next
+implementation is **Task 7P**, followed by 7a, 7b, 7c, and 7d. The backend-first
+sequence then runs B1, B2, B3, B4b, and B5a-B5e, with Task 14f as the explicit
+UI authorization gate. No backend package or UI task runs in parallel with that
+declared sequence unless this plan is deliberately revised and re-reviewed.
 
 **C6 does not gate C8 — this was previously drawn as `C6 -> C8` and is
 corrected.** Task 9 never consumes the C6 stores or selectors. C6's consumers
-are U2-U5, and it is sequenced after C8 and B4a so it is built once against the
+are U2-U5, and it is sequenced after C8 and Task 13a-R so it is built once against the
 rewired Story Player and final bounded history/sync contracts.
 
 **C7 gated C8 — this was previously drawn as parallel and is corrected here.**
@@ -2918,12 +5340,11 @@ no longer publishes the raw imported module graph from `publicDir`.
 
 C1a gated C2 because C4 models its event stream on the C1 stream projection;
 correcting that projection after C4 exists would have meant rewriting the event
-model and its tests. B1 can proceed alongside C7-C8/B4a/C6 now that C1 contracts
-have stabilized. B2 preserves C1a's error-frame behavior and can run after B1
-without delaying the UI. B3 is different: it is the parent plan's pre-exposure
-throughput gate and therefore finishes before U1. B4 was split because its public
-cursor/sync shapes must land before C6, while measured query/index optimization
-can follow B1 but must finish before the long-campaign U5 implementation.
+model and its tests. B4 was split because its public cursor/sync shapes had to
+land before C6, while measured query/index optimization follows the core backend
+extraction. The user-selected backend-first policy now serializes all remaining
+backend work and its audit before U1, even where a narrower technical dependency
+would permit overlap.
 
 ---
 
@@ -2970,11 +5391,21 @@ can follow B1 but must finish before the long-campaign U5 implementation.
 - [ ] Owner-identity resolution is memoized and no longer queried per request.
 - [ ] `/app/` is built, served, secured, cached, and deployed through the same
   artifact contract as existing services.
+- [ ] B4a's opaque campaign-bound cursor, sync token, bounded turn window, and
+  sanitized pending/recovery projection are the only Slice 1 history/resume
+  contracts; browser storage remains a non-authoritative optimization.
 - [ ] The replacement core play loop passes unit, contract, integration, E2E,
   accessibility, visual, and performance gates.
-- [ ] SSE database polling removal, configurable worker concurrency, and bounded
-  play-loop reads are implemented or explicitly tracked as pre-exposure blockers
-  with owners.
+- [ ] B2 SSE database polling removal, B3 configurable/fair worker lanes, B4b
+  measured play-loop read optimization, and all B5a-B5e domain extractions are
+  implemented and verified before U1. Task 14f records the backend completion
+  evidence and explicitly authorizes UI implementation; none may be waived as
+  merely tracked.
+- [ ] Rejected/incomplete story jobs never mutate authoritative campaign or
+  Chronicle state; owner/campaign prompt isolation holds; and illustration
+  failure never changes story acceptance or reuses text-provider credentials.
+- [ ] Dark, light, and system theme behavior, WCAG 2.2 AA, 320 px/200% reflow,
+  reduced motion, keyboard, and screen-reader requirements pass for Slice 1.
 - [ ] Legacy tests remain only where replacement behavior does not yet exist.
 - [ ] All documentation contradictions identified above are resolved.
 - [ ] `pnpm check`, `pnpm build`, `pnpm test:unit`, `pnpm test:integration`,
