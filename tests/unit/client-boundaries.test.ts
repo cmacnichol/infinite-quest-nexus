@@ -248,6 +248,52 @@ describe("client boundary checks", () => {
     expect(violations).toEqual([]);
   });
 
+  test("allows application local modules and the contracts public package", () => {
+    const violations = collectClientBoundaryViolations([
+      {
+        file: "packages/application/src/generation/use-cases.ts",
+        text: `
+          import type { GenerationRequest } from "@infinite-quest/contracts";
+          import { makeRequest } from "./request.js";
+          export { makeRequest };
+          export type { GenerationRequest };
+        `
+      },
+      {
+        file: "packages/application/src/generation/request.ts",
+        text: "export const makeRequest = () => undefined;"
+      }
+    ]);
+
+    expect(violations).toEqual([]);
+  });
+
+  test("rejects application imports outside its platform-free dependency boundary in every import form", () => {
+    const violations = collectClientBoundaryViolations([
+      {
+        file: "packages/application/src/generation/forbidden.mts",
+        text: `
+          import type { FastifyInstance } from "fastify";
+          import { Pool } from "pg";
+          export { runWorker } from "../../../../services/worker/src/worker.js";
+          import runtime = require("../../../../services/runtime/src/main.js");
+          export type Provider = import("../../../story-engine/src/index.js").TextProviderProfile;
+          const scheduler = import("node:timers/promises");
+          export { FastifyInstance, Pool, runtime, scheduler };
+        `
+      }
+    ]);
+
+    expect(violations).toEqual([
+      "packages/application/src/generation/forbidden.mts: application import ../../../../services/runtime/src/main.js is outside packages/application or contracts",
+      "packages/application/src/generation/forbidden.mts: application import ../../../../services/worker/src/worker.js is outside packages/application or contracts",
+      "packages/application/src/generation/forbidden.mts: application import ../../../story-engine/src/index.js is outside packages/application or contracts",
+      "packages/application/src/generation/forbidden.mts: application import fastify is outside packages/application or contracts",
+      "packages/application/src/generation/forbidden.mts: application import node:timers/promises is prohibited",
+      "packages/application/src/generation/forbidden.mts: application import pg is outside packages/application or contracts"
+    ]);
+  });
+
   test("rejects client-core source-relative imports that bypass the contracts package", () => {
     const violations = collectClientBoundaryViolations([
       {

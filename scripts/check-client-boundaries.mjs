@@ -117,7 +117,8 @@ function resolvedImportedFile(file, specifier, sourceFiles) {
 }
 
 function moduleSpecifierText(node) {
-  return ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text : null;
+  const literal = ts.isLiteralTypeNode(node) ? node.literal : node;
+  return ts.isStringLiteral(literal) || ts.isNoSubstitutionTemplateLiteral(literal) ? literal.text : null;
 }
 
 function importedModules(sourceFile) {
@@ -159,6 +160,12 @@ function isClientWebImportAllowed(file, specifier) {
   if (specifier === "@infinite-quest/client-core" || specifier === "@infinite-quest/contracts" || specifier === "zod") return true;
   const target = relativeModulePath(file, specifier);
   return target !== null && (target.startsWith("packages/client-web/") || target.startsWith("packages/client-core/"));
+}
+
+function isApplicationImportAllowed(file, specifier) {
+  if (specifier === "@infinite-quest/contracts") return true;
+  const target = relativeModulePath(file, specifier);
+  return target !== null && target.startsWith("packages/application/");
 }
 
 function checkClientCore(file, sourceFile, violations) {
@@ -205,6 +212,16 @@ function checkClientWeb(file, sourceFile, violations) {
   }
 
   visit(sourceFile);
+}
+
+function checkApplication(file, sourceFile, violations) {
+  for (const specifier of importedModules(sourceFile)) {
+    if (specifier.startsWith("node:")) {
+      violations.push(`${file}: application import ${specifier} is prohibited`);
+    } else if (!isApplicationImportAllowed(file, specifier)) {
+      violations.push(`${file}: application import ${specifier} is outside packages/application or contracts`);
+    }
+  }
 }
 
 function checkCrossRoleImports(file, sourceFile, violations) {
@@ -279,6 +296,7 @@ export function collectClientBoundaryViolations(entries) {
     sourceFiles.set(file, sourceFile);
     if (file.startsWith("packages/client-core/")) checkClientCore(file, sourceFile, violations);
     if (file.startsWith("packages/client-web/")) checkClientWeb(file, sourceFile, violations);
+    if (file.startsWith("packages/application/src/")) checkApplication(file, sourceFile, violations);
     checkCrossRoleImports(file, sourceFile, violations);
   }
 

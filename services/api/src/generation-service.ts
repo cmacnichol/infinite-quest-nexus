@@ -85,7 +85,8 @@ import {
   type SegmentConfigRow
 } from "./segmented-illustration-service.js";
 import { attributeGenerationCostsToTurn, recordProfileCost, turnReportedCosts } from "./cost-service.js";
-import { promptFromSnapshot, promptProtocolVersion, resolvePromptSnapshot, type PromptSnapshot } from "./prompt-library-service.js";
+import { promptFromSnapshot, promptProtocolVersion, resolvePromptSnapshot } from "./prompt-library-service.js";
+import type { PromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import {
   runTurnGenerationPhase,

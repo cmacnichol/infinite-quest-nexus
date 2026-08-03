@@ -31,10 +31,10 @@ import {
 } from "./world-generator-service.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
+import type { PromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
 import {
   promptFromSnapshot,
-  resolvePromptSnapshot,
-  type PromptSnapshot
+  resolvePromptSnapshot
 } from "./prompt-library-service.js";
 
 

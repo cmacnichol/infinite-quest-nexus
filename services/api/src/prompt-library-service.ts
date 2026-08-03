@@ -5,6 +5,7 @@ import {
   sampleValuesForPrompt,
   promptTemplateKeySchema,
   promptTemplateOverrideSchema,
+  type PromptSnapshot,
   type PromptTemplateKey
 } from "../../../packages/contracts/src/prompt-library.js";
 import { z } from "zod";
@@ -20,7 +21,6 @@ import {
 type Database = DatabasePool | DatabaseClient;
 
 type OverrideRow = { prompt_key: PromptTemplateKey; content: string; campaign_id: string | null; updated_at: string };
-export type PromptSnapshot = Record<PromptTemplateKey, { content: string; hash: string; source: "shipped" | "application" | "campaign" }>;
 
 function hash(content: string) { return createHash("sha256").update(content).digest("hex"); }
 

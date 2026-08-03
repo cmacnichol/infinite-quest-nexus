@@ -9,7 +9,8 @@ import {
 } from "../../packages/contracts/src/prompt-library.js";
 import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../../packages/domain/src/illustrations.js";
 import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
-import { promptProtocolVersion, type PromptSnapshot } from "../../services/api/src/prompt-library-service.js";
+import { promptProtocolVersion } from "../../services/api/src/prompt-library-service.js";
+import type { PromptSnapshot } from "../../packages/contracts/src/index.js";
 import { infiniteWorldsPromptSet } from "../../services/api/src/infinite-worlds-import-service.js";
 
 describe("Prompt Library catalog", () => {

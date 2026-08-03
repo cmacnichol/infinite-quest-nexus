@@ -9,6 +9,12 @@ export const promptTemplateKeySchema = z.enum([
 ]);
 export type PromptTemplateKey = z.infer<typeof promptTemplateKeySchema>;
 
+export type PromptSnapshot = Record<PromptTemplateKey, {
+  content: string;
+  hash: string;
+  source: "shipped" | "application" | "campaign";
+}>;
+
 export type PromptTemplateDefinition = {
   key: PromptTemplateKey;
   title: string;

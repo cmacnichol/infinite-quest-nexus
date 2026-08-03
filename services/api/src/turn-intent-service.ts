@@ -1,5 +1,6 @@
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
+import type { PromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
 import type { TurnInputClassificationRequest, TurnInputMode } from "../../../packages/contracts/src/generation.js";
 import {
   buildTurnIntentPrompt,
@@ -17,7 +18,7 @@ import {
   resolveEffectiveProviderId
 } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
-import { promptFromSnapshot, resolvePromptSnapshot, type PromptSnapshot } from "./prompt-library-service.js";
+import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
 
 type TurnControlStyle = "action_only" | "flexible_auto" | "flexible_action" | "flexible_scene";
 
