@@ -205,6 +205,60 @@ describe("generation command compatibility", () => {
     infoLog.mockRestore();
   });
 
+  test("loads lifecycle context before retry and cancellation mutations", async () => {
+    const events: string[] = [];
+    const repository = commandRepository([]);
+    repository.retry = async () => {
+      events.push("retry");
+      return { id: jobId, status: "queued", operationKind: "append", replacementTurnId: null };
+    };
+    repository.cancel = async () => {
+      events.push("cancel");
+      return { id: jobId, status: "cancelled", operationKind: "append", replacementTurnId: null };
+    };
+    const pool = {
+      query: vi.fn(async () => {
+        events.push("context");
+        return {
+          rows: [{
+            generationJobId: jobId,
+            campaignId,
+            providerProfileId: "44444444-4444-4444-8444-444444444444",
+            expectedTurnNumber: 4,
+            operationKind: "append",
+            jobAttempt: 2
+          }]
+        };
+      })
+    } as unknown as DatabasePool;
+    const compatibility = createGenerationCommandCompatibility({
+      pool,
+      repository,
+      initialOwnerId: async () => ownerUserId
+    });
+    const infoLog = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+
+    await compatibility.retryGeneration(jobId);
+    await compatibility.cancelGeneration(jobId);
+
+    expect(events).toEqual(["context", "retry", "context", "cancel"]);
+    infoLog.mockRestore();
+  });
+
+  test("does not mutate when lifecycle context cannot be loaded", async () => {
+    const calls: Array<{ method: string; scope: unknown; request?: unknown }> = [];
+    const unavailable = new Error("database socket closed");
+    const compatibility = createGenerationCommandCompatibility({
+      pool: { query: vi.fn(async () => { throw unavailable; }) } as unknown as DatabasePool,
+      repository: commandRepository(calls),
+      initialOwnerId: async () => ownerUserId
+    });
+
+    await expect(compatibility.retryGeneration(jobId)).rejects.toBe(unavailable);
+    await expect(compatibility.cancelGeneration(jobId)).rejects.toBe(unavailable);
+    expect(calls).toEqual([]);
+  });
+
   test("returns not-found errors without exposing cross-owner job data and preserves unknown failures", async () => {
     expect(mapGenerationApplicationError(new GenerationApplicationError("not_found", { jobId })))
       .toMatchObject({ statusCode: 404, message: "Generation job not found." });

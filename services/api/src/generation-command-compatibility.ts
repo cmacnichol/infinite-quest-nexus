@@ -165,8 +165,8 @@ export function createGenerationCommandCompatibility({
     getGenerationResult: (jobId: string) => withOwner((ownerUserId) => repository.getResult({ ownerUserId, jobId })),
     retryGeneration: async (jobId: string) => {
       return withOwner(async (ownerUserId) => {
+        const context = await generationLifecycleLogContext(pool, ownerUserId, jobId);
         const requeued = await repository.retry({ ownerUserId, jobId });
-        const context = await generationLifecycleLogContext(pool, ownerUserId, requeued.id);
         if (context) logger.info({
           event: "turn_generation_requeued",
           ...context
@@ -176,8 +176,8 @@ export function createGenerationCommandCompatibility({
     },
     cancelGeneration: async (jobId: string) => {
       return withOwner(async (ownerUserId) => {
+        const context = await generationLifecycleLogContext(pool, ownerUserId, jobId);
         const cancelled = await repository.cancel({ ownerUserId, jobId });
-        const context = await generationLifecycleLogContext(pool, ownerUserId, cancelled.id);
         if (context) logger.info({
           event: "turn_generation_cancelled",
           generationJobId: context.generationJobId,

@@ -91,6 +91,8 @@ type MutationRow = {
   replacementTurnId: string | null;
 };
 
+class ReplacementInsertUniqueConflict extends Error {}
+
 export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
   resolvePromptSnapshot: (
     client: DatabaseClient,
@@ -250,7 +252,7 @@ async function resolveTextProviderId(
   return null;
 }
 
-async function activeGenerationConflict(client: DatabaseClient, ownerUserId: string, campaignId: string): Promise<never> {
+async function activeGenerationConflict(client: DatabaseClient | DatabasePool, ownerUserId: string, campaignId: string): Promise<never> {
   const active = await client.query<{
     id: string;
     status: JobStatus;
@@ -352,8 +354,9 @@ export function createPostgresGenerationCommandRepository(
     },
 
     async enqueueReplacement(scope, request) {
-      return withTransaction(pool, async (client) => {
-        const requestFingerprint = sha256(stableStringify(request));
+      const requestFingerprint = sha256(stableStringify(request));
+      try {
+        return await withTransaction(pool, async (client) => {
         const existing = await client.query<EnqueueRow & { recoveryMetadata: Record<string, unknown> }>(
           `SELECT id, status, result_turn_id AS "resultTurnId", action, operation_kind AS "operationKind",
                   replacement_turn_id AS "replacementTurnId", expected_turn_number AS "expectedTurnNumber",
@@ -469,31 +472,35 @@ export function createPostgresGenerationCommandRepository(
           );
           await client.query("RELEASE SAVEPOINT enqueue_replacement_insert");
           return enqueueResult(inserted.rows[0]!, false);
-        } catch (error) {
-          if (sqlState(error) === "23505") {
-            await client.query("ROLLBACK TO SAVEPOINT enqueue_replacement_insert");
-            await client.query("RELEASE SAVEPOINT enqueue_replacement_insert");
-            const replay = await client.query<EnqueueRow & { recoveryMetadata: Record<string, unknown> }>(
-              `SELECT id, status, result_turn_id AS "resultTurnId", action, operation_kind AS "operationKind",
-                      replacement_turn_id AS "replacementTurnId", expected_turn_number AS "expectedTurnNumber",
-                      recovery_metadata AS "recoveryMetadata", created_at AS "createdAt"
-                 FROM generation_jobs
-                WHERE campaign_id = $1 AND idempotency_key = $2 AND owner_user_id = $3`,
-              [scope.campaignId, request.idempotencyKey, scope.ownerUserId]
-            );
-            const replayJob = replay.rows[0];
-            if (replayJob
-                && replayJob.action === request.action
-                && replayJob.operationKind === "replace_latest"
-                && replayJob.expectedTurnNumber === request.expectedCurrentTurnNumber
-                && replayJob.recoveryMetadata.requestFingerprint === requestFingerprint) {
-              return enqueueResult(replayJob, true);
+          } catch (error) {
+            if (sqlState(error) === "23505") {
+              await client.query("ROLLBACK TO SAVEPOINT enqueue_replacement_insert");
+              await client.query("RELEASE SAVEPOINT enqueue_replacement_insert");
+              throw new ReplacementInsertUniqueConflict();
             }
-            return activeGenerationConflict(client, scope.ownerUserId, scope.campaignId);
+            throw error;
           }
-          throw error;
+        });
+      } catch (error) {
+        if (!(error instanceof ReplacementInsertUniqueConflict)) throw error;
+        const replay = await pool.query<EnqueueRow & { recoveryMetadata: Record<string, unknown> }>(
+          `SELECT id, status, result_turn_id AS "resultTurnId", action, operation_kind AS "operationKind",
+                  replacement_turn_id AS "replacementTurnId", expected_turn_number AS "expectedTurnNumber",
+                  recovery_metadata AS "recoveryMetadata", created_at AS "createdAt"
+             FROM generation_jobs
+            WHERE campaign_id = $1 AND idempotency_key = $2 AND owner_user_id = $3`,
+          [scope.campaignId, request.idempotencyKey, scope.ownerUserId]
+        );
+        const replayJob = replay.rows[0];
+        if (replayJob
+            && replayJob.action === request.action
+            && replayJob.operationKind === "replace_latest"
+            && replayJob.expectedTurnNumber === request.expectedCurrentTurnNumber
+            && replayJob.recoveryMetadata.requestFingerprint === requestFingerprint) {
+          return enqueueResult(replayJob, true);
         }
-      });
+        return activeGenerationConflict(pool, scope.ownerUserId, scope.campaignId);
+      }
     },
 
     async getJob(scope) {

@@ -5207,9 +5207,10 @@ translation point.
 
 **10b evidence (audited 2026-08-03).** Implementation landed in `3ee033d` with
 corrections in `93113bc`, `7933c3a`, `2e6901e`, and `bb29eeb` (base `e199f47`).
-Re-measured on `bb29eeb`: `pnpm check` **561 candidate files**, `pnpm build`
-clean, `pnpm test:unit` **1040/1040 across 88 files**, `pnpm test:integration`
-**211 passed, 2 skipped across 18 files**.
+The original correction review found two remaining Important defects, so this
+checkpoint remains **in progress** until the correction-round-2 checklist and a
+fresh scoped review pass. The older measurement below is historical evidence,
+not approval of the checkpoint.
 
 Verified against the shipped code rather than the commit messages:
 
@@ -5221,17 +5222,54 @@ Verified against the shipped code rather than the commit messages:
   SQLSTATE `23505`, so no query runs inside an aborted transaction. Five
   `FOR UPDATE` locks are retained.
 - No SQLSTATE, `pg` type, or snake-case row reaches `packages/application`.
-- **The 10b gate holds:** `services/api/src/server.ts`, `services/worker/**`,
-  and `services/runtime/**` are untouched in this range, and no migration was
+- `services/api/src/server.ts`, `services/worker/**`, and
+  `services/runtime/**` remain untouched in this range, and no migration was
   added.
 - `partialOutput` remains an internal field of the pre-existing
   `GenerationJobStatus` projection with `partialNarration` derived from it; it
   is not a *new* public field, and the API-layer projections still strip it.
-- Every required integration case is covered, including three whose test names
-  do not use the specification's words: mismatched idempotency fingerprint
-  (`idempotency_mismatch`), repeated cancellation (two consecutive `cancel`
-  calls on one job), and cancellation in each of the six cancellable phases
-  (`it.each([...])`).
+- The initial suite covers same-key replacement replay, repeated cancellation,
+  and all six cancellable phases, but it did not yet prove every persistence
+  invariant below.
+
+**10b correction round 2 — required before Task 10c.** The fresh review of
+`2e6901e..8677fb8` found that the existing assertions were insufficient even
+though the initial implementation was behaviorally close. Do not advance the
+checkpoint or treat the earlier evidence as completion until every item below is
+checked and independently re-reviewed.
+
+- [ ] **Atomic lifecycle logging:** make retry and cancel obtain their
+  owner-scoped logging context before the repository mutation (or return it from
+  that mutation atomically). A context-read failure must leave the durable job
+  unchanged and return the existing failure path; it must never turn a committed
+  retry/cancel into a 5xx. Preserve the legacy `jobAttempt` value for retry and
+  the established cancellation log shape. Add a unit regression that proves the
+  context read happens before the mutation and that a failed read performs no
+  repository mutation.
+- [ ] **Replacement idempotency and rollback proof:** add a direct repository
+  case where a replacement reuses its idempotency key with a different request
+  fingerprint and receives `idempotency_mismatch`. In the distinct-key concurrent
+  replacement race, create a queued latest-turn image before both submissions and
+  prove the losing transaction leaves that image and every other pre-savepoint
+  durable row intact after its outer transaction rolls back; the winner alone may
+  perform queued-image cleanup.
+- [ ] **Mutation preservation and child cleanup:** retry, discard, and every
+  cancellation state must assert that accepted turns, campaign state, Chronicle
+  memory, completed-result rows, and valid result data are unchanged. Extend the
+  provisional-child fixture to include an actual segment asset plus its asset
+  reference, then prove cancellation removes or cancels every target child while
+  retaining the other campaign's equivalent records.
+- [ ] **Strict transaction instrumentation:** replace presence-only SQL checks
+  with exact per-command boundary assertions. `getJob`/`getResult` issue no
+  `BEGIN`, `COMMIT`, or `ROLLBACK`; append/replacement issue exactly one outer
+  `BEGIN`/`COMMIT` and their named insert savepoint; cancellation issues exactly
+  one outer transaction; retry and discard issue neither an outer transaction
+  nor more than their single statement. Record the statements per operation so
+  earlier fixture setup cannot satisfy the assertion.
+- [ ] Re-run the focused unit and real-PostgreSQL repository suites, then the
+  full required Task 10b verification matrix. Have a fresh reviewer inspect the
+  correction diff and approve the full `e199f47..HEAD` 10b range before marking
+  this checkpoint complete.
 
 **Carried into 10c — the compatibility bridge has no removal owner.** 10b
 introduced `services/api/src/generation-command-compatibility.ts` and its
@@ -5251,6 +5289,9 @@ not contain generation state-machine or SQL policy.
 
 - Create: `services/api/src/generation-application-adapter.ts`
 - Create: `tests/unit/generation-application-adapter.test.ts`
+- Create or relocate: `services/api/src/turn-input-safety.ts` — one shared
+  mechanics-language guard used by both the new route adapter and the still-live
+  execution path until Task 10d moves execution
 - Delete: `services/api/src/generation-command-compatibility.ts` — the temporary
   10b facade; 10c is its named removal owner
 - Delete: `tests/unit/generation-command-compatibility.test.ts` — after
@@ -5261,11 +5302,13 @@ not contain generation state-machine or SQL policy.
 - Test: `tests/unit/client-api-contracts.test.ts`
 - Test: `tests/unit/client-api-routes.test.ts`
 - Test: `tests/unit/server-security.test.ts`
+- Test: `tests/unit/generation-input.test.ts`
 - Test: `tests/unit/user-profile.test.ts`
 - Test: `tests/integration/campaign-archive.integration.test.ts`
 - Test: `tests/integration/dashboard-stats.integration.test.ts`
 - Test: `tests/integration/generation.integration.test.ts`
 - Test: `tests/integration/gameplay.integration.test.ts`
+- Test: `tests/integration/image-pipeline.integration.test.ts`
 - Test: `tests/integration/provider-routes.integration.test.ts`
 
 **Composition and authority requirements:**
@@ -5301,10 +5344,12 @@ not contain generation state-machine or SQL policy.
 - [ ] Move what the bridge legitimately owns rather than deleting it wholesale.
   It currently holds an owner-scoped `generationLifecycleLogContext` read used
   for structured logging and the `safeTurnInput` mechanics-language guard.
-  Re-home both — logging context to the API adapter, input validation to
-  wherever route-level request validation lives — and prove by test that the
-  existing log fields and the 400 rejection message are unchanged. Do not drop
-  them silently along with the facade.
+  Re-home lifecycle logging to the API adapter. Move `safeTurnInput` into the
+  shared `turn-input-safety.ts` module and use it both for route validation and
+  from the existing execution path: Task 10d, not 10c, moves execution. Prove
+  the existing 400 rejection message, the execution-time defense-in-depth guard,
+  and log fields are unchanged. Do not drop any of these responsibilities along
+  with the facade.
 - [ ] The five remaining `initialOwnerId` call sites in `generation-service.ts`
   are on this facade path. After the bridge is deleted and routes resolve owner
   scope at composition, confirm the count is zero for generation commands;
@@ -5321,6 +5366,12 @@ not contain generation state-machine or SQL policy.
   `partialOutput`, lease timestamps, or replacement-provenance drift.
 - [ ] Re-run append, replace-latest, retry, cancel, discard, result recovery,
   and sync integration flows through HTTP, not only through the repository.
+- [ ] Before deleting the command delegates, re-home the direct command usage in
+  `image-pipeline.integration.test.ts` to an explicit application/repository
+  fixture (with the server-resolved owner scope). Keep `runGenerationJob` on its
+  current execution path until Task 10d/10e. This proves the bridge deletion does
+  not strand illustration-cancellation coverage while avoiding a second callable
+  command facade.
 
 **10c review gate:** all generation HTTP routes depend on the application
 interface, public contracts are unchanged, and the API owns request authority

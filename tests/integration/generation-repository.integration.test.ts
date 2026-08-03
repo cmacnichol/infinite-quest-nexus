@@ -135,6 +135,21 @@ integration("PostgreSQL generation command repository", () => {
     return result.rows[0]!.id;
   }
 
+  async function authoritativeCampaignSnapshot(campaignId: string) {
+    const result = await pool.query<{
+      turn_count: string;
+      chronicle_count: string;
+      state_revision: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::text FROM turns WHERE campaign_id = $1 AND owner_user_id = $2) AS turn_count,
+         (SELECT count(*)::text FROM chronicle_memories WHERE campaign_id = $1 AND owner_user_id = $2) AS chronicle_count,
+         (SELECT revision FROM campaign_state WHERE campaign_id = $1 AND owner_user_id = $2) AS state_revision`,
+      [campaignId, ownerUserId]
+    );
+    return result.rows[0]!;
+  }
+
   async function directGenerationJob(
     campaignId: string,
     status: string,
@@ -160,6 +175,40 @@ integration("PostgreSQL generation command repository", () => {
       [ownerUserId, campaignId, turnId, providerProfileId, "A quiet repository observatory.", sha256(`image-${crypto.randomUUID()}`), status]
     );
     return result.rows[0]!.id;
+  }
+
+  async function installGenerationInsertBarrier(campaignId: string) {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const trigger = `hold_generation_insert_${suffix}`;
+    const classId = Number.parseInt(suffix.slice(0, 7), 16);
+    const objectId = Number.parseInt(suffix.slice(7, 14), 16);
+    const holder = await pool.connect();
+    const holderPid = (await holder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+    await holder.query("SELECT pg_advisory_lock($1::integer, $2::integer)", [classId, objectId]);
+    await pool.query(`CREATE FUNCTION ${trigger}_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        PERFORM pg_advisory_xact_lock(${classId}, ${objectId});
+        RETURN NEW;
+      END
+    $$`);
+    await pool.query(`CREATE TRIGGER ${trigger} BEFORE INSERT ON generation_jobs
+      FOR EACH ROW WHEN (NEW.campaign_id = '${campaignId}'::uuid) EXECUTE FUNCTION ${trigger}_fn()`);
+    return {
+      wait: async () => expect.poll(async () => pool.query<{ pid: number }>(
+        `SELECT activity.pid FROM pg_stat_activity activity
+           WHERE activity.datname = current_database()
+             AND activity.wait_event_type = 'Lock'
+             AND $1 = ANY(pg_blocking_pids(activity.pid))`,
+        [holderPid]
+      ).then((result) => result.rows[0]?.pid), { timeout: 5_000 }).toBeTypeOf("number"),
+      release: async () => holder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [classId, objectId]),
+      cleanup: async () => {
+        await holder.query("SELECT pg_advisory_unlock($1::integer, $2::integer)", [classId, objectId]).catch(() => undefined);
+        holder.release();
+        await pool.query(`DROP TRIGGER IF EXISTS ${trigger} ON generation_jobs`);
+        await pool.query(`DROP FUNCTION IF EXISTS ${trigger}_fn()`);
+      }
+    };
   }
 
   async function provisionalIllustrationChildren(campaignId: string, generationJobId: string) {
@@ -188,6 +237,22 @@ integration("PostgreSQL generation command repository", () => {
       [ownerUserId, campaignId, providerProfileId, "A streaming observatory illustration.",
         sha256(`streaming-image-${generationJobId}`), generationJobId]
     );
+    const asset = await pool.query<{ id: string }>(
+      `INSERT INTO assets (
+         owner_user_id, campaign_id, content_hash, storage_driver, storage_path, mime_type, byte_length
+       ) VALUES ($1,$2,$3,'filesystem',$4,'image/png',1) RETURNING id`,
+      [ownerUserId, campaignId, sha256(`provisional-asset-${generationJobId}`), `provisional/${generationJobId}.png`]
+    );
+    await pool.query(
+      `INSERT INTO turn_illustration_segment_assets (segment_id, owner_user_id, asset_id, image_job_id, variant_index)
+       VALUES ($1,$2,$3,$4,0)`,
+      [segment.rows[0]!.id, ownerUserId, asset.rows[0]!.id, image.rows[0]!.id]
+    );
+    const assetReference = await pool.query<{ id: string }>(
+      `INSERT INTO asset_references (owner_user_id, asset_id, campaign_id, turn_id, asset_role)
+       VALUES ($1,$2,$3,NULL,'turn_illustration') RETURNING id`,
+      [ownerUserId, asset.rows[0]!.id, campaignId]
+    );
     const prompt = await pool.query<{ id: string }>(
       `INSERT INTO illustration_prompt_jobs (
          owner_user_id, campaign_id, segment_id, provider_profile_id, status
@@ -197,14 +262,16 @@ integration("PostgreSQL generation command repository", () => {
     const resolution = await pool.query<{ id: string }>(
       `INSERT INTO illustration_resolution_jobs (
          owner_user_id, campaign_id, segment_id, source_policy, matching_scope,
-         confidence_profile, query_context_snapshot, status
-       ) VALUES ($1,$2,$3,'library_only','campaign','balanced','{}'::jsonb,'queued') RETURNING id`,
-      [ownerUserId, campaignId, segment.rows[0]!.id]
+         confidence_profile, query_context_snapshot, selected_asset_id, status
+       ) VALUES ($1,$2,$3,'library_only','campaign','balanced','{}'::jsonb,$4,'queued') RETURNING id`,
+      [ownerUserId, campaignId, segment.rows[0]!.id, asset.rows[0]!.id]
     );
     return {
       setId: set.rows[0]!.id,
       segmentId: segment.rows[0]!.id,
       imageId: image.rows[0]!.id,
+      assetId: asset.rows[0]!.id,
+      assetReferenceId: assetReference.rows[0]!.id,
       promptId: prompt.rows[0]!.id,
       resolutionId: resolution.rows[0]!.id
     };
@@ -375,15 +442,18 @@ integration("PostgreSQL generation command repository", () => {
   it("retries recoverable jobs and discards failed jobs without changing their campaign scope", async () => {
     const retryCampaign = await campaign();
     const retryJobId = await directGenerationJob(retryCampaign.campaignId, "recoverable");
+    const retryBefore = await authoritativeCampaignSnapshot(retryCampaign.campaignId);
     await expect(repository().retry({ ownerUserId, jobId: retryJobId })).resolves.toMatchObject({
       id: retryJobId,
       status: "queued",
       operationKind: "append",
       replacementTurnId: null
     });
+    await expect(authoritativeCampaignSnapshot(retryCampaign.campaignId)).resolves.toEqual(retryBefore);
 
     const discardCampaign = await campaign();
     const discardJobId = await directGenerationJob(discardCampaign.campaignId, "failed");
+    const discardBefore = await authoritativeCampaignSnapshot(discardCampaign.campaignId);
     await expect(repository().discard({ ownerUserId, jobId: discardJobId })).resolves.toMatchObject({
       id: discardJobId,
       status: "discarded",
@@ -394,9 +464,29 @@ integration("PostgreSQL generation command repository", () => {
       "SELECT status, campaign_id FROM generation_jobs WHERE id = $1",
       [discardJobId]
     )).resolves.toMatchObject({ rows: [{ status: "discarded", campaign_id: discardCampaign.campaignId }] });
+    await expect(authoritativeCampaignSnapshot(discardCampaign.campaignId)).resolves.toEqual(discardBefore);
   });
 
-  it("uses transactions only for enqueue and cancellation command paths", async () => {
+  it("leaves completed result data and authoritative campaign records intact on invalid mutations", async () => {
+    const imported = await campaign();
+    const turnId = await latestTurnId(imported.campaignId);
+    const completedJobId = await directGenerationJob(imported.campaignId, "completed", { resultTurnId: turnId, expectedTurnNumber: 2 });
+    const commands = repository();
+    const before = await authoritativeCampaignSnapshot(imported.campaignId);
+    const resultBefore = await commands.getResult({ ownerUserId, jobId: completedJobId });
+
+    await expect(commands.retry({ ownerUserId, jobId: completedJobId }))
+      .rejects.toMatchObject({ kind: "invalid_state", details: { reason: "retry_source_state" } });
+    await expect(commands.cancel({ ownerUserId, jobId: completedJobId }))
+      .rejects.toMatchObject({ kind: "invalid_state", details: { reason: "cancel_source_state" } });
+    await expect(commands.discard({ ownerUserId, jobId: completedJobId }))
+      .rejects.toMatchObject({ kind: "invalid_state", details: { reason: "discard_source_state" } });
+
+    await expect(commands.getResult({ ownerUserId, jobId: completedJobId })).resolves.toEqual(resultBefore);
+    await expect(authoritativeCampaignSnapshot(imported.campaignId)).resolves.toEqual(before);
+  });
+
+  it("uses exactly the required transaction boundaries for each command", async () => {
     const { commands, statements } = recordingRepository();
     const readCampaign = await campaign();
     const completedTurnId = await latestTurnId(readCampaign.campaignId);
@@ -405,7 +495,7 @@ integration("PostgreSQL generation command repository", () => {
     statements.length = 0;
     await commands.getJob({ ownerUserId, jobId: completedJobId });
     await commands.getResult({ ownerUserId, jobId: completedJobId });
-    expect(statements).not.toContain("BEGIN");
+    expect(statements.filter((statement) => /^(BEGIN|COMMIT|ROLLBACK)/.test(statement))).toEqual([]);
 
     const appendCampaign = await campaign();
     statements.length = 0;
@@ -413,28 +503,30 @@ integration("PostgreSQL generation command repository", () => {
       { ownerUserId, campaignId: appendCampaign.campaignId },
       appendRequest("Open the transaction-instrumented append observatory.")
     );
-    expect(statements).toContain("BEGIN");
-    expect(statements).toContain("COMMIT");
-    expect(statements).toContain("SAVEPOINT enqueue_generation_insert");
+    expect(statements.filter((statement) => statement === "BEGIN")).toHaveLength(1);
+    expect(statements.filter((statement) => statement === "COMMIT")).toHaveLength(1);
+    expect(statements.filter((statement) => statement === "ROLLBACK")).toHaveLength(0);
+    expect(statements.filter((statement) => statement === "SAVEPOINT enqueue_generation_insert")).toHaveLength(1);
 
     statements.length = 0;
     await commands.cancel({ ownerUserId, jobId: queued.id });
-    expect(statements).toContain("BEGIN");
-    expect(statements).toContain("COMMIT");
+    expect(statements.filter((statement) => statement === "BEGIN")).toHaveLength(1);
+    expect(statements.filter((statement) => statement === "COMMIT")).toHaveLength(1);
+    expect(statements.filter((statement) => statement === "ROLLBACK")).toHaveLength(0);
 
     const retryCampaign = await campaign();
     const retryJobId = await directGenerationJob(retryCampaign.campaignId, "recoverable");
     statements.length = 0;
     await commands.retry({ ownerUserId, jobId: retryJobId });
-    expect(statements).not.toContain("BEGIN");
-    expect(statements.some((statement) => statement.startsWith("WITH source AS"))).toBe(true);
+    expect(statements.filter((statement) => /^(BEGIN|COMMIT|ROLLBACK)/.test(statement))).toEqual([]);
+    expect(statements.filter((statement) => statement.startsWith("WITH source AS"))).toHaveLength(1);
 
     const discardCampaign = await campaign();
     const discardJobId = await directGenerationJob(discardCampaign.campaignId, "failed");
     statements.length = 0;
     await commands.discard({ ownerUserId, jobId: discardJobId });
-    expect(statements).not.toContain("BEGIN");
-    expect(statements.some((statement) => statement.startsWith("WITH source AS"))).toBe(true);
+    expect(statements.filter((statement) => /^(BEGIN|COMMIT|ROLLBACK)/.test(statement))).toEqual([]);
+    expect(statements.filter((statement) => statement.startsWith("WITH source AS"))).toHaveLength(1);
 
     const replacementCampaign = await campaign();
     statements.length = 0;
@@ -442,9 +534,10 @@ integration("PostgreSQL generation command repository", () => {
       { ownerUserId, campaignId: replacementCampaign.campaignId },
       replacementRequest("Open the transaction-instrumented replacement observatory.")
     );
-    expect(statements).toContain("BEGIN");
-    expect(statements).toContain("COMMIT");
-    expect(statements).toContain("SAVEPOINT enqueue_replacement_insert");
+    expect(statements.filter((statement) => statement === "BEGIN")).toHaveLength(1);
+    expect(statements.filter((statement) => statement === "COMMIT")).toHaveLength(1);
+    expect(statements.filter((statement) => statement === "ROLLBACK")).toHaveLength(0);
+    expect(statements.filter((statement) => statement === "SAVEPOINT enqueue_replacement_insert")).toHaveLength(1);
   });
 
   it.each(["queued", "replacement_queued", "assessing", "generating", "validating", "committing"])(
@@ -478,6 +571,8 @@ integration("PostgreSQL generation command repository", () => {
     const otherJobId = await directGenerationJob(otherCampaign.campaignId, "generating");
     const targetChildren = await provisionalIllustrationChildren(targetCampaign.campaignId, targetJobId);
     const otherChildren = await provisionalIllustrationChildren(otherCampaign.campaignId, otherJobId);
+    const targetBefore = await authoritativeCampaignSnapshot(targetCampaign.campaignId);
+    const otherBefore = await authoritativeCampaignSnapshot(otherCampaign.campaignId);
 
     await repository().cancel({ ownerUserId, jobId: targetJobId });
 
@@ -491,10 +586,20 @@ integration("PostgreSQL generation command repository", () => {
       .resolves.toMatchObject({ rows: [{ status: "cancelled" }] });
     await expect(pool.query<{ status: string }>("SELECT status FROM illustration_resolution_jobs WHERE id = $1", [targetChildren.resolutionId]))
       .resolves.toMatchObject({ rows: [{ status: "cancelled" }] });
+    await expect(pool.query("SELECT segment_id FROM turn_illustration_segment_assets WHERE segment_id = $1", [targetChildren.segmentId]))
+      .resolves.toMatchObject({ rows: [] });
+    await expect(pool.query("SELECT id FROM asset_references WHERE id = $1", [targetChildren.assetReferenceId]))
+      .resolves.toMatchObject({ rows: [] });
     await expect(pool.query<{ status: string }>("SELECT status FROM image_jobs WHERE id = $1", [otherChildren.imageId]))
       .resolves.toMatchObject({ rows: [{ status: "generating" }] });
     await expect(pool.query<{ status: string }>("SELECT status FROM turn_illustration_sets WHERE id = $1", [otherChildren.setId]))
       .resolves.toMatchObject({ rows: [{ status: "provisional" }] });
+    await expect(pool.query<{ asset_id: string }>("SELECT asset_id FROM turn_illustration_segment_assets WHERE segment_id = $1", [otherChildren.segmentId]))
+      .resolves.toMatchObject({ rows: [{ asset_id: otherChildren.assetId }] });
+    await expect(pool.query<{ id: string }>("SELECT id FROM asset_references WHERE id = $1", [otherChildren.assetReferenceId]))
+      .resolves.toMatchObject({ rows: [{ id: otherChildren.assetReferenceId }] });
+    await expect(authoritativeCampaignSnapshot(targetCampaign.campaignId)).resolves.toEqual(targetBefore);
+    await expect(authoritativeCampaignSnapshot(otherCampaign.campaignId)).resolves.toEqual(otherBefore);
   });
 
   it("does not reveal or mutate a known foreign-owner job through any command or query", async () => {
@@ -606,5 +711,67 @@ integration("PostgreSQL generation command repository", () => {
     expect(fulfilled.map((result) => result.value)).toEqual(expect.arrayContaining([
       expect.objectContaining({ status: "replacement_queued", operationKind: "replace_latest" })
     ]));
+  });
+
+  it("rejects a replacement idempotency-key reuse with a different fingerprint", async () => {
+    const imported = await campaign();
+    const commands = repository();
+    const idempotencyKey = crypto.randomUUID();
+    await commands.enqueueReplacement(
+      { ownerUserId, campaignId: imported.campaignId },
+      replacementRequest("Rewrite the observatory ledger.", idempotencyKey)
+    );
+
+    await expect(commands.enqueueReplacement(
+      { ownerUserId, campaignId: imported.campaignId },
+      replacementRequest("Rewrite the observatory ledger with a different intent.", idempotencyKey)
+    )).rejects.toMatchObject({ kind: "conflict", details: { reason: "idempotency_mismatch" } });
+  });
+
+  it("rolls back a losing replacement's pre-insert classification consumption", async () => {
+    const imported = await campaign();
+    const commands = repository();
+    const latestTurn = await latestTurnId(imported.campaignId);
+    const queuedImageJobId = await directTurnImageJob(imported.campaignId, latestTurn, "queued");
+    const losingAction = "Rewrite the turn with the losing Auto-classification request.";
+    const classification = await pool.query<{ id: string }>(
+      `INSERT INTO turn_input_classifications (
+         owner_user_id, campaign_id, input_hash, classification, resolved_mode, confidence_band,
+         provider_profile_id, provider_source, diagnostics
+       ) VALUES ($1,$2,$3,'action','action','clear',$4,'story_text','{}'::jsonb) RETURNING id`,
+      [ownerUserId, imported.campaignId, sha256(losingAction), providerProfileId]
+    );
+    const barrier = await installGenerationInsertBarrier(imported.campaignId);
+    const winner = commands.enqueueReplacement(
+      { ownerUserId, campaignId: imported.campaignId },
+      replacementRequest("Rewrite the winning replacement request.")
+    );
+    await barrier.wait();
+    const loser = commands.enqueueReplacement(
+      { ownerUserId, campaignId: imported.campaignId },
+      generationRetryLatestRequestSchema.parse({
+        ...replacementRequest(losingAction),
+        requestedInputMode: "auto",
+        resolvedInputMode: "action",
+        inputModeSource: "auto",
+        classificationId: classification.rows[0]!.id
+      })
+    );
+    try {
+      await barrier.release();
+      await expect(winner).resolves.toMatchObject({ status: "replacement_queued", duplicate: false });
+      await expect(loser).rejects.toMatchObject({ kind: "active_job", details: { reason: "active_generation" } });
+    } finally {
+      await barrier.cleanup();
+    }
+
+    await expect(pool.query<{ consumed_at: string | null }>(
+      "SELECT consumed_at FROM turn_input_classifications WHERE id = $1",
+      [classification.rows[0]!.id]
+    )).resolves.toMatchObject({ rows: [{ consumed_at: null }] });
+    await expect(pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM image_jobs WHERE id = $1",
+      [queuedImageJobId]
+    )).resolves.toMatchObject({ rows: [{ count: "0" }] });
   });
 });
