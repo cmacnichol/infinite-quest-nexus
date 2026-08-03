@@ -5350,7 +5350,42 @@ not contain generation state-machine or SQL policy.
 - Test: `tests/integration/image-pipeline.integration.test.ts`
 - Test: `tests/integration/provider-routes.integration.test.ts`
 
-**Composition and authority requirements:**
+### 10c delivery stages and checkpoints
+
+10c is the largest checkpoint in Task 10: a required-field change across 53 call
+sites, a full route conversion, an error-mapping port, and the bridge removal
+with two responsibilities to re-home. Its review gate is **contract parity**, so
+composition churn must not dominate the diff a reviewer reads for parity.
+
+It is delivered as **three ordered sub-checkpoints**, each its own commit and
+scoped review. The requirements below remain one specification and are not
+split; what splits is the work.
+
+| Stage | Contains | Character | Ends with |
+|---|---|---|---|
+| **10c1 — plumbing** | required `generation` field, exported `BuildServerOptions`, `serverOptions()` helper, all 53 call sites converted | mechanical; **zero behaviour change** | routes still call the 10b facade; the injected application is constructed and unused |
+| **10c2 — adapter** | `generation-application-adapter.ts` with owner scope, application calls, and the ported reason-level error mapping, unit-tested against a fake | purely additive; nothing removed | adapter exists and is fully tested; routes still on the facade; bridge still live |
+| **10c3 — cutover** | routes switched to the adapter, bridge deleted, `safeTurnInput` and lifecycle logging re-homed, `image-pipeline` usage re-homed, `initialOwnerId` proven zero | the parity-sensitive diff | the 10c review gate |
+
+- [ ] Land them in order. 10c1 must change no response and 10c2 must delete
+  nothing, so that by the time a reviewer reads the parity-sensitive diff in
+  10c3 it contains only the cutover.
+- [ ] **10c1 ends green with the injected application unused.** That is
+  intentional, not an oversight: it proves the composition root can construct
+  the application and that all 53 sites are converted, at zero contract risk.
+  Do not "improve" 10c1 by switching a route to it.
+- [ ] **Port the error mapping in 10c2; delete the bridge in 10c3.** The bridge
+  is the only implementation of that mapping. Deleting it in the same commit
+  that ports it would leave no reviewable moment where both exist and can be
+  compared.
+- [ ] Do not split 10c3 further. The route switch, the bridge deletion, and the
+  re-homing are one atomic parity change; a checkpoint between them leaves
+  either two callable implementations or a route whose validation guard has
+  moved out from under it.
+- [ ] Each stage records its own evidence with measured figures, per the Task 4a
+  P4 rule. Keep Task 10's top-level status `Not started` throughout.
+
+**Composition and authority requirements:** *(10c1 unless marked otherwise)*
 
 - [ ] Call `createGenerationApplication(commandRepository)` once at the
   runtime/API composition boundary and inject the returned
@@ -5380,18 +5415,20 @@ not contain generation state-machine or SQL policy.
 - [ ] Do **not** make the field optional with an internal default. That keeps
   `buildServer` importing the repository constructor and weakens exactly the
   composition-ownership property 10f has to audit.
-- [ ] Resolve the credential-free `initial-owner` server-side for the API role
+- [ ] *(10c3)* Resolve the credential-free `initial-owner` server-side for the API role
   and supply its UUID as `OwnerScope`. Continue rejecting or ignoring any
   caller-supplied `user_id`, identity header, email, display name, OIDC subject,
   or provider identifier as authority.
-- [ ] Keep request schema validation, campaign/job path parameters,
+- [ ] *(10c3)* Keep request schema validation, campaign/job path parameters,
   idempotency/operation provenance, safe result projections, status codes,
   response headers, and response bodies byte-for-byte contract-compatible.
-- [ ] **Port the error mapping at `details.reason` granularity, not by `kind`.**
+- [ ] *(10c2)* **Port the error mapping at `details.reason` granularity, not by `kind`.**
   An earlier revision of this item said "map each kind", which understates the
-  contract by a wide margin: there are 6 `kind` values but ~17 `reason` values,
-  and the HTTP status is chosen by reason. Collapsing to six statuses would
-  break the byte-for-byte compatibility this checkpoint exists to preserve.
+  contract by a wide margin: there are **6 `kind` values and 16 `reason`
+  values** (verified against `packages/application/src/generation/errors.ts` and
+  the 16-case switch in the bridge), and the HTTP status is chosen by reason.
+  Collapsing to six statuses would break the byte-for-byte compatibility this
+  checkpoint exists to preserve.
   The authoritative mapping is the `legacyGenerationError` switch in
   `services/api/src/generation-command-compatibility.ts` — **the file this
   checkpoint deletes** — so port it into
@@ -5412,23 +5449,30 @@ not contain generation state-machine or SQL policy.
   `details.campaignId` is present ("Campaign not found." vs "Generation job not
   found."). Unknown failures follow the existing 5xx handler and internal
   structured logging; do not expose adapter/provider text.
-- [ ] Table-test the ported mapping over **every** reason, asserting status,
-  message, and details together. A test that asserts only status would pass
-  while the messages regressed.
-- [ ] Keep SSE behavior and its 350 ms polling topology unchanged in this
+- [ ] *(10c2)* Table-test the ported mapping over all 16 reasons, asserting
+  status, message, and details together. A test that asserts only status would
+  pass while every message regressed.
+- [ ] *(10c2)* Keep the emitted `details.code` values inside the
+  `SAFE_ERROR_CODES` allowlist in `services/api/src/generation-diagnostics.ts`,
+  which is a **second, independent** consumer of `active_generation_exists`.
+  The status/message mapping lives only in the bridge, but that allowlist does
+  not, so deleting the bridge cannot be assumed to carry the code contract with
+  it. Assert the ported adapter's codes against that set rather than
+  hand-copying them.
+- [ ] *(10c3)* Keep SSE behavior and its 350 ms polling topology unchanged in this
   checkpoint. Task 11 owns notification delivery. SSE and polling must continue
   using their distinct validated projections and safe error allowlists.
-- [ ] Remove API-facing generation command/query logic from
+- [ ] *(10c3)* Remove API-facing generation command/query logic from
   `generation-service.ts` after all route consumers use the application. Keep
   only explicitly out-of-scope campaign and execution code; do not leave two
   callable implementations.
-- [ ] **Delete the 10b compatibility bridge.** `services/api/src/generation-command-compatibility.ts`
+- [ ] *(10c3)* **Delete the 10b compatibility bridge.** `services/api/src/generation-command-compatibility.ts`
   and `tests/unit/generation-command-compatibility.test.ts` were introduced by
   10b as an explicitly temporary facade, and 10c is their named removal owner.
   Once routes call `GenerationApplication` directly, the bridge has no consumer;
   leaving it in place would be the "two callable implementations" the item above
   forbids, just relocated to its own file.
-- [ ] Move what the bridge legitimately owns rather than deleting it wholesale.
+- [ ] *(10c3)* Move what the bridge legitimately owns rather than deleting it wholesale.
   It currently holds an owner-scoped `generationLifecycleLogContext` read used
   for structured logging and the `safeTurnInput` mechanics-language guard.
   Re-home lifecycle logging to the API adapter. Move `safeTurnInput` into the
@@ -5437,23 +5481,23 @@ not contain generation state-machine or SQL policy.
   the existing 400 rejection message, the execution-time defense-in-depth guard,
   and log fields are unchanged. Do not drop any of these responsibilities along
   with the facade.
-- [ ] The five remaining `initialOwnerId` call sites in `generation-service.ts`
+- [ ] *(10c3)* The five remaining `initialOwnerId` call sites in `generation-service.ts`
   are on this facade path. After the bridge is deleted and routes resolve owner
   scope at composition, confirm the count is zero for generation commands;
   10b deliberately left them because routes had not yet been converted.
 
 **Required tests:**
 
-- [ ] Table-test every route against a fake application for validated input,
+- [ ] *(10c2)* Table-test every route against a fake application for validated input,
   correct owner/campaign/job scope, success projection, each typed error, and an
   unknown error.
-- [ ] Prove a spoofed identity header/body/query value cannot alter the injected
+- [ ] *(10c3)* Prove a spoofed identity header/body/query value cannot alter the injected
   owner and Owner A cannot obtain Owner B's job through a known UUID.
-- [ ] Re-run polling/SSE contract tests to prove no new fields, raw errors,
+- [ ] *(10c3)* Re-run polling/SSE contract tests to prove no new fields, raw errors,
   `partialOutput`, lease timestamps, or replacement-provenance drift.
-- [ ] Re-run append, replace-latest, retry, cancel, discard, result recovery,
+- [ ] *(10c3)* Re-run append, replace-latest, retry, cancel, discard, result recovery,
   and sync integration flows through HTTP, not only through the repository.
-- [ ] Before deleting the command delegates, re-home the direct command usage in
+- [ ] *(10c3)* Before deleting the command delegates, re-home the direct command usage in
   `image-pipeline.integration.test.ts` to an explicit application/repository
   fixture (with the server-resolved owner scope). Keep `runGenerationJob` on its
   current execution path until Task 10d/10e. This proves the bridge deletion does
