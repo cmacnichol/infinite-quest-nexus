@@ -84,7 +84,7 @@ describe("campaign selectors", () => {
   it.each([
     [generation(), true],
     [generation({ monitoring: "detached" }), true],
-    [generation({ snapshot: { id: "33333333-3333-4333-8333-333333333333", campaignId: "22222222-2222-4222-8222-222222222222", expectedTurnNumber: 8, status: "recoverable", action: "", operationKind: "append", replacementTurnId: null, attempts: 1, partialNarration: null, resultTurnId: null, errorCode: null, errorMessage: null } }), false],
+    [generation({ snapshot: { id: "33333333-3333-4333-8333-333333333333", campaignId: "22222222-2222-4222-8222-222222222222", expectedTurnNumber: 8, status: "recoverable", action: "", operationKind: "append", replacementTurnId: null, attempts: 1, partialNarration: null, resultTurnId: null, errorCode: null, errorMessage: null } }), true],
     [generation({ result: { state: "unavailable", message: "later", correlationId: null } }), false],
     [generation({ result: { state: "failed", outcome: "failed", message: "failed" } }), false]
   ])("derives in-flight only from an active pending generation", (job, expected) => {

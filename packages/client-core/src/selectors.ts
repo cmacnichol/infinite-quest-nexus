@@ -19,7 +19,7 @@ export function selectIsGenerationInFlight(state: Immutable<CampaignProjection>)
   if (generation === null || generation.result.state !== "pending") return false;
   const status = generation.snapshot?.status;
   return status === undefined
-    || !["completed", "recoverable", "failed", "cancelled", "discarded"].includes(status);
+    || !["completed", "failed", "cancelled", "discarded"].includes(status);
 }
 
 export function selectRequestedTurnInputMode(state: Immutable<CampaignProjection>): TurnInputSelection {

@@ -436,6 +436,7 @@ function mergeOlderTurns(
   currentTurns: readonly Immutable<TurnSummary>[],
   olderTurns: readonly Immutable<TurnSummary>[]
 ): readonly Immutable<TurnSummary>[] {
+  const normalizedOlderTurns = normalizeTurns(olderTurns);
   const byId = new Map<string, Immutable<TurnSummary>>();
   const byNumber = new Map<number, Immutable<TurnSummary>>();
   for (const turn of currentTurns) {
@@ -443,7 +444,7 @@ function mergeOlderTurns(
     byNumber.set(turn.turnNumber, turn);
   }
 
-  for (const incoming of olderTurns) {
+  for (const incoming of normalizedOlderTurns) {
     const sameId = byId.get(incoming.id);
     const sameNumber = byNumber.get(incoming.turnNumber);
     if (sameId !== undefined && sameId.turnNumber !== incoming.turnNumber) throw protocol("duplicate_turn_id");

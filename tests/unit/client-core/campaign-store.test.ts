@@ -280,6 +280,28 @@ describe("campaign store hydration", () => {
     expect(controller.store.get()).toBe(before);
   });
 
+  it("rejects duplicate IDs and turn numbers within one incoming page atomically", () => {
+    const duplicateIdController = createCampaignStore();
+    duplicateIdController.load(sync());
+    const duplicateIdBefore = duplicateIdController.store.get();
+
+    expectProtocol(
+      () => duplicateIdController.prependOlderTurns(page([turn(0, turnThreeId), turn(0, turnThreeId)])),
+      "duplicate_turn_id"
+    );
+    expect(duplicateIdController.store.get()).toBe(duplicateIdBefore);
+
+    const duplicateNumberController = createCampaignStore();
+    duplicateNumberController.load(sync());
+    const duplicateNumberBefore = duplicateNumberController.store.get();
+
+    expectProtocol(
+      () => duplicateNumberController.prependOlderTurns(page([turn(0, turnThreeId), turn(0, otherCampaignId)])),
+      "duplicate_turn_number"
+    );
+    expect(duplicateNumberController.store.get()).toBe(duplicateNumberBefore);
+  });
+
   it("requires a loaded matching campaign for runtime state and generation attachment", () => {
     const controller = createCampaignStore();
     expectProtocol(() => controller.loadRuntimeState(runtime()), "campaign_not_loaded");
