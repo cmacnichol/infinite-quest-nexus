@@ -12,7 +12,7 @@ export function navigateToStoryCampaign(campaignId: string, browserLocation?: St
 
 export function branchCampaignFromTurn(
   campaignId: string,
-  turnIndex: number,
+  targetTurnNumber: number,
   branch: (campaignId: string, request: { targetTurnNumber: number }) => Promise<CampaignBranch>,
   browserLocation?: StoryLocation
 ): Promise<CampaignBranch>;

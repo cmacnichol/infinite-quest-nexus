@@ -199,7 +199,7 @@ export const generationRecoverySchema = z.object({
   resultTurnId: z.uuid().nullable()
 });
 
-export const campaignSyncStatusSchema = campaignSyncCampaignSchema.extend({
+const campaignSyncStatusBaseSchema = campaignSyncCampaignSchema.extend({
   campaign: campaignSyncCampaignSchema,
   world: z.object({
     id: z.uuid(),
@@ -228,8 +228,6 @@ export const campaignSyncStatusSchema = campaignSyncCampaignSchema.extend({
   }),
   pendingGeneration: pendingGenerationSchema.nullable(),
   syncToken: z.string().min(1),
-  turnWindowMode: z.enum(["unchanged", "replace"]),
-  turns: z.lazy(() => turnListResponseSchema).nullable(),
   generationRecovery: generationRecoverySchema.nullable()
 });
 
@@ -252,6 +250,26 @@ export const turnListResponseSchema = z.object({
   turns: z.array(turnSummarySchema),
   nextCursor: z.string().min(1).nullable()
 });
+
+export const turnPageRequestSchema = z.object({
+  before: z.string().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional()
+});
+
+export const syncStatusRequestSchema = z.object({
+  since: z.string().min(1).optional()
+});
+
+export const campaignSyncStatusSchema = z.discriminatedUnion("turnWindowMode", [
+  campaignSyncStatusBaseSchema.extend({
+    turnWindowMode: z.literal("unchanged"),
+    turns: z.null()
+  }),
+  campaignSyncStatusBaseSchema.extend({
+    turnWindowMode: z.literal("replace"),
+    turns: z.lazy(() => turnListResponseSchema)
+  })
+]);
 
 export const generationEnqueueResponseSchema = z.object({
   id: z.uuid(),
@@ -323,6 +341,8 @@ export type CampaignSyncStatus = z.infer<typeof campaignSyncStatusSchema>;
 export type GenerationRecovery = z.infer<typeof generationRecoverySchema>;
 export type TurnSummary = z.infer<typeof turnSummarySchema>;
 export type TurnListResponse = z.infer<typeof turnListResponseSchema>;
+export type TurnPageRequest = z.input<typeof turnPageRequestSchema>;
+export type SyncStatusRequest = z.input<typeof syncStatusRequestSchema>;
 export type GenerationEnqueueResponse = z.infer<typeof generationEnqueueResponseSchema>;
 export type GenerationResult = z.infer<typeof generationResultSchema>;
 export type GenerationActionResponse = z.infer<typeof generationActionResponseSchema>;

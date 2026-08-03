@@ -377,6 +377,8 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       pendingGenerationId: null
     }] };
 
+    if (sql.includes('AS "historyVersion"') && sql.includes("FROM turns")) return { rows: [{ historyVersion: `1:2:${TURN_ID}` }] };
+
     if (sql.startsWith("SELECT id, turn_number AS")) return { rows: [{
       id: TURN_ID,
       turnNumber: 2,

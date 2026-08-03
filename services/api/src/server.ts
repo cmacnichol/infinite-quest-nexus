@@ -68,8 +68,10 @@ import {
   playableCharacterListResponseSchema,
   providerListResponseSchema,
   sessionResponseSchema,
+  syncStatusRequestSchema,
   turnInputClassificationResponseSchema,
   turnListResponseSchema,
+  turnPageRequestSchema,
   userProfileResponseSchema,
   worldCreateResponseSchema
 } from "../../../packages/contracts/src/client-api.js";
@@ -642,8 +644,8 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
   app.get<{ Params: { campaignId: string }; Querystring: { before?: string; limit?: string } }>("/api/v1/campaigns/:campaignId/turns", async (request) => {
     const ownerUserId = await initialOwnerId(pool);
     const campaignId = uuidSchema.parse(request.params.campaignId);
-    const limit = request.query.limit === undefined ? 50 : z.coerce.number().int().min(1).max(200).parse(request.query.limit);
-    const page = await readTurnPage(pool, ownerUserId, campaignId, request.query.before, limit);
+    const pageRequest = turnPageRequestSchema.parse(request.query);
+    const page = await readTurnPage(pool, ownerUserId, campaignId, pageRequest.before, pageRequest.limit ?? 50);
     const costs = await turnReportedCosts(pool, ownerUserId, page.turns.map((turn) => turn.id));
     return parseResponseProjection(turnListResponseSchema, {
       turns: page.turns.map((turn) => ({
@@ -677,6 +679,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
 
   app.get<{ Params: { campaignId: string }; Querystring: { since?: string } }>("/api/v1/campaigns/:campaignId/sync-status", async (request) => {
     const ownerUserId = await initialOwnerId(pool);
+    const syncRequest = syncStatusRequestSchema.parse(request.query);
     const result = await pool.query(
       `SELECT c.id, c.title, c.active_turn_number AS "activeTurnNumber", c.world_version_id AS "worldVersionId",
               c.story_length_profile AS "storyLengthProfile", c.updated_at AS "updatedAt",
@@ -801,7 +804,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       recoveryId: generationRecovery?.id ?? null, recoveryStatus: generationRecovery?.status ?? null,
       recoveryAttempts: generationRecovery?.attempts ?? null
     }));
-    const unchanged = request.query.since === syncToken;
+    const unchanged = syncRequest.since === syncToken;
     return parseResponseProjection(campaignSyncStatusSchema, {
       ...campaign, campaign, world, playerConfig, pendingGeneration, syncToken,
       turnWindowMode: unchanged ? "unchanged" : "replace",

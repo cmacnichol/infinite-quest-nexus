@@ -615,7 +615,7 @@ describe("Nexus management UI contracts", () => {
     expect(storyScript).toContain('function promptBranchOrReset(turnIndex)');
     expect(storyScript).toContain('apiClient.campaigns.rewind(state.campaignId');
     expect(storyScript).toContain('import { branchCampaignFromTurn } from "./story-routing.js";');
-    expect(storyScript).toContain('await branchCampaignFromTurn(state.campaignId, branchDlg._turnIndex, apiClient.campaigns.branch);');
+    expect(storyScript).toContain('await branchCampaignFromTurn(state.campaignId, branchDlg._targetTurnNumber, apiClient.campaigns.branch);');
     expect(managementScript).toContain('window.location.assign("/story/" + encodeURIComponent(selectedCampaign.id));');
     expect(storyScript).toContain('async function resumePendingGeneration()');
   });

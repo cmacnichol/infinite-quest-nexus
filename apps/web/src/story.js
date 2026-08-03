@@ -3,6 +3,12 @@
    ═══════════════════════════════════════════════════════════════ */
 import { branchCampaignFromTurn } from "./story-routing.js";
 import {
+  appendExpectedTurnNumber,
+  latestTurnNumber,
+  selectedTurnNumber,
+  undoTargetTurnNumber
+} from "./story-turn-window.js";
+import {
   cancelGeneration,
   reconcileRemoteGenerationCancellation,
   syncCancelGenerationButton
@@ -867,7 +873,7 @@ async function runGeneration(action, options = {}) {
     const operationKind = options.operationKind || "append";
     const expectedTurnNumber = operationKind === "replace_latest"
       ? Number(options.expectedCurrentTurnNumber)
-      : state.turns.length + 1;
+      : appendExpectedTurnNumber(state.campaign);
     const submission = {
       action,
       requestedInputMode: options.requestedInputMode || "action",
@@ -1307,7 +1313,7 @@ async function resumePendingGeneration() {
 function updateStatusBar() {
   const turnPill = $("turnPill");
   const viewPill = $("viewPill");
-  if (turnPill) turnPill.textContent = `Turn ${state.turns.length}`;
+  if (turnPill) turnPill.textContent = `Turn ${state.campaign?.activeTurnNumber || 0}`;
   const isLatest = state.viewIndex === -1 || state.viewIndex >= state.turns.length - 1;
   if (viewPill) {
     viewPill.textContent = isLatest
@@ -1384,8 +1390,9 @@ async function undoLatest() {
   if (!confirm("Undo the last turn? This rewinds the campaign and cannot be reversed.")) return;
   showBusy("Rewinding…");
   try {
-    await apiClient.campaigns.rewind(state.campaignId, { targetTurnNumber: state.turns.length - 1 });
-    recordActivity("system", "Turn undone", `Rewound to turn ${state.turns.length - 1}.`);
+    const targetTurnNumber = undoTargetTurnNumber(state.campaign);
+    await apiClient.campaigns.rewind(state.campaignId, { targetTurnNumber });
+    recordActivity("system", "Turn undone", `Rewound to turn ${targetTurnNumber}.`);
     await loadCampaign(state.campaignId);
     toast("Last turn removed.");
   } catch (err) {
@@ -1436,8 +1443,9 @@ async function executeRetryWithPrompt(submittedPromptText) {
     return;
   }
 
-  const currentTurnNumber = state.turns.length;
-  const originalTurn = state.turns[currentTurnNumber - 1] || {};
+  const currentTurnNumber = latestTurnNumber(state.turns);
+  if (!currentTurnNumber) return;
+  const originalTurn = state.turns.at(-1) || {};
   const resolvedInputMode = originalTurn.resolvedInputMode || originalTurn.inputMode || "action";
   closeRetryPromptDialog();
   await runGeneration(action, {
@@ -1452,9 +1460,11 @@ async function executeRetryWithPrompt(submittedPromptText) {
 function promptBranchOrReset(turnIndex) {
   const dlg = $("branchStoryDialog");
   if (!dlg) return;
+  const targetTurnNumber = selectedTurnNumber(state.turns, turnIndex);
+  if (!targetTurnNumber) return;
   const msg = $("branchStoryMessage");
-  if (msg) msg.textContent = `You selected Turn ${turnIndex + 1} (of ${state.turns.length}). Choose what should happen to later turns before continuing.`;
-  dlg._turnIndex = turnIndex;
+  if (msg) msg.textContent = `You selected Turn ${targetTurnNumber} (of ${state.campaign?.activeTurnNumber || 0}). Choose what should happen to later turns before continuing.`;
+  dlg._targetTurnNumber = targetTurnNumber;
   openManagedModal(dlg);
 }
 
@@ -2036,7 +2046,7 @@ function populateHistoryContainer(container) {
     const inputModeLabel = inputMode === "scene" ? "Scene direction" : "Action";
     card.innerHTML = `
       <div class="history-card-heading">
-        <h4>${i === currentIdx ? "◆ " : ""}Turn ${i + 1}${t.action ? `: ${escapeHtml(t.action.slice(0, 60))}` : (i === 0 ? ": Adventure Begin" : "")}</h4>
+        <h4>${i === currentIdx ? "◆ " : ""}Turn ${t.turnNumber}${t.action ? `: ${escapeHtml(t.action.slice(0, 60))}` : (t.turnNumber === 1 ? ": Adventure Begin" : "")}</h4>
         <span class="turn-input-mode-pill ${inputMode}" title="Story Engine interpreted this prompt as ${inputModeLabel}" aria-label="Prompt interpretation: ${inputModeLabel}">${inputModeLabel}</span>
       </div>
       <p>${escapeHtml(preview)}</p>
@@ -2062,7 +2072,8 @@ function selectHistoryTurn(turnIndex) {
     card.setAttribute("aria-pressed", String(selected));
   });
   updateHistorySelectionActions();
-  inspectTurnState(turnIndex + 1);
+  const turnNumber = selectedTurnNumber(state.turns, turnIndex);
+  if (turnNumber) inspectTurnState(turnNumber);
 }
 
 function updateHistorySelectionActions() {
@@ -2487,7 +2498,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnTurnHistoryDone) btnTurnHistoryDone.addEventListener("click", () => { const d = $("turnHistoryDialog"); if (d && d.close) d.close(); });
   const btnTurnHistoryInspect = $("btnTurnHistoryInspect");
   if (btnTurnHistoryInspect) btnTurnHistoryInspect.addEventListener("click", () => {
-    if (Number.isInteger(state.historySelectedIndex)) inspectTurnState(state.historySelectedIndex + 1);
+    const turnNumber = selectedTurnNumber(state.turns, state.historySelectedIndex);
+    if (turnNumber) inspectTurnState(turnNumber);
   });
   const btnTurnHistoryJump = $("btnTurnHistoryJump");
   if (btnTurnHistoryJump) btnTurnHistoryJump.addEventListener("click", () => {
@@ -2532,10 +2544,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const branchDlg = $("branchStoryDialog");
   if (branchDlg) branchDlg.addEventListener("close", async () => {
     const result = branchDlg.returnValue;
-    if (result === "reset" && branchDlg._turnIndex !== undefined) {
+    if (result === "reset" && branchDlg._targetTurnNumber !== undefined) {
       showBusy("Rewinding campaign…");
       try {
-        await apiClient.campaigns.rewind(state.campaignId, { targetTurnNumber: branchDlg._turnIndex + 1 });
+        await apiClient.campaigns.rewind(state.campaignId, { targetTurnNumber: branchDlg._targetTurnNumber });
         await loadCampaign(state.campaignId);
         navigateTo(-1);
         toast("Campaign rewound.");
@@ -2545,10 +2557,10 @@ document.addEventListener("DOMContentLoaded", () => {
         hideBusy();
       }
     }
-    if (result === "copy" && branchDlg._turnIndex !== undefined) {
+    if (result === "copy" && branchDlg._targetTurnNumber !== undefined) {
       showBusy("Creating campaign branch…");
       try {
-        await branchCampaignFromTurn(state.campaignId, branchDlg._turnIndex, apiClient.campaigns.branch);
+        await branchCampaignFromTurn(state.campaignId, branchDlg._targetTurnNumber, apiClient.campaigns.branch);
       } catch (err) {
         toast(`Branch failed: ${err.message}`);
       } finally {

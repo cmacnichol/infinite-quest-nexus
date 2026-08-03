@@ -12,7 +12,7 @@ describe("Story Player routing", () => {
     expect(paths).toEqual(["/story/Branch%20%2F%20%231"]);
   });
 
-  it("branches from an earlier turn and navigates to the returned campaign", async () => {
+  it("branches from an absolute earlier turn and navigates to the returned campaign", async () => {
     const requests: Array<{ campaignId: string; request: { targetTurnNumber: number } }> = [];
     const paths: string[] = [];
     const branch = async (campaignId: string, request: { targetTurnNumber: number }) => {
@@ -20,13 +20,13 @@ describe("Story Player routing", () => {
       return { id: "branch campaign" };
     };
 
-    await branchCampaignFromTurn("parent-campaign", 1, branch, {
+    await branchCampaignFromTurn("parent-campaign", 51, branch, {
       assign: (path: string) => paths.push(path)
     });
 
     expect(requests).toEqual([{
       campaignId: "parent-campaign",
-      request: { targetTurnNumber: 2 }
+      request: { targetTurnNumber: 51 }
     }]);
     expect(paths).toEqual(["/story/branch%20campaign"]);
   });

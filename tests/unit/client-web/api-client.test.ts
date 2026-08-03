@@ -249,6 +249,21 @@ describe("createNexusApiClient", () => {
     expect(queue.urls).toEqual([]);
   });
 
+  it("validates bounded page and sync query options before the transport fetches", () => {
+    const queue = invalidResponseFetch();
+    const client = createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort(), fetchImpl: queue.fetchImpl });
+
+    expect(() => client.campaigns.turns(campaignId, { limit: 201 })).toThrow(expect.objectContaining({
+      phase: "request",
+      path: `/campaigns/${campaignId}/turns`
+    }));
+    expect(() => client.generation.syncStatus(campaignId, { since: "" })).toThrow(expect.objectContaining({
+      phase: "request",
+      path: `/campaigns/${campaignId}/sync-status`
+    }));
+    expect(queue.urls).toEqual([]);
+  });
+
   it("preserves the actual method supplied for request-contract errors", () => {
     let caught: unknown;
     try {

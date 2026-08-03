@@ -20,9 +20,11 @@ import {
   playableCharacterListResponseSchema,
   providerListResponseSchema,
   sessionResponseSchema,
+  syncStatusRequestSchema,
   turnInputClassificationRequestSchema,
   turnInputClassificationResponseSchema,
   turnListResponseSchema,
+  turnPageRequestSchema,
   userProfileResponseSchema,
   userProfileUpdateSchema,
   worldCreateResponseSchema,
@@ -53,6 +55,8 @@ import type {
   TurnInputClassificationRequest,
   TurnInputClassificationResponse,
   TurnListResponse,
+  TurnPageRequest,
+  SyncStatusRequest,
   UserProfileResponse,
   UserProfileUpdate,
   WorldCreateRequest,
@@ -113,9 +117,6 @@ export interface NexusApiClient {
   providers: ProviderApi;
 }
 
-export type TurnPageRequest = { before?: string; limit?: number };
-export type SyncStatusRequest = { since?: string };
-
 function splitOptions<T extends object>(options: T | AbortSignal | undefined, signal: AbortSignal | undefined): [T | undefined, AbortSignal | undefined] {
   return options && "aborted" in options ? [undefined, options as AbortSignal] : [options, signal];
 }
@@ -171,9 +172,10 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
     list: (signal) => http.request(withSignal({ method: "GET", path: "/campaigns", responseSchema: campaignListResponseSchema }, signal)),
     turns: (campaignId, options, signal) => {
       const [page, resolvedSignal] = splitOptions<TurnPageRequest>(options, signal);
+      const request = validatedRequest(turnPageRequestSchema, page || {}, "GET", `/campaigns/${encodedPathSegment(campaignId)}/turns`);
       const query = new URLSearchParams();
-      if (page?.before) query.set("before", page.before);
-      if (page?.limit !== undefined) query.set("limit", String(page.limit));
+      if (request.before) query.set("before", request.before);
+      if (request.limit !== undefined) query.set("limit", String(request.limit));
       return http.request(withSignal({
         method: "GET",
         path: `/campaigns/${encodedPathSegment(campaignId)}/turns${query.size ? `?${query}` : ""}`,
@@ -219,7 +221,8 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
   const generation: GenerationApi = {
     syncStatus: (campaignId, options, signal) => {
       const [sync, resolvedSignal] = splitOptions<SyncStatusRequest>(options, signal);
-      const query = sync?.since ? `?since=${encodeURIComponent(sync.since)}` : "";
+      const request = validatedRequest(syncStatusRequestSchema, sync || {}, "GET", `/campaigns/${encodedPathSegment(campaignId)}/sync-status`);
+      const query = request.since ? `?since=${encodeURIComponent(request.since)}` : "";
       return http.request(withSignal({
         method: "GET",
         path: `/campaigns/${encodedPathSegment(campaignId)}/sync-status${query}`,

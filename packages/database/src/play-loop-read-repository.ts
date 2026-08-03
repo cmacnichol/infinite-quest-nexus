@@ -4,7 +4,8 @@ import type { DatabasePool } from "./pool.js";
 const cursorSchema = z.object({
   campaignId: z.uuid(),
   turnNumber: z.number().int().positive(),
-  id: z.uuid()
+  id: z.uuid(),
+  historyVersion: z.string().min(1)
 });
 
 export type TurnPageRow = {
@@ -27,7 +28,7 @@ function encodeCursor(cursor: z.output<typeof cursorSchema>): string {
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
 }
 
-function decodeCursor(value: string, campaignId: string) {
+function decodeCursor(value: string, campaignId: string, historyVersion: string) {
   let decoded: unknown;
   try {
     decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
@@ -38,7 +39,23 @@ function decodeCursor(value: string, campaignId: string) {
   if (!cursor.success || cursor.data.campaignId !== campaignId) {
     throw Object.assign(new Error("The turn cursor is invalid for this campaign."), { statusCode: 400 });
   }
+  if (cursor.data.historyVersion !== historyVersion) {
+    throw Object.assign(new Error("The campaign history changed; reload before requesting older turns."), {
+      statusCode: 409,
+      details: { code: "turn_history_changed" }
+    });
+  }
   return cursor.data;
+}
+
+async function currentHistoryVersion(pool: DatabasePool, ownerUserId: string, campaignId: string): Promise<string> {
+  const result = await pool.query<{ historyVersion: string }>(
+    `SELECT COUNT(*)::integer::text || ':' || COALESCE(MAX(turn_number), 0)::text || ':' || COALESCE((ARRAY_AGG(id ORDER BY turn_number DESC, id DESC))[1]::text, '') AS "historyVersion"
+       FROM turns
+      WHERE owner_user_id = $1 AND campaign_id = $2`,
+    [ownerUserId, campaignId]
+  );
+  return result.rows[0]?.historyVersion || "0:0:";
 }
 
 export async function readTurnPage(
@@ -48,7 +65,8 @@ export async function readTurnPage(
   before: string | undefined,
   limit: number
 ): Promise<TurnPage> {
-  const cursor = before === undefined ? null : decodeCursor(before, campaignId);
+  const historyVersion = await currentHistoryVersion(pool, ownerUserId, campaignId);
+  const cursor = before === undefined ? null : decodeCursor(before, campaignId, historyVersion);
   const result = await pool.query<TurnPageRow>(
     `SELECT id, turn_number AS "turnNumber", action, COALESCE(input_mode, 'action') AS "inputMode",
             COALESCE(input_mode_source, 'explicit') AS "inputModeSource", narration, choices,
@@ -66,6 +84,6 @@ export async function readTurnPage(
   const earliest = selected[0];
   return {
     turns: selected,
-    nextCursor: hasMore && earliest ? encodeCursor({ campaignId, turnNumber: earliest.turnNumber, id: earliest.id }) : null
+    nextCursor: hasMore && earliest ? encodeCursor({ campaignId, turnNumber: earliest.turnNumber, id: earliest.id, historyVersion }) : null
   };
 }

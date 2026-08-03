@@ -23,6 +23,8 @@ import {
   turnInputClassificationRequestSchema,
   turnInputClassificationResponseSchema,
   turnListResponseSchema,
+  turnPageRequestSchema,
+  syncStatusRequestSchema,
   userProfileResponseSchema,
   userProfileUpdateSchema,
   worldCreateResponseSchema,
@@ -84,6 +86,52 @@ describe("client API response contracts", () => {
 
     expect(parsed.error).toBe("GenerationConflictError");
     expect(parsed.details).toMatchObject({ code: "active_generation_exists" });
+  });
+
+  it("validates bounded read requests and makes sync windows internally consistent", () => {
+    expect(turnPageRequestSchema.parse({ before: "cursor", limit: 50 })).toEqual({ before: "cursor", limit: 50 });
+    expect(turnPageRequestSchema.safeParse({ limit: 201 }).success).toBe(false);
+    expect(syncStatusRequestSchema.parse({ since: "sync-token" })).toEqual({ since: "sync-token" });
+    expect(syncStatusRequestSchema.safeParse({ since: "" }).success).toBe(false);
+
+    const sync = campaignSyncStatusSchema.parse({
+      id: CAMPAIGN_ID,
+      title: "Campaign",
+      activeTurnNumber: 0,
+      worldVersionId: WORLD_VERSION_ID,
+      storyLengthProfile: "standard",
+      updatedAt: TIMESTAMP,
+      selectedCharacterId: null,
+      selectedCharacterName: "",
+      characterSnapshot: null,
+      characterProfile: null,
+      characterProfileRevision: 0,
+      status: "active",
+      campaign: {
+        id: CAMPAIGN_ID,
+        title: "Campaign",
+        activeTurnNumber: 0,
+        worldVersionId: WORLD_VERSION_ID,
+        storyLengthProfile: "standard",
+        updatedAt: TIMESTAMP,
+        selectedCharacterId: null,
+        selectedCharacterName: "",
+        characterSnapshot: null,
+        characterProfile: null,
+        characterProfileRevision: 0,
+        status: "active"
+      },
+      world: { id: WORLD_ID, title: "World", versionNumber: 1, genre: "", tone: "", premise: "", backgroundStory: "", character: "", firstAction: "", rules: "", playableCharacters: [] },
+      playerConfig: { selectedCharacterId: null, selectedCharacterName: "", characterSnapshot: null, characterProfile: null, characterProfileRevision: 0, rpgStats: [], trackers: [], eventTriggers: [], useRpgStats: false, suppressEventTriggers: false },
+      pendingGeneration: null,
+      syncToken: "sync-token",
+      turnWindowMode: "unchanged",
+      turns: null,
+      generationRecovery: null
+    });
+    expect(sync.turnWindowMode).toBe("unchanged");
+    expect(campaignSyncStatusSchema.safeParse({ ...sync, turnWindowMode: "unchanged", turns: { turns: [], nextCursor: null } }).success).toBe(false);
+    expect(campaignSyncStatusSchema.safeParse({ ...sync, turnWindowMode: "replace", turns: null }).success).toBe(false);
   });
 
   it("rejects campaign list field drift", () => {

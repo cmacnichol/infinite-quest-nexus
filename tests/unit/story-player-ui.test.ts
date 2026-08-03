@@ -362,7 +362,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('await runGeneration(action, {');
     expect(storyScript).not.toContain('confirm("Retry the last turn? The current outcome will be replaced.")');
     expect(storyScript).toContain('branchDlg.addEventListener("close"');
-    expect(storyScript).toContain('await branchCampaignFromTurn(state.campaignId, branchDlg._turnIndex, apiClient.campaigns.branch);');
+    expect(storyScript).toContain('await branchCampaignFromTurn(state.campaignId, branchDlg._targetTurnNumber, apiClient.campaigns.branch);');
     expect(storyScript).toContain('function openTurnHistoryModal()');
     expect(storyScript).toContain('el.addEventListener("click", openTurnHistoryModal);');
   });
@@ -380,7 +380,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('card.setAttribute("aria-pressed", "false");');
     expect(storyScript).toContain('if (event.key === "Enter" || event.key === " ")');
     expect(storyScript).toContain('card.classList.toggle("selected", selected);');
-    expect(storyScript).toContain('inspectTurnState(turnIndex + 1);');
+    expect(storyScript).toContain('const turnNumber = selectedTurnNumber(state.turns, turnIndex);');
     expect(storyScript).toContain('inspectBtn.disabled = !hasSelection;');
     expect(storyScript).toContain('jumpBtn.disabled = !hasSelection;');
     expect(storyScript).toContain('branchBtn.classList.toggle("hidden", !hasSelection || state.historySelectedIndex >= state.turns.length - 1);');

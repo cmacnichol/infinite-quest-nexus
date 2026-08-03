@@ -161,6 +161,38 @@ describe("generation workflow", () => {
     expect(pending.value).toBeNull();
   });
 
+  it("resumes an authoritative completed recovery outside the returned turn window", async () => {
+    const pending = store();
+    const resultIds: string[] = [];
+    const client = api({
+      syncStatus: async () => ({
+        pendingGeneration: null,
+        turns: { turns: [], nextCursor: null },
+        generationRecovery: {
+          id: otherJobId,
+          status: "completed",
+          operationKind: "append",
+          expectedTurnNumber: 51,
+          attempts: 1,
+          errorCode: null,
+          errorMessage: null,
+          resultTurnId: "44444444-4444-4444-8444-444444444444"
+        }
+      } as unknown as CampaignSyncStatus),
+      result: async (id) => {
+        resultIds.push(id);
+        return { ...completedResult(), id: otherJobId };
+      }
+    });
+    const workflow = createGenerationWorkflow({ api: client, source: sourceFromSessions([]), clock: { now: () => 1_000 }, pendingSubmissions: pending });
+
+    const resumed = await workflow.resume(campaignId);
+
+    expect(resumed?.jobId).toBe(otherJobId);
+    await resumed?.fetchResult();
+    expect(resultIds).toEqual([otherJobId]);
+  });
+
   it("auto-retries once through a fresh source session and then settles with the fetched result", async () => {
     const source = sourceFromSessions([
       [{ kind: "snapshot", snapshot: snapshot({ status: "recoverable", attempts: 1 }) }],
