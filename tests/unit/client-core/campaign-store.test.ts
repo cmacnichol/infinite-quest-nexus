@@ -346,6 +346,31 @@ describe("campaign store hydration", () => {
     expect(controller.store.get()).toMatchObject({ campaign: { id: otherCampaignId }, generation: null });
   });
 
+  it("keeps matching live generation attached when authoritative hydration refreshes it", () => {
+    const pending = {
+      id: jobId,
+      status: "queued" as const,
+      action: "wait",
+      expectedTurnNumber: 3,
+      createdAt: "2026-08-03T12:00:00.000Z",
+      updatedAt: "2026-08-03T12:00:00.000Z",
+      operationKind: "append" as const,
+      replacementTurnId: null
+    };
+    const controller = createCampaignStore();
+    controller.load(sync({ pendingGeneration: pending }));
+    controller.attachGeneration(run());
+
+    controller.load(sync({ pendingGeneration: { ...pending, status: "generating" } }));
+
+    expect(controller.store.get().generation).toMatchObject({
+      jobId,
+      monitoring: "attached",
+      hydratedGeneration: { status: "generating" },
+      result: { state: "pending" }
+    });
+  });
+
   it("keeps campaign-only selectors pure and allocation-free", () => {
     const controller = createCampaignStore();
     controller.load(sync());

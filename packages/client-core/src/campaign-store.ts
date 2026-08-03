@@ -89,7 +89,8 @@ export function createCampaignStore(): CampaignStoreController {
     const switchingCampaign = previous.campaign !== null && previous.campaign.id !== sync.campaign.id;
     const isSameCampaign = previous.campaign?.id === sync.campaign.id;
     const nextWindow = resolveWindow(sync, previous, isSameCampaign);
-    const generation = hydrateGeneration(sync, nextWindow.turns);
+    const hydratedGeneration = hydrateGeneration(sync, nextWindow.turns);
+    const generation = mergeMatchingLiveGeneration(previous.generation, hydratedGeneration, liveGeneration);
 
     if (switchingCampaign || (liveGeneration && liveGeneration.run.jobId !== generation?.jobId)) {
       liveGeneration = null;
@@ -193,6 +194,25 @@ function hydrateGeneration(sync: CampaignSyncStatus, turns: readonly Immutable<T
       ? { state: "unavailable" as const, message: "Accepted result is ready to load.", correlationId: null }
       : { state: "pending" as const };
   return hydratedJob(sync.campaign.id, "hydrated_recovery", summary, result);
+}
+
+function mergeMatchingLiveGeneration(
+  previous: Immutable<GenerationJobProjection> | null,
+  hydrated: GenerationJobProjection | null,
+  live: LiveGeneration | null
+): GenerationJobProjection | null {
+  if (hydrated === null
+    || previous === null
+    || live === null
+    || hydrated.jobId !== live.run.jobId
+    || previous.jobId !== live.run.jobId) return hydrated;
+  return {
+    ...hydrated,
+    monitoring: "attached",
+    snapshot: previous.snapshot,
+    narration: previous.narration,
+    transport: previous.transport
+  };
 }
 
 function copyPending(pending: NonNullable<CampaignSyncStatus["pendingGeneration"]>): HydratedGenerationProjection {
