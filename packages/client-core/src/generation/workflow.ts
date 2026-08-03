@@ -23,12 +23,20 @@ export function createGenerationWorkflow(dependencies: GenerationWorkflowDepende
       return createRun(campaignId, response.id, dependencies);
     },
     async resume(campaignId) {
-      const submission = submissions.load(campaignId);
       const sync = await dependencies.api.syncStatus(campaignId);
       if (sync.pendingGeneration) {
         dependencies.pendingSubmissions.clear(campaignId);
         return createRun(campaignId, sync.pendingGeneration.id, dependencies);
       }
+      const recovery = sync.generationRecovery;
+      const completedTurnAlreadyLoaded = recovery?.status === "completed"
+        && recovery.resultTurnId !== null
+        && sync.turns?.turns.some((turn) => turn.id === recovery.resultTurnId);
+      if (recovery && !completedTurnAlreadyLoaded) {
+        dependencies.pendingSubmissions.clear(campaignId);
+        return createRun(campaignId, recovery.id, dependencies);
+      }
+      const submission = submissions.load(campaignId);
       if (!submission) return null;
       if (submission.jobId) return createRun(campaignId, submission.jobId, dependencies);
       const response = await submissions.replay(campaignId, submission);

@@ -71,7 +71,7 @@ export interface WorldApi {
 
 export interface CampaignApi {
   list(signal?: AbortSignal): Promise<CampaignListResponse>;
-  turns(campaignId: string, signal?: AbortSignal): Promise<TurnListResponse>;
+  turns(campaignId: string, options?: TurnPageRequest | AbortSignal, signal?: AbortSignal): Promise<TurnListResponse>;
   state(campaignId: string, turnNumber?: number, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
   updateState(campaignId: string, request: CampaignRuntimeStateUpdate, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
   classifyTurnInput(campaignId: string, request: TurnInputClassificationRequest, signal?: AbortSignal): Promise<TurnInputClassificationResponse>;
@@ -94,7 +94,7 @@ export interface ProviderApi {
 }
 
 export interface GenerationApi {
-  syncStatus(campaignId: string, signal?: AbortSignal): Promise<CampaignSyncStatus>;
+  syncStatus(campaignId: string, options?: SyncStatusRequest | AbortSignal, signal?: AbortSignal): Promise<CampaignSyncStatus>;
   enqueue(campaignId: string, request: GenerationRequest, signal?: AbortSignal): Promise<GenerationEnqueueResponse>;
   enqueueReplacement(campaignId: string, request: GenerationRetryLatestRequest, signal?: AbortSignal): Promise<GenerationEnqueueResponse>;
   get(jobId: string, signal?: AbortSignal): Promise<GenerationJobSnapshot>;
@@ -111,6 +111,13 @@ export interface NexusApiClient {
   meta: ShellApi;
   session: SessionApi;
   providers: ProviderApi;
+}
+
+export type TurnPageRequest = { before?: string; limit?: number };
+export type SyncStatusRequest = { since?: string };
+
+function splitOptions<T extends object>(options: T | AbortSignal | undefined, signal: AbortSignal | undefined): [T | undefined, AbortSignal | undefined] {
+  return options && "aborted" in options ? [undefined, options as AbortSignal] : [options, signal];
 }
 
 function encodedPathSegment(value: string): string {
@@ -162,11 +169,17 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
   };
   const campaigns: CampaignApi = {
     list: (signal) => http.request(withSignal({ method: "GET", path: "/campaigns", responseSchema: campaignListResponseSchema }, signal)),
-    turns: (campaignId, signal) => http.request(withSignal({
-      method: "GET",
-      path: `/campaigns/${encodedPathSegment(campaignId)}/turns`,
-      responseSchema: turnListResponseSchema
-    }, signal)),
+    turns: (campaignId, options, signal) => {
+      const [page, resolvedSignal] = splitOptions<TurnPageRequest>(options, signal);
+      const query = new URLSearchParams();
+      if (page?.before) query.set("before", page.before);
+      if (page?.limit !== undefined) query.set("limit", String(page.limit));
+      return http.request(withSignal({
+        method: "GET",
+        path: `/campaigns/${encodedPathSegment(campaignId)}/turns${query.size ? `?${query}` : ""}`,
+        responseSchema: turnListResponseSchema
+      }, resolvedSignal));
+    },
     state: (campaignId, turnNumber, signal) => http.request(withSignal({
       method: "GET",
       path: `/campaigns/${encodedPathSegment(campaignId)}/state${turnNumber === undefined ? "" : `?turnNumber=${encodeURIComponent(String(turnNumber))}`}`,
@@ -204,11 +217,15 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
     }
   };
   const generation: GenerationApi = {
-    syncStatus: (campaignId, signal) => http.request(withSignal({
-      method: "GET",
-      path: `/campaigns/${encodedPathSegment(campaignId)}/sync-status`,
-      responseSchema: campaignSyncStatusSchema
-    }, signal)),
+    syncStatus: (campaignId, options, signal) => {
+      const [sync, resolvedSignal] = splitOptions<SyncStatusRequest>(options, signal);
+      const query = sync?.since ? `?since=${encodeURIComponent(sync.since)}` : "";
+      return http.request(withSignal({
+        method: "GET",
+        path: `/campaigns/${encodedPathSegment(campaignId)}/sync-status${query}`,
+        responseSchema: campaignSyncStatusSchema
+      }, resolvedSignal));
+    },
     async enqueue(campaignId, request, signal) {
       const method: HttpMethod = "POST";
       const path = `/campaigns/${encodedPathSegment(campaignId)}/generations`;

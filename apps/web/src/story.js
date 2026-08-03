@@ -59,6 +59,7 @@ const state = {
   runtimeState: null,
   editStateSession: null,
   turns: [],
+  historyNextCursor: null,
   viewIndex: -1,
   busy: false,
   providers: [],
@@ -198,7 +199,7 @@ function syncInputState() {
 
   const lastTurnHasAction = turnCount > 0 && Boolean(state.turns[turnCount - 1] && state.turns[turnCount - 1].action);
 
-  if (btnPrev) btnPrev.disabled = generationLocked || turnCount === 0 || curr <= 0;
+  if (btnPrev) btnPrev.disabled = generationLocked || turnCount === 0 || (curr <= 0 && !state.historyNextCursor);
   if (btnNext) btnNext.disabled = generationLocked || turnCount === 0 || isLatest;
   if (btnUndo) btnUndo.disabled = generationLocked || turnCount === 0 || !isLatest;
   if (btnRetry) btnRetry.disabled = generationLocked || turnCount === 0 || !isLatest || !lastTurnHasAction;
@@ -266,8 +267,9 @@ async function loadCampaign(campaignId, options = {}) {
     state.pendingGeneration = syncData.pendingGeneration || null;
     syncTurnInputModeFromCampaign();
 
-    const turnData = await apiClient.campaigns.turns(campaignId);
+    const turnData = syncData.turns || await apiClient.campaigns.turns(campaignId);
     state.turns = turnData.turns || [];
+    state.historyNextCursor = turnData.nextCursor || null;
     state.runtimeState = await apiClient.campaigns.state(campaignId);
     try {
       state.illustrationConfig = await illustrationApi.config(campaignId);
@@ -1332,9 +1334,39 @@ function navigateTo(index) {
   scrollToView();
 }
 
-function goToPrevious() {
+async function loadOlderTurnPage() {
+  if (!state.historyNextCursor || state.busy) return false;
+  showBusy("Loading older turns…");
+  try {
+    const page = await apiClient.campaigns.turns(state.campaignId, { before: state.historyNextCursor });
+    const knownIds = new Set(state.turns.map((turn) => turn.id));
+    const olderTurns = (page.turns || []).filter((turn) => !knownIds.has(turn.id));
+    if (!olderTurns.length) {
+      state.historyNextCursor = null;
+      return false;
+    }
+    state.turns = [...olderTurns, ...state.turns];
+    state.historyNextCursor = page.nextCursor || null;
+    state.viewIndex = olderTurns.length - 1;
+    renderAllScenes();
+    updateStatusBar();
+    return true;
+  } catch (error) {
+    toast(`Unable to load older turns: ${error.message}`);
+    recordActivity("error", "Older turn page failed", error.message);
+    return false;
+  } finally {
+    hideBusy();
+  }
+}
+
+async function goToPrevious() {
   const curr = state.viewIndex === -1 ? state.turns.length - 1 : state.viewIndex;
-  if (state.busy || state.turns.length === 0 || curr <= 0) return;
+  if (state.busy || state.turns.length === 0) return;
+  if (curr <= 0) {
+    await loadOlderTurnPage();
+    return;
+  }
   navigateTo(curr - 1);
 }
 

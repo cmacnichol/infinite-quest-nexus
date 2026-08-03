@@ -188,6 +188,17 @@ const pendingGenerationSchema = z.object({
   updatedAt: apiTimestampSchema
 });
 
+export const generationRecoverySchema = z.object({
+  id: z.uuid(),
+  status: z.enum(["recoverable", "failed", "completed"]),
+  operationKind: operationKindSchema,
+  expectedTurnNumber: z.number().int().min(1),
+  attempts: z.number().int().min(0),
+  errorCode: z.string().nullable(),
+  errorMessage: z.string().nullable(),
+  resultTurnId: z.uuid().nullable()
+});
+
 export const campaignSyncStatusSchema = campaignSyncCampaignSchema.extend({
   campaign: campaignSyncCampaignSchema,
   world: z.object({
@@ -215,7 +226,11 @@ export const campaignSyncStatusSchema = campaignSyncCampaignSchema.extend({
     useRpgStats: z.boolean(),
     suppressEventTriggers: z.boolean()
   }),
-  pendingGeneration: pendingGenerationSchema.nullable()
+  pendingGeneration: pendingGenerationSchema.nullable(),
+  syncToken: z.string().min(1),
+  turnWindowMode: z.enum(["unchanged", "replace"]),
+  turns: z.lazy(() => turnListResponseSchema).nullable(),
+  generationRecovery: generationRecoverySchema.nullable()
 });
 
 export const turnSummarySchema = z.object({
@@ -234,7 +249,8 @@ export const turnSummarySchema = z.object({
 });
 
 export const turnListResponseSchema = z.object({
-  turns: z.array(turnSummarySchema)
+  turns: z.array(turnSummarySchema),
+  nextCursor: z.string().min(1).nullable()
 });
 
 export const generationEnqueueResponseSchema = z.object({
@@ -304,6 +320,7 @@ export type CampaignCreateResponse = z.infer<typeof campaignCreateResponseSchema
 export type WorldCreateResponse = z.infer<typeof worldCreateResponseSchema>;
 export type PlayableCharacterListResponse = z.infer<typeof playableCharacterListResponseSchema>;
 export type CampaignSyncStatus = z.infer<typeof campaignSyncStatusSchema>;
+export type GenerationRecovery = z.infer<typeof generationRecoverySchema>;
 export type TurnSummary = z.infer<typeof turnSummarySchema>;
 export type TurnListResponse = z.infer<typeof turnListResponseSchema>;
 export type GenerationEnqueueResponse = z.infer<typeof generationEnqueueResponseSchema>;

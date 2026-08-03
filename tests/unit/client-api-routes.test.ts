@@ -473,8 +473,13 @@ describe("client API route contracts without PostgreSQL", () => {
     try {
       expect(worldListResponseSchema.parse((await app.inject({ method: "GET", url: "/api/v1/worlds" })).json()).worlds).toHaveLength(1);
       expect(campaignListResponseSchema.parse((await app.inject({ method: "GET", url: "/api/v1/campaigns" })).json()).campaigns).toHaveLength(1);
-      expect(campaignSyncStatusSchema.parse((await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/sync-status` })).json()).campaign.id).toBe(CAMPAIGN_ID);
-      expect(turnListResponseSchema.parse((await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/turns` })).json()).turns).toHaveLength(1);
+      const sync = campaignSyncStatusSchema.parse((await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/sync-status` })).json());
+      expect(sync.campaign.id).toBe(CAMPAIGN_ID);
+      expect(sync.turnWindowMode).toBe("replace");
+      expect(sync.turns?.nextCursor).toBeNull();
+      const turns = turnListResponseSchema.parse((await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/turns?limit=50` })).json());
+      expect(turns.turns).toHaveLength(1);
+      expect(turns.nextCursor).toBeNull();
       const snapshotResponse = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}` });
       expect(generationJobSnapshotSchema.parse(snapshotResponse.json())).toMatchObject({ id: JOB_ID, operationKind: "append", updatedAt: NOW.toISOString() });
       expect(snapshotResponse.json()).not.toHaveProperty("partialOutput");

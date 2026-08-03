@@ -110,7 +110,7 @@ const legacyStreamProjection = (job: typeof generationJob) => ({
 process.stdout.write(`${JSON.stringify({
   command: "pnpm exec tsx scripts/benchmark-client-contracts.ts",
   fixture: { turns: TURN_COUNT, warmUpSamples: WARM_UP_SAMPLES, measuredSamples: MEASURED_SAMPLES },
-  turnListValidation: measure(() => { turnListResponseSchema.parse({ turns }); }),
+  turnListValidation: measure(() => { turnListResponseSchema.parse({ turns, nextCursor: null }); }),
   payloadBytes: {
     preC1HandBuilt: Buffer.byteLength(JSON.stringify(legacyStreamSnapshot)),
     c1Stream: Buffer.byteLength(JSON.stringify(pollingSnapshot)),

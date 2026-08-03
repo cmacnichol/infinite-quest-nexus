@@ -75,6 +75,8 @@ import {
 } from "../../../packages/contracts/src/client-api.js";
 import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
 import { formatNarrationParagraphs } from "../../../packages/story-engine/src/narration-formatting.js";
+import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
+import { readTurnPage } from "../../../packages/database/src/play-loop-read-repository.js";
 import { userProfileUpdateSchema } from "../../../packages/contracts/src/users.js";
 import { assetListQuerySchema, assetMetadataUpdateSchema } from "../../../packages/contracts/src/assets.js";
 import {
@@ -637,26 +639,19 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     return reply.code(result.reused ? 200 : 201).send(result);
   });
 
-  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/turns", async (request) => {
+  app.get<{ Params: { campaignId: string }; Querystring: { before?: string; limit?: string } }>("/api/v1/campaigns/:campaignId/turns", async (request) => {
     const ownerUserId = await initialOwnerId(pool);
     const campaignId = uuidSchema.parse(request.params.campaignId);
-    const result = await pool.query(
-      `SELECT id, turn_number AS "turnNumber", action, COALESCE(input_mode, 'action') AS "inputMode",
-              COALESCE(input_mode_source, 'explicit') AS "inputModeSource", narration, choices,
-              custom_action_suggestion AS "customActionSuggestion", image_prompt AS "imagePrompt",
-              image_url AS "imageUrl", accepted_at AS "acceptedAt"
-         FROM turns
-        WHERE owner_user_id = $1 AND campaign_id = $2
-        ORDER BY turn_number`,
-      [ownerUserId, campaignId]
-    );
-    const costs = await turnReportedCosts(pool, ownerUserId, result.rows.map((turn: { id: string }) => turn.id));
+    const limit = request.query.limit === undefined ? 50 : z.coerce.number().int().min(1).max(200).parse(request.query.limit);
+    const page = await readTurnPage(pool, ownerUserId, campaignId, request.query.before, limit);
+    const costs = await turnReportedCosts(pool, ownerUserId, page.turns.map((turn) => turn.id));
     return parseResponseProjection(turnListResponseSchema, {
-      turns: result.rows.map((turn: { id: string; narration: string }) => ({
+      turns: page.turns.map((turn) => ({
         ...turn,
         narration: formatNarrationParagraphs(turn.narration),
         reportedCost: costs.get(turn.id) || null
-      }))
+      })),
+      nextCursor: page.nextCursor
     });
   });
 
@@ -680,7 +675,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
     getCampaignCostSummary(pool, uuidSchema.parse(request.params.campaignId))
   ));
 
-  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/sync-status", async (request) => {
+  app.get<{ Params: { campaignId: string }; Querystring: { since?: string } }>("/api/v1/campaigns/:campaignId/sync-status", async (request) => {
     const ownerUserId = await initialOwnerId(pool);
     const result = await pool.query(
       `SELECT c.id, c.title, c.active_turn_number AS "activeTurnNumber", c.world_version_id AS "worldVersionId",
@@ -697,7 +692,10 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
               pending.requested_input_mode AS "pendingRequestedInputMode",
               pending.resolved_input_mode AS "pendingResolvedInputMode", pending.input_mode_source AS "pendingInputModeSource",
               pending.expected_turn_number AS "pendingGenerationExpectedTurnNumber",
-              pending.created_at AS "pendingGenerationCreatedAt", pending.updated_at AS "pendingGenerationUpdatedAt"
+              pending.created_at AS "pendingGenerationCreatedAt", pending.updated_at AS "pendingGenerationUpdatedAt",
+              recovery.id AS "recoveryId", recovery.status AS "recoveryStatus", recovery.operation_kind AS "recoveryOperationKind",
+              recovery.expected_turn_number AS "recoveryExpectedTurnNumber", recovery.attempts AS "recoveryAttempts",
+              recovery.error_code AS "recoveryErrorCode", recovery.error_message AS "recoveryErrorMessage", recovery.result_turn_id AS "recoveryResultTurnId"
          FROM campaigns c
          JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
          JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
@@ -707,9 +705,16 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
                   expected_turn_number, created_at, updated_at
              FROM generation_jobs
             WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
-              AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
+              AND status IN ('queued','replacement_queued','assessing','generating','validating','committing')
             ORDER BY created_at DESC LIMIT 1
          ) pending ON true
+         LEFT JOIN LATERAL (
+           SELECT id, status, operation_kind, expected_turn_number, attempts, error_code, error_message, result_turn_id
+             FROM generation_jobs
+            WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
+              AND status IN ('recoverable','failed','completed')
+            ORDER BY updated_at DESC, id DESC LIMIT 1
+         ) recovery ON true
         WHERE c.id = $1 AND c.owner_user_id = $2`,
       [uuidSchema.parse(request.params.campaignId), ownerUserId]
     );
@@ -772,7 +777,37 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       createdAt: row.pendingGenerationCreatedAt,
       updatedAt: row.pendingGenerationUpdatedAt
     } : null;
-    return parseResponseProjection(campaignSyncStatusSchema, { ...campaign, campaign, world, playerConfig, pendingGeneration });
+    const turnPage = await readTurnPage(pool, ownerUserId, campaign.id, undefined, 50);
+    const costs = await turnReportedCosts(pool, ownerUserId, turnPage.turns.map((turn) => turn.id));
+    const turns = {
+      turns: turnPage.turns.map((turn) => ({ ...turn, narration: formatNarrationParagraphs(turn.narration), reportedCost: costs.get(turn.id) || null })),
+      nextCursor: turnPage.nextCursor
+    };
+    const generationRecovery = row.recoveryId && !turns.turns.some((turn) => turn.id === row.recoveryResultTurnId) ? {
+      id: row.recoveryId,
+      status: row.recoveryStatus,
+      operationKind: row.recoveryOperationKind,
+      expectedTurnNumber: row.recoveryExpectedTurnNumber,
+      attempts: row.recoveryAttempts,
+      errorCode: row.recoveryErrorCode,
+      errorMessage: row.recoveryErrorMessage,
+      resultTurnId: row.recoveryResultTurnId
+    } : null;
+    const syncToken = sha256(stableStringify({
+      ownerUserId, campaign, world, playerConfig,
+      latestTurnId: turns.turns.at(-1)?.id ?? null, latestTurnNumber: turns.turns.at(-1)?.turnNumber ?? null,
+      pendingGenerationId: pendingGeneration?.id ?? null, pendingGenerationStatus: pendingGeneration?.status ?? null,
+      pendingGenerationUpdatedAt: pendingGeneration?.updatedAt ?? null,
+      recoveryId: generationRecovery?.id ?? null, recoveryStatus: generationRecovery?.status ?? null,
+      recoveryAttempts: generationRecovery?.attempts ?? null
+    }));
+    const unchanged = request.query.since === syncToken;
+    return parseResponseProjection(campaignSyncStatusSchema, {
+      ...campaign, campaign, world, playerConfig, pendingGeneration, syncToken,
+      turnWindowMode: unchanged ? "unchanged" : "replace",
+      turns: unchanged ? null : turns,
+      generationRecovery
+    });
   });
 
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/player-config", async (request) => (

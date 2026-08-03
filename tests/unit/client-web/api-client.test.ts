@@ -130,6 +130,7 @@ describe("createNexusApiClient", () => {
         turnControlStyle: "flexible_auto"
       }, signal),
       () => client.campaigns.turns("campaign / id", signal),
+      () => client.campaigns.turns("campaign / id", { before: "older-page", limit: 3 }, signal),
       () => client.campaigns.state("campaign / id", undefined, signal),
       () => client.campaigns.state("campaign / id", 3, signal),
       () => client.campaigns.updateState(campaignId, {
@@ -148,6 +149,7 @@ describe("createNexusApiClient", () => {
       () => client.campaigns.rewind(campaignId, { targetTurnNumber: 2 }, signal),
       () => client.campaigns.branch(campaignId, { targetTurnNumber: 2 }, signal),
       () => client.generation.syncStatus("campaign / id", signal),
+      () => client.generation.syncStatus("campaign / id", { since: "resume-token" }, signal),
       () => client.generation.enqueue(campaignId, generationRequest, signal),
       () => client.generation.enqueueReplacement(campaignId, replacementRequest, signal),
       () => client.generation.get("job / id", signal),
@@ -170,6 +172,7 @@ describe("createNexusApiClient", () => {
       "/api/v1/campaigns",
       "/api/v1/campaigns",
       "/api/v1/campaigns/campaign%20%2F%20id/turns",
+      "/api/v1/campaigns/campaign%20%2F%20id/turns?before=older-page&limit=3",
       "/api/v1/campaigns/campaign%20%2F%20id/state",
       "/api/v1/campaigns/campaign%20%2F%20id/state?turnNumber=3",
       `/api/v1/campaigns/${campaignId}/state`,
@@ -177,6 +180,7 @@ describe("createNexusApiClient", () => {
       `/api/v1/campaigns/${campaignId}/rewind`,
       `/api/v1/campaigns/${campaignId}/branch`,
       "/api/v1/campaigns/campaign%20%2F%20id/sync-status",
+      "/api/v1/campaigns/campaign%20%2F%20id/sync-status?since=resume-token",
       `/api/v1/campaigns/${campaignId}/generations`,
       `/api/v1/campaigns/${campaignId}/generations/retry-latest`,
       "/api/v1/generation-jobs/job%20%2F%20id",
@@ -190,12 +194,12 @@ describe("createNexusApiClient", () => {
       "/api/v1/providers"
     ]);
     expect(queue.options.map((option) => option.method)).toEqual([
-      "GET", "POST", "GET", "GET", "POST", "GET", "GET", "GET", "PATCH", "POST", "POST", "POST",
-      "GET", "POST", "POST", "GET", "GET", "POST", "POST", "POST", "GET", "GET", "PATCH", "GET"
+      "GET", "POST", "GET", "GET", "POST", "GET", "GET", "GET", "GET", "PATCH", "POST", "POST", "POST",
+      "GET", "GET", "POST", "POST", "GET", "GET", "POST", "POST", "POST", "GET", "GET", "PATCH", "GET"
     ]);
-    expect(queue.options[13]?.body).toBe(JSON.stringify(generationRequest));
-    expect(queue.options[14]?.body).toBe(JSON.stringify(replacementRequest));
-    expect(queue.options.slice(17, 20).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
+    expect(queue.options[15]?.body).toBe(JSON.stringify(generationRequest));
+    expect(queue.options[16]?.body).toBe(JSON.stringify(replacementRequest));
+    expect(queue.options.slice(19, 22).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
     expect(queue.options.every((option) => option.signal === signal)).toBe(true);
   });
 

@@ -130,6 +130,37 @@ describe("generation workflow", () => {
     expect(pending.value).toBeNull();
   });
 
+  it("prefers authoritative recovery over a saved submission without replaying its key", async () => {
+    const pending = store({ ...submission(), createdAt: 1_000 });
+    const replayedKeys: string[] = [];
+    const client = api({
+      enqueue: async (_campaignId, request) => {
+        replayedKeys.push(request.idempotencyKey);
+        return enqueueResponse(otherJobId);
+      },
+      syncStatus: async () => ({
+        pendingGeneration: null,
+        generationRecovery: {
+          id: otherJobId,
+          status: "recoverable",
+          operationKind: "append",
+          expectedTurnNumber: 1,
+          attempts: 1,
+          errorCode: "provider_unavailable",
+          errorMessage: "Try again.",
+          resultTurnId: null
+        }
+      } as CampaignSyncStatus)
+    });
+    const workflow = createGenerationWorkflow({ api: client, source: sourceFromSessions([]), clock: { now: () => 1_000 }, pendingSubmissions: pending });
+
+    const resumed = await workflow.resume(campaignId);
+
+    expect(resumed?.jobId).toBe(otherJobId);
+    expect(replayedKeys).toEqual([]);
+    expect(pending.value).toBeNull();
+  });
+
   it("auto-retries once through a fresh source session and then settles with the fetched result", async () => {
     const source = sourceFromSessions([
       [{ kind: "snapshot", snapshot: snapshot({ status: "recoverable", attempts: 1 }) }],

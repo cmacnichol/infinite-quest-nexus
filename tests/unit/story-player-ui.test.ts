@@ -158,6 +158,13 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('class="replacement-pending-banner"');
   });
 
+  it("adopts bounded sync windows and requests older pages before exhausting history navigation", () => {
+    expect(storyScript).toContain("historyNextCursor: null");
+    expect(storyScript).toContain("async function loadOlderTurnPage()");
+    expect(storyScript).toContain("apiClient.campaigns.turns(state.campaignId, { before: state.historyNextCursor }");
+    expect(storyScript).toContain("syncData.turns || await apiClient.campaigns.turns(campaignId)");
+  });
+
   it("delegates monitoring and durable pending submissions to the injected workflow", () => {
     expect(storyScript).toContain("composition.workflow.submit");
     expect(storyScript).toContain("composition.workflow.resume");
@@ -715,7 +722,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('const storyInputLocked = generationLocked || !isLatest;');
     expect(storyScript).toContain('if (btnAction) btnAction.disabled = storyInputLocked;');
     expect(storyScript).not.toContain('inputAction.style.pointerEvents = "none";');
-    expect(storyScript).toContain('if (btnPrev) btnPrev.disabled = generationLocked || turnCount === 0 || curr <= 0;');
+    expect(storyScript).toContain('if (btnPrev) btnPrev.disabled = generationLocked || turnCount === 0 || (curr <= 0 && !state.historyNextCursor);');
     expect(storyScript).toContain('if (btnNext) btnNext.disabled = generationLocked || turnCount === 0 || isLatest;');
     expect(storyScript).toContain('if (btnUndo) btnUndo.disabled = generationLocked || turnCount === 0 || !isLatest;');
     expect(storyScript).toContain('if (btnRetry) btnRetry.disabled = generationLocked || turnCount === 0 || !isLatest || !lastTurnHasAction;');

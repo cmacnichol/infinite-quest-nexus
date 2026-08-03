@@ -209,7 +209,11 @@ describe("client API response contracts", () => {
         expectedTurnNumber: 2,
         createdAt: TIMESTAMP,
         updatedAt: TIMESTAMP
-      }
+      },
+      syncToken: "sync-token",
+      turnWindowMode: "replace",
+      turns: { turns: [], nextCursor: null },
+      generationRecovery: null
     });
 
     expect(parsed.pendingGeneration?.status).toBe("replacement_queued");
@@ -231,7 +235,8 @@ describe("client API response contracts", () => {
       acceptedAt: TIMESTAMP,
       reportedCost: null
     };
-    expect(turnListResponseSchema.parse({ turns: [turn] }).turns).toHaveLength(1);
+    expect(turnListResponseSchema.parse({ turns: [turn], nextCursor: null }).turns).toHaveLength(1);
+    expect(() => turnListResponseSchema.parse({ turns: [turn] })).toThrow();
 
     const result = generationResultSchema.parse({
       id: JOB_ID,
