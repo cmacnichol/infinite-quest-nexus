@@ -455,7 +455,24 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       reportedCost: null
     }] };
 
-    if (sql.startsWith("UPDATE generation_jobs SET status = CASE")) return { rows: [{ id: JOB_ID, status: "queued", operation_kind: "append", replacementTurnId: null }] };
+    if (sql.startsWith("WITH source AS ( SELECT id, status, campaign_id AS \"campaignId\"")) return { rows: [{
+      id: JOB_ID,
+      status: "queued",
+      operationKind: "append",
+      replacementTurnId: null,
+      campaignId: CAMPAIGN_ID,
+      providerProfileId: PROVIDER_ID,
+      expectedTurnNumber: 3,
+      attempts: 1,
+      generationStatus: "recoverable"
+    }] };
+    if (sql.startsWith("WITH source AS ( SELECT id, status FROM generation_jobs")) return { rows: [{
+      id: JOB_ID,
+      status: "discarded",
+      operationKind: "append",
+      replacementTurnId: null,
+      generationStatus: "recoverable"
+    }] };
     if (sql.startsWith("UPDATE generation_jobs SET status = 'discarded'")) return { rows: [{ id: JOB_ID, status: "discarded", campaignId: CAMPAIGN_ID, operationKind: "append", replacementTurnId: null }] };
     if (sql.startsWith("UPDATE generation_jobs SET status = 'cancelled'")) return { rows: [{ id: JOB_ID, status: "cancelled", campaignId: CAMPAIGN_ID, operationKind: "append", replacementTurnId: null }] };
     if (sql.startsWith("INSERT INTO campaign_state")
