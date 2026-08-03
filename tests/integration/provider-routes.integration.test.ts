@@ -4,6 +4,7 @@ import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { buildServer } from "../../services/api/src/server.js";
+import { serverOptions } from "../helpers/build-server-options.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -82,7 +83,7 @@ integration("provider route configuration redaction", () => {
         trustProxyHops: 0
       }
     };
-    app = await buildServer({ config, pool });
+    app = await buildServer(serverOptions({ config, pool }));
   });
 
   afterAll(async () => {

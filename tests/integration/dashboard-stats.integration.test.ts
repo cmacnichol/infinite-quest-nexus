@@ -4,6 +4,7 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { getDashboardStats } from "../../services/api/src/dashboard-service.js";
 import { buildServer } from "../../services/api/src/server.js";
+import { serverOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -69,7 +70,7 @@ integration("dashboard statistics integration", () => {
         trustProxyHops: 0
       }
     };
-    app = await buildServer({ config, pool });
+    app = await buildServer(serverOptions({ config, pool }));
   });
 
   afterAll(async () => {

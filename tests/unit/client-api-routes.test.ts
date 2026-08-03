@@ -29,6 +29,7 @@ import {
   worldListResponseSchema
 } from "../../packages/contracts/src/index.js";
 import { buildServer } from "../../services/api/src/server.js";
+import { serverOptions } from "../helpers/build-server-options.js";
 
 const OWNER_ID = "00000000-0000-4000-8000-000000000001";
 const CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
@@ -514,7 +515,7 @@ describe("client API route contracts without PostgreSQL", () => {
   });
 
   it("serializes adopted read routes through their shared response schemas", async () => {
-    const app = await buildServer({ config: config(storageRoot), pool: mockPool() });
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool() }));
     try {
       expect(worldListResponseSchema.parse((await app.inject({ method: "GET", url: "/api/v1/worlds" })).json()).worlds).toHaveLength(1);
       expect(campaignListResponseSchema.parse((await app.inject({ method: "GET", url: "/api/v1/campaigns" })).json()).campaigns).toHaveLength(1);
@@ -541,7 +542,7 @@ describe("client API route contracts without PostgreSQL", () => {
   });
 
   it("replaces raw generation failure details before the polling response reaches a client", async () => {
-    const app = await buildServer({ config: config(storageRoot), pool: mockPool({ rawGenerationError: true }) });
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool({ rawGenerationError: true }) }));
     try {
       const response = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}` });
 
@@ -558,7 +559,7 @@ describe("client API route contracts without PostgreSQL", () => {
   });
 
   it("serves metadata without accepting caller identity as application identity", async () => {
-    const app = await buildServer({ config: config(storageRoot), pool: mockPool() });
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool() }));
     try {
       const response = await app.inject({
         method: "GET",
@@ -578,7 +579,7 @@ describe("client API route contracts without PostgreSQL", () => {
   });
 
   it("serializes every remaining adopted success route through its shared response schema", async () => {
-    const app = await buildServer({ config: config(storageRoot), pool: mockPool() });
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool() }));
     const runtimeStateUpdate = {
       expectedTurnNumber: 2,
       expectedRevision: 1,
@@ -704,7 +705,7 @@ describe("client API route contracts without PostgreSQL", () => {
     ["POST", `/api/v1/campaigns/${CAMPAIGN_ID}/rewind`],
     ["POST", `/api/v1/campaigns/${CAMPAIGN_ID}/branch`]
   ] as const)("returns a correlated contract error for malformed %s %s input", async (method, url) => {
-    const app = await buildServer({ config: config(storageRoot), pool: mockPool() });
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool() }));
     try {
       const response = await app.inject({
         method,
@@ -725,7 +726,7 @@ describe("client API route contracts without PostgreSQL", () => {
   it("does not emit a lease-only snapshot and closes cleanly on a later read failure", async () => {
     const leaseRenewedAt = new Date("2026-08-01T12:00:05.000Z");
     const completedAt = new Date("2026-08-01T12:00:10.000Z");
-    const dedupeApp = await buildServer({
+    const dedupeApp = await buildServer(serverOptions({
       config: config(storageRoot),
       pool: mockPool({
         streamSnapshots: [
@@ -734,11 +735,11 @@ describe("client API route contracts without PostgreSQL", () => {
           { status: "completed", updatedAt: completedAt }
         ]
       })
-    });
-    const failureApp = await buildServer({ config: config(storageRoot), pool: mockPool({
+    }));
+    const failureApp = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool({
       streamSnapshots: [{ status: "generating" }],
       streamReadFailure: true
-    }) });
+    }) }));
 
     try {
       const dedupeResponse = await dedupeApp.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
@@ -760,13 +761,13 @@ describe("client API route contracts without PostgreSQL", () => {
 
   it("does not query a generation job after the stream disconnects during its poll sleep", async () => {
     let generationJobReads = 0;
-    const app = await buildServer({
+    const app = await buildServer(serverOptions({
       config: config(storageRoot),
       pool: mockPool({
         streamSnapshots: [{ status: "generating" }],
         onGenerationJobRead: () => { generationJobReads += 1; }
       })
-    });
+    }));
 
     try {
       const address = await app.listen({ host: "127.0.0.1", port: 0 });
@@ -789,7 +790,7 @@ describe("client API route contracts without PostgreSQL", () => {
   });
 
   it("serializes adopted generation mutation routes through their shared schemas", async () => {
-    const app = await buildServer({ config: config(storageRoot), pool: mockPool() });
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool() }));
     try {
       const append = await app.inject({
         method: "POST",
@@ -816,9 +817,9 @@ describe("client API route contracts without PostgreSQL", () => {
   });
 
   it("uses structured envelopes for sync 404s, initial SSE failures, and malformed service projections", async () => {
-    const missingSyncApp = await buildServer({ config: config(storageRoot), pool: mockPool({ missingSync: true }) });
-    const missingJobApp = await buildServer({ config: config(storageRoot), pool: mockPool({ missingJob: true }) });
-    const malformedJobApp = await buildServer({ config: config(storageRoot), pool: mockPool({ malformedJob: true }) });
+    const missingSyncApp = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool({ missingSync: true }) }));
+    const missingJobApp = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool({ missingJob: true }) }));
+    const malformedJobApp = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool({ malformedJob: true }) }));
     try {
       const syncResponse = await missingSyncApp.inject({
         method: "GET",

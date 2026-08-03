@@ -9,6 +9,7 @@ import {
   createProviderTransport
 } from "../../../packages/story-engine/src/provider-transport.js";
 import { runRuntimeLifecycle } from "./lifecycle.js";
+import { createApiGenerationApplication } from "./generation-api-composition.js";
 
 const config = loadRuntimeConfig();
 const abortController = new AbortController();
@@ -42,14 +43,16 @@ async function dispatchRuntimeRole(
   }
 
   if (roleConfig.role === "api") {
-    const server = await buildServer({ config: roleConfig, pool });
+    const generation = createApiGenerationApplication(pool);
+    const server = await buildServer({ config: roleConfig, pool, generation });
     await server.listen({ host: roleConfig.host, port: roleConfig.port });
     await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
     await server.close();
   } else if (roleConfig.role === "worker") {
     await runWorker(pool, roleConfig, signal);
   } else if (roleConfig.role === "all") {
-    const server = await buildServer({ config: roleConfig, pool });
+    const generation = createApiGenerationApplication(pool);
+    const server = await buildServer({ config: roleConfig, pool, generation });
     await server.listen({ host: roleConfig.host, port: roleConfig.port });
     await runWorker(pool, roleConfig, signal);
     await server.close();

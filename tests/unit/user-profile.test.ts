@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { resolve } from "node:path";
 import { buildServer } from "../../services/api/src/server.js";
+import { serverOptions } from "../helpers/build-server-options.js";
 import { getSessionUserProfile, updateSessionUserProfile } from "../../services/api/src/user-service.js";
 import { userProfileSchema, userSettingsSchema, userProfileUpdateSchema } from "../../packages/contracts/src/users.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
@@ -141,7 +142,7 @@ describe("user service and API endpoints", () => {
       }
     } as unknown as DatabasePool;
 
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
 
     const getSessionRes = await app.inject({
       method: "GET",

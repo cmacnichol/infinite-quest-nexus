@@ -6,6 +6,7 @@ import { createDatabasePool, type DatabasePool } from "../../packages/database/s
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
 import { buildServer } from "../../services/api/src/server.js";
+import { serverOptions } from "../helpers/build-server-options.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { runGenerationJob } from "../../services/api/src/generation-service.js";
 import { runImageJob } from "../../services/api/src/image-service.js";
@@ -134,7 +135,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     await migrateDatabase(pool, resolve("database/migrations"));
     providerTransport = installIntegrationProviderTransport();
     const config = makeConfig(databaseUrl!);
-    app = await buildServer({ config, pool });
+    app = await buildServer(serverOptions({ config, pool }));
 
     mockServer = createServer((req, res) => {
       let body = "";

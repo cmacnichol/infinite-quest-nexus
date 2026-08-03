@@ -7,6 +7,7 @@ import fastifyMultipart from "@fastify/multipart";
 import { z } from "zod";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
+import type { GenerationApplication } from "../../../packages/application/src/index.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import { createLoggerOptions, logger } from "../../../packages/logger/src/index.js";
 import { characterLegacyText, effectiveCampaignCharacter } from "../../../packages/domain/src/world-characters.js";
@@ -158,9 +159,10 @@ import {
   removeSegmentIllustrationVariant
 } from "./segmented-illustration-service.js";
 
-type BuildServerOptions = {
+export type BuildServerOptions = {
   config: RuntimeConfig;
   pool: DatabasePool;
+  generation: GenerationApplication;
 };
 
 const uuidSchema = z.uuid();
@@ -279,7 +281,7 @@ function generationStreamSnapshot(value: unknown) {
   return parseResponseProjection(generationStreamSnapshotSchema, { ...value as object, ...generationPublicError(value) });
 }
 
-export async function buildServer({ config, pool }: BuildServerOptions): Promise<FastifyInstance> {
+export async function buildServer({ config, pool, generation: _generation }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: createLoggerOptions(),
     bodyLimit: config.security.apiDefaultBodyLimitBytes,

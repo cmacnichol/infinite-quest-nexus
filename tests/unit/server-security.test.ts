@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import { buildServer } from "../../services/api/src/server.js";
+import { serverOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { logger } from "../../packages/logger/src/index.js";
@@ -123,7 +124,7 @@ describe("API server security and CORS headers", () => {
   it("exposes public application metadata without querying the database", async () => {
     const config = makeConfig();
     const mockPool = { query: async () => { throw new Error("Metadata must not query the database."); } } as unknown as DatabasePool;
-    const app = await buildServer({ config, pool: mockPool });
+    const app = await buildServer(serverOptions({ config, pool: mockPool }));
 
     const response = await app.inject({ method: "GET", url: "/api/v1/meta" });
 
@@ -143,7 +144,7 @@ describe("API server security and CORS headers", () => {
         ? { rows: [{ id: ownerId }] }
         : { rows: [] }
     } as unknown as DatabasePool;
-    const app = await buildServer({ config: makeConfig(), pool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool }));
 
     const generated = await app.inject({ method: "GET", url: "/api/v1/worlds" });
     const echoed = await app.inject({
@@ -163,7 +164,7 @@ describe("API server security and CORS headers", () => {
   it.each(["/", "/index.html"])("redirects %s to the active Nexus client without serving legacy HTML", async (url) => {
     const config = makeConfig();
     const mockPool = { query: async () => ({ rows: [] }) } as unknown as DatabasePool;
-    const app = await buildServer({ config, pool: mockPool });
+    const app = await buildServer(serverOptions({ config, pool: mockPool }));
 
     const response = await app.inject({ method: "GET", url });
 
@@ -177,7 +178,7 @@ describe("API server security and CORS headers", () => {
 
   it("serves the replacement app root and extensionless deep links with HTML no-cache", async () => {
     const fixture = await staticRootFixture();
-    const app = await buildServer({ config: fixture.config, pool: mockPool });
+    const app = await buildServer(serverOptions({ config: fixture.config, pool: mockPool }));
 
     try {
       const redirect = await app.inject({ method: "GET", url: "/app" });
@@ -202,7 +203,7 @@ describe("API server security and CORS headers", () => {
 
   it("caches only generated content-hashed replacement assets as immutable", async () => {
     const fixture = await staticRootFixture();
-    const app = await buildServer({ config: fixture.config, pool: mockPool });
+    const app = await buildServer(serverOptions({ config: fixture.config, pool: mockPool }));
 
     try {
       const hashed = await app.inject({ method: "GET", url: "/app/assets/app-AbCd1234.js" });
@@ -234,7 +235,7 @@ describe("API server security and CORS headers", () => {
 
   it("keeps missing assets, reserved routes, and traversal attempts out of app fallback", async () => {
     const fixture = await staticRootFixture();
-    const app = await buildServer({ config: fixture.config, pool: mockPool });
+    const app = await buildServer(serverOptions({ config: fixture.config, pool: mockPool }));
 
     try {
       for (const url of [
@@ -284,7 +285,7 @@ describe("API server security and CORS headers", () => {
 
   it("keeps legacy Nexus and Story routes on the explicit legacy root", async () => {
     const fixture = await staticRootFixture();
-    const app = await buildServer({ config: fixture.config, pool: mockPool });
+    const app = await buildServer(serverOptions({ config: fixture.config, pool: mockPool }));
 
     try {
       const nexus = await app.inject({ method: "GET", url: "/nexus/" });
@@ -303,7 +304,7 @@ describe("API server security and CORS headers", () => {
   });
 
   it("allows origin-less and exact same-origin requests", async () => {
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     expect((await app.inject({ method: "GET", url: "/health/live" })).statusCode).toBe(200);
     const sameOrigin = await app.inject({
       method: "GET",
@@ -317,7 +318,7 @@ describe("API server security and CORS headers", () => {
   });
 
   it("rejects hostile origins and hostile preflights", async () => {
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     for (const method of ["GET", "OPTIONS"] as const) {
       const response = await app.inject({
         method,
@@ -333,7 +334,7 @@ describe("API server security and CORS headers", () => {
   });
 
   it("rejects DNS-rebinding requests whose hostile Origin matches a hostile Host", async () => {
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     const response = await app.inject({
       method: "POST",
       url: "/api/v1/providers/discover-models",
@@ -346,7 +347,7 @@ describe("API server security and CORS headers", () => {
   });
 
   it("rejects malformed Host headers with the typed origin error", async () => {
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     const response = await app.inject({
       method: "GET",
       url: "/health/live",
@@ -360,7 +361,7 @@ describe("API server security and CORS headers", () => {
   });
 
   it("sends the enforced CSP without unsafe-inline", async () => {
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     const response = await app.inject({ method: "GET", url: "/health/live" });
     expect(response.headers["content-security-policy"]).toBe(
       "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
@@ -371,14 +372,14 @@ describe("API server security and CORS headers", () => {
   });
 
   it("sends HSTS only for direct or explicitly trusted HTTPS", async () => {
-    const directHttp = await buildServer({ config: makeConfig(), pool: mockPool });
+    const directHttp = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     expect((await directHttp.inject({ method: "GET", url: "/health/live" })).headers["strict-transport-security"]).toBeUndefined();
     await directHttp.close();
 
-    const proxied = await buildServer({
+    const proxied = await buildServer(serverOptions({
       config: makeConfig({ security: { ...makeConfig().security, trustProxyHops: 1 } }),
       pool: mockPool
-    });
+    }));
     const response = await proxied.inject({
       method: "GET",
       url: "/health/live",
@@ -396,7 +397,7 @@ describe("API server security and CORS headers", () => {
         throw error;
       }
     } as unknown as DatabasePool;
-    const app = await buildServer({ config, pool: mockPool });
+    const app = await buildServer(serverOptions({ config, pool: mockPool }));
 
     const response = await app.inject({
       method: "GET",
@@ -414,10 +415,10 @@ describe("API server security and CORS headers", () => {
   it("exposes typed safe archive errors without filesystem paths or raw payloads", async () => {
     const root = await mkdtemp(join(tmpdir(), "infinitequest-archive-error-"));
     const upload = multipartArchiveUpload(Buffer.from("not a zip archive", "utf8"), { kind: "embedded" });
-    const app = await buildServer({
+    const app = await buildServer(serverOptions({
       config: makeConfig({ assetStorageRoot: join(root, "assets"), archiveStorageRoot: join(root, "archives") }),
       pool: mockPool
-    });
+    }));
     try {
       const response = await app.inject({
         method: "POST",
@@ -454,7 +455,7 @@ describe("API server security and CORS headers", () => {
       }
     });
     const upload = multipartArchiveUpload(Buffer.alloc(512, 0x61), { kind: "embedded" });
-    const app = await buildServer({ config, pool: mockPool });
+    const app = await buildServer(serverOptions({ config, pool: mockPool }));
     try {
       const response = await app.inject({
         method: "POST",
@@ -491,7 +492,7 @@ describe("API server security and CORS headers", () => {
       "requestOverrides",
       JSON.stringify({ sourceName: "oversized", padding: "x".repeat(512) })
     );
-    const app = await buildServer({ config, pool: mockPool });
+    const app = await buildServer(serverOptions({ config, pool: mockPool }));
     try {
       const response = await app.inject({
         method: "POST",
@@ -508,7 +509,7 @@ describe("API server security and CORS headers", () => {
   });
 
   it("exposes only safe structured generated-world validation details", async () => {
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     app.get("/test/generated-world-error", async () => {
       try {
         parseCompleteGeneratedWorld({
@@ -544,7 +545,7 @@ describe("API server security and CORS headers", () => {
 
   it("exposes an actionable malformed-JSON issue without the parser body", async () => {
     const marker = "PRIVATE_MALFORMED_PROVIDER_BODY";
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     app.get("/test/generated-world-json-error", async () => {
       throw incompleteGeneratedWorldError(
         new SyntaxError(`Unexpected token in ${marker}`)
@@ -574,7 +575,7 @@ describe("API server security and CORS headers", () => {
 
   it("bounds generated-world issue fields before exposing the API envelope", async () => {
     const marker = "PRIVATE_OVERSIZED_API_ISSUE";
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     app.get("/test/generated-world-oversized-error", async () => {
       throw incompleteGeneratedWorldError(new z.ZodError([{
         path: [`world.${"p".repeat(500)}${marker}`],
@@ -613,7 +614,7 @@ describe("API server security and CORS headers", () => {
     );
     const safeProviderError = generatedWorldProviderError(rawProviderError);
     const errorLogs: unknown[] = [];
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     app.get("/test/generated-world-provider-error", async (request) => {
       (request.log as unknown as { error: (...args: unknown[]) => void }).error = (...args) => {
         errorLogs.push(args);
@@ -680,7 +681,7 @@ describe("API server security and CORS headers", () => {
       credentials: `${marker}: private credentials`
     }));
     const errorLogs: unknown[] = [];
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     app.get("/test/generated-world-typed-provider-error", async (request) => {
       (request.log as unknown as { error: (...args: unknown[]) => void }).error = (...args) => {
         errorLogs.push(args);
@@ -719,7 +720,7 @@ describe("API server security and CORS headers", () => {
       security: { ...baseConfig.security, apiImportBodyLimitBytes: 10 * 1024 * 1024 }
     });
     const mockPool = {} as unknown as DatabasePool;
-    const app = await buildServer({ config, pool: mockPool });
+    const app = await buildServer(serverOptions({ config, pool: mockPool }));
 
     // Payload larger than 10MB limit (11MB string)
     const oversizedPayload = "a".repeat(11 * 1024 * 1024);
@@ -759,7 +760,7 @@ describe("API server security and CORS headers", () => {
         throw new Error(`Unexpected query: ${query}`);
       }
     } as unknown as DatabasePool;
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
 
     const response = await app.inject({
       method: "GET",
@@ -820,7 +821,7 @@ describe("API server security and CORS headers", () => {
       },
       connect: async () => mockClient
     } as unknown as DatabasePool;
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
 
     try {
       const response = await app.inject({ method: "POST", url: `/api/v1/generation-jobs/${jobId}/cancel` });
@@ -882,7 +883,7 @@ describe("API server security and CORS headers", () => {
       }
     } as unknown as DatabasePool;
     const loggerInfo = vi.spyOn(logger, "info").mockImplementation(() => logger);
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
 
     try {
       const response = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${jobId}/stream` });
@@ -948,7 +949,7 @@ describe("API server security and CORS headers", () => {
     } as unknown as DatabasePool;
     const loggerInfo = vi.spyOn(logger, "info").mockImplementation(() => logger);
     const loggerWarn = vi.spyOn(logger, "warn").mockImplementation(() => logger);
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
 
     try {
       const response = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${jobId}/stream` });
@@ -1020,7 +1021,7 @@ describe("API server security and CORS headers", () => {
       }
     } as unknown as DatabasePool;
     const loggerInfo = vi.spyOn(logger, "info").mockImplementation(() => logger);
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     app.addHook("onRequest", async (request, reply) => {
       if (request.url.endsWith(`/generation-jobs/${jobId}/stream`)) {
         closeStream = () => { request.raw.emit("close"); };

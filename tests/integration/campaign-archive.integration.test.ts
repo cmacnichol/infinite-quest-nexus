@@ -23,6 +23,7 @@ import { persistOriginalImage } from "../../services/api/src/asset-service.js";
 import { captureCampaignArchiveSnapshot, cleanupExpiredArchivePreviews, exportCampaign, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
 import { importCampaignArchive } from "../../services/api/src/import-service.js";
 import { buildServer } from "../../services/api/src/server.js";
+import { serverOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 
 const archiveCleanupTestState = vi.hoisted(() => ({
@@ -488,7 +489,7 @@ integration("campaign archive export", () => {
   });
 
   secureGeneratedStagingIt("[secure generated staging] serves campaign exports as no-store attachments and removes the response artifact", async () => {
-    const app = await buildServer({ config: serverConfig(), pool });
+    const app = await buildServer(serverOptions({ config: serverConfig(), pool }));
     const before = await artifactNames();
     try {
       const response = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/export` });
@@ -505,7 +506,7 @@ integration("campaign archive export", () => {
   });
 
   secureGeneratedStagingIt("[secure generated staging] previews multipart Campaign Archives and commits the bound JSON request", async () => {
-    const app = await buildServer({ config: serverConfig(), pool });
+    const app = await buildServer(serverOptions({ config: serverConfig(), pool }));
     const destination = await createCompatibleDestination("Route archive destination");
     const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
     const upload = multipartBody([
@@ -554,7 +555,7 @@ integration("campaign archive export", () => {
     const foreignVersion = await pool.query<{ id: string }>("INSERT INTO world_versions (world_id,owner_user_id,version_number,content) VALUES ($1,$2,1,$3::jsonb) RETURNING id", [foreignWorld.rows[0]!.id, foreignUserId, JSON.stringify({ schemaVersion: 4, world: { title: "Foreign archive world" } })]);
     const foreignCampaign = await pool.query<{ id: string }>("INSERT INTO campaigns (owner_user_id,world_version_id,title) VALUES ($1,$2,'Foreign archive campaign') RETURNING id", [foreignUserId, foreignVersion.rows[0]!.id]);
     await pool.query("INSERT INTO campaign_state (campaign_id,owner_user_id) VALUES ($1,$2)", [foreignCampaign.rows[0]!.id, foreignUserId]);
-    const app = await buildServer({ config: serverConfig(), pool });
+    const app = await buildServer(serverOptions({ config: serverConfig(), pool }));
     try {
       const response = await app.inject({ method: "GET", url: `/api/v1/campaigns/${foreignCampaign.rows[0]!.id}/export` });
       expect(response.statusCode).toBe(404);
@@ -564,7 +565,7 @@ integration("campaign archive export", () => {
   });
 
   it("returns the typed safe archive error for malformed archive uploads", async () => {
-    const app = await buildServer({ config: serverConfig(), pool });
+    const app = await buildServer(serverOptions({ config: serverConfig(), pool }));
     const upload = multipartBody([
       { name: "file", filename: "broken.zip", value: Buffer.from("not a zip archive", "utf8") },
       { name: "destination", value: JSON.stringify({ kind: "embedded" }) }
@@ -597,7 +598,7 @@ integration("campaign archive export", () => {
   });
 
   it("keeps legacy JSON imports and manifest-less ZIP previews available", async () => {
-    const app = await buildServer({ config: serverConfig(), pool });
+    const app = await buildServer(serverOptions({ config: serverConfig(), pool }));
     const legacyZipPath = join(root, `legacy-route-${randomUUID()}.zip`);
     const output = createWriteStream(legacyZipPath, { flags: "wx" });
     const archive = new ZipArchive({ zlib: { level: 9 } });
