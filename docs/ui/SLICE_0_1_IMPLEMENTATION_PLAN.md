@@ -5206,11 +5206,11 @@ import, and verify the compatibility mapper is the only temporary legacy-error
 translation point.
 
 **10b evidence (audited 2026-08-03).** Implementation landed in `3ee033d` with
-corrections in `93113bc`, `7933c3a`, `2e6901e`, and `bb29eeb` (base `e199f47`).
-The original correction review found two remaining Important defects, so this
-checkpoint remains **in progress** until the correction-round-2 checklist and a
-fresh scoped review pass. The older measurement below is historical evidence,
-not approval of the checkpoint.
+corrections in `93113bc`, `7933c3a`, `2e6901e`, `bb29eeb`, and `d778043` (base
+`e199f47`). The original correction review found two Important defects, and a
+later stricter review expanded the needed proof. The completed correction-round-2
+coverage below passed a fresh scoped review. The older measurement remains
+historical evidence, not the sole basis for approval.
 
 Verified against the shipped code rather than the commit messages:
 
@@ -5238,7 +5238,7 @@ though the initial implementation was behaviorally close. Do not advance the
 checkpoint or treat the earlier evidence as completion until every item below is
 checked and independently re-reviewed.
 
-- [ ] **Atomic lifecycle logging:** make retry and cancel obtain their
+- [x] **Atomic lifecycle logging:** make retry and cancel obtain their
   owner-scoped logging context before the repository mutation (or return it from
   that mutation atomically). A context-read failure must leave the durable job
   unchanged and return the existing failure path; it must never turn a committed
@@ -5246,30 +5246,47 @@ checked and independently re-reviewed.
   the established cancellation log shape. Add a unit regression that proves the
   context read happens before the mutation and that a failed read performs no
   repository mutation.
-- [ ] **Replacement idempotency and rollback proof:** add a direct repository
+- [x] **Replacement idempotency and rollback proof:** add a direct repository
   case where a replacement reuses its idempotency key with a different request
   fingerprint and receives `idempotency_mismatch`. In the distinct-key concurrent
   replacement race, create a queued latest-turn image before both submissions and
   prove the losing transaction leaves that image and every other pre-savepoint
   durable row intact after its outer transaction rolls back; the winner alone may
   perform queued-image cleanup.
-- [ ] **Mutation preservation and child cleanup:** retry, discard, and every
+- [x] **Mutation preservation and child cleanup:** retry, discard, and every
   cancellation state must assert that accepted turns, campaign state, Chronicle
   memory, completed-result rows, and valid result data are unchanged. Extend the
   provisional-child fixture to include an actual segment asset plus its asset
   reference, then prove cancellation removes or cancels every target child while
   retaining the other campaign's equivalent records.
-- [ ] **Strict transaction instrumentation:** replace presence-only SQL checks
+- [x] **Strict transaction instrumentation:** replace presence-only SQL checks
   with exact per-command boundary assertions. `getJob`/`getResult` issue no
   `BEGIN`, `COMMIT`, or `ROLLBACK`; append/replacement issue exactly one outer
   `BEGIN`/`COMMIT` and their named insert savepoint; cancellation issues exactly
   one outer transaction; retry and discard issue neither an outer transaction
   nor more than their single statement. Record the statements per operation so
   earlier fixture setup cannot satisfy the assertion.
-- [ ] Re-run the focused unit and real-PostgreSQL repository suites, then the
+- [x] Re-run the focused unit and real-PostgreSQL repository suites, then the
   full required Task 10b verification matrix. Have a fresh reviewer inspect the
   correction diff and approve the full `e199f47..HEAD` 10b range before marking
   this checkpoint complete.
+
+**10b correction round 2 status — complete (2026-08-03).** `d778043` moved
+retry/cancel lifecycle-context reads before their mutations and made replacement
+unique-conflict recovery roll back the entire outer transaction before replay or
+active-job lookup. The repository regression now creates an initially failed
+competitor, pauses the loser after its queued-image cleanup and Auto
+classification consumption, then transitions the competitor to `queued` before
+releasing the barrier; this proves a late concurrent unique conflict restores
+all pre-savepoint work through the full outer rollback. The compatibility table
+now drives every applicable typed error through every applicable `withOwner`
+delegate, preserving its production kind and legacy HTTP-safe status, message,
+and details. Verification passed: `pnpm check`, `git diff --check`, focused
+compatibility units (57 tests), real PostgreSQL repository coverage (21 tests),
+`generation-input` (2 tests), and the required generation/gameplay/image
+integration suites (67 passed, 2 skipped). A fresh scoped review found no
+Critical, Important, or Minor findings and approved Task 10b. Task 10c remains
+pending.
 
 **Carried into 10c — the compatibility bridge has no removal owner.** 10b
 introduced `services/api/src/generation-command-compatibility.ts` and its

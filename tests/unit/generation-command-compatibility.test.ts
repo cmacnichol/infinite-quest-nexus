@@ -43,7 +43,13 @@ function lifecyclePool() {
   } as unknown as DatabasePool;
 }
 
-function commandRepository(calls: Array<{ method: string; scope: unknown; request?: unknown }>): GenerationCommandRepository {
+type RepositoryMethod = keyof GenerationCommandRepository;
+type RepositoryRejection = Readonly<{ method: RepositoryMethod; error: Error }>;
+
+function commandRepository(
+  calls: Array<{ method: string; scope: unknown; request?: unknown }>,
+  rejection?: RepositoryRejection
+): GenerationCommandRepository {
   const enqueue = {
     id: jobId,
     status: "queued",
@@ -55,14 +61,66 @@ function commandRepository(calls: Array<{ method: string; scope: unknown; reques
   const result = { id: jobId } as GenerationResult;
   const mutation = { id: jobId, status: "cancelled", operationKind: "append", replacementTurnId: null } as GenerationActionResponse;
   return {
-    enqueueAppend: async (scope, input) => { calls.push({ method: "enqueueAppend", scope, request: input }); return enqueue; },
-    enqueueReplacement: async (scope, input) => { calls.push({ method: "enqueueReplacement", scope, request: input }); return enqueue; },
-    getJob: async (scope) => { calls.push({ method: "getJob", scope }); return job; },
-    getResult: async (scope) => { calls.push({ method: "getResult", scope }); return result; },
-    retry: async (scope) => { calls.push({ method: "retry", scope }); return mutation; },
-    cancel: async (scope) => { calls.push({ method: "cancel", scope }); return mutation; },
-    discard: async (scope) => { calls.push({ method: "discard", scope }); return mutation; }
+    enqueueAppend: async (scope, input) => {
+      calls.push({ method: "enqueueAppend", scope, request: input });
+      if (rejection?.method === "enqueueAppend") throw rejection.error;
+      return enqueue;
+    },
+    enqueueReplacement: async (scope, input) => {
+      calls.push({ method: "enqueueReplacement", scope, request: input });
+      if (rejection?.method === "enqueueReplacement") throw rejection.error;
+      return enqueue;
+    },
+    getJob: async (scope) => {
+      calls.push({ method: "getJob", scope });
+      if (rejection?.method === "getJob") throw rejection.error;
+      return job;
+    },
+    getResult: async (scope) => {
+      calls.push({ method: "getResult", scope });
+      if (rejection?.method === "getResult") throw rejection.error;
+      return result;
+    },
+    retry: async (scope) => {
+      calls.push({ method: "retry", scope });
+      if (rejection?.method === "retry") throw rejection.error;
+      return mutation;
+    },
+    cancel: async (scope) => {
+      calls.push({ method: "cancel", scope });
+      if (rejection?.method === "cancel") throw rejection.error;
+      return mutation;
+    },
+    discard: async (scope) => {
+      calls.push({ method: "discard", scope });
+      if (rejection?.method === "discard") throw rejection.error;
+      return mutation;
+    }
   };
+}
+
+type CompatibilityDelegate =
+  | "enqueueGeneration"
+  | "enqueueLatestReplacement"
+  | "getGenerationJob"
+  | "getGenerationResult"
+  | "retryGeneration"
+  | "cancelGeneration"
+  | "discardGeneration";
+
+async function invokeDelegate(
+  compatibility: ReturnType<typeof createGenerationCommandCompatibility>,
+  delegate: CompatibilityDelegate
+) {
+  switch (delegate) {
+    case "enqueueGeneration": return compatibility.enqueueGeneration(campaignId, request);
+    case "enqueueLatestReplacement": return compatibility.enqueueLatestReplacement(campaignId, replacementRequest);
+    case "getGenerationJob": return compatibility.getGenerationJob(jobId);
+    case "getGenerationResult": return compatibility.getGenerationResult(jobId);
+    case "retryGeneration": return compatibility.retryGeneration(jobId);
+    case "cancelGeneration": return compatibility.cancelGeneration(jobId);
+    case "discardGeneration": return compatibility.discardGeneration(jobId);
+  }
 }
 
 describe("generation command compatibility", () => {
@@ -146,6 +204,79 @@ describe("generation command compatibility", () => {
     expect(mapGenerationApplicationError(new GenerationApplicationError("invalid_state", {
       reason: "classification_missing_or_expired"
     }))).toMatchObject({ statusCode: 400, message: "Auto input requires a current classification." });
+  });
+
+  const pendingGeneration = {
+    id: jobId,
+    status: "queued",
+    action: "Open the observatory.",
+    operationKind: "append",
+    expectedTurnNumber: 4
+  } as const;
+  const sharedEnqueueErrors = [
+    ["conflict", { reason: "idempotency_mismatch" }, 409, "The idempotency key was already used for a different generation request.", undefined],
+    ["invalid_state", { reason: "action_only_mode" }, 400, "This campaign accepts player actions only.", undefined],
+    ["invalid_state", { reason: "explicit_input_mode_mismatch" }, 400, "Explicit turn input mode does not match the resolved mode.", undefined],
+    ["invalid_state", { reason: "classification_id_forbidden" }, 400, "Classification IDs are valid only for Auto input.", undefined],
+    ["conflict", { reason: "classification_missing_or_expired" }, 409, "The Auto classification is missing, expired, consumed, or does not match this input.", undefined],
+    ["invalid_state", { reason: "classification_missing_or_expired" }, 400, "Auto input requires a current classification.", undefined],
+    ["conflict", { reason: "classification_mode_mismatch" }, 409, "The submitted turn mode does not match the Auto classification.", undefined],
+    ["provider_required", { reason: "selected_provider_unavailable" }, 400, "Enabled text provider profile not found.", undefined],
+    ["provider_required", { reason: "no_text_provider" }, 409, "Select a text provider for this campaign or mark a default text provider.", undefined],
+    ["not_found", { campaignId }, 404, "Campaign not found.", undefined],
+    ["active_job", { reason: "active_generation", pendingGeneration }, 409, "This campaign already has an active story generation.", {
+      code: "active_generation_exists",
+      pendingGeneration
+    }]
+  ] as const;
+  const sharedEnqueueDelegates = [
+    ["enqueueGeneration", "enqueueAppend"],
+    ["enqueueLatestReplacement", "enqueueReplacement"]
+  ] as const;
+  const delegateErrorCases = [
+    ...sharedEnqueueDelegates.flatMap(([delegate, method]) => sharedEnqueueErrors.map((errorCase) => [delegate, method, ...errorCase] as const)),
+    ["enqueueLatestReplacement", "enqueueReplacement", "stale_turn", { reason: "stale_current_turn", actualTurnNumber: 5, expectedTurnNumber: 3 }, 409, "Campaign is at turn 5, not 3.", undefined],
+    ["enqueueLatestReplacement", "enqueueReplacement", "not_found", { reason: "missing_latest_turn", campaignId }, 404, "The latest accepted turn was not found.", undefined],
+    ["enqueueLatestReplacement", "enqueueReplacement", "active_job", { reason: "active_illustration" }, 409, "Wait for the latest turn illustration to finish before retrying the turn.", undefined],
+    ["getGenerationJob", "getJob", "not_found", { jobId }, 404, "Generation job not found.", undefined],
+    ["getGenerationResult", "getResult", "not_found", { jobId }, 404, "Generation job not found.", undefined],
+    ["retryGeneration", "retry", "not_found", { jobId }, 404, "Generation job not found.", undefined],
+    ["cancelGeneration", "cancel", "not_found", { jobId }, 404, "Generation job not found.", undefined],
+    ["discardGeneration", "discard", "not_found", { jobId }, 404, "Generation job not found.", undefined],
+    ["getGenerationResult", "getResult", "invalid_state", { reason: "result_not_completed", generationStatus: "failed" }, 409, "Generation could not be completed.", undefined],
+    ["retryGeneration", "retry", "invalid_state", { reason: "retry_source_state" }, 409, "Only recoverable or failed generation jobs can be retried.", undefined],
+    ["cancelGeneration", "cancel", "invalid_state", { reason: "cancel_source_state" }, 409, "Only active generation jobs can be cancelled.", undefined],
+    ["discardGeneration", "discard", "invalid_state", { reason: "discard_source_state" }, 409, "Only recoverable or failed generation jobs can be discarded.", undefined]
+  ] as const;
+
+  test.each(delegateErrorCases)("maps %s repository errors through the %s owner-scoped delegate", async (
+    delegate,
+    method,
+    kind,
+    details,
+    statusCode,
+    message,
+    expectedDetails
+  ) => {
+    const calls: Array<{ method: string; scope: unknown; request?: unknown }> = [];
+    const compatibility = createGenerationCommandCompatibility({
+      pool: lifecyclePool(),
+      repository: commandRepository(calls, {
+        method,
+        error: new GenerationApplicationError(kind, details)
+      }),
+      initialOwnerId: async () => ownerUserId
+    });
+
+    const error = await invokeDelegate(compatibility, delegate).then(
+      () => undefined,
+      (rejection: unknown) => rejection
+    );
+
+    expect(error).toMatchObject({ statusCode, message });
+    expect((error as { details?: unknown }).details).toEqual(expectedDetails);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ method });
   });
 
   test("preserves retry and cancellation lifecycle logs from the legacy service boundary", async () => {

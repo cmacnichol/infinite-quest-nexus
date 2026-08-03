@@ -136,18 +136,38 @@ integration("PostgreSQL generation command repository", () => {
   }
 
   async function authoritativeCampaignSnapshot(campaignId: string) {
-    const result = await pool.query<{
-      turn_count: string;
-      chronicle_count: string;
-      state_revision: number;
-    }>(
-      `SELECT
-         (SELECT count(*)::text FROM turns WHERE campaign_id = $1 AND owner_user_id = $2) AS turn_count,
-         (SELECT count(*)::text FROM chronicle_memories WHERE campaign_id = $1 AND owner_user_id = $2) AS chronicle_count,
-         (SELECT revision FROM campaign_state WHERE campaign_id = $1 AND owner_user_id = $2) AS state_revision`,
+    const result = await pool.query<{ snapshot: unknown }>(
+      `SELECT jsonb_build_object(
+         'acceptedTurns', COALESCE((
+           SELECT jsonb_agg(to_jsonb(turn_row) ORDER BY turn_row.turn_number)
+             FROM turns turn_row
+            WHERE turn_row.campaign_id = $1
+              AND turn_row.owner_user_id = $2
+              AND turn_row.accepted_at IS NOT NULL
+         ), '[]'::jsonb),
+         'campaignState', COALESCE((
+           SELECT to_jsonb(campaign_state_row)
+             FROM campaign_state campaign_state_row
+            WHERE campaign_state_row.campaign_id = $1
+              AND campaign_state_row.owner_user_id = $2
+         ), '{}'::jsonb),
+         'chronicle', COALESCE((
+           SELECT jsonb_agg(to_jsonb(memory_row) ORDER BY memory_row.ordinal, memory_row.id)
+             FROM chronicle_memories memory_row
+            WHERE memory_row.campaign_id = $1
+              AND memory_row.owner_user_id = $2
+         ), '[]'::jsonb),
+         'completedResultRows', COALESCE((
+           SELECT jsonb_agg(to_jsonb(completed_job) ORDER BY completed_job.created_at, completed_job.id)
+             FROM generation_jobs completed_job
+            WHERE completed_job.campaign_id = $1
+              AND completed_job.owner_user_id = $2
+              AND completed_job.status = 'completed'
+         ), '[]'::jsonb)
+       ) AS snapshot`,
       [campaignId, ownerUserId]
     );
-    return result.rows[0]!;
+    return result.rows[0]!.snapshot;
   }
 
   async function directGenerationJob(
@@ -177,7 +197,7 @@ integration("PostgreSQL generation command repository", () => {
     return result.rows[0]!.id;
   }
 
-  async function installGenerationInsertBarrier(campaignId: string) {
+  async function installGenerationInsertBarrier(campaignId: string, idempotencyKey?: string) {
     const suffix = crypto.randomUUID().replaceAll("-", "");
     const trigger = `hold_generation_insert_${suffix}`;
     const classId = Number.parseInt(suffix.slice(0, 7), 16);
@@ -191,8 +211,9 @@ integration("PostgreSQL generation command repository", () => {
         RETURN NEW;
       END
     $$`);
+    const idempotencyPredicate = idempotencyKey ? ` AND NEW.idempotency_key = '${idempotencyKey.replaceAll("'", "''")}'` : "";
     await pool.query(`CREATE TRIGGER ${trigger} BEFORE INSERT ON generation_jobs
-      FOR EACH ROW WHEN (NEW.campaign_id = '${campaignId}'::uuid) EXECUTE FUNCTION ${trigger}_fn()`);
+      FOR EACH ROW WHEN (NEW.campaign_id = '${campaignId}'::uuid${idempotencyPredicate}) EXECUTE FUNCTION ${trigger}_fn()`);
     return {
       wait: async () => expect.poll(async () => pool.query<{ pid: number }>(
         `SELECT activity.pid FROM pg_stat_activity activity
@@ -442,19 +463,32 @@ integration("PostgreSQL generation command repository", () => {
   it("retries recoverable jobs and discards failed jobs without changing their campaign scope", async () => {
     const retryCampaign = await campaign();
     const retryJobId = await directGenerationJob(retryCampaign.campaignId, "recoverable");
+    const retryCompletedJobId = await directGenerationJob(retryCampaign.campaignId, "completed", {
+      resultTurnId: await latestTurnId(retryCampaign.campaignId),
+      expectedTurnNumber: 2
+    });
+    const retryCommands = repository();
     const retryBefore = await authoritativeCampaignSnapshot(retryCampaign.campaignId);
-    await expect(repository().retry({ ownerUserId, jobId: retryJobId })).resolves.toMatchObject({
+    const retryResultBefore = await retryCommands.getResult({ ownerUserId, jobId: retryCompletedJobId });
+    await expect(retryCommands.retry({ ownerUserId, jobId: retryJobId })).resolves.toMatchObject({
       id: retryJobId,
       status: "queued",
       operationKind: "append",
       replacementTurnId: null
     });
     await expect(authoritativeCampaignSnapshot(retryCampaign.campaignId)).resolves.toEqual(retryBefore);
+    await expect(retryCommands.getResult({ ownerUserId, jobId: retryCompletedJobId })).resolves.toEqual(retryResultBefore);
 
     const discardCampaign = await campaign();
     const discardJobId = await directGenerationJob(discardCampaign.campaignId, "failed");
+    const discardCompletedJobId = await directGenerationJob(discardCampaign.campaignId, "completed", {
+      resultTurnId: await latestTurnId(discardCampaign.campaignId),
+      expectedTurnNumber: 2
+    });
+    const discardCommands = repository();
     const discardBefore = await authoritativeCampaignSnapshot(discardCampaign.campaignId);
-    await expect(repository().discard({ ownerUserId, jobId: discardJobId })).resolves.toMatchObject({
+    const discardResultBefore = await discardCommands.getResult({ ownerUserId, jobId: discardCompletedJobId });
+    await expect(discardCommands.discard({ ownerUserId, jobId: discardJobId })).resolves.toMatchObject({
       id: discardJobId,
       status: "discarded",
       operationKind: "append",
@@ -465,6 +499,7 @@ integration("PostgreSQL generation command repository", () => {
       [discardJobId]
     )).resolves.toMatchObject({ rows: [{ status: "discarded", campaign_id: discardCampaign.campaignId }] });
     await expect(authoritativeCampaignSnapshot(discardCampaign.campaignId)).resolves.toEqual(discardBefore);
+    await expect(discardCommands.getResult({ ownerUserId, jobId: discardCompletedJobId })).resolves.toEqual(discardResultBefore);
   });
 
   it("leaves completed result data and authoritative campaign records intact on invalid mutations", async () => {
@@ -518,6 +553,7 @@ integration("PostgreSQL generation command repository", () => {
     const retryJobId = await directGenerationJob(retryCampaign.campaignId, "recoverable");
     statements.length = 0;
     await commands.retry({ ownerUserId, jobId: retryJobId });
+    expect(statements).toHaveLength(1);
     expect(statements.filter((statement) => /^(BEGIN|COMMIT|ROLLBACK)/.test(statement))).toEqual([]);
     expect(statements.filter((statement) => statement.startsWith("WITH source AS"))).toHaveLength(1);
 
@@ -525,6 +561,7 @@ integration("PostgreSQL generation command repository", () => {
     const discardJobId = await directGenerationJob(discardCampaign.campaignId, "failed");
     statements.length = 0;
     await commands.discard({ ownerUserId, jobId: discardJobId });
+    expect(statements).toHaveLength(1);
     expect(statements.filter((statement) => /^(BEGIN|COMMIT|ROLLBACK)/.test(statement))).toEqual([]);
     expect(statements.filter((statement) => statement.startsWith("WITH source AS"))).toHaveLength(1);
 
@@ -547,8 +584,15 @@ integration("PostgreSQL generation command repository", () => {
       const otherCampaign = await campaign();
       const targetJobId = await directGenerationJob(targetCampaign.campaignId, status);
       const otherJobId = await directGenerationJob(otherCampaign.campaignId, "queued");
+      const completedJobId = await directGenerationJob(targetCampaign.campaignId, "completed", {
+        resultTurnId: await latestTurnId(targetCampaign.campaignId),
+        expectedTurnNumber: 2
+      });
+      const commands = repository();
+      const targetBefore = await authoritativeCampaignSnapshot(targetCampaign.campaignId);
+      const resultBefore = await commands.getResult({ ownerUserId, jobId: completedJobId });
 
-      await expect(repository().cancel({ ownerUserId, jobId: targetJobId })).resolves.toMatchObject({
+      await expect(commands.cancel({ ownerUserId, jobId: targetJobId })).resolves.toMatchObject({
         id: targetJobId,
         status: "cancelled",
         operationKind: "append",
@@ -561,6 +605,8 @@ integration("PostgreSQL generation command repository", () => {
         { id: targetJobId, status: "cancelled" },
         { id: otherJobId, status: "queued" }
       ]) });
+      await expect(authoritativeCampaignSnapshot(targetCampaign.campaignId)).resolves.toEqual(targetBefore);
+      await expect(commands.getResult({ ownerUserId, jobId: completedJobId })).resolves.toEqual(resultBefore);
     }
   );
 
@@ -594,6 +640,17 @@ integration("PostgreSQL generation command repository", () => {
       .resolves.toMatchObject({ rows: [{ status: "generating" }] });
     await expect(pool.query<{ status: string }>("SELECT status FROM turn_illustration_sets WHERE id = $1", [otherChildren.setId]))
       .resolves.toMatchObject({ rows: [{ status: "provisional" }] });
+    await expect(pool.query<{ status: string }>("SELECT status FROM turn_illustration_segments WHERE id = $1", [otherChildren.segmentId]))
+      .resolves.toMatchObject({ rows: [{ status: "completed" }] });
+    await expect(pool.query<{ status: string }>("SELECT status FROM illustration_prompt_jobs WHERE id = $1", [otherChildren.promptId]))
+      .resolves.toMatchObject({ rows: [{ status: "queued" }] });
+    await expect(pool.query<{ status: string }>("SELECT status FROM illustration_resolution_jobs WHERE id = $1", [otherChildren.resolutionId]))
+      .resolves.toMatchObject({ rows: [{ status: "queued" }] });
+    await expect(pool.query<{ id: string }>("SELECT id FROM assets WHERE id = $1 AND campaign_id = $2 AND owner_user_id = $3", [
+      otherChildren.assetId,
+      otherCampaign.campaignId,
+      ownerUserId
+    ])).resolves.toMatchObject({ rows: [{ id: otherChildren.assetId }] });
     await expect(pool.query<{ asset_id: string }>("SELECT asset_id FROM turn_illustration_segment_assets WHERE segment_id = $1", [otherChildren.segmentId]))
       .resolves.toMatchObject({ rows: [{ asset_id: otherChildren.assetId }] });
     await expect(pool.query<{ id: string }>("SELECT id FROM asset_references WHERE id = $1", [otherChildren.assetReferenceId]))
@@ -728,12 +785,14 @@ integration("PostgreSQL generation command repository", () => {
     )).rejects.toMatchObject({ kind: "conflict", details: { reason: "idempotency_mismatch" } });
   });
 
-  it("rolls back a losing replacement's pre-insert classification consumption", async () => {
+  it("rolls back a losing replacement's pre-insert cleanup and classification consumption", async () => {
     const imported = await campaign();
-    const commands = repository();
+    const { commands, statements } = recordingRepository();
     const latestTurn = await latestTurnId(imported.campaignId);
     const queuedImageJobId = await directTurnImageJob(imported.campaignId, latestTurn, "queued");
+    const competingJobId = await directGenerationJob(imported.campaignId, "failed");
     const losingAction = "Rewrite the turn with the losing Auto-classification request.";
+    const losingIdempotencyKey = crypto.randomUUID();
     const classification = await pool.query<{ id: string }>(
       `INSERT INTO turn_input_classifications (
          owner_user_id, campaign_id, input_hash, classification, resolved_mode, confidence_band,
@@ -741,16 +800,11 @@ integration("PostgreSQL generation command repository", () => {
        ) VALUES ($1,$2,$3,'action','action','clear',$4,'story_text','{}'::jsonb) RETURNING id`,
       [ownerUserId, imported.campaignId, sha256(losingAction), providerProfileId]
     );
-    const barrier = await installGenerationInsertBarrier(imported.campaignId);
-    const winner = commands.enqueueReplacement(
-      { ownerUserId, campaignId: imported.campaignId },
-      replacementRequest("Rewrite the winning replacement request.")
-    );
-    await barrier.wait();
+    const barrier = await installGenerationInsertBarrier(imported.campaignId, losingIdempotencyKey);
     const loser = commands.enqueueReplacement(
       { ownerUserId, campaignId: imported.campaignId },
       generationRetryLatestRequestSchema.parse({
-        ...replacementRequest(losingAction),
+        ...replacementRequest(losingAction, losingIdempotencyKey),
         requestedInputMode: "auto",
         resolvedInputMode: "action",
         inputModeSource: "auto",
@@ -758,8 +812,17 @@ integration("PostgreSQL generation command repository", () => {
       })
     );
     try {
+      await barrier.wait();
+      const queuedImageDuringLosingTransaction = await pool.query<{ id: string; status: string }>(
+        "SELECT id, status FROM image_jobs WHERE id = $1",
+        [queuedImageJobId]
+      );
+      expect(queuedImageDuringLosingTransaction.rows).toEqual([{ id: queuedImageJobId, status: "queued" }]);
+      await expect(pool.query<{ id: string; status: string }>(
+        "UPDATE generation_jobs SET status = 'queued' WHERE id = $1 AND status = 'failed' RETURNING id, status",
+        [competingJobId]
+      )).resolves.toMatchObject({ rows: [{ id: competingJobId, status: "queued" }] });
       await barrier.release();
-      await expect(winner).resolves.toMatchObject({ status: "replacement_queued", duplicate: false });
       await expect(loser).rejects.toMatchObject({ kind: "active_job", details: { reason: "active_generation" } });
     } finally {
       await barrier.cleanup();
@@ -769,9 +832,31 @@ integration("PostgreSQL generation command repository", () => {
       "SELECT consumed_at FROM turn_input_classifications WHERE id = $1",
       [classification.rows[0]!.id]
     )).resolves.toMatchObject({ rows: [{ consumed_at: null }] });
-    await expect(pool.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM image_jobs WHERE id = $1",
+    await expect(pool.query<{ id: string; status: string }>(
+      "SELECT id, status FROM image_jobs WHERE id = $1",
       [queuedImageJobId]
-    )).resolves.toMatchObject({ rows: [{ count: "0" }] });
+    )).resolves.toMatchObject({ rows: [{ id: queuedImageJobId, status: "queued" }] });
+    await expect(pool.query<{ id: string; status: string }>(
+      "SELECT id, status FROM generation_jobs WHERE id = $1",
+      [competingJobId]
+    )).resolves.toMatchObject({ rows: [{ id: competingJobId, status: "queued" }] });
+
+    const queuedImageDelete = statements.findIndex((statement) => statement.startsWith("DELETE FROM image_jobs"));
+    const savepoint = statements.indexOf("SAVEPOINT enqueue_replacement_insert");
+    const rollbackToSavepoint = statements.indexOf("ROLLBACK TO SAVEPOINT enqueue_replacement_insert");
+    const releaseSavepoint = statements.indexOf("RELEASE SAVEPOINT enqueue_replacement_insert");
+    const outerRollback = statements.indexOf("ROLLBACK");
+    const replayLookup = statements.findIndex((statement, index) => index > outerRollback
+      && statement.includes("FROM generation_jobs")
+      && statement.includes("idempotency_key = $2"));
+    const activeLookup = statements.findIndex((statement, index) => index > replayLookup
+      && statement.includes("FROM generation_jobs WHERE campaign_id = $1 AND owner_user_id = $2"));
+    expect(queuedImageDelete).toBeGreaterThan(-1);
+    expect(queuedImageDelete).toBeLessThan(savepoint);
+    expect(savepoint).toBeLessThan(rollbackToSavepoint);
+    expect(rollbackToSavepoint).toBeLessThan(releaseSavepoint);
+    expect(releaseSavepoint).toBeLessThan(outerRollback);
+    expect(outerRollback).toBeLessThan(replayLookup);
+    expect(replayLookup).toBeLessThan(activeLookup);
   });
 });
