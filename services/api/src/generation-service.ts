@@ -9,6 +9,8 @@ import {
   type CampaignTracker,
   type GenerationRequest,
   type GenerationRetryLatestRequest,
+  PUBLIC_GENERATION_FAILURE_CODE,
+  PUBLIC_GENERATION_FAILURE_MESSAGE,
   type PlayerCampaignConfig,
   type PlayerEventTrigger,
   type PlayerRpgStat,
@@ -2249,7 +2251,7 @@ export async function executeGenerationJob(pool: DatabasePool, workerId: string,
        WHERE id = $1 AND owner_user_id = $2
          AND status IN ('assessing','generating','validating','committing') AND lease_owner = $6
        RETURNING id`,
-      [job.id, job.owner_user_id, code, (error instanceof Error ? error.message : String(error)).slice(0, 4000),
+      [job.id, job.owner_user_id, PUBLIC_GENERATION_FAILURE_CODE, PUBLIC_GENERATION_FAILURE_MESSAGE,
         json(transportError ? { transportError } : {}), workerId]
     );
     if (failed.rows[0]) {

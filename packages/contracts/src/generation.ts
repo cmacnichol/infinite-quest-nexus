@@ -416,11 +416,21 @@ export const generationJobStatusSchema = z.object({
   partialNarration: z.string().nullable().optional()
 });
 
+export const PUBLIC_GENERATION_FAILURE_CODE = "generation_failed" as const;
+export const PUBLIC_GENERATION_FAILURE_MESSAGE = "Generation could not be completed." as const;
+
+const publicGenerationFailureFields = {
+  errorCode: z.literal(PUBLIC_GENERATION_FAILURE_CODE).nullable(),
+  errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable()
+};
+
 const generationJobSnapshotBaseSchema = generationJobStatusSchema.omit({
   operationKind: true,
   replacementTurnId: true,
-  partialOutput: true
-});
+  partialOutput: true,
+  errorCode: true,
+  errorMessage: true
+}).extend(publicGenerationFailureFields);
 
 export const generationJobSnapshotSchema = z.discriminatedUnion("operationKind", [
   generationJobSnapshotBaseSchema.extend({
@@ -442,10 +452,8 @@ const generationStreamSnapshotBaseSchema = generationJobStatusSchema.pick({
   // Attempts is the monotonic retry-cycle marker used for stream reconciliation.
   attempts: true,
   partialNarration: true,
-  errorMessage: true,
-  errorCode: true,
   resultTurnId: true
-});
+}).extend(publicGenerationFailureFields);
 
 export const generationStreamSnapshotSchema = z.discriminatedUnion("operationKind", [
   generationStreamSnapshotBaseSchema.extend({

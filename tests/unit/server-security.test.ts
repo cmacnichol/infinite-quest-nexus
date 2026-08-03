@@ -836,6 +836,7 @@ describe("API server security and CORS headers", () => {
     const fixtureAction = "fixture action that must not appear in lifecycle logs";
     const fixturePartialNarration = "fixture partial narration that must not appear in lifecycle logs";
     const fixturePartialOutput = `{"narration":"${fixturePartialNarration}","choices":[]}`;
+    const rawFailure = "MODEL_SECRET=distinctive-raw-provider-detail";
     const mockPool = {
       query: async (query: string) => {
         if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
@@ -859,8 +860,8 @@ describe("API server security and CORS headers", () => {
               providerResponseId: null,
               providerFinishReason: null,
               resultTurnId: null,
-              errorCode: null,
-              errorMessage: null,
+              errorCode: "provider_transport_error",
+              errorMessage: rawFailure,
               recoveryMetadata: {},
               createdAt: new Date(),
               updatedAt: new Date(),
@@ -887,9 +888,12 @@ describe("API server security and CORS headers", () => {
       expect(generationStreamSnapshotSchema.parse(snapshotPayload)).toMatchObject({
         id: jobId,
         status: "cancelled",
-        partialNarration: fixturePartialNarration
+        partialNarration: fixturePartialNarration,
+        errorCode: "generation_failed",
+        errorMessage: "Generation could not be completed."
       });
       expect(snapshotPayload).not.toHaveProperty("partialOutput");
+      expect(response.body).not.toContain(rawFailure);
 
       const lifecycleLogs = loggerInfo.mock.calls
         .map(([fields]) => fields as Record<string, unknown>)

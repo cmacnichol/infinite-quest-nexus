@@ -64,7 +64,7 @@ describe("generation machine", () => {
       .toMatchObject({ kind: "accepted", narrationChanged: false });
     expect(machine.observe(snapshot({ status: "generating", partialNarration: "The gate groans." })))
       .toMatchObject({ kind: "accepted", narrationChanged: true });
-    expect(machine.observe(snapshot({ status: "generating", partialNarration: "The gate groans.", errorCode: "provider_wait" })))
+    expect(machine.observe(snapshot({ status: "generating", partialNarration: "The gate groans.", errorCode: "generation_failed" })))
       .toMatchObject({ kind: "accepted", narrationChanged: false });
   });
 

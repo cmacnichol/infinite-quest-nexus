@@ -203,6 +203,17 @@ function httpError(statusCode: number, retryAfter?: string): NexusApiError {
 }
 
 describe("generation polling session", () => {
+  it("rejects raw backend failure details instead of yielding them to the client store", async () => {
+    const rawFailure = "MODEL_SECRET=distinctive-raw-provider-detail";
+    const rawSnapshot = {
+      ...snapshot({ status: "failed" }),
+      errorCode: "provider_transport_error",
+      errorMessage: rawFailure
+    } as unknown as GenerationJobSnapshot;
+
+    await expect(collect(options({ api: apiQueue(rawSnapshot) }))).rejects.toMatchObject({ kind: "invalid_snapshot" });
+  });
+
   it("polls immediately, strips durable timestamps, waits 1500 ms, and never overlaps reads", async () => {
     const api = apiQueue(snapshot(), snapshot({ status: "completed" }));
     const delay = immediateDelay();

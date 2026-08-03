@@ -490,7 +490,7 @@ integration("durable Story Engine integration", () => {
 
     try {
       expect(await runGenerationJob(pool, "story-worker-replacement-transport", 30, credentialSecret)).toBe(true);
-      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "failed", errorCode: "provider_transport_error" });
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "failed", errorCode: "generation_failed" });
       const events = [...warnSpy.mock.calls, ...errorSpy.mock.calls]
         .map(([event]) => event)
         .filter((event): event is Record<string, unknown> => {
@@ -2076,6 +2076,8 @@ describe("generation HTTP route-to-workflow boundary", () => {
           id: routeJobId,
           status: "queued",
           duplicate: false,
+          operationKind: "append",
+          replacementTurnId: null,
           expectedTurnNumber: 1,
           createdAt: "2026-08-02T12:00:00.000Z"
         }));

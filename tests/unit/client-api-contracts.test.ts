@@ -414,7 +414,9 @@ describe("client API response contracts", () => {
       createdAt: TIMESTAMP,
       updatedAt: TIMESTAMP,
       partialOutput: "raw provider response",
-      partialNarration: "Sanitized narration"
+      partialNarration: "Sanitized narration",
+      errorCode: null,
+      errorMessage: null
     };
     const parsed = generationStreamSnapshotSchema.parse(snapshot);
 
@@ -427,7 +429,9 @@ describe("client API response contracts", () => {
       replacementTurnId: null,
       status: "cancelled",
       attempts: 1,
-      partialNarration: "Sanitized narration"
+      partialNarration: "Sanitized narration",
+      errorCode: null,
+      errorMessage: null
     });
     expect(generationStreamSnapshotSchema.safeParse({ ...snapshot, expectedTurnNumber: "3" }).success).toBe(false);
     expect(generationStreamSnapshotSchema.safeParse({ ...snapshot, status: "mystery" }).success).toBe(false);
@@ -449,7 +453,9 @@ describe("client API response contracts", () => {
       createdAt: TIMESTAMP,
       updatedAt: TIMESTAMP,
       partialOutput: "raw provider response",
-      partialNarration: "Sanitized narration"
+      partialNarration: "Sanitized narration",
+      errorCode: null,
+      errorMessage: null
     });
 
     expect(parsed).toMatchObject({ id: JOB_ID, createdAt: TIMESTAMP, updatedAt: TIMESTAMP });

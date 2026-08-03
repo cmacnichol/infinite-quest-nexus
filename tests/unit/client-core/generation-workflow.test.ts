@@ -186,8 +186,8 @@ describe("generation workflow", () => {
           replacementTurnId: null,
           expectedTurnNumber: 1,
           attempts: 1,
-          errorCode: "provider_unavailable",
-          errorMessage: "Try again.",
+          errorCode: "generation_failed",
+          errorMessage: "Generation could not be completed.",
           resultTurnId: null
         }
       } as CampaignSyncStatus)
@@ -232,6 +232,102 @@ describe("generation workflow", () => {
     expect(resumed?.jobId).toBe(otherJobId);
     await resumed?.fetchResult();
     expect(resultIds).toEqual([otherJobId]);
+  });
+
+  it("resumes a stored replacement job with its persisted validated target", async () => {
+    const pending = store({
+      operationKind: "replace_latest",
+      expectedTurnNumber: 1,
+      createdAt: 1_000,
+      jobId,
+      replacementTurnId,
+      request: { ...submission().request, expectedCurrentTurnNumber: 1 }
+    } as StoredGenerationSubmission);
+    const workflow = createGenerationWorkflow({
+      api: api({ syncStatus: async () => sync() }),
+      source: sourceFromSessions([]),
+      clock: { now: () => 1_000 },
+      pendingSubmissions: pending
+    });
+
+    await expect(workflow.resume(campaignId)).resolves.toMatchObject({
+      jobId,
+      operationKind: "replace_latest",
+      replacementTurnId
+    });
+  });
+
+  it("rejects a stream snapshot whose operation pair conflicts with the run", async () => {
+    const workflow = createGenerationWorkflow({
+      api: api({
+        enqueueReplacement: async () => ({
+          id: jobId,
+          status: "replacement_queued",
+          duplicate: false,
+          operationKind: "replace_latest",
+          replacementTurnId
+        } as GenerationEnqueueResponse)
+      }),
+      source: sourceFromSessions([[{ kind: "snapshot", snapshot: snapshot({ status: "replacement_queued" }) }]]),
+      clock: { now: () => 1_000 },
+      pendingSubmissions: store()
+    });
+    const run = await workflow.submit(campaignId, {
+      operationKind: "replace_latest",
+      request: { ...submission().request, expectedCurrentTurnNumber: 1 }
+    });
+
+    await expect(collect(run.watch(signal()))).rejects.toMatchObject({ kind: "invalid_snapshot" });
+  });
+
+  it("rejects a terminal action response whose operation pair conflicts with the run", async () => {
+    const workflow = createGenerationWorkflow({
+      api: api({
+        enqueueReplacement: async () => ({
+          id: jobId,
+          status: "replacement_queued",
+          duplicate: false,
+          operationKind: "replace_latest",
+          replacementTurnId
+        } as GenerationEnqueueResponse),
+        cancel: async () => actionResponse("cancelled")
+      }),
+      source: sourceFromSessions([]),
+      clock: { now: () => 1_000 },
+      pendingSubmissions: store()
+    });
+    const run = await workflow.submit(campaignId, {
+      operationKind: "replace_latest",
+      request: { ...submission().request, expectedCurrentTurnNumber: 1 }
+    });
+
+    await expect(run.cancelGeneration()).rejects.toMatchObject({ kind: "action_response_mismatch" });
+  });
+
+  it("clears a stale stored replacement job when sync contains its result and suppresses completed recovery", async () => {
+    const pending = store({
+      operationKind: "replace_latest",
+      expectedTurnNumber: 1,
+      createdAt: 1_000,
+      jobId,
+      replacementTurnId,
+      request: { ...submission().request, expectedCurrentTurnNumber: 1 }
+    });
+    const workflow = createGenerationWorkflow({
+      api: api({
+        syncStatus: async () => ({
+          pendingGeneration: null,
+          turns: { turns: [{ id: otherJobId, turnNumber: 1 }], nextCursor: null },
+          generationRecovery: null
+        } as unknown as CampaignSyncStatus)
+      }),
+      source: sourceFromSessions([]),
+      clock: { now: () => 1_000 },
+      pendingSubmissions: pending
+    });
+
+    await expect(workflow.resume(campaignId)).resolves.toBeNull();
+    expect(pending.value).toBeNull();
   });
 
   it("auto-retries once through a fresh source session and then settles with the fetched result", async () => {

@@ -5,6 +5,7 @@ import { createGenerationSubmissionCoordinator } from "../../../packages/client-
 
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const jobId = "22222222-2222-4222-8222-222222222222";
+const replacementTurnId = "33333333-3333-4333-8333-333333333333";
 
 type AppendGenerationSubmissionInput = Extract<GenerationSubmissionInput, { operationKind: "append" }>;
 
@@ -77,6 +78,13 @@ describe("generation submission coordinator", () => {
   it("derives replacement storage turn from the request before enqueuing the intact request", async () => {
     const saved: StoredGenerationSubmission[] = [];
     const replacement = replacementRequest();
+    const replacementResponse: GenerationEnqueueResponse = {
+      id: jobId,
+      status: "replacement_queued",
+      duplicate: false,
+      operationKind: "replace_latest",
+      replacementTurnId
+    };
     const coordinator = createGenerationSubmissionCoordinator({
       api: {
         async enqueue() {
@@ -87,7 +95,7 @@ describe("generation submission coordinator", () => {
           expect(saved).toEqual([
             { operationKind: "replace_latest", request: replacement, expectedTurnNumber: 7, createdAt: 1_000 }
           ]);
-          return response();
+          return replacementResponse;
         }
       },
       clock: { now: () => 1_000 },
@@ -105,11 +113,45 @@ describe("generation submission coordinator", () => {
       expectedTurnNumber: 4,
       request: replacement
     };
-    await expect(coordinator.submit(campaignId, forgedInput as GenerationSubmissionInput)).resolves.toEqual(response());
+    await expect(coordinator.submit(campaignId, forgedInput as GenerationSubmissionInput)).resolves.toEqual(replacementResponse);
     expect(saved).toEqual([
       { operationKind: "replace_latest", request: replacement, expectedTurnNumber: 7, createdAt: 1_000 },
-      { operationKind: "replace_latest", request: replacement, expectedTurnNumber: 7, createdAt: 1_000, jobId }
+      { operationKind: "replace_latest", request: replacement, expectedTurnNumber: 7, createdAt: 1_000, jobId, replacementTurnId }
     ]);
+  });
+
+  it("persists the server-validated replacement target with a durable replacement job", async () => {
+    const saved: StoredGenerationSubmission[] = [];
+    const coordinator = createGenerationSubmissionCoordinator({
+      api: {
+        async enqueue() {
+          throw new Error("unexpected append enqueue");
+        },
+        async enqueueReplacement() {
+          return {
+            id: jobId,
+            status: "replacement_queued",
+            duplicate: false,
+            operationKind: "replace_latest",
+            replacementTurnId
+          };
+        }
+      },
+      clock: { now: () => 1_000 },
+      store: {
+        load: () => null,
+        save(_campaignId, value) { saved.push(value); },
+        clear: () => undefined
+      }
+    });
+
+    await coordinator.submit(campaignId, { operationKind: "replace_latest", request: replacementRequest() });
+
+    expect(saved.at(-1)).toMatchObject({
+      operationKind: "replace_latest",
+      jobId,
+      replacementTurnId
+    });
   });
 
   it("uses one injected clock for the exact fifteen-minute expiry boundary", () => {

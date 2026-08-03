@@ -11,6 +11,7 @@ import type {
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const otherCampaignId = "22222222-2222-4222-8222-222222222222";
 const jobId = "33333333-3333-4333-8333-333333333333";
+const replacementTurnId = "99999999-9999-4999-8999-999999999999";
 const classificationId = "44444444-4444-4444-8444-444444444444";
 const providerProfileId = "55555555-5555-4555-8555-555555555555";
 
@@ -33,6 +34,7 @@ const replacement: StoredGenerationSubmission = {
   expectedTurnNumber: 7,
   createdAt: 234_567,
   jobId,
+  replacementTurnId,
   request: {
     action: "Take the other path",
     requestedInputMode: "auto",
@@ -52,8 +54,9 @@ const replacement: StoredGenerationSubmission = {
   }
 };
 
-const { jobId: _replacementJobId, ...replacementWithoutJob } = replacement;
+const { jobId: _replacementJobId, replacementTurnId: _replacementTurnId, ...replacementWithoutJob } = replacement;
 void _replacementJobId;
+void _replacementTurnId;
 
 class MemoryStorage implements PendingSubmissionStorage {
   readonly values = new Map<string, string>();

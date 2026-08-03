@@ -20,6 +20,8 @@ import {
   generationRetryLatestRequestSchema,
   generationJobSnapshotSchema,
   generationStreamSnapshotSchema,
+  PUBLIC_GENERATION_FAILURE_CODE,
+  PUBLIC_GENERATION_FAILURE_MESSAGE,
   illustrationConfigSchema,
   illustrationRequestSchema,
   illustrationSegmentImageRequestSchema,
@@ -259,12 +261,22 @@ function parseResponseProjection<TSchema extends z.ZodType>(schema: TSchema, val
   }
 }
 
+function generationPublicError(value: unknown): { errorCode: null | typeof PUBLIC_GENERATION_FAILURE_CODE; errorMessage: null | typeof PUBLIC_GENERATION_FAILURE_MESSAGE } {
+  const status = typeof value === "object" && value !== null && "status" in value
+    ? (value as { status?: unknown }).status
+    : undefined;
+  if (["failed", "recoverable", "cancelled", "discarded"].includes(String(status))) {
+    return { errorCode: PUBLIC_GENERATION_FAILURE_CODE, errorMessage: PUBLIC_GENERATION_FAILURE_MESSAGE };
+  }
+  return { errorCode: null, errorMessage: null };
+}
+
 function generationSnapshot(value: unknown) {
-  return parseResponseProjection(generationJobSnapshotSchema, value);
+  return parseResponseProjection(generationJobSnapshotSchema, { ...value as object, ...generationPublicError(value) });
 }
 
 function generationStreamSnapshot(value: unknown) {
-  return parseResponseProjection(generationStreamSnapshotSchema, value);
+  return parseResponseProjection(generationStreamSnapshotSchema, { ...value as object, ...generationPublicError(value) });
 }
 
 export async function buildServer({ config, pool }: BuildServerOptions): Promise<FastifyInstance> {
@@ -797,8 +809,7 @@ export async function buildServer({ config, pool }: BuildServerOptions): Promise
       operationKind: row.recoveryOperationKind,
       expectedTurnNumber: row.recoveryExpectedTurnNumber,
       attempts: row.recoveryAttempts,
-      errorCode: row.recoveryErrorCode,
-      errorMessage: row.recoveryErrorMessage,
+      ...generationPublicError({ status: row.recoveryStatus }),
       resultTurnId: row.recoveryResultTurnId,
       replacementTurnId: row.recoveryReplacementTurnId
     } : null;

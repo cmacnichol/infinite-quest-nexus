@@ -52,7 +52,18 @@ export interface GenerationApiPort {
   discard(jobId: string): Promise<GenerationActionResponse>;
 }
 
-export type StoredGenerationSubmission = PendingGenerationSubmission & { jobId?: string };
+type StoredAppendGenerationSubmission = Extract<PendingGenerationSubmission, { operationKind: "append" }> & {
+  jobId?: string;
+};
+
+type StoredReplacementGenerationSubmission = Extract<PendingGenerationSubmission, { operationKind: "replace_latest" }> & (
+  | { jobId?: undefined; replacementTurnId?: undefined }
+  | { jobId: string; replacementTurnId: string }
+);
+
+export type StoredGenerationSubmission =
+  | StoredAppendGenerationSubmission
+  | StoredReplacementGenerationSubmission;
 
 type AppendGenerationSubmissionInput = Omit<
   Extract<StoredGenerationSubmission, { operationKind: "append" }>,
@@ -68,11 +79,9 @@ export type GenerationSubmissionInput =
   | AppendGenerationSubmissionInput
   | ReplaceLatestGenerationSubmissionInput;
 
-export interface GenerationRun {
+interface GenerationRunBase {
   readonly campaignId: string;
   readonly jobId: string;
-  readonly operationKind: GenerationStreamSnapshot["operationKind"];
-  readonly replacementTurnId: GenerationStreamSnapshot["replacementTurnId"];
   watch(signal: AbortSignalLike): AsyncIterable<GenerationEvent>;
   retryGeneration(signal: AbortSignalLike): AsyncIterable<GenerationEvent>;
   cancelGeneration(): Promise<GenerationActionResponse>;
@@ -82,6 +91,11 @@ export interface GenerationRun {
     | Extract<GenerationEvent, { type: "result_unavailable" }>
   >;
 }
+
+export type GenerationRun = GenerationRunBase & (
+  | { readonly operationKind: "append"; readonly replacementTurnId: null }
+  | { readonly operationKind: "replace_latest"; readonly replacementTurnId: string }
+);
 
 export interface GenerationWorkflow {
   submit(campaignId: string, submission: GenerationSubmissionInput): Promise<GenerationRun>;

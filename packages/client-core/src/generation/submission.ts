@@ -56,6 +56,11 @@ async function enqueue(
   const response = submission.operationKind === "append"
     ? await dependencies.api.enqueue(campaignId, submission.request)
     : await dependencies.api.enqueueReplacement(campaignId, submission.request);
-  dependencies.store.save(campaignId, { ...submission, jobId: response.id });
+  const acknowledged: StoredGenerationSubmission = submission.operationKind === "append"
+    ? { ...submission, jobId: response.id }
+    : response.operationKind === "replace_latest"
+      ? { ...submission, jobId: response.id, replacementTurnId: response.replacementTurnId }
+      : (() => { throw new Error("Generation enqueue operation mismatch."); })();
+  dependencies.store.save(campaignId, acknowledged);
   return response;
 }

@@ -16,23 +16,28 @@ export interface PendingSubmissionStorage {
 
 const commonSubmissionFields = {
   expectedTurnNumber: z.number().int().min(1),
-  createdAt: z.number().finite().nonnegative(),
-  jobId: z.uuid().optional()
+  createdAt: z.number().finite().nonnegative()
 };
 
 const appendSubmissionSchema = z.object({
   operationKind: z.literal("append"),
   request: generationRequestSchema,
-  ...commonSubmissionFields
+  ...commonSubmissionFields,
+  jobId: z.uuid().optional()
 }).strict();
 
 const replacementSubmissionSchema = z.object({
   operationKind: z.literal("replace_latest"),
   request: generationRetryLatestRequestSchema,
-  ...commonSubmissionFields
+  ...commonSubmissionFields,
+  jobId: z.uuid().optional(),
+  replacementTurnId: z.uuid().optional()
 }).strict().refine(
   (value) => value.request.expectedCurrentTurnNumber === value.expectedTurnNumber,
   { message: "Replacement turn numbers must match." }
+).refine(
+  (value) => (value.jobId === undefined) === (value.replacementTurnId === undefined),
+  { message: "Durable replacement jobs must retain their validated replacement target." }
 );
 
 const storedSubmissionSchema = z.discriminatedUnion("operationKind", [
@@ -167,12 +172,24 @@ function normalizeSubmission(
       ...job
     };
   }
+  if (submission.jobId === undefined) {
+    return {
+      operationKind: "replace_latest",
+      request: submission.request,
+      expectedTurnNumber: submission.expectedTurnNumber,
+      createdAt: submission.createdAt
+    };
+  }
+  if (submission.replacementTurnId === undefined) {
+    throw new Error("Stored replacement job is missing its validated target.");
+  }
   return {
     operationKind: "replace_latest",
     request: submission.request,
     expectedTurnNumber: submission.expectedTurnNumber,
     createdAt: submission.createdAt,
-    ...job
+    jobId: submission.jobId,
+    replacementTurnId: submission.replacementTurnId
   };
 }
 

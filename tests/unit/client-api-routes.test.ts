@@ -75,6 +75,7 @@ type MockPoolOptions = {
   malformedJob?: boolean;
   missingJob?: boolean;
   missingSync?: boolean;
+  rawGenerationError?: boolean;
   onGenerationJobRead?: () => void;
   streamReadFailure?: boolean;
   streamSnapshots?: Array<Record<string, unknown>>;
@@ -163,6 +164,12 @@ function jobRow(options: MockPoolOptions) {
     completedAt: NOW,
     partialOutput: "raw provider payload"
   };
+  if (options.rawGenerationError) {
+    row.status = "failed";
+    row.resultTurnId = null;
+    row.errorCode = "provider_transport_error";
+    row.errorMessage = "MODEL_SECRET=distinctive-raw-provider-detail";
+  }
   if (options.malformedJob) delete row.operationKind;
   return row;
 }
@@ -502,6 +509,23 @@ describe("client API route contracts without PostgreSQL", () => {
       expect(generationJobSnapshotSchema.parse(snapshotResponse.json())).toMatchObject({ id: JOB_ID, operationKind: "append", updatedAt: NOW.toISOString() });
       expect(snapshotResponse.json()).not.toHaveProperty("partialOutput");
       expect(generationResultSchema.parse((await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/result` })).json()).resultTurnId).toBe(TURN_ID);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("replaces raw generation failure details before the polling response reaches a client", async () => {
+    const app = await buildServer({ config: config(storageRoot), pool: mockPool({ rawGenerationError: true }) });
+    try {
+      const response = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}` });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        status: "failed",
+        errorCode: "generation_failed",
+        errorMessage: "Generation could not be completed."
+      });
+      expect(response.body).not.toContain("MODEL_SECRET=distinctive-raw-provider-detail");
     } finally {
       await app.close();
     }

@@ -10,6 +10,10 @@ import {
   type GenerationWorkflowDependencies
 } from "./types.js";
 
+type GenerationOperation =
+  | Pick<Extract<import("@infinite-quest/contracts").GenerationStreamSnapshot, { operationKind: "append" }>, "operationKind" | "replacementTurnId">
+  | Pick<Extract<import("@infinite-quest/contracts").GenerationStreamSnapshot, { operationKind: "replace_latest" }>, "operationKind" | "replacementTurnId">;
+
 export function createGenerationWorkflow(dependencies: GenerationWorkflowDependencies): GenerationWorkflow {
   const submissions = createGenerationSubmissionCoordinator({
     api: dependencies.api,
@@ -20,30 +24,49 @@ export function createGenerationWorkflow(dependencies: GenerationWorkflowDepende
   return {
     async submit(campaignId, submission) {
       const response = await submissions.submit(campaignId, submission);
-      return createRun(campaignId, response.id, response.operationKind, response.replacementTurnId, dependencies);
+      return createRun(campaignId, response.id, response, dependencies);
     },
     async resume(campaignId) {
       const sync = await dependencies.api.syncStatus(campaignId);
       if (sync.pendingGeneration) {
         dependencies.pendingSubmissions.clear(campaignId);
-        return createRun(campaignId, sync.pendingGeneration.id, sync.pendingGeneration.operationKind, sync.pendingGeneration.replacementTurnId, dependencies);
+        return createRun(campaignId, sync.pendingGeneration.id, sync.pendingGeneration, dependencies);
       }
       const recovery = sync.generationRecovery;
       const completedTurnAlreadyLoaded = recovery?.status === "completed"
         && recovery.resultTurnId !== null
         && sync.turns?.turns.some((turn) => turn.id === recovery.resultTurnId);
-      if (recovery && !completedTurnAlreadyLoaded) {
+      if (completedTurnAlreadyLoaded) {
         dependencies.pendingSubmissions.clear(campaignId);
-        return createRun(campaignId, recovery.id, recovery.operationKind, recovery.replacementTurnId, dependencies);
+        return null;
+      }
+      if (recovery) {
+        dependencies.pendingSubmissions.clear(campaignId);
+        return createRun(campaignId, recovery.id, recovery, dependencies);
       }
       const submission = submissions.load(campaignId);
       if (!submission) return null;
+      const completedReplacementAlreadyLoaded = submission.jobId !== undefined
+        && submission.operationKind === "replace_latest"
+        && sync.turns?.turns.some((turn) => (
+          turn.turnNumber === submission.expectedTurnNumber
+          && turn.id !== submission.replacementTurnId
+        ));
+      if (completedReplacementAlreadyLoaded) {
+        dependencies.pendingSubmissions.clear(campaignId);
+        return null;
+      }
       if (submission.jobId) {
-        if (submission.operationKind !== "append") return null;
-        return createRun(campaignId, submission.jobId, "append", null, dependencies);
+        if (submission.operationKind === "append") {
+          return createRun(campaignId, submission.jobId, { operationKind: "append", replacementTurnId: null }, dependencies);
+        }
+        return createRun(campaignId, submission.jobId, {
+          operationKind: "replace_latest",
+          replacementTurnId: submission.replacementTurnId
+        }, dependencies);
       }
       const response = await submissions.replay(campaignId, submission);
-      return createRun(campaignId, response.id, response.operationKind, response.replacementTurnId, dependencies);
+      return createRun(campaignId, response.id, response, dependencies);
     }
   };
 }
@@ -51,8 +74,7 @@ export function createGenerationWorkflow(dependencies: GenerationWorkflowDepende
 function createRun(
   campaignId: string,
   jobId: string,
-  operationKind: import("@infinite-quest/contracts").GenerationStreamSnapshot["operationKind"],
-  replacementTurnId: import("@infinite-quest/contracts").GenerationStreamSnapshot["replacementTurnId"],
+  operation: GenerationOperation,
   dependencies: GenerationWorkflowDependencies
 ): GenerationRun {
   const machine = createGenerationMachine();
@@ -84,7 +106,10 @@ function createRun(
         : action === "cancel"
           ? ["cancelled"]
           : ["discarded"];
-      if (actionResponse.id !== jobId || !expectedStatus.includes(actionResponse.status)) {
+      if (actionResponse.id !== jobId
+        || !expectedStatus.includes(actionResponse.status)
+        || actionResponse.operationKind !== operation.operationKind
+        || actionResponse.replacementTurnId !== operation.replacementTurnId) {
         throw new GenerationWorkflowProtocolError("action_response_mismatch");
       }
       if (action === "retry") machine.acknowledgeRetry();
@@ -109,6 +134,9 @@ function createRun(
   }
 
   async function observeSnapshot(snapshot: import("@infinite-quest/contracts").GenerationStreamSnapshot) {
+    if (snapshot.operationKind !== operation.operationKind || snapshot.replacementTurnId !== operation.replacementTurnId) {
+      throw new GenerationWorkflowProtocolError("invalid_snapshot");
+    }
     try {
       return machine.observe(snapshot);
     } catch (cause) {
@@ -260,15 +288,13 @@ function createRun(
     }
   }
 
-  return {
+  const run = {
     campaignId,
     jobId,
-    operationKind,
-    replacementTurnId,
-    watch(signal) {
+    watch(signal: import("../ports.js").AbortSignalLike) {
       return observe(signal, false);
     },
-    retryGeneration(signal) {
+    retryGeneration(signal: import("../ports.js").AbortSignalLike) {
       return observe(signal, true);
     },
     cancelGeneration() {
@@ -279,6 +305,9 @@ function createRun(
     },
     fetchResult
   };
+  return operation.operationKind === "append"
+    ? { ...run, operationKind: "append", replacementTurnId: null }
+    : { ...run, operationKind: "replace_latest", replacementTurnId: operation.replacementTurnId };
 }
 
 function terminalError(message: string | null | undefined): Error {

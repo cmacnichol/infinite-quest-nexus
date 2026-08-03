@@ -8,6 +8,8 @@ import {
   generationJobSnapshotSchema,
   generationJobStatusSchema,
   generationStreamSnapshotSchema,
+  PUBLIC_GENERATION_FAILURE_CODE,
+  PUBLIC_GENERATION_FAILURE_MESSAGE,
   playerEventTriggerSchema,
   playerRpgStatSchema,
   turnInputClassificationRequestSchema,
@@ -212,8 +214,8 @@ const generationRecoveryBaseSchema = z.object({
   status: z.enum(["recoverable", "failed", "completed"]),
   expectedTurnNumber: z.number().int().min(1),
   attempts: z.number().int().min(0),
-  errorCode: z.string().nullable(),
-  errorMessage: z.string().nullable(),
+  errorCode: z.literal(PUBLIC_GENERATION_FAILURE_CODE).nullable(),
+  errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable(),
   resultTurnId: z.uuid().nullable()
 });
 
