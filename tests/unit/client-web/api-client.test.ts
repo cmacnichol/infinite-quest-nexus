@@ -220,6 +220,69 @@ describe("createNexusApiClient", () => {
     });
   });
 
+  it("rejects malformed replacement provenance in a sync response", async () => {
+    const sync = {
+      id: campaignId,
+      title: "Campaign",
+      activeTurnNumber: 1,
+      worldVersionId,
+      storyLengthProfile: "standard",
+      updatedAt: "2026-08-02T00:00:00.000Z",
+      selectedCharacterId: null,
+      selectedCharacterName: "",
+      characterSnapshot: null,
+      characterProfile: null,
+      characterProfileRevision: 0,
+      status: "active",
+      campaign: {
+        id: campaignId,
+        title: "Campaign",
+        activeTurnNumber: 1,
+        worldVersionId,
+        storyLengthProfile: "standard",
+        updatedAt: "2026-08-02T00:00:00.000Z",
+        selectedCharacterId: null,
+        selectedCharacterName: "",
+        characterSnapshot: null,
+        characterProfile: null,
+        characterProfileRevision: 0,
+        status: "active"
+      },
+      world: { id: "44444444-4444-4444-8444-444444444444", title: "World", versionNumber: 1, genre: "", tone: "", premise: "", backgroundStory: "", character: "", firstAction: "", rules: "", playableCharacters: [] },
+      playerConfig: { selectedCharacterId: null, selectedCharacterName: "", characterSnapshot: null, characterProfile: null, characterProfileRevision: 0, rpgStats: [], trackers: [], eventTriggers: [], useRpgStats: false, suppressEventTriggers: false },
+      pendingGeneration: null,
+      syncToken: "sync-token",
+      turnWindowMode: "unchanged",
+      turns: null,
+      generationRecovery: {
+        id: jobId,
+        status: "completed",
+        operationKind: "replace_latest",
+        expectedTurnNumber: 1,
+        attempts: 1,
+        errorCode: null,
+        errorMessage: null,
+        resultTurnId: "55555555-5555-4555-8555-555555555555",
+        replacementTurnId: null
+      }
+    };
+    const client = createNexusApiClient({
+      basePath: "/api/v1",
+      session: createNoopSessionPort(),
+      fetchImpl: async () => new Response(JSON.stringify(sync), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    });
+
+    await expect(client.generation.syncStatus(campaignId)).rejects.toMatchObject({
+      phase: "response",
+      kind: "response_schema_mismatch",
+      path: `/campaigns/${campaignId}/sync-status`,
+      issues: [expect.objectContaining({ path: ["generationRecovery", "replacementTurnId"] })]
+    });
+  });
+
   it("strips caller-supplied identity fields and never invents identity headers", async () => {
     const queue = invalidResponseFetch();
     const client = createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort(), fetchImpl: queue.fetchImpl });
