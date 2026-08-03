@@ -5326,6 +5326,8 @@ not contain generation state-machine or SQL policy.
 
 - Create: `services/api/src/generation-application-adapter.ts`
 - Create: `tests/unit/generation-application-adapter.test.ts`
+- Create: `tests/helpers/build-server-options.ts` — test-only `serverOptions()`
+  factory so the 53 `buildServer(` call sites convert through one helper
 - Create or relocate: `services/api/src/turn-input-safety.ts` — one shared
   mechanics-language guard used by both the new route adapter and the still-live
   execution path until Task 10d moves execution
@@ -5354,6 +5356,30 @@ not contain generation state-machine or SQL policy.
   runtime/API composition boundary and inject the returned
   `GenerationApplication` into `buildServer`; tests may inject a fake. Do not
   instantiate repositories or factories inside individual route handlers.
+- [ ] **Make `generation` a required field and export the options type —
+  decided 2026-08-03.** `BuildServerOptions` is currently unexported, and there
+  are **53 `buildServer(` call sites across 9 files**, each building an inline
+  object literal; `tests/unit/server-security.test.ts` alone holds 29 and
+  `tests/unit/client-api-routes.test.ts` 12. A required field is what lets 10f
+  prove that no route path constructs a repository, so the churn is accepted
+  rather than avoided.
+
+  ```ts
+  export type BuildServerOptions = {
+    config: RuntimeConfig;
+    pool: DatabasePool;
+    generation: GenerationApplication;
+  };
+  ```
+
+- [ ] Add `tests/helpers/build-server-options.ts` exporting a
+  `serverOptions(overrides: Partial<BuildServerOptions> = {})` factory that
+  supplies a default application, so the 53 sites convert through one helper
+  call instead of 53 hand-written literals. The helper is test-only and must not
+  be imported by `services/**`.
+- [ ] Do **not** make the field optional with an internal default. That keeps
+  `buildServer` importing the repository constructor and weakens exactly the
+  composition-ownership property 10f has to audit.
 - [ ] Resolve the credential-free `initial-owner` server-side for the API role
   and supply its UUID as `OwnerScope`. Continue rejecting or ignoring any
   caller-supplied `user_id`, identity header, email, display name, OIDC subject,
@@ -5361,10 +5387,34 @@ not contain generation state-machine or SQL policy.
 - [ ] Keep request schema validation, campaign/job path parameters,
   idempotency/operation provenance, safe result projections, status codes,
   response headers, and response bodies byte-for-byte contract-compatible.
-- [ ] Map each `GenerationApplicationError.kind` to the existing HTTP status,
-  fixed safe message, and existing safe details such as
-  `active_generation_exists`. Unknown failures follow the existing 5xx handler
-  and internal structured logging; do not expose adapter/provider text.
+- [ ] **Port the error mapping at `details.reason` granularity, not by `kind`.**
+  An earlier revision of this item said "map each kind", which understates the
+  contract by a wide margin: there are 6 `kind` values but ~17 `reason` values,
+  and the HTTP status is chosen by reason. Collapsing to six statuses would
+  break the byte-for-byte compatibility this checkpoint exists to preserve.
+  The authoritative mapping is the `legacyGenerationError` switch in
+  `services/api/src/generation-command-compatibility.ts` — **the file this
+  checkpoint deletes** — so port it into
+  `generation-application-adapter.ts` *before* removing the bridge. Its only
+  consumers are `generation-service.ts` and its own test, so nothing preserves
+  it by accident.
+
+  Four properties an implementer must not flatten:
+
+  | Property | Example |
+  |---|---|
+  | Status varies by reason, not kind | `missing_latest_turn` → **404**; `selected_provider_unavailable` → **400**; `no_text_provider` → **409** |
+  | One reason needs `kind` as a tiebreaker | `classification_missing_or_expired` → 409 when `kind` is `conflict`, 400 otherwise, **with different messages** |
+  | Two messages are computed, not fixed | `stale_current_turn` interpolates `details.actualTurnNumber`/`expectedTurnNumber`; `result_not_completed` branches its text on `details.generationStatus` |
+  | One carries structured details | `active_generation` → 409 with `code: "active_generation_exists"` plus a `pendingGeneration` payload |
+
+  The `not_found` default also discriminates its message on whether
+  `details.campaignId` is present ("Campaign not found." vs "Generation job not
+  found."). Unknown failures follow the existing 5xx handler and internal
+  structured logging; do not expose adapter/provider text.
+- [ ] Table-test the ported mapping over **every** reason, asserting status,
+  message, and details together. A test that asserts only status would pass
+  while the messages regressed.
 - [ ] Keep SSE behavior and its 350 ms polling topology unchanged in this
   checkpoint. Task 11 owns notification delivery. SSE and polling must continue
   using their distinct validated projections and safe error allowlists.
