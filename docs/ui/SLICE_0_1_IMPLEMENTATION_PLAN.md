@@ -4815,21 +4815,21 @@ compile-time assertions that accept append/null and replace-latest/UUID-shaped
 values and reject append/UUID plus replace-latest/null. Do not weaken the union
 with optional fields or casts in factories, fakes, or adapters.
 
-- [ ] Keep `promptSnapshot`, `contextOptions`, `orchestrationPrivate`,
+- [x] Keep `promptSnapshot`, `contextOptions`, `orchestrationPrivate`,
   `baseStatePrivate`, `baseTurnNumber`, `requestedModel`, the input-mode trio,
   `promptProtocolVersion`, and `streamingSegmentsState` **out** of the
   application port. They are execution-internal payloads, not application
   decisions. `orchestration_private` in particular is checkpoint state the
   executor merges and writes back mid-run
   (`generation-service.ts:1393-1402`); it must stay on the side that mutates it.
-- [ ] Accept the tradeoff deliberately: the executor adapter performs **one
+- [x] Accept the tradeoff deliberately: the executor adapter performs **one
   additional guarded read** to load the execution payload after `claimNext`
   returns. It must match `jobId`, `ownerUserId`, `workerId` as the current lease
   owner, and status `assessing`. This is not a second claim and must not re-run
   `FOR UPDATE SKIP LOCKED`, increment attempts, or reassign the lease. A missing
   match is cancellation or lost lease and must stop before provider loading.
   Record the read in 10d's SQL inventory.
-- [ ] Do not "solve" this by making `packages/application` depend on
+- [x] Do not "solve" this by making `packages/application` depend on
   `story-engine`, or by hand-copying its types into the application package.
   The first pulls Node modules into an implementation-free package; the second
   reintroduces the unguarded duplication that Task 5a existed to remove.
@@ -4838,28 +4838,28 @@ with optional fields or casts in factories, fakes, or adapters.
 one-line type whose only dependency, `PromptTemplateKey`, is already in
 `packages/contracts/src/prompt-library.ts`, so the move adds no new dependency:
 
-- [ ] Move `export type PromptSnapshot` from
+- [x] Move `export type PromptSnapshot` from
   `services/api/src/prompt-library-service.ts` into
   `packages/contracts/src/prompt-library.ts`. Leave `resolvePromptSnapshot` in
   `services/api` — it needs `pg` and stays an adapter. Do not re-export the type
   from `prompt-library-service.ts`; that would preserve the wrong ownership and
   permit future runtime code to import the API adapter for a shared type.
-- [ ] Update every current direct consumer:
+- [x] Update every current direct consumer:
   `prompt-library-service.ts`, `generation-service.ts`,
   `turn-intent-service.ts`, `infinite-worlds-import-service.ts`, and
   `tests/unit/prompt-library.test.ts`. Add a public-barrel type assertion so a
   future runtime adapter can import `PromptSnapshot` through
   `@infinite-quest/contracts` without a deep source path.
-- [ ] Run `tests/unit/prompt-library.test.ts` after the move. Its hash/version
+- [x] Run `tests/unit/prompt-library.test.ts` after the move. Its hash/version
   assertions must pass unchanged; this is a type-ownership move, not a prompt
   protocol or runtime behavior change.
-- [ ] The application never references this type. It is moved so that 10d's
+- [x] The application never references this type. It is moved so that 10d's
   executor adapter, which lives in `services/runtime`, does not have to import a
   type back out of `services/api` after execution has been moved out of the API
   role. The boundary scanner would not catch that import — it only checks
   `services/api` against `services/worker` (`check-client-boundaries.mjs:211`) —
   so this is a design rule, not a checkable one.
-- [ ] `packages/contracts/src/story-settings.ts` is not re-exported from the
+- [x] `packages/contracts/src/story-settings.ts` is not re-exported from the
   contracts barrel, so `StoryLengthProfile` is only reachable by deep relative
   import. No 10a work depends on it under this decision; fix it in the
   checkpoint that first needs it through the package name, not speculatively.
@@ -4885,23 +4885,23 @@ back to the existing HTTP status, message, and safe `details` payload.
 
 **Test-first requirements:**
 
-- [ ] Test `createGenerationApplication` with a fake
+- [x] Test `createGenerationApplication` with a fake
   `GenerationCommandRepository`; cover all seven command/query methods and
   prove arguments and return values are forwarded without mutation.
-- [ ] Test `createGenerationWorkerApplication` with separate fake
+- [x] Test `createGenerationWorkerApplication` with separate fake
   `GenerationClaimRepository` and `GenerationExecutor` adapters; cover
   `claimNext` and `executeClaimed`, prove each call reaches only its owning
   adapter, and prove arguments and return values are forwarded without
   mutation. Do not use a combined fake that could conceal an accidental
   combined production port.
-- [ ] Prove owner and campaign/job scope cannot be omitted and that a claimed
+- [x] Prove owner and campaign/job scope cannot be omitted and that a claimed
   job's owner survives into `executeClaimed`.
-- [ ] Prove typed repository errors remain typed application errors and unknown
+- [x] Prove typed repository errors remain typed application errors and unknown
   adapter failures are not rewritten into a misleading domain condition.
-- [ ] Add a package-boundary fixture or scanner assertion that rejects imports
+- [x] Add a package-boundary fixture or scanner assertion that rejects imports
   from `services/**`, Fastify, `pg`, Node-only scheduling modules, and concrete
   provider adapters.
-- [ ] Run the application package check and focused unit test red before adding
+- [x] Run the application package check and focused unit test red before adding
   the minimal implementation, then run both green.
 
 **10a review gate:** package direction and type completeness are approved; no
@@ -4924,6 +4924,33 @@ Final verification passed: application package check, client-boundary check,
 correction re-reviews passed. The scanner coverage now includes direct,
 type-only, re-export, CommonJS, dynamic/import-type, non-literal, and
 triple-slash reference forms.
+
+**10a checklist audit (2026-08-03).** The items were left unticked because the
+commit titled "record Task 10a completion" expanded this substage's
+specification — adding the three ripple-effect consumers, naming
+`isApplicationImportAllowed`/`checkApplication`, and pinning the package
+tsconfig — rather than marking what it satisfied. All fourteen were then
+verified against the shipped code and ticked. Re-measured on `736e197`:
+`pnpm check` 557 candidate files, `pnpm build` clean, `pnpm test:unit`
+**1018/1018 across 87 files**, `pnpm test:integration` **193 passed, 2 skipped
+across 17 files**.
+
+Verified specifically:
+
+- `ClaimedGeneration` implements the 10a decision and tightens it: rather than a
+  flat `replacementTurnId: string | null`, it is an `operationKind`-discriminated
+  union matching the 7P and 13a-R pattern.
+- Every payload the decision excluded is absent from the application types —
+  `promptSnapshot`, `contextOptions`, `orchestrationPrivate`, `baseStatePrivate`,
+  `streamingSegmentsState`, `requestedModel`, and `promptProtocolVersion` each
+  appear zero times — and no application module references `PromptSnapshot`.
+- The boundary predicate was mutation-tested at correct relative depths:
+  `story-engine`, `database`, `logger`, `services/**`, Fastify, `pg`, `node:*`,
+  and **deep-relative access to contracts** are all rejected, while the package
+  name and intra-package paths are allowed. The three correction commits close
+  dynamic-import, `require`, `import type`, and `@ts-ignore` bypasses.
+- Task 10's top-level status correctly remains `Not started`; the substage rule
+  that prevents a half-migrated boundary reading as B1 complete was honored.
 
 ### Task 10b — B1b: Move PostgreSQL command and query behavior
 
