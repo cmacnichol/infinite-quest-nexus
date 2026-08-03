@@ -298,6 +298,64 @@ describe("client boundary checks", () => {
     ]);
   });
 
+  test("rejects application dynamic imports and require calls with non-literal specifiers", () => {
+    const violations = collectClientBoundaryViolations([
+      {
+        file: "packages/application/src/generation/non-literal-loaders.ts",
+        text: `
+          const packageName = "pg";
+          const fromIdentifier = import(packageName);
+          const fromConcatenation = import("p" + "g");
+          const fromTemplate = import(\`\${packageName}\`);
+          const requiredIdentifier = require(packageName);
+          const requiredConcatenation = require("p" + "g");
+          const requiredTemplate = require(\`\${packageName}\`);
+          export { fromIdentifier, fromConcatenation, fromTemplate, requiredIdentifier, requiredConcatenation, requiredTemplate };
+        `
+      }
+    ]);
+
+    expect(violations).toEqual([
+      "packages/application/src/generation/non-literal-loaders.ts: application dynamic import specifier must be a string literal",
+      "packages/application/src/generation/non-literal-loaders.ts: application dynamic import specifier must be a string literal",
+      "packages/application/src/generation/non-literal-loaders.ts: application dynamic import specifier must be a string literal",
+      "packages/application/src/generation/non-literal-loaders.ts: application require specifier must be a string literal",
+      "packages/application/src/generation/non-literal-loaders.ts: application require specifier must be a string literal",
+      "packages/application/src/generation/non-literal-loaders.ts: application require specifier must be a string literal"
+    ]);
+  });
+
+  test("rejects application triple-slash platform references and path escapes while allowing local references", () => {
+    const violations = collectClientBoundaryViolations([
+      {
+        file: "packages/application/src/generation/forbidden-references.ts",
+        text: `
+          /// <reference types="node" />
+          /// <reference lib="dom" />
+          /// <reference path="../../../../services/api/src/server.ts" />
+          export const forbidden = true;
+        `
+      },
+      {
+        file: "packages/application/src/generation/local-reference.ts",
+        text: `
+          /// <reference path="./local-reference-target.ts" />
+          export const local = true;
+        `
+      },
+      {
+        file: "packages/application/src/generation/local-reference-target.ts",
+        text: "export const target = true;"
+      }
+    ]);
+
+    expect(violations).toEqual([
+      "packages/application/src/generation/forbidden-references.ts: application reference lib dom is prohibited",
+      "packages/application/src/generation/forbidden-references.ts: application reference path ../../../../services/api/src/server.ts is outside packages/application",
+      "packages/application/src/generation/forbidden-references.ts: application reference types node is prohibited"
+    ]);
+  });
+
   test("rejects client-core source-relative imports that bypass the contracts package", () => {
     const violations = collectClientBoundaryViolations([
       {

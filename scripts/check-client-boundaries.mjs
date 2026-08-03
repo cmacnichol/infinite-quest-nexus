@@ -52,6 +52,16 @@ const DOM_MANIPULATION_METHODS = new Set([
   "replaceWith"
 ]);
 const DOM_PROPERTY_WRITES = new Set(["className", "innerHTML", "innerText", "outerHTML", "textContent"]);
+const APPLICATION_PLATFORM_LIBRARIES = new Set([
+  "dom",
+  "dom.asynciterable",
+  "dom.iterable",
+  "scripthost",
+  "webworker",
+  "webworker.asynciterable",
+  "webworker.importscripts",
+  "webworker.iterable"
+]);
 const ASSIGNMENT_OPERATOR_KINDS = new Set([
   ts.SyntaxKind.AmpersandAmpersandEqualsToken,
   ts.SyntaxKind.AmpersandEqualsToken,
@@ -225,6 +235,39 @@ function checkApplication(file, sourceFile, violations) {
       violations.push(`${file}: application import ${specifier} is outside packages/application or contracts`);
     }
   }
+
+  for (const reference of sourceFile.typeReferenceDirectives) {
+    violations.push(`${file}: application reference types ${reference.fileName} is prohibited`);
+  }
+  for (const reference of sourceFile.libReferenceDirectives) {
+    if (APPLICATION_PLATFORM_LIBRARIES.has(reference.fileName.toLowerCase())) {
+      violations.push(`${file}: application reference lib ${reference.fileName} is prohibited`);
+    }
+  }
+  for (const reference of sourceFile.referencedFiles) {
+    const target = relativeModulePath(file, reference.fileName);
+    if (target === null || !target.startsWith("packages/application/")) {
+      violations.push(`${file}: application reference path ${reference.fileName} is outside packages/application`);
+    }
+  }
+
+  function visit(node) {
+    const isDynamicImport = ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword;
+    const isCanonicalRequire = ts.isCallExpression(node)
+      && node.arguments.length === 1
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === "require";
+    if (isDynamicImport || isCanonicalRequire) {
+      const specifier = node.arguments.length > 0 ? moduleSpecifierText(node.arguments[0]) : null;
+      if (specifier === null) {
+        const kind = isDynamicImport ? "dynamic import" : "require";
+        violations.push(`${file}: application ${kind} specifier must be a string literal`);
+      }
+    }
+    node.forEachChild(visit);
+  }
+
+  visit(sourceFile);
 }
 
 function checkCrossRoleImports(file, sourceFile, violations) {
