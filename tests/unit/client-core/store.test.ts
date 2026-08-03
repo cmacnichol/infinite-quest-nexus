@@ -117,4 +117,12 @@ describe("createWritableStore", () => {
     immutableDate.setYear(126);
     expectTypeOf(read.get().createdAt.toISOString).toBeFunction();
   });
+
+  it("keeps ordinary setTime-bearing objects recursively immutable", () => {
+    type TimerState = { setTime: () => void; nested: { value: number } };
+    const state: Immutable<TimerState> = { setTime: () => undefined, nested: { value: 1 } };
+
+    // @ts-expect-error A non-Date setTime member must not bypass recursive readonly mapping.
+    state.nested.value = 2;
+  });
 });

@@ -16,7 +16,51 @@ type DateMutator =
   | "setUTCSeconds"
   | "setYear";
 
-type MutableDate = { setTime: unknown };
+type MutableDate = {
+  getDate: unknown;
+  getDay: unknown;
+  getFullYear: unknown;
+  getHours: unknown;
+  getMilliseconds: unknown;
+  getMinutes: unknown;
+  getMonth: unknown;
+  getSeconds: unknown;
+  getTime: unknown;
+  getTimezoneOffset: unknown;
+  getUTCDate: unknown;
+  getUTCDay: unknown;
+  getUTCFullYear: unknown;
+  getUTCHours: unknown;
+  getUTCMilliseconds: unknown;
+  getUTCMinutes: unknown;
+  getUTCMonth: unknown;
+  getUTCSeconds: unknown;
+  setDate: unknown;
+  setFullYear: unknown;
+  setHours: unknown;
+  setMilliseconds: unknown;
+  setMinutes: unknown;
+  setMonth: unknown;
+  setSeconds: unknown;
+  setTime: unknown;
+  setUTCDate: unknown;
+  setUTCFullYear: unknown;
+  setUTCHours: unknown;
+  setUTCMilliseconds: unknown;
+  setUTCMinutes: unknown;
+  setUTCMonth: unknown;
+  setUTCSeconds: unknown;
+  toDateString: unknown;
+  toISOString: unknown;
+  toJSON: unknown;
+  toLocaleDateString: unknown;
+  toLocaleString: unknown;
+  toLocaleTimeString: unknown;
+  toString: unknown;
+  toTimeString: unknown;
+  toUTCString: unknown;
+  valueOf: unknown;
+};
 
 export type Immutable<T> =
   T extends MutableDate
