@@ -279,7 +279,9 @@ describe("client boundary checks", () => {
           import runtime = require("../../../../services/runtime/src/main.js");
           export type Provider = import("../../../story-engine/src/index.js").TextProviderProfile;
           const scheduler = import("node:timers/promises");
-          export { FastifyInstance, Pool, runtime, scheduler };
+          const configuredDynamicImport = import("undici", { with: { type: "json" } });
+          const commonJsAdapter = require("pino");
+          export { FastifyInstance, Pool, runtime, scheduler, configuredDynamicImport, commonJsAdapter };
         `
       }
     ]);
@@ -290,7 +292,9 @@ describe("client boundary checks", () => {
       "packages/application/src/generation/forbidden.mts: application import ../../../story-engine/src/index.js is outside packages/application or contracts",
       "packages/application/src/generation/forbidden.mts: application import fastify is outside packages/application or contracts",
       "packages/application/src/generation/forbidden.mts: application import node:timers/promises is prohibited",
-      "packages/application/src/generation/forbidden.mts: application import pg is outside packages/application or contracts"
+      "packages/application/src/generation/forbidden.mts: application import pg is outside packages/application or contracts",
+      "packages/application/src/generation/forbidden.mts: application import pino is outside packages/application or contracts",
+      "packages/application/src/generation/forbidden.mts: application import undici is outside packages/application or contracts"
     ]);
   });
 

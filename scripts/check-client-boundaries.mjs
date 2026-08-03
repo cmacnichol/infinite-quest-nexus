@@ -137,11 +137,14 @@ function importedModules(sourceFile) {
       const specifier = moduleSpecifierText(node.argument);
       if (specifier !== null) modules.push(specifier);
     }
-    if (ts.isCallExpression(node) && node.arguments.length === 1) {
+    const isDynamicImport = ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword;
+    const isCanonicalRequire = ts.isCallExpression(node)
+      && node.arguments.length === 1
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === "require";
+    if ((isDynamicImport || isCanonicalRequire) && node.arguments.length > 0) {
       const specifier = moduleSpecifierText(node.arguments[0]);
-      if (specifier !== null && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === "require"))) {
-        modules.push(specifier);
-      }
+      if (specifier !== null) modules.push(specifier);
     }
     node.forEachChild(visit);
   }
