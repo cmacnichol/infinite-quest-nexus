@@ -5326,8 +5326,13 @@ not contain generation state-machine or SQL policy.
 
 - Create: `services/api/src/generation-application-adapter.ts`
 - Create: `tests/unit/generation-application-adapter.test.ts`
+- Create: `services/runtime/src/generation-api-composition.ts` — constructs the
+  API-role `GenerationApplication` from the PostgreSQL command repository and
+  its three already-approved injected callbacks
+- Create: `tests/unit/runtime-generation-composition.test.ts` — verifies that
+  the real API composition creates the application without running a command
 - Create: `tests/helpers/build-server-options.ts` — test-only `serverOptions()`
-  factory so the 53 `buildServer(` call sites convert through one helper
+  factory so the 50 test `buildServer(` calls convert through one helper
 - Create or relocate: `services/api/src/turn-input-safety.ts` — one shared
   mechanics-language guard used by both the new route adapter and the still-live
   execution path until Task 10d moves execution
@@ -5363,7 +5368,7 @@ split; what splits is the work.
 
 | Stage | Contains | Character | Ends with |
 |---|---|---|---|
-| **10c1 — plumbing** | required `generation` field, exported `BuildServerOptions`, `serverOptions()` helper, all 53 call sites converted | mechanical; **zero behaviour change** | routes still call the 10b facade; the injected application is constructed and unused |
+| **10c1 — plumbing** | required `generation` field, exported `BuildServerOptions`, API composition factory, `serverOptions()` helper, 50 test calls and 2 runtime calls converted | mechanical; **zero behaviour change** | routes still call the 10b facade; the injected application is constructed and unused |
 | **10c2 — adapter** | `generation-application-adapter.ts` with owner scope, application calls, and the ported reason-level error mapping, unit-tested against a fake | purely additive; nothing removed | adapter exists and is fully tested; routes still on the facade; bridge still live |
 | **10c3 — cutover** | routes switched to the adapter, bridge deleted, `safeTurnInput` and lifecycle logging re-homed, `image-pipeline` usage re-homed, `initialOwnerId` proven zero | the parity-sensitive diff | the 10c review gate |
 
@@ -5372,7 +5377,8 @@ split; what splits is the work.
   10c3 it contains only the cutover.
 - [ ] **10c1 ends green with the injected application unused.** That is
   intentional, not an oversight: it proves the composition root can construct
-  the application and that all 53 sites are converted, at zero contract risk.
+  the application and that all 52 invocation sites are converted, at zero
+  contract risk. Do not count `buildServer`'s declaration as a call site.
   Do not "improve" 10c1 by switching a route to it.
 - [ ] **Port the error mapping in 10c2; delete the bridge in 10c3.** The bridge
   is the only implementation of that mapping. Deleting it in the same commit
@@ -5392,12 +5398,13 @@ split; what splits is the work.
   `GenerationApplication` into `buildServer`; tests may inject a fake. Do not
   instantiate repositories or factories inside individual route handlers.
 - [ ] **Make `generation` a required field and export the options type —
-  decided 2026-08-03.** `BuildServerOptions` is currently unexported, and there
-  are **53 `buildServer(` call sites across 9 files**, each building an inline
-  object literal; `tests/unit/server-security.test.ts` alone holds 29 and
-  `tests/unit/client-api-routes.test.ts` 12. A required field is what lets 10f
-  prove that no route path constructs a repository, so the churn is accepted
-  rather than avoided.
+  decided 2026-08-03.** `BuildServerOptions` is currently unexported. There
+  are **52 `buildServer(` invocations**: 50 test invocations across 7 files and
+  2 API-role invocations in `services/runtime/src/main.ts`; the declaration in
+  `server.ts` is not a call site. `tests/unit/server-security.test.ts` alone
+  holds 29 and `tests/unit/client-api-routes.test.ts` 12. A required field is
+  what lets 10f prove that no route path constructs a repository, so the churn
+  is accepted rather than avoided.
 
   ```ts
   export type BuildServerOptions = {
@@ -5407,11 +5414,47 @@ split; what splits is the work.
   };
   ```
 
-- [ ] Add `tests/helpers/build-server-options.ts` exporting a
-  `serverOptions(overrides: Partial<BuildServerOptions> = {})` factory that
-  supplies a default application, so the 53 sites convert through one helper
-  call instead of 53 hand-written literals. The helper is test-only and must not
-  be imported by `services/**`.
+- [ ] Add `tests/helpers/build-server-options.ts` exporting the following
+  test-only helper. `config` and `pool` deliberately remain required: this
+  repository has no safe universal test defaults for them. Only `generation`
+  receives a default inert fake because 10c1 must not call it.
+
+  ```ts
+  export type ServerOptionsOverrides = Readonly<
+    Pick<BuildServerOptions, "config" | "pool"> &
+    Partial<Pick<BuildServerOptions, "generation">>
+  >;
+
+  export function serverOptions(overrides: ServerOptionsOverrides): BuildServerOptions;
+  ```
+
+  Convert the 50 test calls to `buildServer(serverOptions({ config, pool }))`.
+  The 2 runtime calls must not import this test helper: they pass the real
+  application constructed below. The helper must not be imported by
+  `services/**`.
+- [ ] **Construct the real application once per API-role process.** Create
+  `services/runtime/src/generation-api-composition.ts` with an exported
+  `createApiGenerationApplication(pool: DatabasePool): GenerationApplication`.
+  It must call `createGenerationApplication(createPostgresGenerationCommandRepository(pool, dependencies))`
+  using exactly the existing callback wiring:
+
+  ```ts
+  {
+    resolvePromptSnapshot,
+    promptProtocolVersion,
+    readTurnReportedCosts: (ownerUserId, turnIds) =>
+      turnReportedCosts(pool, ownerUserId, [...turnIds])
+  }
+  ```
+
+  `services/runtime/src/main.ts` imports this factory and calls it only on the
+  `api` and `all` role paths, once before `buildServer`. Do not construct it for
+  `migrate` or `worker`; do not move these callbacks into route handlers or
+  duplicate the repository's SQL.
+- [ ] Add `tests/unit/runtime-generation-composition.test.ts` with a typed mock
+  pool. Assert `createApiGenerationApplication(pool)` returns all seven command
+  methods and makes no query during construction. This is the composition proof
+  that the injected application is real while routes remain untouched in 10c1.
 - [ ] Do **not** make the field optional with an internal default. That keeps
   `buildServer` importing the repository constructor and weakens exactly the
   composition-ownership property 10f has to audit.
