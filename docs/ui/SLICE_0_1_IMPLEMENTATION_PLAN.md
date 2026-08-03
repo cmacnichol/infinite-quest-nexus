@@ -5375,7 +5375,7 @@ split; what splits is the work.
 - [ ] Land them in order. 10c1 must change no response and 10c2 must delete
   nothing, so that by the time a reviewer reads the parity-sensitive diff in
   10c3 it contains only the cutover.
-- [ ] **10c1 ends green with the injected application unused.** That is
+- [x] **10c1 ends green with the injected application unused.** That is
   intentional, not an oversight: it proves the composition root can construct
   the application and that all 52 invocation sites are converted, at zero
   contract risk. Do not count `buildServer`'s declaration as a call site.
@@ -5390,6 +5390,20 @@ split; what splits is the work.
   moved out from under it.
 - [ ] Each stage records its own evidence with measured figures, per the Task 4a
   P4 rule. Keep Task 10's top-level status `Not started` throughout.
+
+**10c1 evidence (2026-08-03): complete.** `c23be50` exports the required
+`BuildServerOptions`, injects a deliberately unused real application through
+both API-role runtime paths, and adds the isolated composition factory plus
+its typed construction proof. Exactly 52 `buildServer` invocations are now
+explicit: 50 test calls (29 + 12 + 5 + 1 + 1 + 1 + 1) use the test-only
+`serverOptions({ config, pool })` helper and the two `api`/`all` runtime calls
+receive the real application; `worker` and `migrate` construct none. The new
+composition test passed (1 test), the converted focused suite passed (50 tests;
+42 database integration cases correctly skipped without a database URL), and
+`pnpm check`, full `pnpm test:unit`, full `pnpm test:integration`,
+`git diff --check`, and `pjm precheck` passed. An independent Task 10c1 review
+approved the full diff with no Critical, Important, or Minor findings. Task 10
+remains `Not started`; 10c2 and 10c3 are still pending.
 
 **Composition and authority requirements:** *(10c1 unless marked otherwise)*
 
