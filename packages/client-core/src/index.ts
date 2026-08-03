@@ -14,6 +14,7 @@ export {
 } from "./campaign-store.js";
 export type {
   CampaignStoreController,
+  CampaignProjectionProtocolErrorKind,
   GenerationProjectionSession
 } from "./campaign-store.js";
 export type {
@@ -27,6 +28,7 @@ export type {
 export {
   selectGeneration,
   selectHistorySyncRequired,
+  selectIsGenerationInFlight,
   selectLatestAcceptedTurn,
   selectLatestAcceptedTurnNumber,
   selectRequestedTurnInputMode,

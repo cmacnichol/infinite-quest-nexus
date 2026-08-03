@@ -14,6 +14,14 @@ export function selectGeneration(state: Immutable<CampaignProjection>): Immutabl
   return state.generation;
 }
 
+export function selectIsGenerationInFlight(state: Immutable<CampaignProjection>): boolean {
+  const generation = state.generation;
+  if (generation === null || generation.result.state !== "pending") return false;
+  const status = generation.snapshot?.status;
+  return status === undefined
+    || !["completed", "recoverable", "failed", "cancelled", "discarded"].includes(status);
+}
+
 export function selectRequestedTurnInputMode(state: Immutable<CampaignProjection>): TurnInputSelection {
   return state.requestedTurnInputMode;
 }

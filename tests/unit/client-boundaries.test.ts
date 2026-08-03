@@ -80,6 +80,7 @@ describe("client boundary checks", () => {
     expect(readOnly.get()).toBe(1);
     expect("WritableStore" in core).toBe(false);
     expect("createWritableStore" in core).toBe(false);
+    expect("selectIsGenerationInFlight" in core).toBe(true);
   });
 
   test("actual Web compiler fixture accepts framework-free port adapters using Web APIs", () => {
