@@ -176,14 +176,18 @@ replacement reconciliation marks `historySyncRequired` and clears the local
 sync token so the next authoritative sync resolves any out-of-window result.
 
 Generation attachment is likewise campaign- and job-scoped. A session reduces
-validated `GenerationEvent` values into the projection, retains a private
-matching run only while monitoring is attached, and never exposes the run,
-watcher, raw provider error, or transport object. The operation is a
-discriminated pair: `append` has no replacement target; `replace_latest`
-carries the durable `replacementTurnId` through enqueue, status, stream,
-recovery, and local reconciliation. A completed recovery may be represented
-without its result in the current bounded window; the store fetches the
-authoritative result and requests a sync rather than inventing history.
+already-validated `GenerationEvent` values into the projection; application /
+workflow orchestration owns watcher iteration plus result fetch and
+authoritative sync, then feeds their outcomes to that session. The store never
+exposes the run, watcher, raw provider error, or transport object. Its private
+matching run/session survives a `detached` event for resume and result recovery;
+it is superseded by a different job or campaign, or cleared only after accepted
+completion, cancellation, or discard. The operation is a discriminated pair:
+`append` has no replacement target; `replace_latest` carries the durable
+`replacementTurnId` through enqueue, status, stream, recovery, and local
+reconciliation. A completed recovery may be represented without its result in
+the current bounded window; the application/workflow obtains the authoritative
+result and syncs rather than the store inventing history.
 
 `world-store.ts` is not part of C6. The management client's module-level
 globals remain a later UI-slice migration concern and must not be copied into
