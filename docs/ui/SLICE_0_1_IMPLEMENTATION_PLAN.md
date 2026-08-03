@@ -5357,8 +5357,8 @@ not contain generation state-machine or SQL policy.
 
 ### 10c delivery stages and checkpoints
 
-10c is the largest checkpoint in Task 10: a required-field change across 53 call
-sites, a full route conversion, an error-mapping port, and the bridge removal
+10c is the largest checkpoint in Task 10: a required-field change across 52
+invocations, a full route conversion, an error-mapping port, and the bridge removal
 with two responsibilities to re-home. Its review gate is **contract parity**, so
 composition churn must not dominate the diff a reviewer reads for parity.
 
@@ -5405,13 +5405,33 @@ composition test passed (1 test), the converted focused suite passed (50 tests;
 approved the full diff with no Critical, Important, or Minor findings. Task 10
 remains `Not started`; 10c2 and 10c3 are still pending.
 
+**10c1 checklist audit (2026-08-03).** The six items were verified against the
+shipped code and ticked. Re-measured independently: `pnpm check` **564 candidate
+files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**,
+`pnpm test:integration` **214 passed, 2 skipped across 18 test files**.
+
+- The zero-behaviour-change property holds literally. The entire
+  `services/api/src/server.ts` diff is three changes: the type import, the
+  exported field, and destructuring `generation: _generation` so it is
+  deliberately unused. No route logic moved.
+- `serverOptions()` supplies an **inert** application whose every method throws.
+  That is stronger than a silent stub: it turns "a route accidentally uses the
+  application during 10c1" from an invisible regression into a loud failure.
+- `createApiGenerationApplication(pool)` performs no query during construction,
+  proved by `runtime-generation-composition.test.ts` asserting `query` is never
+  called — so injecting it cannot have started database work at startup.
+- Count correction carried from an earlier revision of this plan: there are
+  **52 `buildServer` invocations across 8 files**, not 53 across 9. A naive
+  `buildServer(` grep also matches the declaration in `server.ts`. The 10c1
+  evidence figures were already correct; the staging table has been aligned.
+
 **Composition and authority requirements:** *(10c1 unless marked otherwise)*
 
-- [ ] Call `createGenerationApplication(commandRepository)` once at the
+- [x] Call `createGenerationApplication(commandRepository)` once at the
   runtime/API composition boundary and inject the returned
   `GenerationApplication` into `buildServer`; tests may inject a fake. Do not
   instantiate repositories or factories inside individual route handlers.
-- [ ] **Make `generation` a required field and export the options type —
+- [x] **Make `generation` a required field and export the options type —
   decided 2026-08-03.** `BuildServerOptions` is currently unexported. There
   are **52 `buildServer(` invocations**: 50 test invocations across 7 files and
   2 API-role invocations in `services/runtime/src/main.ts`; the declaration in
@@ -5428,7 +5448,7 @@ remains `Not started`; 10c2 and 10c3 are still pending.
   };
   ```
 
-- [ ] Add `tests/helpers/build-server-options.ts` exporting the following
+- [x] Add `tests/helpers/build-server-options.ts` exporting the following
   test-only helper. `config` and `pool` deliberately remain required: this
   repository has no safe universal test defaults for them. Only `generation`
   receives a default inert fake because 10c1 must not call it.
@@ -5446,7 +5466,7 @@ remains `Not started`; 10c2 and 10c3 are still pending.
   The 2 runtime calls must not import this test helper: they pass the real
   application constructed below. The helper must not be imported by
   `services/**`.
-- [ ] **Construct the real application once per API-role process.** Create
+- [x] **Construct the real application once per API-role process.** Create
   `services/runtime/src/generation-api-composition.ts` with an exported
   `createApiGenerationApplication(pool: DatabasePool): GenerationApplication`.
   It must call `createGenerationApplication(createPostgresGenerationCommandRepository(pool, dependencies))`
@@ -5465,11 +5485,11 @@ remains `Not started`; 10c2 and 10c3 are still pending.
   `api` and `all` role paths, once before `buildServer`. Do not construct it for
   `migrate` or `worker`; do not move these callbacks into route handlers or
   duplicate the repository's SQL.
-- [ ] Add `tests/unit/runtime-generation-composition.test.ts` with a typed mock
+- [x] Add `tests/unit/runtime-generation-composition.test.ts` with a typed mock
   pool. Assert `createApiGenerationApplication(pool)` returns all seven command
   methods and makes no query during construction. This is the composition proof
   that the injected application is real while routes remain untouched in 10c1.
-- [ ] Do **not** make the field optional with an internal default. That keeps
+- [x] Do **not** make the field optional with an internal default. That keeps
   `buildServer` importing the repository constructor and weakens exactly the
   composition-ownership property 10f has to audit.
 - [ ] *(10c3)* Resolve the credential-free `initial-owner` server-side for the API role
