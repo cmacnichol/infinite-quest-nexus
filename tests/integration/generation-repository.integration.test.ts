@@ -138,6 +138,61 @@ integration("PostgreSQL generation command repository", () => {
     )).rejects.toMatchObject({ kind: "conflict", details: { reason: "classification_mode_mismatch" } });
   });
 
+  it("does not reveal or mutate a known foreign-owner job through any command or query", async () => {
+    const foreignUser = await pool.query<{ id: string }>(
+      "INSERT INTO users (display_name) VALUES ('Generation repository foreign owner') RETURNING id"
+    );
+    const foreignOwnerUserId = foreignUser.rows[0]!.id;
+    const foreignWorld = await pool.query<{ id: string }>(
+      "INSERT INTO worlds (owner_user_id, title) VALUES ($1, 'Foreign generation repository world') RETURNING id",
+      [foreignOwnerUserId]
+    );
+    const foreignWorldVersion = await pool.query<{ id: string }>(
+      `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
+       VALUES ($1,$2,1,'{}'::jsonb) RETURNING id`,
+      [foreignWorld.rows[0]!.id, foreignOwnerUserId]
+    );
+    const foreignCampaign = await pool.query<{ id: string }>(
+      "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1,$2,'Foreign generation repository campaign') RETURNING id",
+      [foreignOwnerUserId, foreignWorldVersion.rows[0]!.id]
+    );
+    const foreignProvider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (owner_user_id, name, provider_type, provider_role, base_url, default_model)
+       VALUES ($1,'Foreign generation repository provider','openai_compatible','text','http://127.0.0.1:9912','foreign-model')
+       RETURNING id`,
+      [foreignOwnerUserId]
+    );
+    const foreignJob = await pool.query<{ id: string }>(
+      `INSERT INTO generation_jobs (
+         owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number, action
+       ) VALUES ($1,$2,$3,$4,1,'Open the foreign observatory.') RETURNING id`,
+      [foreignOwnerUserId, foreignCampaign.rows[0]!.id, foreignProvider.rows[0]!.id, crypto.randomUUID()]
+    );
+    const commands = repository();
+    const foreignJobId = foreignJob.rows[0]!.id;
+
+    await expect(commands.enqueueAppend(
+      { ownerUserId, campaignId: foreignCampaign.rows[0]!.id },
+      appendRequest("Attempt to reach the foreign observatory.")
+    )).rejects.toMatchObject({ kind: "not_found", details: { campaignId: foreignCampaign.rows[0]!.id } });
+    await expect(commands.enqueueReplacement(
+      { ownerUserId, campaignId: foreignCampaign.rows[0]!.id },
+      replacementRequest("Attempt to replace the foreign observatory.")
+    )).rejects.toMatchObject({ kind: "not_found", details: { campaignId: foreignCampaign.rows[0]!.id } });
+    await expect(commands.getJob({ ownerUserId, jobId: foreignJobId }))
+      .rejects.toMatchObject({ kind: "not_found", details: { jobId: foreignJobId } });
+    await expect(commands.getResult({ ownerUserId, jobId: foreignJobId }))
+      .rejects.toMatchObject({ kind: "not_found", details: { jobId: foreignJobId } });
+    await expect(commands.retry({ ownerUserId, jobId: foreignJobId }))
+      .rejects.toMatchObject({ kind: "not_found", details: { jobId: foreignJobId } });
+    await expect(commands.cancel({ ownerUserId, jobId: foreignJobId }))
+      .rejects.toMatchObject({ kind: "not_found", details: { jobId: foreignJobId } });
+    await expect(commands.discard({ ownerUserId, jobId: foreignJobId }))
+      .rejects.toMatchObject({ kind: "not_found", details: { jobId: foreignJobId } });
+    await expect(pool.query<{ status: string }>("SELECT status FROM generation_jobs WHERE id = $1", [foreignJobId]))
+      .resolves.toMatchObject({ rows: [{ status: "queued" }] });
+  });
+
   it("recovers replacement unique conflicts with its savepoint and leaves one durable active job", async () => {
     const imported = await campaign();
     const commands = repository();
