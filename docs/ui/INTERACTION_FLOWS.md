@@ -125,11 +125,11 @@ campaign's world pinning before committing.
 Closest analog: reviewing the accepted-turn ledger / recent job outcomes for a campaign.
 
 - **Preconditions:** Campaign has at least one turn or job.
-- **Main path:** STORY-PLAYER turn-history drawer, or NEX-CAMPAIGN-DETAIL history tab → scroll/browse accepted turns, each showing action, narration excerpt, cost, illustration status.
+- **Main path:** STORY-PLAYER turn-history drawer, or NEX-CAMPAIGN-DETAIL history tab → use the current bounded accepted-turn window, then request older pages with the opaque `nextCursor` when needed. Each page identifies its campaign and is merged without duplicates; it does not become an authorization source.
 - **Alternate paths:** Activity log (broader event stream, incl. non-turn events).
 - **Error paths:** n/a (read-only browse).
 - **Completion state:** User has located the turn/event they were looking for.
-- **APIs:** `GET /campaigns/:id/turns`.
+- **APIs:** `GET /campaigns/:id/turns?before=<opaque-cursor>`, initially supplied by `GET /campaigns/:id/sync-status` when `turnWindowMode` is `replace`.
 - **Screens:** STORY-PLAYER, NEX-CAMPAIGN-DETAIL.
 - **Current implementation status:** Implemented and wired.
 
@@ -164,11 +164,12 @@ exists beyond these two.
 
 ## Flow 11 — Resume interrupted work
 
-- **Preconditions:** User returns to a campaign (fresh page load, tab reopen) that had an in-flight generation job or an in-progress import.
-- **Main path (campaign):** STORY-PLAYER boot → `GenerationWorkflow.resume()` checks `GET .../sync-status`; `pendingGeneration` from the server is authoritative and creates the run for that exact job. The local pending-submission record is only an idempotent replay hint when the server has no active snapshot.
+- **Preconditions:** User returns to a campaign (fresh page load, tab reopen) that had an in-flight generation job, a recently settled job, or an in-progress import.
+- **Main path (campaign):** STORY-PLAYER boot requests `GET .../sync-status`, normally with the last opaque `syncToken`. It first accepts an authoritative active `pendingGeneration` and attaches the matching run. With no active job, it checks the sanitized `generationRecovery`: recoverable/failed summaries expose their existing actions; completed recovery fetches its accepted result when the result is not represented in the returned bounded window. Only after neither server path applies may the validated local pending-submission record act as an idempotent replay hint.
+- **Window reconciliation:** A `turnWindowMode: "unchanged"` response retains only the already loaded window for that same campaign. A `"replace"` response atomically replaces it with its self-identifying page and opaque continuation cursor. Completed retry-latest may replace an older target or add a result outside the current window; after local reconciliation the client requests authoritative sync rather than assuming the visible page is complete.
 - **Alternate path (Infinite Worlds import):** `GET /imports/progress?key=...` — **not durable** across an API restart (`CURRENT_UI_AUDIT.md` UI-004); the UI must disclose this rather than imply guaranteed resumability.
-- **Error paths:** Sync-status shows no pending job but the user expected one (e.g., it completed/failed while away) → reconcile by also checking recent turn history / job history, not just assuming nothing happened.
-- **Completion state:** UI state matches server state; no orphaned "still generating" UI after the job has actually finished.
+- **Error paths:** A malformed, cross-campaign, or incompatible page/recovery is rejected without mutating the current projection. A missing completed result remains complete-but-loading and retries only result fetch; it never restarts generation or a watcher.
+- **Completion state:** UI state converges on the server's active/recovery/window state; no orphaned "still generating" UI or duplicate replay remains after reload.
 - **APIs:** `GET /campaigns/:id/sync-status`, `GET /imports/progress`.
 - **Screens:** STORY-PLAYER, NEX-IMPORTS.
 - **Current implementation status:** Implemented and wired (campaign resume); Implemented but incomplete (import progress durability).

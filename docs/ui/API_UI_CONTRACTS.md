@@ -61,7 +61,7 @@ same standard error/correlation behavior.
 | Chronicle jobs | Poll only | `GET /api/v1/jobs/:jobId` | No fixed client interval observed in source; implement a bounded poll with visible failure state | No SSE counterpart. |
 | World-cover jobs | Poll only | `GET /api/v1/worlds/:worldId/cover-job` | Same as above | No SSE counterpart. |
 | Infinite Worlds import conversion | Poll only, **non-durable** | `GET /api/v1/imports/progress?key=...` | In-memory server-side map, lost on API restart | See `CURRENT_UI_AUDIT.md` UI-004 — disclose this limitation in UI copy. |
-| Resume/reconnect snapshot | Plain fetch, called on load/resume | `GET /api/v1/campaigns/:campaignId/sync-status` | Not a poll loop — called once per page load/resume to detect an in-flight `pendingGeneration` | Use this to reconcile state after a reload before deciding whether to open a new SSE/poll loop. |
+| Resume/reconnect snapshot | Plain fetch, called on load/resume | `GET /api/v1/campaigns/:campaignId/sync-status?since=<syncToken>` | Not a poll loop — called once per page load/resume to reconcile an active job, recovery, and a bounded accepted-turn window | `pendingGeneration` is active-only. Reconcile pending first, then sanitized recovery, then local storage only as a non-authoritative replay hint; use the returned `syncToken` and `turnWindowMode` to retain or replace the window. |
 
 **Contract detail for the SSE stream:** wire frames are runtime-validated by
 `packages/client-web` before the workflow observes them. The headless workflow
@@ -113,18 +113,37 @@ quick index for implementers wiring one screen at a time.
 - Turn fields (`GET .../turns`, `server.ts:558-579`): `id, turnNumber,
   action, inputMode, inputModeSource, narration, choices, imagePrompt,
   imageUrl, acceptedAt, reportedCost`.
-- `sync-status` response: `{campaign, world, playerConfig,
-  pendingGeneration}` — the resume snapshot; `pendingGeneration` is present
-  only if a job is actively in flight.
+- `sync-status` response always includes `{id, campaign, world, playerConfig,
+  pendingGeneration, syncToken, generationRecovery, turnWindowMode, turns}`.
+  `pendingGeneration` is present only for an active job. `turnWindowMode` is a
+  discriminated contract: `unchanged` has `turns: null` and retains only a
+  previously loaded window for the same campaign; `replace` carries a bounded,
+  self-identifying `TurnListResponse`. The page includes `campaignId`, ordered
+  turn summaries, and an opaque `nextCursor`; it is replaced atomically, while
+  older pages are fetched separately with `GET .../turns?before=<cursor>`.
+  `syncToken` is an opaque freshness marker, not authorization or a cursor.
+- `generationRecovery` is a sanitized summary of a recent `recoverable`,
+  `failed`, or `completed` job when no active job is present. It carries a
+  discriminated operation pair: `append` with `replacementTurnId: null`, or
+  `replace_latest` with a durable target UUID. A completed recovery whose
+  accepted result is outside the returned window is resolved through the
+  result endpoint followed by authoritative sync; it is never treated as a
+  missing or replayable pending submission.
 
 ### Generation jobs
 - Status values (current, `generation.ts:397` + `0023_durable_generation_replacement.sql:15-18`):
   `queued, replacement_queued, assessing, generating, validating,
   committing, completed, recoverable, failed, cancelled, discarded`.
-- `operation_kind`: `append | replace_latest`.
-- Job fields for polling: `id, status, action, partialOutput,
-  partialNarration, errorMessage, errorCode, recoveryMetadata,
-  resultTurnId`.
+- `operationKind` is always paired with `replacementTurnId`: `append` requires
+  `null`; `replace_latest` requires the UUID of the accepted turn being
+  replaced. This provenance is preserved on enqueue, polling, streaming,
+  pending sync, recovery, and client-store reconciliation.
+- Job polling snapshots contain durable validated metadata and may contain
+  `partialNarration`, but never raw `partialOutput`. Stream snapshots use the
+  smaller explicit allowlist and carry the same operation pair. Public failure
+  fields are the fixed safe `generation_failed` / `Generation could not be
+  completed.` pair; provider and backend error details never cross this
+  boundary.
 - **Concurrency contract**: only one active (non-terminal) job per campaign
   — the UI must not allow submitting a second turn while one is in flight.
   On the structured active-job 409, attach/resume the authoritative job from

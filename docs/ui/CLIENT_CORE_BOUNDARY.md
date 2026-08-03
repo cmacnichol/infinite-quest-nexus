@@ -148,19 +148,46 @@ Requirements:
 ### Generic non-generation jobs
 
 A generic watcher for image, Chronicle, world-cover, and import jobs remains
-deferred. C8 does not claim that extraction. Illustration calls use the named,
-contract-validating `legacy-illustration-api.ts` transition adapter until the
-Slice 2 illustration migration.
+deferred. `packages/client-core` reduces the single, validated
+`GenerationEvent` family only; it never owns an `AbortController`, transport
+iterator, timer, browser session, or cross-job-family registry. The app owns
+watch iteration and lifecycle, while `packages/client-web` owns the browser
+SSE/polling and persistence adapters. Illustration calls remain behind the
+named, contract-validating `legacy-illustration-api.ts` transition adapter
+until the Slice 2 illustration migration.
 
-### `campaign-store.ts` / `world-store.ts` (not implemented in C8)
+### `campaign-store.ts` — C6 immutable campaign projection
 
-Plain observable state — a subscribe/notify object, not a framework store.
-`story.js`'s existing `state = { … }` object is already close to correct and
-should be lifted largely as-is; it is the better of the two current
-patterns.
+`createCampaignStore()` exposes only a read-only `Store<CampaignProjection>`
+to consumers. Its package-internal writable primitive publishes immutable
+snapshots; ingress values are copied, external arrays cannot mutate stored
+state, and selectors are pure reads. It is not a lift of the legacy
+`story.js` state object.
 
-`nexus.js`'s **58 module-level mutable globals** (`nexus.js:12-71`) are the
-opposite pattern and must not survive the migration in any form.
+The projection contains only contract-validated campaign data: campaign,
+world, player configuration, a bounded accepted-turn window with its opaque
+next-page cursor and `syncToken`, runtime state, input selection, and one
+generation projection. Runtime state is accepted only after its `campaignId`
+matches the loaded campaign. A `turnWindowMode: "unchanged"` sync may retain an
+existing same-campaign window only; a `"replace"` sync atomically replaces the
+window after validating the nested page identity. Older pages are
+campaign-scoped and deduplicated before mutation. Local completion or
+replacement reconciliation marks `historySyncRequired` and clears the local
+sync token so the next authoritative sync resolves any out-of-window result.
+
+Generation attachment is likewise campaign- and job-scoped. A session reduces
+validated `GenerationEvent` values into the projection, retains a private
+matching run only while monitoring is attached, and never exposes the run,
+watcher, raw provider error, or transport object. The operation is a
+discriminated pair: `append` has no replacement target; `replace_latest`
+carries the durable `replacementTurnId` through enqueue, status, stream,
+recovery, and local reconciliation. A completed recovery may be represented
+without its result in the current bounded window; the store fetches the
+authoritative result and requests a sync rather than inventing history.
+
+`world-store.ts` is not part of C6. The management client's module-level
+globals remain a later UI-slice migration concern and must not be copied into
+this campaign store.
 
 ### `errors.ts` / `formatting.ts`
 
