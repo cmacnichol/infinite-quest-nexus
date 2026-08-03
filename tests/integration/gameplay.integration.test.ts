@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { runGenerationJob } from "../../services/api/src/generation-service.js";
@@ -338,12 +339,18 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     const completedRecoveryId = completedRecovery.rows[0]?.id;
     if (!completedRecoveryId) throw new Error("Expected a completed recovery job.");
 
-    const first = turnListResponseSchema.parse((await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/turns?limit=25` })).json());
+    const firstResponse = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/turns?limit=25` });
+    expect(firstResponse.statusCode).toBe(200);
+    const first = turnListResponseSchema.parse(firstResponse.json());
     expect(first.turns.map((turn) => turn.turnNumber)).toEqual(Array.from({ length: 25 }, (_, index) => index + 31));
     expect(first.nextCursor).toEqual(expect.any(String));
-    const middle = turnListResponseSchema.parse((await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/turns?limit=25&before=${encodeURIComponent(first.nextCursor || "")}` })).json());
+    const middleResponse = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/turns?limit=25&before=${encodeURIComponent(first.nextCursor || "")}` });
+    expect(middleResponse.statusCode).toBe(200);
+    const middle = turnListResponseSchema.parse(middleResponse.json());
     expect(middle.turns.map((turn) => turn.turnNumber)).toEqual(Array.from({ length: 25 }, (_, index) => index + 6));
-    const last = turnListResponseSchema.parse((await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/turns?limit=25&before=${encodeURIComponent(middle.nextCursor || "")}` })).json());
+    const lastResponse = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/turns?limit=25&before=${encodeURIComponent(middle.nextCursor || "")}` });
+    expect(lastResponse.statusCode).toBe(200);
+    const last = turnListResponseSchema.parse(lastResponse.json());
     expect(last.turns.map((turn) => turn.turnNumber)).toEqual([1, 2, 3, 4, 5]);
     expect(last.nextCursor).toBeNull();
     expect([...last.turns, ...middle.turns, ...first.turns].map((turn) => turn.turnNumber)).toEqual(Array.from({ length: 55 }, (_, index) => index + 1));
@@ -352,7 +359,14 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     const otherCampaign = await importCampaign("bounded-history-other");
     expect((await app.inject({ method: "GET", url: `/api/v1/campaigns/${otherCampaign.campaignId}/turns?before=${encodeURIComponent(first.nextCursor || "")}` })).statusCode).toBe(400);
 
+    const emptyCampaign = await importCampaign("bounded-history-empty");
+    await pool.query("DELETE FROM turns WHERE campaign_id = $1", [emptyCampaign.campaignId]);
+    const emptyPageResponse = await app.inject({ method: "GET", url: `/api/v1/campaigns/${emptyCampaign.campaignId}/turns?limit=25` });
+    expect(emptyPageResponse.statusCode).toBe(200);
+    expect(turnListResponseSchema.parse(emptyPageResponse.json())).toEqual({ turns: [], nextCursor: null });
+
     const initialSyncResponse = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/sync-status` });
+    expect(initialSyncResponse.statusCode).toBe(200);
     const initialSync = campaignSyncStatusSchema.parse(initialSyncResponse.json());
     expect(initialSync.turnWindowMode).toBe("replace");
     expect(initialSync.turns?.turns).toHaveLength(50);
@@ -362,12 +376,13 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
       resultTurnId: earliestTurnId
     });
     const unchangedSyncResponse = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/sync-status?since=${initialSync.syncToken}` });
+    expect(unchangedSyncResponse.statusCode).toBe(200);
     const unchangedSync = campaignSyncStatusSchema.parse(unchangedSyncResponse.json());
     expect(unchangedSync).toMatchObject({ turnWindowMode: "unchanged", turns: null, campaign: { id: campaignId } });
     const initialPayloadBytes = Buffer.byteLength(initialSyncResponse.body);
     const unchangedPayloadBytes = Buffer.byteLength(unchangedSyncResponse.body);
-    // Measured against this deterministic 55-turn fixture: 17,669 B initial and 2,828 B unchanged.
-    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 17_669, unchangedPayloadBytes: 2_828 });
+    // Measured against this deterministic 55-turn fixture: 17,883 B initial and 3,042 B unchanged.
+    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 17_883, unchangedPayloadBytes: 3_042 });
     expect(unchangedPayloadBytes).toBeLessThan(initialPayloadBytes);
 
     replies.push({ content: validStory("A replacement changes the current history boundary.") });
@@ -386,9 +401,59 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(await runGenerationJob(pool, "worker-bounded-history-replacement", 30, credentialSecret)).toBe(true);
     expect((await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/turns?before=${encodeURIComponent(first.nextCursor || "")}` })).statusCode).toBe(409);
 
-    const postReplacement = turnListResponseSchema.parse((await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/turns?limit=25` })).json());
+    const postReplacementResponse = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/turns?limit=25` });
+    expect(postReplacementResponse.statusCode).toBe(200);
+    const postReplacement = turnListResponseSchema.parse(postReplacementResponse.json());
     expect((await app.inject({ method: "POST", url: `/api/v1/campaigns/${campaignId}/rewind`, payload: { targetTurnNumber: 54 } })).statusCode).toBe(200);
     expect((await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/turns?before=${encodeURIComponent(postReplacement.nextCursor || "")}` })).statusCode).toBe(409);
+  });
+
+  it("returns a page and cursor from one PostgreSQL history snapshot during a concurrent replacement", async () => {
+    const { campaignId } = await importCampaign("cursor-snapshot");
+    const owner = await pool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'");
+    const ownerUserId = owner.rows[0]?.id;
+    if (!ownerUserId) throw new Error("Expected the initial owner.");
+    await pool.query("DELETE FROM turns WHERE campaign_id = $1", [campaignId]);
+    await pool.query(
+      `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration)
+       VALUES ($1, $2, 1, 'First action', 'First narration'),
+              ($1, $2, 2, 'Original latest action', 'Original latest narration')`,
+      [ownerUserId, campaignId]
+    );
+    const latest = await pool.query<{ id: string }>("SELECT id FROM turns WHERE campaign_id = $1 AND turn_number = 2", [campaignId]);
+    const originalLatestId = latest.rows[0]?.id;
+    if (!originalLatestId) throw new Error("Expected the original latest turn.");
+
+    let replacementCommitted = false;
+    async function queryWithConcurrentReplacement(target: Pick<DatabasePool, "query">, query: unknown, values?: unknown[]) {
+      const result = await target.query(query as string, values);
+      if (!replacementCommitted && String(query).includes('AS "historyVersion"')) {
+        replacementCommitted = true;
+        await pool.query("DELETE FROM turns WHERE id = $1", [originalLatestId]);
+        await pool.query(
+          `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration)
+           VALUES ($1, $2, 2, 'Replacement latest action', 'Replacement latest narration')`,
+          [ownerUserId, campaignId]
+        );
+      }
+      return result;
+    }
+    const racingPool = {
+      connect: async () => {
+        const client = await pool.connect();
+        return {
+          query: (query: unknown, values?: unknown[]) => queryWithConcurrentReplacement(client, query, values),
+          release: () => client.release()
+        };
+      },
+      query: (query: unknown, values?: unknown[]) => queryWithConcurrentReplacement(pool, query, values)
+    } as unknown as DatabasePool;
+
+    const page = await readTurnPage(racingPool, ownerUserId, campaignId, undefined, 1);
+
+    expect(replacementCommitted).toBe(true);
+    expect(page.turns.map((turn) => turn.id)).toEqual([originalLatestId]);
+    expect(page.nextCursor).toEqual(expect.any(String));
   });
 
   it("exposes and idempotently resumes a staged latest-turn replacement through sync-status", async () => {

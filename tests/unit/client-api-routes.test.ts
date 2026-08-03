@@ -172,7 +172,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
   let userDisplayName = "Initial Owner";
   const query = async (queryInput: unknown, params: unknown[] = []) => {
     const sql = String(queryInput).replaceAll(/\s+/g, " ").trim();
-    if (["BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT enqueue_generation_insert"].includes(sql)) return { rows: [] };
+    if (["BEGIN", "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "COMMIT", "ROLLBACK", "SAVEPOINT enqueue_generation_insert"].includes(sql)) return { rows: [] };
     if (sql.startsWith("SELECT id FROM users")) return { rows: [{ id: OWNER_ID }] };
     if (sql.startsWith('SELECT id, system_key AS "systemKey"')) return { rows: [{
       id: OWNER_ID,

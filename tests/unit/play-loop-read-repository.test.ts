@@ -27,14 +27,15 @@ function turn(id: string, turnNumber: number) {
 describe("play-loop turn pages", () => {
   it("rejects a cursor after retry-latest replaces the current history boundary", async () => {
     let latestId = LATEST_ID;
-    const pool = {
-      query: async (query: unknown) => {
-        const sql = String(query);
-        if (sql.includes("historyVersion")) {
-          return { rows: [{ historyVersion: `2:2:${latestId}` }] };
-        }
-        return { rows: [turn(LATEST_ID, 2), turn(FIRST_ID, 1)] };
+    const query = async (statement: unknown) => {
+      const sql = String(statement);
+      if (sql.includes("historyVersion")) {
+        return { rows: [{ historyVersion: `2:2:${latestId}` }] };
       }
+      return { rows: [turn(LATEST_ID, 2), turn(FIRST_ID, 1)] };
+    };
+    const pool = {
+      connect: async () => ({ query, release: () => undefined })
     } as unknown as DatabasePool;
 
     const firstPage = await readTurnPage(pool, OWNER_ID, CAMPAIGN_ID, undefined, 1);

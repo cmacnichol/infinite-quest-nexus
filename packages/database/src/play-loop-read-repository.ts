@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { DatabasePool } from "./pool.js";
+import type { DatabaseClient, DatabasePool } from "./pool.js";
 
 const cursorSchema = z.object({
   campaignId: z.uuid(),
@@ -48,14 +48,29 @@ function decodeCursor(value: string, campaignId: string, historyVersion: string)
   return cursor.data;
 }
 
-async function currentHistoryVersion(pool: DatabasePool, ownerUserId: string, campaignId: string): Promise<string> {
-  const result = await pool.query<{ historyVersion: string }>(
+async function currentHistoryVersion(client: DatabaseClient, ownerUserId: string, campaignId: string): Promise<string> {
+  const result = await client.query<{ historyVersion: string }>(
     `SELECT COUNT(*)::integer::text || ':' || COALESCE(MAX(turn_number), 0)::text || ':' || COALESCE((ARRAY_AGG(id ORDER BY turn_number DESC, id DESC))[1]::text, '') AS "historyVersion"
        FROM turns
       WHERE owner_user_id = $1 AND campaign_id = $2`,
     [ownerUserId, campaignId]
   );
   return result.rows[0]?.historyVersion || "0:0:";
+}
+
+async function withTurnPageSnapshot<T>(pool: DatabasePool, read: (client: DatabaseClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const value = await read(client);
+    await client.query("COMMIT");
+    return value;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function readTurnPage(
@@ -65,25 +80,27 @@ export async function readTurnPage(
   before: string | undefined,
   limit: number
 ): Promise<TurnPage> {
-  const historyVersion = await currentHistoryVersion(pool, ownerUserId, campaignId);
-  const cursor = before === undefined ? null : decodeCursor(before, campaignId, historyVersion);
-  const result = await pool.query<TurnPageRow>(
-    `SELECT id, turn_number AS "turnNumber", action, COALESCE(input_mode, 'action') AS "inputMode",
-            COALESCE(input_mode_source, 'explicit') AS "inputModeSource", narration, choices,
-            custom_action_suggestion AS "customActionSuggestion", image_prompt AS "imagePrompt",
-            image_url AS "imageUrl", accepted_at AS "acceptedAt"
-       FROM turns
-      WHERE owner_user_id = $1 AND campaign_id = $2
-        AND ($3::integer IS NULL OR (turn_number, id) < ($3, $4::uuid))
-      ORDER BY turn_number DESC, id DESC
-      LIMIT $5`,
-    [ownerUserId, campaignId, cursor?.turnNumber ?? null, cursor?.id ?? null, limit + 1]
-  );
-  const hasMore = result.rows.length > limit;
-  const selected = result.rows.slice(0, limit).reverse();
-  const earliest = selected[0];
-  return {
-    turns: selected,
-    nextCursor: hasMore && earliest ? encodeCursor({ campaignId, turnNumber: earliest.turnNumber, id: earliest.id, historyVersion }) : null
-  };
+  return withTurnPageSnapshot(pool, async (client) => {
+    const historyVersion = await currentHistoryVersion(client, ownerUserId, campaignId);
+    const cursor = before === undefined ? null : decodeCursor(before, campaignId, historyVersion);
+    const result = await client.query<TurnPageRow>(
+      `SELECT id, turn_number AS "turnNumber", action, COALESCE(input_mode, 'action') AS "inputMode",
+              COALESCE(input_mode_source, 'explicit') AS "inputModeSource", narration, choices,
+              custom_action_suggestion AS "customActionSuggestion", image_prompt AS "imagePrompt",
+              image_url AS "imageUrl", accepted_at AS "acceptedAt"
+         FROM turns
+        WHERE owner_user_id = $1 AND campaign_id = $2
+          AND ($3::integer IS NULL OR (turn_number, id) < ($3, $4::uuid))
+        ORDER BY turn_number DESC, id DESC
+        LIMIT $5`,
+      [ownerUserId, campaignId, cursor?.turnNumber ?? null, cursor?.id ?? null, limit + 1]
+    );
+    const hasMore = result.rows.length > limit;
+    const selected = result.rows.slice(0, limit).reverse();
+    const earliest = selected[0];
+    return {
+      turns: selected,
+      nextCursor: hasMore && earliest ? encodeCursor({ campaignId, turnNumber: earliest.turnNumber, id: earliest.id, historyVersion }) : null
+    };
+  });
 }
