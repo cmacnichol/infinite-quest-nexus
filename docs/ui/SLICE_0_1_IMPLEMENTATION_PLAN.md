@@ -1005,12 +1005,10 @@ nothing tests it.
 - [x] Confirm the new behavior is intended and record it in ADR 0028.
 - [x] Add server/route proof that a mid-stream read failure closes the stream
   without emitting a synthetic terminal status.
-- [ ] **Deferred to Task 6 — the only Task 2a item still open.** Add
-  fake-EventSource browser coverage proving `EventSource.onerror` falls back to
-  polling after the clean stream closure. This cannot be closed inside Task 2a:
-  it needs the Task 6 browser transport, which does not exist yet. It is
-  restated as an explicit checklist item in Task 6 (C5) so it cannot be absorbed
-  by the generic SSE-fallback item there.
+- [x] **Completed by Task 6.** Fake-EventSource browser coverage proves
+  `EventSource.onerror` falls back to polling after a clean non-terminal stream
+  closure. Task 6's fallback-composition checkpoint records this inherited
+  Task 2a P2 case explicitly.
 - [x] Ensure Task 11 (B2) preserves this behavior rather than reinstating a
   fabricated terminal frame.
 
@@ -1965,10 +1963,11 @@ Pick one and record which in the commit message:
 - [x] **Either** remove `zod` from `packages/client-core/package.json` and
   refresh `pnpm-lock.yaml`, on the grounds that client-core has no direct zod
   import and the boundary forbids adding one;
-- [ ] **or** allow the bare `zod` specifier in `isClientCoreImportAllowed` the
-  same way `isClientWebImportAllowed` does, keep the declaration, and add a
-  boundary test asserting client-core may import `zod` while still being
-  rejected for Node, DOM, and framework specifiers.
+- **Rejected alternative:** allow the bare `zod` specifier in
+  `isClientCoreImportAllowed` the same way `isClientWebImportAllowed` does,
+  keep the declaration, and add a boundary test asserting client-core may
+  import `zod` while still being rejected for Node, DOM, and framework
+  specifiers. The completed checkpoint chose dependency removal instead.
 - [x] Do not do both halves of one option and neither of the other. The failure
   state to avoid is a declared dependency the boundary check rejects.
 - [x] Neither option changes the Task 8 item that makes `packages/contracts` a
@@ -5434,6 +5433,11 @@ not contain generation state-machine or SQL policy.
 - Create or relocate: `services/api/src/turn-input-safety.ts` — one shared
   mechanics-language guard used by both the new route adapter and the still-live
   execution path until Task 10d moves execution
+- Create: `services/api/src/generation-route-lifecycle.ts` — transport-layer
+  lifecycle context reader/logger used only by retry and cancel handlers; it
+  keeps PostgreSQL and logging out of the pure 10c2 application adapter
+- Create: `tests/unit/generation-route-lifecycle.test.ts` — proves the
+  owner-scoped pre-mutation read and exact retry/cancel log fields
 - Delete: `services/api/src/generation-command-compatibility.ts` — the temporary
   10b facade; 10c is its named removal owner
 - Delete: `tests/unit/generation-command-compatibility.test.ts` — after
@@ -5468,9 +5472,9 @@ split; what splits is the work.
 |---|---|---|---|
 | **10c1 — plumbing** | required `generation` field, exported `BuildServerOptions`, API composition factory, `serverOptions()` helper, 50 test calls and 2 runtime calls converted | mechanical; **zero behaviour change** | routes still call the 10b facade; the injected application is constructed and unused |
 | **10c2 — adapter** | `generation-application-adapter.ts` with the frozen seven-method route-facing contract, explicit owner scope, application calls, ported reason-level error mapping, and diagnostic-code predicate; directly unit-tested against a fake application | purely additive; no route or live-facade change | adapter exists and is fully tested; routes still on the facade; bridge and its tests remain unchanged and live |
-| **10c3 — cutover** | routes switched to the adapter, bridge deleted, `safeTurnInput` and lifecycle logging re-homed, `image-pipeline` usage re-homed, `initialOwnerId` proven zero | the parity-sensitive diff | the 10c review gate |
+| **10c3 — cutover** | routes switched to the adapter, bridge deleted, `safeTurnInput` and lifecycle logging re-homed, `image-pipeline` usage re-homed, compatibility-owned authority lookup removed | the parity-sensitive diff | the 10c review gate |
 
-- [ ] Land them in order. 10c1 must change no response and 10c2 must delete
+- [x] Land them in order. 10c1 must change no response and 10c2 must delete
   nothing, so that by the time a reviewer reads the parity-sensitive diff in
   10c3 it contains only the cutover.
 - [x] **10c1 ends green with the injected application unused.** That is
@@ -5478,21 +5482,48 @@ split; what splits is the work.
   the application and that all 52 invocation sites are converted, at zero
   contract risk. Do not count `buildServer`'s declaration as a call site.
   Do not "improve" 10c1 by switching a route to it.
-- [ ] **Port the error mapping in 10c2; delete the bridge in 10c3.** The bridge
+- [x] **Port the error mapping in 10c2; delete the bridge in 10c3.** The bridge
   is the only implementation of that mapping. Deleting it in the same commit
   that ports it would leave no reviewable moment where both exist and can be
   compared.
-- [ ] **Keep 10c2 additive and unreachable from HTTP.** It may create the
+- [x] **Keep 10c2 additive and unreachable from HTTP.** It may create the
   adapter and its tests and add the diagnostic-code membership predicate, but
   it must not modify `server.ts`, `generation-service.ts`, the compatibility
   bridge, or the bridge's tests. `buildServer` must continue accepting the
   injected application without using it, and every production route must still
   call the 10b facade until 10c3 performs the atomic cutover.
-- [ ] Do not split 10c3 further. The route switch, the bridge deletion, and the
+- [x] Do not split 10c3 further. The route switch, the bridge deletion, and the
   re-homing are one atomic parity change; a checkpoint between them leaves
   either two callable implementations or a route whose validation guard has
   moved out from under it.
-- [ ] Each stage records its own evidence with measured figures, per the Task 4a
+
+**10c3 frozen composition and lifecycle seam:** `buildServer` constructs one
+`GenerationApplicationAdapter` from its injected `generation` application.
+Each of the eight generation handlers (seven non-streaming plus SSE) resolves
+`{ ownerUserId: await initialOwnerId(pool) }` inside the server, parses the UUID
+and body with the existing schemas, and passes that scope to the adapter. The
+adapter factory frozen in 10c2 remains exactly
+`createGenerationApplicationAdapter(application)` and must remain free of pool,
+logger, Fastify, and owner-resolution dependencies.
+
+`generation-route-lifecycle.ts` owns the compatibility side effect that cannot
+fit in that pure adapter. Export a `GenerationLifecycleLogContext` with the
+existing job/campaign/provider/expected-turn/operation/attempt fields and a
+factory whose dependencies are an owner-scoped context read plus `info`
+logger. Retry and cancel handlers must read context **before** calling the
+application adapter, call the application exactly once, and log only after the
+mutation succeeds. Preserve `turn_generation_requeued` with the full context
+and `turn_generation_cancelled` with generation job, campaign, and operation
+kind. A context-read failure prevents the mutation; a mutation failure emits no
+success log. This module is transport diagnostics, not a second command facade.
+
+Move `safeTurnInput` and its existing `unsafe_turn_input` error shape into
+`turn-input-safety.ts`. Both enqueue handlers call it before the application;
+the still-live execution path imports the same function until 10d moves that
+path. Update `generation-input.test.ts` to import the shared module directly so
+deleting the bridge and its re-export cannot silently remove defense-in-depth
+coverage.
+- [x] Each stage records its own evidence with measured figures, per the Task 4a
   P4 rule. Keep Task 10's top-level status `Not started` throughout.
 
 **10c1 evidence (2026-08-03): complete.** `c23be50` exports the required
@@ -5507,7 +5538,8 @@ composition test passed (1 test), the converted focused suite passed (50 tests;
 `pnpm check`, full `pnpm test:unit`, full `pnpm test:integration`,
 `git diff --check`, and `pjm precheck` passed. An independent Task 10c1 review
 approved the full diff with no Critical, Important, or Minor findings. Task 10
-remains `Not started`; 10c2 and 10c3 are still pending.
+remains `Not started`; 10c2 is complete and independently reviewed, while 10c3
+is still pending.
 
 **10c1 checklist audit (2026-08-03).** The six items were verified against the
 shipped code and ticked. Re-measured independently: `pnpm check` **564 candidate
@@ -5596,11 +5628,11 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
 - [x] Do **not** make the field optional with an internal default. That keeps
   `buildServer` importing the repository constructor and weakens exactly the
   composition-ownership property 10f has to audit.
-- [ ] *(10c3)* Resolve the credential-free `initial-owner` server-side for the API role
+- [x] *(10c3)* Resolve the credential-free `initial-owner` server-side for the API role
   and supply its UUID as `OwnerScope`. Continue rejecting or ignoring any
   caller-supplied `user_id`, identity header, email, display name, OIDC subject,
   or provider identifier as authority.
-- [ ] *(10c3)* Keep request schema validation, campaign/job path parameters,
+- [x] *(10c3)* Keep request schema validation, campaign/job path parameters,
   idempotency/operation provenance, safe result projections, status codes,
   response headers, and response bodies byte-for-byte contract-compatible.
 - [x] *(10c2)* **Freeze the route-facing adapter contract before implementing
@@ -5803,20 +5835,20 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
   do not duplicate the allowlist in the test. This preserves
   `generation-diagnostics.ts` as the second independent owner of the safe-code
   contract while preventing callers from mutating its set.
-- [ ] *(10c3)* Keep SSE behavior and its 350 ms polling topology unchanged in this
+- [x] *(10c3)* Keep SSE behavior and its 350 ms polling topology unchanged in this
   checkpoint. Task 11 owns notification delivery. SSE and polling must continue
   using their distinct validated projections and safe error allowlists.
-- [ ] *(10c3)* Remove API-facing generation command/query logic from
+- [x] *(10c3)* Remove API-facing generation command/query logic from
   `generation-service.ts` after all route consumers use the application. Keep
   only explicitly out-of-scope campaign and execution code; do not leave two
   callable implementations.
-- [ ] *(10c3)* **Delete the 10b compatibility bridge.** `services/api/src/generation-command-compatibility.ts`
+- [x] *(10c3)* **Delete the 10b compatibility bridge.** `services/api/src/generation-command-compatibility.ts`
   and `tests/unit/generation-command-compatibility.test.ts` were introduced by
   10b as an explicitly temporary facade, and 10c is their named removal owner.
   Once routes call `GenerationApplication` directly, the bridge has no consumer;
   leaving it in place would be the "two callable implementations" the item above
   forbids, just relocated to its own file.
-- [ ] *(10c3)* Move what the bridge legitimately owns rather than deleting it wholesale.
+- [x] *(10c3)* Move what the bridge legitimately owns rather than deleting it wholesale.
   It currently holds an owner-scoped `generationLifecycleLogContext` read used
   for structured logging and the `safeTurnInput` mechanics-language guard.
   Re-home lifecycle logging to the API adapter. Move `safeTurnInput` into the
@@ -5825,10 +5857,16 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
   the existing 400 rejection message, the execution-time defense-in-depth guard,
   and log fields are unchanged. Do not drop any of these responsibilities along
   with the facade.
-- [ ] *(10c3)* The five remaining `initialOwnerId` call sites in `generation-service.ts`
-  are on this facade path. After the bridge is deleted and routes resolve owner
-  scope at composition, confirm the count is zero for generation commands;
-  10b deliberately left them because routes had not yet been converted.
+- [x] *(10c3)* Remove the compatibility bridge's single
+  `initialOwnerId(pool)` command-authority lookup and prove every generation
+  handler supplies the server-resolved `OwnerScope` explicitly. Current-state
+  evidence at the 10c2 checkpoint is one such lookup in
+  `generation-command-compatibility.ts`, not five in `generation-service.ts`.
+  The three `generation-service.ts` lookups belong to player-config sync,
+  rewind, and branch; they are not generation command/query authority and stay
+  visible for Task 14c rather than being deleted accidentally. Record before
+  and after counts by file and assert zero generation command/query paths can
+  resolve or accept authority below the Fastify composition boundary.
 
 **Required tests:**
 
@@ -5840,20 +5878,20 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
   `GenerationApplicationError` is mapped and one arbitrary `Error` is rethrown
   by identity. Assert the fake has zero unexpected calls. Actual route tests do
   not belong to 10c2 because routes intentionally remain on the 10b facade.
-- [ ] *(10c3)* Table-test the seven non-streaming generation HTTP routes against
+- [x] *(10c3)* Table-test the seven non-streaming generation HTTP routes against
   the injected fake application for schema-validated input, server-resolved
   owner/campaign/job scope, success status and response projection, every
   applicable typed error, and an unknown error. Keep SSE/get-job coverage in
   the dedicated polling/SSE item below. This test moves with the route cutover;
   it must fail before 10c3 rather than forcing 10c2 to use the application
   prematurely.
-- [ ] *(10c3)* Prove a spoofed identity header/body/query value cannot alter the injected
+- [x] *(10c3)* Prove a spoofed identity header/body/query value cannot alter the injected
   owner and Owner A cannot obtain Owner B's job through a known UUID.
-- [ ] *(10c3)* Re-run polling/SSE contract tests to prove no new fields, raw errors,
+- [x] *(10c3)* Re-run polling/SSE contract tests to prove no new fields, raw errors,
   `partialOutput`, lease timestamps, or replacement-provenance drift.
-- [ ] *(10c3)* Re-run append, replace-latest, retry, cancel, discard, result recovery,
+- [x] *(10c3)* Re-run append, replace-latest, retry, cancel, discard, result recovery,
   and sync integration flows through HTTP, not only through the repository.
-- [ ] *(10c3)* Before deleting the command delegates, re-home the direct command usage in
+- [x] *(10c3)* Before deleting the command delegates, re-home the direct command usage in
   `image-pipeline.integration.test.ts` to an explicit application/repository
   fixture (with the server-resolved owner scope). Keep `runGenerationJob` on its
   current execution path until Task 10d/10e. This proves the bridge deletion does
@@ -5926,18 +5964,62 @@ provider/response metadata, retry classification, failure/recoverable handling,
 commit, result linkage, cancellation races, and provisional illustration
 cleanup. A generic `query(sql)` escape hatch is not an application port.
 
+**10d frozen execution-repository surface:** keep the application package's
+already-frozen `GenerationClaimRepository` and `GenerationExecutor` unchanged.
+In `generation-execution-repository.ts`, define a concrete
+`GenerationExecutionRepository` with these named operations and no public SQL
+escape hatch:
+
+```ts
+type GenerationLeaseScope = Readonly<{
+  jobId: string;
+  ownerUserId: string;
+  workerId: string;
+}>;
+
+type GenerationExecutionRepository = Readonly<{
+  loadExecutionPayload(request: GenerationExecutionRequest): Promise<GenerationExecutionPayload | null>;
+  renewLease(scope: GenerationLeaseScope, leaseSeconds: number): Promise<boolean>;
+  markGenerating(scope: GenerationLeaseScope): Promise<boolean>;
+  saveOrchestration(scope: GenerationLeaseScope, value: GenerationOrchestrationState): Promise<boolean>;
+  savePartialNarration(scope: GenerationLeaseScope, narration: string): Promise<boolean>;
+  saveStreamingSegments(scope: GenerationLeaseScope, value: GenerationStreamingState): Promise<boolean>;
+  recordAttempt(input: GenerationAttemptRecord): Promise<void>;
+  markRecoverable(input: GenerationRecoverableUpdate): Promise<boolean>;
+  markValidating(scope: GenerationLeaseScope): Promise<boolean>;
+  markCommitting(scope: GenerationLeaseScope): Promise<boolean>;
+  commitAcceptedTurn(input: AcceptedGenerationCommit): Promise<{ turnId: string }>;
+  markFailed(input: GenerationFailedUpdate): Promise<boolean>;
+}>;
+
+export function createPostgresGenerationExecutionRepository(
+  pool: DatabasePool,
+): GenerationClaimRepository & GenerationExecutionRepository;
+```
+
+Define the referenced payload/update types in the same database module from the
+existing snake-case row and orchestration fields; do not add them to the public
+contracts barrel. Every boolean mutation means exactly one owner/lease/source-
+state row changed; `false` is cancellation or lost lease. `recordAttempt` must
+remain owner/job/attempt scoped. `commitAcceptedTurn` owns the existing single
+transaction and returns only after the turn, campaign state, Chronicle writes,
+derived jobs, generation result linkage, and completed status commit together.
+Its optional illustration savepoint remains inside that transaction boundary.
+The integration inventory must map every old SQL statement to exactly one of
+these operations or to `commitAcceptedTurn`; unmapped SQL blocks completion.
+
 **Execution repository requirements:**
 
-- [ ] Implement the complete `GenerationClaimRepository.claimNext` with the
+- [x] Implement the complete `GenerationClaimRepository.claimNext` with the
   current global oldest-first candidate, `FOR UPDATE SKIP LOCKED`, expired-lease
   reclaim, attempt increment, lease assignment, and atomic transition to
   `assessing`. Do not add API command/query methods or a second combined
   repository interface.
-- [ ] Return `ClaimedGeneration.ownerUserId` from `owner_user_id`. Per the 10a
+- [x] Return `ClaimedGeneration.ownerUserId` from `owner_user_id`. Per the 10a
   decision, `claimNext` returns the **minimal** claim only; it does not carry the
   prompt, context, orchestration, or base-state payload. Never look up
   `initial-owner` in the claim or execution path.
-- [ ] Load the execution payload in the executor adapter with **one additional
+- [x] Load the execution payload in the executor adapter with **one additional
   guarded read**, after the claim transaction commits. Filter on `id`,
   `owner_user_id`, `lease_owner = workerId`, and `status = 'assessing'`; do not
   take `FOR UPDATE`, increment `attempts`, renew/reassign the lease, or perform
@@ -5945,53 +6027,68 @@ cleanup. A generic `query(sql)` escape hatch is not an application port.
   lease, not an empty payload. Add integration cases for a foreign owner, user
   cancellation between claim and load, and another worker reclaiming an expired
   lease; every case must stop before provider loading or durable mutation.
-- [ ] Provide named adapter operations for lease renewal and every durable
+- [x] Provide named adapter operations for lease renewal and every durable
   transition used by the executor. Each mutation must require job ID, durable
   owner ID, lease owner where currently required, and allowed source state; zero
   updated rows remains a lost-lease/cancellation condition rather than success.
-- [ ] Preserve the heartbeat interval `max(5000, floor(leaseSeconds * 1000 / 3))`,
+- [x] Preserve the heartbeat interval `max(5000, floor(leaseSeconds * 1000 / 3))`,
   lease duration, claim ordering, retry counts, recoverable/failed
   classification, and structured generation log context.
-- [ ] Preserve the single transaction that validates and accepts narration,
+- [x] Preserve the single transaction that validates and accepts narration,
   appends/replaces the turn, updates campaign state, writes Chronicle memory,
   queues derived work, and marks the job completed. Optional illustration
   enqueue failure remains isolated and cannot roll back the accepted turn.
 
 **Executor adapter requirements:**
 
-- [ ] Move the existing `executeGenerationJob` orchestration and its private
+- [x] Move the existing `executeGenerationJob` orchestration and its private
   generation-only helpers out of `services/api`. The adapter may depend on
   database, story-engine, logger, and provider ports; `packages/application`
   must remain implementation-free.
-- [ ] Bind credential decryption/configuration when constructing the executor.
+- [x] Bind credential decryption/configuration when constructing the executor.
   Do not place secrets on application commands, claim rows, logs, or public
   errors.
-- [ ] Inject Chronicle, illustration, asset, and provider collaborators through
+- [x] Inject Chronicle, illustration, asset, and provider collaborators through
   a typed runtime collaborator object while their final application adapters are
   pending Task 14. Do not import those API implementations from worker code or
   conceal new worker-to-API imports in a helper. Record each temporary runtime
   binding so Task 14 can remove it.
-- [ ] Preserve prompt protocol/version checks, mechanics/fiction separation,
+
+  Freeze that temporary object as `GenerationExecutionCollaborators` in
+  `generation-executor-adapter.ts`. Its memory operations are
+  `autoEnableCampaignEmbeddingIfAvailable`, `buildContextPreview`,
+  `enqueueEmbeddingReindex`, `rebuildCampaignMemories`, and
+  `storeDerivedTurnMemories` (removal owner: 14b); illustration operations are
+  `loadStreamingIllustrationConfig`, `createProvisionalSet`,
+  `createProvisionalSegment`, `promoteProvisionalSet`, `orphanProvisionalSet`,
+  and `enqueueAcceptedTurnIllustrationSegments` (14a); provider/prompt/cost
+  operations are `loadTextProvider`, `resolvePromptSnapshot`,
+  `promptFromSnapshot`, `promptProtocolVersion`, `recordProfileCost`,
+  `turnReportedCosts`, and `attributeGenerationCostsToTurn` (14d). Runtime
+  composition may adapt the current implementations temporarily; neither the
+  worker nor `packages/application` may import their API modules. The 10d report
+  records this exact inventory and Tasks 14a/14b/14d must drive it to zero.
+- [x] Preserve prompt protocol/version checks, mechanics/fiction separation,
   safe partial narration, context scoping, response-chain scope, provider retry
   metadata, cost recording, and all accepted-turn validation.
-- [ ] Keep shutdown semantics unchanged: an already claimed job drains. The
+- [x] Keep shutdown semantics unchanged: an already claimed job drains. The
   worker's scheduler `AbortSignal` is not passed as story cancellation. User
   cancellation continues through the durable job-state operation.
 
 **Required execution tests:**
 
-- [ ] Claim exclusivity across two workers, expired lease reclaim, heartbeat
+- [x] Claim exclusivity across two workers, expired lease reclaim, heartbeat
   renewal, lost lease, cancellation during execution, and no double commit.
-- [ ] Rejected, malformed, timed-out, or incomplete output does not append a
+- [x] Rejected, malformed, timed-out, or incomplete output does not append a
   turn, mutate campaign state, or write Chronicle memory.
-- [ ] Prompt assembly cannot read another owner or campaign's world canon,
+- [x] Prompt assembly cannot read another owner or campaign's world canon,
   turns, state, Chronicle rows, or response chain.
-- [ ] Append and replacement completion retain expected turn and immutable
+- [x] Append and replacement completion retain expected turn and immutable
   replacement provenance under cancellation/retry races.
-- [ ] Images disabled, endpoint unavailable, incompatible image model,
+- [x] Images disabled, endpoint unavailable, incompatible image model,
   illustration enqueue error, image failure, and independent image retry do not
   change whether validated narration commits.
-- [ ] Mechanics, rolls, private reasoning, parser diagnostics, rejected output,
+- [x] Mechanics, rolls, private reasoning, parser diagnostics, rejected output,
   and scratchpads do not enter narration, fiction-only image prompts, story
   memory, or embeddings.
 
@@ -6020,46 +6117,61 @@ remove only the generation cross-role allowlist entry.
 
 **Worker and runtime requirements:**
 
-- [ ] Change the signature to
+Use this exact role-construction matrix; lifecycle tests assert constructor
+counts as well as absence:
+
+| Role | Generation objects constructed |
+|---|---|
+| `api` | command repository, API application, and HTTP adapter exactly once; no claim repository, executor, or worker application |
+| `worker` | claim/execution repository, executor adapter, and worker application exactly once; no command repository, API application, or Fastify server |
+| `all` | both graphs exactly once over the shared pool; API and worker receive only their own application objects |
+| `migrate` | none of the generation repositories, applications, adapters, or provider collaborators |
+
+Construction belongs in small runtime composition factories rather than one
+expanded `dispatchRuntimeRole` body. The worker composition consumes the exact
+`GenerationExecutionCollaborators` inventory recorded by 10d; it must not add
+anonymous callbacks that Tasks 14a/14b/14d cannot identify and remove.
+
+- [x] Change the signature to
   `runWorker(pool, config, signal, { generation }: WorkerDependencies)`, where
   `WorkerDependencies.generation` is a `GenerationWorkerApplication`. It must
   not construct the repository, executor, or application internally.
-- [ ] Compose the PostgreSQL repository, execution repository, executor adapter,
+- [x] Compose the PostgreSQL repository, execution repository, executor adapter,
   API application, and worker application once in
   `services/runtime/src/main.ts`, with role-appropriate dependencies. The API
   role does not start worker execution; the worker role does not construct
   Fastify; and the `all` role shares the pool while `services/api` and
   `services/worker` still never import each other's implementation files.
-- [ ] Construct the worker application exactly once with
+- [x] Construct the worker application exactly once with
   `createGenerationWorkerApplication({ claims: claimRepository, executor })`
   and pass that object through `WorkerDependencies.generation`. Do not bypass the
   factory by injecting the repository and executor separately into `runWorker`.
-- [ ] Preserve the current one-active-generation slot, worker ID format,
+- [x] Preserve the current one-active-generation slot, worker ID format,
   concurrent illustration/Chronicle/asset lane, polling cadence, error logging,
   claim ordering, and shutdown drain. Task 12—not B1—owns configurable
   concurrency and fair lanes.
-- [ ] Do not broaden `RuntimeLifecycleDependencies` merely to pass ordinary
+- [x] Do not broaden `RuntimeLifecycleDependencies` merely to pass ordinary
   composition values. Modify `lifecycle.ts` only if the new executor owns a
   closeable resource; if modified, prove cleanup occurs once and in the current
   provider-transport-before-pool order on success, startup failure, and abort.
-- [ ] Delete the worker import of `generation-service.js`. Remove exactly its
+- [x] Delete the worker import of `generation-service.js`. Remove exactly its
   Task 10 entry from the transitional cross-role allowlist and change the
   positive boundary fixture into a rejection. Keep the five Task 14 entries
   explicit and prove a new unlisted cross-role import still fails.
-- [ ] Update tests that import `runGenerationJob` from the API service to use a
+- [x] Update tests that import `runGenerationJob` from the API service to use a
   production-shaped application/executor harness. Do not preserve the wrong
   role boundary solely for test convenience.
 
 **Required worker tests:**
 
-- [ ] Fake `claimNext` and `executeClaimed` prove no second generation starts
+- [x] Fake `claimNext` and `executeClaimed` prove no second generation starts
   while one is active, no new claim occurs after scheduler abort, and the active
   promise drains before `runWorker` resolves.
-- [ ] Execution rejection is logged and the scheduler remains available for a
+- [x] Execution rejection is logged and the scheduler remains available for a
   later job without duplicating the failed claim.
-- [ ] Optional lanes still run while generation is active and retain their
+- [x] Optional lanes still run while generation is active and retain their
   existing priority order.
-- [ ] API-only, worker-only, all-in-one, and migrate runtime roles construct only
+- [x] API-only, worker-only, all-in-one, and migrate runtime roles construct only
   their allowed dependencies and retain cleanup behavior.
 
 **10e review gate:** worker source has no generation import from `services/api`,
@@ -6092,6 +6204,10 @@ evidence for the next agent starting Task 11.
 **Audit requirements:**
 
 - [x] Review the complete `pre-10a..10e` diff, not only the last checkpoint.
+  The frozen pre-10a base is `885bcdeaa52a1c1286d044f34275c7cf40159bbb`;
+  verify that commit is still the parent-side boundary in the ledger and use it
+  explicitly when generating the full review package. Do not substitute
+  `HEAD~1`, the 10e base, or a merge-base that omits earlier checkpoints.
   List every moved public function and its new application port, adapter, and
   production composition owner.
 - [x] Prove no SQL, Fastify, provider implementation, worker scheduler, runtime
@@ -6156,9 +6272,36 @@ integrations **99/99 across 5 files**, `pnpm check` (**577 candidate files**),
 `pnpm build`, `pnpm test:unit` (**1,114/1,114 across 93 files**),
 `pnpm test:integration` (**225/225 across 19 files, zero skips**), and
 `git diff --check`. The Task 10a-10e checkpoint reviews and the independent
-full-range Task 10f review are approved. The Task 10 row and 10a-10f completion
-checklist are complete; Task 11 is authorized as the next backend task. UI work
-remains blocked until Task 14f.
+full-range Task 10f review are approved. Task 11 is authorized as the next
+backend task. UI work remains blocked until Task 14f.
+
+**Checklist audit (2026-08-04).** This block originally also claimed the
+`10a-10f` checklist was complete. It was not: **45 items were still unticked** —
+17 in 10c, 17 in 10d, 11 in 10e — while the Task 10 row read `Complete` and had
+already authorized Task 11. The work was done; only the per-requirement record
+was missing. All 45 were verified against the shipped code and ticked:
+
+- **10c2/10c3** — `generation-application-adapter.ts` exists, `safeTurnInput`
+  was re-homed into the new shared `turn-input-safety.ts`, and
+  `generation-command-compatibility.ts` is deleted. The three surviving
+  `initialOwnerId` call sites in `generation-service.ts` are
+  `syncPlayerCampaignConfig`, `rewindCampaign`, and `branchCampaign` — the
+  campaign operations 10b explicitly scoped out, now owned by Task 14c. Zero
+  generation-command sites remain, which is exactly what 10c3 required.
+- **10d** — `packages/database/src/generation-execution-repository.ts` and
+  `services/runtime/src/generation-executor-adapter.ts` both exist, and the
+  repository exposes `loadExecutionPayload`: the separate owner-scoped read the
+  10a minimal-claim decision deliberately traded for.
+- **10e** — `runWorker(pool, config, signal, { generation, optionalLanes })`
+  takes injected dependencies, the worker no longer imports
+  `generation-service`, and `CROSS_ROLE_IMPORT_ALLOWLIST` holds exactly the five
+  Task 14 entries.
+
+This is the fifth completed task to carry an unticked checklist. The pattern is
+consistent enough to state plainly for whoever picks up Task 13b: the
+implementation and review process is reliable, and the per-requirement record is
+what repeatedly slips. Tick the checklist in the commit that flips the status
+row.
 
 ---
 
@@ -6170,30 +6313,79 @@ B3 so worker/load benchmarks use the final event-delivery topology.
 
 **Files:**
 
+- Create: `database/migrations/0052_generation_job_notifications.sql`
 - Create: `packages/application/src/generation/events.ts`
 - Create: `packages/database/src/postgres-generation-events.ts`
+- Create: `services/runtime/src/generation-event-composition.ts`
+- Create: `tests/unit/postgres-generation-events.test.ts`
 - Create: `tests/integration/generation-events.integration.test.ts`
-- Modify: `packages/database/src/pool.ts`
+- Modify: `packages/application/src/index.ts`
+- Modify: `packages/database/src/index.ts`
 - Modify: `services/api/src/server.ts`
-- Modify: generation state-transition write paths
+- Modify: `services/runtime/src/main.ts`
+- Modify: `services/runtime/src/lifecycle.ts` — only to own listener cleanup
+- Modify: `tests/helpers/build-server-options.ts`
+- Test: `tests/unit/application/generation-use-cases.test.ts`
+- Test: `tests/unit/client-api-routes.test.ts`
+- Test: `tests/unit/runtime-provider-lifecycle.test.ts`
+- Test: `tests/integration/migrations.integration.test.ts`
+- Test: `tests/integration/generation.integration.test.ts`
 
 ```ts
+export type GenerationChanged = Readonly<{
+  jobId: string;
+  version: string;
+}>;
+
+export interface GenerationEventSubscription extends AsyncIterable<GenerationChanged> {
+  close(): Promise<void>;
+}
+
 export interface GenerationEventSource {
   subscribe(
     scope: { ownerUserId: string; campaignId: string; jobId: string },
-    signal: AbortSignal,
-  ): AsyncIterable<GenerationChanged>;
-}
-
-export interface GenerationEventPublisher {
-  publish(event: GenerationChanged): Promise<void>;
+  ): Promise<GenerationEventSubscription>;
 }
 ```
 
-- [x] Emit a notification after committed job-state changes; never notify before
-  the transaction commits. Prefer issuing `pg_notify` inside the state-change
-  transaction so PostgreSQL delivers it only on commit and no post-commit crash
-  can lose the wake-up.
+`packages/application` remains platform-free: do not use `AbortSignal`, DOM
+event types, `pg`, timers, or Node globals in this port. Fastify owns request
+abort and calls `subscription.close()` exactly once. `version` is an opaque
+wake-up/coalescing hint; neither field is authoritative state or authorization.
+
+**Transaction-coupled publication decision:** use migration 0052 to install an
+`AFTER INSERT OR UPDATE` trigger on `generation_jobs` and a versioned channel
+name `infinitequest_generation_changed_v1`. PostgreSQL delivers trigger-issued
+`pg_notify` only after commit, so every existing and future state writer is
+covered without passing a database client through the application port. The
+payload is bounded JSON containing only `jobId` and an opaque version derived
+from the committed row. Fire for inserts and for changes to SSE-visible fields
+(`status`, `partial_output`, `attempts`, and `result_turn_id`), not
+lease-heartbeat-only timestamp changes. `partialNarration` is derived from
+`partial_output`, and the public error fields are derived from terminal status;
+there is no `partial_narration` database column and raw private error columns
+must not enlarge the notification surface. The down migration removes the
+trigger and function. Do not introduce an application-level publisher whose
+call could occur on a different connection or before commit.
+
+`createPostgresGenerationEventSource` owns exactly one dedicated `pg.Client`
+per API process, created from the configured database URL outside the request
+pool. It validates notification JSON/UUID/version length, reconnects with
+bounded jittered backoff, re-issues `LISTEN`, and fans out only to subscriptions
+whose owner/campaign/job tuple passed an ownership-scoped database read during
+`subscribe`. Invalid or oversized notifications are logged safely and ignored.
+The source has idempotent `start()` and `close()` methods; close stops reconnect,
+closes every iterator, and ends the dedicated client once.
+
+Task 11 adds a required `generationEvents: GenerationEventSource` field to
+`BuildServerOptions`. The test `serverOptions()` helper supplies an inert source
+by default, while `api` and `all` runtime roles construct/start one real source
+and close it before the shared request pool; `worker` and `migrate` construct
+none. No individual SSE request may create or check out a listener connection.
+
+- [x] Prove migration-trigger notifications are invisible before commit,
+  delivered after commit, absent after rollback, and emitted for every
+  SSE-visible transition while lease-only heartbeats remain silent.
 - [x] Use PostgreSQL `LISTEN/NOTIFY` as a wake-up hint, not authoritative state.
   Validate a small notification payload (`jobId` plus a transition/version
   hint), then read the job row after each notification through the full
@@ -6211,12 +6403,18 @@ export interface GenerationEventPublisher {
   pool `max` and asserts that pool checkouts do not scale with subscriber count.
 - [x] Send an initial snapshot immediately and perform a bounded 15-second
   reconciliation read so dropped notifications cannot strand a client.
+- [x] Close the subscribe race with this exact sequence: perform the first
+  owner-scoped read, register the subscription, immediately perform a second
+  owner-scoped read, then consume hints plus the 15-second reconciliation
+  cadence. Project every read through the existing SSE schema; never serialize
+  the notification payload itself.
 - [x] Preserve SSE frame schema, terminal closure, cancellation, ownership, and
   structured logging.
 - [x] Perform the initial ownership-scoped read before registering the in-memory
-  subscriber, close the subscription when that read is unauthorized/not found,
-  and ensure fan-out keys cannot deliver a same-ID event across campaign or
-  owner scope.
+  subscriber; create no subscription when that read is unauthorized/not found.
+  Once registered, close the subscription on every terminal, client-close, and
+  error path, and ensure fan-out keys cannot deliver a same-ID event across
+  campaign or owner scope.
 - [x] Test notification-before-subscribe races, reconnect, dropped notification,
   duplicate notification, API restart, terminal transition, and client close.
 - [x] Record query counts and verify the fixed 350 ms loop is gone.
@@ -6242,11 +6440,43 @@ and notification load are included in concurrency evidence.
 - Modify: `compose.yaml`
 - Modify: `deploy/swarm/stack.yaml`
 - Modify: `.env.example`
+- Modify: `docs/runbooks/deployment.md`
+- Modify: `docs/workflows/testing.md`
+- Create: `scripts/benchmark-worker-concurrency.mjs`
 - Create: `tests/unit/worker-concurrency.test.ts`
+- Test: `tests/unit/security-config.test.ts`
+- Test: `tests/unit/runtime-shutdown.test.ts`
+- Test: `tests/unit/deployment-cors.test.ts`
 - Test: `tests/integration/generation.integration.test.ts`
 
-- [x] Add bounded `WORKER_GENERATION_CONCURRENCY` configuration with default 1
-  and an operationally safe documented maximum.
+**Frozen scheduler/configuration contract:**
+
+- `WORKER_GENERATION_CONCURRENCY` is an integer from **1 through 4**, default
+  **1**, exposed as `RuntimeConfig.workerGenerationConcurrency`. Four is the
+  approved maximum for this slice and the highest required benchmark point;
+  raising it is a later measured configuration change, not an unbounded parse.
+- Generation is one lane with that capacity. Illustration work (prompt,
+  resolution, and image execution in its existing priority order), Chronicle
+  work, and asset backfill are three separate lanes with capacity **1** each.
+  Each lane owns its active-promise set and catches/logs its own rejection so a
+  failure cannot stop slot refill in another lane.
+- On every scheduler pass, visit generation, illustration, Chronicle, and asset
+  once in round-robin order. On the generation visit, attempt at most one claim
+  for each free generation slot; on each optional-lane visit, attempt at most
+  one claim for its single free slot. Complete the full lane rotation before
+  beginning another generation fill pass, and yield through the existing poll
+  wait when no lane starts work. Do not drain one queue before offering the
+  others a slot. PostgreSQL claim/active-job constraints remain the
+  cross-replica and per-campaign correctness boundary.
+- Validate database capacity after both settings are parsed. Worker-only roles
+  require `DATABASE_MAX_CONNECTIONS >= workerGenerationConcurrency + 4` (three
+  optional lanes plus one control/recovery connection). The `all` role requires
+  `>= workerGenerationConcurrency + 8` to retain API headroom. Reject an
+  explicitly smaller value at startup with both setting names in the error;
+  defaults remain 8 for `worker` and 12 for `all`, which satisfy the 1-4 range.
+
+- [x] Add the frozen 1-4 `WORKER_GENERATION_CONCURRENCY` setting, manifest/env
+  documentation, and boundary-value/invalid-value/pool-capacity tests.
 - [x] Size database pools and shutdown deadlines for configured concurrency.
 - [x] Claim up to available generation slots without allowing two active jobs for
   one campaign.
@@ -6258,14 +6488,23 @@ and notification load are included in concurrency evidence.
   retry limits, and per-lane concurrency. Never fall back from a missing image
   profile to the text provider or expose either provider's credential to the
   other lane.
-- [x] Drain all active work on shutdown within the existing bounded lifecycle.
+- [x] On shutdown, stop every lane from claiming new work and await all active
+  promises; continue to withhold the scheduler `AbortSignal` from story
+  execution. There is no pre-existing application-level hard deadline. Add a
+  10-minute Compose/Swarm `stop_grace_period` and document that provider work
+  exceeding the operator grace may be force-stopped and must recover through
+  lease expiry/reclaim without double commit. Tests cover both graceful drain
+  and simulated process loss followed by reclaim.
 - [x] Add tests for slot refill, fair lanes, campaign exclusivity, abort, drain,
   lease expiry, and multiple worker replicas.
 - [x] Add tests proving story completion with images disabled, image endpoint
   unavailable, incompatible image models, exhausted image retries, and image
   failure after story validation. Image retry must not re-enqueue narration.
 - [x] Benchmark concurrency 1, 2, and 4 against the test database and record
-  throughput, queue latency, database utilization, and provider limits.
+  throughput, queue latency, database utilization, active/peak lane counts,
+  provider limits, fixture seed, warm-ups, measured samples, and variance using
+  the Task 1 C0 profile. The benchmark uses deterministic provider delays and
+  fails if any campaign commits duplicate turn numbers.
 
 **Definition of done:** Throughput scales with configured slots/replicas without
 duplicate turns, cross-campaign leakage, unbounded shutdown, or illustration
@@ -6379,10 +6618,30 @@ without changing those contracts.
 
 - Create: `scripts/benchmark-play-loop.mjs`
 - Create: `tests/integration/play-loop-read-performance.integration.test.ts`
-- Modify: request/response schemas under `packages/contracts/src/`
-- Modify: applicable read repositories under `packages/database/src/`
-- Modify: applicable route adapters under `services/api/src/`
+- Create: `tests/unit/database-pool.test.ts`
+- Modify: `packages/database/src/play-loop-read-repository.ts`
+- Modify: `packages/database/src/pool.ts`
+- Modify: `packages/database/src/index.ts` only if a new measured query helper
+  requires export
+- Modify: `services/api/src/server.ts`
+- Create conditionally: `database/migrations/0053_play_loop_read_indexes.sql`
+  only when recorded `EXPLAIN (ANALYZE, BUFFERS)` evidence justifies an index
+- Review unchanged: `packages/contracts/src/client-api.ts` and
+  `packages/contracts/src/generation.ts` — B4a/7P public cursor, sync, polling,
+  and result contracts are frozen in B4b
+- Test: `tests/unit/play-loop-read-repository.test.ts`
+- Test: `tests/unit/client-api-routes.test.ts`
+- Test: `tests/integration/gameplay.integration.test.ts`
+- Test: `tests/integration/dashboard-stats.integration.test.ts`
+- Test: `tests/integration/generation.integration.test.ts`
+- Test conditionally: `tests/integration/migrations.integration.test.ts` when
+  migration 0053 is created
 - Modify: `docs/workflows/testing.md`
+
+No request or response schema may change in B4b. A measured need to change a
+page limit, token shape, response field, or SSE/polling projection is a public
+contract finding that stops this task and returns to plan review; it is not an
+optimization hidden inside `packages/contracts`.
 
 - [ ] Seed small, 200-turn, and long-running campaign fixtures with realistic
   world/version, job, image, and Chronicle cardinalities.
@@ -6399,15 +6658,23 @@ without changing those contracts.
 - [ ] Remove measured N+1 reads and avoid returning columns or nested records the
   play loop does not consume.
 - [ ] **Memoize the owner-identity lookup.** `initialOwnerId`
-  (`packages/database/src/pool.ts:35`) issues
+  (`packages/database/src/pool.ts`) issues
   `SELECT id FROM users WHERE system_key = 'initial-owner' AND status =
-  'active'` on every call, uncached, from **99 call sites** across `services/` —
-  several per request on play-loop paths — for a value that cannot change while
-  the process runs. Cache it per process behind the existing function so no
-  call site changes, keep the "not bootstrapped" error behavior on a cache miss,
-  and invalidate on nothing (a restart is the only lifecycle event that matters
-  pre-authentication). This is the cheapest measurable win in the track; do it
-  before chasing index changes.
+  'active'` on every call. At the 10c2 checkpoint there are **93** occurrences
+  in `services/`; remeasure after Tasks 10-12 rather than treating that number
+  as permanent. Cache the in-flight/resolved promise in a
+  `WeakMap<DatabasePool | DatabaseClient, Promise<string>>` keyed by the actual
+  pool/client object passed to the existing function, so concurrent calls on
+  one pool coalesce while separate databases in the same test process can never
+  share an owner UUID. Delete only a rejected promise from the map so a later
+  successful bootstrap can be observed; a resolved UUID has no invalidation in
+  the pre-auth process lifetime.
+- [ ] Add owner-cache tests proving one query for concurrent and sequential
+  calls on one pool, different UUIDs for two pools/databases, no cross-pool
+  reuse, preserved `Initial user is not bootstrapped.` failure, retry after a
+  failed lookup, and separately cached/correct behavior when a transaction
+  client is deliberately distinct. Do not export a reset hook used only by
+  tests.
 - [ ] Keep this cache explicitly limited to lookup of the stable
   `initial-owner` bridge. When interactive authentication arrives, request
   handlers receive the session-resolved internal `user_id` and must stop calling
@@ -6415,7 +6682,10 @@ without changing those contracts.
   caller-supplied identities. Bootstrap/administrative code that genuinely still
   needs the initial owner may retain the stable cache.
 - [ ] Add query-count assertions for deterministic routes and a seeded-data load
-  profile that reports p50, p95, payload bytes, and error rate.
+  profile that reports p50, p95, payload bytes, error rate, PostgreSQL version,
+  fixture cardinalities, warm-up/sample counts, and variance. Cover campaign
+  list/dashboard, sync unchanged/replacement, first/middle/last history page,
+  generation polling, result recovery, and initial Story Player hydration.
 - [ ] Treat the 10% regression budget as a guardrail, not proof of speed: record
   absolute baseline and post-change measurements and approve explicit targets
   after C0 evidence exists.
@@ -6483,15 +6753,204 @@ distributed across the domains**:
   `Not started` until 10f.
 - [ ] Each domain records its own `Current Task 14x verification` block with
   measured figures per the Task 4a P4 rule, and its own scoped review.
-- [ ] Write each domain's brief before implementing it: exact routes, worker
-  entry points, database transactions, ownership scope, existing tests, and UI
-  slice consumer. The generic "applicable files" placeholder is not sufficient
-  input for a fresh agent.
+- [ ] Deliver every domain as four ordered, separately committed and reviewed
+  checkpoints: **14x1 contracts/use cases**, **14x2 concrete adapters**, **14x3
+  API/worker cutover and legacy removal**, and **14x4 full-domain parity audit**.
+  Contracts and adapters are additive; only 14x3 may switch production callers
+  and remove old callable implementations. Do not begin the next domain before
+  14x4 passes.
 
-- [ ] Treat each numbered domain as a separately planned/reviewed task and
-  commit series. Before its implementation, inventory its routes, worker entry
-  points, database transactions, ownership scope, tests, and UI slice consumer;
-  replace generic “applicable files” with exact paths.
+### Frozen B5 dependency and temporary-binding policy
+
+Early domains depend on capabilities whose final extraction occurs later. They
+must express those dependencies as narrow application ports and bind the current
+implementation only in `services/runtime` composition. They may not import a
+later domain's `services/api/*-service.ts` implementation from application,
+database, API adapter, or worker code. Every temporary binding is recorded with
+one removal owner:
+
+| Temporary capability introduced/consumed | First consumer | Removal owner |
+|---|---|---|
+| image provider, prompt snapshot, and cost recording | 14a illustration | 14d |
+| asset persistence/read and filesystem storage | 14a illustration | 14e |
+| embedding provider and memory cost recording | 14b Chronicle | 14d |
+| text provider/prompt operations for world and character generation | 14c | 14d |
+| archive/import asset storage and portable-file I/O | 14e | 14e (same checkpoint) |
+| API-layer `loadOrNotFound` row helper in `service-helpers.ts` | 10d/14a/14c/14e | 14e, after its last asset consumer moves |
+
+The runtime composition report maintains a machine-checkable inventory of these
+bindings plus the Task 10d `GenerationExecutionCollaborators` inventory. A later
+domain replaces the port adapter in place; it does not create a second port with
+the same responsibility. Task 14f requires the temporary inventory to be empty.
+
+### Task 14a — B5a: illustration and image jobs
+
+**Current sources owned:** `services/api/src/image-service.ts`,
+`services/api/src/illustration-resolution-service.ts`, and
+`services/api/src/segmented-illustration-service.ts`; their routes in
+`services/api/src/server.ts`; the three matching worker imports; and the
+illustration callbacks in `GenerationExecutionCollaborators`.
+
+**Create/modify:**
+
+- Create `packages/application/src/illustration/{types,ports,use-cases}.ts` and
+  export it from `packages/application/src/index.ts`.
+- Create `packages/database/src/illustration-repository.ts` and export its
+  factories from `packages/database/src/index.ts`.
+- Create `services/api/src/illustration-application-adapter.ts` and
+  `services/runtime/src/illustration-composition.ts`.
+- Modify `services/api/src/server.ts`, `services/worker/src/worker.ts`,
+  `services/runtime/src/main.ts`, the generation executor composition, and the
+  boundary allowlist/tests.
+- Test `tests/unit/image-library.test.ts`,
+  `tests/unit/image-job-durability.test.ts`,
+  `tests/unit/illustration-segmentation.test.ts`,
+  `tests/unit/legacy-illustration-api.test.ts`,
+  `tests/unit/image-artifact-download-security.test.ts`,
+  `tests/integration/image-pipeline.integration.test.ts`,
+  `tests/integration/generation.integration.test.ts`, and
+  `tests/integration/world-library.integration.test.ts`; add pure application,
+  repository integration, API-adapter, and worker-adapter suites under the same
+  domain name.
+
+14a1 freezes separate API and worker applications for illustration config,
+world covers, accepted-turn/segment/backfill enqueue, job/result/retry reads,
+library matching/rematch, and `runNextIllustration`. Every command/query carries
+owner plus campaign/world/turn/job scope as applicable. 14a2 moves claim/lease,
+prompt/refinement, resolution, image execution, retry, artifact download, and
+asset binding behind concrete adapters while keeping text and image provider
+profiles distinct. 14a3 switches routes and the worker, replaces the six Task
+10d illustration callbacks, removes exactly the three 14a allowlist entries,
+and deletes or reduces the three old services so no callable shadow remains.
+14a4 proves images disabled/unavailable/incompatible/failed/retried never change
+narration acceptance, fiction-only prompts exclude mechanics/private output,
+artifact SSRF controls remain pinned, and owner/campaign isolation holds.
+
+### Task 14b — B5b: Chronicle memory and embeddings
+
+**Current sources owned:** `services/api/src/memory-service.ts`, its routes in
+`server.ts`, the worker's `runChronicleJob` import, and the five Task 10d memory
+callbacks. Contracts remain in `packages/contracts/src/memory.ts`; pure
+Chronicle logic remains in `packages/story-engine/src/chronicle.ts`.
+
+Create `packages/application/src/memory/{types,ports,use-cases}.ts`,
+`packages/database/src/chronicle-repository.ts`,
+`services/api/src/memory-application-adapter.ts`, and
+`services/runtime/src/memory-composition.ts`. Modify server/worker/runtime and
+the boundary allowlist. Cover `tests/unit/chronicle.test.ts`,
+`tests/unit/semantic-memory-auto-enable.test.ts`,
+`tests/integration/import-memory.integration.test.ts`, gameplay/generation
+integration, plus new application/repository/adapter suites.
+
+14b1 freezes applications for embedding configuration, context preview,
+metrics, Chronicle/embedding reindex, derived-turn writes, state correction,
+and `runNextChronicle`. 14b2 moves owner/campaign-scoped authoritative reads,
+derived writes, claim/lease/retry, embedding provider calls, and rebuilds behind
+ports. 14b3 switches API, worker, generation executor, campaign-transfer, world,
+and import consumers; removes the memory allowlist entry and all five Task 10d
+memory callbacks; and leaves no worker import from API. 14b4 proves accepted
+turns/state remain authoritative, summaries/embeddings are rebuildable,
+rejected generations write no memory, and retrieval/reindex cannot cross owner,
+campaign, world, or world-version scope.
+
+### Task 14c — B5c: identity, worlds, versions, and campaigns
+
+**Current sources owned:** `world-service.ts`, `campaign-state-service.ts`,
+`character-profile-service.ts`, the remaining player-config/rewind/branch
+portion of `generation-service.ts`, `campaign-transfer-service.ts`,
+`world-generator-service.ts`, `world-generation-progress-service.ts`,
+`dashboard-service.ts`, and `user-service.ts`, together with their server
+routes. `play-loop-read-repository.ts` remains the B4a/B4b read adapter and is
+consumed rather than duplicated.
+
+Split this domain internally: **14c1** creates platform-free world/version,
+campaign, campaign-state, character-profile, dashboard, and session-owner use
+cases plus exact owner-scoped ports; **14c2** creates focused PostgreSQL adapters
+(`world-repository.ts`, `campaign-repository.ts`,
+`campaign-state-repository.ts`, and `world-generation-repository.ts`) and
+provider/memory collaborator adapters; **14c3** cuts over CRUD/publication,
+fork/import/export, campaign create/update/delete, character/profile/state,
+sync/rewind/branch/transfer, dashboard/session, and world/character generation
+routes; **14c4** removes the old callable implementations and performs parity
+review. Create API adapters and `services/runtime/src/world-campaign-composition.ts`;
+cover world-library, world-generation, progress, gameplay, campaign-transfer,
+state-correction, dashboard, user-profile, and client-route suites plus new
+pure application/repository/adapter tests.
+
+The initial-user resolver is injected at the Fastify boundary; no request field,
+header, email, display name, or provider identity is accepted as authority.
+Initial-user bootstrap remains idempotent and credential-free. Preserve non-null
+ownership, immutable published versions, explicit campaign migration/promotion,
+append-only accepted turns, durable replacement provenance, and deletion
+blockers. On completion, the three campaign-operation `initialOwnerId` lookups
+recorded by 10c3 have moved to route composition and
+`generation-service.ts` has no remaining callable responsibility.
+
+### Task 14d — B5d: providers, prompts, intent, and cost
+
+**Current sources owned:** `provider-service.ts`,
+`prompt-library-service.ts`, `turn-intent-service.ts`, and `cost-service.ts`,
+their routes/consumers, and every temporary provider/prompt/cost binding recorded
+by 10d and Tasks 14a-14c.
+
+Create `packages/application/src/providers/{types,ports,use-cases}.ts`,
+`packages/database/src/provider-repository.ts`,
+`packages/database/src/prompt-repository.ts`,
+`packages/database/src/cost-repository.ts`,
+`services/api/src/provider-application-adapter.ts`, and
+`services/runtime/src/provider-application-composition.ts`. Cover provider,
+prompt-library, turn-intent, cost-attribution, network-policy, lifecycle,
+generation, image, memory, and world-generation tests plus new pure
+application/repository/adapter suites.
+
+14d1 freezes role-discriminated text/image/embedding/intent profiles and prompt
+snapshot/version use cases. 14d2 binds encrypted credentials and the pinned
+provider transport without putting secrets in application commands, logs, or
+public errors. 14d3 switches routes and every temporary consumer, then removes
+all provider/prompt/cost temporary bindings and old callable services. 14d4
+proves text and image base URLs, tokens, inventories, selected models, health,
+timeouts, and retry policies remain independent; no missing image profile falls
+back to text; prompt-protocol changes invalidate chains explicitly; and provider
+queries are owner-isolated.
+
+### Task 14e — B5e: imports, exports, archives, and assets
+
+**Current sources owned:** `asset-service.ts`, `asset-archive-service.ts`,
+`campaign-archive-service.ts`, `import-service.ts`,
+`infinite-worlds-import-service.ts`, business operations used by
+`archive-routes.ts`, the worker asset-backfill import, and remaining temporary
+asset/filesystem bindings. This is also the final removal owner for
+`service-helpers.ts`: Tasks 10d, 14a, and 14c remove its generation, image, and
+campaign-state consumers, and 14e deletes the helper after moving its last
+asset consumer into a database adapter. `archive-routes.ts` and bounded
+multipart parsing remain API transport; `archive-io.ts` becomes a
+filesystem/archive adapter.
+
+Create `packages/application/src/assets/{types,ports,use-cases}.ts`,
+`packages/application/src/imports/{types,ports,use-cases}.ts`,
+`packages/database/src/asset-repository.ts`,
+`packages/database/src/import-repository.ts`,
+`services/api/src/archive-application-adapter.ts`, and
+`services/runtime/src/asset-import-composition.ts`. Cover archive contracts/I/O/
+routes, asset archive/service/security, legacy/CYOA/Infinite Worlds import,
+campaign archive/transfer, migrations, and image-pipeline suites plus new pure
+application/repository/API-worker adapter tests.
+
+14e1 freezes asset library/selection/backfill and preview/commit/export use
+cases with explicit owner scope and opaque portable provenance. 14e2 implements
+PostgreSQL plus filesystem/archive adapters with bounded streaming, path
+containment, symlink/reparse rejection, hash/MIME verification, cleanup, and
+transactional ownership. 14e3 switches archive routes, imports, exports, image/
+world consumers, and worker backfill; removes the final asset allowlist entry
+and all temporary asset bindings; and removes old callable business services.
+14e4 proves aggregate archive caps, rollback/cleanup, owner assignment,
+cross-install source IDs never authorizing records, complete portable JSON/ZIP
+round trips, and no private campaign/export fixture enters source control.
+
+- [ ] Treat each numbered domain and its four frozen checkpoints as a
+  separately briefed/reviewed commit series. Re-measure route/function/import
+  counts at checkpoint start and record drift, but do not defer architecture or
+  file ownership to a future planning task.
 - [ ] Illustration extraction preserves the independent image provider profile,
   credential/model/health/retry lane and the rule that image failure cannot
   affect accepted narration.
@@ -6529,6 +6988,18 @@ components, styles, browser visual tests, or any other `apps/web-next` UI work.
 - [ ] Verify API and worker roles have no implementation imports from one
   another across every extracted domain; record the exact boundary command and
   reviewed exceptions (normally none).
+- [ ] Prove both cleanup inventories reach zero: the five Task 14 cross-role
+  allowlist entries and every temporary runtime collaborator recorded by 10d or
+  Tasks 14a-14c. Run the boundary scanner, search runtime composition for each
+  recorded legacy symbol, and fail the audit on any anonymous replacement
+  callback or unowned exception.
+- [ ] For every current business source named in the 14a-14e inventories, record
+  one disposition: deleted, reduced to a transport adapter, or replaced by a
+  named application/database/runtime module. Verify no old and new callable
+  implementations remain reachable. Infrastructure-only `request-security.ts`,
+  `archive-routes.ts`, `archive-io.ts`, `admission-service.ts`, and
+  `app-metadata.ts` may remain only within their documented transport/runtime
+  responsibilities.
 - [ ] **Assert `CROSS_ROLE_IMPORT_ALLOWLIST` is empty.** This is the crisp,
   machine-checkable form of the criterion above. The list holds six entries
   today: Task 10e removes `generation-service.js`, 14a removes three, 14b one,
@@ -6548,10 +7019,18 @@ components, styles, browser visual tests, or any other `apps/web-next` UI work.
 - [ ] Reconcile architecture, deployment, operations, configuration/secrets,
   migration/rollback, and testing documentation with the shipped backend. Keep
   text/image provider secrets and runtime settings independent in all manifests.
+- [ ] Render Compose and Swarm manifests, run the same-image API/worker/all-role
+  smoke, rehearse rollback across any new online migration, and verify listener
+  reconnect, worker drain/forced-stop lease recovery, initial-owner bootstrap,
+  and separate text/image secret wiring. No UI route, component, style, or
+  browser visual artifact may change in this backend audit range.
 - [ ] Run `pnpm check`, `pnpm build`, `pnpm test:unit`,
   `pnpm test:integration`, `git diff --check`, complete-diff review, and
   `pjm precheck`; record a named backend audit report with command results,
-  benchmark links, known limitations, and scoped review approval.
+  exact pass/fail/skip counts, benchmark links, Node/pnpm/PostgreSQL versions,
+  base/head SHAs, known limitations, and scoped review approval. Compare skipped
+  tests to the pre-Task10 baseline; any new skip needs a named blocking issue
+  and cannot be used to authorize UI work.
 
 - [ ] **Record the authorization in this plan, not only in the audit report.**
   Flip the Task 14f completion row, add its `Current Task 14f verification`
