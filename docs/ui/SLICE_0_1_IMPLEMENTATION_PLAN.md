@@ -5326,6 +5326,11 @@ not contain generation state-machine or SQL policy.
 
 - Create: `services/api/src/generation-application-adapter.ts`
 - Create: `tests/unit/generation-application-adapter.test.ts`
+- Modify: `services/api/src/generation-diagnostics.ts` — 10c2 exports a
+  read-only membership predicate over the private diagnostic error-code set;
+  the mutable set itself remains private
+- Test: `tests/unit/generation-diagnostics.test.ts` — 10c2 proves the new
+  predicate accepts the adapter's safe code and rejects an arbitrary code
 - Create: `services/runtime/src/generation-api-composition.ts` — constructs the
   API-role `GenerationApplication` from the PostgreSQL command repository and
   its three already-approved injected callbacks
@@ -5369,7 +5374,7 @@ split; what splits is the work.
 | Stage | Contains | Character | Ends with |
 |---|---|---|---|
 | **10c1 — plumbing** | required `generation` field, exported `BuildServerOptions`, API composition factory, `serverOptions()` helper, 50 test calls and 2 runtime calls converted | mechanical; **zero behaviour change** | routes still call the 10b facade; the injected application is constructed and unused |
-| **10c2 — adapter** | `generation-application-adapter.ts` with owner scope, application calls, and the ported reason-level error mapping, unit-tested against a fake | purely additive; nothing removed | adapter exists and is fully tested; routes still on the facade; bridge still live |
+| **10c2 — adapter** | `generation-application-adapter.ts` with the frozen seven-method route-facing contract, explicit owner scope, application calls, ported reason-level error mapping, and diagnostic-code predicate; directly unit-tested against a fake application | purely additive; no route or live-facade change | adapter exists and is fully tested; routes still on the facade; bridge and its tests remain unchanged and live |
 | **10c3 — cutover** | routes switched to the adapter, bridge deleted, `safeTurnInput` and lifecycle logging re-homed, `image-pipeline` usage re-homed, `initialOwnerId` proven zero | the parity-sensitive diff | the 10c review gate |
 
 - [ ] Land them in order. 10c1 must change no response and 10c2 must delete
@@ -5384,6 +5389,12 @@ split; what splits is the work.
   is the only implementation of that mapping. Deleting it in the same commit
   that ports it would leave no reviewable moment where both exist and can be
   compared.
+- [ ] **Keep 10c2 additive and unreachable from HTTP.** It may create the
+  adapter and its tests and add the diagnostic-code membership predicate, but
+  it must not modify `server.ts`, `generation-service.ts`, the compatibility
+  bridge, or the bridge's tests. `buildServer` must continue accepting the
+  injected application without using it, and every production route must still
+  call the 10b facade until 10c3 performs the atomic cutover.
 - [ ] Do not split 10c3 further. The route switch, the bridge deletion, and the
   re-homing are one atomic parity change; a checkpoint between them leaves
   either two callable implementations or a route whose validation guard has
@@ -5499,6 +5510,73 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
 - [ ] *(10c3)* Keep request schema validation, campaign/job path parameters,
   idempotency/operation provenance, safe result projections, status codes,
   response headers, and response bodies byte-for-byte contract-compatible.
+- [ ] *(10c2)* **Freeze the route-facing adapter contract before implementing
+  it.** Create `generation-application-adapter.ts` with these exact exported
+  types and factory. The method names deliberately match the temporary facade
+  so 10c3 changes route dependencies rather than inventing a second route API:
+
+  ```ts
+  export type GenerationHttpError = Error & {
+    statusCode: number;
+    details?: unknown;
+  };
+
+  export type GenerationApplicationAdapter = Readonly<{
+    enqueueGeneration(
+      ownerScope: OwnerScope,
+      campaignId: string,
+      request: GenerationRequest,
+    ): Promise<EnqueueGenerationResult>;
+    enqueueLatestReplacement(
+      ownerScope: OwnerScope,
+      campaignId: string,
+      request: GenerationRetryLatestRequest,
+    ): Promise<EnqueueGenerationResult>;
+    getGenerationJob(
+      ownerScope: OwnerScope,
+      jobId: string,
+    ): Promise<GenerationJob>;
+    getGenerationResult(
+      ownerScope: OwnerScope,
+      jobId: string,
+    ): Promise<GenerationResult>;
+    retryGeneration(
+      ownerScope: OwnerScope,
+      jobId: string,
+    ): Promise<GenerationMutationResult>;
+    cancelGeneration(
+      ownerScope: OwnerScope,
+      jobId: string,
+    ): Promise<GenerationMutationResult>;
+    discardGeneration(
+      ownerScope: OwnerScope,
+      jobId: string,
+    ): Promise<GenerationMutationResult>;
+  }>;
+
+  export function mapGenerationApplicationError(
+    error: GenerationApplicationError,
+  ): GenerationHttpError;
+
+  export function createGenerationApplicationAdapter(
+    application: GenerationApplication,
+  ): GenerationApplicationAdapter;
+  ```
+
+  Import `GenerationRequest`, `GenerationResult`, and
+  `GenerationRetryLatestRequest` from contracts. Import `OwnerScope`,
+  `EnqueueGenerationResult`, `GenerationJob`, `GenerationMutationResult`,
+  `GenerationApplication`, and `GenerationApplicationError` from the
+  application package. The adapter constructs only
+  `{ ownerUserId, campaignId }` or `{ ownerUserId, jobId }` scopes and delegates
+  once to the corresponding application method. It returns successful values
+  unchanged; Zod response projection remains an HTTP-handler responsibility in
+  10c3. It catches only `GenerationApplicationError`, maps that error through
+  the exported mapper, and rethrows every unknown error by object identity.
+  It must not import Fastify, Zod, `DatabasePool`, `initialOwnerId`, a
+  repository, logger, `safeTurnInput`, or generation execution code. Owner
+  resolution, input safety, lifecycle logging, and route projection remain
+  assigned to 10c3.
 - [ ] *(10c2)* **Port the error mapping at `details.reason` granularity, not by `kind`.**
   An earlier revision of this item said "map each kind", which understates the
   contract by a wide margin: there are **6 `kind` values and 16 `reason`
@@ -5506,7 +5584,8 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
   the 16-case switch in the bridge), and the HTTP status is chosen by reason.
   Collapsing to six statuses would break the byte-for-byte compatibility this
   checkpoint exists to preserve.
-  The authoritative mapping is the `legacyGenerationError` switch in
+  The authoritative mapping is the current `mapGenerationApplicationError`
+  switch (which builds errors through its private `legacyError` helper) in
   `services/api/src/generation-command-compatibility.ts` — **the file this
   checkpoint deletes** — so port it into
   `generation-application-adapter.ts` *before* removing the bridge. Its only
@@ -5526,16 +5605,111 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
   `details.campaignId` is present ("Campaign not found." vs "Generation job not
   found."). Unknown failures follow the existing 5xx handler and internal
   structured logging; do not expose adapter/provider text.
-- [ ] *(10c2)* Table-test the ported mapping over all 16 reasons, asserting
-  status, message, and details together. A test that asserts only status would
-  pass while every message regressed.
-- [ ] *(10c2)* Keep the emitted `details.code` values inside the
-  `SAFE_ERROR_CODES` allowlist in `services/api/src/generation-diagnostics.ts`,
-  which is a **second, independent** consumer of `active_generation_exists`.
-  The status/message mapping lives only in the bridge, but that allowlist does
-  not, so deleting the bridge cannot be assumed to carry the code contract with
-  it. Assert the ported adapter's codes against that set rather than
-  hand-copying them.
+- [ ] *(10c2)* **Make mapping coverage exhaustive by type and by runtime
+  branch.** In the adapter test import `GenerationApplicationErrorDetails`,
+  `GenerationApplicationErrorKind`, and `GenerationApplicationErrorReason`
+  from the application package and define the fixture type exactly as:
+
+  ```ts
+  type MappingFixture = Readonly<{
+    kind: GenerationApplicationErrorKind;
+    details: Omit<GenerationApplicationErrorDetails, "reason">;
+    expectedStatusCode: number;
+    expectedMessage: string;
+    expectedDetails?: unknown;
+  }>;
+  ```
+
+  Define the 16 base fixtures as a value satisfying
+  `Record<GenerationApplicationErrorReason, MappingFixture>` so adding a new
+  reason fails compilation until its HTTP contract is specified. Construct each
+  typed error with `{ reason, ...fixture.details }`, deriving `reason` from the
+  record key so a fixture cannot silently name a different reason. Use these
+  exact base expectations:
+
+  | Reason | Kind | Status | Exact message | Expected details |
+  |---|---|---:|---|---|
+  | `idempotency_mismatch` | `conflict` | 409 | `The idempotency key was already used for a different generation request.` | absent |
+  | `action_only_mode` | `invalid_state` | 400 | `This campaign accepts player actions only.` | absent |
+  | `explicit_input_mode_mismatch` | `invalid_state` | 400 | `Explicit turn input mode does not match the resolved mode.` | absent |
+  | `classification_id_forbidden` | `invalid_state` | 400 | `Classification IDs are valid only for Auto input.` | absent |
+  | `classification_missing_or_expired` | `conflict` | 409 | `The Auto classification is missing, expired, consumed, or does not match this input.` | absent |
+  | `classification_mode_mismatch` | `conflict` | 409 | `The submitted turn mode does not match the Auto classification.` | absent |
+  | `selected_provider_unavailable` | `provider_required` | 400 | `Enabled text provider profile not found.` | absent |
+  | `no_text_provider` | `provider_required` | 409 | `Select a text provider for this campaign or mark a default text provider.` | absent |
+  | `stale_current_turn` | `stale_turn` | 409 | `Campaign is at turn 5, not 3.` | absent |
+  | `missing_latest_turn` | `not_found` | 404 | `The latest accepted turn was not found.` | absent |
+  | `active_generation` | `active_job` | 409 | `This campaign already has an active story generation.` | `{ code: "active_generation_exists", pendingGeneration }` |
+  | `active_illustration` | `active_job` | 409 | `Wait for the latest turn illustration to finish before retrying the turn.` | absent |
+  | `result_not_completed` | `invalid_state` | 409 | `Generation could not be completed.` | absent |
+  | `retry_source_state` | `invalid_state` | 409 | `Only recoverable or failed generation jobs can be retried.` | absent |
+  | `cancel_source_state` | `invalid_state` | 409 | `Only active generation jobs can be cancelled.` | absent |
+  | `discard_source_state` | `invalid_state` | 409 | `Only recoverable or failed generation jobs can be discarded.` | absent |
+
+  Give the stale fixture `actualTurnNumber: 5` and `expectedTurnNumber: 3`,
+  the result fixture `generationStatus: "failed"`, and the active fixture a
+  complete typed `pendingGeneration` constant. For every fixture assert the
+  complete normalized error snapshot:
+  `{ name, message, statusCode, details, hasTopLevelCode }`. `name` must remain
+  exactly `"Error"`; `active_generation_exists` belongs under `details.code`
+  and must not appear as a top-level `error.code`. A status-only assertion is
+  insufficient. Normalize both implementations with this shape so `Error`
+  prototype differences cannot hide a contract mismatch:
+
+  ```ts
+  function errorSnapshot(error: GenerationHttpError) {
+    return {
+      name: error.name,
+      message: error.message,
+      statusCode: error.statusCode,
+      details: error.details,
+      hasTopLevelCode: Object.prototype.hasOwnProperty.call(error, "code"),
+    };
+  }
+  ```
+
+  Add explicit variant fixtures beyond the 16 reason keys for every branch the
+  base record cannot represent:
+
+  - `classification_missing_or_expired` with `kind: "conflict"` and with
+    `kind: "invalid_state"`, including their different status/message pairs;
+  - `result_not_completed` for each collapsed terminal status (`failed`,
+    `recoverable`, `cancelled`, and `discarded`) and for one non-terminal
+    status such as `generating` so both computed-message branches are proved;
+  - `stale_current_turn` with unequal concrete actual/expected values so the
+    interpolation is asserted rather than snapshotting `undefined`;
+  - `active_generation` with a populated `pendingGeneration` and with no
+    pending value, where the mapped payload must contain
+    `pendingGeneration: null`;
+  - a reasonless `not_found` error with `campaignId`, a reasonless `not_found`
+    error with only `jobId`, and a reasonless non-`not_found` error for the
+    generic 409 fallback.
+
+  While both implementations coexist, import the old mapper under an explicit
+  alias and run every base and variant fixture through both mappers. Compare the
+  normalized snapshots for exact equality. Keep the existing bridge and its
+  test unchanged in 10c2; this differential test is deleted or converted to a
+  single-implementation contract test only when 10c3 removes the bridge.
+- [ ] *(10c2)* Keep the emitted `details.code` values inside the diagnostic
+  allowlist without exporting a mutable `Set`. In
+  `services/api/src/generation-diagnostics.ts`, leave `SAFE_ERROR_CODES`
+  private and export exactly:
+
+  ```ts
+  export function isSafeGenerationDiagnosticErrorCode(value: string): boolean {
+    return SAFE_ERROR_CODES.has(value);
+  }
+  ```
+
+  Make the existing private `safeErrorCode` call this predicate after its
+  existing trim/lowercase normalization; do not change its fallback,
+  sanitization, or logging behavior. Add focused diagnostics tests proving
+  `active_generation_exists` is accepted and an arbitrary private code is
+  rejected. In the adapter mapping test, read the actual mapped
+  `details.code`, prove it is a string, and pass that value to the predicate;
+  do not duplicate the allowlist in the test. This preserves
+  `generation-diagnostics.ts` as the second independent owner of the safe-code
+  contract while preventing callers from mutating its set.
 - [ ] *(10c3)* Keep SSE behavior and its 350 ms polling topology unchanged in this
   checkpoint. Task 11 owns notification delivery. SSE and polling must continue
   using their distinct validated projections and safe error allowlists.
@@ -5565,9 +5739,21 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
 
 **Required tests:**
 
-- [ ] *(10c2)* Table-test every route against a fake application for validated input,
-  correct owner/campaign/job scope, success projection, each typed error, and an
-  unknown error.
+- [ ] *(10c2)* Table-test all seven **adapter methods**, not Fastify routes,
+  against a fake `GenerationApplication`. For each method assert the exact
+  application method invoked, one invocation only, the explicit owner plus
+  campaign/job scope, request identity where applicable, and unchanged success
+  result identity. For every method, separately prove one
+  `GenerationApplicationError` is mapped and one arbitrary `Error` is rethrown
+  by identity. Assert the fake has zero unexpected calls. Actual route tests do
+  not belong to 10c2 because routes intentionally remain on the 10b facade.
+- [ ] *(10c3)* Table-test the seven non-streaming generation HTTP routes against
+  the injected fake application for schema-validated input, server-resolved
+  owner/campaign/job scope, success status and response projection, every
+  applicable typed error, and an unknown error. Keep SSE/get-job coverage in
+  the dedicated polling/SSE item below. This test moves with the route cutover;
+  it must fail before 10c3 rather than forcing 10c2 to use the application
+  prematurely.
 - [ ] *(10c3)* Prove a spoofed identity header/body/query value cannot alter the injected
   owner and Owner A cannot obtain Owner B's job through a known UUID.
 - [ ] *(10c3)* Re-run polling/SSE contract tests to prove no new fields, raw errors,
@@ -5580,6 +5766,38 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
   current execution path until Task 10d/10e. This proves the bridge deletion does
   not strand illustration-cancellation coverage while avoiding a second callable
   command facade.
+
+**10c2 implementation sequence and handoff gate:**
+
+1. Add the failing `generation-application-adapter.test.ts` imports and the
+   seven-method delegation table. Run only that file and record the expected
+   missing-module/export failure before creating production code.
+2. Add the typed 16-reason mapping record, all branch-variant fixtures, and the
+   legacy/new differential snapshot assertions. Keep the old mapper as the
+   oracle for parity, but retain explicit expected snapshots so a shared bug
+   cannot make both implementations pass incorrectly.
+3. Implement the minimal adapter contract and mapper. Re-run the adapter unit
+   file until the seven delegation/error cases and the complete mapping matrix
+   pass. Do not edit a route or the live facade to make these tests green.
+4. Add `isSafeGenerationDiagnosticErrorCode`, route the existing normalized
+   diagnostic lookup through it, and add its focused positive/negative tests.
+   Re-run the adapter and diagnostics unit files together.
+5. Run the unchanged compatibility suite in the same focused command. The
+   required focused gate is:
+
+   ```sh
+   pnpm vitest run tests/unit/generation-application-adapter.test.ts tests/unit/generation-command-compatibility.test.ts tests/unit/generation-diagnostics.test.ts
+   ```
+
+6. Confirm the 10c2 diff contains only the new adapter/test, the diagnostic
+   predicate/test, and this substage's measured evidence. `server.ts`,
+   `generation-service.ts`, `generation-command-compatibility.ts`, and
+   `generation-command-compatibility.test.ts` must have zero diff.
+7. Run `pnpm check`, `pnpm build`, `pnpm test:unit`,
+   `pnpm test:integration`, `git diff --check`, and `pjm precheck`. Record exact
+   test/file counts and the base/head range, commit 10c2 separately, and obtain
+   a fresh scoped review before checking its items complete. Keep Task 10's
+   top-level status `Not started` and do not begin 10c3 in the same checkpoint.
 
 **10c review gate:** all generation HTTP routes depend on the application
 interface, public contracts are unchanged, and the API owns request authority
