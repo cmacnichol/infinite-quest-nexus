@@ -653,7 +653,7 @@ async function completeImageJob(
   provider: TextProviderProfile & { id: string; name: string },
   result: { artifacts: ImageProviderArtifact[]; usage: Record<string, unknown>; reportedCost: ImageProviderResult["reportedCost"]; providerMetadata: Record<string, unknown> }
 ): Promise<void> {
-  if (!result.artifacts.length || result.artifacts.length > 2) throw Object.assign(new Error("Image provider returned an unsupported artifact count."), { code: "invalid_artifact_count", permanent: true });
+  if (result.artifacts.length !== job.image_count) throw Object.assign(new Error("Image provider returned an unsupported artifact count."), { code: "invalid_artifact_count", permanent: true });
   const downloading = await pool.query<{ id: string }>(
     `UPDATE image_jobs SET status = 'downloading', provider_status = 'completed', updated_at = now()
       WHERE id = $1 AND lease_owner = $2 AND status IN ('generating','provider_pending','downloading')
@@ -1174,7 +1174,7 @@ async function completePortImageJob(
   assets: IllustrationAssetPort,
   costs: IllustrationCostPort,
 ): Promise<void> {
-  if (!result.artifacts.length || result.artifacts.length > 2) {
+  if (result.artifacts.length !== job.image_count) {
     throw Object.assign(new Error("Image provider returned an unsupported artifact count."), { code: "invalid_artifact_count", permanent: true });
   }
   const downloading = await pool.query<{ id: string }>(

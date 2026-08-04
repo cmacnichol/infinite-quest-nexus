@@ -25,6 +25,7 @@ import {
   listCampaignIllustrationSegments,
   loadConfig,
   previewIllustrationBackfill,
+  regenerateSegmentIllustration,
   runIllustrationPromptJob
 } from "../../services/runtime/src/illustration-segment-job-adapter.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
@@ -1372,6 +1373,77 @@ integration("independent illustration pipeline", () => {
         "SELECT operation FROM provider_cost_events WHERE image_job_id = $1",
         [job.rows[0]!.id]
       )).resolves.toMatchObject({ rows: [{ operation: "illustration" }] });
+    } finally {
+      imageArtifactPayloads = [tinyPng];
+    }
+  });
+
+  it("rejects extra provider artifacts for a targeted variant replacement without persistence", async () => {
+    const firstArtifact = await sharp({
+      create: { width: 2, height: 2, channels: 4, background: "#2d5d93" }
+    }).png().toBuffer();
+    const secondArtifact = await sharp({
+      create: { width: 2, height: 2, channels: 4, background: "#93612d" }
+    }).png().toBuffer();
+    imageArtifactPayloads = [firstArtifact.toString("base64"), secondArtifact.toString("base64")];
+    try {
+      const imported = await campaign();
+      await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+        enabled: true,
+        sourcePolicy: "generate_only",
+        providerProfileId: imageProviderId,
+        model: "synthetic-image-model",
+        maxAttempts: 1,
+        segmentWordCount: 100,
+        imagesPerSegment: 2,
+        segmentPromptMode: "direct"
+      }));
+      const turn = await pool.query<{ id: string }>(
+        "SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number DESC LIMIT 1",
+        [imported.campaignId]
+      );
+      await pool.query(
+        "UPDATE turns SET narration = $2 WHERE id = $1",
+        [turn.rows[0]!.id, Array.from({ length: 160 }, () => "Lantern light crosses the moonlit observatory while silver rain gathers above the quiet valley.").join(" ")]
+      );
+      const created = await generateTurnIllustrationSegments(
+        pool,
+        turn.rows[0]!.id,
+        illustrationSegmentRequestSchema.parse({ mode: "missing" })
+      );
+      expect(created.segmentCount).toBeGreaterThan(0);
+      const worker = createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot });
+      for (let index = 0; index < created.segmentCount + 2; index += 1) {
+        if (!await worker.runNextIllustration({ workerId: `target-variant-batch-worker-${crypto.randomUUID()}`, leaseSeconds: 30 })) break;
+      }
+      const normalJob = await pool.query<{ id: string; segment_id: string }>(
+        `SELECT jobs.id, jobs.segment_id
+           FROM image_jobs jobs
+           JOIN turn_illustration_segments segments ON segments.id = jobs.segment_id
+          WHERE segments.turn_id = $1
+          ORDER BY jobs.created_at
+          LIMIT 1`,
+        [turn.rows[0]!.id]
+      );
+      expect(normalJob.rows[0]).toBeTruthy();
+      expect(await getImageJob(pool, normalJob.rows[0]!.id)).toMatchObject({ status: "completed", imageCount: 2 });
+      await expect(pool.query<{ variant_index: number }>(
+        "SELECT variant_index FROM turn_illustration_segment_assets WHERE image_job_id = $1 ORDER BY variant_index",
+        [normalJob.rows[0]!.id]
+      )).resolves.toMatchObject({ rows: [{ variant_index: 0 }, { variant_index: 1 }] });
+
+      const replacement = await regenerateSegmentIllustration(pool, normalJob.rows[0]!.segment_id, {
+        prompt: "A lantern bearer crossing an observatory under silver rain.",
+        variantIndex: 1
+      });
+      expect(replacement).toMatchObject({ duplicate: false, variantIndex: 1, status: "queued" });
+      const completedReplacement = await processThroughTerminal(replacement.id, "target-variant-replacement-worker");
+      expect(completedReplacement).toMatchObject({ status: "failed", imageCount: 1, assetId: null, errorCode: "invalid_artifact_count" });
+      expect(await completionWriteCounts(replacement.id)).toEqual({ contexts: 0, references: 0, assets: 0 });
+      await expect(pool.query<{ count: number }>(
+        "SELECT count(*)::integer AS count FROM turn_illustration_segment_assets WHERE image_job_id = $1",
+        [replacement.id]
+      )).resolves.toMatchObject({ rows: [{ count: 0 }] });
     } finally {
       imageArtifactPayloads = [tinyPng];
     }
