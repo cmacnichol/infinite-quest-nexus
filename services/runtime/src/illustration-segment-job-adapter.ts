@@ -65,6 +65,11 @@ type SegmentRow = {
 };
 
 export async function loadConfig(client: DatabaseClient | DatabasePool, ownerUserId: string, campaignId: string): Promise<SegmentConfigRow> {
+  const campaign = await client.query(
+    "SELECT id FROM campaigns WHERE id = $1 AND owner_user_id = $2",
+    [campaignId, ownerUserId]
+  );
+  if (!campaign.rowCount) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
   const result = await client.query<SegmentConfigRow>(
     `SELECT config.enabled, config.source_policy, config.matching_scope, config.confidence_profile,
             config.repetition_window, config.provider_profile_id, config.model, config.size,
@@ -659,6 +664,11 @@ export async function enqueueIllustrationBackfill(
 
 export async function listCampaignIllustrationSegments(pool: DatabasePool, campaignId: string) {
   const ownerUserId = await initialOwnerId(pool);
+  const campaign = await pool.query(
+    "SELECT id FROM campaigns WHERE id = $1 AND owner_user_id = $2",
+    [campaignId, ownerUserId]
+  );
+  if (!campaign.rowCount) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
   const rows = await pool.query(
     `SELECT sets.id AS "setId", sets.turn_id AS "turnId", sets.status AS "setStatus",
             sets.segment_word_count AS "segmentWordCount", sets.images_per_segment AS "imagesPerSegment",

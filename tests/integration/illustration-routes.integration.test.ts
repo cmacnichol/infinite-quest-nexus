@@ -127,6 +127,19 @@ integration("illustration HTTP route parity", () => {
     return { ...imported, turnId: turn.rows[0]!.id };
   }
 
+  async function ownedAsset(campaignId: string, turnId: string) {
+    const asset = await pool.query<{ id: string }>(
+      `INSERT INTO assets (
+         owner_user_id, campaign_id, turn_id, content_hash, storage_driver,
+         storage_path, mime_type, byte_length
+       ) VALUES ($1,$2,$3,$4,'filesystem',$5,'image/png',68) RETURNING id`,
+      [ownerUserId, campaignId, turnId,
+        crypto.randomUUID().replaceAll("-", "").padEnd(64, "0").slice(0, 64),
+        `illustration-route/${crypto.randomUUID()}.png`]
+    );
+    return asset.rows[0]!.id;
+  }
+
   const illustrationConfig = {
     enabled: true,
     sourcePolicy: "generate_only",
@@ -146,7 +159,8 @@ integration("illustration HTTP route parity", () => {
     refinementPrompt: "Return only a concise fiction-only illustration prompt."
   };
 
-  it("preserves status and response parity across configured illustration routes", async () => {
+  // Inventory: every illustration route in services/api/src/server.ts is covered here or by the owned-scope matrix below.
+  it("preserves status, duplicate, and selection parity across configured illustration routes", async () => {
     const imported = await campaign();
     const configResponse = await app.inject({
       method: "PUT",
@@ -172,9 +186,25 @@ integration("illustration HTTP route parity", () => {
     });
     expect(worldCover.statusCode).toBe(202);
     expect(worldCover.json()).toMatchObject({ id: expect.any(String), targetType: "world_cover", duplicate: false });
+    const duplicateWorldCover = await app.inject({
+      method: "POST",
+      url: `/api/v1/worlds/${imported.worldId}/cover`,
+      payload: { prompt: "A moonlit observatory above silver pines." }
+    });
+    expect(duplicateWorldCover.statusCode).toBe(200);
+    expect(duplicateWorldCover.json()).toMatchObject({ id: worldCover.json().id, targetType: "world_cover", duplicate: true });
     const worldCoverJob = await app.inject({ method: "GET", url: `/api/v1/worlds/${imported.worldId}/cover-job` });
     expect(worldCoverJob.statusCode).toBe(200);
     expect(worldCoverJob.json()).toMatchObject({ id: worldCover.json().id, targetType: "world_cover" });
+
+    const assetId = await ownedAsset(imported.campaignId, imported.turnId);
+    const selectCover = await app.inject({
+      method: "PUT",
+      url: `/api/v1/worlds/${imported.worldId}/cover-asset`,
+      payload: { assetId }
+    });
+    expect(selectCover.statusCode).toBe(200);
+    expect(selectCover.json()).toEqual({ assetUrl: `/api/v1/assets/${assetId}` });
 
     const turnImage = await app.inject({
       method: "POST",
@@ -184,6 +214,20 @@ integration("illustration HTTP route parity", () => {
     expect(turnImage.statusCode).toBe(202);
     expect(turnImage.json()).toMatchObject({ id: expect.any(String), turnId: imported.turnId, duplicate: false, status: "queued" });
     const imageJobId = turnImage.json().id as string;
+    const duplicateTurnImage = await app.inject({
+      method: "POST",
+      url: `/api/v1/turns/${imported.turnId}/illustrations`,
+      payload: { prompt: "A lantern bearer crosses a moonlit observatory path." }
+    });
+    expect(duplicateTurnImage.statusCode).toBe(200);
+    expect(duplicateTurnImage.json()).toMatchObject({ id: imageJobId, turnId: imported.turnId, duplicate: true, status: "queued" });
+    const selectTurnIllustration = await app.inject({
+      method: "PUT",
+      url: `/api/v1/turns/${imported.turnId}/illustration-asset`,
+      payload: { assetId }
+    });
+    expect(selectTurnIllustration.statusCode).toBe(200);
+    expect(selectTurnIllustration.json()).toEqual({ assetUrl: `/api/v1/assets/${assetId}` });
     const jobs = await app.inject({ method: "GET", url: `/api/v1/campaigns/${imported.campaignId}/image-jobs` });
     expect(jobs.statusCode).toBe(200);
     expect(jobs.json()).toMatchObject({ jobs: [expect.objectContaining({ id: imageJobId, turnId: imported.turnId })] });
@@ -202,6 +246,29 @@ integration("illustration HTTP route parity", () => {
     });
     expect(segments.statusCode).toBe(202);
     expect(segments.json()).toMatchObject({ setId: expect.any(String), duplicate: false, segmentCount: expect.any(Number) });
+    const duplicateSegments = await app.inject({
+      method: "POST",
+      url: `/api/v1/turns/${imported.turnId}/illustration-segments`,
+      payload: { mode: "rebuild" }
+    });
+    expect(duplicateSegments.statusCode).toBe(202);
+    expect(duplicateSegments.json()).toMatchObject({
+      setId: expect.any(String),
+      duplicate: false,
+      segmentCount: segments.json().segmentCount
+    });
+    expect(duplicateSegments.json().setId).not.toBe(segments.json().setId);
+    const existingSegments = await app.inject({
+      method: "POST",
+      url: `/api/v1/turns/${imported.turnId}/illustration-segments`,
+      payload: { mode: "missing" }
+    });
+    expect(existingSegments.statusCode).toBe(200);
+    expect(existingSegments.json()).toMatchObject({
+      setId: duplicateSegments.json().setId,
+      duplicate: true,
+      segmentCount: 0
+    });
     const listSegments = await app.inject({ method: "GET", url: `/api/v1/campaigns/${imported.campaignId}/illustration-segments` });
     expect(listSegments.statusCode).toBe(200);
     expect(listSegments.json().segments).toEqual(expect.arrayContaining([
@@ -229,6 +296,18 @@ integration("illustration HTTP route parity", () => {
       duplicate: true
     });
 
+    await pool.query(
+      `INSERT INTO turn_illustration_segment_assets (segment_id, owner_user_id, asset_id, variant_index)
+       VALUES ($1,$2,$3,0)`,
+      [segmentId, ownerUserId, assetId]
+    );
+    const deleteVariant = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/illustration-segments/${segmentId}/images/0`
+    });
+    expect(deleteVariant.statusCode).toBe(200);
+    expect(deleteVariant.json()).toEqual({ segmentId, variantIndex: 0, removedAssetId: assetId, retainedInLibrary: true });
+
     const preview = await app.inject({
       method: "POST",
       url: `/api/v1/campaigns/${imported.campaignId}/illustration-backfill/preview`,
@@ -236,18 +315,31 @@ integration("illustration HTTP route parity", () => {
     });
     expect(preview.statusCode).toBe(200);
     expect(preview.json()).toMatchObject({ campaignId: imported.campaignId, mode: "missing", totalCampaignTurns: 2 });
+    const backfillIdempotencyKey = `route-backfill-${crypto.randomUUID()}`;
     const backfill = await app.inject({
       method: "POST",
       url: `/api/v1/campaigns/${imported.campaignId}/illustration-backfill`,
       payload: {
         mode: "missing",
-        idempotencyKey: `route-backfill-${crypto.randomUUID()}`,
+        idempotencyKey: backfillIdempotencyKey,
         expectedConfigUpdatedAt: preview.json().configUpdatedAt,
         expectedTurnCount: preview.json().totalCampaignTurns
       }
     });
     expect(backfill.statusCode).toBe(202);
     expect(backfill.json()).toMatchObject({ id: expect.any(String), status: "completed", duplicate: false });
+    const duplicateBackfill = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${imported.campaignId}/illustration-backfill`,
+      payload: {
+        mode: "missing",
+        idempotencyKey: backfillIdempotencyKey,
+        expectedConfigUpdatedAt: preview.json().configUpdatedAt,
+        expectedTurnCount: preview.json().totalCampaignTurns
+      }
+    });
+    expect(duplicateBackfill.statusCode).toBe(202);
+    expect(duplicateBackfill.json()).toMatchObject({ id: backfill.json().id, status: "completed", duplicate: true });
 
     await pool.query(
       `INSERT INTO illustration_resolution_jobs (
@@ -264,7 +356,7 @@ integration("illustration HTTP route parity", () => {
     expect(rematch.json()).toMatchObject({ id: resolution.json().id, status: "queued" });
   });
 
-  it("returns 404 rather than exposing non-owned campaign, world, turn, segment, and job scopes", async () => {
+  it("returns 404 rather than exposing every foreign-owned illustration resource route", async () => {
     const foreignUserId = crypto.randomUUID();
     await pool.query("INSERT INTO users (id, display_name) VALUES ($1, 'Foreign illustration route owner')", [foreignUserId]);
     const foreignWorld = await pool.query<{ id: string }>(
@@ -297,15 +389,56 @@ integration("illustration HTTP route parity", () => {
        ) VALUES ($1,$2,$3,$4,0,0,27,0,4,'Foreign moonlit observatory.','foreign-route-segment','Foreign moonlit observatory.') RETURNING id`,
       [foreignUserId, foreignSet.rows[0]!.id, foreignCampaign.rows[0]!.id, foreignTurn.rows[0]!.id]
     );
-    const unknownJobId = crypto.randomUUID();
+    const foreignProvider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id, name, provider_type, provider_role, base_url, default_model
+       ) VALUES ($1,'Foreign route image provider','openai_compatible','image','http://127.0.0.1:9911','foreign-image-model')
+       RETURNING id`,
+      [foreignUserId]
+    );
+    const foreignJob = await pool.query<{ id: string }>(
+      `INSERT INTO image_jobs (
+         owner_user_id, campaign_id, turn_id, provider_profile_id, requested_model, prompt, prompt_hash,
+         status, provider_type, world_id, target_type, completed_at
+       ) VALUES ($1,NULL,NULL,$2,'foreign-image-model','Foreign observatory','foreign-route-job','failed',
+                 'openai_compatible',$3,'world_cover',now()) RETURNING id`,
+      [foreignUserId, foreignProvider.rows[0]!.id, foreignWorld.rows[0]!.id]
+    );
+    const foreignConfigPayload = { ...illustrationConfig, providerProfileId: imageProviderId };
+    const foreignBackfillPayload = {
+      mode: "missing",
+      idempotencyKey: `foreign-backfill-${crypto.randomUUID()}`,
+      expectedConfigUpdatedAt: new Date().toISOString(),
+      expectedTurnCount: 1
+    };
+    const foreignCampaignId = foreignCampaign.rows[0]!.id;
+    const foreignWorldId = foreignWorld.rows[0]!.id;
+    const foreignTurnId = foreignTurn.rows[0]!.id;
+    const foreignSegmentId = foreignSegment.rows[0]!.id;
+    const foreignJobId = foreignJob.rows[0]!.id;
 
-    const responses = await Promise.all([
-      app.inject({ method: "GET", url: `/api/v1/campaigns/${foreignCampaign.rows[0]!.id}/illustration-config` }),
-      app.inject({ method: "GET", url: `/api/v1/worlds/${foreignWorld.rows[0]!.id}/cover-job` }),
-      app.inject({ method: "POST", url: `/api/v1/turns/${foreignTurn.rows[0]!.id}/illustrations`, payload: {} }),
-      app.inject({ method: "POST", url: `/api/v1/illustration-segments/${foreignSegment.rows[0]!.id}/images`, payload: { prompt: "Foreign observatory.", variantIndex: 0 } }),
-      app.inject({ method: "GET", url: `/api/v1/image-jobs/${unknownJobId}` })
+    const expectNotFound = async (route: string, response: PromiseLike<{ statusCode: number }>) => {
+      expect((await response).statusCode, route).toBe(404);
+    };
+    await Promise.all([
+      expectNotFound("campaign illustration config read", app.inject({ method: "GET", url: `/api/v1/campaigns/${foreignCampaignId}/illustration-config` })),
+      expectNotFound("campaign illustration config write", app.inject({ method: "PUT", url: `/api/v1/campaigns/${foreignCampaignId}/illustration-config`, payload: foreignConfigPayload })),
+      expectNotFound("world cover enqueue", app.inject({ method: "POST", url: `/api/v1/worlds/${foreignWorldId}/cover`, payload: { prompt: "Foreign observatory cover." } })),
+      expectNotFound("world cover job read", app.inject({ method: "GET", url: `/api/v1/worlds/${foreignWorldId}/cover-job` })),
+      expectNotFound("world cover selection", app.inject({ method: "PUT", url: `/api/v1/worlds/${foreignWorldId}/cover-asset`, payload: { assetId: null } })),
+      expectNotFound("campaign image jobs list", app.inject({ method: "GET", url: `/api/v1/campaigns/${foreignCampaignId}/image-jobs` })),
+      expectNotFound("campaign illustration segments list", app.inject({ method: "GET", url: `/api/v1/campaigns/${foreignCampaignId}/illustration-segments` })),
+      expectNotFound("illustration backfill preview", app.inject({ method: "POST", url: `/api/v1/campaigns/${foreignCampaignId}/illustration-backfill/preview`, payload: { mode: "missing" } })),
+      expectNotFound("illustration backfill enqueue", app.inject({ method: "POST", url: `/api/v1/campaigns/${foreignCampaignId}/illustration-backfill`, payload: foreignBackfillPayload })),
+      expectNotFound("turn segment generation", app.inject({ method: "POST", url: `/api/v1/turns/${foreignTurnId}/illustration-segments`, payload: { mode: "missing" } })),
+      expectNotFound("segment image regeneration", app.inject({ method: "POST", url: `/api/v1/illustration-segments/${foreignSegmentId}/images`, payload: { prompt: "Foreign observatory.", variantIndex: 0 } })),
+      expectNotFound("segment variant deletion", app.inject({ method: "DELETE", url: `/api/v1/illustration-segments/${foreignSegmentId}/images/0` })),
+      expectNotFound("turn illustration enqueue", app.inject({ method: "POST", url: `/api/v1/turns/${foreignTurnId}/illustrations`, payload: { prompt: "Foreign observatory." } })),
+      expectNotFound("turn illustration selection", app.inject({ method: "PUT", url: `/api/v1/turns/${foreignTurnId}/illustration-asset`, payload: { assetId: null } })),
+      expectNotFound("turn illustration resolution", app.inject({ method: "GET", url: `/api/v1/turns/${foreignTurnId}/illustration-resolution` })),
+      expectNotFound("turn illustration rematch", app.inject({ method: "POST", url: `/api/v1/turns/${foreignTurnId}/illustration-match` })),
+      expectNotFound("image job read", app.inject({ method: "GET", url: `/api/v1/image-jobs/${foreignJobId}` })),
+      expectNotFound("image job retry", app.inject({ method: "POST", url: `/api/v1/image-jobs/${foreignJobId}/retry` }))
     ]);
-    for (const response of responses) expect(response.statusCode).toBe(404);
   });
 });

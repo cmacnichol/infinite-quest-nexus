@@ -461,6 +461,11 @@ export async function getLatestWorldCoverJob(pool: DatabasePool, worldId: string
 
 export async function listCampaignImageJobs(pool: DatabasePool, campaignId: string) {
   const ownerUserId = await initialOwnerId(pool);
+  const campaign = await pool.query(
+    "SELECT id FROM campaigns WHERE id = $1 AND owner_user_id = $2",
+    [campaignId, ownerUserId]
+  );
+  loadOrNotFound(campaign, "Campaign");
   const result = await pool.query<ImageJobRow>(
     `SELECT ${jobColumns} FROM image_jobs WHERE campaign_id = $1 AND owner_user_id = $2 ORDER BY created_at DESC LIMIT 100`,
     [campaignId, ownerUserId]
@@ -470,6 +475,11 @@ export async function listCampaignImageJobs(pool: DatabasePool, campaignId: stri
 
 export async function retryImageJob(pool: DatabasePool, jobId: string) {
   const ownerUserId = await initialOwnerId(pool);
+  const existing = await pool.query(
+    "SELECT id FROM image_jobs WHERE id = $1 AND owner_user_id = $2",
+    [jobId, ownerUserId]
+  );
+  loadOrNotFound(existing, "Image job");
   const result = await pool.query<ImageJobRow>(
     `UPDATE image_jobs SET status = 'queued', attempts = 0, next_attempt_at = now(), lease_owner = NULL,
        lease_expires_at = NULL, generation_revision = generation_revision + 1,
