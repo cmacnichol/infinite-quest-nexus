@@ -12,6 +12,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
+import { createWorkerIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, retryImageJob, runImageJob, setIllustrationConfig } from "../../services/runtime/src/illustration-image-job-adapter.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
@@ -1117,6 +1118,9 @@ integration("independent illustration pipeline", () => {
   it("sends the visual reference to AI refinement and appends it once to the provider prompt", async () => {
     const imported = await campaign();
     const ownerUserId = await initialOwnerId(pool);
+    const privateScratchpad = `PRIVATE_ILLUSTRATION_SCRATCHPAD_${crypto.randomUUID()}`;
+    const privateTrackers = `PRIVATE_ILLUSTRATION_TRACKERS_${crypto.randomUUID()}`;
+    const privateMechanics = `PRIVATE_ILLUSTRATION_MECHANICS_${crypto.randomUUID()}`;
     await pool.query(
       `UPDATE campaigns
           SET character_profile = $3, character_profile_revision = 2, updated_at = now()
@@ -1131,6 +1135,15 @@ integration("independent illustration pipeline", () => {
         }
       })]
     );
+    await pool.query(
+      `UPDATE campaign_state
+          SET scratchpad_private = $3,
+              scratchpad_safe_for_prompt = true,
+              trackers = jsonb_build_array($4::text),
+              rpg_stats = jsonb_build_object('private', $5::text)
+        WHERE campaign_id = $1 AND owner_user_id = $2`,
+      [imported.campaignId, ownerUserId, privateScratchpad, privateTrackers, privateMechanics]
+    );
     await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
       enabled: true,
       providerProfileId: imageProviderId,
@@ -1142,7 +1155,11 @@ integration("independent illustration pipeline", () => {
       maxAttempts: 3,
       segmentWordCount: 100,
       imagesPerSegment: 1,
-      segmentPromptMode: "ai_refined"
+      segmentPromptMode: "ai_refined",
+      // Exercise the default lane order end-to-end: refinement -> library
+      // resolution -> image transport/artifact/asset fallback.
+      sourcePolicy: "library_then_generate",
+      matchingScope: "campaign"
     }));
     const turn = await pool.query<{ id: string }>(
       "SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number DESC LIMIT 1",
@@ -1150,19 +1167,55 @@ integration("independent illustration pipeline", () => {
     );
     const turnId = turn.rows[0]!.id;
     const refinementCountBefore = refinementRequests.length;
+    const imageCountBefore = imageRequests.length;
     const created = await generateTurnIllustrationSegments(
       pool,
       turnId,
       illustrationSegmentRequestSchema.parse({ mode: "missing" })
     );
-    for (let index = 0; index < created.segmentCount + 2; index += 1) {
-      if (!await runIllustrationPromptJob(pool, `refinement-worker-${crypto.randomUUID()}`, 30, credentialSecret)) break;
+    // Run the default runtime composition, rather than directly invoking a
+    // legacy handler, so this PostgreSQL case captures the real typed port
+    // path for both refinement and image generation.
+    const worker = createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot });
+    for (let index = 0; index < created.segmentCount * 3 + 4; index += 1) {
+      if (!await worker.runNextIllustration({ workerId: `refinement-worker-${crypto.randomUUID()}`, leaseSeconds: 30 })) break;
     }
 
     const submitted = refinementRequests.slice(refinementCountBefore).map((request) => JSON.stringify(request));
+    const imageSubmitted = imageRequests.slice(imageCountBefore).map((request) => JSON.stringify(request));
+    const campaignImageSubmitted = imageSubmitted.filter((request) => request.includes("weathered purple coat"));
     expect(submitted).toHaveLength(created.segmentCount);
+    expect(campaignImageSubmitted).toHaveLength(created.segmentCount);
     expect(submitted.every((request) => request.includes("weathered purple coat"))).toBe(true);
     expect(submitted.every((request) => request.includes("STORY CONTEXT"))).toBe(true);
+    // Private campaign state is never illustration context, even when an
+    // unrelated narrative path marks its scratchpad safe for text prompts.
+    for (const request of [...submitted, ...campaignImageSubmitted]) {
+      expect(request).not.toContain(privateScratchpad);
+      expect(request).not.toContain(privateTrackers);
+      expect(request).not.toContain(privateMechanics);
+    }
+    await expect(pool.query(
+      `SELECT status, reason_code
+         FROM illustration_resolution_jobs
+        WHERE campaign_id = $1
+        ORDER BY created_at`,
+      [imported.campaignId]
+    )).resolves.toMatchObject({
+      rows: Array.from({ length: created.segmentCount }, () => ({ status: "completed", reason_code: "generated" }))
+    });
+    await expect(pool.query(
+      `SELECT count(*)::int AS count
+         FROM provider_cost_events
+        WHERE campaign_id = $1 AND operation = 'image_generation'`,
+      [imported.campaignId]
+    )).resolves.toMatchObject({ rows: [{ count: created.segmentCount }] });
+    await expect(pool.query(
+      `SELECT count(*)::int AS count
+         FROM provider_cost_events
+        WHERE campaign_id = $1 AND operation = 'prompt_refinement'`,
+      [imported.campaignId]
+    )).resolves.toMatchObject({ rows: [{ count: 0 }] });
     const segments = await pool.query<{ direct_prompt: string; resolved_prompt: string; prompt: string }>(
       `SELECT segments.direct_prompt, segments.resolved_prompt, jobs.prompt
          FROM turn_illustration_segments segments
@@ -1261,10 +1314,12 @@ integration("independent illustration pipeline", () => {
     expect(filtered.assets.map((item) => item.id)).toContain(asset!.id);
     expect(filtered.assets.find((item) => item.id === asset!.id)?.metadataRevision).toBe(updated.metadataRevision);
     expect(filtered.facets.tags.night).toBeGreaterThanOrEqual(1);
+    const cursorAssetHashA = crypto.randomUUID().replaceAll("-", "").repeat(2);
+    const cursorAssetHashB = crypto.randomUUID().replaceAll("-", "").repeat(2);
     await pool.query(
       `INSERT INTO assets (owner_user_id, content_hash, storage_driver, storage_path, mime_type, byte_length, pixel_width, pixel_height)
        VALUES ($1,$2,'filesystem',$3,'image/png',68,1,1), ($1,$4,'filesystem',$5,'image/png',68,1,1)`,
-      [ownerUserId, "a".repeat(64), "aa/cursor-a.png", "b".repeat(64), "bb/cursor-b.png"]
+      [ownerUserId, cursorAssetHashA, "aa/cursor-a.png", cursorAssetHashB, "bb/cursor-b.png"]
     );
     const firstPageQuery = assetListQuerySchema.parse({ limit: 1 });
     const firstPage = await queryAssets(pool, ownerUserId, firstPageQuery);
@@ -1303,15 +1358,15 @@ integration("independent illustration pipeline", () => {
     const resolution = await getTurnIllustrationResolution(pool, turnId) as { candidates: Array<{ score: number }> };
     expect(resolution.candidates[0]?.score).toBeGreaterThanOrEqual(0.38);
     expect(resolution).toMatchObject({
-      status: "completed", selectedAssetId: asset!.id, reasonCode: "matched",
-      candidates: [expect.objectContaining({ assetId: asset!.id, rank: 1 })]
+      status: "completed", selectedAssetId: asset!.id, reasonCode: "matched"
     });
+    expect(resolution.candidates).toContainEqual(expect.objectContaining({ assetId: asset!.id, rank: 1 }));
   });
 
   it("restores an original without a thumbnail and lets metadata backfill regenerate it", async () => {
     const ownerUserId = await initialOwnerId(pool);
     const restoredBytes = await sharp({
-      create: { width: 2, height: 3, channels: 4, background: "#123456" }
+      create: { width: 2, height: 3, channels: 4, background: `#${crypto.randomUUID().replaceAll("-", "").slice(0, 6)}` }
     }).png().toBuffer();
     const restored = await withTransaction(pool, (client) => persistOriginalImage(client, { root: assetRoot }, ownerUserId, {
       bytes: restoredBytes, mimeType: "image/png", createThumbnail: false

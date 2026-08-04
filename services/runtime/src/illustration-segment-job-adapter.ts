@@ -5,6 +5,7 @@ import type {
   IllustrationSegmentRequest
 } from "../../../packages/contracts/src/generation.js";
 import { DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT } from "../../../packages/contracts/src/generation.js";
+import type { IllustrationCostPort, IllustrationPromptRefinementPort } from "../../../packages/application/src/index.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
@@ -892,7 +893,6 @@ type IllustrationStoryContext = {
   characterSnapshot: Record<string, unknown> | null;
   characterProfile?: Record<string, unknown> | null;
   characterVisualReference?: string;
-  continuity: string;
   previousNarration: string;
 };
 
@@ -920,7 +920,6 @@ export function buildBriefIllustrationStoryContext(context: IllustrationStoryCon
     characterDescription
       ? `Player character appearance:\n${characterDescription}`
       : "",
-    briefFictionText(context.continuity, 360) ? `Continuity: ${briefFictionText(context.continuity, 360)}` : "",
     briefFictionText(context.previousNarration, 500) ? `Previous scene: ${briefFictionText(context.previousNarration, 500)}` : ""
   ].filter(Boolean);
   return truncateAtBoundary(lines.join("\n"), 1_800);
@@ -947,17 +946,14 @@ async function loadBriefIllustrationStoryContext(
     world_content: Record<string, unknown>;
     character_snapshot: Record<string, unknown> | null;
     character_profile: Record<string, unknown> | null;
-    continuity: string;
     previous_narration: string;
   }>(
     `SELECT campaigns.title AS campaign_title, world_versions.content AS world_content,
             campaigns.character_snapshot, campaigns.character_profile,
-            CASE WHEN state.scratchpad_safe_for_prompt THEN state.scratchpad_private ELSE '' END AS continuity,
             COALESCE(previous.narration, '') AS previous_narration
        FROM turns target
        JOIN campaigns ON campaigns.id = target.campaign_id AND campaigns.owner_user_id = target.owner_user_id
        JOIN world_versions ON world_versions.id = campaigns.world_version_id AND world_versions.owner_user_id = campaigns.owner_user_id
-       LEFT JOIN campaign_state state ON state.campaign_id = campaigns.id AND state.owner_user_id = campaigns.owner_user_id
        LEFT JOIN LATERAL (
          SELECT narration FROM turns
           WHERE campaign_id = target.campaign_id AND owner_user_id = target.owner_user_id
@@ -974,7 +970,6 @@ async function loadBriefIllustrationStoryContext(
     characterSnapshot: row.character_snapshot,
     characterProfile: row.character_profile,
     characterVisualReference: visualReference,
-    continuity: row.continuity,
     previousNarration: row.previous_narration
   }) : "";
 }
@@ -983,7 +978,9 @@ export async function runIllustrationPromptJob(
   pool: DatabasePool,
   workerId: string,
   leaseSeconds: number,
-  credentialSecret: string
+  credentialSecret: string,
+  refinementPort?: IllustrationPromptRefinementPort,
+  costPort?: IllustrationCostPort
 ): Promise<boolean> {
   const claimed = await withTransaction(pool, async (client) => {
     const result = await client.query<any>(
@@ -1017,14 +1014,6 @@ export async function runIllustrationPromptJob(
   const segment = segmentResult.rows[0];
   if (!segment) return true;
   try {
-    const provider = await loadTextProvider(
-      pool,
-      claimed.owner_user_id,
-      claimed.provider_profile_id,
-      credentialSecret,
-      claimed.requested_model
-    );
-    const config = await loadConfig(pool, claimed.owner_user_id, claimed.campaign_id);
     const storyContext = await loadBriefIllustrationStoryContext(
       pool,
       claimed.owner_user_id,
@@ -1032,20 +1021,49 @@ export async function runIllustrationPromptJob(
       claimed.turn_id,
       segment.character_visual_reference
     );
-    const result = await callTextProvider(provider, {
-      systemPrompt: promptFromSnapshot(claimed.prompt_snapshot, "illustration_refinement"),
-      input: buildIllustrationRefinementInput(segment.source_text, storyContext)
-    });
     let prompt: string;
-    try {
-      prompt = parseRefinedPrompt(result.content);
-    } catch (parseError) {
-      logger.error({
-        event: "illustration_refinement_parse_error",
-        error: parseError instanceof Error ? parseError.message : String(parseError),
-        rawContent: result.content
+    let responseId = "";
+    let portMetadata: Readonly<Record<string, unknown>> | null = null;
+    let legacyProvider: Awaited<ReturnType<typeof loadTextProvider>> | null = null;
+    let legacyResult: Awaited<ReturnType<typeof callTextProvider>> | null = null;
+    if (refinementPort) {
+      const result = await refinementPort.refinePrompt({
+        ownerUserId: claimed.owner_user_id,
+        campaignId: claimed.campaign_id,
+        turnId: segment.turn_id,
+        segmentId: segment.id,
+        providerProfileId: claimed.provider_profile_id,
+        model: claimed.requested_model,
+        systemPrompt: promptFromSnapshot(claimed.prompt_snapshot, "illustration_refinement"),
+        fictionText: segment.source_text,
+        storyContext
       });
-      throw parseError;
+      prompt = result.prompt;
+      responseId = String(result.metadata.responseId || "");
+      portMetadata = result.metadata;
+    } else {
+      legacyProvider = await loadTextProvider(
+        pool,
+        claimed.owner_user_id,
+        claimed.provider_profile_id,
+        credentialSecret,
+        claimed.requested_model
+      );
+      legacyResult = await callTextProvider(legacyProvider, {
+        systemPrompt: promptFromSnapshot(claimed.prompt_snapshot, "illustration_refinement"),
+        input: buildIllustrationRefinementInput(segment.source_text, storyContext)
+      });
+      try {
+        prompt = parseRefinedPrompt(legacyResult.content);
+      } catch (parseError) {
+        logger.error({
+          event: "illustration_refinement_parse_error",
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          rawContent: legacyResult.content
+        });
+        throw parseError;
+      }
+      responseId = legacyResult.responseId;
     }
     await withTransaction(pool, async (client) => {
       const currentConfig = await loadConfig(client, claimed.owner_user_id, claimed.campaign_id);
@@ -1059,16 +1077,41 @@ export async function runIllustrationPromptJob(
             SET status = 'completed', response_id = $3, completed_at = now(), updated_at = now(),
                 lease_owner = NULL, lease_expires_at = NULL, error_code = NULL, error_message = NULL
           WHERE id = $1 AND lease_owner = $2 AND status = 'refining'`,
-        [claimed.id, workerId, result.responseId]
+        [claimed.id, workerId, responseId]
       );
-      await recordProfileCost(client, provider, {
-        ownerUserId: claimed.owner_user_id,
-        campaignId: claimed.campaign_id,
-        turnId: claimed.turn_id,
-        category: "image",
-        operation: "illustration_prompt_refinement",
-        localCallId: claimed.id
-      }, result);
+      if (!refinementPort) {
+        await recordProfileCost(client, legacyProvider!, {
+          ownerUserId: claimed.owner_user_id,
+          campaignId: claimed.campaign_id,
+          turnId: claimed.turn_id,
+          category: "image",
+          operation: "illustration_prompt_refinement",
+          localCallId: claimed.id
+        }, legacyResult!);
+      } else if (costPort && portMetadata) {
+        const profile = await client.query<{ provider_type: string }>(
+          "SELECT provider_type FROM provider_profiles WHERE id = $1 AND owner_user_id = $2",
+          [claimed.provider_profile_id, claimed.owner_user_id]
+        );
+        const reported = portMetadata.reportedCost;
+        await costPort.recordIllustrationCost(client, {
+          ownerUserId: claimed.owner_user_id,
+          campaignId: claimed.campaign_id,
+          turnId: claimed.turn_id,
+          promptJobId: claimed.id,
+          providerProfileId: claimed.provider_profile_id,
+          providerType: profile.rows[0]?.provider_type || "unknown",
+          requestedModel: claimed.requested_model,
+          operation: "prompt_refinement",
+          usage: portMetadata.usage && typeof portMetadata.usage === "object" ? portMetadata.usage as Record<string, unknown> : {},
+          reportedCost: reported && typeof reported === "object"
+            && typeof (reported as { amount?: unknown }).amount === "string"
+            && typeof (reported as { currency?: unknown }).currency === "string"
+            ? reported as { amount: string; currency: string }
+            : null,
+          responseId
+        });
+      }
     });
   } catch (error) {
     logProviderTransportError(error, {

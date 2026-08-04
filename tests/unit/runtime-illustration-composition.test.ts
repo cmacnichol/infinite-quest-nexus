@@ -343,7 +343,10 @@ describe("createWorkerIllustrationApplication", () => {
     )).toBe(application);
     expect((factories as unknown as { createPorts: ReturnType<typeof vi.fn> }).createPorts)
       .toHaveBeenCalledWith(pool, "credential-secret", store);
-    expect(factories.createLanes).toHaveBeenCalledWith(pool, "credential-secret", store);
+    // The default execution lanes must receive the same typed ports exposed
+    // by the worker application; otherwise those adapters are test-only
+    // delegation while legacy handlers bypass them in production.
+    expect(factories.createLanes).toHaveBeenCalledWith(pool, "credential-secret", store, ports);
     expect(factories.createState).toHaveBeenCalledWith(pool, lanes);
     expect(factories.createExecutor).toHaveBeenCalledWith(state);
     expect(factories.createApplication).toHaveBeenCalledWith({ executor, ports, state });

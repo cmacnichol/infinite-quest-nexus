@@ -359,7 +359,8 @@ describe("illustration application use cases", () => {
         persistTurnIllustration: async () => { throw new Error("not invoked"); },
         persistWorldCover: async () => { throw new Error("not invoked"); },
         bindSegmentAsset: async () => { throw new Error("not invoked"); }
-      }
+      },
+      costs: { recordIllustrationCost: async () => null }
     } as Parameters<typeof createIllustrationWorkerApplication>[0]["ports"];
     const application = createIllustrationWorkerApplication({
       executor,
@@ -478,7 +479,8 @@ describe("illustration application use cases", () => {
         persistTurnIllustration: async () => ({ assetId: jobId }),
         persistWorldCover: async () => ({ assetId: jobId }),
         bindSegmentAsset: async () => false
-      }
+      },
+      costs: { recordIllustrationCost: async () => null }
     } as Parameters<typeof createIllustrationWorkerApplication>[0]["ports"];
     const worker = createIllustrationWorkerApplication({ executor, ports, state });
     const application = createIllustrationApplication({
@@ -560,7 +562,10 @@ describe("illustration application use cases", () => {
         artifacts: [],
         usage: {},
         reportedCost: null,
-        metadata: {}
+        metadata: {},
+        artifactDownloadTimeoutMs: 30_000,
+        allowPrivateArtifactHosts: false,
+        generationTimeoutMs: 180_000
       })
     };
     const refinementPort: IllustrationPromptRefinementPort = {
@@ -608,7 +613,10 @@ describe("illustration application use cases", () => {
       progress: 40,
       queuePosition: 2,
       etaSeconds: 15,
-      metadata: {}
+      metadata: {},
+      artifactDownloadTimeoutMs: 30_000,
+      allowPrivateArtifactHosts: false,
+      generationTimeoutMs: 180_000
     };
     const urlArtifactDownload: Parameters<IllustrationArtifactDownloadPort["downloadArtifact"]>[0] = {
       ownerUserId,

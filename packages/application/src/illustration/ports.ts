@@ -229,14 +229,19 @@ export interface IllustrationPromptSnapshotPort {
 }
 
 export interface IllustrationCostPort {
-  recordIllustrationCost(input: Readonly<{
+  recordIllustrationCost(database: IllustrationTransactionContext, input: Readonly<{
     ownerUserId: string;
-    campaignId?: string;
+    campaignId: string;
+    turnId?: string | null;
     imageJobId?: string;
     promptJobId?: string;
     providerProfileId: string;
+    providerType: string;
+    requestedModel: string;
     operation: "image_generation" | "prompt_refinement";
     usage: Readonly<Record<string, unknown>>;
+    reportedCost: Readonly<{ amount: string; currency: string }> | null;
+    responseId: string;
   }>): Promise<string | null>;
 }
 
@@ -287,6 +292,8 @@ export type IllustrationWorkerPorts = Readonly<{
   promptRefinement: IllustrationPromptRefinementPort;
   artifactDownload: IllustrationArtifactDownloadPort;
   assets: IllustrationAssetPort;
+  /** Temporary runtime binding; Task 14d owns the provider/cost replacement. */
+  costs: IllustrationCostPort;
 }>;
 
 export type IllustrationWorkerApplicationDependencies = Readonly<{

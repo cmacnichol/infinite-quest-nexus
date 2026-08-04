@@ -340,6 +340,9 @@ type IllustrationImageExecutionResultBase = Readonly<{
   providerProfileId: string;
   model: string;
   metadata: Readonly<Record<string, unknown>>;
+  artifactDownloadTimeoutMs: number;
+  allowPrivateArtifactHosts: boolean;
+  generationTimeoutMs: number;
 }>;
 
 export type IllustrationImageArtifact =

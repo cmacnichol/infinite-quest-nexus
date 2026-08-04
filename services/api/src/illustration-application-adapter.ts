@@ -120,6 +120,33 @@ function imageArtifact(artifact: ImageProviderArtifact): IllustrationImageArtifa
     : { source: "url", url: artifact.url, ...(artifact.mimeType ? { mimeType: artifact.mimeType } : {}) };
 }
 
+function boundedProviderSetting(
+  provider: Parameters<typeof submitImageProvider>[0],
+  key: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const candidate = Number(provider.configuration?.[key]);
+  return Number.isFinite(candidate)
+    ? Math.min(maximum, Math.max(minimum, candidate))
+    : fallback;
+}
+
+function imageExecutionPolicy(provider: Parameters<typeof submitImageProvider>[0]) {
+  return {
+    artifactDownloadTimeoutMs: boundedProviderSetting(provider, "artifactDownloadTimeoutMs", 30_000, 5_000, 120_000),
+    allowPrivateArtifactHosts: provider.configuration?.allowPrivateArtifactHosts === true,
+    generationTimeoutMs: boundedProviderSetting(
+      provider,
+      "generationTimeoutMs",
+      provider.providerType === "sogni_sdk" ? 600_000 : 180_000,
+      30_000,
+      provider.providerType === "sogni_sdk" ? 3_600_000 : 600_000,
+    )
+  } as const;
+}
+
 function completedImageResult(
   providerProfileId: string,
   model: string,
@@ -129,6 +156,7 @@ function completedImageResult(
     reportedCost: Readonly<{ amount: string; currency: string }> | null;
     providerMetadata: Readonly<Record<string, unknown>>;
   }>,
+  policy: ReturnType<typeof imageExecutionPolicy>,
 ): IllustrationImageExecutionResult {
   return {
     providerRole: "image",
@@ -138,7 +166,8 @@ function completedImageResult(
     artifacts: result.artifacts.map(imageArtifact),
     usage: result.usage,
     reportedCost: result.reportedCost,
-    metadata: sanitizedProviderMetadata(result.providerMetadata)
+    metadata: sanitizedProviderMetadata(result.providerMetadata),
+    ...policy
   };
 }
 
@@ -174,6 +203,7 @@ export function createIllustrationImageProviderAdapter(
             request.providerProfileId,
             true,
           );
+          const policy = imageExecutionPolicy(provider);
           if (result.status === "pending") {
             return {
               providerRole: "image",
@@ -185,10 +215,11 @@ export function createIllustrationImageProviderAdapter(
               progress: result.progress ?? null,
               queuePosition: result.queuePosition ?? null,
               etaSeconds: result.etaSeconds ?? null,
-              metadata: sanitizedProviderMetadata(result.providerMetadata)
+              metadata: sanitizedProviderMetadata(result.providerMetadata),
+              ...policy
             };
           }
-          return completedImageResult(request.providerProfileId, request.model, result);
+          return completedImageResult(request.providerProfileId, request.model, result, policy);
         }
 
         const result = await dependencies.submitImageProvider(provider, {
@@ -206,6 +237,7 @@ export function createIllustrationImageProviderAdapter(
           request.providerProfileId,
           true,
         );
+        const policy = imageExecutionPolicy(provider);
         if (result.mode === "pending") {
           return {
             providerRole: "image",
@@ -217,10 +249,11 @@ export function createIllustrationImageProviderAdapter(
             progress: result.progress ?? null,
             queuePosition: result.queuePosition ?? null,
             etaSeconds: result.etaSeconds ?? null,
-            metadata: sanitizedProviderMetadata(result.providerMetadata)
+            metadata: sanitizedProviderMetadata(result.providerMetadata),
+            ...policy
           };
         }
-        return completedImageResult(request.providerProfileId, request.model, result);
+        return completedImageResult(request.providerProfileId, request.model, result, policy);
       } catch (error) {
         await dependencies.recordProviderHealth(
           pool,

@@ -4,6 +4,14 @@ import {
   type IllustrationRequest,
   type WorldCoverRequest
 } from "../../../packages/contracts/src/generation.js";
+import type {
+  IllustrationArtifactDownloadPort,
+  IllustrationAssetPort,
+  IllustrationCostPort,
+  IllustrationImageExecutionResult,
+  IllustrationImageProviderPort,
+  IllustrationWorkerPorts
+} from "../../../packages/application/src/index.js";
 import { Agent } from "undici";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
@@ -833,8 +841,12 @@ export async function runImageJob(
   workerId: string,
   leaseSeconds: number,
   credentialSecret: string,
-  store: FilesystemAssetStore
+  store: FilesystemAssetStore,
+  ports?: IllustrationWorkerPorts
 ): Promise<boolean> {
+  if (ports) {
+    return runImageJobThroughPorts(pool, workerId, leaseSeconds, ports);
+  }
   const job = await claimImageJob(pool, workerId, leaseSeconds);
   if (!job) return false;
   try {
@@ -996,6 +1008,309 @@ export async function runImageJob(
     }
   }
   return true;
+}
+
+/**
+ * The runtime default lane uses the extracted application ports for all
+ * provider transport, artifact retrieval, and asset writes.  The legacy
+ * overload above remains only for directly invoked compatibility tests while
+ * the 14a extraction is being audited; composition always supplies ports.
+ */
+async function runImageJobThroughPorts(
+  pool: DatabasePool,
+  workerId: string,
+  leaseSeconds: number,
+  ports: IllustrationWorkerPorts,
+): Promise<boolean> {
+  const job = await claimImageJob(pool, workerId, leaseSeconds);
+  if (!job) return false;
+  try {
+    if (containsMechanicsLanguage(job.prompt)) {
+      throw Object.assign(new Error("Illustration prompt failed the fiction-only boundary."), {
+        code: "unsafe_prompt",
+        permanent: true
+      });
+    }
+    const persistedSogniTerminalError = job.remote_job_id && job.provider_type === "sogni_sdk"
+      && ["5001", "5002", "5003", "5005"].includes(job.error_code || "");
+    if (persistedSogniTerminalError && job.attempts < job.max_attempts) {
+      await requeueRemoteImageJob(pool, job, workerId, job.error_code!, job.error_message || "Sogni remote generation failed.");
+      return true;
+    }
+    if (job.remote_job_id && job.generation_deadline && job.generation_deadline.getTime() <= Date.now()) {
+      throw Object.assign(new Error("The provider generation deadline expired before completion."), {
+        code: "image_generation_expired",
+        expired: true,
+        permanent: true
+      });
+    }
+    const result = await ports.imageProvider.executeImage({
+      ownerUserId: job.owner_user_id,
+      jobId: job.id,
+      providerProfileId: job.provider_profile_id,
+      model: job.requested_model,
+      prompt: job.prompt,
+      generationRevision: job.generation_revision,
+      idempotencyKey: `${job.id}:${job.generation_revision}`,
+      imageCount: job.image_count,
+      size: job.size,
+      aspectRatio: job.aspect_ratio,
+      quality: job.quality,
+      outputFormat: job.output_format,
+      remoteJobId: job.remote_job_id
+    });
+    if (result.status === "pending") {
+      await persistPendingPortImageJob(pool, job, workerId, result);
+      return true;
+    }
+    await completePortImageJob(pool, job, workerId, result, ports.artifactDownload, ports.assets, ports.costs);
+  } catch (error) {
+    logProviderTransportError(error, {
+      imageJobId: job.id,
+      campaignId: job.campaign_id,
+      turnId: job.turn_id,
+      providerProfileId: job.provider_profile_id,
+      workerId
+    });
+    const { permanent, code, expired, remoteTerminal } = imageProviderFailureMetadata(error);
+    const retryableSubmission = !job.remote_job_id && !permanent && job.attempts < job.max_attempts;
+    const retryableRemoteFailure = Boolean(job.remote_job_id) && remoteTerminal && !permanent && job.attempts < job.max_attempts;
+    const retryablePoll = Boolean(job.remote_job_id) && !remoteTerminal && !permanent
+      && (!job.generation_deadline || job.generation_deadline.getTime() > Date.now());
+    if (retryableRemoteFailure) {
+      await requeueRemoteImageJob(pool, job, workerId, code, error instanceof Error ? error.message : String(error));
+      return true;
+    }
+    const nextStatus = expired ? "expired" : retryablePoll ? "provider_pending" : retryableSubmission ? "queued" : permanent ? "failed" : "recoverable";
+    const requestedRetryDelay = typeof error === "object" && error !== null && "retryAfterMs" in error
+      ? Number((error as { retryAfterMs: unknown }).retryAfterMs)
+      : Number.NaN;
+    const fallbackRetryDelay = retryablePoll
+      ? Math.min(Math.max(job.attempts, 1), 5) * 2_000
+      : Math.min(Math.max(job.attempts, 1), 5) * 15_000;
+    const retryDelayMs = Number.isFinite(requestedRetryDelay)
+      ? Math.min(300_000, Math.max(1_000, Math.round(requestedRetryDelay)))
+      : fallbackRetryDelay;
+    const persistedFailure = await pool.query<{ id: string }>(
+      `UPDATE image_jobs SET status = $3, next_attempt_at = CASE WHEN $3 = 'queued'
+           THEN now() + ($7::text || ' milliseconds')::interval ELSE next_attempt_at END,
+         next_poll_at = CASE WHEN $3 = 'provider_pending'
+           THEN now() + ($7::text || ' milliseconds')::interval ELSE next_poll_at END,
+         error_code = $4, error_message = $5, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $6
+         AND status IN ('generating','provider_pending','downloading')
+       RETURNING id`,
+      [job.id, job.owner_user_id, nextStatus, code,
+        (error instanceof Error ? error.message : String(error)).slice(0, 4000), workerId, retryDelayMs]
+    );
+    if (!persistedFailure.rows[0]) return true;
+    if (job.segment_id && ["recoverable", "failed", "expired"].includes(nextStatus)) {
+      await pool.query(
+        `UPDATE turn_illustration_segments
+            SET status = $3, updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2`,
+        [job.segment_id, job.owner_user_id, nextStatus === "recoverable" ? "recoverable" : "failed"]
+      );
+    }
+    if (["failed", "expired"].includes(nextStatus)) {
+      await pool.query(
+        `UPDATE illustration_resolution_jobs
+            SET status = 'failed', reason_code = $3, completed_at = now(), updated_at = now()
+          WHERE image_job_id = $1 AND owner_user_id = $2 AND status = 'generation_queued'`,
+        [job.id, job.owner_user_id, `generation_${code}`.slice(0, 200)]
+      );
+    }
+  }
+  return true;
+}
+
+function portPollAfterMs(result: Extract<IllustrationImageExecutionResult, { status: "pending" }>): number {
+  return Math.min(30_000, Math.max(1_000, result.pollAfterMs || 2_000));
+}
+
+async function persistPendingPortImageJob(
+  pool: DatabasePool,
+  job: ImageJobRow,
+  workerId: string,
+  result: Extract<IllustrationImageExecutionResult, { status: "pending" }>,
+): Promise<void> {
+  const pollAfterMs = portPollAfterMs(result);
+  const persisted = await pool.query<{ id: string }>(
+    `UPDATE image_jobs SET status = 'provider_pending', remote_job_id = COALESCE(remote_job_id, $3), provider_status = $4,
+       provider_progress = $5, provider_queue_position = $6,
+       provider_eta_at = CASE WHEN $7::double precision IS NULL THEN NULL ELSE now() + ($7::text || ' seconds')::interval END,
+       submitted_at = CASE WHEN remote_job_id IS NULL THEN COALESCE(submitted_at, now()) ELSE submitted_at END,
+       last_polled_at = CASE WHEN remote_job_id IS NULL THEN last_polled_at ELSE now() END,
+       next_poll_at = now() + ($8::text || ' milliseconds')::interval,
+       generation_deadline = COALESCE(generation_deadline, now() + ($9::text || ' milliseconds')::interval),
+       provider_result_metadata = $10, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+     WHERE id = $1 AND lease_owner = $2
+       AND status IN ('generating','provider_pending','downloading')
+     RETURNING id`,
+    [job.id, workerId, result.remoteJobId, pendingProviderStatus(result.metadata), result.progress, result.queuePosition,
+      result.etaSeconds, pollAfterMs, result.generationTimeoutMs, JSON.stringify(result.metadata)]
+  );
+  if (!persisted.rows[0]) {
+    throw Object.assign(new Error("Image job lease was lost before provider state was persisted."), { code: "lease_lost" });
+  }
+  logger.info({
+    event: job.remote_job_id ? "image_provider_status" : "image_provider_submitted",
+    imageJobId: job.id,
+    providerType: job.provider_type,
+    remoteJobId: result.remoteJobId,
+    stage: pendingProviderStatus(result.metadata),
+    progress: result.progress,
+    queuePosition: result.queuePosition,
+    etaSeconds: result.etaSeconds
+  });
+}
+
+async function completePortImageJob(
+  pool: DatabasePool,
+  job: ImageJobRow,
+  workerId: string,
+  result: Extract<IllustrationImageExecutionResult, { status: "completed" }>,
+  artifactDownload: IllustrationArtifactDownloadPort,
+  assets: IllustrationAssetPort,
+  costs: IllustrationCostPort,
+): Promise<void> {
+  if (!result.artifacts.length || result.artifacts.length > 2) {
+    throw Object.assign(new Error("Image provider returned an unsupported artifact count."), { code: "invalid_artifact_count", permanent: true });
+  }
+  const downloading = await pool.query<{ id: string }>(
+    `UPDATE image_jobs SET status = 'downloading', provider_status = 'completed', updated_at = now()
+      WHERE id = $1 AND lease_owner = $2 AND status IN ('generating','provider_pending','downloading')
+      RETURNING id`,
+    [job.id, workerId]
+  );
+  if (!downloading.rows[0]) return;
+  const downloaded = await Promise.all(result.artifacts.map((artifact) => artifactDownload.downloadArtifact({
+    ownerUserId: job.owner_user_id,
+    imageJobId: job.id,
+    artifact,
+    timeoutMs: result.artifactDownloadTimeoutMs,
+    allowPrivateHosts: result.allowPrivateArtifactHosts,
+    maximumBytes: MAX_IMAGE_ARTIFACT_BYTES
+  })));
+  const rawRequestedVariantIndex = job.provider_request_metadata.targetVariantIndex;
+  const requestedVariantIndex = Number(rawRequestedVariantIndex);
+  const hasRequestedVariant = rawRequestedVariantIndex !== null
+    && rawRequestedVariantIndex !== undefined
+    && Boolean(job.segment_id)
+    && Number.isInteger(requestedVariantIndex)
+    && requestedVariantIndex >= 0
+    && requestedVariantIndex <= 1;
+  const persistedAssets = [] as Array<Readonly<{ assetId: string }>>;
+  for (const image of downloaded) {
+    persistedAssets.push(job.target_type === "world_cover"
+      ? await assets.persistWorldCover({
+        ownerUserId: job.owner_user_id,
+        worldId: job.world_id!,
+        imageJobId: job.id,
+        bytes: image.bytes,
+        mimeType: image.mimeType
+      })
+      : await assets.persistTurnIllustration({
+        ownerUserId: job.owner_user_id,
+        campaignId: job.campaign_id!,
+        turnId: job.turn_id,
+        imageJobId: job.id,
+        bytes: image.bytes,
+        mimeType: image.mimeType
+      }));
+  }
+  for (const [artifactIndex, asset] of persistedAssets.entries()) {
+    if (job.segment_id) {
+      await assets.bindSegmentAsset({
+        ownerUserId: job.owner_user_id,
+        campaignId: job.campaign_id!,
+        turnId: job.turn_id,
+        segmentId: job.segment_id,
+        imageJobId: job.id,
+        assetId: asset.assetId,
+        variantIndex: hasRequestedVariant ? requestedVariantIndex : artifactIndex
+      });
+    }
+  }
+  const primary = persistedAssets[0]!;
+  const usageQuantity = Number(result.usage.quantity ?? result.usage.images ?? result.usage.image_count);
+  const persistedUsageQuantity = Number.isFinite(usageQuantity) && usageQuantity >= 0 ? usageQuantity : persistedAssets.length;
+  const usageUnit = String(result.usage.unit || "image").slice(0, 100);
+  const providerResponseId = String(result.metadata.responseId || job.remote_job_id || "");
+  await withTransaction(pool, async (client) => {
+    if (job.generation_job_id) {
+      const parent = await client.query<{ status: string }>(
+        "SELECT status FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE",
+        [job.generation_job_id, job.owner_user_id]
+      );
+      if (!parent.rows[0] || !["assessing", "generating", "validating", "committing"].includes(parent.rows[0].status)) return;
+    }
+    const completed = await client.query<{ id: string }>(
+      `UPDATE image_jobs SET status = 'completed', asset_id = $3,
+         provider_response_id = COALESCE(NULLIF($10, ''), remote_job_id, provider_response_id),
+         response_metadata = $4, provider_result_metadata = $5, provider_progress = 100,
+         usage_quantity = $6, usage_unit = $7, reported_cost = $8, reported_currency = $9,
+         completed_at = now(), updated_at = now(), lease_owner = NULL, lease_expires_at = NULL,
+         next_poll_at = NULL, error_code = NULL, error_message = NULL
+       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $11 AND status = 'downloading'
+       RETURNING id`,
+      [job.id, job.owner_user_id, primary.assetId,
+        JSON.stringify({ usage: result.usage, provider: result.metadata, mimeType: downloaded[0]!.mimeType, byteLength: downloaded[0]!.bytes.length, assetIds: persistedAssets.map((asset) => asset.assetId) }),
+        JSON.stringify({ ...result.metadata, artifactCount: persistedAssets.length, assetIds: persistedAssets.map((asset) => asset.assetId) }),
+        persistedUsageQuantity, usageUnit, result.reportedCost?.amount ?? null, result.reportedCost?.currency ?? null,
+        providerResponseId, workerId]
+    );
+    if (!completed.rows[0]) return;
+    if (job.campaign_id) {
+      await costs.recordIllustrationCost(client, {
+        ownerUserId: job.owner_user_id,
+        campaignId: job.campaign_id,
+        turnId: job.turn_id,
+        imageJobId: job.id,
+        providerProfileId: job.provider_profile_id,
+        providerType: job.provider_type || "unknown",
+        requestedModel: job.requested_model,
+        operation: "image_generation",
+        usage: result.usage,
+        reportedCost: result.reportedCost,
+        responseId: providerResponseId
+      });
+    }
+    if (job.target_type === "world_cover") {
+      await client.query("UPDATE worlds SET cover_asset_id = $3, updated_at = now() WHERE id = $1 AND owner_user_id = $2", [job.world_id, job.owner_user_id, primary.assetId]);
+    } else if (!job.segment_id) {
+      await client.query("UPDATE turns SET image_url = $3 WHERE id = $1 AND owner_user_id = $2", [job.turn_id, job.owner_user_id, `/api/v1/assets/${primary.assetId}`]);
+    }
+    if (job.segment_id) {
+      await client.query(
+        `UPDATE turn_illustration_segments SET status = 'completed', updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2`,
+        [job.segment_id, job.owner_user_id]
+      );
+      await client.query(
+        `UPDATE turn_illustration_sets sets
+            SET status = CASE
+              WHEN NOT EXISTS (SELECT 1 FROM turn_illustration_segments segments WHERE segments.illustration_set_id = sets.id AND segments.status <> 'completed') THEN 'completed'
+              WHEN EXISTS (SELECT 1 FROM turn_illustration_segments segments WHERE segments.illustration_set_id = sets.id AND segments.status = 'completed') THEN 'partial'
+              ELSE 'generating'
+            END,
+            completed_at = CASE WHEN NOT EXISTS (SELECT 1 FROM turn_illustration_segments segments WHERE segments.illustration_set_id = sets.id AND segments.status <> 'completed') THEN now() ELSE NULL END
+          WHERE sets.id = (SELECT illustration_set_id FROM turn_illustration_segments WHERE id = $1)
+            AND sets.owner_user_id = $2`,
+        [job.segment_id, job.owner_user_id]
+      );
+    }
+    await client.query(
+      `UPDATE illustration_resolution_jobs
+          SET status = 'completed', reason_code = 'generated', completed_at = now(), updated_at = now()
+        WHERE image_job_id = $1 AND owner_user_id = $2 AND status = 'generation_queued'`,
+      [job.id, job.owner_user_id]
+    );
+  });
+  logger.info({
+    event: "image_provider_completed", imageJobId: job.id, providerType: job.provider_type,
+    remoteJobId: job.remote_job_id, stage: "completed", progress: 100, artifactCount: downloaded.length
+  });
 }
 
 function withoutTemporaryUrls(metadata: Record<string, unknown> | undefined): Record<string, unknown> {

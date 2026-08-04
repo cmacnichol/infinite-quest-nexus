@@ -1,4 +1,5 @@
 import { withTransaction, type DatabasePool } from "../../../packages/database/src/pool.js";
+import type { IllustrationCostPort } from "../../../packages/application/src/index.js";
 import {
   callTextProvider,
   pollImageProvider,
@@ -19,6 +20,7 @@ import {
   loadTextProvider,
   recordProviderHealth
 } from "../../api/src/provider-service.js";
+import { recordProviderCost, type CostAttribution } from "../../api/src/cost-service.js";
 import type {
   ArtifactDownloadAdapterDependencies,
   AssetAdapterDependencies,
@@ -31,6 +33,8 @@ export type IllustrationPlatformBindings = Readonly<{
   promptRefinement: PromptRefinementAdapterDependencies;
   artifactDownload: ArtifactDownloadAdapterDependencies;
   assets: AssetAdapterDependencies;
+  /** Task 14d owns replacement of this temporary provider-cost binding. */
+  costs: IllustrationCostPort;
 }>;
 
 /**
@@ -58,6 +62,29 @@ export function createIllustrationPlatformBindings(
       parseRefinedPrompt
     },
     artifactDownload: { downloadArtifact },
+    costs: {
+      recordIllustrationCost: (database, input) => {
+        const attribution: CostAttribution = {
+          ownerUserId: input.ownerUserId,
+          campaignId: input.campaignId,
+          providerProfileId: input.providerProfileId,
+          providerType: input.providerType,
+          requestedModel: input.requestedModel,
+          category: "image",
+          operation: input.operation,
+          usage: input.usage
+        };
+        if (input.turnId !== undefined) attribution.turnId = input.turnId;
+        if (input.imageJobId) attribution.imageJobId = input.imageJobId;
+        const localCallId = input.promptJobId ?? input.imageJobId;
+        if (localCallId !== undefined) attribution.localCallId = localCallId;
+        return recordProviderCost(database as never, attribution, {
+          reportedCost: input.reportedCost,
+          responseId: input.responseId,
+          usage: input.usage
+        });
+      }
+    },
     assets: {
       transaction: withTransaction,
       persistTurnImage,

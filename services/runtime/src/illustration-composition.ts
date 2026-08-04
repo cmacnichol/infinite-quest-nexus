@@ -76,6 +76,7 @@ export type WorkerIllustrationCompositionFactories = Readonly<{
     pool: DatabasePool,
     credentialSecret: string,
     store: FilesystemAssetStore,
+    ports: IllustrationWorkerPorts,
   ): IllustrationWorkerLanes;
   createState(pool: DatabasePool, lanes: IllustrationWorkerLanes): IllustrationWorkerStateMachinePort;
   createExecutor(state: IllustrationWorkerStateMachinePort): IllustrationWorkerExecutor;
@@ -100,18 +101,21 @@ export function createIllustrationWorkerPorts(
       bindings.promptRefinement,
     ),
     artifactDownload: createIllustrationArtifactDownloadAdapter(bindings.artifactDownload),
-    assets: createIllustrationAssetAdapter(pool, store, bindings.assets)
+    assets: createIllustrationAssetAdapter(pool, store, bindings.assets),
+    costs: bindings.costs
   };
 }
 
 const workerFactories: WorkerIllustrationCompositionFactories = {
   createPorts: createIllustrationWorkerPorts,
-  createLanes: (pool, credentialSecret, store) => ({
+  createLanes: (pool, credentialSecret, store, ports) => ({
     prompt: (request) => runIllustrationPromptJob(
       pool,
       request.workerId,
       request.leaseSeconds,
       credentialSecret,
+      ports.promptRefinement,
+      ports.costs,
     ),
     resolution: (request) => runIllustrationResolutionJob(
       pool,
@@ -124,6 +128,7 @@ const workerFactories: WorkerIllustrationCompositionFactories = {
       request.leaseSeconds,
       credentialSecret,
       store,
+      ports,
     )
   }),
   createState: createIllustrationWorkerStateMachine,
@@ -138,7 +143,7 @@ export function createWorkerIllustrationApplication(
   factories: WorkerIllustrationCompositionFactories = workerFactories,
 ): IllustrationWorkerApplication {
   const ports = factories.createPorts(pool, credentialSecret, store);
-  const lanes = factories.createLanes(pool, credentialSecret, store);
+  const lanes = factories.createLanes(pool, credentialSecret, store, ports);
   const state = factories.createState(pool, lanes);
   const executor = factories.createExecutor(state);
   return factories.createApplication({ executor, ports, state });

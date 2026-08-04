@@ -81,7 +81,10 @@ describe("illustration provider adapters", () => {
       progress: 10,
       queuePosition: 3,
       etaSeconds: 20,
-      metadata: { status: "queued" }
+      metadata: { status: "queued" },
+      artifactDownloadTimeoutMs: 30_000,
+      allowPrivateArtifactHosts: false,
+      generationTimeoutMs: 180_000
     });
     expect(loadImageProvider).toHaveBeenCalledWith(
       expect.anything(), ownerUserId, providerProfileId, "credential-secret", "image-model"
@@ -105,7 +108,10 @@ describe("illustration provider adapters", () => {
       artifacts: [{ source: "base64", base64: "iVBORw0KGgo=", mimeType: "image/png" }],
       usage: { images: 1 },
       reportedCost: { amount: "0.04", currency: "USD" },
-      metadata: { responseId: "provider-response-1" }
+      metadata: { responseId: "provider-response-1" },
+      artifactDownloadTimeoutMs: 30_000,
+      allowPrivateArtifactHosts: false,
+      generationTimeoutMs: 180_000
     });
     expect(pollImageProvider).toHaveBeenCalledWith(provider, { remoteJobId: "remote-1" });
     expect(recordProviderHealth).toHaveBeenCalledTimes(2);

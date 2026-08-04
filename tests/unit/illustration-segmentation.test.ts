@@ -49,19 +49,22 @@ describe("illustration segmentation", () => {
   });
 
   it("builds brief fiction-only context separately from the excerpt", () => {
-    const context = buildBriefIllustrationStoryContext({
+    const illustrationContext = {
       campaignTitle: "The Lantern Road",
       worldContent: { world: { title: "Night Roads", genre: "Fantasy", tone: "Eerie", premise: "Roads move after dusk." } },
       characterSnapshot: { name: "Mira", characterText: "A traveler in a silver rain cloak." },
-      continuity: "Mira carries the glass lantern.\nDice roll: 20",
-      previousNarration: "The bridge vanished into the fog."
-    });
+      previousNarration: "The bridge vanished into the fog.",
+      // Runtime input is deliberately narrower than the database row. An
+      // unexpected private field must not become illustration context.
+      scratchpad_private: "PRIVATE_ILLUSTRATION_SCRATCHPAD"
+    };
+    const context = buildBriefIllustrationStoryContext(illustrationContext);
     const input = buildIllustrationRefinementInput("Mira raises the lantern as the road bends.", context);
     expect(context).toContain("Player character appearance:");
     expect(context).toContain("Mira");
     expect(context).toContain("A traveler in a silver rain cloak.");
     expect(context).toContain("Previous scene: The bridge vanished into the fog.");
-    expect(context).not.toContain("Dice roll");
+    expect(context).not.toContain("PRIVATE_ILLUSTRATION_SCRATCHPAD");
     expect(context.length).toBeLessThanOrEqual(1_800);
     expect(input).toContain("STORY CONTEXT");
     expect(input).toContain("FICTION EXCERPT TO ILLUSTRATE");
