@@ -8,7 +8,7 @@ import { readTurnPage } from "../../packages/database/src/play-loop-read-reposit
 import { buildServer } from "../../services/api/src/server.js";
 import { serverOptions } from "../helpers/build-server-options.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
-import { runGenerationJob } from "../../services/api/src/generation-service.js";
+import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { runImageJob } from "../../services/api/src/image-service.js";
 import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";

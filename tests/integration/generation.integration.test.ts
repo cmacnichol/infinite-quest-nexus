@@ -9,7 +9,7 @@ import { generationRequestSchema, generationRetryLatestRequestSchema, illustrati
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { setIllustrationConfig } from "../../services/api/src/image-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
-import { branchCampaign, rewindCampaign, runGenerationJob, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
+import { branchCampaign, rewindCampaign, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/api/src/memory-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
@@ -17,6 +17,7 @@ import { getCampaignRuntimeState, updateCampaignRuntimeState } from "../../servi
 import { logger } from "../../packages/logger/src/index.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { createGenerationWorkflow } from "../../packages/client-core/src/index.js";
+import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import {
   createBrowserGenerationSource,
   createNexusApiClient,

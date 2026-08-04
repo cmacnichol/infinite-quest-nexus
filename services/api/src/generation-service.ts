@@ -1,7 +1,5 @@
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
-import type { ClaimedGeneration } from "../../../packages/application/src/index.js";
-import { createPostgresGenerationExecutionRepository } from "../../../packages/database/src/generation-execution-repository.js";
 import {
   type CampaignBranchRequest,
   type CampaignRewindRequest,
@@ -11,32 +9,12 @@ import {
   normalizeCampaignStateSnapshot,
   normalizeCampaignTrackers
 } from "../../../packages/domain/src/index.js";
-import { logger } from "../../../packages/logger/src/index.js";
 import {
   autoEnableCampaignEmbeddingIfAvailable,
-  buildContextPreview,
   enqueueEmbeddingReindex,
-  rebuildCampaignMemories,
-  storeDerivedTurnMemories,
-  type DerivedStoryMemory
+  rebuildCampaignMemories
 } from "./memory-service.js";
-import { loadTextProvider } from "./provider-service.js";
-import {
-  enqueueAcceptedTurnIllustrationSegments,
-  loadConfig as loadStreamingIllustrationConfig,
-  createProvisionalSet,
-  createProvisionalSegment,
-  promoteProvisionalSet,
-  orphanProvisionalSet,
-  type SegmentConfigRow
-} from "./segmented-illustration-service.js";
-import { attributeGenerationCostsToTurn, recordProfileCost, turnReportedCosts } from "./cost-service.js";
-import { promptFromSnapshot, promptProtocolVersion, resolvePromptSnapshot } from "./prompt-library-service.js";
 import { loadOrNotFound } from "./service-helpers.js";
-import {
-  createGenerationExecutor,
-  type GenerationExecutionCollaborators
-} from "../../runtime/src/generation-executor-adapter.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
 
@@ -516,161 +494,4 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
       imageProviderProfileId: campaign.image_provider_profile_id
     };
   });
-}
-
-const executionRepositories = new WeakMap<
-  DatabasePool,
-  ReturnType<typeof createPostgresGenerationExecutionRepository>
->();
-
-function generationExecutionRepository(pool: DatabasePool) {
-  const current = executionRepositories.get(pool);
-  if (current) return current;
-  const created = createPostgresGenerationExecutionRepository(pool);
-  executionRepositories.set(pool, created);
-  return created;
-}
-
-function generationExecutionCollaborators(): GenerationExecutionCollaborators {
-  return {
-    autoEnableCampaignEmbeddingIfAvailable,
-    buildContextPreview: (
-      pool,
-      ownerUserId,
-      campaignId,
-      options,
-      credentialSecret,
-      costAttribution,
-      scope
-    ) => buildContextPreview(
-      pool,
-      campaignId,
-      options,
-      credentialSecret,
-      costAttribution,
-      scope,
-      ownerUserId
-    ),
-    enqueueEmbeddingReindex: (database, ownerUserId, campaignId) =>
-      enqueueEmbeddingReindex(database, campaignId, ownerUserId),
-    rebuildCampaignMemories,
-    storeDerivedTurnMemories: (
-      client,
-      ownerUserId,
-      campaignId,
-      worldVersionId,
-      turnId,
-      ordinal,
-      derived
-    ) => storeDerivedTurnMemories(
-      client,
-      ownerUserId,
-      campaignId,
-      worldVersionId,
-      turnId,
-      ordinal,
-      derived as DerivedStoryMemory
-    ),
-    loadStreamingIllustrationConfig,
-    createProvisionalSet,
-    createProvisionalSegment: (
-      database,
-      ownerUserId,
-      campaignId,
-      generationJobId,
-      setId,
-      segment,
-      config,
-      visualReference
-    ) => createProvisionalSegment(
-      database,
-      ownerUserId,
-      campaignId,
-      generationJobId,
-      setId,
-      segment,
-      config as SegmentConfigRow,
-      visualReference
-    ),
-    promoteProvisionalSet: (
-      database,
-      ownerUserId,
-      generationJobId,
-      turnId,
-      campaignId,
-      narration,
-      config,
-      visualReference
-    ) => promoteProvisionalSet(
-      database,
-      ownerUserId,
-      generationJobId,
-      turnId,
-      campaignId,
-      narration,
-      config as SegmentConfigRow,
-      visualReference
-    ),
-    orphanProvisionalSet,
-    enqueueAcceptedTurnIllustrationSegments,
-    loadTextProvider,
-    resolvePromptSnapshot,
-    promptFromSnapshot,
-    promptProtocolVersion,
-    recordProfileCost,
-    turnReportedCosts: async (database, ownerUserId, turnIds) =>
-      await turnReportedCosts(database, ownerUserId, turnIds) as Map<string, unknown>,
-    attributeGenerationCostsToTurn
-  };
-}
-
-// Task 10e removes these compatibility delegates when the worker receives its
-// application through runtime composition.
-export async function claimGeneration(
-  pool: DatabasePool,
-  workerId: string,
-  leaseSeconds: number
-): Promise<ClaimedGeneration | null> {
-  const claim = await generationExecutionRepository(pool).claimNext({ workerId, leaseSeconds });
-  if (claim) {
-    logger.info({
-      event: "turn_generation_claimed",
-      generationJobId: claim.jobId,
-      campaignId: claim.campaignId,
-      providerProfileId: claim.providerProfileId,
-      expectedTurnNumber: claim.expectedTurnNumber,
-      operationKind: claim.operationKind,
-      jobAttempt: claim.attempts,
-      workerId,
-      leaseSeconds
-    });
-  }
-  return claim;
-}
-
-export async function executeGenerationJob(
-  pool: DatabasePool,
-  workerId: string,
-  claim: ClaimedGeneration,
-  leaseSeconds: number,
-  credentialSecret: string
-): Promise<boolean> {
-  const repository = generationExecutionRepository(pool);
-  return createGenerationExecutor({
-    pool,
-    repository,
-    collaborators: generationExecutionCollaborators(),
-    credentialSecret
-  }).execute({ workerId, leaseSeconds, claim });
-}
-
-export async function runGenerationJob(
-  pool: DatabasePool,
-  workerId: string,
-  leaseSeconds: number,
-  credentialSecret: string
-): Promise<boolean> {
-  const claim = await claimGeneration(pool, workerId, leaseSeconds);
-  if (!claim) return false;
-  return executeGenerationJob(pool, workerId, claim, leaseSeconds, credentialSecret);
 }

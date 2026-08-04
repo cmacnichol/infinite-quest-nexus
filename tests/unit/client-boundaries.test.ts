@@ -552,11 +552,18 @@ describe("client boundary checks", () => {
     ]);
   });
 
-  test("rejects unapproved API and worker cross-role imports but permits documented transitional imports", () => {
+  test("rejects the removed generation bridge and unlisted imports while retaining five Task 14 exceptions", () => {
     const violations = collectClientBoundaryViolations([
       {
         file: "services/worker/src/worker.ts",
-        text: 'import { claimGeneration } from "../../api/src/generation-service.js";'
+        text: `
+          import { claimGeneration } from "../../api/src/generation-service.js";
+          import { runAssetMetadataBackfill } from "../../api/src/asset-service.js";
+          import { runIllustrationResolutionJob } from "../../api/src/illustration-resolution-service.js";
+          import { runImageJob } from "../../api/src/image-service.js";
+          import { runChronicleJob } from "../../api/src/memory-service.js";
+          import { runIllustrationPromptJob } from "../../api/src/segmented-illustration-service.js";
+        `
       },
       {
         file: "services/worker/src/new-worker.ts",
@@ -570,7 +577,8 @@ describe("client boundary checks", () => {
 
     expect(violations).toEqual([
       "services/api/src/route.ts: cross-role import ../../worker/src/worker.js from api to worker is prohibited",
-      "services/worker/src/new-worker.ts: cross-role import ../../api/src/server.js from worker to api is prohibited"
+      "services/worker/src/new-worker.ts: cross-role import ../../api/src/server.js from worker to api is prohibited",
+      "services/worker/src/worker.ts: cross-role import ../../api/src/generation-service.js from worker to api is prohibited"
     ]);
   });
 });

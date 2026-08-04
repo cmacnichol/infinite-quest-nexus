@@ -84,7 +84,6 @@ const ASSIGNMENT_OPERATOR_KINDS = new Set([
 // These worker imports predate packages/application. Each exception is narrow
 // and names the work package that removes it; new cross-role imports fail.
 const CROSS_ROLE_IMPORT_ALLOWLIST = new Map([
-  ["services/worker/src/worker.ts -> services/api/src/generation-service.js", "Task 10 (B1)"],
   ["services/worker/src/worker.ts -> services/api/src/asset-service.js", "Task 14 (B5)"],
   ["services/worker/src/worker.ts -> services/api/src/illustration-resolution-service.js", "Task 14 (B5)"],
   ["services/worker/src/worker.ts -> services/api/src/image-service.js", "Task 14 (B5)"],

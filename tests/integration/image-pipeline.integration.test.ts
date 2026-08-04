@@ -10,7 +10,7 @@ import { worldContentSchema, worldCreateSchema } from "../../packages/contracts/
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
-import { runGenerationJob } from "../../services/api/src/generation-service.js";
+import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
