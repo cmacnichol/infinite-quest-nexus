@@ -102,7 +102,10 @@ import {
 } from "./memory-service.js";
 import { queryAssets, readAsset, readAssetDerivative, selectTurnIllustration, selectWorldCover, updateAssetMetadata, type FilesystemAssetStore } from "./asset-service.js";
 import { createProvider, deleteProvider, discoverUnsavedProviderModels, generateProviderText, listProviders, providerModels, setDefaultProvider, updateProvider } from "./provider-service.js";
-import { branchCampaign, cancelGeneration, discardGeneration, enqueueGeneration, enqueueLatestReplacement, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, syncPlayerCampaignConfig } from "./generation-service.js";
+import { branchCampaign, rewindCampaign, syncPlayerCampaignConfig } from "./generation-service.js";
+import { createGenerationApplicationAdapter } from "./generation-application-adapter.js";
+import { createGenerationRouteLifecycle, type GenerationLifecycleLogContext } from "./generation-route-lifecycle.js";
+import { safeTurnInput } from "./turn-input-safety.js";
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "./campaign-state-service.js";
 import {
   enqueueIllustration,
@@ -281,13 +284,32 @@ function generationStreamSnapshot(value: unknown) {
   return parseResponseProjection(generationStreamSnapshotSchema, { ...value as object, ...generationPublicError(value) });
 }
 
-export async function buildServer({ config, pool, generation: _generation }: BuildServerOptions): Promise<FastifyInstance> {
+async function generationLifecycleLogContext(
+  pool: DatabasePool,
+  ownerUserId: string,
+  generationJobId: string
+): Promise<GenerationLifecycleLogContext | null> {
+  const result = await pool.query<GenerationLifecycleLogContext>(
+    `SELECT id AS "generationJobId", campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
+            expected_turn_number AS "expectedTurnNumber", operation_kind AS "operationKind", attempts AS "jobAttempt"
+       FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`,
+    [generationJobId, ownerUserId]
+  );
+  return result.rows[0] || null;
+}
+
+export async function buildServer({ config, pool, generation }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: createLoggerOptions(),
     bodyLimit: config.security.apiDefaultBodyLimitBytes,
     trustProxy: config.security.trustProxyHops,
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
+  });
+  const generationAdapter = createGenerationApplicationAdapter(generation);
+  const generationLifecycle = createGenerationRouteLifecycle({
+    readContext: (ownerUserId, generationJobId) => generationLifecycleLogContext(pool, ownerUserId, generationJobId),
+    logger
   });
 
   app.setErrorHandler((error, request, reply) => {
@@ -870,28 +892,34 @@ export async function buildServer({ config, pool, generation: _generation }: Bui
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations", async (request, reply) => {
     const body = generationRequestSchema.parse(request.body);
-    const job = await enqueueGeneration(pool, uuidSchema.parse(request.params.campaignId), body);
+    safeTurnInput(body.action);
+    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
+    const job = await generationAdapter.enqueueGeneration(ownerScope, uuidSchema.parse(request.params.campaignId), body);
     return reply.code(job.duplicate ? 200 : 202).send(parseResponseProjection(generationEnqueueResponseSchema, job));
   });
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations/retry-latest", async (request, reply) => {
     const body = generationRetryLatestRequestSchema.parse(request.body);
-    const job = await enqueueLatestReplacement(pool, uuidSchema.parse(request.params.campaignId), body);
+    safeTurnInput(body.action);
+    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
+    const job = await generationAdapter.enqueueLatestReplacement(ownerScope, uuidSchema.parse(request.params.campaignId), body);
     return reply.code(job.duplicate ? 200 : 202).send(parseResponseProjection(generationEnqueueResponseSchema, job));
   });
 
-  app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId", async (request) => (
-    generationSnapshot(await getGenerationJob(pool, uuidSchema.parse(request.params.jobId)))
-  ));
+  app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId", async (request) => {
+    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
+    return generationSnapshot(await generationAdapter.getGenerationJob(ownerScope, uuidSchema.parse(request.params.jobId)));
+  });
 
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/stream", async (request, reply) => {
     const jobId = uuidSchema.parse(request.params.jobId);
+    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
     const streamStartedAt = Date.now();
     let snapshotsSent = 0;
     let finalStatus = "client_closed";
     let isClosed = false;
     request.raw.on("close", () => { isClosed = true; });
-    let job = generationStreamSnapshot(await getGenerationJob(pool, jobId));
+    let job = generationStreamSnapshot(await generationAdapter.getGenerationJob(ownerScope, jobId));
 
     logger.info({
       event: "turn_generation_stream_connected",
@@ -919,7 +947,7 @@ export async function buildServer({ config, pool, generation: _generation }: Bui
         await new Promise((resolve) => setTimeout(resolve, 350));
         if (isClosed) break;
         try {
-          job = generationStreamSnapshot(await getGenerationJob(pool, jobId));
+          job = generationStreamSnapshot(await generationAdapter.getGenerationJob(ownerScope, jobId));
         } catch (error) {
           if (isClosed) break;
           finalStatus = "stream_error";
@@ -945,21 +973,29 @@ export async function buildServer({ config, pool, generation: _generation }: Bui
     if (!isClosed) reply.raw.end();
   });
 
-  app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/result", async (request) => (
-    parseResponseProjection(generationResultSchema, await getGenerationResult(pool, uuidSchema.parse(request.params.jobId)))
-  ));
+  app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/result", async (request) => {
+    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
+    return parseResponseProjection(generationResultSchema, await generationAdapter.getGenerationResult(ownerScope, uuidSchema.parse(request.params.jobId)));
+  });
 
-  app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/retry", async (request, reply) => (
-    reply.code(202).send(parseResponseProjection(generationActionResponseSchema, await retryGeneration(pool, uuidSchema.parse(request.params.jobId))))
-  ));
+  app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/retry", async (request, reply) => {
+    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
+    const jobId = uuidSchema.parse(request.params.jobId);
+    const result = await generationLifecycle.retry(ownerScope.ownerUserId, jobId, () => generationAdapter.retryGeneration(ownerScope, jobId));
+    return reply.code(202).send(parseResponseProjection(generationActionResponseSchema, result));
+  });
 
-  app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/cancel", async (request, reply) => (
-    reply.code(202).send(parseResponseProjection(generationActionResponseSchema, await cancelGeneration(pool, uuidSchema.parse(request.params.jobId))))
-  ));
+  app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/cancel", async (request, reply) => {
+    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
+    const jobId = uuidSchema.parse(request.params.jobId);
+    const result = await generationLifecycle.cancel(ownerScope.ownerUserId, jobId, () => generationAdapter.cancelGeneration(ownerScope, jobId));
+    return reply.code(202).send(parseResponseProjection(generationActionResponseSchema, result));
+  });
 
-  app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/discard", async (request) => (
-    parseResponseProjection(generationActionResponseSchema, await discardGeneration(pool, uuidSchema.parse(request.params.jobId)))
-  ));
+  app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/discard", async (request) => {
+    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
+    return parseResponseProjection(generationActionResponseSchema, await generationAdapter.discardGeneration(ownerScope, uuidSchema.parse(request.params.jobId)));
+  });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-config", async (request) => (
     getIllustrationConfig(pool, uuidSchema.parse(request.params.campaignId))

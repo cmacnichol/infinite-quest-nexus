@@ -1,6 +1,5 @@
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
-import { createPostgresGenerationCommandRepository } from "../../../packages/database/src/generation-repository.js";
 import {
   pendingEventTriggerSchema,
   playerEventTriggerSchema,
@@ -8,8 +7,6 @@ import {
   type CampaignBranchRequest,
   type CampaignRewindRequest,
   type CampaignTracker,
-  type GenerationRequest,
-  type GenerationRetryLatestRequest,
   PUBLIC_GENERATION_FAILURE_CODE,
   PUBLIC_GENERATION_FAILURE_MESSAGE,
   type PlayerCampaignConfig,
@@ -86,12 +83,8 @@ import {
 } from "./segmented-illustration-service.js";
 import { attributeGenerationCostsToTurn, recordProfileCost, turnReportedCosts } from "./cost-service.js";
 import { promptFromSnapshot, promptProtocolVersion, resolvePromptSnapshot } from "./prompt-library-service.js";
-import {
-  createGenerationCommandCompatibility,
-  safeTurnInput
-} from "./generation-command-compatibility.js";
+import { safeTurnInput } from "./turn-input-safety.js";
 import type { PromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
-import type { GenerationResult } from "../../../packages/contracts/src/client-api.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import {
   runTurnGenerationPhase,
@@ -101,23 +94,6 @@ import {
 import { loadOrNotFound } from "./service-helpers.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
-
-const generationCommandCompatibilities = new WeakMap<DatabasePool, ReturnType<typeof createGenerationCommandCompatibility>>();
-
-function generationCommandCompatibility(pool: DatabasePool) {
-  const existing = generationCommandCompatibilities.get(pool);
-  if (existing) return existing;
-  const repository = createPostgresGenerationCommandRepository(pool, {
-    resolvePromptSnapshot,
-    promptProtocolVersion,
-    readTurnReportedCosts: (ownerUserId, turnIds) => turnReportedCosts(pool, ownerUserId, [...turnIds])
-  });
-  const compatibility = createGenerationCommandCompatibility({ pool, repository, initialOwnerId });
-  generationCommandCompatibilities.set(pool, compatibility);
-  return compatibility;
-}
-
-export { safeTurnInput };
 
 function budgetTokenEstimate(text: string): number {
   return Math.max(estimateTokens(text), Math.ceil(text.length / 3));
@@ -325,35 +301,6 @@ export type OrchestrationInputs = {
   characterProfile: Record<string, unknown> | null;
   characterSnapshot: Record<string, unknown> | null;
 };
-
-// Task 10c moves these legacy delegates to API composition; Task 10e owns claim/execution removal.
-export async function enqueueGeneration(pool: DatabasePool, campaignId: string, request: GenerationRequest) {
-  return generationCommandCompatibility(pool).enqueueGeneration(campaignId, request);
-}
-
-export async function enqueueLatestReplacement(pool: DatabasePool, campaignId: string, request: GenerationRetryLatestRequest) {
-  return generationCommandCompatibility(pool).enqueueLatestReplacement(campaignId, request);
-}
-
-export async function getGenerationJob(pool: DatabasePool, jobId: string) {
-  return generationCommandCompatibility(pool).getGenerationJob(jobId);
-}
-
-export async function getGenerationResult(pool: DatabasePool, jobId: string): Promise<GenerationResult> {
-  return generationCommandCompatibility(pool).getGenerationResult(jobId);
-}
-
-export async function retryGeneration(pool: DatabasePool, jobId: string) {
-  return generationCommandCompatibility(pool).retryGeneration(jobId);
-}
-
-export async function cancelGeneration(pool: DatabasePool, jobId: string) {
-  return generationCommandCompatibility(pool).cancelGeneration(jobId);
-}
-
-export async function discardGeneration(pool: DatabasePool, jobId: string) {
-  return generationCommandCompatibility(pool).discardGeneration(jobId);
-}
 
 export async function syncPlayerCampaignConfig(pool: DatabasePool, campaignId: string, config: PlayerCampaignConfig) {
   const ownerUserId = await initialOwnerId(pool);

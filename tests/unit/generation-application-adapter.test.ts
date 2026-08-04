@@ -5,7 +5,6 @@ import {
   type GenerationApplicationAdapter,
   type GenerationHttpError
 } from "../../services/api/src/generation-application-adapter.js";
-import { mapGenerationApplicationError as mapCompatibilityGenerationApplicationError } from "../../services/api/src/generation-command-compatibility.js";
 import {
   GenerationApplicationError,
   type EnqueueGenerationResult,
@@ -157,7 +156,6 @@ describe("generation application adapter", () => {
     const mapped = mapGenerationApplicationError(applicationError);
 
     expect(errorSnapshot(mapped)).toEqual(expectedSnapshot(fixture));
-    expect(errorSnapshot(mapped)).toEqual(errorSnapshot(mapCompatibilityGenerationApplicationError(applicationError)));
   });
 
   test.each([
@@ -174,7 +172,6 @@ describe("generation application adapter", () => {
     const applicationError = new GenerationApplicationError(kind, details);
     const mapped = mapGenerationApplicationError(applicationError);
     expect(errorSnapshot(mapped)).toEqual({ name: "Error", message, statusCode, details: detailsOutput, hasTopLevelCode: false });
-    expect(errorSnapshot(mapped)).toEqual(errorSnapshot(mapCompatibilityGenerationApplicationError(applicationError)));
   });
 
   test("shares the active-generation diagnostic allowlist without exposing a top-level code", () => {

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
+import type { GenerationApplication } from "../../packages/application/src/index.js";
 import {
   apiErrorEnvelopeSchema,
   campaignBranchResponseSchema,
@@ -811,6 +812,37 @@ describe("client API route contracts without PostgreSQL", () => {
         expect(response.statusCode).toBe(path === "discard" ? 200 : 202);
         expect(generationActionResponseSchema.parse(response.json()).status).toBe(status);
       }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("uses the injected generation application with the server-resolved owner", async () => {
+    const calls: Array<{ ownerUserId: string; campaignId: string; action: string }> = [];
+    const enqueueAppend: GenerationApplication["enqueueAppend"] = async (scope, request) => {
+      calls.push({ ...scope, action: request.action });
+      return {
+        id: JOB_ID,
+        status: "queued" as const,
+        duplicate: false,
+        operationKind: "append" as const,
+        replacementTurnId: null
+      };
+    };
+    const generation = {
+      enqueueAppend
+    } as unknown as GenerationApplication;
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), generation }));
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/v1/campaigns/${CAMPAIGN_ID}/generations`,
+        headers: { "x-user-id": "99999999-9999-4999-8999-999999999999" },
+        payload: { action: "Open the dome.", providerProfileId: PROVIDER_ID, idempotencyKey: "injected-application-key" }
+      });
+
+      expect(response.statusCode).toBe(202);
+      expect(calls).toEqual([{ ownerUserId: OWNER_ID, campaignId: CAMPAIGN_ID, action: "Open the dome." }]);
     } finally {
       await app.close();
     }

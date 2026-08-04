@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { API } from "typescript/unstable/sync";
@@ -369,10 +369,12 @@ function repositoryEntries(rootDirectory) {
     { cwd: rootDirectory, encoding: "utf8" }
   );
 
-  return [...new Set(output.split(/\r?\n/u).filter(isBoundarySourceFile))].map((file) => ({
-    file,
-    text: readFileSync(path.join(rootDirectory, file), "utf8")
-  }));
+  return [...new Set(output.split(/\r?\n/u).filter(isBoundarySourceFile))]
+    .filter((file) => existsSync(path.join(rootDirectory, file)))
+    .map((file) => ({
+      file,
+      text: readFileSync(path.join(rootDirectory, file), "utf8")
+    }));
 }
 
 export function checkClientBoundaries(rootDirectory = process.cwd()) {

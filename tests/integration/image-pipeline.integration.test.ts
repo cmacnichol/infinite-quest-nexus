@@ -10,7 +10,8 @@ import { worldContentSchema, worldCreateSchema } from "../../packages/contracts/
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
-import { cancelGeneration, enqueueGeneration, getGenerationJob, runGenerationJob } from "../../services/api/src/generation-service.js";
+import { runGenerationJob } from "../../services/api/src/generation-service.js";
+import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
@@ -33,6 +34,29 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "synthetic-image-integration-secret";
 const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+async function generationCommands(pool: DatabasePool) {
+  const ownerUserId = await initialOwnerId(pool);
+  const application = createApiGenerationApplication(pool);
+  return {
+    enqueueGeneration: (campaignId: string, request: Parameters<typeof application.enqueueAppend>[1]) =>
+      application.enqueueAppend({ ownerUserId, campaignId }, request),
+    getGenerationJob: (jobId: string) => application.getJob({ ownerUserId, jobId }),
+    cancelGeneration: (jobId: string) => application.cancel({ ownerUserId, jobId })
+  };
+}
+
+async function enqueueGeneration(pool: DatabasePool, campaignId: string, request: Parameters<Awaited<ReturnType<typeof generationCommands>>["enqueueGeneration"]>[1]) {
+  return (await generationCommands(pool)).enqueueGeneration(campaignId, request);
+}
+
+async function getGenerationJob(pool: DatabasePool, jobId: string) {
+  return (await generationCommands(pool)).getGenerationJob(jobId);
+}
+
+async function cancelGeneration(pool: DatabasePool, jobId: string) {
+  return (await generationCommands(pool)).cancelGeneration(jobId);
+}
 
 function storyOutput() {
   return JSON.stringify({

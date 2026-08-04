@@ -2,14 +2,15 @@ import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { generationRequestSchema, generationRetryLatestRequestSchema, illustrationConfigSchema } from "../../packages/contracts/src/generation.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { setIllustrationConfig } from "../../services/api/src/image-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
-import { branchCampaign, cancelGeneration, enqueueGeneration, enqueueLatestReplacement, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, runGenerationJob, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
+import { branchCampaign, rewindCampaign, runGenerationJob, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
+import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/api/src/memory-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
@@ -25,6 +26,45 @@ import {
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "integration-test-credential-secret";
+
+async function generationCommands(pool: DatabasePool) {
+  const ownerUserId = await initialOwnerId(pool);
+  const application = createApiGenerationApplication(pool);
+  return {
+    enqueueGeneration: (campaignId: string, request: Parameters<typeof application.enqueueAppend>[1]) =>
+      application.enqueueAppend({ ownerUserId, campaignId }, request),
+    enqueueLatestReplacement: (campaignId: string, request: Parameters<typeof application.enqueueReplacement>[1]) =>
+      application.enqueueReplacement({ ownerUserId, campaignId }, request),
+    getGenerationJob: (jobId: string) => application.getJob({ ownerUserId, jobId }),
+    getGenerationResult: (jobId: string) => application.getResult({ ownerUserId, jobId }),
+    retryGeneration: (jobId: string) => application.retry({ ownerUserId, jobId }),
+    cancelGeneration: (jobId: string) => application.cancel({ ownerUserId, jobId })
+  };
+}
+
+async function enqueueGeneration(pool: DatabasePool, campaignId: string, request: Parameters<Awaited<ReturnType<typeof generationCommands>>["enqueueGeneration"]>[1]) {
+  return (await generationCommands(pool)).enqueueGeneration(campaignId, request);
+}
+
+async function enqueueLatestReplacement(pool: DatabasePool, campaignId: string, request: Parameters<Awaited<ReturnType<typeof generationCommands>>["enqueueLatestReplacement"]>[1]) {
+  return (await generationCommands(pool)).enqueueLatestReplacement(campaignId, request);
+}
+
+async function getGenerationJob(pool: DatabasePool, jobId: string) {
+  return (await generationCommands(pool)).getGenerationJob(jobId);
+}
+
+async function getGenerationResult(pool: DatabasePool, jobId: string) {
+  return (await generationCommands(pool)).getGenerationResult(jobId);
+}
+
+async function retryGeneration(pool: DatabasePool, jobId: string) {
+  return (await generationCommands(pool)).retryGeneration(jobId);
+}
+
+async function cancelGeneration(pool: DatabasePool, jobId: string) {
+  return (await generationCommands(pool)).cancelGeneration(jobId);
+}
 
 type MockReply = {
   content: string;

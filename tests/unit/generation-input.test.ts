@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { safeTurnInput } from "../../services/api/src/generation-service.js";
+import { safeTurnInput } from "../../services/api/src/turn-input-safety.js";
 
 describe("story generation turn input boundary", () => {
   it("accepts ordinary multiline fiction without treating formatting changes as mechanics removal", () => {
