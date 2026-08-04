@@ -1192,51 +1192,7 @@ async function completePortImageJob(
     allowPrivateHosts: result.allowPrivateArtifactHosts,
     maximumBytes: MAX_IMAGE_ARTIFACT_BYTES
   })));
-  const rawRequestedVariantIndex = job.provider_request_metadata.targetVariantIndex;
-  const requestedVariantIndex = Number(rawRequestedVariantIndex);
-  const hasRequestedVariant = rawRequestedVariantIndex !== null
-    && rawRequestedVariantIndex !== undefined
-    && Boolean(job.segment_id)
-    && Number.isInteger(requestedVariantIndex)
-    && requestedVariantIndex >= 0
-    && requestedVariantIndex <= 1;
-  const persistedAssets = [] as Array<Readonly<{ assetId: string }>>;
-  for (const image of downloaded) {
-    persistedAssets.push(job.target_type === "world_cover"
-      ? await assets.persistWorldCover({
-        ownerUserId: job.owner_user_id,
-        worldId: job.world_id!,
-        imageJobId: job.id,
-        bytes: image.bytes,
-        mimeType: image.mimeType
-      })
-      : await assets.persistTurnIllustration({
-        ownerUserId: job.owner_user_id,
-        campaignId: job.campaign_id!,
-        turnId: job.turn_id,
-        imageJobId: job.id,
-        bytes: image.bytes,
-        mimeType: image.mimeType
-      }));
-  }
-  for (const [artifactIndex, asset] of persistedAssets.entries()) {
-    if (job.segment_id) {
-      await assets.bindSegmentAsset({
-        ownerUserId: job.owner_user_id,
-        campaignId: job.campaign_id!,
-        turnId: job.turn_id,
-        segmentId: job.segment_id,
-        imageJobId: job.id,
-        assetId: asset.assetId,
-        variantIndex: hasRequestedVariant ? requestedVariantIndex : artifactIndex
-      });
-    }
-  }
-  const primary = persistedAssets[0]!;
-  const usageQuantity = Number(result.usage.quantity ?? result.usage.images ?? result.usage.image_count);
-  const persistedUsageQuantity = Number.isFinite(usageQuantity) && usageQuantity >= 0 ? usageQuantity : persistedAssets.length;
-  const usageUnit = String(result.usage.unit || "image").slice(0, 100);
-  const providerResponseId = String(result.metadata.responseId || job.remote_job_id || "");
+  let completedArtifactCount = 0;
   await withTransaction(pool, async (client) => {
     if (job.generation_job_id) {
       const parent = await client.query<{ status: string }>(
@@ -1245,6 +1201,51 @@ async function completePortImageJob(
       );
       if (!parent.rows[0] || !["assessing", "generating", "validating", "committing"].includes(parent.rows[0].status)) return;
     }
+    const lease = await client.query<{ lease_owner: string | null; status: ImageJobRow["status"] }>(
+      `SELECT lease_owner, status
+         FROM image_jobs
+        WHERE id = $1 AND owner_user_id = $2
+        FOR UPDATE`,
+      [job.id, job.owner_user_id]
+    );
+    if (lease.rows[0]?.lease_owner !== workerId || lease.rows[0]?.status !== "downloading") return;
+    const rawRequestedVariantIndex = job.provider_request_metadata.targetVariantIndex;
+    const requestedVariantIndex = Number(rawRequestedVariantIndex);
+    const hasRequestedVariant = rawRequestedVariantIndex !== null
+      && rawRequestedVariantIndex !== undefined
+      && Boolean(job.segment_id)
+      && Number.isInteger(requestedVariantIndex)
+      && requestedVariantIndex >= 0
+      && requestedVariantIndex <= 1;
+    const persistedAssets: Array<Readonly<{ assetId: string }>> = [];
+    for (const [artifactIndex, image] of downloaded.entries()) {
+      const variantIndex = hasRequestedVariant ? requestedVariantIndex + artifactIndex : artifactIndex;
+      persistedAssets.push(job.target_type === "world_cover"
+        ? await assets.persistWorldCover({
+          database: client,
+          ownerUserId: job.owner_user_id,
+          worldId: job.world_id!,
+          imageJobId: job.id,
+          variantIndex,
+          bytes: image.bytes,
+          mimeType: image.mimeType
+        })
+        : await assets.persistTurnIllustration({
+          database: client,
+          ownerUserId: job.owner_user_id,
+          campaignId: job.campaign_id!,
+          turnId: job.turn_id,
+          imageJobId: job.id,
+          variantIndex,
+          bytes: image.bytes,
+          mimeType: image.mimeType
+        }));
+    }
+    const primary = persistedAssets[0]!;
+    const usageQuantity = Number(result.usage.quantity ?? result.usage.images ?? result.usage.image_count);
+    const persistedUsageQuantity = Number.isFinite(usageQuantity) && usageQuantity >= 0 ? usageQuantity : persistedAssets.length;
+    const usageUnit = String(result.usage.unit || "image").slice(0, 100);
+    const providerResponseId = String(result.metadata.responseId || job.remote_job_id || "");
     const completed = await client.query<{ id: string }>(
       `UPDATE image_jobs SET status = 'completed', asset_id = $3,
          provider_response_id = COALESCE(NULLIF($10, ''), remote_job_id, provider_response_id),
@@ -1261,6 +1262,23 @@ async function completePortImageJob(
         providerResponseId, workerId]
     );
     if (!completed.rows[0]) return;
+    completedArtifactCount = persistedAssets.length;
+    if (job.segment_id) {
+      for (const [artifactIndex, asset] of persistedAssets.entries()) {
+        const variantIndex = hasRequestedVariant ? requestedVariantIndex + artifactIndex : artifactIndex;
+        const bound = await assets.bindSegmentAsset({
+          database: client,
+          ownerUserId: job.owner_user_id,
+          campaignId: job.campaign_id!,
+          turnId: job.turn_id,
+          segmentId: job.segment_id,
+          imageJobId: job.id,
+          assetId: asset.assetId,
+          variantIndex
+        });
+        if (!bound) throw Object.assign(new Error("Segment illustration asset provenance changed before completion."), { code: "segment_asset_provenance_lost" });
+      }
+    }
     if (job.campaign_id) {
       await costs.recordIllustrationCost(client, {
         ownerUserId: job.owner_user_id,
@@ -1270,7 +1288,7 @@ async function completePortImageJob(
         providerProfileId: job.provider_profile_id,
         providerType: job.provider_type || "unknown",
         requestedModel: job.requested_model,
-        operation: "image_generation",
+        operation: "illustration",
         usage: result.usage,
         reportedCost: result.reportedCost,
         responseId: providerResponseId
@@ -1309,7 +1327,7 @@ async function completePortImageJob(
   });
   logger.info({
     event: "image_provider_completed", imageJobId: job.id, providerType: job.provider_type,
-    remoteJobId: job.remote_job_id, stage: "completed", progress: 100, artifactCount: downloaded.length
+    remoteJobId: job.remote_job_id, stage: "completed", progress: 100, artifactCount: completedArtifactCount
   });
 }
 

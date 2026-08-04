@@ -238,7 +238,8 @@ export interface IllustrationCostPort {
     providerProfileId: string;
     providerType: string;
     requestedModel: string;
-    operation: "image_generation" | "prompt_refinement";
+    /** Stable provider_cost_events values retained for export/ledger compatibility. */
+    operation: "illustration" | "illustration_prompt_refinement";
     usage: Readonly<Record<string, unknown>>;
     reportedCost: Readonly<{ amount: string; currency: string }> | null;
     responseId: string;
@@ -248,21 +249,29 @@ export interface IllustrationCostPort {
 /** Temporary 14a -> 14e binding for durable asset persistence. */
 export interface IllustrationAssetPort {
   persistTurnIllustration(input: Readonly<{
+    /** Caller-owned transaction; asset and image-job completion must commit atomically. */
+    database: IllustrationTransactionContext;
     ownerUserId: string;
     campaignId: string;
     turnId: string | null;
     imageJobId: string;
+    variantIndex: number;
     bytes: Uint8Array;
     mimeType: string;
   }>): Promise<Readonly<{ assetId: string }>>;
   persistWorldCover(input: Readonly<{
+    /** Caller-owned transaction; asset and image-job completion must commit atomically. */
+    database: IllustrationTransactionContext;
     ownerUserId: string;
     worldId: string;
     imageJobId: string;
+    variantIndex: number;
     bytes: Uint8Array;
     mimeType: string;
   }>): Promise<Readonly<{ assetId: string }>>;
   bindSegmentAsset(input: Readonly<{
+    /** Caller-owned transaction; segment provenance follows the final job transition. */
+    database: IllustrationTransactionContext;
     ownerUserId: string;
     campaignId: string;
     turnId: string | null;

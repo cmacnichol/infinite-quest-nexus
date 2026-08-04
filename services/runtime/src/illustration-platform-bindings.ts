@@ -1,4 +1,4 @@
-import { withTransaction, type DatabasePool } from "../../../packages/database/src/pool.js";
+import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import type { IllustrationCostPort } from "../../../packages/application/src/index.js";
 import {
   callTextProvider,
@@ -86,7 +86,6 @@ export function createIllustrationPlatformBindings(
       }
     },
     assets: {
-      transaction: withTransaction,
       persistTurnImage,
       persistWorldCover
     }

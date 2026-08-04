@@ -635,6 +635,7 @@ describe("illustration application use cases", () => {
       maximumBytes: 20 * 1024 * 1024
     };
     const provisionalBinding: Parameters<IllustrationAssetPort["bindSegmentAsset"]>[0] = {
+      database: {},
       ownerUserId,
       campaignId,
       turnId: null,
@@ -644,10 +645,12 @@ describe("illustration application use cases", () => {
       variantIndex: 0
     };
     const provisionalAsset: Parameters<IllustrationAssetPort["persistTurnIllustration"]>[0] = {
+      database: {},
       ownerUserId,
       campaignId,
       turnId: null,
       imageJobId: jobId,
+      variantIndex: 0,
       bytes: new Uint8Array([1, 2, 3]),
       mimeType: "image/png"
     };

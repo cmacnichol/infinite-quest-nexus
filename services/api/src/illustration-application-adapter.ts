@@ -4,7 +4,8 @@ import type {
   IllustrationImageArtifact,
   IllustrationImageExecutionResult,
   IllustrationImageProviderPort,
-  IllustrationPromptRefinementPort
+  IllustrationPromptRefinementPort,
+  IllustrationTransactionContext
 } from "../../../packages/application/src/index.js";
 import {
   type DatabaseClient,
@@ -74,10 +75,6 @@ type IllustrationAssetGenerationContext = Readonly<{
 }>;
 
 export type AssetAdapterDependencies = Readonly<{
-  transaction<T>(
-    pool: DatabasePool,
-    work: (client: DatabaseClient) => Promise<T>,
-  ): Promise<T>;
   persistTurnImage(
     client: DatabaseClient,
     store: IllustrationAssetStore,
@@ -353,6 +350,7 @@ type AssetGenerationContextRow = Readonly<{
   aspect_ratio: string;
   quality: string;
   output_format: string;
+  segment_id: string | null;
 }>;
 
 async function loadAssetGenerationContext(
@@ -364,7 +362,7 @@ async function loadAssetGenerationContext(
   const result = await client.query<AssetGenerationContextRow>(
     `SELECT campaign_id, turn_id, world_id, target_type, prompt,
             provider_profile_id, provider_type, requested_model,
-            size, aspect_ratio, quality, output_format
+            size, aspect_ratio, quality, output_format, segment_id
        FROM image_jobs WHERE id = $1 AND owner_user_id = $2 FOR SHARE`,
     [imageJobId, ownerUserId],
   );
@@ -381,7 +379,7 @@ async function loadAssetGenerationContext(
   return {
     imageJobId,
     targetType: job.target_type,
-    variantIndex: 0,
+    segmentId: job.segment_id,
     prompt: job.prompt,
     providerProfileId: job.provider_profile_id,
     providerType: job.provider_type,
@@ -396,12 +394,13 @@ async function loadAssetGenerationContext(
 }
 
 export function createIllustrationAssetAdapter(
-  pool: DatabasePool,
+  _pool: DatabasePool,
   store: IllustrationAssetStore,
   dependencies: AssetAdapterDependencies,
 ): IllustrationAssetPort {
   return {
-    persistTurnIllustration: (input) => dependencies.transaction(pool, async (client) => {
+    persistTurnIllustration: async (input) => {
+      const client = input.database as DatabaseClient;
       const generationContext = await loadAssetGenerationContext(
         client,
         input.ownerUserId,
@@ -417,13 +416,14 @@ export function createIllustrationAssetAdapter(
         Buffer.from(input.bytes),
         input.mimeType,
         {
-          generationContext,
-          attachReference: input.turnId !== null
+          generationContext: { ...generationContext, variantIndex: input.variantIndex },
+          attachReference: generationContext.segmentId === null && input.variantIndex === 0
         },
       );
       return { assetId: asset.id };
-    }),
-    persistWorldCover: (input) => dependencies.transaction(pool, async (client) => {
+    },
+    persistWorldCover: async (input) => {
+      const client = input.database as DatabaseClient;
       const generationContext = await loadAssetGenerationContext(
         client,
         input.ownerUserId,
@@ -436,11 +436,12 @@ export function createIllustrationAssetAdapter(
         input.ownerUserId,
         Buffer.from(input.bytes),
         input.mimeType,
-        { generationContext },
+        { generationContext: { ...generationContext, variantIndex: input.variantIndex } },
       );
       return { assetId: asset.id };
-    }),
-    bindSegmentAsset: (input) => dependencies.transaction(pool, async (client) => {
+    },
+    bindSegmentAsset: async (input) => {
+      const client = input.database as DatabaseClient;
       const result = await client.query<{ bound: boolean }>(
         `INSERT INTO turn_illustration_segment_assets (
            segment_id, owner_user_id, asset_id, image_job_id, variant_index
@@ -471,7 +472,7 @@ export function createIllustrationAssetAdapter(
         ],
       );
       return result.rows[0]?.bound === true;
-    })
+    }
   };
 }
 

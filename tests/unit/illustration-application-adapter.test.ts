@@ -261,7 +261,7 @@ describe("illustration generation transaction adapter", () => {
 });
 
 describe("illustration asset adapter", () => {
-  it("persists provisional assets and binds them with owner/campaign/turn scope", async () => {
+  it("uses the caller-owned transaction and preserves variant/reference provenance", async () => {
     const assetId = "66666666-6666-4666-8666-666666666666";
     const query = vi.fn()
       .mockResolvedValueOnce({ rows: [{
@@ -280,7 +280,6 @@ describe("illustration asset adapter", () => {
       }] })
       .mockResolvedValueOnce({ rows: [{ bound: true }] });
     const client = { query } as unknown as DatabaseClient;
-    const transaction = vi.fn(async (_pool, work: (database: DatabaseClient) => Promise<unknown>) => work(client));
     const persistTurnImage = vi.fn(async () => ({ id: assetId }));
     const persistWorldCover = vi.fn(async () => ({ id: assetId }));
     const store = { root: "/tmp/illustration-assets" };
@@ -288,7 +287,6 @@ describe("illustration asset adapter", () => {
       {} as DatabasePool,
       store,
       {
-        transaction: transaction as never,
         persistTurnImage: persistTurnImage as never,
         persistWorldCover: persistWorldCover as never
       }
@@ -299,6 +297,8 @@ describe("illustration asset adapter", () => {
       campaignId,
       turnId: null,
       imageJobId: jobId,
+      database: client,
+      variantIndex: 1,
       bytes: new Uint8Array([1, 2, 3]),
       mimeType: "image/png"
     })).resolves.toEqual({ assetId });
@@ -315,7 +315,7 @@ describe("illustration asset adapter", () => {
         generationContext: {
           imageJobId: jobId,
           targetType: "streaming_illustration",
-          variantIndex: 0,
+          variantIndex: 1,
           prompt: "A moonlit observatory.",
           providerProfileId,
           providerType: "openai_compatible",
@@ -337,6 +337,7 @@ describe("illustration asset adapter", () => {
       segmentId,
       imageJobId: jobId,
       assetId,
+      database: client,
       variantIndex: 0
     })).resolves.toBe(true);
     expect(query).toHaveBeenCalledWith(expect.stringContaining("IS NOT DISTINCT FROM $4::uuid"), [
@@ -371,10 +372,6 @@ describe("illustration asset adapter", () => {
       {} as DatabasePool,
       { root: "/tmp/illustration-assets" },
       {
-        transaction: (async (
-          _pool: DatabasePool,
-          work: (database: DatabaseClient) => Promise<unknown>,
-        ) => work(client)) as never,
         persistTurnImage: persistTurnImage as never,
         persistWorldCover: vi.fn() as never
       }
@@ -385,6 +382,8 @@ describe("illustration asset adapter", () => {
       campaignId,
       turnId: null,
       imageJobId: jobId,
+      database: client,
+      variantIndex: 0,
       bytes: new Uint8Array([1, 2, 3]),
       mimeType: "image/png"
     })).rejects.toMatchObject({ statusCode: 404 });

@@ -35,6 +35,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "synthetic-image-integration-secret";
 const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+let imageArtifactPayloads = [tinyPng];
 
 async function generationCommands(pool: DatabasePool) {
   const ownerUserId = await initialOwnerId(pool);
@@ -139,7 +140,11 @@ integration("independent illustration pipeline", () => {
             return;
           }
           response.writeHead(200, { "content-type": "application/json" });
-          const body = JSON.stringify({ id: crypto.randomUUID(), data: [{ b64_json: tinyPng }], usage: { cost: 0.04 } });
+          const body = JSON.stringify({
+            id: crypto.randomUUID(),
+            data: imageArtifactPayloads.map((payload) => ({ b64_json: payload })),
+            usage: { cost: 0.04 }
+          });
           if (imageResponseBarrier) {
             imageResponseBarrier.signalStarted();
             void imageResponseBarrier.release.then(() => response.end(body));
@@ -310,6 +315,26 @@ integration("independent illustration pipeline", () => {
     ).then((result) => result.rows[0]!);
   }
 
+  async function completionWriteCounts(imageJobId: string) {
+    return pool.query<{ contexts: number; references: number; assets: number }>(
+      `SELECT
+         (SELECT count(*)::integer FROM asset_generation_contexts WHERE image_job_id = $1) AS contexts,
+         (SELECT count(*)::integer
+            FROM asset_references asset_refs
+            JOIN asset_generation_contexts contexts
+              ON contexts.asset_id = asset_refs.asset_id
+             AND contexts.owner_user_id = asset_refs.owner_user_id
+           WHERE contexts.image_job_id = $1) AS references,
+         (SELECT count(*)::integer
+            FROM assets
+            JOIN asset_generation_contexts contexts
+              ON contexts.asset_id = assets.id
+             AND contexts.owner_user_id = assets.owner_user_id
+           WHERE contexts.image_job_id = $1) AS assets`,
+      [imageJobId]
+    ).then((result) => result.rows[0]!);
+  }
+
   async function installInsertBarrier(table: string, predicate: string) {
     const suffix = crypto.randomUUID().replaceAll("-", "");
     const trigger = `hold_${table}_${suffix}`;
@@ -367,7 +392,8 @@ integration("independent illustration pipeline", () => {
       };
     });
     try {
-      const worker = runImageJob(pool, "stale-streaming-image-worker", 30, credentialSecret, { root: assetRoot });
+      const worker = createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot })
+        .runNextIllustration({ workerId: "stale-streaming-image-worker", leaseSeconds: 30 });
       await providerRequestStarted;
       await expect.poll(async () => getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "generating" });
       await expect(cancelGeneration(pool, generation.id)).resolves.toMatchObject({ status: "cancelled" });
@@ -378,6 +404,49 @@ integration("independent illustration pipeline", () => {
       releaseProviderResponse();
     }
     expect(await getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "cancelled", assetId: null });
+    expect(await completionWriteCounts(imageJob.rows[0]!.id)).toEqual({ contexts: 0, references: 0, assets: 0 });
+  });
+
+  it("does not persist typed completion artifacts after a replacement worker takes the lease", async () => {
+    const imported = await campaign();
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Fence the replaced image worker.", providerProfileId: textProviderId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const imageJob = await pool.query<{ id: string }>(
+      `INSERT INTO image_jobs (
+         owner_user_id, campaign_id, provider_profile_id, requested_model, prompt, prompt_hash,
+         status, provider_type, target_type, generation_job_id
+       ) VALUES ($1,$2,$3,'synthetic-image-model','A worker-fenced provisional scene.',
+                 'fenced-port-image','queued','openai_compatible','streaming_illustration',$4) RETURNING id`,
+      [ownerUserId, imported.campaignId, imageProviderId, generation.id]
+    );
+    let releaseProviderResponse!: () => void;
+    const providerRequestStarted = new Promise<void>((resolveStarted) => {
+      imageResponseBarrier = {
+        signalStarted: resolveStarted,
+        release: new Promise<void>((resolveRelease) => { releaseProviderResponse = resolveRelease; })
+      };
+    });
+    try {
+      const worker = createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot })
+        .runNextIllustration({ workerId: "lost-lease-port-image-worker", leaseSeconds: 30 });
+      await providerRequestStarted;
+      await expect.poll(async () => getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "generating" });
+      await pool.query(
+        "UPDATE image_jobs SET status = 'downloading', lease_owner = 'replacement-image-worker' WHERE id = $1",
+        [imageJob.rows[0]!.id]
+      );
+      releaseProviderResponse();
+      await expect(worker).resolves.toBe(true);
+    } finally {
+      imageResponseBarrier = null;
+      releaseProviderResponse();
+    }
+    expect(await getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "downloading", assetId: null });
+    expect(await completionWriteCounts(imageJob.rows[0]!.id)).toEqual({ contexts: 0, references: 0, assets: 0 });
+    await expect(cancelGeneration(pool, generation.id)).resolves.toMatchObject({ status: "cancelled" });
   });
 
   it("does not create provisional set or segment work after cancellation between streamed output and child delivery", async () => {
@@ -1207,13 +1276,13 @@ integration("independent illustration pipeline", () => {
     await expect(pool.query(
       `SELECT count(*)::int AS count
          FROM provider_cost_events
-        WHERE campaign_id = $1 AND operation = 'image_generation'`,
+        WHERE campaign_id = $1 AND operation = 'illustration'`,
       [imported.campaignId]
     )).resolves.toMatchObject({ rows: [{ count: created.segmentCount }] });
     await expect(pool.query(
       `SELECT count(*)::int AS count
          FROM provider_cost_events
-        WHERE campaign_id = $1 AND operation = 'prompt_refinement'`,
+        WHERE campaign_id = $1 AND operation = 'illustration_prompt_refinement'`,
       [imported.campaignId]
     )).resolves.toMatchObject({ rows: [{ count: 0 }] });
     const segments = await pool.query<{ direct_prompt: string; resolved_prompt: string; prompt: string }>(
@@ -1230,6 +1299,81 @@ integration("independent illustration pipeline", () => {
       expect(row.resolved_prompt).toContain("Mira, raising a lantern");
       expect(row.prompt).toContain("weathered purple coat");
       expect(row.prompt.match(/CANONICAL CHARACTER REFERENCE:/g)).toHaveLength(1);
+    }
+  });
+
+  it("keeps typed multi-artifact variant provenance without creating segment asset references", async () => {
+    const firstArtifact = await sharp({
+      create: { width: 2, height: 2, channels: 4, background: "#5d3fd3" }
+    }).png().toBuffer();
+    const secondArtifact = await sharp({
+      create: { width: 2, height: 2, channels: 4, background: "#d36f3f" }
+    }).png().toBuffer();
+    imageArtifactPayloads = [firstArtifact.toString("base64"), secondArtifact.toString("base64")];
+    try {
+      const imported = await campaign();
+      await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+        enabled: true,
+        sourcePolicy: "generate_only",
+        providerProfileId: imageProviderId,
+        model: "synthetic-image-model",
+        maxAttempts: 1,
+        segmentWordCount: 100,
+        imagesPerSegment: 2,
+        segmentPromptMode: "direct"
+      }));
+      const turn = await pool.query<{ id: string }>(
+        "SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number DESC LIMIT 1",
+        [imported.campaignId]
+      );
+      await pool.query(
+        "UPDATE turns SET narration = $2 WHERE id = $1",
+        [turn.rows[0]!.id, Array.from({ length: 160 }, () => "Lantern light crosses the moonlit observatory while silver rain gathers above the quiet valley.").join(" ")]
+      );
+      const created = await generateTurnIllustrationSegments(
+        pool,
+        turn.rows[0]!.id,
+        illustrationSegmentRequestSchema.parse({ mode: "missing" })
+      );
+      expect(created.segmentCount).toBeGreaterThan(0);
+      const worker = createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot });
+      for (let index = 0; index < created.segmentCount + 2; index += 1) {
+        if (!await worker.runNextIllustration({ workerId: `multi-artifact-worker-${crypto.randomUUID()}`, leaseSeconds: 30 })) break;
+      }
+      const job = await pool.query<{ id: string; segment_id: string }>(
+        `SELECT jobs.id, jobs.segment_id
+           FROM image_jobs jobs
+           JOIN turn_illustration_segments segments ON segments.id = jobs.segment_id
+          WHERE segments.turn_id = $1
+          ORDER BY jobs.created_at
+          LIMIT 1`,
+        [turn.rows[0]!.id]
+      );
+      expect(job.rows[0]).toBeTruthy();
+      expect(await getImageJob(pool, job.rows[0]!.id)).toMatchObject({ status: "completed", imageCount: 2 });
+      await expect(pool.query<{ variant_index: number }>(
+        "SELECT variant_index FROM asset_generation_contexts WHERE image_job_id = $1 ORDER BY variant_index",
+        [job.rows[0]!.id]
+      )).resolves.toMatchObject({ rows: [{ variant_index: 0 }, { variant_index: 1 }] });
+      await expect(pool.query<{ variant_index: number }>(
+        "SELECT variant_index FROM turn_illustration_segment_assets WHERE image_job_id = $1 ORDER BY variant_index",
+        [job.rows[0]!.id]
+      )).resolves.toMatchObject({ rows: [{ variant_index: 0 }, { variant_index: 1 }] });
+      await expect(pool.query<{ count: number }>(
+        `SELECT count(*)::integer AS count
+           FROM asset_references asset_refs
+           JOIN asset_generation_contexts contexts
+             ON contexts.asset_id = asset_refs.asset_id
+            AND contexts.owner_user_id = asset_refs.owner_user_id
+          WHERE contexts.image_job_id = $1`,
+        [job.rows[0]!.id]
+      )).resolves.toMatchObject({ rows: [{ count: 0 }] });
+      await expect(pool.query<{ operation: string }>(
+        "SELECT operation FROM provider_cost_events WHERE image_job_id = $1",
+        [job.rows[0]!.id]
+      )).resolves.toMatchObject({ rows: [{ operation: "illustration" }] });
+    } finally {
+      imageArtifactPayloads = [tinyPng];
     }
   });
 

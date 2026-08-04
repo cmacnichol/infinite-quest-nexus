@@ -1102,7 +1102,7 @@ export async function runIllustrationPromptJob(
           providerProfileId: claimed.provider_profile_id,
           providerType: profile.rows[0]?.provider_type || "unknown",
           requestedModel: claimed.requested_model,
-          operation: "prompt_refinement",
+          operation: "illustration_prompt_refinement",
           usage: portMetadata.usage && typeof portMetadata.usage === "object" ? portMetadata.usage as Record<string, unknown> : {},
           reportedCost: reported && typeof reported === "object"
             && typeof (reported as { amount?: unknown }).amount === "string"
