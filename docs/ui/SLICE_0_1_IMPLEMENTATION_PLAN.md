@@ -56,9 +56,10 @@ contradictory.
 
 ## Completion status
 
-Runtime implementation reviewed through `d76beb8` on branch
-`wip/main-uncommitted`. None of Track C is merged to `main` yet; `main` is at
-`ad73dc1` and does not contain this plan.
+Runtime implementation reviewed through `57147c7` and Task 12 operational
+documentation aligned through `8593e3e` on branch `wip/main-uncommitted`.
+None of Track C is merged to `main` yet; `main` is at `ad73dc1` and does not
+contain this plan.
 
 | Task | Package | Status | Evidence |
 |---|---|---|---|
@@ -83,7 +84,7 @@ Runtime implementation reviewed through `d76beb8` on branch
 | Task 13a-R | B4a corrective gate — scoped pages and replacement recovery | **Complete** | `5f156ac`, `1ae0dd1`; migration 0051; full check/build/unit/integration; scoped review/re-review clean |
 | Task 10 | B1 — generation application boundary | **Complete** | Final full-range approval of `885bcde..653c7c8`; completion audit `76c1a22`, correction `653c7c8`; Task 11 authorized 2026-08-04 |
 | Task 11 | B2 — notification-backed SSE delivery | **Complete** | `d76beb8`; scoped implementation review approved; focused 65/65, full unit 1,127/1,127, relevant real-PostgreSQL 56/56; notification-to-frame p95 7.812 ms |
-| Task 12 | B3 — worker concurrency and fair lanes | Not started | — |
+| Task 12 | B3 — worker concurrency and fair lanes | **Complete** | Implementation `312ebaa`, correction `57147c7`, docs `8593e3e`; scoped implementation review plus clean correction re-review; full unit 1,150/1,150, implementation full PostgreSQL 232/232, correction-relevant PostgreSQL 68/68; C0 concurrency 1/2/4 benchmark and duplicate-turn guard passed |
 | Task 13b | B4b — play-loop read profiling/optimization | Not started | — |
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | Not started | — |
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | Not started | — |
@@ -126,6 +127,47 @@ and confirmed exactly **one dedicated listener**. Measurements used Node
 24.18.0, pnpm 11.18.0, Docker Engine 29.7.0, and PostgreSQL 18.4 on Linux
 6.8.0-136-generic. The independent scoped reviewer approved Task 11. This block
 records Task 11 completion only; UI work remains blocked until Task 14f.
+
+**Current Task 12 verification (2026-08-04, complete; correction re-review
+approved).** Implementation commit `312ebaa` adds the frozen 1-4
+`WORKER_GENERATION_CONCURRENCY` setting, role-safe connection budgets,
+configurable story slots, and separately bounded illustration, Chronicle, and
+asset lanes. Scheduler passes retain the required generation → illustration →
+Chronicle → asset order, isolate lane failures, stop claims on shutdown, and
+drain active work without passing the scheduler signal into story execution.
+Compose and Swarm now provide a ten-minute worker stop grace. The existing
+runtime lifecycle already kept provider and database resources open through
+worker drain, so Task 12 characterized that ordering rather than changing it.
+
+The scoped implementation review found one Important issue: a poll wait that
+lost `Promise.race` to instant active work retained its timer and abort listener
+until interval expiry. The RED correction regression measured **25 outstanding
+listeners after 25 fast rotations**. Correction commit `57147c7` makes the race
+wait explicitly disposable and cleans it in `finally`; the focused correction
+re-review found no remaining Task 12 issue and the regression now passes without
+cross-rotation accumulation. Commit `8593e3e` records the concurrency, pool,
+shutdown, rolling-update, image-independence, benchmark, and C0 operating
+guidance in the deployment and testing documentation.
+
+Fresh post-correction verification passed `pnpm check`, `pnpm build`, the full
+unit suite (**1,150/1,150 across 95 files**), and the correction-relevant real-
+PostgreSQL generation/image suites (**68/68 across 2 files**). The implementation
+checkpoint also passed the full real-PostgreSQL suite (**232/232 across 20
+files**). `pjm precheck`, staged and unstaged diff checks, multi-replica slot
+fill, lease-reclaim/stale-worker fencing, image attempt exhaustion, and the
+duplicate-turn guard all passed.
+
+The final deterministic benchmark ran in a reported `targetSatisfied` C0 worker
+container (**2 vCPU / 4 GiB**), seed `task-12-c0-worker-v1`, with 5 warm-ups and
+30 measured samples per batch, 12 story jobs and 3 jobs per optional lane per
+sample. Selected mean/median throughput was **27.224131 / 27.315826 jobs/s** at
+concurrency 1, **50.264285 / 50.297259** at 2, and **83.736372 / 85.421612** at
+4. Database peak/active connections were **5/5, 6/6, and 8/8**; story peaks were
+**1, 2, and 4**, while every optional lane stayed at **1**. Concurrency 4's
+first-batch CV was **7.6185%**, so the required three-batch rerun executed and
+selected batch 0 by median throughput; the selected CV remains reported rather
+than concealed. Task 13b is the next backend checkpoint. UI work remains
+blocked until Task 14f explicitly authorizes U1.
 
 **Current Task 2a verification** (re-measured during the Task 2a completion
 review; the figures below replace an earlier stale count of 700 tests across 65
@@ -6203,26 +6245,26 @@ and notification load are included in concurrency evidence.
 - Create: `tests/unit/worker-concurrency.test.ts`
 - Test: `tests/integration/generation.integration.test.ts`
 
-- [ ] Add bounded `WORKER_GENERATION_CONCURRENCY` configuration with default 1
+- [x] Add bounded `WORKER_GENERATION_CONCURRENCY` configuration with default 1
   and an operationally safe documented maximum.
-- [ ] Size database pools and shutdown deadlines for configured concurrency.
-- [ ] Claim up to available generation slots without allowing two active jobs for
+- [x] Size database pools and shutdown deadlines for configured concurrency.
+- [x] Claim up to available generation slots without allowing two active jobs for
   one campaign.
-- [ ] Keep illustration, Chronicle, and asset work in independently bounded lanes
+- [x] Keep illustration, Chronicle, and asset work in independently bounded lanes
   so generation load cannot starve optional work and optional work cannot block
   story acceptance.
-- [ ] Keep story-text and illustration execution as separate provider concerns:
+- [x] Keep story-text and illustration execution as separate provider concerns:
   separate endpoint/profile credentials, model compatibility checks, health,
   retry limits, and per-lane concurrency. Never fall back from a missing image
   profile to the text provider or expose either provider's credential to the
   other lane.
-- [ ] Drain all active work on shutdown within the existing bounded lifecycle.
-- [ ] Add tests for slot refill, fair lanes, campaign exclusivity, abort, drain,
+- [x] Drain all active work on shutdown within the existing bounded lifecycle.
+- [x] Add tests for slot refill, fair lanes, campaign exclusivity, abort, drain,
   lease expiry, and multiple worker replicas.
-- [ ] Add tests proving story completion with images disabled, image endpoint
+- [x] Add tests proving story completion with images disabled, image endpoint
   unavailable, incompatible image models, exhausted image retries, and image
   failure after story validation. Image retry must not re-enqueue narration.
-- [ ] Benchmark concurrency 1, 2, and 4 against the test database and record
+- [x] Benchmark concurrency 1, 2, and 4 against the test database and record
   throughput, queue latency, database utilization, and provider limits.
 
 **Definition of done:** Throughput scales with configured slots/replicas without
