@@ -56,7 +56,7 @@ contradictory.
 
 ## Completion status
 
-Runtime implementation reviewed through `1ae0dd1` on branch
+Runtime implementation reviewed through `d76beb8` on branch
 `wip/main-uncommitted`. None of Track C is merged to `main` yet; `main` is at
 `ad73dc1` and does not contain this plan.
 
@@ -82,7 +82,7 @@ Runtime implementation reviewed through `1ae0dd1` on branch
 | Task 13a | B4a — bounded history and authoritative resume contracts | **Complete** | `b70844c`, `26cd735`, `6e5753d`; two scoped fix re-reviews clean; real-PostgreSQL 55-turn, recovery, and snapshot-race coverage |
 | Task 13a-R | B4a corrective gate — scoped pages and replacement recovery | **Complete** | `5f156ac`, `1ae0dd1`; migration 0051; full check/build/unit/integration; scoped review/re-review clean |
 | Task 10 | B1 — generation application boundary | **Complete** | Final full-range approval of `885bcde..653c7c8`; completion audit `76c1a22`, correction `653c7c8`; Task 11 authorized 2026-08-04 |
-| Task 11 | B2 — notification-backed SSE delivery | Not started | — |
+| Task 11 | B2 — notification-backed SSE delivery | **Complete** | `d76beb8`; scoped implementation review approved; focused 65/65, full unit 1,127/1,127, relevant real-PostgreSQL 56/56; notification-to-frame p95 7.812 ms |
 | Task 12 | B3 — worker concurrency and fair lanes | Not started | — |
 | Task 13b | B4b — play-loop read profiling/optimization | Not started | — |
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | Not started | — |
@@ -92,6 +92,40 @@ Runtime implementation reviewed through `1ae0dd1` on branch
 | Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
+
+**Current Task 11 verification (2026-08-04, complete; scoped review
+approved).** Commit `d76beb8395b2f437cd21bb9718922d41e654c091`
+replaces the fixed 350 ms SSE database polling loop with transaction-coupled
+PostgreSQL notification hints while preserving the existing SSE wire schema.
+Migration 0052 installs the versioned
+`infinitequest_generation_changed_v1` trigger path: notifications remain
+invisible before commit, arrive after commit, do not survive rollback, cover
+every SSE-visible `generation_jobs` transition, and remain silent for
+lease-heartbeat-only updates. The notification carries only `jobId` and an
+opaque version; every delivered frame still comes from a fresh authoritative,
+owner/campaign/job-scoped database read.
+
+Each `api` or `all` process owns one dedicated long-lived listener outside the
+request pool, with validated bounded payloads, in-memory authorized fan-out,
+bounded jittered reconnect, and re-`LISTEN`; `worker` and `migrate` construct no
+listener. The SSE route performs the required first scoped read, registration,
+and immediate second scoped read, then consumes wake-up hints plus one bounded
+15-second reconciliation cadence. Idle streams perform no former 350 ms query
+loop, and subscriptions close exactly once on terminal, client-close, error,
+and API-shutdown paths.
+
+Fresh verification passed: focused Task 11 units **65/65 across 5 files**,
+the full unit suite **1,127/1,127 across 94 files**, and the relevant real-
+PostgreSQL generation-event, migration, and generation suites **56/56 across 3
+files with zero skips**. `pnpm check`, `pjm precheck`, and diff checks also
+passed. A real Fastify/PostgreSQL SSE run measured **7.812 ms p95** across
+**20 samples** with a **10.066 ms maximum** and 23 authoritative job reads; an
+idle 500 ms interval added no reads. The fan-out test opened **8 simultaneous
+streams** against a request pool with **max 3**, observed no waiting checkout,
+and confirmed exactly **one dedicated listener**. Measurements used Node
+24.18.0, pnpm 11.18.0, Docker Engine 29.7.0, and PostgreSQL 18.4 on Linux
+6.8.0-136-generic. The independent scoped reviewer approved Task 11. This block
+records Task 11 completion only; UI work remains blocked until Task 14f.
 
 **Current Task 2a verification** (re-measured during the Task 2a completion
 review; the figures below replace an earlier stale count of 700 tests across 65
@@ -488,9 +522,10 @@ Work the following order:
 1. **Task 10 (B1)** — complete. The final independent reviewer approved the
    full `885bcde..653c7c8` range after the #0289 correction, so B1 now unblocks
    B2/B3/B4b/B5.
-2. **Task 11 (B2)** — **authorized and next.** Replace SSE database polling
-   with a notification port while preserving the C1a error-frame behavior. B2
-   establishes the final event-delivery topology used by B3 load evidence.
+2. **Task 11 (B2)** — **complete.** Commit `d76beb8` replaced SSE database
+   polling with the notification port while preserving the C1a error-frame
+   behavior. B2 establishes the final event-delivery topology used by B3 load
+   evidence.
 3. **Task 12 (B3)** — configurable worker concurrency and fair job lanes.
    Follows B2 and must finish before U1.
 4. **Task 13b (B4b)** — profiling, query/index optimization, and load evidence.
@@ -6113,16 +6148,16 @@ export interface GenerationEventPublisher {
 }
 ```
 
-- [ ] Emit a notification after committed job-state changes; never notify before
+- [x] Emit a notification after committed job-state changes; never notify before
   the transaction commits. Prefer issuing `pg_notify` inside the state-change
   transaction so PostgreSQL delivers it only on commit and no post-commit crash
   can lose the wake-up.
-- [ ] Use PostgreSQL `LISTEN/NOTIFY` as a wake-up hint, not authoritative state.
+- [x] Use PostgreSQL `LISTEN/NOTIFY` as a wake-up hint, not authoritative state.
   Validate a small notification payload (`jobId` plus a transition/version
   hint), then read the job row after each notification through the full
   owner/campaign/job scope. A notification payload never establishes ownership
   and never becomes an SSE response directly.
-- [ ] **Use exactly one dedicated, long-lived listener connection per API
+- [x] **Use exactly one dedicated, long-lived listener connection per API
   process and fan out to subscribers in memory.** A `LISTEN` connection must be
   checked out and held for its lifetime; taking one per SSE subscriber from the
   shared pool exhausts it at `max` concurrent viewers
@@ -6130,19 +6165,19 @@ export interface GenerationEventPublisher {
   regression rather than a fix — worse than the 350 ms loop it replaces. The
   listener connection is created outside the request pool, reconnects with
   backoff, and re-issues `LISTEN` on reconnect.
-- [ ] Add a test that opens more concurrent SSE subscribers than the configured
+- [x] Add a test that opens more concurrent SSE subscribers than the configured
   pool `max` and asserts that pool checkouts do not scale with subscriber count.
-- [ ] Send an initial snapshot immediately and perform a bounded 15-second
+- [x] Send an initial snapshot immediately and perform a bounded 15-second
   reconciliation read so dropped notifications cannot strand a client.
-- [ ] Preserve SSE frame schema, terminal closure, cancellation, ownership, and
+- [x] Preserve SSE frame schema, terminal closure, cancellation, ownership, and
   structured logging.
-- [ ] Perform the initial ownership-scoped read before registering the in-memory
+- [x] Perform the initial ownership-scoped read before registering the in-memory
   subscriber, close the subscription when that read is unauthorized/not found,
   and ensure fan-out keys cannot deliver a same-ID event across campaign or
   owner scope.
-- [ ] Test notification-before-subscribe races, reconnect, dropped notification,
+- [x] Test notification-before-subscribe races, reconnect, dropped notification,
   duplicate notification, API restart, terminal transition, and client close.
-- [ ] Record query counts and verify the fixed 350 ms loop is gone.
+- [x] Record query counts and verify the fixed 350 ms loop is gone.
 
 **Definition of done:** Idle SSE connections do not continuously query
 PostgreSQL, state delivery remains durable, and p95 notification-to-frame latency
