@@ -85,7 +85,7 @@ contain this plan.
 | Task 10 | B1 — generation application boundary | **Complete** | Final full-range approval of `885bcde..653c7c8`; completion audit `76c1a22`, correction `653c7c8`; Task 11 authorized 2026-08-04 |
 | Task 11 | B2 — notification-backed SSE delivery | **Complete** | `d76beb8`; scoped implementation review approved; focused 65/65, full unit 1,127/1,127, relevant real-PostgreSQL 56/56; notification-to-frame p95 7.812 ms |
 | Task 12 | B3 — worker concurrency and fair lanes | **Complete** | Implementation `312ebaa`, correction `57147c7`, docs `8593e3e`; scoped implementation review plus clean correction re-review; full unit 1,150/1,150, implementation full PostgreSQL 232/232, correction-relevant PostgreSQL 68/68; C0 concurrency 1/2/4 benchmark and duplicate-turn guard passed |
-| Task 13b | B4b — play-loop read profiling/optimization | Not started | — |
+| Task 13b | B4b — play-loop read profiling/optimization | **Complete** | Implementation `1d6b766`, correction `ff7f56e`; scoped review and correction re-review approved; full unit 1,156/1,156, full PostgreSQL 234/234, C0 read benchmark passed |
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | Not started | — |
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | Not started | — |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | Not started | — |
@@ -166,8 +166,37 @@ concurrency 1, **50.264285 / 50.297259** at 2, and **83.736372 / 85.421612** at
 **1, 2, and 4**, while every optional lane stayed at **1**. Concurrency 4's
 first-batch CV was **7.6185%**, so the required three-batch rerun executed and
 selected batch 0 by median throughput; the selected CV remains reported rather
-than concealed. Task 13b is the next backend checkpoint. UI work remains
+than concealed. Task 14a is the next backend checkpoint. UI work remains
 blocked until Task 14f explicitly authorizes U1.
+
+**Current Task 13b verification (2026-08-04, complete; scoped review and
+correction re-review approved).** Implementation commit `1d6b766` adds the
+repeatable play-loop benchmark, a pool/client-keyed `initialOwnerId` cache with
+rejected-promise eviction and real two-database isolation coverage, a one-query
+unchanged-sync fast path, and a bounded latest-turn lookup that removes the
+history fingerprint's all-ID aggregate sort. Public request/response schemas,
+cursor and sync-token formats, polling, and SSE behavior remain unchanged.
+Measured plans did not justify migration 0053: the history fingerprint moved
+from 1.028 ms / 330 shared-hit blocks to 0.584 ms / 251, while the sync query
+completed in 0.356 ms with no physical or temporary I/O. Avoiding a new index
+also avoids unmeasured write amplification on every accepted turn/job.
+
+Fresh verification passed `pnpm check`, `pnpm build`, the full unit suite
+(**1,156/1,156 across 96 files**), and the full real-PostgreSQL suite
+(**234/234 across 21 files**), plus `git diff --check` and `pjm precheck`.
+The final benchmark reported `targetSatisfied: true` in the C0 API profile
+(**2 vCPU / 4 GiB**), PostgreSQL 18.4, seed `task-13b-c0-play-loop-v1`, 5
+warm-ups, and 30 measured samples. Replacement sync p95 improved **31.1%**,
+unchanged sync p95 improved **29.8%** while dropping from six queries to one,
+and first/middle/last history p95 improved **20.9% / 18.1% / 17.6%**. The long
+fixture proved exact 50-turn first/middle/last and initial-sync windows with the
+expected first/last cursor boundaries; route query counts were stable at
+**1 / 2 / 6 / 1 / 5 / 1 / 2 / 7** for campaign list, dashboard, replacement
+sync, unchanged sync, each history page, polling, result, and initial hydration.
+Correction commit `ff7f56e` pins those exact per-sample counts and bounded-read
+facts rather than accepting only upper budgets. The independent scoped reviewer
+approved the implementation, and the correction re-review found no remaining
+Task 13b issue. Task 14a is next; no UI task is authorized before Task 14f.
 
 **Current Task 2a verification** (re-measured during the Task 2a completion
 review; the figures below replace an earlier stale count of 700 tests across 65
@@ -6643,21 +6672,21 @@ page limit, token shape, response field, or SSE/polling projection is a public
 contract finding that stops this task and returns to plan review; it is not an
 optimization hidden inside `packages/contracts`.
 
-- [ ] Seed small, 200-turn, and long-running campaign fixtures with realistic
+- [x] Seed small, 200-turn, and long-running campaign fixtures with realistic
   world/version, job, image, and Chronicle cardinalities.
-- [ ] Measure campaign list, campaign sync, turn history, generation status,
+- [x] Measure campaign list, campaign sync, turn history, generation status,
   generation result, and initial Story Player hydration using the C0 profile.
-- [ ] Capture query counts and `EXPLAIN (ANALYZE, BUFFERS)` plans for slow reads;
+- [x] Capture query counts and `EXPLAIN (ANALYZE, BUFFERS)` plans for slow reads;
   store summarized evidence, not environment-specific raw database dumps.
-- [ ] Add owner- and campaign-scoped indexes only where measured plans justify
+- [x] Add owner- and campaign-scoped indexes only where measured plans justify
   them. Verify write amplification and migration rollback implications.
-- [ ] Verify B4a's bounded turn/history and incremental-sync queries under the
+- [x] Verify B4a's bounded turn/history and incremental-sync queries under the
   seeded long-campaign profile; tune their page/window defaults only with
   recorded payload, query-count, and render evidence. Do not change their public
   cursor semantics in this task.
-- [ ] Remove measured N+1 reads and avoid returning columns or nested records the
+- [x] Remove measured N+1 reads and avoid returning columns or nested records the
   play loop does not consume.
-- [ ] **Memoize the owner-identity lookup.** `initialOwnerId`
+- [x] **Memoize the owner-identity lookup.** `initialOwnerId`
   (`packages/database/src/pool.ts`) issues
   `SELECT id FROM users WHERE system_key = 'initial-owner' AND status =
   'active'` on every call. At the 10c2 checkpoint there are **93** occurrences
@@ -6669,24 +6698,24 @@ optimization hidden inside `packages/contracts`.
   share an owner UUID. Delete only a rejected promise from the map so a later
   successful bootstrap can be observed; a resolved UUID has no invalidation in
   the pre-auth process lifetime.
-- [ ] Add owner-cache tests proving one query for concurrent and sequential
+- [x] Add owner-cache tests proving one query for concurrent and sequential
   calls on one pool, different UUIDs for two pools/databases, no cross-pool
   reuse, preserved `Initial user is not bootstrapped.` failure, retry after a
   failed lookup, and separately cached/correct behavior when a transaction
   client is deliberately distinct. Do not export a reset hook used only by
   tests.
-- [ ] Keep this cache explicitly limited to lookup of the stable
+- [x] Keep this cache explicitly limited to lookup of the stable
   `initial-owner` bridge. When interactive authentication arrives, request
   handlers receive the session-resolved internal `user_id` and must stop calling
   `initialOwnerId()` for authority; do not turn this cache into a map of
   caller-supplied identities. Bootstrap/administrative code that genuinely still
   needs the initial owner may retain the stable cache.
-- [ ] Add query-count assertions for deterministic routes and a seeded-data load
+- [x] Add query-count assertions for deterministic routes and a seeded-data load
   profile that reports p50, p95, payload bytes, error rate, PostgreSQL version,
   fixture cardinalities, warm-up/sample counts, and variance. Cover campaign
   list/dashboard, sync unchanged/replacement, first/middle/last history page,
   generation polling, result recovery, and initial Story Player hydration.
-- [ ] Treat the 10% regression budget as a guardrail, not proof of speed: record
+- [x] Treat the 10% regression budget as a guardrail, not proof of speed: record
   absolute baseline and post-change measurements and approve explicit targets
   after C0 evidence exists.
 
