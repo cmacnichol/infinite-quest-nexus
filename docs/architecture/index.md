@@ -23,6 +23,7 @@ Architecture decision records (ADRs) preserve consequential design decisions and
 - [ADR 0020: Retire the legacy player from the runtime](./0020-retire-legacy-player-runtime.md)
 - [ADR 0021: Typed turn input and optional intent classification](./0021-turn-input-intent-classification.md)
 - [ADR 0024: Central Prompt Library](./0024-central-prompt-library.md)
+- [Task 10 B1 generation boundary completion audit](../review/2026-08-03-task-10-b1-completion.md)
 
 ## World Library and characters
 

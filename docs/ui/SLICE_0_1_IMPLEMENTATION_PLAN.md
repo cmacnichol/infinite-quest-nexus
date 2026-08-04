@@ -6050,6 +6050,26 @@ integrity are unchanged; worker no longer imports the API generation service;
 and the only remaining cross-role exceptions are the five explicitly assigned
 to Task 14.
 
+**Current Task 10f verification (2026-08-04, independent review pending).**
+The complete frozen `885bcdeaa52a1c1286d044f34275c7cf40159bbb..4e3e701d2b1e1f5b2250c3d89875fd032b505966`
+range produced a 30-commit, 646,983-byte review package. The named completion
+report at `docs/review/2026-08-03-task-10-b1-completion.md` inventories every
+moved public function, proves server/durable-claim authority, compares HTTP,
+SSE, state, log, transaction, lease, prompt, provider, and shutdown behavior,
+and records the exact five Task 14 cross-role exceptions plus all 18 temporary
+generation-execution collaborators.
+
+Fresh verification passed on Node 24.18.0, pnpm 11.18.0, and PostgreSQL 18.4:
+focused Task 10 units **91/91 across 6 files**, focused real-PostgreSQL Task 10
+integrations **96/96 across 5 files**, `pnpm check` (**577 candidate files**),
+`pnpm build`, `pnpm test:unit` (**1,114/1,114 across 93 files**),
+`pnpm test:integration` (**222/222 across 19 files, zero skips**), and
+`git diff --check`. The Task 10a-10e checkpoint reviews are approved. The
+top-level Task 10 row deliberately remains `Not started`, the final two 10f
+checklist items remain open, and Task 11 is not authorized until a fresh
+independent full-range reviewer approves this audit and any blocking finding is
+resolved.
+
 ---
 
 ## Task 11 — B2: Replace SSE database polling with a notification port

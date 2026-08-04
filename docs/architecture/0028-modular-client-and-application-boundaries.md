@@ -67,17 +67,25 @@ specifier scanning remains an architectural guard, but is not treated as proof
 that the dependency compiles under client-core's platform-free TypeScript
 configuration.
 
-The following temporary worker-to-API imports are the complete transitional
-allowlist. New cross-role imports fail the check.
+Tasks 10a-10e completed the generation application cutover: API generation
+routes and the worker scheduler now depend on separate typed application use
+cases, and the worker no longer imports `generation-service.js`. The following
+five worker-to-API imports are the complete remaining transitional allowlist.
+New cross-role imports fail the check.
 
 | Import target | Removal work package |
 | --- | --- |
-| `generation-service.js` | Task 10 (B1) |
 | `asset-service.js` | Task 14 (B5) |
 | `illustration-resolution-service.js` | Task 14 (B5) |
 | `image-service.js` | Task 14 (B5) |
 | `memory-service.js` | Task 14 (B5) |
 | `segmented-illustration-service.js` | Task 14 (B5) |
+
+The frozen-range evidence, public-function disposition, behavior-parity
+comparison, ownership proof, and remaining collaborator inventory are recorded
+in [the Task 10 B1 completion audit](../review/2026-08-03-task-10-b1-completion.md).
+The implementation plan remains the authority for the independent Task 10f
+review gate and for when Task 11 may start.
 
 ## Performance comparison profile
 
