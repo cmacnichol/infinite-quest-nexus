@@ -1,7 +1,8 @@
 import type {
   ClaimedGeneration,
   GenerationClaimRepository,
-  GenerationExecutionRequest
+  GenerationExecutionRequest,
+  IllustrationGenerationTransactionPort
 } from "../../application/src/index.js";
 import {
   pendingEventTriggerSchema,
@@ -157,26 +158,7 @@ export type AcceptedGenerationCommitCollaborators = Readonly<{
     ownerUserId: string,
     campaignId: string
   ): Promise<string | null>;
-  loadStreamingIllustrationConfig(
-    client: DatabaseClient,
-    ownerUserId: string,
-    campaignId: string
-  ): Promise<unknown>;
-  promoteProvisionalSet(
-    client: DatabaseClient,
-    ownerUserId: string,
-    generationJobId: string,
-    turnId: string,
-    campaignId: string,
-    finalNarration: string,
-    config: unknown
-  ): Promise<unknown>;
-  enqueueAcceptedTurnIllustrationSegments(
-    client: DatabaseClient,
-    ownerUserId: string,
-    campaignId: string,
-    turnId: string
-  ): Promise<unknown>;
+  illustration: IllustrationGenerationTransactionPort;
   attributeGenerationCostsToTurn(
     client: DatabaseClient,
     ownerUserId: string,
@@ -533,35 +515,26 @@ async function commitAcceptedTurn(
   await client.query("SAVEPOINT accepted_turn_illustration_enqueue");
   try {
     if (job.streaming_segments_state?.provisionalSetId) {
-      const illustrationConfig = await collaborators.loadStreamingIllustrationConfig(
+      const illustrationConfig = await collaborators.illustration.loadStreamingIllustrationConfig(
         client,
-        job.owner_user_id,
-        job.campaign_id
+        { ownerUserId: job.owner_user_id, campaignId: job.campaign_id }
       ).catch(() => null);
       if (illustrationConfig) {
-        await collaborators.promoteProvisionalSet(
+        await collaborators.illustration.promoteProvisionalSet(
           client,
-          job.owner_user_id,
-          job.id,
-          turnId,
-          job.campaign_id,
-          story.narration,
-          illustrationConfig
+          { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, generationJobId: job.id, turnId },
+          { finalNarration: story.narration, config: illustrationConfig }
         );
       } else {
-        await collaborators.enqueueAcceptedTurnIllustrationSegments(
+        await collaborators.illustration.enqueueAcceptedTurnIllustrationSegments(
           client,
-          job.owner_user_id,
-          job.campaign_id,
-          turnId
+          { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId }
         );
       }
     } else {
-      await collaborators.enqueueAcceptedTurnIllustrationSegments(
+      await collaborators.illustration.enqueueAcceptedTurnIllustrationSegments(
         client,
-        job.owner_user_id,
-        job.campaign_id,
-        turnId
+        { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId }
       );
     }
     await client.query("RELEASE SAVEPOINT accepted_turn_illustration_enqueue");

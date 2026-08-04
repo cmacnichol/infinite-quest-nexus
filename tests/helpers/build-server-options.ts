@@ -1,10 +1,11 @@
 import type { BuildServerOptions } from "../../services/api/src/server.js";
 import type { GenerationEventSource } from "../../packages/application/src/index.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
+import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 
 export type ServerOptionsOverrides = Readonly<
   Pick<BuildServerOptions, "config" | "pool"> &
-  Partial<Pick<BuildServerOptions, "generation" | "generationEvents">>
+  Partial<Pick<BuildServerOptions, "generation" | "illustration" | "generationEvents">>
 >;
 
 const inertGenerationEvents: GenerationEventSource = {
@@ -33,6 +34,7 @@ export function serverOptions(overrides: ServerOptionsOverrides): BuildServerOpt
   return {
     ...overrides,
     generation: overrides.generation ?? createApiGenerationApplication(overrides.pool),
+    illustration: overrides.illustration ?? createApiIllustrationApplication(overrides.pool),
     generationEvents: overrides.generationEvents ?? inertGenerationEvents
   };
 }

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ClaimedGeneration } from "../../packages/application/src/index.js";
+import type {
+  ClaimedGeneration,
+  IllustrationGenerationTransactionPort
+} from "../../packages/application/src/index.js";
 import type { GenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import {
@@ -31,12 +34,14 @@ function rejectedCollaborators(): GenerationExecutionCollaborators {
     enqueueEmbeddingReindex: unexpected,
     rebuildCampaignMemories: unexpected,
     storeDerivedTurnMemories: unexpected,
-    loadStreamingIllustrationConfig: unexpected,
-    createProvisionalSet: unexpected,
-    createProvisionalSegment: unexpected,
-    promoteProvisionalSet: unexpected,
-    orphanProvisionalSet: unexpected,
-    enqueueAcceptedTurnIllustrationSegments: unexpected,
+    illustration: {
+      loadStreamingIllustrationConfig: unexpected,
+      createProvisionalSet: unexpected,
+      createProvisionalSegment: unexpected,
+      promoteProvisionalSet: unexpected,
+      orphanProvisionalSet: unexpected,
+      enqueueAcceptedTurnIllustrationSegments: unexpected
+    } as IllustrationGenerationTransactionPort,
     loadTextProvider: unexpected,
     resolvePromptSnapshot: unexpected,
     promptFromSnapshot: unexpectedSync,
@@ -90,7 +95,8 @@ describe("generation executor adapter", () => {
       leaseSeconds: 30,
       claim
     });
-    expect(Object.values(collaborators).every((operation) => !vi.mocked(operation).mock.calls.length)).toBe(true);
+    expect(collaborators.illustration.loadStreamingIllustrationConfig).not.toHaveBeenCalled();
+    expect(collaborators.illustration.createProvisionalSet).not.toHaveBeenCalled();
     expect(repository.renewLease).not.toHaveBeenCalled();
     expect(repository.markGenerating).not.toHaveBeenCalled();
     expect(repository.markFailed).not.toHaveBeenCalled();

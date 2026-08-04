@@ -4,10 +4,10 @@ import type { DatabaseClient, DatabasePool } from "../../packages/database/src/p
 import {
   createIllustrationArtifactDownloadAdapter,
   createIllustrationAssetAdapter,
-  createIllustrationGenerationTransactionPort,
   createIllustrationImageProviderAdapter,
   createIllustrationPromptRefinementAdapter
 } from "../../services/api/src/illustration-application-adapter.js";
+import { createIllustrationGenerationTransactionPort } from "../../services/runtime/src/illustration-repository-bindings.js";
 
 const ownerUserId = "11111111-1111-4111-8111-111111111111";
 const jobId = "22222222-2222-4222-8222-222222222222";
@@ -125,13 +125,19 @@ describe("illustration provider adapters", () => {
       reportedCost: null
     }));
     const recordProviderHealth = vi.fn(async () => undefined);
+    const buildRefinementInput = vi.fn((fictionText: string, storyContext: string) => (
+      `${fictionText}\n${storyContext}`
+    ));
+    const parseRefinedPrompt = vi.fn((content: string) => content);
     const adapter = createIllustrationPromptRefinementAdapter(
       {} as DatabasePool,
       "credential-secret",
       {
         loadTextProvider: loadTextProvider as never,
         callTextProvider: callTextProvider as never,
-        recordProviderHealth: recordProviderHealth as never
+        recordProviderHealth: recordProviderHealth as never,
+        buildRefinementInput,
+        parseRefinedPrompt
       }
     );
 
@@ -160,6 +166,13 @@ describe("illustration provider adapters", () => {
     });
     const refinementCall = callTextProvider.mock.calls[0] as unknown as [unknown, { input: string }];
     expect(refinementCall[1].input).toContain("A quiet night beneath a violet sky.");
+    expect(buildRefinementInput).toHaveBeenCalledWith(
+      "Moonlight fills the observatory.",
+      "A quiet night beneath a violet sky.",
+    );
+    expect(parseRefinedPrompt).toHaveBeenCalledWith(
+      "Moonlit observatory, silver lens, cinematic fantasy illustration",
+    );
     expect(recordProviderHealth).toHaveBeenCalledWith(
       expect.anything(), ownerUserId, providerProfileId, true
     );

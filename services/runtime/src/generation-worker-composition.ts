@@ -2,7 +2,8 @@ import {
   createGenerationWorkerApplication,
   type GenerationClaimRepository,
   type GenerationExecutor,
-  type GenerationWorkerApplication
+  type GenerationWorkerApplication,
+  type IllustrationApplication
 } from "../../../packages/application/src/index.js";
 import {
   createPostgresGenerationExecutionRepository,
@@ -18,15 +19,6 @@ import {
   type DerivedStoryMemory
 } from "../../api/src/memory-service.js";
 import { loadTextProvider } from "../../api/src/provider-service.js";
-import {
-  enqueueAcceptedTurnIllustrationSegments,
-  loadConfig as loadStreamingIllustrationConfig,
-  createProvisionalSet,
-  createProvisionalSegment,
-  promoteProvisionalSet,
-  orphanProvisionalSet,
-  type SegmentConfigRow
-} from "../../api/src/segmented-illustration-service.js";
 import {
   attributeGenerationCostsToTurn,
   recordProfileCost,
@@ -47,7 +39,7 @@ type WorkerGenerationRepository = GenerationClaimRepository & GenerationExecutio
 
 export type WorkerGenerationCompositionFactories = Readonly<{
   createRepository(pool: DatabasePool): WorkerGenerationRepository;
-  createCollaborators(): GenerationExecutionCollaborators;
+  createCollaborators(illustration: IllustrationApplication): GenerationExecutionCollaborators;
   createExecutor(dependencies: GenerationExecutorDependencies): GenerationExecutor;
   createApplication(dependencies: Readonly<{
     claims: GenerationClaimRepository;
@@ -55,7 +47,9 @@ export type WorkerGenerationCompositionFactories = Readonly<{
   }>): GenerationWorkerApplication;
 }>;
 
-export function createGenerationExecutionCollaborators(): GenerationExecutionCollaborators {
+export function createGenerationExecutionCollaborators(
+  illustration: IllustrationApplication,
+): GenerationExecutionCollaborators {
   return {
     autoEnableCampaignEmbeddingIfAvailable,
     buildContextPreview: (
@@ -95,48 +89,7 @@ export function createGenerationExecutionCollaborators(): GenerationExecutionCol
       ordinal,
       derived as DerivedStoryMemory
     ),
-    loadStreamingIllustrationConfig,
-    createProvisionalSet,
-    createProvisionalSegment: (
-      database,
-      ownerUserId,
-      campaignId,
-      generationJobId,
-      setId,
-      segment,
-      config,
-      visualReference
-    ) => createProvisionalSegment(
-      database,
-      ownerUserId,
-      campaignId,
-      generationJobId,
-      setId,
-      segment,
-      config as SegmentConfigRow,
-      visualReference
-    ),
-    promoteProvisionalSet: (
-      database,
-      ownerUserId,
-      generationJobId,
-      turnId,
-      campaignId,
-      narration,
-      config,
-      visualReference
-    ) => promoteProvisionalSet(
-      database,
-      ownerUserId,
-      generationJobId,
-      turnId,
-      campaignId,
-      narration,
-      config as SegmentConfigRow,
-      visualReference
-    ),
-    orphanProvisionalSet,
-    enqueueAcceptedTurnIllustrationSegments,
+    illustration: illustration.generation,
     loadTextProvider,
     resolvePromptSnapshot,
     promptFromSnapshot,
@@ -158,10 +111,11 @@ const productionFactories: WorkerGenerationCompositionFactories = {
 export function createWorkerGenerationApplication(
   pool: DatabasePool,
   credentialSecret: string,
+  illustration: IllustrationApplication,
   factories: WorkerGenerationCompositionFactories = productionFactories
 ): GenerationWorkerApplication {
   const repository = factories.createRepository(pool);
-  const collaborators = factories.createCollaborators();
+  const collaborators = factories.createCollaborators(illustration);
   const executor = factories.createExecutor({
     pool,
     repository,

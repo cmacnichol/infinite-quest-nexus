@@ -9,7 +9,7 @@ import { buildServer } from "../../services/api/src/server.js";
 import { serverOptions } from "../helpers/build-server-options.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
-import { runImageJob } from "../../services/api/src/image-service.js";
+import { runImageJob } from "../../services/runtime/src/illustration-image-job-adapter.js";
 import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";

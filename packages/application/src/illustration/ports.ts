@@ -1,5 +1,6 @@
 import type {
   AcceptedTurnIllustrationRequest,
+  AcceptedTurnIllustrationScope,
   CampaignIllustrationScope,
   CampaignIllustrationSegments,
   GenerationIllustrationScope,
@@ -59,7 +60,7 @@ export interface IllustrationJobRepository {
   ): Promise<QueuedIllustrationImageJob>;
   getLatestWorldCoverJob(scope: WorldIllustrationScope): Promise<IllustrationImageJob | null>;
   enqueueAcceptedTurnIllustration(
-    scope: TurnIllustrationScope,
+    scope: AcceptedTurnIllustrationScope,
     request: AcceptedTurnIllustrationRequest,
   ): Promise<string | null>;
   enqueueIllustration(
@@ -77,7 +78,7 @@ export interface IllustrationSegmentRepository {
     request: IllustrationSegmentRequest,
   ): Promise<IllustrationSegmentSetResult>;
   enqueueAcceptedTurnIllustrationSegments(
-    scope: TurnIllustrationScope,
+    scope: AcceptedTurnIllustrationScope,
   ): Promise<IllustrationSegmentSetResult | null>;
   previewIllustrationBackfill(
     scope: CampaignIllustrationScope,
@@ -158,7 +159,7 @@ export interface IllustrationGenerationTransactionPort {
   ): Promise<void>;
   enqueueAcceptedTurnIllustrationSegments(
     database: IllustrationTransactionContext,
-    scope: TurnIllustrationScope,
+    scope: AcceptedTurnIllustrationScope,
   ): Promise<IllustrationSegmentSetResult | null>;
 }
 

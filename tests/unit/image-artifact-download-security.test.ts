@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { downloadArtifact } from "../../services/api/src/image-service.js";
+import { downloadArtifact } from "../../services/runtime/src/illustration-image-job-adapter.js";
 
 const tinyPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",

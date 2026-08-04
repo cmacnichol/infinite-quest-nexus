@@ -9,7 +9,11 @@ import {
   persistWorldCover,
   type FilesystemAssetStore
 } from "../../api/src/asset-service.js";
-import { downloadArtifact } from "../../api/src/image-service.js";
+import { downloadArtifact } from "./illustration-image-job-adapter.js";
+import {
+  buildIllustrationRefinementInput,
+  parseRefinedPrompt
+} from "./illustration-segment-job-adapter.js";
 import {
   loadImageProvider,
   loadTextProvider,
@@ -49,7 +53,9 @@ export function createIllustrationPlatformBindings(
     promptRefinement: {
       loadTextProvider,
       callTextProvider,
-      recordProviderHealth
+      recordProviderHealth,
+      buildRefinementInput: buildIllustrationRefinementInput,
+      parseRefinedPrompt
     },
     artifactDownload: { downloadArtifact },
     assets: {

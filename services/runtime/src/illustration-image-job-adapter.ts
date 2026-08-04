@@ -26,11 +26,11 @@ import {
   type TextProviderProfile
 } from "../../../packages/story-engine/src/index.js";
 import { pinnedConnectOptions } from "../../../packages/story-engine/src/provider-transport.js";
-import { lockOriginalImages, persistTurnImage, persistWorldCover, type FilesystemAssetStore } from "./asset-service.js";
-import { loadImageProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
-import { recordProfileCost } from "./cost-service.js";
-import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
-import { loadOrNotFound } from "./service-helpers.js";
+import { lockOriginalImages, persistTurnImage, persistWorldCover, type FilesystemAssetStore } from "../../api/src/asset-service.js";
+import { loadImageProvider, recordProviderHealth, resolveEffectiveProviderId } from "../../api/src/provider-service.js";
+import { recordProfileCost } from "../../api/src/cost-service.js";
+import { promptFromSnapshot, resolvePromptSnapshot } from "../../api/src/prompt-library-service.js";
+import { loadOrNotFound } from "../../api/src/service-helpers.js";
 
 type IllustrationConfigRow = {
   enabled: boolean;

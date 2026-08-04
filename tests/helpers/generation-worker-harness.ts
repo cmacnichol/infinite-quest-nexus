@@ -1,6 +1,7 @@
 import type { GenerationWorkerApplication } from "../../packages/application/src/index.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { createWorkerGenerationApplication } from "../../services/runtime/src/generation-worker-composition.js";
+import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { startNextGeneration } from "../../services/worker/src/worker.js";
 
 const applications = new WeakMap<DatabasePool, Map<string, GenerationWorkerApplication>>();
@@ -18,7 +19,11 @@ function generationApplication(
   const existing = byCredential.get(credentialSecret);
   if (existing) return existing;
 
-  const application = createWorkerGenerationApplication(pool, credentialSecret);
+  const application = createWorkerGenerationApplication(
+    pool,
+    credentialSecret,
+    createApiIllustrationApplication(pool)
+  );
   byCredential.set(credentialSecret, application);
   return application;
 }

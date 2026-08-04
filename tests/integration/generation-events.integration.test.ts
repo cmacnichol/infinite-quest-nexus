@@ -17,6 +17,7 @@ import { generationStreamSnapshotSchema, type GenerationStreamSnapshot } from ".
 import { logger } from "../../packages/logger/src/index.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
+import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 
 const { Client } = pg;
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -301,6 +302,7 @@ integration("generation job notification delivery", () => {
       config: runtimeConfig(3),
       pool: countedPool,
       generation: createApiGenerationApplication(countedPool),
+      illustration: createApiIllustrationApplication(countedPool),
       generationEvents: source
     });
     let stream: Awaited<ReturnType<typeof openGenerationStream>> | undefined;
@@ -362,6 +364,7 @@ integration("generation job notification delivery", () => {
       config: runtimeConfig(3),
       pool: routePool,
       generation: createApiGenerationApplication(routePool),
+      illustration: createApiIllustrationApplication(routePool),
       generationEvents: source
     });
     const streams: Array<Awaited<ReturnType<typeof openGenerationStream>>> = [];

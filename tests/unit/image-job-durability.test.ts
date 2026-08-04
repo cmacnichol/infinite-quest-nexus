@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
-import { imageProviderFailureMetadata } from "../../services/api/src/image-service.js";
+import { imageProviderFailureMetadata } from "../../services/runtime/src/illustration-image-job-adapter.js";
 
 describe("durable asynchronous image jobs", () => {
   it("classifies provider destination denials as permanent image-job failures", () => {
@@ -16,7 +16,7 @@ describe("durable asynchronous image jobs", () => {
   });
 
   it("persists and resumes a provider workflow instead of submitting it twice", async () => {
-    const source = await readFile(resolve("services/api/src/image-service.ts"), "utf8");
+    const source = await readFile(resolve("services/runtime/src/illustration-image-job-adapter.ts"), "utf8");
 
     expect(source).toContain("idempotencyKey: `${job.id}:${job.generation_revision}`");
     expect(source).toContain("generation_revision = generation_revision + 1");
@@ -59,7 +59,7 @@ describe("durable asynchronous image jobs", () => {
 
   it("extends the durable queue with an owner-scoped world-cover target", async () => {
     const migration = await readFile(resolve("database/migrations/0030_world_cover_image_jobs.sql"), "utf8");
-    const source = await readFile(resolve("services/api/src/image-service.ts"), "utf8");
+    const source = await readFile(resolve("services/runtime/src/illustration-image-job-adapter.ts"), "utf8");
 
     expect(migration).toContain("target_type IN ('turn_illustration', 'world_cover')");
     expect(migration).toContain("image_jobs_one_active_world_cover_idx");
@@ -73,8 +73,8 @@ describe("durable asynchronous image jobs", () => {
 
   it("derives segment-scoped image work without mutating accepted turns", async () => {
     const migration = await readFile(resolve("database/migrations/0033_segmented_turn_illustrations.sql"), "utf8");
-    const imageService = await readFile(resolve("services/api/src/image-service.ts"), "utf8");
-    const segmentService = await readFile(resolve("services/api/src/segmented-illustration-service.ts"), "utf8");
+    const imageService = await readFile(resolve("services/runtime/src/illustration-image-job-adapter.ts"), "utf8");
+    const segmentService = await readFile(resolve("services/runtime/src/illustration-segment-job-adapter.ts"), "utf8");
 
     expect(migration).toContain("CREATE TABLE turn_illustration_sets");
     expect(migration).toContain("CREATE TABLE turn_illustration_segments");

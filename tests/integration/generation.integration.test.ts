@@ -7,11 +7,12 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { generationRequestSchema, generationRetryLatestRequestSchema, illustrationConfigSchema } from "../../packages/contracts/src/generation.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
-import { setIllustrationConfig } from "../../services/api/src/image-service.js";
+import { setIllustrationConfig } from "../../services/runtime/src/illustration-image-job-adapter.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { branchCampaign, rewindCampaign, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { createWorkerGenerationApplication } from "../../services/runtime/src/generation-worker-composition.js";
+import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { runWorker } from "../../services/worker/src/worker.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/api/src/memory-service.js";
@@ -443,11 +444,11 @@ integration("durable Story Engine integration", () => {
     };
     const workers = [
       runWorker(pool, schedulerConfig, controller.signal, {
-        generation: createWorkerGenerationApplication(pool, credentialSecret),
+        generation: createWorkerGenerationApplication(pool, credentialSecret, createApiIllustrationApplication(pool)),
         optionalLanes
       }),
       runWorker(pool, schedulerConfig, controller.signal, {
-        generation: createWorkerGenerationApplication(pool, credentialSecret),
+        generation: createWorkerGenerationApplication(pool, credentialSecret, createApiIllustrationApplication(pool)),
         optionalLanes
       })
     ];
@@ -485,7 +486,7 @@ integration("durable Story Engine integration", () => {
   it("reclaims a process-lost lease and fences the stale worker from a duplicate commit", async () => {
     const imported = await campaign();
     const job = await queue(imported.campaignId, "Recover this turn after simulated process loss.");
-    const lostWorker = createWorkerGenerationApplication(pool, credentialSecret);
+    const lostWorker = createWorkerGenerationApplication(pool, credentialSecret, createApiIllustrationApplication(pool));
     const lostClaim = await lostWorker.claimNext({ workerId: "process-lost-worker", leaseSeconds: 30 });
     expect(lostClaim).toMatchObject({ jobId: job.id, attempts: 1 });
     await pool.query(

@@ -23,10 +23,10 @@ import {
   containsMechanicsLanguage,
   logProviderTransportError
 } from "../../../packages/story-engine/src/index.js";
-import { recordProfileCost } from "./cost-service.js";
-import { insertImageJob } from "./image-service.js";
-import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
-import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
+import { recordProfileCost } from "../../api/src/cost-service.js";
+import { insertImageJob } from "./illustration-image-job-adapter.js";
+import { loadTextProvider, resolveEffectiveProviderId } from "../../api/src/provider-service.js";
+import { promptFromSnapshot, resolvePromptSnapshot } from "../../api/src/prompt-library-service.js";
 
 export type SegmentConfigRow = {
   enabled: boolean;

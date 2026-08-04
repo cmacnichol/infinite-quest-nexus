@@ -12,9 +12,9 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import {
   createIllustrationRepositoryFactories
-} from "../../services/api/src/illustration-application-adapter.js";
+} from "../../services/runtime/src/illustration-repository-bindings.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
-import { insertImageJob } from "../../services/api/src/image-service.js";
+import { insertImageJob } from "../../services/runtime/src/illustration-image-job-adapter.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;

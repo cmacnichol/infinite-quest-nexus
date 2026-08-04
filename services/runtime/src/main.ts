@@ -11,6 +11,10 @@ import {
 import { runRuntimeLifecycle } from "./lifecycle.js";
 import { createApiGenerationApplication } from "./generation-api-composition.js";
 import { createWorkerGenerationApplication } from "./generation-worker-composition.js";
+import {
+  createApiIllustrationApplication,
+  createWorkerIllustrationApplication
+} from "./illustration-composition.js";
 import { dispatchRuntimeRole } from "./runtime-role.js";
 import { createRuntimeGenerationEventSource } from "./generation-event-composition.js";
 
@@ -38,6 +42,12 @@ await runRuntimeLifecycle(config, abortController, {
     migrateDatabase,
     waitForDatabaseMigrations,
     createApiGeneration: createApiGenerationApplication,
+    createApiIllustration: createApiIllustrationApplication,
+    createWorkerIllustration: (pool, credentialSecret, assetStorageRoot) => createWorkerIllustrationApplication(
+      pool,
+      credentialSecret,
+      { root: assetStorageRoot }
+    ),
     createWorkerGeneration: createWorkerGenerationApplication,
     buildServer,
     runWorker

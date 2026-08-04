@@ -4,7 +4,7 @@ import {
   buildBriefIllustrationStoryContext,
   buildIllustrationRefinementInput,
   parseRefinedPrompt
-} from "../../services/api/src/segmented-illustration-service.js";
+} from "../../services/runtime/src/illustration-segment-job-adapter.js";
 
 describe("illustration segmentation", () => {
   it("keeps sentence boundaries within the configured word maximum", () => {

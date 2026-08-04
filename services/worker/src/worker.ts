@@ -1,16 +1,17 @@
 import { hostname } from "node:os";
-import type { GenerationWorkerApplication } from "../../../packages/application/src/index.js";
+import type {
+  GenerationWorkerApplication,
+  IllustrationWorkerApplication
+} from "../../../packages/application/src/index.js";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { runChronicleJob } from "../../api/src/memory-service.js";
-import { runImageJob } from "../../api/src/image-service.js";
-import { runIllustrationResolutionJob } from "../../api/src/illustration-resolution-service.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { runAssetMetadataBackfill } from "../../api/src/asset-service.js";
-import { runIllustrationPromptJob } from "../../api/src/segmented-illustration-service.js";
 
 export type WorkerDependencies = Readonly<{
   generation: GenerationWorkerApplication;
+  illustration?: IllustrationWorkerApplication;
   optionalLanes?: WorkerOptionalLanes;
 }>;
 
@@ -89,25 +90,17 @@ type ActiveLane = {
 function defaultOptionalLanes(
   pool: DatabasePool,
   config: RuntimeConfig,
-  workerId: string
+  workerId: string,
+  illustration: IllustrationWorkerApplication | undefined
 ): WorkerOptionalLanes {
+  if (!illustration) {
+    throw new Error("The worker role requires an illustration application when default optional lanes are enabled.");
+  }
   return {
-    async illustration() {
-      if (await runIllustrationPromptJob(
-        pool,
-        workerId,
-        config.workerLeaseSeconds,
-        config.credentialEncryptionKey
-      )) return true;
-      if (await runIllustrationResolutionJob(pool, workerId, config.workerLeaseSeconds)) return true;
-      return runImageJob(
-        pool,
-        workerId,
-        config.workerLeaseSeconds,
-        config.credentialEncryptionKey,
-        { root: config.assetStorageRoot }
-      );
-    },
+    illustration: () => illustration.runNextIllustration({
+      workerId,
+      leaseSeconds: config.workerLeaseSeconds
+    }),
     chronicle: () => runChronicleJob(
       pool,
       workerId,
@@ -144,14 +137,14 @@ export async function runWorker(
   pool: DatabasePool,
   config: RuntimeConfig,
   signal: AbortSignal,
-  { generation, optionalLanes: injectedOptionalLanes }: WorkerDependencies
+  { generation, illustration, optionalLanes: injectedOptionalLanes }: WorkerDependencies
 ): Promise<void> {
   const workerId = `${hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
   logger.info({ event: "worker_started", workerId });
 
   const activeGeneration = new Set<Promise<boolean>>();
   let generationNextEligibleAt = 0;
-  const optionalLanes = injectedOptionalLanes ?? defaultOptionalLanes(pool, config, workerId);
+  const optionalLanes = injectedOptionalLanes ?? defaultOptionalLanes(pool, config, workerId, illustration);
   const lanes: ActiveLane[] = [
     { name: "illustration", active: new Set(), nextEligibleAt: 0, run: optionalLanes.illustration },
     { name: "chronicle", active: new Set(), nextEligibleAt: 0, run: optionalLanes.chronicle },

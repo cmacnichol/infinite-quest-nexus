@@ -85,10 +85,7 @@ const ASSIGNMENT_OPERATOR_KINDS = new Set([
 // and names the work package that removes it; new cross-role imports fail.
 const CROSS_ROLE_IMPORT_ALLOWLIST = new Map([
   ["services/worker/src/worker.ts -> services/api/src/asset-service.js", "Task 14 (B5)"],
-  ["services/worker/src/worker.ts -> services/api/src/illustration-resolution-service.js", "Task 14 (B5)"],
-  ["services/worker/src/worker.ts -> services/api/src/image-service.js", "Task 14 (B5)"],
-  ["services/worker/src/worker.ts -> services/api/src/memory-service.js", "Task 14 (B5)"],
-  ["services/worker/src/worker.ts -> services/api/src/segmented-illustration-service.js", "Task 14 (B5)"]
+  ["services/worker/src/worker.ts -> services/api/src/memory-service.js", "Task 14 (B5)"]
 ]);
 
 function normalizedPath(file) {

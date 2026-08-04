@@ -25,13 +25,13 @@ vi.mock("../../services/api/src/asset-service.js", () => ({
 vi.mock("../../services/api/src/memory-service.js", () => ({
   runChronicleJob: lane.chronicle
 }));
-vi.mock("../../services/api/src/segmented-illustration-service.js", () => ({
+vi.mock("../../services/runtime/src/illustration-segment-job-adapter.js", () => ({
   runIllustrationPromptJob: lane.illustrationPrompt
 }));
-vi.mock("../../services/api/src/illustration-resolution-service.js", () => ({
+vi.mock("../../services/runtime/src/illustration-resolution-job-adapter.js", () => ({
   runIllustrationResolutionJob: lane.illustrationResolution
 }));
-vi.mock("../../services/api/src/image-service.js", () => ({
+vi.mock("../../services/runtime/src/illustration-image-job-adapter.js", () => ({
   runImageJob: lane.image
 }));
 vi.mock("../../packages/logger/src/index.js", () => ({ logger: log }));
@@ -58,6 +58,18 @@ function claim(jobId: string): ClaimedGeneration {
     operationKind: "append",
     replacementTurnId: null,
     attempts: 1
+  };
+}
+
+function optionalLanes() {
+  return {
+    async illustration() {
+      if (await lane.illustrationPrompt()) return true;
+      if (await lane.illustrationResolution()) return true;
+      return lane.image();
+    },
+    chronicle: lane.chronicle,
+    asset: lane.asset
   };
 }
 
@@ -89,7 +101,7 @@ describe("worker generation application adapter", () => {
     };
 
     let settled = false;
-    const running = runWorker(pool, config, controller.signal, { generation })
+    const running = runWorker(pool, config, controller.signal, { generation, optionalLanes: optionalLanes() })
       .finally(() => { settled = true; });
 
     await vi.waitFor(() => expect(generation.executeClaimed).toHaveBeenCalledOnce());
@@ -125,7 +137,7 @@ describe("worker generation application adapter", () => {
         })
     };
 
-    const running = runWorker(pool, config, controller.signal, { generation });
+    const running = runWorker(pool, config, controller.signal, { generation, optionalLanes: optionalLanes() });
 
     await vi.waitFor(() => expect(generation.executeClaimed).toHaveBeenCalledTimes(2));
     expect(generation.claimNext).toHaveBeenCalledTimes(2);
@@ -176,7 +188,7 @@ describe("worker generation application adapter", () => {
       executeClaimed: vi.fn(() => execution.promise)
     };
 
-    const running = runWorker(pool, config, controller.signal, { generation });
+    const running = runWorker(pool, config, controller.signal, { generation, optionalLanes: optionalLanes() });
     await vi.waitFor(() => expect(lane.image).toHaveBeenCalled());
 
     expect(calls.slice(0, 6)).toEqual([

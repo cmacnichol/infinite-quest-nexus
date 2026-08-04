@@ -11,7 +11,8 @@ import type {
   GenerationApplication,
   GenerationChanged,
   GenerationEventSource,
-  GenerationEventSubscription
+  GenerationEventSubscription,
+  IllustrationApplication
 } from "../../../packages/application/src/index.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import { createLoggerOptions, logger } from "../../../packages/logger/src/index.js";
@@ -113,16 +114,6 @@ import { createGenerationRouteLifecycle, type GenerationLifecycleLogContext } fr
 import { safeTurnInput } from "./turn-input-safety.js";
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "./campaign-state-service.js";
 import {
-  enqueueIllustration,
-  enqueueWorldCover,
-  getIllustrationConfig,
-  getImageJob,
-  getLatestWorldCoverJob,
-  listCampaignImageJobs,
-  retryImageJob,
-  setIllustrationConfig
-} from "./image-service.js";
-import {
   createCampaign,
   createWorld,
   deleteCampaign,
@@ -155,22 +146,14 @@ import { classifyTurnInput } from "./turn-intent-service.js";
 import { previewCampaignWorldTransfer, transferCampaignWorld } from "./campaign-transfer-service.js";
 import { applicationMetadata } from "./app-metadata.js";
 import { getDashboardStats } from "./dashboard-service.js";
-import { getTurnIllustrationResolution, rematchTurnIllustration } from "./illustration-resolution-service.js";
 import { installRequestSecurity } from "./request-security.js";
 import { registerArchiveRoutes } from "./archive-routes.js";
-import {
-  enqueueIllustrationBackfill,
-  generateTurnIllustrationSegments,
-  listCampaignIllustrationSegments,
-  previewIllustrationBackfill,
-  regenerateSegmentIllustration,
-  removeSegmentIllustrationVariant
-} from "./segmented-illustration-service.js";
 
 export type BuildServerOptions = {
   config: RuntimeConfig;
   pool: DatabasePool;
   generation: GenerationApplication;
+  illustration: IllustrationApplication;
   generationEvents: GenerationEventSource;
 };
 
@@ -325,7 +308,28 @@ async function generationLifecycleLogContext(
   return result.rows[0] || null;
 }
 
-export async function buildServer({ config, pool, generation, generationEvents }: BuildServerOptions): Promise<FastifyInstance> {
+export async function buildServer({ config, pool, generation, illustration, generationEvents }: BuildServerOptions): Promise<FastifyInstance> {
+  const illustrationTurnScope = async (turnId: string) => {
+    const ownerUserId = await initialOwnerId(pool);
+    const result = await pool.query<{ campaign_id: string }>(
+      "SELECT campaign_id FROM turns WHERE id = $1 AND owner_user_id = $2",
+      [turnId, ownerUserId]
+    );
+    const campaignId = result.rows[0]?.campaign_id;
+    if (!campaignId) throw Object.assign(new Error("Turn not found."), { statusCode: 404 });
+    return { ownerUserId, campaignId, turnId };
+  };
+  const illustrationSegmentScope = async (segmentId: string) => {
+    const ownerUserId = await initialOwnerId(pool);
+    const result = await pool.query<{ campaign_id: string; turn_id: string }>(
+      `SELECT campaign_id, turn_id FROM turn_illustration_segments
+        WHERE id = $1 AND owner_user_id = $2`,
+      [segmentId, ownerUserId]
+    );
+    const segment = result.rows[0];
+    if (!segment?.turn_id) throw Object.assign(new Error("Illustration segment not found."), { statusCode: 404 });
+    return { ownerUserId, campaignId: segment.campaign_id, turnId: segment.turn_id, segmentId };
+  };
   const app = Fastify({
     logger: createLoggerOptions(),
     bodyLimit: config.security.apiDefaultBodyLimitBytes,
@@ -1093,16 +1097,25 @@ export async function buildServer({ config, pool, generation, generationEvents }
   });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-config", async (request) => (
-    getIllustrationConfig(pool, uuidSchema.parse(request.params.campaignId))
+    illustration.getIllustrationConfig({
+      ownerUserId: await initialOwnerId(pool),
+      campaignId: uuidSchema.parse(request.params.campaignId)
+    })
   ));
 
   app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/cover", async (request, reply) => {
-    const job = await enqueueWorldCover(pool, uuidSchema.parse(request.params.worldId), worldCoverRequestSchema.parse(request.body));
+    const job = await illustration.enqueueWorldCover({
+      ownerUserId: await initialOwnerId(pool),
+      worldId: uuidSchema.parse(request.params.worldId)
+    }, worldCoverRequestSchema.parse(request.body));
     return reply.code(job.duplicate ? 200 : 202).send(job);
   });
 
   app.get<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/cover-job", async (request) => (
-    getLatestWorldCoverJob(pool, uuidSchema.parse(request.params.worldId))
+    illustration.getLatestWorldCoverJob({
+      ownerUserId: await initialOwnerId(pool),
+      worldId: uuidSchema.parse(request.params.worldId)
+    })
   ));
 
   app.put<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/cover-asset", async (request) => {
@@ -1112,47 +1125,56 @@ export async function buildServer({ config, pool, generation, generationEvents }
   });
 
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-config", async (request) => (
-    setIllustrationConfig(
-      pool,
-      uuidSchema.parse(request.params.campaignId),
+    illustration.setIllustrationConfig({
+      ownerUserId: await initialOwnerId(pool),
+      campaignId: uuidSchema.parse(request.params.campaignId)
+    },
       illustrationConfigSchema.parse(request.body)
     )
   ));
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/image-jobs", async (request) => ({
-    jobs: await listCampaignImageJobs(pool, uuidSchema.parse(request.params.campaignId))
+    jobs: await illustration.listCampaignImageJobs({
+      ownerUserId: await initialOwnerId(pool),
+      campaignId: uuidSchema.parse(request.params.campaignId)
+    })
   }));
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-segments", async (request) => (
-    listCampaignIllustrationSegments(pool, uuidSchema.parse(request.params.campaignId))
+    illustration.listCampaignIllustrationSegments({
+      ownerUserId: await initialOwnerId(pool),
+      campaignId: uuidSchema.parse(request.params.campaignId)
+    })
   ));
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-backfill/preview", async (request) => {
     const body = illustrationBackfillPreviewSchema.parse(request.body);
-    return previewIllustrationBackfill(pool, uuidSchema.parse(request.params.campaignId), body.mode);
+    return illustration.previewIllustrationBackfill({
+      ownerUserId: await initialOwnerId(pool),
+      campaignId: uuidSchema.parse(request.params.campaignId)
+    }, body);
   });
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-backfill", async (request, reply) => (
-    reply.code(202).send(await enqueueIllustrationBackfill(
-      pool,
-      uuidSchema.parse(request.params.campaignId),
+    reply.code(202).send(await illustration.enqueueIllustrationBackfill({
+      ownerUserId: await initialOwnerId(pool),
+      campaignId: uuidSchema.parse(request.params.campaignId)
+    },
       illustrationBackfillRequestSchema.parse(request.body)
     ))
   ));
 
   app.post<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustration-segments", async (request, reply) => {
-    const result = await generateTurnIllustrationSegments(
-      pool,
-      uuidSchema.parse(request.params.turnId),
+    const result = await illustration.generateTurnIllustrationSegments(
+      await illustrationTurnScope(uuidSchema.parse(request.params.turnId)),
       illustrationSegmentRequestSchema.parse(request.body)
     );
     return reply.code(result.duplicate ? 200 : 202).send(result);
   });
 
   app.post<{ Params: { segmentId: string } }>("/api/v1/illustration-segments/:segmentId/images", async (request, reply) => {
-    const result = await regenerateSegmentIllustration(
-      pool,
-      uuidSchema.parse(request.params.segmentId),
+    const result = await illustration.regenerateSegmentIllustration(
+      await illustrationSegmentScope(uuidSchema.parse(request.params.segmentId)),
       illustrationSegmentImageRequestSchema.parse(request.body)
     );
     return reply.code(result.duplicate ? 200 : 202).send(result);
@@ -1160,15 +1182,17 @@ export async function buildServer({ config, pool, generation, generationEvents }
 
   app.delete<{ Params: { segmentId: string; variantIndex: string } }>(
     "/api/v1/illustration-segments/:segmentId/images/:variantIndex",
-    async (request) => removeSegmentIllustrationVariant(
-      pool,
-      uuidSchema.parse(request.params.segmentId),
+    async (request) => illustration.removeSegmentIllustrationVariant(
+      await illustrationSegmentScope(uuidSchema.parse(request.params.segmentId)),
       z.coerce.number().int().min(0).max(1).parse(request.params.variantIndex)
     )
   );
 
   app.post<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustrations", async (request, reply) => {
-    const job = await enqueueIllustration(pool, uuidSchema.parse(request.params.turnId), illustrationRequestSchema.parse(request.body));
+    const job = await illustration.enqueueIllustration(
+      await illustrationTurnScope(uuidSchema.parse(request.params.turnId)),
+      illustrationRequestSchema.parse(request.body)
+    );
     return reply.code(job.duplicate ? 200 : 202).send(job);
   });
 
@@ -1179,21 +1203,31 @@ export async function buildServer({ config, pool, generation, generationEvents }
   });
 
   app.get<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustration-resolution", async (request, reply) => {
-    const resolution = await getTurnIllustrationResolution(pool, uuidSchema.parse(request.params.turnId));
+    const resolution = await illustration.getTurnIllustrationResolution(
+      await illustrationTurnScope(uuidSchema.parse(request.params.turnId))
+    );
     if (!resolution) return reply.code(404).send({ error: "Not found" });
     return resolution;
   });
 
   app.post<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustration-match", async (request, reply) => (
-    reply.code(202).send(await rematchTurnIllustration(pool, uuidSchema.parse(request.params.turnId)))
+    reply.code(202).send(await illustration.rematchTurnIllustration(
+      await illustrationTurnScope(uuidSchema.parse(request.params.turnId))
+    ))
   ));
 
   app.get<{ Params: { jobId: string } }>("/api/v1/image-jobs/:jobId", async (request) => (
-    getImageJob(pool, uuidSchema.parse(request.params.jobId))
+    illustration.getImageJob({
+      ownerUserId: await initialOwnerId(pool),
+      jobId: uuidSchema.parse(request.params.jobId)
+    })
   ));
 
   app.post<{ Params: { jobId: string } }>("/api/v1/image-jobs/:jobId/retry", async (request, reply) => (
-    reply.code(202).send(await retryImageJob(pool, uuidSchema.parse(request.params.jobId)))
+    reply.code(202).send(await illustration.retryImageJob({
+      ownerUserId: await initialOwnerId(pool),
+      jobId: uuidSchema.parse(request.params.jobId)
+    }))
   ));
 
   app.get<{ Params: { assetId: string } }>("/api/v1/assets/:assetId", async (request, reply) => {

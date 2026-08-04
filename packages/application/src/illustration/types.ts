@@ -24,6 +24,10 @@ export type TurnIllustrationScope = CampaignIllustrationScope & Readonly<{
   turnId: string;
 }>;
 
+export type AcceptedTurnIllustrationScope = CampaignIllustrationScope & Readonly<{
+  turnId: string;
+}>;
+
 export type SegmentIllustrationScope = TurnIllustrationScope & Readonly<{
   segmentId: string;
 }>;

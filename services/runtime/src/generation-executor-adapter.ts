@@ -1,4 +1,8 @@
-import type { GenerationExecutor } from "../../../packages/application/src/index.js";
+import type {
+  GenerationExecutor,
+  IllustrationGenerationTransactionPort,
+  StreamingIllustrationConfig
+} from "../../../packages/application/src/index.js";
 import {
   PUBLIC_GENERATION_FAILURE_CODE,
   PUBLIC_GENERATION_FAILURE_MESSAGE,
@@ -70,10 +74,6 @@ type GenerationTextProvider = TextProviderProfile & {
   name: string;
 };
 
-type StreamingIllustrationConfig = Record<string, unknown> & {
-  segment_word_count: number;
-};
-
 type GenerationContextPreview = {
   campaign: {
     id: string;
@@ -134,57 +134,7 @@ export type GenerationExecutionCollaborators = Readonly<{
     ordinal: number,
     derived: unknown
   ): Promise<void>;
-  loadStreamingIllustrationConfig(
-    database: DatabaseClient | DatabasePool,
-    ownerUserId: string,
-    campaignId: string
-  ): Promise<StreamingIllustrationConfig>;
-  createProvisionalSet(
-    database: DatabaseClient | DatabasePool,
-    ownerUserId: string,
-    campaignId: string,
-    generationJobId: string,
-    visualReference?: string
-  ): Promise<string | null>;
-  createProvisionalSegment(
-    database: DatabaseClient | DatabasePool,
-    ownerUserId: string,
-    campaignId: string,
-    generationJobId: string,
-    setId: string,
-    segment: {
-      ordinal: number;
-      startOffset: number;
-      endOffset: number;
-      startWord: number;
-      endWord: number;
-      wordCount: number;
-      text: string;
-    },
-    config: StreamingIllustrationConfig,
-    visualReference?: string
-  ): Promise<boolean>;
-  promoteProvisionalSet(
-    database: DatabaseClient | DatabasePool,
-    ownerUserId: string,
-    generationJobId: string,
-    turnId: string,
-    campaignId: string,
-    finalNarration: string,
-    config: StreamingIllustrationConfig,
-    visualReference?: string
-  ): Promise<unknown>;
-  orphanProvisionalSet(
-    database: DatabaseClient | DatabasePool,
-    ownerUserId: string,
-    generationJobId: string
-  ): Promise<unknown>;
-  enqueueAcceptedTurnIllustrationSegments(
-    client: DatabaseClient,
-    ownerUserId: string,
-    campaignId: string,
-    turnId: string
-  ): Promise<unknown>;
+  illustration: IllustrationGenerationTransactionPort;
   loadTextProvider(
     pool: DatabasePool,
     ownerUserId: string,
@@ -868,15 +818,14 @@ async function executeLoadedGeneration(
     const { storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults } = promptPreparation;
 
     const streamingIllustration = await phase("streaming_illustration_setup", async () => {
-      const illustrationConfig = await collaborators.loadStreamingIllustrationConfig(
+      const illustrationConfig = await collaborators.illustration.loadStreamingIllustrationConfig(
         pool,
-        job.owner_user_id,
-        job.campaign_id
+        { ownerUserId: job.owner_user_id, campaignId: job.campaign_id }
       ).catch(() => null);
       return {
         illustrationConfig,
         segmentTracker: illustrationConfig
-          ? new StreamingSegmentTracker(illustrationConfig.segment_word_count)
+          ? new StreamingSegmentTracker(illustrationConfig.segmentWordCount)
           : null
       };
     });
@@ -935,12 +884,10 @@ async function executeLoadedGeneration(
         const newSegments = segmentTracker.detectNewSegments(narration);
         for (const segment of newSegments) {
           if (!provisionalSetId) {
-            provisionalSetId = await collaborators.createProvisionalSet(
+            provisionalSetId = await collaborators.illustration.createProvisionalSet(
               pool,
-              job.owner_user_id,
-              job.campaign_id,
-              job.id,
-              characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
+              { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, generationJobId: job.id },
+              { visualReference: characterVisualReference(inputs.characterProfile, inputs.characterSnapshot) }
             );
             if (!provisionalSetId) {
               throw Object.assign(new Error(
@@ -957,15 +904,19 @@ async function executeLoadedGeneration(
             );
             job.streaming_segments_state = streamingState;
           }
-          await collaborators.createProvisionalSegment(
+          await collaborators.illustration.createProvisionalSegment(
             pool,
-            job.owner_user_id,
-            job.campaign_id,
-            job.id,
-            provisionalSetId,
-            segment,
-            illustrationConfig,
-            characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
+            {
+              ownerUserId: job.owner_user_id,
+              campaignId: job.campaign_id,
+              generationJobId: job.id,
+              setId: provisionalSetId
+            },
+            {
+              segment,
+              config: illustrationConfig,
+              visualReference: characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
+            }
           );
         }
         if (!singleSectionDetected && isNarrationFieldComplete(accumulated)
@@ -974,15 +925,13 @@ async function executeLoadedGeneration(
           singleSectionDetected = true;
           if (!isIllustrationSegmentEligible(
             { wordCount: segmentTracker.accumulatedWordCount },
-            illustrationConfig.segment_word_count
+            illustrationConfig.segmentWordCount
           )) return;
           if (!provisionalSetId) {
-            provisionalSetId = await collaborators.createProvisionalSet(
+            provisionalSetId = await collaborators.illustration.createProvisionalSet(
               pool,
-              job.owner_user_id,
-              job.campaign_id,
-              job.id,
-              characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
+              { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, generationJobId: job.id },
+              { visualReference: characterVisualReference(inputs.characterProfile, inputs.characterSnapshot) }
             );
             if (!provisionalSetId) {
               throw Object.assign(new Error(
@@ -999,23 +948,27 @@ async function executeLoadedGeneration(
             );
             job.streaming_segments_state = streamingState;
           }
-          await collaborators.createProvisionalSegment(
+          await collaborators.illustration.createProvisionalSegment(
             pool,
-            job.owner_user_id,
-            job.campaign_id,
-            job.id,
-            provisionalSetId,
             {
-              ordinal: 0,
-              startWord: 0,
-              endWord: segmentTracker.accumulatedWordCount,
-              startOffset: 0,
-              endOffset: narration.length,
-              wordCount: segmentTracker.accumulatedWordCount,
-              text: narration
+              ownerUserId: job.owner_user_id,
+              campaignId: job.campaign_id,
+              generationJobId: job.id,
+              setId: provisionalSetId
             },
-            illustrationConfig,
-            characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
+            {
+              segment: {
+                ordinal: 0,
+                startWord: 0,
+                endWord: segmentTracker.accumulatedWordCount,
+                startOffset: 0,
+                endOffset: narration.length,
+                wordCount: segmentTracker.accumulatedWordCount,
+                text: narration
+              },
+              config: illustrationConfig,
+              visualReference: characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
+            }
           );
         }
       } catch {
@@ -1385,9 +1338,7 @@ async function executeLoadedGeneration(
       rebuildCampaignMemories: collaborators.rebuildCampaignMemories,
       storeDerivedTurnMemories: collaborators.storeDerivedTurnMemories,
       enqueueEmbeddingReindex: collaborators.enqueueEmbeddingReindex,
-      loadStreamingIllustrationConfig: collaborators.loadStreamingIllustrationConfig,
-      promoteProvisionalSet: collaborators.promoteProvisionalSet,
-      enqueueAcceptedTurnIllustrationSegments: collaborators.enqueueAcceptedTurnIllustrationSegments,
+      illustration: collaborators.illustration,
       attributeGenerationCostsToTurn: collaborators.attributeGenerationCostsToTurn
     };
     const { turnId } = await phase("turn_commit", () => repository.commitAcceptedTurn({
@@ -1446,7 +1397,11 @@ async function executeLoadedGeneration(
     }
     if (job.streaming_segments_state?.provisionalSetId) {
       try {
-        await collaborators.orphanProvisionalSet(pool, job.owner_user_id, job.id);
+        await collaborators.illustration.orphanProvisionalSet(pool, {
+          ownerUserId: job.owner_user_id,
+          campaignId: job.campaign_id,
+          generationJobId: job.id
+        });
       } catch {
         // Provisional cleanup failure cannot replace the generation result.
       }

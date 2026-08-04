@@ -2,8 +2,8 @@ import type { DatabaseClient, DatabasePool } from "../../../packages/database/sr
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { containsMechanicsLanguage } from "../../../packages/story-engine/src/index.js";
-import { enqueueIllustration } from "./image-service.js";
-import { enqueueSegmentProviderImage } from "./segmented-illustration-service.js";
+import { enqueueIllustration } from "./illustration-image-job-adapter.js";
+import { enqueueSegmentProviderImage } from "./illustration-segment-job-adapter.js";
 
 const MATCH_ALGORITHM_VERSION = "library-match-v1";
 const THRESHOLDS = { strict: 0.68, balanced: 0.52, broad: 0.38 } as const;

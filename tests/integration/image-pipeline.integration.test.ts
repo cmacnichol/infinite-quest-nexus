@@ -12,11 +12,11 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
-import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, retryImageJob, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
+import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, retryImageJob, runImageJob, setIllustrationConfig } from "../../services/runtime/src/illustration-image-job-adapter.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { listAssets, persistOriginalImage, queryAssets, readAssetDerivative, runAssetMetadataBackfill, selectTurnIllustration, selectWorldCover, updateAssetMetadata } from "../../services/api/src/asset-service.js";
-import { getTurnIllustrationResolution, runIllustrationResolutionJob } from "../../services/api/src/illustration-resolution-service.js";
+import { getTurnIllustrationResolution, runIllustrationResolutionJob } from "../../services/runtime/src/illustration-resolution-job-adapter.js";
 import {
   createProvisionalSegment,
   createProvisionalSet,
@@ -25,7 +25,7 @@ import {
   loadConfig,
   previewIllustrationBackfill,
   runIllustrationPromptJob
-} from "../../services/api/src/segmented-illustration-service.js";
+} from "../../services/runtime/src/illustration-segment-job-adapter.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 import { createWorld, getWorld } from "../../services/api/src/world-service.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";

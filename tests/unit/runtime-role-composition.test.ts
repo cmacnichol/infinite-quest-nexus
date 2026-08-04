@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   GenerationApplication,
   GenerationEventSource,
-  GenerationWorkerApplication
+  GenerationWorkerApplication,
+  IllustrationApplication,
+  IllustrationWorkerApplication
 } from "../../packages/application/src/index.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
@@ -14,6 +16,8 @@ import {
 const pool = {} as DatabasePool;
 const apiGeneration = { kind: "api-generation" } as unknown as GenerationApplication;
 const workerGeneration = { kind: "worker-generation" } as unknown as GenerationWorkerApplication;
+const illustration = { kind: "illustration" } as unknown as IllustrationApplication;
+const workerIllustration = { kind: "worker-illustration" } as unknown as IllustrationWorkerApplication;
 const generationEvents = { kind: "generation-events" } as unknown as GenerationEventSource;
 
 function config(role: RuntimeConfig["role"]): RuntimeConfig {
@@ -40,6 +44,8 @@ function dependencies(controller: AbortController) {
     values: {
       buildServer: vi.fn(async () => server),
       createApiGeneration: vi.fn(() => apiGeneration),
+      createApiIllustration: vi.fn(() => illustration),
+      createWorkerIllustration: vi.fn(() => workerIllustration),
       createWorkerGeneration: vi.fn(() => workerGeneration),
       migrateDatabase: vi.fn(async () => []),
       runWorker: vi.fn(async () => undefined),
@@ -63,6 +69,7 @@ describe("runtime role generation composition", () => {
       config: expect.objectContaining({ role: "api" }),
       pool,
       generation: apiGeneration,
+      illustration,
       generationEvents
     });
     expect(values.runWorker).not.toHaveBeenCalled();
@@ -81,13 +88,13 @@ describe("runtime role generation composition", () => {
       17_000
     );
     expect(values.createWorkerGeneration).toHaveBeenCalledOnce();
-    expect(values.createWorkerGeneration).toHaveBeenCalledWith(pool, "role-secret");
+    expect(values.createWorkerGeneration).toHaveBeenCalledWith(pool, "role-secret", illustration);
     expect(values.runWorker).toHaveBeenCalledOnce();
     expect(values.runWorker).toHaveBeenCalledWith(
       pool,
       expect.objectContaining({ role: "worker" }),
       controller.signal,
-      { generation: workerGeneration }
+      { generation: workerGeneration, illustration: workerIllustration }
     );
     expect(values.createApiGeneration).not.toHaveBeenCalled();
     expect(values.buildServer).not.toHaveBeenCalled();
@@ -103,18 +110,19 @@ describe("runtime role generation composition", () => {
     expect(values.createApiGeneration).toHaveBeenCalledOnce();
     expect(values.createApiGeneration).toHaveBeenCalledWith(pool);
     expect(values.createWorkerGeneration).toHaveBeenCalledOnce();
-    expect(values.createWorkerGeneration).toHaveBeenCalledWith(pool, "role-secret");
+    expect(values.createWorkerGeneration).toHaveBeenCalledWith(pool, "role-secret", illustration);
     expect(values.buildServer).toHaveBeenCalledWith({
       config: expect.objectContaining({ role: "all" }),
       pool,
       generation: apiGeneration,
+      illustration,
       generationEvents
     });
     expect(values.runWorker).toHaveBeenCalledWith(
       pool,
       expect.objectContaining({ role: "all" }),
       controller.signal,
-      { generation: workerGeneration }
+      { generation: workerGeneration, illustration: workerIllustration }
     );
     expect(server.close).toHaveBeenCalledOnce();
   });
