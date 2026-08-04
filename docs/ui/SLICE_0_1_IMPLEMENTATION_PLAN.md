@@ -5510,7 +5510,7 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
 - [ ] *(10c3)* Keep request schema validation, campaign/job path parameters,
   idempotency/operation provenance, safe result projections, status codes,
   response headers, and response bodies byte-for-byte contract-compatible.
-- [ ] *(10c2)* **Freeze the route-facing adapter contract before implementing
+- [x] *(10c2)* **Freeze the route-facing adapter contract before implementing
   it.** Create `generation-application-adapter.ts` with these exact exported
   types and factory. The method names deliberately match the temporary facade
   so 10c3 changes route dependencies rather than inventing a second route API:
@@ -5577,7 +5577,7 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
   repository, logger, `safeTurnInput`, or generation execution code. Owner
   resolution, input safety, lifecycle logging, and route projection remain
   assigned to 10c3.
-- [ ] *(10c2)* **Port the error mapping at `details.reason` granularity, not by `kind`.**
+- [x] *(10c2)* **Port the error mapping at `details.reason` granularity, not by `kind`.**
   An earlier revision of this item said "map each kind", which understates the
   contract by a wide margin: there are **6 `kind` values and 16 `reason`
   values** (verified against `packages/application/src/generation/errors.ts` and
@@ -5605,7 +5605,7 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
   `details.campaignId` is present ("Campaign not found." vs "Generation job not
   found."). Unknown failures follow the existing 5xx handler and internal
   structured logging; do not expose adapter/provider text.
-- [ ] *(10c2)* **Make mapping coverage exhaustive by type and by runtime
+- [x] *(10c2)* **Make mapping coverage exhaustive by type and by runtime
   branch.** In the adapter test import `GenerationApplicationErrorDetails`,
   `GenerationApplicationErrorKind`, and `GenerationApplicationErrorReason`
   from the application package and define the fixture type exactly as:
@@ -5690,7 +5690,7 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
   normalized snapshots for exact equality. Keep the existing bridge and its
   test unchanged in 10c2; this differential test is deleted or converted to a
   single-implementation contract test only when 10c3 removes the bridge.
-- [ ] *(10c2)* Keep the emitted `details.code` values inside the diagnostic
+- [x] *(10c2)* Keep the emitted `details.code` values inside the diagnostic
   allowlist without exporting a mutable `Set`. In
   `services/api/src/generation-diagnostics.ts`, leave `SAFE_ERROR_CODES`
   private and export exactly:
@@ -5739,7 +5739,7 @@ files**, `pnpm build` clean, `pnpm test:unit` **1077/1077 across 89 test files**
 
 **Required tests:**
 
-- [ ] *(10c2)* Table-test all seven **adapter methods**, not Fastify routes,
+- [x] *(10c2)* Table-test all seven **adapter methods**, not Fastify routes,
   against a fake `GenerationApplication`. For each method assert the exact
   application method invoked, one invocation only, the explicit owner plus
   campaign/job scope, request identity where applicable, and unchanged success
