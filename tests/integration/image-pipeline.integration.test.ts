@@ -257,6 +257,16 @@ integration("independent illustration pipeline", () => {
     return getImageJob(pool, jobId);
   }
 
+  async function processThroughComposedImageLane(jobId: string, workerPrefix: string) {
+    const worker = createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot });
+    for (let index = 0; index < 20; index += 1) {
+      const current = await getImageJob(pool, jobId);
+      if (["completed", "recoverable", "failed"].includes(current.status)) return current;
+      await worker.runImageHandler({ workerId: `${workerPrefix}-${index}`, leaseSeconds: 30 });
+    }
+    return getImageJob(pool, jobId);
+  }
+
   async function acceptedStorySnapshot(campaignId: string, generationJobId: string) {
     const [generation, turns, state, memories, generationJobs] = await Promise.all([
       pool.query(
@@ -1859,13 +1869,15 @@ integration("independent illustration pipeline", () => {
       const [imageJob] = await listCampaignImageJobs(pool, imported.campaignId);
       expect(imageJob).toMatchObject({ status: "queued", attempts: 0, maxAttempts: 2 });
 
-      await expect(runImageJob(
-        pool,
-        "synthetic-image-exhaustion-first-worker",
-        30,
-        credentialSecret,
-        { root: assetRoot }
-      )).resolves.toBe(true);
+      await expect(processThroughComposedImageLane(
+        imageJob!.id,
+        "synthetic-image-exhaustion-first-worker"
+      )).resolves.toMatchObject({
+        status: "queued",
+        attempts: 1,
+        maxAttempts: 2,
+        errorCode: "image_generation_failed"
+      });
       await expect(getImageJob(pool, imageJob!.id)).resolves.toMatchObject({
         status: "queued",
         attempts: 1,
@@ -1874,26 +1886,25 @@ integration("independent illustration pipeline", () => {
       });
       await pool.query("UPDATE image_jobs SET next_attempt_at = now() WHERE id = $1", [imageJob!.id]);
 
-      await expect(runImageJob(
-        pool,
-        "synthetic-image-exhaustion-final-worker",
-        30,
-        credentialSecret,
-        { root: assetRoot }
-      )).resolves.toBe(true);
+      await expect(processThroughComposedImageLane(
+        imageJob!.id,
+        "synthetic-image-exhaustion-final-worker"
+      )).resolves.toMatchObject({
+        status: "recoverable",
+        attempts: 2,
+        maxAttempts: 2,
+        errorCode: "image_generation_failed"
+      });
       await expect(getImageJob(pool, imageJob!.id)).resolves.toMatchObject({
         status: "recoverable",
         attempts: 2,
         maxAttempts: 2,
         errorCode: "image_generation_failed"
       });
-      await expect(runImageJob(
-        pool,
-        "synthetic-image-exhaustion-extra-worker",
-        30,
-        credentialSecret,
-        { root: assetRoot }
-      )).resolves.toBe(false);
+      await expect(createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot }).runImageHandler({
+        workerId: "synthetic-image-exhaustion-extra-worker",
+        leaseSeconds: 30
+      })).resolves.toBe(false);
 
       expect(await acceptedStorySnapshot(imported.campaignId, storyJob.id)).toEqual(acceptedBeforeFailures);
       expect(storyRequests).toHaveLength(storyRequestCount);
@@ -1907,13 +1918,13 @@ integration("independent illustration pipeline", () => {
     try {
       const imported = await campaign(1);
       const storyJob = await generate(imported.campaignId);
-      const acceptedBefore = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM turns WHERE campaign_id = $1", [imported.campaignId]);
+      const acceptedBefore = await acceptedStorySnapshot(imported.campaignId, storyJob.id);
       const [imageJob] = await listCampaignImageJobs(pool, imported.campaignId);
       expect(imageJob).toMatchObject({ status: "queued", model: "synthetic-image-model" });
-      expect(await processThroughTerminal(imageJob!.id, "synthetic-failing-image-worker")).toMatchObject({ status: "recoverable", errorCode: "image_generation_failed" });
+      expect(await processThroughComposedImageLane(imageJob!.id, "synthetic-failing-image-worker"))
+        .toMatchObject({ status: "recoverable", errorCode: "image_generation_failed" });
       expect(await getGenerationJob(pool, storyJob.id)).toMatchObject({ status: "completed" });
-      const acceptedAfter = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM turns WHERE campaign_id = $1", [imported.campaignId]);
-      expect(acceptedAfter.rows[0]?.count).toBe(acceptedBefore.rows[0]?.count);
+      expect(await acceptedStorySnapshot(imported.campaignId, storyJob.id)).toEqual(acceptedBefore);
     } finally {
       failImages = false;
     }
