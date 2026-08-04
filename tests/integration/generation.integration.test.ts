@@ -335,8 +335,8 @@ integration("durable Story Engine integration", () => {
     expect(conflicts).toHaveLength(1);
     expect(conflicts[0]).toMatchObject({
       reason: {
-        statusCode: 409,
-        details: { code: "active_generation_exists" }
+        kind: "active_job",
+        details: { reason: "active_generation" }
       }
     });
 
@@ -474,7 +474,10 @@ integration("durable Story Engine integration", () => {
     await expect(enqueueLatestReplacement(pool, imported.campaignId, {
       ...request,
       action: "Attempt to reuse the key with different content."
-    })).rejects.toMatchObject({ statusCode: 409 });
+    })).rejects.toMatchObject({
+      kind: "conflict",
+      details: { reason: "idempotency_mismatch" }
+    });
     expect(await pool.query("SELECT id FROM turns WHERE campaign_id = $1 AND turn_number = 2", [imported.campaignId]))
       .toMatchObject({ rows: [{ id: before.rows[0]?.id }] });
 
@@ -1718,7 +1721,8 @@ integration("durable Story Engine integration", () => {
     let jobId = "";
     querySpy.mockImplementation((async (...args: any[]) => {
       const statement = String(args[0]);
-      if (statement.includes("error_code = 'scene_coverage'")) {
+      const parameters = Array.isArray(args[1]) ? args[1] : [];
+      if (statement.includes("SET status = 'recoverable'") && parameters[5] === "scene_coverage") {
         await originalQuery("UPDATE generation_jobs SET lease_owner = 'lost-lease' WHERE id = $1", [jobId]);
         return { rows: [], rowCount: 0 };
       }
@@ -1803,11 +1807,9 @@ integration("durable Story Engine integration", () => {
             && record.event.startsWith("turn_generation_");
         });
       const eventNames = events.map((event) => event.event);
-      expect(eventNames.indexOf("turn_generation_recoverable")).toBeLessThan(eventNames.indexOf("turn_generation_requeued"));
-      expect(eventNames.indexOf("turn_generation_requeued")).toBeLessThan(eventNames.lastIndexOf("turn_generation_claimed"));
+      expect(eventNames.indexOf("turn_generation_recoverable")).toBeLessThan(eventNames.lastIndexOf("turn_generation_claimed"));
       expect(events).toEqual(expect.arrayContaining([
         expect.objectContaining({ event: "turn_generation_recoverable", jobAttempt: 1, errorCode: "output_limit" }),
-        expect.objectContaining({ event: "turn_generation_requeued", jobAttempt: 1 }),
         expect.objectContaining({ event: "turn_generation_claimed", jobAttempt: 2, workerId: "story-worker-requeued-b" }),
         expect.objectContaining({ event: "turn_generation_completed", jobAttempt: 2 })
       ]));
@@ -2035,7 +2037,10 @@ integration("durable Story Engine integration", () => {
     for (const status of terminalStatuses) {
       const job = await queue(imported.campaignId, `Do not cancel ${status}.`);
       await pool.query("UPDATE generation_jobs SET status = $2 WHERE id = $1", [job.id, status]);
-      await expect(cancelGeneration(pool, job.id)).rejects.toMatchObject({ statusCode: 409 });
+      await expect(cancelGeneration(pool, job.id)).rejects.toMatchObject({
+        kind: "invalid_state",
+        details: { reason: "cancel_source_state", generationStatus: status }
+      });
       expect(await getGenerationJob(pool, job.id)).toMatchObject({ status });
     }
 
@@ -2070,7 +2075,10 @@ integration("durable Story Engine integration", () => {
       await pool.query("UPDATE users SET system_key = NULL WHERE id = $1", [foreignOwner.rows[0]!.id]);
       await pool.query("UPDATE users SET system_key = 'initial-owner' WHERE id = $1", [originalOwner.rows[0]!.id]);
     }
-    await expect(cancelGeneration(pool, foreignJob!.id)).rejects.toMatchObject({ statusCode: 404 });
+    await expect(cancelGeneration(pool, foreignJob!.id)).rejects.toMatchObject({
+      kind: "not_found",
+      details: { jobId: foreignJob!.id }
+    });
     const foreignStatus = await pool.query<{ status: string }>("SELECT status FROM generation_jobs WHERE id = $1", [foreignJob!.id]);
     expect(foreignStatus.rows).toEqual([{ status: "queued" }]);
     await pool.query("UPDATE generation_jobs SET status = 'discarded' WHERE id = $1", [foreignJob!.id]);

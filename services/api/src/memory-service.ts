@@ -209,7 +209,7 @@ export async function autoEnableCampaignEmbeddingIfAvailable(
                embedding_document_prefix, embedding_query_prefix, updated_at`,
     [campaignId, ownerUserId, providerProfileId, embeddingModel]
   );
-  await enqueueEmbeddingReindex(client, campaignId);
+  await enqueueEmbeddingReindex(client, campaignId, ownerUserId);
   return publicEmbeddingConfig(saved.rows[0]);
 }
 
@@ -798,9 +798,10 @@ export async function buildContextPreview(
   options: MemoryContextQuery,
   credentialSecret = "",
   costAttribution: { generationJobId?: string; operation?: "retrieval_embedding" | "context_preview_embedding" } = {},
-  scope: { throughTurnNumber?: number; stateOverride?: Record<string, unknown>; scratchpadSafeForPrompt?: boolean } = {}
+  scope: { throughTurnNumber?: number; stateOverride?: Record<string, unknown>; scratchpadSafeForPrompt?: boolean } = {},
+  scopedOwnerUserId?: string
 ) {
-  const ownerUserId = await initialOwnerId(pool);
+  const ownerUserId = scopedOwnerUserId ?? await initialOwnerId(pool);
   const campaign = await campaignScope(pool, ownerUserId, campaignId);
   if (scope.throughTurnNumber !== undefined) campaign.active_turn_number = scope.throughTurnNumber;
   if (scope.stateOverride) {
@@ -989,8 +990,12 @@ export async function enqueueChronicleReindex(pool: DatabasePool, campaignId: st
   return id;
 }
 
-export async function enqueueEmbeddingReindex(client: DatabaseClient | DatabasePool, campaignId: string): Promise<string | null> {
-  const ownerUserId = await initialOwnerId(client);
+export async function enqueueEmbeddingReindex(
+  client: DatabaseClient | DatabasePool,
+  campaignId: string,
+  scopedOwnerUserId?: string
+): Promise<string | null> {
+  const ownerUserId = scopedOwnerUserId ?? await initialOwnerId(client);
   await campaignScope(client, ownerUserId, campaignId);
   const config = await embeddingConfig(client, ownerUserId, campaignId);
   if (!config?.embedding_enabled || !config.embedding_provider_profile_id || !config.embedding_model) return null;

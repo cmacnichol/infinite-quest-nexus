@@ -1,76 +1,25 @@
-import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
+import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
+import type { ClaimedGeneration } from "../../../packages/application/src/index.js";
+import { createPostgresGenerationExecutionRepository } from "../../../packages/database/src/generation-execution-repository.js";
 import {
-  pendingEventTriggerSchema,
-  playerEventTriggerSchema,
-  playerRpgStatSchema,
   type CampaignBranchRequest,
   type CampaignRewindRequest,
-  type CampaignTracker,
-  PUBLIC_GENERATION_FAILURE_CODE,
-  PUBLIC_GENERATION_FAILURE_MESSAGE,
-  type PlayerCampaignConfig,
-  type PlayerEventTrigger,
-  type PlayerRpgStat,
-  type StoryTurnOutput
+  type PlayerCampaignConfig
 } from "../../../packages/contracts/src/generation.js";
-import type { MemoryContextQuery } from "../../../packages/contracts/src/memory.js";
 import {
-  storyLengthProfileFromUnknown,
-  storyLengthWordRange,
-  type StoryLengthProfile,
-  type StoryLengthWordRange
-} from "../../../packages/contracts/src/story-settings.js";
-import { buildTurnFictionMemory } from "../../../packages/story-engine/src/chronicle.js";
-import {
-  activatedEventsFromResponse,
-  applyTriggerHits,
-  buildEventExtensionPrompt,
-  buildEventTriggerPrompt,
-  buildRpgAssessmentPrompt,
-  buildStoryUserPrompt,
-  buildSceneCoveragePrompt,
-  compactStoryLengthWordRange,
-  callTextProvider,
-  containsMechanicsLanguage,
-  EVENT_EXTENSION_SYSTEM_PROMPT,
-  EVENT_TRIGGER_SYSTEM_PROMPT,
-  fictionGuidanceForEvents,
-  fictionGuidanceForRoll,
-  formatNarrationParagraphs,
-  localRpgAssessment,
-  logProviderTransportError,
-  mechanicsLeakFields,
-  parseEventExtension,
-  parseRpgAssessment,
-  parseStoryOutput,
-  parseSceneCoverageOutput,
-  extractPartialNarration,
-  performPrivateRoll,
-  recoveryInstruction,
-  RPG_ASSESSMENT_SYSTEM_PROMPT,
-  STORY_PROMPT_PROTOCOL_VERSION,
-  STORY_SYSTEM_PROMPT,
-  SCENE_COVERAGE_SYSTEM_PROMPT,
-  sceneCoverageRewriteInstruction,
-  providerTransportErrorDetails,
-  isNarrationFieldComplete,
-  type ActivatedEvent,
-  type PrivateRollResolution
-} from "../../../packages/story-engine/src/index.js";
-import {
-  StreamingSegmentTracker,
-  characterVisualReference,
-  isIllustrationSegmentEligible,
   normalizeCampaignStateSnapshot,
-  normalizeCampaignTrackers,
-  sha256,
-  stableStringify,
-  estimateTokens
+  normalizeCampaignTrackers
 } from "../../../packages/domain/src/index.js";
-import { buildScopedEntityCatalog, resolveEntityMetadata } from "../../../packages/domain/src/entity-references.js";
 import { logger } from "../../../packages/logger/src/index.js";
-import { autoEnableCampaignEmbeddingIfAvailable, buildContextPreview, enqueueEmbeddingReindex, rebuildCampaignMemories, storeDerivedTurnMemories } from "./memory-service.js";
+import {
+  autoEnableCampaignEmbeddingIfAvailable,
+  buildContextPreview,
+  enqueueEmbeddingReindex,
+  rebuildCampaignMemories,
+  storeDerivedTurnMemories,
+  type DerivedStoryMemory
+} from "./memory-service.js";
 import { loadTextProvider } from "./provider-service.js";
 import {
   enqueueAcceptedTurnIllustrationSegments,
@@ -83,224 +32,13 @@ import {
 } from "./segmented-illustration-service.js";
 import { attributeGenerationCostsToTurn, recordProfileCost, turnReportedCosts } from "./cost-service.js";
 import { promptFromSnapshot, promptProtocolVersion, resolvePromptSnapshot } from "./prompt-library-service.js";
-import { safeTurnInput } from "./turn-input-safety.js";
-import type { PromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
-import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
-import {
-  runTurnGenerationPhase,
-  type TurnGenerationDiagnosticContext,
-  type TurnGenerationPhase
-} from "./generation-diagnostics.js";
 import { loadOrNotFound } from "./service-helpers.js";
+import {
+  createGenerationExecutor,
+  type GenerationExecutionCollaborators
+} from "../../runtime/src/generation-executor-adapter.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
-
-function budgetTokenEstimate(text: string): number {
-  return Math.max(estimateTokens(text), Math.ceil(text.length / 3));
-}
-
-function recoveryPromptFromSnapshot(job: ClaimedJob, reason: "output_limit" | "invalid_json" | "invalid_schema" | "mechanics_leak", errors: string[], storyLength: StoryLengthWordRange) {
-  if (reason === "output_limit") {
-    const compact = compactStoryLengthWordRange(storyLength);
-    return renderPromptTemplate(promptFromSnapshot(job.prompt_snapshot, "story_recovery_output_limit"), compact);
-  }
-  if (reason === "mechanics_leak") {
-    const details = errors.length ? ` The fiction-boundary validator found: ${errors.slice(0, 8).join("; ")}` : "";
-    return renderPromptTemplate(promptFromSnapshot(job.prompt_snapshot, "story_recovery_mechanics"), { details });
-  }
-  const detail = errors.length ? ` Correct these validation errors: ${errors.slice(0, 8).join("; ")}.` : "";
-  return renderPromptTemplate(promptFromSnapshot(job.prompt_snapshot, "story_recovery_schema"), { errors: detail });
-}
-
-function storyMemoryDefaultsFromContext(context: unknown) {
-  if (!context || typeof context !== "object") return {};
-  const chronicle = Array.isArray((context as { chronicle?: unknown }).chronicle)
-    ? (context as { chronicle: unknown[] }).chronicle
-    : [];
-  const entries = chronicle.flatMap((entry) => {
-    if (!entry || typeof entry !== "object") return [];
-    const memory = entry as { kind?: unknown; ordinal?: unknown; content?: unknown };
-    return typeof memory.content === "string"
-      ? [{ kind: String(memory.kind || ""), ordinal: Number(memory.ordinal || 0), content: memory.content }]
-      : [];
-  });
-  const latest = (kind: string) => entries
-    .filter((entry) => entry.kind === kind)
-    .sort((left, right) => right.ordinal - left.ordinal)[0];
-  const summary = latest("campaign_summary")?.content.trim();
-  const openThreads = latest("open_thread")?.content.split("\n").slice(1)
-    .map((line) => line.replace(/^[-•]\s*/, "").trim())
-    .filter(Boolean);
-  return {
-    ...(summary ? { continuitySummary: summary } : {}),
-    canonicalFacts: [],
-    supersededFacts: [],
-    ...(openThreads ? { openThreads } : {})
-  };
-}
-
-type ClaimedJob = {
-  id: string;
-  owner_user_id: string;
-  campaign_id: string;
-  provider_profile_id: string;
-  expected_turn_number: number;
-  operation_kind: "append" | "replace_latest";
-  replacement_turn_id: string | null;
-  base_turn_number: number | null;
-  base_state_private: Record<string, unknown>;
-  base_scratchpad_safe_for_prompt: boolean;
-  action: string;
-  requested_input_mode: "auto" | "action" | "scene";
-  resolved_input_mode: "action" | "scene";
-  input_mode_source: "explicit" | "auto" | "generated_choice" | "opening_action" | "fallback";
-  requested_model: string;
-  context_options: MemoryContextQuery & {
-    modelContextWindowTokens?: number;
-    storyLengthProfile?: StoryLengthProfile;
-    narrationMinWords?: number;
-    narrationMaxWords?: number;
-  };
-  prompt_protocol_version: string;
-  prompt_snapshot: PromptSnapshot;
-  attempts: number;
-  orchestration_private: OrchestrationPrivate;
-  streaming_segments_state?: unknown;
-};
-
-function generationLogContext(job: Pick<ClaimedJob, "id" | "campaign_id" | "provider_profile_id" | "expected_turn_number" | "operation_kind" | "attempts">, workerId?: string) {
-  return {
-    generationJobId: job.id,
-    campaignId: job.campaign_id,
-    providerProfileId: job.provider_profile_id,
-    expectedTurnNumber: job.expected_turn_number,
-    operationKind: job.operation_kind,
-    jobAttempt: job.attempts,
-    ...(workerId ? { workerId } : {})
-  };
-}
-
-function errorCodeFrom(error: unknown): string | null {
-  return typeof error === "object" && error !== null && "code" in error && typeof (error as { code?: unknown }).code === "string"
-    ? (error as { code: string }).code
-    : null;
-}
-
-function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): string {
-  if (typeof value !== "string") return fallback;
-  const normalized = value.trim().toLowerCase();
-  return /^[a-z][a-z0-9_]{0,63}$/.test(normalized) ? normalized : fallback;
-}
-
-type StoryCostOperation = "rpg_assessment" | "event_trigger_before" | "story_generation"
-  | "story_recovery" | "event_trigger_after" | "event_extension" | "scene_coverage_validation" | "scene_coverage_rewrite";
-
-async function callCampaignTextProvider(
-  pool: DatabasePool,
-  provider: Awaited<ReturnType<typeof loadTextProvider>>,
-  job: ClaimedJob,
-  operation: StoryCostOperation,
-  request: Parameters<typeof callTextProvider>[1]
-) {
-  const startedAt = Date.now();
-  logger.info({
-    event: "turn_generation_provider_started",
-    ...generationLogContext(job),
-    storyOperation: operation,
-    providerType: provider.providerType,
-    requestedModel: provider.model,
-    streaming: typeof request.onChunk === "function",
-    recovery: Boolean(request.recoveryInput)
-  });
-  try {
-    const result = await callTextProvider(provider, request);
-    await recordProfileCost(pool, provider, {
-      ownerUserId: job.owner_user_id,
-      campaignId: job.campaign_id,
-      generationJobId: job.id,
-      category: "story",
-      operation
-    }, result);
-    logger.info({
-      event: "turn_generation_provider_completed",
-      ...generationLogContext(job),
-      storyOperation: operation,
-      providerType: provider.providerType,
-      requestedModel: provider.model,
-      streaming: typeof request.onChunk === "function",
-      recovery: Boolean(request.recoveryInput),
-      providerResponseId: result.responseId || null,
-      finishReason: result.finishReason || null,
-      outputLimited: result.outputLimited,
-      modelInstanceId: result.modelInstanceId || null,
-      inputTokens: result.usage.inputTokens,
-      outputTokens: result.usage.outputTokens,
-      totalTokens: result.usage.totalTokens,
-      durationMs: Date.now() - startedAt
-    });
-    return result;
-  } catch (error) {
-    logProviderTransportError(error, {
-      generationJobId: job.id,
-      campaignId: job.campaign_id,
-      providerProfileId: job.provider_profile_id,
-      storyOperation: operation
-    });
-    const transportError = providerTransportErrorDetails(error);
-    const rawErrorCode = transportError?.transportCode || errorCodeFrom(error);
-    const errorCode = rawErrorCode ? safeLogErrorCode(rawErrorCode) : null;
-    logger.warn({
-      event: "turn_generation_provider_failed",
-      ...generationLogContext(job),
-      storyOperation: operation,
-      providerType: provider.providerType,
-      requestedModel: provider.model,
-      streaming: typeof request.onChunk === "function",
-      recovery: Boolean(request.recoveryInput),
-      errorName: error instanceof Error ? error.name : "Error",
-      ...(errorCode ? { errorCode } : {}),
-      transportTimedOut: Boolean(transportError?.timedOut),
-      durationMs: Date.now() - startedAt
-    });
-    throw error;
-  }
-}
-
-function snapshottedStoryLength(context: ClaimedJob["context_options"]): StoryLengthWordRange {
-  const profile = storyLengthProfileFromUnknown(context.storyLengthProfile);
-  const fallback = storyLengthWordRange(profile);
-  const minWords = Number(context.narrationMinWords);
-  const maxWords = Number(context.narrationMaxWords);
-  if (!Number.isInteger(minWords) || !Number.isInteger(maxWords) || minWords < 100 || maxWords > 10_000 || minWords > maxWords) return fallback;
-  return { profile, minWords, maxWords };
-}
-
-type OrchestrationPrivate = {
-  roll?: PrivateRollResolution | null;
-  rpgAssessmentError?: string;
-  beforeEvents?: ActivatedEvent[];
-  beforeTriggerError?: string;
-  afterEvents?: ActivatedEvent[];
-  afterTriggerError?: string;
-  extension?: { additionalText: string; scratchpad?: string; trackerUpdates: Array<Record<string, unknown>> };
-  extensionError?: string;
-};
-
-export type OrchestrationInputs = {
-  useRpgStats: boolean;
-  rpgStats: PlayerRpgStat[];
-  eventTriggers: PlayerEventTrigger[];
-  pendingEventTriggers: ActivatedEvent[];
-  storyMemoryDefaults: {
-    continuitySummary?: string;
-    canonicalFacts: string[];
-    supersededFacts: string[];
-    openThreads?: string[];
-  };
-  suppressEventTriggers: boolean;
-  characterProfile: Record<string, unknown> | null;
-  characterSnapshot: Record<string, unknown> | null;
-};
 
 export async function syncPlayerCampaignConfig(pool: DatabasePool, campaignId: string, config: PlayerCampaignConfig) {
   const ownerUserId = await initialOwnerId(pool);
@@ -780,1009 +518,159 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
   });
 }
 
-export async function claimGeneration(pool: DatabasePool, workerId: string, leaseSeconds: number): Promise<ClaimedJob | null> {
-  const claimed = await withTransaction(pool, async (client) => {
-    const result = await client.query<ClaimedJob>(
-      `WITH candidate AS (
-         SELECT id FROM generation_jobs
-          WHERE status IN ('queued','replacement_queued') OR (status IN ('assessing','generating','validating','committing') AND lease_expires_at < now())
-          ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
-       )
-       UPDATE generation_jobs j SET status = 'assessing', attempts = attempts + 1, lease_owner = $1,
-              lease_expires_at = now() + ($2::text || ' seconds')::interval, updated_at = now()
-         FROM candidate WHERE j.id = candidate.id
-       RETURNING j.id, j.owner_user_id, j.campaign_id, j.provider_profile_id, j.expected_turn_number,
-                 j.action, j.operation_kind, j.replacement_turn_id, j.base_turn_number, j.base_state_private,
-                 j.base_scratchpad_safe_for_prompt,
-                 j.requested_input_mode, j.resolved_input_mode, j.input_mode_source,
-                 j.requested_model, j.context_options, j.prompt_protocol_version, j.prompt_snapshot, j.attempts,
-                 j.orchestration_private, j.streaming_segments_state`,
-      [workerId, leaseSeconds]
-    );
-    return result.rows[0] ?? null;
-  });
-  if (claimed) {
+const executionRepositories = new WeakMap<
+  DatabasePool,
+  ReturnType<typeof createPostgresGenerationExecutionRepository>
+>();
+
+function generationExecutionRepository(pool: DatabasePool) {
+  const current = executionRepositories.get(pool);
+  if (current) return current;
+  const created = createPostgresGenerationExecutionRepository(pool);
+  executionRepositories.set(pool, created);
+  return created;
+}
+
+function generationExecutionCollaborators(): GenerationExecutionCollaborators {
+  return {
+    autoEnableCampaignEmbeddingIfAvailable,
+    buildContextPreview: (
+      pool,
+      ownerUserId,
+      campaignId,
+      options,
+      credentialSecret,
+      costAttribution,
+      scope
+    ) => buildContextPreview(
+      pool,
+      campaignId,
+      options,
+      credentialSecret,
+      costAttribution,
+      scope,
+      ownerUserId
+    ),
+    enqueueEmbeddingReindex: (database, ownerUserId, campaignId) =>
+      enqueueEmbeddingReindex(database, campaignId, ownerUserId),
+    rebuildCampaignMemories,
+    storeDerivedTurnMemories: (
+      client,
+      ownerUserId,
+      campaignId,
+      worldVersionId,
+      turnId,
+      ordinal,
+      derived
+    ) => storeDerivedTurnMemories(
+      client,
+      ownerUserId,
+      campaignId,
+      worldVersionId,
+      turnId,
+      ordinal,
+      derived as DerivedStoryMemory
+    ),
+    loadStreamingIllustrationConfig,
+    createProvisionalSet,
+    createProvisionalSegment: (
+      database,
+      ownerUserId,
+      campaignId,
+      generationJobId,
+      setId,
+      segment,
+      config,
+      visualReference
+    ) => createProvisionalSegment(
+      database,
+      ownerUserId,
+      campaignId,
+      generationJobId,
+      setId,
+      segment,
+      config as SegmentConfigRow,
+      visualReference
+    ),
+    promoteProvisionalSet: (
+      database,
+      ownerUserId,
+      generationJobId,
+      turnId,
+      campaignId,
+      narration,
+      config,
+      visualReference
+    ) => promoteProvisionalSet(
+      database,
+      ownerUserId,
+      generationJobId,
+      turnId,
+      campaignId,
+      narration,
+      config as SegmentConfigRow,
+      visualReference
+    ),
+    orphanProvisionalSet,
+    enqueueAcceptedTurnIllustrationSegments,
+    loadTextProvider,
+    resolvePromptSnapshot,
+    promptFromSnapshot,
+    promptProtocolVersion,
+    recordProfileCost,
+    turnReportedCosts: async (database, ownerUserId, turnIds) =>
+      await turnReportedCosts(database, ownerUserId, turnIds) as Map<string, unknown>,
+    attributeGenerationCostsToTurn
+  };
+}
+
+// Task 10e removes these compatibility delegates when the worker receives its
+// application through runtime composition.
+export async function claimGeneration(
+  pool: DatabasePool,
+  workerId: string,
+  leaseSeconds: number
+): Promise<ClaimedGeneration | null> {
+  const claim = await generationExecutionRepository(pool).claimNext({ workerId, leaseSeconds });
+  if (claim) {
     logger.info({
       event: "turn_generation_claimed",
-      ...generationLogContext(claimed, workerId),
+      generationJobId: claim.jobId,
+      campaignId: claim.campaignId,
+      providerProfileId: claim.providerProfileId,
+      expectedTurnNumber: claim.expectedTurnNumber,
+      operationKind: claim.operationKind,
+      jobAttempt: claim.attempts,
+      workerId,
       leaseSeconds
     });
   }
-  return claimed;
+  return claim;
 }
 
-function mergedTrackers(current: unknown, updates: Array<Record<string, unknown>>): CampaignTracker[] {
-  const existing = normalizeCampaignTrackers(current);
-  const map = new Map<string, Record<string, unknown>>(
-    existing.map((item) => [item.id, { ...item }])
-  );
-  for (const update of updates) {
-    const key = String(update.id || update.name || crypto.randomUUID());
-    map.set(key, { ...(map.get(key) || {}), ...update });
-  }
-  return normalizeCampaignTrackers([...map.values()]);
-}
-
-async function loadOrchestrationInputs(pool: DatabasePool, job: ClaimedJob): Promise<OrchestrationInputs> {
-  const result = await pool.query<{
-    legacy_settings: Record<string, unknown>;
-    rpg_stats: unknown;
-    event_triggers: unknown;
-    pending_event_triggers: unknown;
-    state_snapshot_private: Record<string, unknown> | null;
-    character_profile: Record<string, unknown> | null;
-    character_snapshot: Record<string, unknown> | null;
-  }>(
-    `SELECT c.legacy_settings, c.character_profile, c.character_snapshot, cs.rpg_stats, cs.event_triggers, cs.pending_event_triggers,
-            latest.state_snapshot_private
-       FROM campaigns c
-       JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
-       LEFT JOIN LATERAL (
-         SELECT state_snapshot_private FROM turns
-          WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
-          ORDER BY turn_number DESC LIMIT 1
-       ) latest ON true
-      WHERE c.id = $1 AND c.owner_user_id = $2`,
-    [job.campaign_id, job.owner_user_id]
-  );
-  const row = result.rows[0];
-  if (!row) throw new Error("Campaign orchestration state was not found.");
-  const stagedState = job.operation_kind === "replace_latest" ? job.base_state_private || {} : null;
-  const rpgSource = stagedState && Array.isArray(stagedState.rpgStats) ? stagedState.rpgStats : row.rpg_stats;
-  const eventSource = stagedState && Array.isArray(stagedState.eventTriggers) ? stagedState.eventTriggers : row.event_triggers;
-  const pendingSource = stagedState && Array.isArray(stagedState.pendingEventTriggers) ? stagedState.pendingEventTriggers : row.pending_event_triggers;
-  const rpgStats = (Array.isArray(rpgSource) ? rpgSource : []).flatMap((entry) => {
-    const parsed = playerRpgStatSchema.safeParse(entry);
-    return parsed.success ? [parsed.data] : [];
-  });
-  const eventTriggers = (Array.isArray(eventSource) ? eventSource : []).flatMap((entry) => {
-    const parsed = playerEventTriggerSchema.safeParse(entry);
-    return parsed.success ? [parsed.data] : [];
-  });
-  const pendingEventTriggers = (Array.isArray(pendingSource) ? pendingSource : []).flatMap((entry) => {
-    const parsed = pendingEventTriggerSchema.safeParse(entry);
-    return parsed.success ? [{ ...parsed.data, addTextAfter: false }] : [];
-  });
-  const latestSnapshot = stagedState || row.state_snapshot_private || {};
-  const continuitySummary = typeof latestSnapshot.continuitySummary === "string"
-    ? latestSnapshot.continuitySummary.trim()
-    : "";
-  const openThreads = Array.isArray(latestSnapshot.openThreads)
-    ? latestSnapshot.openThreads.filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
-    : undefined;
-  const storyMemoryDefaults = {
-    ...(continuitySummary ? { continuitySummary } : {}),
-    canonicalFacts: [],
-    supersededFacts: [],
-    ...(openThreads ? { openThreads } : {})
-  };
-  return {
-    useRpgStats: row.legacy_settings?.useRpgStats === true,
-    rpgStats,
-    eventTriggers,
-    pendingEventTriggers,
-    storyMemoryDefaults,
-    suppressEventTriggers: Boolean(row.legacy_settings?.suppressEventTriggers),
-    characterProfile: row.character_profile,
-    characterSnapshot: row.character_snapshot
-  };
-}
-
-function assertActiveGenerationUpdate(result: { rows: Array<{ id: string }> }, action: string): void {
-  if (!result.rows[0]) {
-    throw Object.assign(new Error(`Generation was cancelled or its lease was lost while ${action}.`), {
-      code: "generation_cancelled"
-    });
-  }
-}
-
-async function persistOrchestration(pool: DatabasePool, job: ClaimedJob, patch: Partial<OrchestrationPrivate>, workerId: string): Promise<OrchestrationPrivate> {
-  const merged = { ...(job.orchestration_private || {}), ...patch };
-  const result = await pool.query<{ id: string }>(
-    `UPDATE generation_jobs SET orchestration_private = $3, updated_at = now()
-      WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $4
-        AND status IN ('assessing','generating','validating','committing')
-      RETURNING id`,
-    [job.id, job.owner_user_id, json(merged), workerId]
-  );
-  assertActiveGenerationUpdate(result, "persisting private orchestration");
-  job.orchestration_private = merged;
-  return merged;
-}
-
-function extractTurnFacts(memory: { facts: Record<string, string>; status: string }) {
-  if (memory.status !== "active") return {};
-  return memory.facts || {};
-}
-
-async function evaluateTriggers(
+export async function executeGenerationJob(
   pool: DatabasePool,
-  provider: Awaited<ReturnType<typeof loadTextProvider>>,
-  phase: "before" | "after",
-  context: unknown,
-  job: ClaimedJob,
-  triggers: PlayerEventTrigger[],
-  narration = ""
-): Promise<ActivatedEvent[]> {
-  if (!triggers.length) return [];
-  const response = await callCampaignTextProvider(pool, provider, job,
-    phase === "before" ? "event_trigger_before" : "event_trigger_after", {
-    systemPrompt: promptFromSnapshot(job.prompt_snapshot, "event_trigger"),
-    input: buildEventTriggerPrompt(phase, context, job.action, job.expected_turn_number, triggers, narration)
-  });
-  if (response.outputLimited) throw new Error("The private event evaluation reached its output limit.");
-  return activatedEventsFromResponse(response.content, triggers, job.expected_turn_number);
+  workerId: string,
+  claim: ClaimedGeneration,
+  leaseSeconds: number,
+  credentialSecret: string
+): Promise<boolean> {
+  const repository = generationExecutionRepository(pool);
+  return createGenerationExecutor({
+    pool,
+    repository,
+    collaborators: generationExecutionCollaborators(),
+    credentialSecret
+  }).execute({ workerId, leaseSeconds, claim });
 }
 
-async function commitStory(
-  client: DatabaseClient,
-  job: ClaimedJob,
-  story: StoryTurnOutput,
-  provider: Awaited<ReturnType<typeof loadTextProvider>>,
-  response: Awaited<ReturnType<typeof callTextProvider>>,
-  contextFingerprint: string,
-  contextDiagnostics: Record<string, unknown>,
-  inputs: OrchestrationInputs,
-  orchestration: OrchestrationPrivate,
-  fictionAction: string,
-  workerId: string
-): Promise<string> {
-  const lease = await client.query<{ id: string }>(
-    `SELECT id FROM generation_jobs
-      WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'committing'
-      FOR UPDATE`,
-    [job.id, job.owner_user_id, workerId]
-  );
-  if (!lease.rows[0]) throw Object.assign(new Error("Generation lease was lost or cancelled before commit."), { code: "lease_lost" });
-  const campaignResult = await client.query<{
-    active_turn_number: number;
-    world_version_id: string;
-    character_snapshot: Record<string, unknown> | null;
-    character_profile: Record<string, unknown> | null;
-    world_content: Record<string, unknown>;
-  }>(
-    `SELECT c.active_turn_number, c.world_version_id, c.character_snapshot, c.character_profile,
-            wv.content AS world_content
-       FROM campaigns c
-       JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
-      WHERE c.id = $1 AND c.owner_user_id = $2
-      FOR UPDATE OF c`,
-    [job.campaign_id, job.owner_user_id]
-  );
-  const campaign = campaignResult.rows[0];
-  if (!campaign) throw new Error("Campaign disappeared before story commit.");
-  const entityCatalog = buildScopedEntityCatalog({
-    worldContent: campaign.world_content,
-    characterSnapshot: campaign.character_snapshot,
-    characterProfile: campaign.character_profile
-  });
-  const isReplacement = job.operation_kind === "replace_latest";
-  const expectedCampaignTurn = isReplacement ? job.expected_turn_number : job.expected_turn_number - 1;
-  if (campaign.active_turn_number !== expectedCampaignTurn) {
-    throw Object.assign(new Error("Campaign advanced before this generation could commit."), { code: "stale_campaign" });
-  }
-  if (isReplacement) {
-    const replacement = await client.query<{ id: string }>(
-      `SELECT id FROM turns
-        WHERE id = $1 AND campaign_id = $2 AND owner_user_id = $3 AND turn_number = $4 FOR UPDATE`,
-      [job.replacement_turn_id, job.campaign_id, job.owner_user_id, job.expected_turn_number]
-    );
-    if (!replacement.rows[0]) throw Object.assign(new Error("The turn selected for replacement changed before commit."), { code: "stale_campaign" });
-    const conflictingWork = await client.query(
-      `SELECT 'image' AS kind FROM image_jobs
-        WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_id = $3 AND status IN ('queued','generating')
-       UNION ALL
-       SELECT 'chronicle' AS kind FROM chronicle_jobs
-        WHERE campaign_id = $1 AND owner_user_id = $2 AND status = 'running'
-       LIMIT 1`,
-      [job.campaign_id, job.owner_user_id, job.replacement_turn_id]
-    );
-    if (conflictingWork.rows[0]) {
-      throw Object.assign(new Error("Active derived work prevented the replacement from committing safely."), { code: "replacement_work_active" });
-    }
-  }
-  const stateResult = await client.query<{ trackers: unknown }>(`SELECT trackers FROM campaign_state WHERE campaign_id = $1 AND owner_user_id = $2 FOR UPDATE`, [job.campaign_id, job.owner_user_id]);
-  const trackerBase = isReplacement && Array.isArray(job.base_state_private?.trackers)
-    ? job.base_state_private.trackers
-    : stateResult.rows[0]?.trackers;
-  const trackers = mergedTrackers(trackerBase, story.tracker_updates);
-  const allEvents = [...(orchestration.beforeEvents || []), ...(orchestration.afterEvents || [])];
-  const newlyActivated = allEvents.filter((event) => event.sourceTurn === job.expected_turn_number);
-  const eventTriggers = applyTriggerHits(inputs.eventTriggers, newlyActivated, new Date().toISOString());
-  const pendingEventTriggers = (orchestration.afterEvents || [])
-    .filter((event) => !event.addTextAfter || Boolean(orchestration.extensionError))
-    .map(({ addTextAfter: _addTextAfter, ...event }) => event);
-  const mechanicsPrivate = {
-    roll: orchestration.roll || null,
-    beforeEvents: orchestration.beforeEvents || [],
-    afterEvents: orchestration.afterEvents || [],
-    extensionApplied: Boolean((orchestration.afterEvents || []).some((event) => event.addTextAfter) && !orchestration.extensionError)
-  };
-  if (isReplacement) {
-    await client.query(
-      `DELETE FROM campaign_state_edits
-        WHERE campaign_id = $1 AND owner_user_id = $2 AND effective_turn_number > $3`,
-      [job.campaign_id, job.owner_user_id, job.base_turn_number ?? 0]
-    );
-    await client.query(
-      `DELETE FROM summary_checkpoints
-        WHERE campaign_id = $1 AND owner_user_id = $2 AND through_turn > $3`,
-      [job.campaign_id, job.owner_user_id, job.base_turn_number ?? 0]
-    );
-    await client.query(
-      `DELETE FROM chronicle_jobs
-        WHERE campaign_id = $1 AND owner_user_id = $2 AND status <> 'running'`,
-      [job.campaign_id, job.owner_user_id]
-    );
-    await client.query(
-      `DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2`,
-      [job.campaign_id, job.owner_user_id]
-    );
-    await client.query(
-      `DELETE FROM turns WHERE id = $1 AND campaign_id = $2 AND owner_user_id = $3`,
-      [job.replacement_turn_id, job.campaign_id, job.owner_user_id]
-    );
-  }
-  const turnResult = await client.query<{ id: string }>(
-    `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, input_mode, input_mode_source, narration, choices,
-       custom_action_suggestion, image_prompt, mechanics_private, state_snapshot_private, model_metadata)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
-    [job.owner_user_id, job.campaign_id, job.expected_turn_number, job.action, job.resolved_input_mode, job.input_mode_source,
-      story.narration, json(story.choices),
-      story.custom_action_suggestion, story.image_prompt, json(mechanicsPrivate),
-      json({ scratchpad: story.scratchpad, trackers, eventTriggers, pendingEventTriggers, rpgStats: inputs.rpgStats,
-        continuitySummary: story.continuity_summary, canonicalFacts: story.canonical_facts,
-        supersededFacts: story.superseded_facts,
-        canonicalFactUpdates: story.canonical_fact_updates.map((update) => ({
-          content: update.content,
-          supersedesFactIds: update.supersedes_fact_ids
-        })),
-        openThreads: story.open_threads }),
-      json({ providerProfileId: provider.id, providerType: provider.providerType, model: provider.model, modelInstanceId: response.modelInstanceId,
-        responseId: response.responseId, usage: response.usage, promptProtocolVersion: job.prompt_protocol_version,
-        contextFingerprint, contextDiagnostics })]
-  );
-  const turnId = turnResult.rows[0]?.id;
-  if (!turnId) throw new Error("Story turn insert did not return an ID.");
-  await attributeGenerationCostsToTurn(client, job.owner_user_id, job.campaign_id, job.id, turnId);
-  await client.query(
-    `UPDATE campaign_state SET scratchpad_private = $3, scratchpad_safe_for_prompt = true, trackers = $4, event_triggers = $5,
-       pending_event_triggers = $6, rpg_stats = $7, revision = revision + 1, updated_at = now()
-      WHERE campaign_id = $1 AND owner_user_id = $2`,
-    [job.campaign_id, job.owner_user_id, story.scratchpad, json(trackers), json(eventTriggers), json(pendingEventTriggers), json(inputs.rpgStats)]
-  );
-  await client.query(`UPDATE campaigns SET active_turn_number = $3, updated_at = now() WHERE id = $1 AND owner_user_id = $2`, [job.campaign_id, job.owner_user_id, job.expected_turn_number]);
-  if (isReplacement) {
-    await rebuildCampaignMemories(client, job.owner_user_id, job.campaign_id);
-    await client.query(
-      `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, correlation_id, details)
-       VALUES ($1,$2,'campaign_turn_replaced',$3,$4)`,
-      [job.owner_user_id, job.campaign_id, job.id, json({ turnNumber: job.expected_turn_number, replacementTurnId: turnId })]
-    );
-  } else {
-    await storeDerivedTurnMemories(client, job.owner_user_id, job.campaign_id, campaign.world_version_id, turnId,
-      job.expected_turn_number, {
-        continuitySummary: story.continuity_summary,
-        canonicalFacts: story.canonical_facts,
-        supersededFacts: story.superseded_facts,
-        canonicalFactUpdates: story.canonical_fact_updates.map((update) => ({
-          content: update.content,
-          supersedesFactIds: update.supersedes_fact_ids
-        })),
-        openThreads: story.open_threads,
-        entityCatalog
-      });
-    const memory = buildTurnFictionMemory({ action: fictionAction, narration: story.narration }, job.expected_turn_number);
-    const entityMetadata = resolveEntityMetadata(memory.content, entityCatalog);
-    await client.query(
-      `INSERT INTO chronicle_memories (
-         owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal,
-         content, token_estimate, importance, entities, entity_ids, metadata
-       ) VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,$7,$8,$9,$10,$11)`,
-      [job.owner_user_id, job.campaign_id, campaign.world_version_id, turnId, job.expected_turn_number, memory.content, memory.tokenEstimate,
-        Math.min(1, 0.5 + job.expected_turn_number / 100), entityMetadata.entities, entityMetadata.entityIds,
-        json({ sanitized: memory.sanitized, removedMechanicsSegments: memory.removedMechanicsSegments, generated: true })]
-    );
-  }
-  await client.query("SAVEPOINT accepted_turn_illustration_enqueue");
-  try {
-    const streamingState = job.streaming_segments_state as any;
-    if (streamingState?.provisionalSetId) {
-      const illustrationConfig = await loadStreamingIllustrationConfig(client, job.owner_user_id, job.campaign_id)
-        .catch(() => null);
-      if (illustrationConfig) {
-        await promoteProvisionalSet(
-          client, job.owner_user_id, job.id, turnId, job.campaign_id,
-          story.narration, illustrationConfig
-        );
-      } else {
-        // Fallback
-        await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
-      }
-    } else {
-      await enqueueAcceptedTurnIllustrationSegments(client, job.owner_user_id, job.campaign_id, turnId);
-    }
-    await client.query("RELEASE SAVEPOINT accepted_turn_illustration_enqueue");
-  } catch (error) {
-    await client.query("ROLLBACK TO SAVEPOINT accepted_turn_illustration_enqueue");
-    await client.query("RELEASE SAVEPOINT accepted_turn_illustration_enqueue");
-    logger.warn({
-      event: "accepted_turn_illustration_enqueue_failed",
-      generationJobId: job.id,
-      campaignId: job.campaign_id,
-      turnId,
-      errorCode: typeof error === "object" && error !== null && "code" in error
-        ? String((error as { code: unknown }).code)
-        : undefined,
-      errorMessage: error instanceof Error ? error.message : String(error)
-    });
-  }
-  await enqueueEmbeddingReindex(client, job.campaign_id);
-  const completed = await client.query<{ id: string }>(
-    `UPDATE generation_jobs SET status = 'completed', result_turn_id = $3, provider_response_id = $4,
-       provider_finish_reason = $5, completed_at = now(), updated_at = now(), lease_owner = NULL, lease_expires_at = NULL,
-       partial_output = NULL, error_code = NULL, error_message = NULL
-     WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $6 AND status = 'committing'
-     RETURNING id`,
-    [job.id, job.owner_user_id, turnId, response.responseId || null, response.finishReason || null, workerId]
-  );
-  assertActiveGenerationUpdate(completed, "marking the committed turn complete");
-  return turnId;
-}
-
-export async function executeGenerationJob(pool: DatabasePool, workerId: string, job: ClaimedJob, leaseSeconds: number, credentialSecret: string): Promise<boolean> {
-  const generationStartedAt = Date.now();
-  const diagnosticContext: TurnGenerationDiagnosticContext = {
-    generationJobId: job.id,
-    campaignId: job.campaign_id,
-    providerProfileId: job.provider_profile_id,
-    expectedTurnNumber: job.expected_turn_number,
-    operationKind: job.operation_kind,
-    jobAttempt: job.attempts,
-    workerId
-  };
-  const phase = <T>(phaseName: TurnGenerationPhase, operation: () => Promise<T>) =>
-    runTurnGenerationPhase({
-      logger,
-      context: diagnosticContext,
-      phase: phaseName,
-      generationStartedAt
-    }, operation);
-  logger.info({
-    event: "turn_generation_started",
-    ...generationLogContext(job, workerId)
-  });
-  const heartbeat = setInterval(() => {
-    void pool.query(
-      `UPDATE generation_jobs SET lease_expires_at = now() + ($3::text || ' seconds')::interval, updated_at = now()
-        WHERE id = $1 AND lease_owner = $2 AND status IN ('assessing','generating','validating','committing')`,
-      [job.id, workerId, leaseSeconds]
-    ).catch(() => undefined);
-  }, Math.max(5000, Math.floor(leaseSeconds * 1000 / 3)));
-  try {
-    const provider = await phase("provider_loading", () =>
-      loadTextProvider(pool, job.owner_user_id, job.provider_profile_id, credentialSecret, job.requested_model));
-
-    const preparedInput = await phase("input_preparation", async () => {
-      const safeAction = safeTurnInput(job.action);
-      const storyLength = snapshottedStoryLength(job.context_options);
-      const requestedContextWindow = Number(job.context_options.modelContextWindowTokens || provider.contextWindowTokens);
-      const effectiveContextWindow = Math.min(provider.contextWindowTokens, requestedContextWindow);
-      const inputTokenLimit = effectiveContextWindow - provider.maxOutputTokens;
-      const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
-      const storySystemPrompt = promptFromSnapshot(job.prompt_snapshot, "story_system");
-      const fixedPromptEnvelope = budgetTokenEstimate(storySystemPrompt)
-        + budgetTokenEstimate(buildStoryUserPrompt(emptyPromptContext, safeAction, false, [], storyLength, job.resolved_input_mode))
-        + 1024;
-      if (inputTokenLimit - fixedPromptEnvelope < 512) {
-        throw Object.assign(new Error(`The provider context window (${effectiveContextWindow}) cannot fit the configured output reserve (${provider.maxOutputTokens}) and story prompt envelope.`), { code: "context_budget_invalid" });
-      }
-      const safeContextBudget = Math.max(512, Math.min(
-        Number(job.context_options.budgetTokens || 32000),
-        inputTokenLimit - fixedPromptEnvelope
-      ));
-      return { safeAction, storyLength, effectiveContextWindow, inputTokenLimit, storySystemPrompt, safeContextBudget };
-    });
-    const { safeAction, storyLength, effectiveContextWindow, inputTokenLimit, storySystemPrompt, safeContextBudget } = preparedInput;
-
-    const context = await phase("context_retrieval", () => buildContextPreview(
-      pool,
-      job.campaign_id,
-      { ...job.context_options, budgetTokens: safeContextBudget, query: safeAction },
-      credentialSecret,
-      { generationJobId: job.id, operation: "retrieval_embedding" },
-      job.operation_kind === "replace_latest"
-        ? {
-            throughTurnNumber: job.base_turn_number ?? 0,
-            stateOverride: job.base_state_private,
-            scratchpadSafeForPrompt: job.base_scratchpad_safe_for_prompt
-          }
-        : {}
-    ));
-    const promptContext = context.scopes;
-    const inputs = await phase("orchestration_loading", () => loadOrchestrationInputs(pool, job));
-    let orchestration = job.orchestration_private || {};
-    if (orchestration.roll === undefined) {
-      await phase("rpg_assessment", async () => {
-        if (job.resolved_input_mode === "action" && inputs.useRpgStats && job.expected_turn_number > 1 && inputs.rpgStats.length) {
-          let assessment;
-          let assessmentError = "";
-          try {
-            const response = await callCampaignTextProvider(pool, provider, job, "rpg_assessment", {
-              systemPrompt: promptFromSnapshot(job.prompt_snapshot, "rpg_assessment"),
-              input: buildRpgAssessmentPrompt(promptContext, job.action, inputs.rpgStats)
-            });
-            if (response.outputLimited) throw new Error("The private RPG assessment reached its output limit.");
-            assessment = parseRpgAssessment(response.content);
-          } catch (error) {
-            assessmentError = error instanceof Error ? error.message : String(error);
-            assessment = localRpgAssessment(job.action, inputs.rpgStats);
-          }
-          orchestration = await persistOrchestration(pool, job, {
-            roll: performPrivateRoll(assessment, inputs.rpgStats),
-            ...(assessmentError ? { rpgAssessmentError: assessmentError.slice(0, 2000) } : {})
-          }, workerId);
-        } else {
-          orchestration = await persistOrchestration(pool, job, { roll: null }, workerId);
-        }
-      });
-    }
-    if (orchestration.beforeEvents === undefined) {
-      await phase("before_event_evaluation", async () => {
-        let activated: ActivatedEvent[] = [];
-        let triggerError = "";
-        if (!inputs.suppressEventTriggers) {
-          const triggers = inputs.eventTriggers.filter((trigger) => trigger.timing === "before");
-          try {
-            activated = await evaluateTriggers(pool, provider, "before", promptContext, job, triggers);
-          } catch (error) {
-            triggerError = error instanceof Error ? error.message : String(error);
-          }
-        }
-        orchestration = await persistOrchestration(pool, job, {
-          beforeEvents: [...inputs.pendingEventTriggers, ...activated],
-          ...(triggerError ? { beforeTriggerError: triggerError.slice(0, 2000) } : {})
-        }, workerId);
-      });
-    }
-    const promptPreparation = await phase("prompt_preparation", async () => {
-      const safeGuidance = [
-        ...fictionGuidanceForRoll(orchestration.roll || null),
-        ...fictionGuidanceForEvents(orchestration.beforeEvents || [])
-      ].filter((entry) => entry && !containsMechanicsLanguage(entry));
-      const generating = await pool.query<{ id: string }>(
-        `UPDATE generation_jobs SET status = 'generating', updated_at = now()
-          WHERE id = $1 AND lease_owner = $2 AND status = 'assessing'
-          RETURNING id`,
-        [job.id, workerId]
-      );
-      assertActiveGenerationUpdate(generating, "entering generation");
-      let storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength, job.resolved_input_mode);
-      const removalPriority = ["chronological", "relevant", "summary_checkpoint", "recent", "open_threads"];
-      while (budgetTokenEstimate(storySystemPrompt) + budgetTokenEstimate(storyInput) > inputTokenLimit && promptContext.chronicle.length) {
-        let removalIndex = -1;
-        for (const reason of removalPriority) {
-          removalIndex = promptContext.chronicle.findIndex((memory) => memory.reason === reason);
-          if (removalIndex >= 0) break;
-        }
-        promptContext.chronicle.splice(removalIndex >= 0 ? removalIndex : 0, 1);
-        storyInput = buildStoryUserPrompt(promptContext, safeAction, false, safeGuidance, storyLength, job.resolved_input_mode);
-      }
-      const estimatedPromptTokens = budgetTokenEstimate(storySystemPrompt) + budgetTokenEstimate(storyInput);
-      if (estimatedPromptTokens > inputTokenLimit) {
-        throw Object.assign(new Error(`The fixed authoritative story context requires about ${estimatedPromptTokens} input tokens but only ${inputTokenLimit} are available.`), { code: "context_budget_exceeded" });
-      }
-      const contextFingerprint = sha256(stableStringify({
-        provider: provider.id,
-        model: provider.model,
-        protocol: job.prompt_protocol_version,
-        expectedTurnNumber: job.expected_turn_number,
-        action: safeAction,
-        inputMode: job.resolved_input_mode,
-        storyLength,
-        context: promptContext
-      }));
-      const contextDiagnostics = {
-        effectiveContextWindow,
-        inputTokenLimit,
-        reservedOutputTokens: provider.maxOutputTokens,
-        estimatedPromptTokens,
-        campaignId: context.campaign.id,
-        worldVersionId: context.campaign.worldVersionId,
-        selectedCharacterId: context.campaign.selectedCharacterId,
-        characterProfileRevision: context.campaign.characterProfileRevision,
-        promptProtocolVersion: job.prompt_protocol_version,
-        storyLength,
-        selectedMemoryIds: promptContext.chronicle.map((memory) => memory.id),
-        selectedMemoryHashes: promptContext.chronicle.map((memory) => sha256(memory.content)),
-        selectedCompression: context.selectedCompression,
-        retrieval: context.retrieval
-      };
-      const storyMemoryDefaults = {
-        ...storyMemoryDefaultsFromContext(promptContext),
-        ...inputs.storyMemoryDefaults
-      };
-      return { storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults };
-    });
-    const { storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults } = promptPreparation;
-
-    const streamingIllustration = await phase("streaming_illustration_setup", async () => {
-      const illustrationConfig = await loadStreamingIllustrationConfig(pool, job.owner_user_id, job.campaign_id)
-        .catch(() => null);
-      return {
-        illustrationConfig,
-        segmentTracker: illustrationConfig
-          ? new StreamingSegmentTracker(illustrationConfig.segment_word_count)
-          : null
-      };
-    });
-    const { illustrationConfig, segmentTracker } = streamingIllustration;
-    let provisionalSetId: string | null = null;
-    let singleSectionDetected = false;
-
-    let lastPartialUpdate = 0;
-    let lastPartialContent = "";
-    let lastStreamLogAt = 0;
-    let lastStreamLogChars = 0;
-    let lastStreamPersistWarningAt = 0;
-    const onChunk = async (_delta: string, accumulated: string) => {
-      const now = Date.now();
-      if (now - lastPartialUpdate >= 350 && accumulated !== lastPartialContent) {
-        lastPartialUpdate = now;
-        lastPartialContent = accumulated;
-        
-        try {
-          const partialUpdate = await pool.query<{ id: string }>(
-            `UPDATE generation_jobs SET partial_output = $2, updated_at = now()
-              WHERE id = $1 AND lease_owner = $3 AND status = 'generating' RETURNING id`,
-            [job.id, accumulated, workerId]
-          );
-          assertActiveGenerationUpdate(partialUpdate, "persisting streamed output");
-          if (lastStreamLogAt === 0 || now - lastStreamLogAt >= 5000 || accumulated.length - lastStreamLogChars >= 4096) {
-            const narration = extractPartialNarration(accumulated);
-            logger.info({
-              event: "turn_generation_stream_progress",
-              ...generationLogContext(job, workerId),
-              storyOperation: "story_generation",
-              accumulatedChars: accumulated.length,
-              narrationChars: narration.length,
-              streamDurationMs: now - generationStartedAt
-            });
-            lastStreamLogAt = now;
-            lastStreamLogChars = accumulated.length;
-          }
-        } catch (error) {
-          if (errorCodeFrom(error) === "generation_cancelled") throw error;
-          if (now - lastStreamPersistWarningAt >= 5000) {
-            const rawErrorCode = errorCodeFrom(error);
-            const errorCode = rawErrorCode ? safeLogErrorCode(rawErrorCode) : null;
-            logger.warn({
-              event: "turn_generation_stream_persist_failed",
-              ...generationLogContext(job, workerId),
-              storyOperation: "story_generation",
-              errorName: error instanceof Error ? error.name : "Error",
-              ...(errorCode ? { errorCode } : {})
-            });
-            lastStreamPersistWarningAt = now;
-          }
-        }
-
-        if (segmentTracker && illustrationConfig) {
-          try {
-            const narration = extractPartialNarration(accumulated);
-            if (narration) {
-              const newSegments = segmentTracker.detectNewSegments(narration);
-              for (const segment of newSegments) {
-                if (!provisionalSetId) {
-                  const createdSetId = await createProvisionalSet(
-                    pool, job.owner_user_id, job.campaign_id, job.id,
-                    characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
-                  );
-                  if (!createdSetId) throw Object.assign(new Error("Generation was cancelled before creating provisional illustrations."), { code: "generation_cancelled" });
-                  provisionalSetId = createdSetId;
-                  const state = await pool.query<{ id: string }>(
-                    `UPDATE generation_jobs SET streaming_segments_state = jsonb_set(streaming_segments_state, '{provisionalSetId}', $2)
-                      WHERE id = $1 AND owner_user_id = $3 AND lease_owner = $4 AND status = 'generating' RETURNING id`,
-                    [job.id, JSON.stringify(provisionalSetId), job.owner_user_id, workerId]
-                  );
-                  assertActiveGenerationUpdate(state, "persisting provisional illustration state");
-                }
-                await createProvisionalSegment(
-                  pool, job.owner_user_id, job.campaign_id, job.id,
-                  provisionalSetId, segment, illustrationConfig,
-                  characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
-                );
-              }
-              
-              if (!singleSectionDetected && isNarrationFieldComplete(accumulated) && segmentTracker.emittedSegmentCount === 0 && segmentTracker.accumulatedWordCount > 0) {
-                singleSectionDetected = true;
-                if (!isIllustrationSegmentEligible({ wordCount: segmentTracker.accumulatedWordCount }, illustrationConfig.segment_word_count)) return;
-                if (!provisionalSetId) {
-                  const createdSetId = await createProvisionalSet(
-                    pool, job.owner_user_id, job.campaign_id, job.id,
-                    characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
-                  );
-                  if (!createdSetId) throw Object.assign(new Error("Generation was cancelled before creating provisional illustrations."), { code: "generation_cancelled" });
-                  provisionalSetId = createdSetId;
-                  const state = await pool.query<{ id: string }>(
-                    `UPDATE generation_jobs SET streaming_segments_state = jsonb_set(streaming_segments_state, '{provisionalSetId}', $2)
-                      WHERE id = $1 AND owner_user_id = $3 AND lease_owner = $4 AND status = 'generating' RETURNING id`,
-                    [job.id, JSON.stringify(provisionalSetId), job.owner_user_id, workerId]
-                  );
-                  assertActiveGenerationUpdate(state, "persisting provisional illustration state");
-                }
-                await createProvisionalSegment(
-                  pool, job.owner_user_id, job.campaign_id, job.id,
-                  provisionalSetId,
-                  { ordinal: 0, startWord: 0, endWord: segmentTracker.accumulatedWordCount,
-                    startOffset: 0, endOffset: narration.length,
-                    wordCount: segmentTracker.accumulatedWordCount, text: narration },
-                  illustrationConfig,
-                  characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
-                );
-              }
-            }
-          } catch {
-            // streaming illustration failures must not affect text generation
-          }
-        }
-      }
-    };
-    const supportsStreaming = Boolean(
-      provider.configuration
-      && (provider.configuration.streaming === true || provider.configuration.streamingSupport === true)
-    );
-    const baseRequest = {
-      systemPrompt: storySystemPrompt,
-      input: storyInput
-    };
-    const primaryRequest = supportsStreaming && job.attempts === 1
-      ? { ...baseRequest, onChunk }
-      : baseRequest;
-    let result = await phase("story_generation", () =>
-      callCampaignTextProvider(pool, provider, job, "story_generation", primaryRequest));
-    let validation = await phase("story_validation", async () => {
-      const parsed = parseStoryOutput(result.content, storyMemoryDefaults);
-      const firstReason: "output_limit" | "invalid_json" | "invalid_schema" | "mechanics_leak" | null =
-        result.outputLimited ? "output_limit" : (!parsed.ok ? parsed.code : null);
-      const initialValidationErrors = parsed.ok ? [] : parsed.errors;
-      const initialAttemptNumber = job.attempts * 2 - 1;
-      logger.info({
-        event: "turn_generation_validation_completed",
-        ...generationLogContext(job, workerId),
-        storyOperation: "story_generation",
-        valid: parsed.ok && !result.outputLimited,
-        outputLimited: result.outputLimited,
-        validationCode: firstReason,
-        validationErrorCount: initialValidationErrors.length,
-        attemptNumber: initialAttemptNumber
-      });
-      await pool.query(
-        `INSERT INTO generation_attempts (owner_user_id, generation_job_id, attempt_number, recovery_kind, request_metadata,
-           response_metadata, provider_response_id, finish_reason, raw_output, validation_errors, completed_at)
-         VALUES ($1,$2,$3,'initial',$4,$5,$6,$7,$8,$9,now())
-         ON CONFLICT (generation_job_id, attempt_number) DO UPDATE SET response_metadata = EXCLUDED.response_metadata,
-           provider_response_id = EXCLUDED.provider_response_id, finish_reason = EXCLUDED.finish_reason,
-           raw_output = EXCLUDED.raw_output, validation_errors = EXCLUDED.validation_errors, completed_at = now()`,
-        [job.owner_user_id, job.id, initialAttemptNumber,
-          json({ model: provider.model, providerType: provider.providerType, contextFingerprint, contextDiagnostics }),
-          json({ usage: result.usage, outputLimited: result.outputLimited, modelInstanceId: result.modelInstanceId }),
-          result.responseId || null, result.finishReason || null, result.content || null, json(initialValidationErrors)]
-      );
-      return { parsed, firstReason, initialValidationErrors, initialAttemptNumber };
-    });
-    let { parsed, firstReason, initialValidationErrors, initialAttemptNumber } = validation;
-    if (firstReason) {
-      const recoveryReason = firstReason;
-      const recoveryKind = recoveryReason === "mechanics_leak" ? "mechanics_cleanup" : recoveryReason === "output_limit" ? "compact_completion" : "schema_repair";
-      const rejectedResponse = result.content;
-      logger.warn({
-        event: "turn_generation_recovery_started",
-        ...generationLogContext(job, workerId),
-        firstReason: recoveryReason,
-        recoveryKind,
-        initialAttemptNumber,
-        validationErrorCount: initialValidationErrors.length
-      });
-      result = await phase("story_recovery", () =>
-        callCampaignTextProvider(pool, provider, job, "story_recovery", {
-          ...baseRequest,
-          ...(provider.providerType === "lmstudio" && result.responseId && recoveryReason !== "mechanics_leak" ? { previousResponseId: result.responseId } : {}),
-          recoveryInput: recoveryPromptFromSnapshot(job, recoveryReason, initialValidationErrors, storyLength),
-          rejectedResponse
-        }));
-      validation = await phase("story_validation", async () => {
-        const recoveredParsed = parseStoryOutput(result.content, storyMemoryDefaults);
-        logger.info({
-          event: "turn_generation_validation_completed",
-          ...generationLogContext(job, workerId),
-          storyOperation: "story_recovery",
-          valid: recoveredParsed.ok && !result.outputLimited,
-          outputLimited: result.outputLimited,
-          validationCode: result.outputLimited ? "output_limit" : (recoveredParsed.ok ? null : recoveredParsed.code),
-          validationErrorCount: recoveredParsed.ok ? 0 : recoveredParsed.errors.length,
-          attemptNumber: initialAttemptNumber + 1
-        });
-        await pool.query(
-          `INSERT INTO generation_attempts (owner_user_id, generation_job_id, attempt_number, recovery_kind, request_metadata,
-             response_metadata, provider_response_id, finish_reason, raw_output, validation_errors, completed_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())`,
-          [job.owner_user_id, job.id, initialAttemptNumber + 1, recoveryKind, json({ model: provider.model, providerType: provider.providerType,
-            previousResponseIdUsed: provider.providerType === "lmstudio" && recoveryReason !== "mechanics_leak", rejectedResponseIncluded: Boolean(rejectedResponse) }),
-            json({ usage: result.usage, outputLimited: result.outputLimited, modelInstanceId: result.modelInstanceId }), result.responseId || null,
-            result.finishReason || null, result.content || null, json(recoveredParsed.ok ? [] : recoveredParsed.errors)]
-        );
-        return { parsed: recoveredParsed, firstReason: recoveryReason, initialValidationErrors, initialAttemptNumber };
-      });
-      ({ parsed, firstReason, initialValidationErrors, initialAttemptNumber } = validation);
-    }
-    const validationFailure = "code" in parsed ? parsed : null;
-    if (result.outputLimited || validationFailure) {
-      const code = result.outputLimited ? "output_limit" : validationFailure?.code || "invalid_schema";
-      const messages = result.outputLimited ? ["The provider stopped before a complete story object was available."] : validationFailure?.errors || ["Story validation failed."];
-      const recoverable = await pool.query(
-        `UPDATE generation_jobs SET status = 'recoverable', provider_response_id = $3, provider_finish_reason = $4,
-           error_code = $5, error_message = $6, recovery_metadata = recovery_metadata || $7::jsonb,
-           lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-         WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $8
-           AND status IN ('assessing','generating','validating','committing')
-         RETURNING id`,
-        [job.id, job.owner_user_id, result.responseId || null, result.finishReason || null, code,
-          messages.join(" ").slice(0, 4000), json({ retryable: true, attemptCount: firstReason ? 2 : 1 }), workerId]
-      );
-      assertActiveGenerationUpdate(recoverable, "saving recovery state");
-      logger.warn({
-        event: "turn_generation_recoverable",
-        ...generationLogContext(job, workerId),
-        errorCode: code,
-        attemptCount: firstReason ? 2 : 1,
-        durationMs: Date.now() - generationStartedAt
-      });
-      return true;
-    }
-    if (!parsed.ok) throw new Error("Story validation invariant failed.");
-    if (mechanicsLeakFields(parsed.story).length) throw new Error("Mechanics validation invariant failed.");
-    if (job.resolved_input_mode === "scene") {
-      let coverage;
-      let coverageOutputLimited = true;
-      try {
-        const narration = parsed.story.narration;
-        const coverageResponse = await phase("scene_coverage_validation", () =>
-          callCampaignTextProvider(pool, provider, job, "scene_coverage_validation", {
-            systemPrompt: promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-            input: buildSceneCoveragePrompt(safeAction, narration)
-          }));
-        coverageOutputLimited = coverageResponse.outputLimited;
-        coverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
-      } catch {
-        coverage = null;
-      }
-      logger.info({
-        event: "turn_generation_scene_coverage_completed",
-        ...generationLogContext(job, workerId),
-        covered: Boolean(coverage?.covered),
-        outputLimited: coverageOutputLimited,
-        validationCode: coverage?.covered ? null : "scene_coverage",
-        missingRequiredBeatCount: coverage?.missing_required_beats.length || 0,
-        contradictionCount: coverage?.contradictions.length || 0
-      });
-      if (!coverage?.covered) {
-        const rejectedResponse = result.content;
-        logger.warn({
-          event: "turn_generation_recovery_started",
-          ...generationLogContext(job, workerId),
-          firstReason: "scene_coverage",
-          recoveryKind: "scene_coverage_rewrite",
-          initialAttemptNumber,
-          validationErrorCount: (coverage?.missing_required_beats.length || 0) + (coverage?.contradictions.length || 0)
-        });
-        result = await phase("scene_coverage_rewrite", () =>
-          callCampaignTextProvider(pool, provider, job, "scene_coverage_rewrite", {
-            ...baseRequest,
-            recoveryInput: renderPromptTemplate(
-              promptFromSnapshot(job.prompt_snapshot, "scene_coverage_rewrite"),
-              { validation: stableStringify({
-                missing_required_beats: coverage?.missing_required_beats || ["Coverage could not be verified."],
-                contradictions: coverage?.contradictions || []
-              }) }
-            ),
-            rejectedResponse
-          }));
-        parsed = parseStoryOutput(result.content, storyMemoryDefaults);
-        let repairedCoverage = null;
-        let repairedCoverageOutputLimited = true;
-        if (parsed.ok && !result.outputLimited) {
-          const repairedNarration = parsed.story.narration;
-          try {
-            const coverageResponse = await phase("scene_coverage_validation", () =>
-              callCampaignTextProvider(pool, provider, job, "scene_coverage_validation", {
-                systemPrompt: promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-                input: buildSceneCoveragePrompt(safeAction, repairedNarration)
-              }));
-            repairedCoverageOutputLimited = coverageResponse.outputLimited;
-            repairedCoverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
-          } catch {
-            repairedCoverage = null;
-          }
-        }
-        logger.info({
-          event: "turn_generation_scene_coverage_completed",
-          ...generationLogContext(job, workerId),
-          covered: Boolean(repairedCoverage?.covered),
-          outputLimited: repairedCoverageOutputLimited,
-          validationCode: repairedCoverage?.covered ? null : "scene_coverage",
-          missingRequiredBeatCount: repairedCoverage?.missing_required_beats.length || 0,
-          contradictionCount: repairedCoverage?.contradictions.length || 0
-        });
-        if (!parsed.ok || result.outputLimited || !repairedCoverage?.covered) {
-          const details = repairedCoverage
-            ? [...repairedCoverage.missing_required_beats, ...repairedCoverage.contradictions]
-            : ["The required scene beats could not be verified after one rewrite."];
-          const recoverable = await pool.query<{ id: string }>(
-            `UPDATE generation_jobs SET status = 'recoverable', provider_response_id = $3, provider_finish_reason = $4,
-               error_code = 'scene_coverage', error_message = $5,
-               recovery_metadata = recovery_metadata || $6::jsonb, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $7
-               AND status IN ('assessing','generating','validating','committing')
-             RETURNING id`,
-            [job.id, job.owner_user_id, result.responseId || null, result.finishReason || null,
-              details.join(" ").slice(0, 4000), json({ retryable: true, sceneCoverageRewriteAttempted: true }), workerId]
-          );
-          assertActiveGenerationUpdate(recoverable, "saving scene recovery state");
-          logger.warn({
-            event: "turn_generation_recoverable",
-            ...generationLogContext(job, workerId),
-            errorCode: "scene_coverage",
-            attemptCount: job.attempts,
-            durationMs: Date.now() - generationStartedAt
-          });
-          return true;
-        }
-      }
-    }
-    const validating = await pool.query<{ id: string }>(
-      `UPDATE generation_jobs SET status = 'validating', updated_at = now()
-        WHERE id = $1 AND lease_owner = $2 AND status = 'generating'
-        RETURNING id`,
-      [job.id, workerId]
-    );
-    assertActiveGenerationUpdate(validating, "entering validation");
-    if (orchestration.afterEvents === undefined) {
-      await phase("after_event_evaluation", async () => {
-        let activated: ActivatedEvent[] = [];
-        let triggerError = "";
-        if (!inputs.suppressEventTriggers) {
-          const triggers = inputs.eventTriggers.filter((trigger) => trigger.timing === "after");
-          try {
-            activated = await evaluateTriggers(pool, provider, "after", promptContext, job, triggers, parsed.story.narration);
-          } catch (error) {
-            triggerError = error instanceof Error ? error.message : String(error);
-          }
-        }
-        orchestration = await persistOrchestration(pool, job, {
-          afterEvents: activated,
-          ...(triggerError ? { afterTriggerError: triggerError.slice(0, 2000) } : {})
-        }, workerId);
-      });
-    }
-    const immediateEvents = (orchestration.afterEvents || []).filter((event) => event.addTextAfter);
-    if (immediateEvents.length && !orchestration.extension && !orchestration.extensionError) {
-      await phase("event_extension", async () => {
-        try {
-          const guidance = fictionGuidanceForEvents(immediateEvents);
-          if (!guidance.length) throw new Error("Activated extension instructions were not safe for a fiction prompt.");
-          const extensionResponse = await callCampaignTextProvider(pool, provider, job, "event_extension", {
-            systemPrompt: promptFromSnapshot(job.prompt_snapshot, "event_extension"),
-            input: buildEventExtensionPrompt(parsed.story.narration, guidance)
-          });
-          if (extensionResponse.outputLimited) throw new Error("The optional event extension reached its output limit.");
-          const extension = parseEventExtension(extensionResponse.content);
-          orchestration = await persistOrchestration(pool, job, {
-            extension: {
-              additionalText: extension.additional_text,
-              ...(extension.scratchpad !== undefined ? { scratchpad: extension.scratchpad } : {}),
-              trackerUpdates: extension.tracker_updates
-            }
-          }, workerId);
-        } catch (error) {
-          orchestration = await persistOrchestration(pool, job, { extensionError: (error instanceof Error ? error.message : String(error)).slice(0, 2000) }, workerId);
-        }
-      });
-    }
-    const committedStory: StoryTurnOutput = orchestration.extension ? {
-      ...parsed.story,
-      narration: formatNarrationParagraphs(`${parsed.story.narration}\n\n${orchestration.extension.additionalText}`),
-      scratchpad: orchestration.extension.scratchpad ?? parsed.story.scratchpad,
-      tracker_updates: [...parsed.story.tracker_updates, ...orchestration.extension.trackerUpdates]
-    } : parsed.story;
-    if (mechanicsLeakFields(committedStory).length) throw new Error("Mechanics validation invariant failed after event extension.");
-    const committing = await pool.query<{ id: string }>(
-      `UPDATE generation_jobs SET status = 'committing', updated_at = now()
-        WHERE id = $1 AND lease_owner = $2 AND status = 'validating'
-        RETURNING id`,
-      [job.id, workerId]
-    );
-    assertActiveGenerationUpdate(committing, "entering commit");
-    const turnId = await phase("turn_commit", () =>
-      withTransaction(pool, (client) => commitStory(
-        client,
-        job,
-        committedStory,
-        provider,
-        result,
-        contextFingerprint,
-        contextDiagnostics,
-        inputs,
-        orchestration,
-        safeAction,
-        workerId
-      )));
-    logger.info({
-      event: "turn_generation_completed",
-      ...generationLogContext(job, workerId),
-      resultTurnId: turnId,
-      providerResponseId: result.responseId || null,
-      finishReason: result.finishReason || null,
-      durationMs: Date.now() - generationStartedAt
-    });
-  } catch (error) {
-    const transportError = providerTransportErrorDetails(error);
-    const rawCode = transportError
-      ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
-      : errorCodeFrom(error) || "generation_failed";
-    const code = safeLogErrorCode(rawCode, "generation_failed");
-    const failed = await pool.query<{ id: string }>(
-      `UPDATE generation_jobs SET status = 'failed', error_code = $3, error_message = $4,
-         recovery_metadata = recovery_metadata || $5::jsonb,
-         lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-       WHERE id = $1 AND owner_user_id = $2
-         AND status IN ('assessing','generating','validating','committing') AND lease_owner = $6
-       RETURNING id`,
-      [job.id, job.owner_user_id, PUBLIC_GENERATION_FAILURE_CODE, PUBLIC_GENERATION_FAILURE_MESSAGE,
-        json(transportError ? { transportError } : {}), workerId]
-    );
-    if (failed.rows[0]) {
-      logger.error({
-        event: "turn_generation_failed",
-        ...generationLogContext(job, workerId),
-        errorCode: code,
-        durationMs: Date.now() - generationStartedAt,
-        transportTimedOut: Boolean(transportError?.timedOut)
-      });
-    }
-    if (job.streaming_segments_state && (job.streaming_segments_state as any).provisionalSetId) {
-      try {
-        await orphanProvisionalSet(pool, job.owner_user_id, job.id);
-      } catch {}
-    }
-  } finally {
-    clearInterval(heartbeat);
-  }
-  return true;
-}
-
-export async function runGenerationJob(pool: DatabasePool, workerId: string, leaseSeconds: number, credentialSecret: string): Promise<boolean> {
-  const job = await claimGeneration(pool, workerId, leaseSeconds);
-  if (!job) return false;
-  return executeGenerationJob(pool, workerId, job, leaseSeconds, credentialSecret);
+export async function runGenerationJob(
+  pool: DatabasePool,
+  workerId: string,
+  leaseSeconds: number,
+  credentialSecret: string
+): Promise<boolean> {
+  const claim = await claimGeneration(pool, workerId, leaseSeconds);
+  if (!claim) return false;
+  return executeGenerationJob(pool, workerId, claim, leaseSeconds, credentialSecret);
 }
