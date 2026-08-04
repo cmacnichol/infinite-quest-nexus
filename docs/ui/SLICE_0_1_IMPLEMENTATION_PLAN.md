@@ -81,7 +81,7 @@ Runtime implementation reviewed through `1ae0dd1` on branch
 | Task 9 | C8 — current Story Player boundary proof | **Complete** | Gate 1 `9cca4e7`, `cac241a`; Gate 2 `4bcd3de`; focused and full verification; clean Gate 2 revert rehearsal; detail in `docs/review/2026-08-02-task-9-c8-completion.md` |
 | Task 13a | B4a — bounded history and authoritative resume contracts | **Complete** | `b70844c`, `26cd735`, `6e5753d`; two scoped fix re-reviews clean; real-PostgreSQL 55-turn, recovery, and snapshot-race coverage |
 | Task 13a-R | B4a corrective gate — scoped pages and replacement recovery | **Complete** | `5f156ac`, `1ae0dd1`; migration 0051; full check/build/unit/integration; scoped review/re-review clean |
-| Task 10 | B1 — generation application boundary | Not started | — |
+| Task 10 | B1 — generation application boundary | **Complete** | Final full-range approval of `885bcde..653c7c8`; completion audit `76c1a22`, correction `653c7c8`; Task 11 authorized 2026-08-04 |
 | Task 11 | B2 — notification-backed SSE delivery | Not started | — |
 | Task 12 | B3 — worker concurrency and fair lanes | Not started | — |
 | Task 13b | B4b — play-loop read profiling/optimization | Not started | — |
@@ -485,14 +485,12 @@ implementation begins until the backend completion gate at Task 14f.
 
 Work the following order:
 
-1. **Task 10 (B1)** — extract the generation application boundary. This is the
-   head of the backend lane and unblocks B2/B3/B4b/B5. **In progress:** 10a,
-   10b, and 10c1 are complete and ticked; **10c2 is next**, then 10c3, 10d, 10e,
-   and the 10f parity audit. Task 10's top-level row stays `Not started` until
-   10f passes — that is deliberate, not stale bookkeeping.
-2. **Task 11 (B2)** — replace SSE database polling with a notification port.
-   Follows B1, must preserve the C1a error-frame behavior, and establishes the
-   final event-delivery topology used by B3 load evidence.
+1. **Task 10 (B1)** — complete. The final independent reviewer approved the
+   full `885bcde..653c7c8` range after the #0289 correction, so B1 now unblocks
+   B2/B3/B4b/B5.
+2. **Task 11 (B2)** — **authorized and next.** Replace SSE database polling
+   with a notification port while preserving the C1a error-frame behavior. B2
+   establishes the final event-delivery topology used by B3 load evidence.
 3. **Task 12 (B3)** — configurable worker concurrency and fair job lanes.
    Follows B2 and must finish before U1.
 4. **Task 13b (B4b)** — profiling, query/index optimization, and load evidence.
@@ -4589,20 +4587,20 @@ current high-churn bug magnets and require smaller review surfaces.
 
 For every checkpoint:
 
-- [ ] Start from the preceding reviewed checkpoint and record the base and head
+- [x] Start from the preceding reviewed checkpoint and record the base and head
   commit SHAs in the evidence block.
-- [ ] Use red/green tests for every changed behavior or contract; a pure file
+- [x] Use red/green tests for every changed behavior or contract; a pure file
   move still requires tests proving imports and public behavior at its new
   boundary.
-- [ ] Preserve unrelated dirty worktree files and stage only the checkpoint's
+- [x] Preserve unrelated dirty worktree files and stage only the checkpoint's
   named files.
-- [ ] Run `pnpm check`, `pnpm build`, `pnpm test:unit`,
+- [x] Run `pnpm check`, `pnpm build`, `pnpm test:unit`,
   `pnpm test:integration`, `git diff --check`, and `pjm precheck` before review.
-- [ ] Have a fresh reviewer inspect `base..head` for spec compliance, ownership
+- [x] Have a fresh reviewer inspect `base..head` for spec compliance, ownership
   isolation, transaction parity, role dependency direction, and unintended
   public-contract changes. Resolve findings in a separate correction commit and
   repeat the scoped review.
-- [ ] Keep Task 10's top-level status `Not started` until 10f passes. During
+- [x] Keep Task 10's top-level status `Not started` until 10f passes. During
   implementation, record only the completed substage and its evidence so a
   partially migrated boundary is never mistaken for B1 completion.
 
@@ -6016,29 +6014,29 @@ evidence for the next agent starting Task 11.
 
 **Audit requirements:**
 
-- [ ] Review the complete `pre-10a..10e` diff, not only the last checkpoint.
+- [x] Review the complete `pre-10a..10e` diff, not only the last checkpoint.
   List every moved public function and its new application port, adapter, and
   production composition owner.
-- [ ] Prove no SQL, Fastify, provider implementation, worker scheduler, runtime
+- [x] Prove no SQL, Fastify, provider implementation, worker scheduler, runtime
   config, secret, or `services/**` import is reachable from
   `@infinite-quest/application`.
-- [ ] Prove all API command/query paths use server-resolved owner scope; all
+- [x] Prove all API command/query paths use server-resolved owner scope; all
   worker paths use the owner on the claimed durable job; and no caller-supplied
   identity can establish either authority.
-- [ ] Compare pre/post HTTP payload fixtures, SSE frames, job transition traces,
+- [x] Compare pre/post HTTP payload fixtures, SSE frames, job transition traces,
   structured log event names/fields, SQL transaction boundaries, lease timing,
   prompt protocol, and shutdown behavior. Explain any difference; unapproved
   behavioral drift blocks completion.
-- [ ] Record the remaining five Task 14 cross-role exceptions and temporary
+- [x] Record the remaining five Task 14 cross-role exceptions and temporary
   runtime collaborator bindings. B1 completion means the generation exception
   is gone, not that B5 is complete.
-- [ ] Record exact commands, pass/fail/skip counts, PostgreSQL version, Node/pnpm
+- [x] Record exact commands, pass/fail/skip counts, PostgreSQL version, Node/pnpm
   versions, base/head SHAs, correction commits, reviewer result, and any
   environment limitation in the completion report.
-- [ ] Run a fresh independent final review against ADR 0028, the generation
+- [x] Run a fresh independent final review against ADR 0028, the generation
   integrity rules, identity rules, provider independence rules, and the testing
   matrix. Resolve every blocking finding before checking Task 10 complete.
-- [ ] Only after the final review passes, check 10a-10f, change the Task 10 status
+- [x] Only after the final review passes, check 10a-10f, change the Task 10 status
   row to `Complete`, add the verification block, and authorize Task 11. Do not
   start Task 11 or Task 12 in the same checkpoint.
 
@@ -6050,15 +6048,19 @@ integrity are unchanged; worker no longer imports the API generation service;
 and the only remaining cross-role exceptions are the five explicitly assigned
 to Task 14.
 
-**Current Task 10f verification (2026-08-04, correction evidence passed;
-independent re-review pending).**
-The complete frozen `885bcdeaa52a1c1286d044f34275c7cf40159bbb..4e3e701d2b1e1f5b2250c3d89875fd032b505966`
-range produced a 30-commit, 646,983-byte review package. The named completion
-report at `docs/review/2026-08-03-task-10-b1-completion.md` inventories every
-moved public function, proves server/durable-claim authority, compares HTTP,
-SSE, state, log, transaction, lease, prompt, provider, and shutdown behavior,
-and records the exact five Task 14 cross-role exceptions plus all 18 temporary
-generation-execution collaborators.
+**Current Task 10f verification (2026-08-04, complete; Task 11 authorized).**
+The independently approved full range is
+`885bcdeaa52a1c1286d044f34275c7cf40159bbb..653c7c867ca23c15aa482ced7601745972dfdd01`.
+It includes the original 30-commit B1 implementation range, completion audit
+`76c1a22473f8e9e0b963830e0f7614655e4d98c8`, and correction
+`653c7c867ca23c15aa482ced7601745972dfdd01`. The completion report at
+`docs/review/2026-08-03-task-10-b1-completion.md` inventories every moved public
+function, proves server/durable-claim authority, compares HTTP, SSE, state, log,
+transaction, lease, prompt, provider, and shutdown behavior, and records the
+exact five Task 14 cross-role exceptions plus all 18 temporary
+generation-execution collaborators. The independent final reviewer approved B1
+after the #0289 correction; Task 11 is authorized, but this checkpoint does not
+start Task 11 or Task 12.
 
 Fix round 1 adds active real-PostgreSQL coverage for all three finding #0289
 image-independence modes: disabled illustrations commit the accepted turn,
@@ -6068,20 +6070,18 @@ retries an unsuccessful image independently without changing the original
 generation job, accepted story/state/Chronicle snapshot, or text-provider
 request count. The targeted TDD run was red with 2 failures/1 pass before the
 fixture and assertion corrections, then green at 3/3; the complete image suite
-is 22/22. No production implementation changed. Finding #0288 points to stale
-pickup wording outside this Task 10f-specific block, so that unrelated
-user-authored plan hunk remains untouched for its owning update.
+is 22/22. No production implementation changed. Finding #0288 is resolved by
+the approved Task 11 pickup instruction above.
 
 Fresh verification passed on Node 24.18.0, pnpm 11.18.0, and PostgreSQL 18.4:
 focused Task 10 units **91/91 across 6 files**, focused real-PostgreSQL Task 10
 integrations **99/99 across 5 files**, `pnpm check` (**577 candidate files**),
 `pnpm build`, `pnpm test:unit` (**1,114/1,114 across 93 files**),
 `pnpm test:integration` (**225/225 across 19 files, zero skips**), and
-`git diff --check`. The Task 10a-10e checkpoint reviews are approved. The
-top-level Task 10 row deliberately remains `Not started`, the final two 10f
-checklist items remain open, and Task 11 is not authorized until a fresh
-independent full-range reviewer approves this audit and any blocking finding is
-resolved.
+`git diff --check`. The Task 10a-10e checkpoint reviews and the independent
+full-range Task 10f review are approved. The Task 10 row and 10a-10f completion
+checklist are complete; Task 11 is authorized as the next backend task. UI work
+remains blocked until Task 14f.
 
 ---
 

@@ -2,21 +2,22 @@
 
 **Audit date:** 2026-08-04
 
-**Status:** review correction evidence passed; independent Task 10f re-review pending
+**Status:** complete — independent full-range review approved; Task 11 authorized
 
 **Frozen range:**
-`885bcdeaa52a1c1286d044f34275c7cf40159bbb..4e3e701d2b1e1f5b2250c3d89875fd032b505966`
+`885bcdeaa52a1c1286d044f34275c7cf40159bbb..653c7c867ca23c15aa482ced7601745972dfdd01`
 
-This report audits the complete Task 10a-10e range. It deliberately does not
-use `HEAD~1` or the Task 10e base. The frozen base is the parent-side boundary
-recorded in the SDD ledger, is an ancestor of the frozen head, and produced a
-30-commit, 646,983-byte review package at:
+This report audits the complete Task 10a-10e range plus its Task 10f audit and
+correction commits. It deliberately does not use `HEAD~1` or the Task 10e base.
+The frozen base is the parent-side boundary recorded in the SDD ledger, is an
+ancestor of the approved head, and produced the original 30-commit, 646,983-byte
+implementation review package at:
 
 `.superpowers/sdd/SLICE_0_1_IMPLEMENTATION_PLAN/review-885bcde..4e3e701.diff`
 
-Task 10 is not marked complete in the implementation plan yet. The required
-independent full-range review must approve this evidence first. Task 11 remains
-unauthorized until that review has no blocking finding.
+The independent final reviewer approved the full range after validating the
+#0289 correction. Task 10 is complete in the implementation plan and Task 11
+is authorized; this approval does not start Task 11 or Task 12.
 
 ## Audit verdict by requirement
 
@@ -29,7 +30,7 @@ unauthorized until that review has no blocking finding.
 | Worker authority comes from the durable claim | claim returns `owner_user_id`; payload load and every mutation/commit use that owner plus job and lease owner | Pass |
 | Durable generation semantics are preserved | focused PostgreSQL suites cover command transactions, claims, leases, races, state trace, accepted-turn transaction, Chronicle, and independent images | Pass |
 | Generation cross-role exception is removed | worker has no generation-service import; scanner rejects it and retains exactly five Task 14 exceptions | Pass |
-| Independent final review | must inspect this report and the frozen review package | Pending |
+| Independent final review | approved the `885bcde..653c7c8` range after #0289 correction evidence | Pass |
 
 ## Public-function disposition
 
@@ -279,14 +280,16 @@ The implementation/correction chain is:
 - 10d: `618457fade27ad085eed38a8503a1289cec07ef4`, corrected by
   `9eb98bc7ec7d788560ce68f99ce70bfe61d66ddb`.
 - 10e: `4e3e701d2b1e1f5b2250c3d89875fd032b505966`.
+- 10f completion audit: `76c1a22473f8e9e0b963830e0f7614655e4d98c8`,
+  corrected by `653c7c867ca23c15aa482ced7601745972dfdd01`.
 
 Checkpoint reviews for 10a, 10b, 10c1, 10c2, 10c3, 10d, and 10e are recorded
 as approved in the SDD ledger after their correction rounds. The Task 10f
 independent full-range reviewer requested corrections for findings #0288 and
-#0289. Finding #0289 is addressed below with active real-PostgreSQL regression
-coverage. Finding #0288 identified stale pickup wording outside the Task
-10f-specific plan block; that unrelated, user-authored plan hunk was preserved
-under the correction scope and remains for its owning plan update.
+#0289, then approved the complete `885bcde..653c7c8` range after the correction
+commit. Finding #0289 is addressed below with active real-PostgreSQL regression
+coverage. Finding #0288 is resolved by the corrected Task 11 pickup instruction
+in the implementation plan.
 
 ### Fix round 1 — accepted-story/image independence
 
@@ -364,9 +367,9 @@ PostgreSQL suites are real, isolated database executions. No Compose/Swarm
 deployment or rolling-update rehearsal is claimed by this B1 audit; those
 system-level gates remain assigned to the final backend audit in Task 14f.
 
-## Independent-review gate
+## Independent-review result
 
-The fresh reviewer must evaluate the frozen package and this report against:
+The independent reviewer evaluated the frozen package and this report against:
 
 - ADR 0028 dependency direction;
 - generation integrity and accepted-turn atomicity;
@@ -374,7 +377,6 @@ The fresh reviewer must evaluate the frozen package and this report against:
 - text/image/embedding provider independence;
 - the repository testing matrix and zero newly skipped Task 10 tests.
 
-If that review is clean, the correction checkpoint may mark Tasks 10a-10f and
-the Task 10 status row complete, record the reviewer result and Task 10f commit
-SHA here, and authorize Task 11. Until then, this report is evidence for review,
-not authorization to advance.
+The reviewer approved the range after the #0289 correction. Tasks 10a-10f and
+the Task 10 status row are complete; Task 11 is authorized. This report remains
+the B1 evidence record and does not authorize beginning Task 12 or UI work.
