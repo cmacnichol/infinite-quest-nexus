@@ -85,7 +85,11 @@ Runtime implementation reviewed through `1ae0dd1` on branch
 | Task 11 | B2 — notification-backed SSE delivery | Not started | — |
 | Task 12 | B3 — worker concurrency and fair lanes | Not started | — |
 | Task 13b | B4b — play-loop read profiling/optimization | Not started | — |
-| Task 14a-14e | B5a-B5e — backend domain modularization | Not started | — |
+| Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | Not started | — |
+| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | Not started | — |
+| Task 14c | B5c — worlds, versions, campaign management (removes none) | Not started | — |
+| Task 14d | B5d — providers and prompt configuration (removes none) | Not started | — |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -482,7 +486,10 @@ implementation begins until the backend completion gate at Task 14f.
 Work the following order:
 
 1. **Task 10 (B1)** — extract the generation application boundary. This is the
-   head of the backend lane and unblocks B2/B3/B4b/B5.
+   head of the backend lane and unblocks B2/B3/B4b/B5. **In progress:** 10a,
+   10b, and 10c1 are complete and ticked; **10c2 is next**, then 10c3, 10d, 10e,
+   and the 10f parity audit. Task 10's top-level row stays `Not started` until
+   10f passes — that is deliberate, not stale bookkeeping.
 2. **Task 11 (B2)** — replace SSE database polling with a notification port.
    Follows B1, must preserve the C1a error-frame behavior, and establishes the
    final event-delivery topology used by B3 load evidence.
@@ -491,7 +498,18 @@ Work the following order:
 4. **Task 13b (B4b)** — profiling, query/index optimization, and load evidence.
    Must finish before U5.
 5. **Task 14a-14e (B5 by domain)**, then the **Task 14f** backend completion
-   audit, which is the gate that authorizes Track U.
+   audit, which is the gate that authorizes Track U. Each domain now has its own
+   completion row; see **Which cross-role exception each domain closes** in Task
+   14, because 14a removes three allowlist entries while 14c and 14d remove none
+   and therefore need a different completion signal.
+
+**Reading file:line citations in this plan.** Citations inside a completed
+task's evidence or rationale describe the tree **as of that task's commits** and
+are deliberately not renumbered — several are already stale because
+`server.ts` and `generation-service.ts` have moved substantially. Resolve them
+by searching for the named symbol rather than jumping to the line. Citations in
+**unstarted** task instructions are kept current; the only two remaining
+(`packages/database/src/pool.ts:8` and `:35`) were re-verified on 2026-08-03.
 
 Two documentation items remain carried and unowned; neither blocks B1:
 
@@ -6317,6 +6335,49 @@ worker adapters, boundary checks, and existing integration coverage. Do not
 create one generic repository or god service. Shared abstractions are promoted
 only after two real domains prove the same shape.
 
+### Which cross-role exception each domain closes
+
+Verified against `CROSS_ROLE_IMPORT_ALLOWLIST` in
+`scripts/check-client-boundaries.mjs` and the worker's imports. Task 10 removes
+the `generation-service.js` entry; these five remain, and they are **not evenly
+distributed across the domains**:
+
+| Domain | Allowlist entries it removes | Worker symbol |
+|---|---|---|
+| **14a** Illustration and image jobs | **3** — `image-service.js`, `illustration-resolution-service.js`, `segmented-illustration-service.js` | `runImageJob`, `runIllustrationResolutionJob`, `runIllustrationPromptJob` |
+| **14b** Chronicle memory and embeddings | **1** — `memory-service.js` | `runChronicleJob` |
+| **14c** Worlds, versions, campaign management | **none** | — |
+| **14d** Providers and prompt configuration | **none** | — |
+| **14e** Imports, exports, archives, assets | **1** — `asset-service.js` | `runAssetMetadataBackfill` |
+
+- [ ] **14a, 14b, and 14e prove completion by allowlist removal.** Each deletes
+  exactly its own entries, converts the matching positive boundary fixture into
+  a rejection, and leaves the other domains' entries explicit. A domain that
+  removes an entry it does not own has overreached.
+- [ ] **14c and 14d close no cross-role exception**, so they cannot use one as
+  their completion signal and need a different one: their API routes must depend
+  on application ports, with no SQL or domain state transition left in a Fastify
+  handler, proved by the route-adapter tests Task 10c establishes. Say this in
+  each brief so neither is declared complete by running a boundary check that
+  was already green.
+- [ ] **14a is the largest by a wide margin** — three exceptions and three worker
+  entry points, against one each for 14b and 14e. Plan it as its own
+  multi-commit series with per-service checkpoints, the way Task 10 was split,
+  not as a single diff.
+
+### Per-domain checkpoint structure
+
+- [ ] Give each of 14a-14e its **own completion-table row** rather than the
+  single shared `Task 14a-14e` row, so a partially migrated backend cannot read
+  as complete. This mirrors the rule holding Task 10's top-level status at
+  `Not started` until 10f.
+- [ ] Each domain records its own `Current Task 14x verification` block with
+  measured figures per the Task 4a P4 rule, and its own scoped review.
+- [ ] Write each domain's brief before implementing it: exact routes, worker
+  entry points, database transactions, ownership scope, existing tests, and UI
+  slice consumer. The generic "applicable files" placeholder is not sufficient
+  input for a fresh agent.
+
 - [ ] Treat each numbered domain as a separately planned/reviewed task and
   commit series. Before its implementation, inventory its routes, worker entry
   points, database transactions, ownership scope, tests, and UI slice consumer;
@@ -6358,6 +6419,12 @@ components, styles, browser visual tests, or any other `apps/web-next` UI work.
 - [ ] Verify API and worker roles have no implementation imports from one
   another across every extracted domain; record the exact boundary command and
   reviewed exceptions (normally none).
+- [ ] **Assert `CROSS_ROLE_IMPORT_ALLOWLIST` is empty.** This is the crisp,
+  machine-checkable form of the criterion above. The list holds six entries
+  today: Task 10e removes `generation-service.js`, 14a removes three, 14b one,
+  and 14e one. If it is non-empty at this gate, some domain is incomplete
+  regardless of what its report claims. Add a test asserting emptiness so the
+  condition cannot regress after the audit.
 - [ ] Re-run all pure application, adapter contract, real-PostgreSQL,
   ownership/isolation, generation-integrity, image-independence, import
   ownership, migration, and deployment smoke suites required by the repository
@@ -6376,10 +6443,20 @@ components, styles, browser visual tests, or any other `apps/web-next` UI work.
   `pjm precheck`; record a named backend audit report with command results,
   benchmark links, known limitations, and scoped review approval.
 
+- [ ] **Record the authorization in this plan, not only in the audit report.**
+  Flip the Task 14f completion row, add its `Current Task 14f verification`
+  block, and state in **Completion status** that Task 15/U1 is authorized. Task
+  7d already demonstrated the failure mode: it produced a correct Track C exit
+  audit artifact while the plan still showed every stage `Not started`, so the
+  next agent could not tell from the plan that the gate had passed. A gate whose
+  result lives only in a review document does not function as a gate.
+
 **Definition of done:** Tasks 10, 11, 12, 13b, and 14a-14e are complete and
-reviewed; all backend architecture, correctness, isolation, performance,
-deployment, and rollback gates have current evidence; and the audit explicitly
-marks Task 15/U1 authorized. Until then, every Track U task remains blocked.
+reviewed; `CROSS_ROLE_IMPORT_ALLOWLIST` is empty and asserted so by a test; all
+backend architecture, correctness, isolation, performance, deployment, and
+rollback gates have current evidence; and both the audit report **and this
+plan's Completion status** explicitly mark Task 15/U1 authorized. Until then,
+every Track U task remains blocked.
 
 ---
 
