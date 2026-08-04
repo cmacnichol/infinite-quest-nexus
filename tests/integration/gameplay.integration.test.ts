@@ -16,6 +16,7 @@ import { installIntegrationProviderTransport } from "./provider-transport-test-h
 import {
   campaignListResponseSchema,
   campaignSyncStatusSchema,
+  generationActionResponseSchema,
   generationEnqueueResponseSchema,
   generationJobSnapshotSchema,
   generationResultSchema,
@@ -308,6 +309,79 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(worldListResponseSchema.parse(worldList.json()).worlds).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: campaignData.world.id })])
     );
+  });
+
+  it("runs append, replacement, recovery, retry, cancel, discard, and sync through the Fastify generation routes", async () => {
+    const { campaignId } = await importCampaign("generation-route-cutover");
+    const append = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${campaignId}/generations`,
+      payload: {
+        action: "Open the observatory dome.",
+        providerProfileId: textProviderId,
+        idempotencyKey: crypto.randomUUID(),
+        context: { budgetTokens: 16000, compression: "auto", recentTurns: 10 }
+      }
+    });
+    expect(append.statusCode).toBe(202);
+    const appendJob = generationEnqueueResponseSchema.parse(append.json());
+    expect(appendJob).toMatchObject({ operationKind: "append", status: "queued" });
+
+    replies.push({ content: validStory("The dome opens over a recovered constellation.") });
+    expect(await runGenerationJob(pool, "worker-generation-route-cutover", 30, credentialSecret)).toBe(true);
+    const recovered = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${appendJob.id}/result` });
+    expect(recovered.statusCode).toBe(200);
+    expect(generationResultSchema.parse(recovered.json())).toMatchObject({ id: appendJob.id, campaignId, status: "completed" });
+
+    const replacement = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${campaignId}/generations/retry-latest`,
+      payload: {
+        action: "Choose another path beneath the dome.",
+        expectedCurrentTurnNumber: 3,
+        providerProfileId: textProviderId,
+        idempotencyKey: crypto.randomUUID(),
+        context: { budgetTokens: 16000, compression: "auto", recentTurns: 10 }
+      }
+    });
+    expect(replacement.statusCode).toBe(202);
+    const replacementJob = generationEnqueueResponseSchema.parse(replacement.json());
+    expect(replacementJob).toMatchObject({ operationKind: "replace_latest", status: "replacement_queued" });
+
+    await pool.query(
+      "UPDATE generation_jobs SET status = 'recoverable', error_code = 'provider_transport_error', error_message = 'synthetic retry fixture' WHERE id = $1",
+      [replacementJob.id]
+    );
+    const retried = await app.inject({ method: "POST", url: `/api/v1/generation-jobs/${replacementJob.id}/retry` });
+    expect(retried.statusCode).toBe(202);
+    expect(generationActionResponseSchema.parse(retried.json())).toMatchObject({ id: replacementJob.id, status: "replacement_queued", operationKind: "replace_latest" });
+    const cancelled = await app.inject({ method: "POST", url: `/api/v1/generation-jobs/${replacementJob.id}/cancel` });
+    expect(cancelled.statusCode).toBe(202);
+    expect(generationActionResponseSchema.parse(cancelled.json())).toMatchObject({ id: replacementJob.id, status: "cancelled" });
+
+    const discardCandidate = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${campaignId}/generations`,
+      payload: {
+        action: "Leave the dome unopened.",
+        providerProfileId: textProviderId,
+        idempotencyKey: crypto.randomUUID(),
+        context: { budgetTokens: 16000, compression: "auto", recentTurns: 10 }
+      }
+    });
+    expect(discardCandidate.statusCode).toBe(202);
+    const discardJob = generationEnqueueResponseSchema.parse(discardCandidate.json());
+    await pool.query(
+      "UPDATE generation_jobs SET status = 'recoverable', error_code = 'provider_transport_error', error_message = 'synthetic discard fixture' WHERE id = $1",
+      [discardJob.id]
+    );
+    const discarded = await app.inject({ method: "POST", url: `/api/v1/generation-jobs/${discardJob.id}/discard` });
+    expect(discarded.statusCode).toBe(200);
+    expect(generationActionResponseSchema.parse(discarded.json())).toMatchObject({ id: discardJob.id, status: "discarded" });
+
+    const sync = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/sync-status` });
+    expect(sync.statusCode).toBe(200);
+    expect(campaignSyncStatusSchema.parse(sync.json())).toMatchObject({ campaign: { id: campaignId }, pendingGeneration: null });
   });
 
   it("paginates a real campaign history safely across replacement, rewind, and unchanged sync", async () => {

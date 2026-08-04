@@ -51,4 +51,36 @@ describe("generation route lifecycle logging", () => {
     expect(mutated).toBe(false);
     expect(logs).toEqual([]);
   });
+
+  it("logs the exact minimal cancel event only after a successful mutation", async () => {
+    const logs: Record<string, unknown>[] = [];
+    const lifecycle = createGenerationRouteLifecycle({
+      readContext: async () => context,
+      logger: { info: (fields) => { logs.push(fields); } }
+    });
+
+    await lifecycle.cancel(ownerUserId, generationJobId, async () => (
+      { id: generationJobId, status: "cancelled", operationKind: "append", replacementTurnId: null }
+    ));
+
+    expect(logs).toEqual([{
+      event: "turn_generation_cancelled",
+      generationJobId,
+      campaignId: context.campaignId,
+      operationKind: "append"
+    }]);
+  });
+
+  it.each(["retry", "cancel"] as const)("does not log a successful %s event when its mutation fails", async (operation) => {
+    const failure = new Error(`${operation} mutation failed`);
+    const logs: Record<string, unknown>[] = [];
+    const lifecycle = createGenerationRouteLifecycle({
+      readContext: async () => context,
+      logger: { info: (fields) => { logs.push(fields); } }
+    });
+
+    await expect(lifecycle[operation](ownerUserId, generationJobId, async () => { throw failure; })).rejects.toBe(failure);
+
+    expect(logs).toEqual([]);
+  });
 });

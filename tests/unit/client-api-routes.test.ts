@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
-import type { GenerationApplication } from "../../packages/application/src/index.js";
+import { GenerationApplicationError, type GenerationApplication } from "../../packages/application/src/index.js";
 import {
   apiErrorEnvelopeSchema,
   campaignBranchResponseSchema,
@@ -77,6 +77,7 @@ type MockPoolOptions = {
   malformedJob?: boolean;
   missingJob?: boolean;
   missingSync?: boolean;
+  onInitialOwnerRead?: () => void;
   rawGenerationError?: boolean;
   onGenerationJobRead?: () => void;
   streamReadFailure?: boolean;
@@ -182,7 +183,10 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
   const query = async (queryInput: unknown, params: unknown[] = []) => {
     const sql = String(queryInput).replaceAll(/\s+/g, " ").trim();
     if (["BEGIN", "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "COMMIT", "ROLLBACK", "SAVEPOINT enqueue_generation_insert"].includes(sql)) return { rows: [] };
-    if (sql.startsWith("SELECT id FROM users")) return { rows: [{ id: OWNER_ID }] };
+    if (sql.startsWith("SELECT id FROM users")) {
+      options.onInitialOwnerRead?.();
+      return { rows: [{ id: OWNER_ID }] };
+    }
     if (sql.startsWith('SELECT id, system_key AS "systemKey"')) return { rows: [{
       id: OWNER_ID,
       systemKey: "initial-owner",
@@ -504,6 +508,20 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
   } as unknown as DatabasePool;
 }
 
+function injectedGenerationApplication(overrides: Partial<GenerationApplication>): GenerationApplication {
+  const unavailable = async () => { throw new Error("Unexpected injected generation application call."); };
+  return {
+    enqueueAppend: unavailable,
+    enqueueReplacement: unavailable,
+    getJob: unavailable,
+    getResult: unavailable,
+    retry: unavailable,
+    cancel: unavailable,
+    discard: unavailable,
+    ...overrides
+  } as unknown as GenerationApplication;
+}
+
 describe("client API route contracts without PostgreSQL", () => {
   let storageRoot: string;
 
@@ -817,32 +835,215 @@ describe("client API route contracts without PostgreSQL", () => {
     }
   });
 
-  it("uses the injected generation application with the server-resolved owner", async () => {
-    const calls: Array<{ ownerUserId: string; campaignId: string; action: string }> = [];
-    const enqueueAppend: GenerationApplication["enqueueAppend"] = async (scope, request) => {
-      calls.push({ ...scope, action: request.action });
-      return {
-        id: JOB_ID,
-        status: "queued" as const,
-        duplicate: false,
-        operationKind: "append" as const,
-        replacementTurnId: null
-      };
-    };
-    const generation = {
-      enqueueAppend
-    } as unknown as GenerationApplication;
+  it("uses every injected generation application route exactly once with server-owned scopes and serialized requests", async () => {
+    const calls: Array<{ method: string; scope: Record<string, string>; request?: Record<string, unknown> }> = [];
+    const appendRequest = { action: "Open the dome.", providerProfileId: PROVIDER_ID, idempotencyKey: "injected-application-key", userId: "99999999-9999-4999-8999-999999999999" };
+    const replacementRequest = { action: "Take another route.", expectedCurrentTurnNumber: 2, providerProfileId: PROVIDER_ID, idempotencyKey: "injected-replacement-key", userId: "99999999-9999-4999-8999-999999999999" };
+    const generation = injectedGenerationApplication({
+      enqueueAppend: async (scope, request) => {
+        calls.push({ method: "enqueueAppend", scope, request });
+        return { id: JOB_ID, status: "queued", duplicate: false, operationKind: "append", replacementTurnId: null };
+      },
+      enqueueReplacement: async (scope, request) => {
+        calls.push({ method: "enqueueReplacement", scope, request });
+        return { id: JOB_ID, status: "replacement_queued", duplicate: false, operationKind: "replace_latest", replacementTurnId: TURN_ID };
+      },
+      getJob: async (scope) => {
+        calls.push({ method: "getJob", scope });
+        return jobRow({}) as never;
+      },
+      getResult: async (scope) => {
+        calls.push({ method: "getResult", scope });
+        return {
+          id: JOB_ID,
+          status: "completed",
+          campaignId: CAMPAIGN_ID,
+          expectedTurnNumber: 3,
+          resultTurnId: TURN_ID,
+          errorCode: null,
+          errorMessage: null,
+          turnNumber: 3,
+          action: "Open the dome.",
+          inputMode: "action",
+          inputModeSource: "explicit",
+          narration: "Emerald light fills the room.",
+          choices: ["Look up.", "Step back.", "Call out.", "Close it."],
+          customActionSuggestion: "Study the constellations.",
+          imagePrompt: "An emerald observatory.",
+          modelMetadata: {},
+          mechanics: {},
+          acceptedAt: NOW,
+          stateSnapshot: {},
+          reportedCost: null
+        } as never;
+      },
+      retry: async (scope) => {
+        calls.push({ method: "retry", scope });
+        return { id: JOB_ID, status: "queued", operationKind: "append", replacementTurnId: null };
+      },
+      cancel: async (scope) => {
+        calls.push({ method: "cancel", scope });
+        return { id: JOB_ID, status: "cancelled", operationKind: "append", replacementTurnId: null };
+      },
+      discard: async (scope) => {
+        calls.push({ method: "discard", scope });
+        return { id: JOB_ID, status: "discarded", operationKind: "append", replacementTurnId: null };
+      }
+    });
     const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), generation }));
     try {
-      const response = await app.inject({
+      const append = await app.inject({
         method: "POST",
         url: `/api/v1/campaigns/${CAMPAIGN_ID}/generations`,
         headers: { "x-user-id": "99999999-9999-4999-8999-999999999999" },
-        payload: { action: "Open the dome.", providerProfileId: PROVIDER_ID, idempotencyKey: "injected-application-key" }
+        payload: appendRequest
+      });
+      const replacement = await app.inject({ method: "POST", url: `/api/v1/campaigns/${CAMPAIGN_ID}/generations/retry-latest`, headers: { "x-user-id": "99999999-9999-4999-8999-999999999999" }, payload: replacementRequest });
+      const job = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}?user_id=99999999-9999-4999-8999-999999999999`, headers: { "x-user-id": "99999999-9999-4999-8999-999999999999" } });
+      const result = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/result?user_id=99999999-9999-4999-8999-999999999999`, headers: { "x-user-id": "99999999-9999-4999-8999-999999999999" } });
+      const retry = await app.inject({ method: "POST", url: `/api/v1/generation-jobs/${JOB_ID}/retry?user_id=99999999-9999-4999-8999-999999999999`, headers: { "x-user-id": "99999999-9999-4999-8999-999999999999" } });
+      const cancel = await app.inject({ method: "POST", url: `/api/v1/generation-jobs/${JOB_ID}/cancel?user_id=99999999-9999-4999-8999-999999999999`, headers: { "x-user-id": "99999999-9999-4999-8999-999999999999" } });
+      const discard = await app.inject({ method: "POST", url: `/api/v1/generation-jobs/${JOB_ID}/discard?user_id=99999999-9999-4999-8999-999999999999`, headers: { "x-user-id": "99999999-9999-4999-8999-999999999999" } });
+
+      expect(append.statusCode).toBe(202);
+      expect(replacement.statusCode).toBe(202);
+      expect(job.statusCode).toBe(200);
+      expect(result.statusCode).toBe(200);
+      expect(retry.statusCode).toBe(202);
+      expect(cancel.statusCode).toBe(202);
+      expect(discard.statusCode).toBe(200);
+      expect(generationEnqueueResponseSchema.parse(append.json())).toMatchObject({ id: JOB_ID, operationKind: "append" });
+      expect(generationEnqueueResponseSchema.parse(replacement.json())).toMatchObject({ id: JOB_ID, operationKind: "replace_latest", replacementTurnId: TURN_ID });
+      expect(generationJobSnapshotSchema.parse(job.json())).toMatchObject({ id: JOB_ID, campaignId: CAMPAIGN_ID });
+      expect(generationResultSchema.parse(result.json())).toMatchObject({ id: JOB_ID, resultTurnId: TURN_ID });
+      expect(generationActionResponseSchema.parse(retry.json())).toMatchObject({ id: JOB_ID, status: "queued" });
+      expect(generationActionResponseSchema.parse(cancel.json())).toMatchObject({ id: JOB_ID, status: "cancelled" });
+      expect(generationActionResponseSchema.parse(discard.json())).toMatchObject({ id: JOB_ID, status: "discarded" });
+      expect(calls).toHaveLength(7);
+      expect(calls.map(({ method }) => method)).toEqual(["enqueueAppend", "enqueueReplacement", "getJob", "getResult", "retry", "cancel", "discard"]);
+      expect(calls.map(({ scope }) => scope)).toEqual([
+        { ownerUserId: OWNER_ID, campaignId: CAMPAIGN_ID },
+        { ownerUserId: OWNER_ID, campaignId: CAMPAIGN_ID },
+        { ownerUserId: OWNER_ID, jobId: JOB_ID },
+        { ownerUserId: OWNER_ID, jobId: JOB_ID },
+        { ownerUserId: OWNER_ID, jobId: JOB_ID },
+        { ownerUserId: OWNER_ID, jobId: JOB_ID },
+        { ownerUserId: OWNER_ID, jobId: JOB_ID }
+      ]);
+      expect(calls[0]?.request).toMatchObject({ action: appendRequest.action, providerProfileId: PROVIDER_ID, idempotencyKey: appendRequest.idempotencyKey });
+      expect(calls[0]?.request).not.toHaveProperty("userId");
+      expect(calls[1]?.request).toMatchObject({ action: replacementRequest.action, expectedCurrentTurnNumber: 2, providerProfileId: PROVIDER_ID, idempotencyKey: replacementRequest.idempotencyKey });
+      expect(calls[1]?.request).not.toHaveProperty("userId");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([
+    ["enqueue append", "enqueueAppend", "POST", `/api/v1/campaigns/${CAMPAIGN_ID}/generations`, { action: "Open the dome.", providerProfileId: PROVIDER_ID, idempotencyKey: "typed-append" }, new GenerationApplicationError("not_found", { campaignId: CAMPAIGN_ID }), 404],
+    ["enqueue replacement", "enqueueReplacement", "POST", `/api/v1/campaigns/${CAMPAIGN_ID}/generations/retry-latest`, { action: "Open the dome.", expectedCurrentTurnNumber: 2, providerProfileId: PROVIDER_ID, idempotencyKey: "typed-replacement" }, new GenerationApplicationError("not_found", { campaignId: CAMPAIGN_ID }), 404],
+    ["get job", "getJob", "GET", `/api/v1/generation-jobs/${JOB_ID}`, undefined, new GenerationApplicationError("not_found", { jobId: JOB_ID }), 404],
+    ["get result", "getResult", "GET", `/api/v1/generation-jobs/${JOB_ID}/result`, undefined, new GenerationApplicationError("not_found", { jobId: JOB_ID }), 404],
+    ["retry", "retry", "POST", `/api/v1/generation-jobs/${JOB_ID}/retry`, undefined, new GenerationApplicationError("invalid_state", { reason: "retry_source_state" }), 409],
+    ["cancel", "cancel", "POST", `/api/v1/generation-jobs/${JOB_ID}/cancel`, undefined, new GenerationApplicationError("invalid_state", { reason: "cancel_source_state" }), 409],
+    ["discard", "discard", "POST", `/api/v1/generation-jobs/${JOB_ID}/discard`, undefined, new GenerationApplicationError("invalid_state", { reason: "discard_source_state" }), 409]
+  ] as const)("maps typed injected application failures for %s", async (_label, method, httpMethod, url, payload, error, expectedStatus) => {
+    const calls: Record<string, string>[] = [];
+    const generation = injectedGenerationApplication({
+      [method]: async (scope: Record<string, string>) => {
+        calls.push(scope);
+        throw error;
+      }
+    } as Partial<GenerationApplication>);
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), generation }));
+
+    try {
+      const response = await app.inject(payload === undefined
+        ? { method: httpMethod, url: `${url}?user_id=99999999-9999-4999-8999-999999999999`, headers: { "x-user-id": "99999999-9999-4999-8999-999999999999" } }
+        : { method: httpMethod, url: `${url}?user_id=99999999-9999-4999-8999-999999999999`, headers: { "x-user-id": "99999999-9999-4999-8999-999999999999" }, payload });
+
+      expect(response.statusCode).toBe(expectedStatus);
+      expect(apiErrorEnvelopeSchema.parse(response.json()).error).toBe("Error");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ ownerUserId: OWNER_ID });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("does not allow a spoofed request identity to retrieve another owner's known generation job", async () => {
+    const foreignJobId = "99999999-9999-4999-8999-999999999998";
+    const scopes: Record<string, string>[] = [];
+    const generation = injectedGenerationApplication({
+      getJob: async (scope) => {
+        scopes.push(scope);
+        throw new GenerationApplicationError("not_found", { jobId: foreignJobId });
+      }
+    });
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), generation }));
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/v1/generation-jobs/${foreignJobId}?user_id=99999999-9999-4999-8999-999999999999`,
+        headers: { "x-user-id": "99999999-9999-4999-8999-999999999999" }
       });
 
-      expect(response.statusCode).toBe(202);
-      expect(calls).toEqual([{ ownerUserId: OWNER_ID, campaignId: CAMPAIGN_ID, action: "Open the dome." }]);
+      expect(response.statusCode).toBe(404);
+      expect(scopes).toEqual([{ ownerUserId: OWNER_ID, jobId: foreignJobId }]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([
+    ["enqueue append", "enqueueAppend", "POST", `/api/v1/campaigns/${CAMPAIGN_ID}/generations`, { action: "Open the dome.", providerProfileId: PROVIDER_ID, idempotencyKey: "unknown-append" }],
+    ["enqueue replacement", "enqueueReplacement", "POST", `/api/v1/campaigns/${CAMPAIGN_ID}/generations/retry-latest`, { action: "Open the dome.", expectedCurrentTurnNumber: 2, providerProfileId: PROVIDER_ID, idempotencyKey: "unknown-replacement" }],
+    ["get job", "getJob", "GET", `/api/v1/generation-jobs/${JOB_ID}`, undefined],
+    ["get result", "getResult", "GET", `/api/v1/generation-jobs/${JOB_ID}/result`, undefined],
+    ["retry", "retry", "POST", `/api/v1/generation-jobs/${JOB_ID}/retry`, undefined],
+    ["cancel", "cancel", "POST", `/api/v1/generation-jobs/${JOB_ID}/cancel`, undefined],
+    ["discard", "discard", "POST", `/api/v1/generation-jobs/${JOB_ID}/discard`, undefined]
+  ] as const)("keeps unknown injected application failures internal for %s", async (_label, method, httpMethod, url, payload) => {
+    const rawMessage = "RAW_GENERATION_FAILURE_SHOULD_NOT_REACH_CLIENT";
+    const generation = injectedGenerationApplication({ [method]: async () => { throw new Error(rawMessage); } } as Partial<GenerationApplication>);
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), generation }));
+
+    try {
+      const response = await app.inject(payload === undefined ? { method: httpMethod, url } : { method: httpMethod, url, payload });
+
+      expect(response.statusCode).toBe(500);
+      expect(apiErrorEnvelopeSchema.parse(response.json()).error).toBe("Internal server error");
+      expect(response.body).not.toContain(rawMessage);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([
+    ["append unsafe action", "POST", `/api/v1/campaigns/not-a-uuid/generations`, { action: "I roll a 17.", providerProfileId: PROVIDER_ID, idempotencyKey: "unsafe-path-first" }],
+    ["replacement unsafe action", "POST", `/api/v1/campaigns/not-a-uuid/generations/retry-latest`, { action: "I roll a 17.", expectedCurrentTurnNumber: 2, providerProfileId: PROVIDER_ID, idempotencyKey: "unsafe-replacement-path-first" }],
+    ["append valid action", "POST", `/api/v1/campaigns/not-a-uuid/generations`, { action: "Open the dome.", providerProfileId: PROVIDER_ID, idempotencyKey: "valid-path-first" }],
+    ["replacement valid action", "POST", `/api/v1/campaigns/not-a-uuid/generations/retry-latest`, { action: "Open the dome.", expectedCurrentTurnNumber: 2, providerProfileId: PROVIDER_ID, idempotencyKey: "valid-replacement-path-first" }],
+    ["job lookup", "GET", "/api/v1/generation-jobs/not-a-uuid", undefined],
+    ["job stream", "GET", "/api/v1/generation-jobs/not-a-uuid/stream", undefined],
+    ["job result", "GET", "/api/v1/generation-jobs/not-a-uuid/result", undefined],
+    ["job retry", "POST", "/api/v1/generation-jobs/not-a-uuid/retry", undefined],
+    ["job cancel", "POST", "/api/v1/generation-jobs/not-a-uuid/cancel", undefined],
+    ["job discard", "POST", "/api/v1/generation-jobs/not-a-uuid/discard", undefined]
+  ] as const)("rejects a malformed UUID before generation mechanics or owner resolution: %s", async (_label, method, url, payload) => {
+    let initialOwnerReads = 0;
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot),
+      pool: mockPool({ onInitialOwnerRead: () => { initialOwnerReads += 1; } })
+    }));
+
+    try {
+      const response = await app.inject(payload === undefined ? { method, url } : { method, url, payload });
+
+      expect(response.statusCode).toBe(400);
+      expect(apiErrorEnvelopeSchema.parse(response.json()).error).toBe("ZodError");
+      expect(initialOwnerReads).toBe(0);
     } finally {
       await app.close();
     }

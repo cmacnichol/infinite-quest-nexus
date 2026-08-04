@@ -891,24 +891,27 @@ export async function buildServer({ config, pool, generation }: BuildServerOptio
   ));
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations", async (request, reply) => {
+    const campaignId = uuidSchema.parse(request.params.campaignId);
     const body = generationRequestSchema.parse(request.body);
     safeTurnInput(body.action);
     const ownerScope = { ownerUserId: await initialOwnerId(pool) };
-    const job = await generationAdapter.enqueueGeneration(ownerScope, uuidSchema.parse(request.params.campaignId), body);
+    const job = await generationAdapter.enqueueGeneration(ownerScope, campaignId, body);
     return reply.code(job.duplicate ? 200 : 202).send(parseResponseProjection(generationEnqueueResponseSchema, job));
   });
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations/retry-latest", async (request, reply) => {
+    const campaignId = uuidSchema.parse(request.params.campaignId);
     const body = generationRetryLatestRequestSchema.parse(request.body);
     safeTurnInput(body.action);
     const ownerScope = { ownerUserId: await initialOwnerId(pool) };
-    const job = await generationAdapter.enqueueLatestReplacement(ownerScope, uuidSchema.parse(request.params.campaignId), body);
+    const job = await generationAdapter.enqueueLatestReplacement(ownerScope, campaignId, body);
     return reply.code(job.duplicate ? 200 : 202).send(parseResponseProjection(generationEnqueueResponseSchema, job));
   });
 
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId", async (request) => {
+    const jobId = uuidSchema.parse(request.params.jobId);
     const ownerScope = { ownerUserId: await initialOwnerId(pool) };
-    return generationSnapshot(await generationAdapter.getGenerationJob(ownerScope, uuidSchema.parse(request.params.jobId)));
+    return generationSnapshot(await generationAdapter.getGenerationJob(ownerScope, jobId));
   });
 
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/stream", async (request, reply) => {
@@ -974,27 +977,29 @@ export async function buildServer({ config, pool, generation }: BuildServerOptio
   });
 
   app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/result", async (request) => {
+    const jobId = uuidSchema.parse(request.params.jobId);
     const ownerScope = { ownerUserId: await initialOwnerId(pool) };
-    return parseResponseProjection(generationResultSchema, await generationAdapter.getGenerationResult(ownerScope, uuidSchema.parse(request.params.jobId)));
+    return parseResponseProjection(generationResultSchema, await generationAdapter.getGenerationResult(ownerScope, jobId));
   });
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/retry", async (request, reply) => {
-    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
     const jobId = uuidSchema.parse(request.params.jobId);
+    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
     const result = await generationLifecycle.retry(ownerScope.ownerUserId, jobId, () => generationAdapter.retryGeneration(ownerScope, jobId));
     return reply.code(202).send(parseResponseProjection(generationActionResponseSchema, result));
   });
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/cancel", async (request, reply) => {
-    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
     const jobId = uuidSchema.parse(request.params.jobId);
+    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
     const result = await generationLifecycle.cancel(ownerScope.ownerUserId, jobId, () => generationAdapter.cancelGeneration(ownerScope, jobId));
     return reply.code(202).send(parseResponseProjection(generationActionResponseSchema, result));
   });
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/discard", async (request) => {
+    const jobId = uuidSchema.parse(request.params.jobId);
     const ownerScope = { ownerUserId: await initialOwnerId(pool) };
-    return parseResponseProjection(generationActionResponseSchema, await generationAdapter.discardGeneration(ownerScope, uuidSchema.parse(request.params.jobId)));
+    return parseResponseProjection(generationActionResponseSchema, await generationAdapter.discardGeneration(ownerScope, jobId));
   });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-config", async (request) => (

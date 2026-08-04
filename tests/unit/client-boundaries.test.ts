@@ -18,7 +18,7 @@ import type {
 import type { GenerationApiPort } from "../../packages/client-core/src/generation/types.js";
 import type { GenerationRequest } from "../../packages/contracts/src/generation.js";
 // @ts-expect-error JavaScript check scripts intentionally have no declaration files.
-import { collectClientBoundaryViolations, isBoundarySourceFile } from "../../scripts/check-client-boundaries.mjs";
+import { checkClientBoundaries, collectClientBoundaryViolations, isBoundarySourceFile } from "../../scripts/check-client-boundaries.mjs";
 // @ts-expect-error JavaScript check scripts intentionally have no declaration files.
 import { formatWebBundleBudgetReport, inspectWebBundleBudget } from "../../scripts/check-web-bundle-budget.mjs";
 
@@ -42,6 +42,26 @@ function typecheckFixture(tsconfigPath: string): { succeeded: boolean; output: s
 }
 
 describe("client boundary checks", () => {
+  test("continues scanning live sources when Git also lists a deleted tracked source", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "infinitequest-client-boundary-git-"));
+    const deletedSource = path.join(root, "packages/client-core/src/deleted.ts");
+    const violatingSource = path.join(root, "packages/client-core/src/live-violation.ts");
+    try {
+      mkdirSync(path.dirname(deletedSource), { recursive: true });
+      writeFileSync(deletedSource, "export const deleted = 1;\n");
+      writeFileSync(violatingSource, 'import { readFile } from "node:fs"; export { readFile };\n');
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      execFileSync("git", ["add", "packages/client-core/src/deleted.ts", "packages/client-core/src/live-violation.ts"], { cwd: root });
+      rmSync(deletedSource);
+
+      expect(checkClientBoundaries(root)).toEqual([
+        "packages/client-core/src/live-violation.ts: client-core import node:fs is prohibited"
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("the composed browser source and API retain the pure Task 5 port contracts", () => {
     expectTypeOf<ReturnType<typeof createBrowserGenerationSource>>()
       .toEqualTypeOf<GenerationSnapshotSource>();
