@@ -9,6 +9,7 @@ import type {
   IllustrationBackfillResult,
   IllustrationConfig,
   IllustrationConfigView,
+  IllustrationImageArtifact,
   IllustrationImageExecutionRequest,
   IllustrationImageExecutionResult,
   IllustrationImageJob,
@@ -210,7 +211,9 @@ export interface IllustrationArtifactDownloadPort {
   downloadArtifact(input: Readonly<{
     ownerUserId: string;
     imageJobId: string;
-    sourceUrl: string;
+    artifact: IllustrationImageArtifact;
+    timeoutMs: number;
+    allowPrivateHosts: boolean;
     maximumBytes: number;
   }>): Promise<Readonly<{
     bytes: Uint8Array;

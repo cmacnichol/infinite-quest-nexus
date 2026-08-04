@@ -3,6 +3,7 @@ import {
   createIllustrationApplication,
   createIllustrationWorkerApplication,
   type IllustrationApplication,
+  type IllustrationArtifactDownloadPort,
   type IllustrationAssetPort,
   type IllustrationConfigRepository,
   type IllustrationImageProviderPort,
@@ -379,7 +380,10 @@ describe("illustration application use cases", () => {
         providerRole: "image",
         providerProfileId: request.providerProfileId,
         model: request.model,
+        status: "completed",
         artifacts: [],
+        usage: {},
+        reportedCost: null,
         metadata: {}
       })
     };
@@ -399,8 +403,52 @@ describe("illustration application use cases", () => {
       segmentId,
       providerProfileId: "99999999-9999-4999-8999-999999999999",
       model: "text-model",
+      systemPrompt: "Return one fiction-only visual prompt.",
       fictionText: "Moonlight fills the observatory.",
       storyContext: "A quiet night."
+    };
+    const imageExecution: Parameters<IllustrationImageProviderPort["executeImage"]>[0] = {
+      ownerUserId,
+      jobId,
+      providerProfileId: "99999999-9999-4999-8999-999999999999",
+      model: "image-model",
+      prompt: "A moonlit observatory.",
+      generationRevision: 1,
+      idempotencyKey: `${jobId}:1`,
+      imageCount: 2,
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "auto",
+      outputFormat: "png",
+      remoteJobId: "remote-image-job"
+    };
+    const pendingExecution: Awaited<ReturnType<IllustrationImageProviderPort["executeImage"]>> = {
+      providerRole: "image",
+      providerProfileId: imageExecution.providerProfileId,
+      model: imageExecution.model,
+      status: "pending",
+      remoteJobId: "remote-image-job",
+      pollAfterMs: 2_000,
+      progress: 40,
+      queuePosition: 2,
+      etaSeconds: 15,
+      metadata: {}
+    };
+    const urlArtifactDownload: Parameters<IllustrationArtifactDownloadPort["downloadArtifact"]>[0] = {
+      ownerUserId,
+      imageJobId: jobId,
+      artifact: { source: "url", url: "https://images.example.test/result.png", mimeType: "image/png" },
+      timeoutMs: 30_000,
+      allowPrivateHosts: false,
+      maximumBytes: 20 * 1024 * 1024
+    };
+    const base64ArtifactDownload: Parameters<IllustrationArtifactDownloadPort["downloadArtifact"]>[0] = {
+      ownerUserId,
+      imageJobId: jobId,
+      artifact: { source: "base64", base64: "iVBORw0KGgo=", mimeType: "image/png" },
+      timeoutMs: 30_000,
+      allowPrivateHosts: true,
+      maximumBytes: 20 * 1024 * 1024
     };
     const provisionalBinding: Parameters<IllustrationAssetPort["bindSegmentAsset"]>[0] = {
       ownerUserId,
@@ -421,6 +469,10 @@ describe("illustration application use cases", () => {
     };
     expectTypeOf(imagePort).not.toEqualTypeOf(refinementPort);
     expect(provisionalRefinement.turnId).toBeNull();
+    expect(imageExecution.remoteJobId).toBe("remote-image-job");
+    expect(pendingExecution.status).toBe("pending");
+    expect(urlArtifactDownload.artifact.source).toBe("url");
+    expect(base64ArtifactDownload.artifact.source).toBe("base64");
     expect(provisionalBinding.turnId).toBeNull();
     expect(provisionalAsset.turnId).toBeNull();
   });

@@ -282,24 +282,55 @@ export type IllustrationImageExecutionRequest = ImageJobScope & Readonly<{
   prompt: string;
   generationRevision: number;
   idempotencyKey: string;
+  imageCount: 1 | 2;
+  size: string;
+  aspectRatio: string;
+  quality: IllustrationConfig["quality"];
+  outputFormat: IllustrationConfig["outputFormat"];
+  remoteJobId: string | null;
 }>;
 
-export type IllustrationImageExecutionResult = Readonly<{
+type IllustrationImageExecutionResultBase = Readonly<{
   providerRole: "image";
   providerProfileId: string;
   model: string;
-  artifacts: readonly Readonly<{
-    url?: string;
-    data?: string;
-    mimeType?: string;
-    fileName?: string;
-  }>[];
   metadata: Readonly<Record<string, unknown>>;
 }>;
+
+export type IllustrationImageArtifact =
+  | Readonly<{
+      source: "url";
+      url: string;
+      mimeType?: string;
+      fileName?: string;
+    }>
+  | Readonly<{
+      source: "base64";
+      base64: string;
+      mimeType?: string;
+      fileName?: string;
+    }>;
+
+export type IllustrationImageExecutionResult =
+  | (IllustrationImageExecutionResultBase & Readonly<{
+      status: "pending";
+      remoteJobId: string;
+      pollAfterMs: number;
+      progress: number | null;
+      queuePosition: number | null;
+      etaSeconds: number | null;
+    }>)
+  | (IllustrationImageExecutionResultBase & Readonly<{
+      status: "completed";
+      artifacts: readonly IllustrationImageArtifact[];
+      usage: Readonly<Record<string, unknown>>;
+      reportedCost: Readonly<{ amount: string; currency: string }> | null;
+    }>);
 
 export type IllustrationPromptRefinementRequest = IllustrationSegmentExecutionScope & Readonly<{
   providerProfileId: string;
   model: string;
+  systemPrompt: string;
   fictionText: string;
   storyContext: string;
 }>;
