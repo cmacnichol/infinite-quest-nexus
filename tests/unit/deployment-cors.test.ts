@@ -57,4 +57,28 @@ describe("deployment security configuration", () => {
     expect(environment).toContain("NEXT_WEB_ROOT=/app/apps/web-next/dist");
     expect(environment).not.toMatch(/^WEB_ROOT=/mu);
   });
+
+  it.each([
+    ["Compose combined app", "compose.yaml", "infinitequest-app", "12"],
+    ["Swarm worker", "deploy/swarm/stack.yaml", "infinitequest-worker", "8"]
+  ])("configures bounded generation concurrency and pool capacity for %s", (
+    _name,
+    path,
+    service,
+    defaultConnections
+  ) => {
+    const source = readFileSync(path, "utf8");
+    const environment = serviceEnvironment(source, service);
+
+    expect(environment).toContain("WORKER_GENERATION_CONCURRENCY: ${WORKER_GENERATION_CONCURRENCY:-1}");
+    expect(environment).toContain(`DATABASE_MAX_CONNECTIONS: \${DATABASE_MAX_CONNECTIONS:-${defaultConnections}}`);
+    expect(environment).toContain("stop_grace_period: 10m");
+  });
+
+  it("documents worker concurrency and role-safe pool capacity in the example environment", () => {
+    const environment = readFileSync(".env.example", "utf8");
+
+    expect(environment).toContain("WORKER_GENERATION_CONCURRENCY=1");
+    expect(environment).toContain("DATABASE_MAX_CONNECTIONS=12");
+  });
 });

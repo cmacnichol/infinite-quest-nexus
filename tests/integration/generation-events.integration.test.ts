@@ -116,6 +116,7 @@ integration("generation job notification delivery", () => {
       allowMaintenanceMigrations: false,
       workerPollIntervalMs: 1_000,
       workerLeaseSeconds: 60,
+      workerGenerationConcurrency: 1,
       legacyWebRoot: resolve("apps/web/public"),
       nextWebRoot: resolve("apps/web-next"),
       assetStorageDriver: "filesystem",

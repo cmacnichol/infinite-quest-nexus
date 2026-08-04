@@ -70,10 +70,12 @@ services:
     environment:
       APP_ROLE: worker
       DATABASE_URL_FILE: /run/secrets/infinitequest_database_url
+      DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-8}
       CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/infinitequest_credential_encryption_key
       ASSET_STORAGE_DRIVER: filesystem
       ASSET_STORAGE_ROOT: /var/lib/infinitequest/assets
       WORKER_POLL_INTERVAL_MS: 2000
+      WORKER_GENERATION_CONCURRENCY: ${WORKER_GENERATION_CONCURRENCY:-1}
       PROVIDER_NETWORK_ALLOWLIST: ${PROVIDER_NETWORK_ALLOWLIST:-}
     secrets:
       - infinitequest_database_url
@@ -84,6 +86,7 @@ services:
         target: /var/lib/infinitequest/assets
     networks:
       - infinitequest-backend
+    stop_grace_period: 10m
     healthcheck:
       test: ["CMD", "node", "-e", "import('./dist/packages/database/src/config.js').then(c=>import('./dist/packages/database/src/pool.js').then(p=>p.createDatabasePool(c.databaseConfig()).query('SELECT 1').then(()=>process.exit(0)))).catch(()=>process.exit(1))"]
       interval: 15s

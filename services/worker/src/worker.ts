@@ -11,6 +11,13 @@ import { runIllustrationPromptJob } from "../../api/src/segmented-illustration-s
 
 export type WorkerDependencies = Readonly<{
   generation: GenerationWorkerApplication;
+  optionalLanes?: WorkerOptionalLanes;
+}>;
+
+export type WorkerOptionalLanes = Readonly<{
+  illustration(): Promise<boolean>;
+  chronicle(): Promise<boolean>;
+  asset(): Promise<boolean>;
 }>;
 
 export type StartedGeneration = Readonly<{
@@ -46,36 +53,123 @@ export async function startNextGeneration(
 function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (signal.aborted) return resolve();
-    const timeout = setTimeout(resolve, milliseconds);
-    signal.addEventListener("abort", () => {
+    let timeout!: ReturnType<typeof setTimeout>;
+    const onAbort = () => {
       clearTimeout(timeout);
+      signal.removeEventListener("abort", onAbort);
       resolve();
-    }, { once: true });
+    };
+    timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+type ActiveLane = {
+  name: "illustration" | "chronicle" | "asset";
+  active: Set<Promise<boolean>>;
+  nextEligibleAt: number;
+  run(): Promise<boolean>;
+};
+
+function defaultOptionalLanes(
+  pool: DatabasePool,
+  config: RuntimeConfig,
+  workerId: string
+): WorkerOptionalLanes {
+  return {
+    async illustration() {
+      if (await runIllustrationPromptJob(
+        pool,
+        workerId,
+        config.workerLeaseSeconds,
+        config.credentialEncryptionKey
+      )) return true;
+      if (await runIllustrationResolutionJob(pool, workerId, config.workerLeaseSeconds)) return true;
+      return runImageJob(
+        pool,
+        workerId,
+        config.workerLeaseSeconds,
+        config.credentialEncryptionKey,
+        { root: config.assetStorageRoot }
+      );
+    },
+    chronicle: () => runChronicleJob(
+      pool,
+      workerId,
+      config.workerLeaseSeconds,
+      config.credentialEncryptionKey
+    ),
+    asset: () => runAssetMetadataBackfill(pool, { root: config.assetStorageRoot })
+  };
+}
+
+function lanePromises(
+  activeGeneration: ReadonlySet<Promise<boolean>>,
+  lanes: readonly ActiveLane[]
+): Promise<boolean>[] {
+  return [
+    ...activeGeneration,
+    ...lanes.flatMap((lane) => [...lane.active])
+  ];
+}
+
+function laneWaitMilliseconds(
+  pollIntervalMs: number,
+  generationNextEligibleAt: number,
+  lanes: readonly ActiveLane[]
+): number {
+  const now = Date.now();
+  const eligibleTimes = [generationNextEligibleAt, ...lanes.map((lane) => lane.nextEligibleAt)]
+    .filter((eligibleAt) => eligibleAt > now);
+  if (eligibleTimes.length === 0) return pollIntervalMs;
+  return Math.max(1, Math.min(pollIntervalMs, Math.min(...eligibleTimes) - now));
 }
 
 export async function runWorker(
   pool: DatabasePool,
   config: RuntimeConfig,
   signal: AbortSignal,
-  { generation }: WorkerDependencies
+  { generation, optionalLanes: injectedOptionalLanes }: WorkerDependencies
 ): Promise<void> {
   const workerId = `${hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
   logger.info({ event: "worker_started", workerId });
 
-  let activeGeneration: Promise<boolean> | null = null;
+  const activeGeneration = new Set<Promise<boolean>>();
+  let generationNextEligibleAt = 0;
+  const optionalLanes = injectedOptionalLanes ?? defaultOptionalLanes(pool, config, workerId);
+  const lanes: ActiveLane[] = [
+    { name: "illustration", active: new Set(), nextEligibleAt: 0, run: optionalLanes.illustration },
+    { name: "chronicle", active: new Set(), nextEligibleAt: 0, run: optionalLanes.chronicle },
+    { name: "asset", active: new Set(), nextEligibleAt: 0, run: optionalLanes.asset }
+  ];
 
   while (!signal.aborted) {
-    try {
-      // Start a generation job if none is active (runs concurrently)
-      if (!activeGeneration) {
-        const started = await startNextGeneration(
-          generation,
-          workerId,
-          config.workerLeaseSeconds
-        );
-        if (started) {
-          activeGeneration = started.execution
+    const now = Date.now();
+
+    // Generation is visited once per rotation and receives at most one claim
+    // attempt for each slot that was free at the start of this visit.
+    if (now >= generationNextEligibleAt) {
+      const freeGenerationSlots = Math.max(
+        0,
+        config.workerGenerationConcurrency - activeGeneration.size
+      );
+      for (let slot = 0; slot < freeGenerationSlots && !signal.aborted; slot += 1) {
+        try {
+          const started = await startNextGeneration(
+            generation,
+            workerId,
+            config.workerLeaseSeconds
+          );
+          if (!started) {
+            generationNextEligibleAt = Date.now() + config.workerPollIntervalMs;
+            break;
+          }
+          generationNextEligibleAt = 0;
+          let tracked!: Promise<boolean>;
+          tracked = started.execution
             .catch((error) => {
               logger.error({
                 event: "worker_generation_error",
@@ -85,40 +179,80 @@ export async function runWorker(
               });
               return false;
             })
-            .finally(() => { activeGeneration = null; });
+            .finally(() => {
+              activeGeneration.delete(tracked);
+              generationNextEligibleAt = 0;
+            });
+          activeGeneration.add(tracked);
+        } catch (error) {
+          generationNextEligibleAt = Date.now() + config.workerPollIntervalMs;
+          logger.error({
+            event: "worker_generation_claim_error",
+            workerId,
+            message: error instanceof Error ? error.message : String(error)
+          });
+          break;
         }
       }
+    }
 
-      // Process illustration and image jobs (runs in main loop, concurrent with generation)
-      const refined = await runIllustrationPromptJob(pool, workerId, config.workerLeaseSeconds, config.credentialEncryptionKey);
-      const resolved = refined || await runIllustrationResolutionJob(pool, workerId, config.workerLeaseSeconds);
-      const illustrated = resolved || await runImageJob(
-        pool, workerId, config.workerLeaseSeconds, config.credentialEncryptionKey,
-        { root: config.assetStorageRoot }
-      );
-      const chronicled = illustrated || await runChronicleJob(pool, workerId, config.workerLeaseSeconds, config.credentialEncryptionKey);
-      const backfilled = chronicled || await runAssetMetadataBackfill(pool, { root: config.assetStorageRoot });
+    // Each optional lane is independently bounded at one active promise. A
+    // lane that finds no work waits for the poll interval, while completed
+    // work is eligible for immediate refill on the next full rotation.
+    for (const lane of lanes) {
+      if (signal.aborted || lane.active.size > 0 || Date.now() < lane.nextEligibleAt) continue;
+      let tracked!: Promise<boolean>;
+      tracked = Promise.resolve()
+        .then(() => lane.run())
+        .then((worked) => {
+          lane.nextEligibleAt = worked ? 0 : Date.now() + config.workerPollIntervalMs;
+          return worked;
+        })
+        .catch((error) => {
+          lane.nextEligibleAt = Date.now() + config.workerPollIntervalMs;
+          logger.error({
+            event: `worker_${lane.name}_error`,
+            workerId,
+            message: error instanceof Error ? error.message : String(error)
+          });
+          return false;
+        })
+        .finally(() => { lane.active.delete(tracked); });
+      lane.active.add(tracked);
+    }
 
-      const worked = refined || resolved || illustrated || chronicled || backfilled;
-      if (!worked && !activeGeneration) {
-        await wait(config.workerPollIntervalMs, signal);
-      } else if (!worked && activeGeneration) {
-        // Generation is running but no other work — short wait before checking again
-        await wait(Math.min(1000, config.workerPollIntervalMs), signal);
-      }
-    } catch (error) {
-      logger.error({
-        event: "worker_loop_error", workerId,
-        message: error instanceof Error ? error.message : String(error)
-      });
-      await wait(config.workerPollIntervalMs, signal);
+    if (signal.aborted) break;
+    const active = lanePromises(activeGeneration, lanes);
+    const waitMilliseconds = laneWaitMilliseconds(
+      config.workerPollIntervalMs,
+      generationNextEligibleAt,
+      lanes
+    );
+    if (active.length === 0) {
+      await wait(waitMilliseconds, signal);
+    } else {
+      await Promise.race([
+        ...active,
+        wait(waitMilliseconds, signal).then(() => false)
+      ]);
+      // A lane may complete synchronously (for example, a local queue scan or
+      // deterministic provider double). Yield one macrotask so timers, abort,
+      // and other replicas are not starved by an all-microtask refill loop.
+      if (!signal.aborted) await wait(0, signal);
     }
   }
 
-  // On shutdown, wait for active generation to complete
-  if (activeGeneration) {
-    logger.info({ event: "worker_draining_generation", workerId });
-    await activeGeneration.catch(() => undefined);
+  const draining = lanePromises(activeGeneration, lanes);
+  if (draining.length > 0) {
+    logger.info({
+      event: "worker_draining_jobs",
+      workerId,
+      generationJobs: activeGeneration.size,
+      illustrationJobs: lanes[0]!.active.size,
+      chronicleJobs: lanes[1]!.active.size,
+      assetJobs: lanes[2]!.active.size
+    });
+    await Promise.allSettled(draining);
   }
   logger.info({ event: "worker_stopped", workerId });
 }

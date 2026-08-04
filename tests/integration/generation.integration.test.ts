@@ -11,6 +11,9 @@ import { setIllustrationConfig } from "../../services/api/src/image-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { branchCampaign, rewindCampaign, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
+import { createWorkerGenerationApplication } from "../../services/runtime/src/generation-worker-composition.js";
+import { runWorker } from "../../services/worker/src/worker.js";
+import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/api/src/memory-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
@@ -395,6 +398,115 @@ integration("durable Story Engine integration", () => {
       turn_number: 3,
       narration: expect.any(String)
     }]);
+  });
+
+  it("fills configured slots across worker replicas without duplicate campaign turns", async () => {
+    const importedCampaigns = await Promise.all([
+      campaign(undefined, `Concurrent scheduler A ${crypto.randomUUID()}`),
+      campaign(undefined, `Concurrent scheduler B ${crypto.randomUUID()}`),
+      campaign(undefined, `Concurrent scheduler C ${crypto.randomUUID()}`),
+      campaign(undefined, `Concurrent scheduler D ${crypto.randomUUID()}`)
+    ]);
+    let providerRequestsStarted = 0;
+    let signalAllProviderRequests!: () => void;
+    const allProviderRequests = new Promise<void>((resolveStarted) => {
+      signalAllProviderRequests = resolveStarted;
+    });
+    let releaseProviderResponses!: () => void;
+    const providerResponseGate = new Promise<void>((resolveResponses) => {
+      releaseProviderResponses = resolveResponses;
+    });
+    const jobs = await Promise.all(importedCampaigns.map((imported, index) => {
+      replies.push({
+        content: validStory(`Concurrent scheduler campaign ${index + 1} commits exactly once.`),
+        onRequest: () => {
+          providerRequestsStarted += 1;
+          if (providerRequestsStarted === importedCampaigns.length) signalAllProviderRequests();
+        },
+        waitFor: providerResponseGate
+      });
+      return queue(imported.campaignId, `Run concurrent scheduler campaign ${index + 1}.`);
+    }));
+    const controller = new AbortController();
+    const schedulerConfig = {
+      workerGenerationConcurrency: 2,
+      workerLeaseSeconds: 30,
+      workerPollIntervalMs: 10,
+      credentialEncryptionKey: credentialSecret,
+      assetStorageRoot: "/tmp/infinite-quest-worker-integration"
+    } as RuntimeConfig;
+    const optionalLanes = {
+      illustration: async () => false,
+      chronicle: async () => false,
+      asset: async () => false
+    };
+    const workers = [
+      runWorker(pool, schedulerConfig, controller.signal, {
+        generation: createWorkerGenerationApplication(pool, credentialSecret),
+        optionalLanes
+      }),
+      runWorker(pool, schedulerConfig, controller.signal, {
+        generation: createWorkerGenerationApplication(pool, credentialSecret),
+        optionalLanes
+      })
+    ];
+
+    try {
+      await expect(Promise.race([
+        allProviderRequests,
+        new Promise((_resolve, reject) => {
+          setTimeout(() => reject(new Error("Four generation slots did not reach the provider.")), 5_000);
+        })
+      ])).resolves.toBeUndefined();
+      releaseProviderResponses();
+      await expect.poll(async () => Promise.all(
+        jobs.map(async (job) => (await getGenerationJob(pool, job.id)).status)
+      ), { timeout: 15_000 }).toEqual(["completed", "completed", "completed", "completed"]);
+    } finally {
+      releaseProviderResponses();
+      controller.abort();
+      await Promise.all(workers);
+    }
+
+    expect(providerRequestsStarted).toBe(4);
+    const committed = await pool.query<{ campaign_id: string; count: number; distinct_turns: number }>(
+      `SELECT campaign_id, count(*)::int AS count, count(DISTINCT turn_number)::int AS distinct_turns
+         FROM turns
+        WHERE campaign_id = ANY($1::uuid[]) AND turn_number = 3
+        GROUP BY campaign_id
+        ORDER BY campaign_id`,
+      [importedCampaigns.map((imported) => imported.campaignId)]
+    );
+    expect(committed.rows).toHaveLength(4);
+    expect(committed.rows.every((row) => row.count === 1 && row.distinct_turns === 1)).toBe(true);
+  });
+
+  it("reclaims a process-lost lease and fences the stale worker from a duplicate commit", async () => {
+    const imported = await campaign();
+    const job = await queue(imported.campaignId, "Recover this turn after simulated process loss.");
+    const lostWorker = createWorkerGenerationApplication(pool, credentialSecret);
+    const lostClaim = await lostWorker.claimNext({ workerId: "process-lost-worker", leaseSeconds: 30 });
+    expect(lostClaim).toMatchObject({ jobId: job.id, attempts: 1 });
+    await pool.query(
+      "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+      [job.id]
+    );
+    replies.push({ content: validStory("The reclaimed worker commits this recovered turn exactly once.") });
+
+    expect(await runGenerationJob(pool, "lease-reclaim-worker", 30, credentialSecret)).toBe(true);
+    await expect(lostWorker.executeClaimed({
+      workerId: "process-lost-worker",
+      leaseSeconds: 30,
+      claim: lostClaim!
+    })).resolves.toBe(false);
+
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });
+    const committed = await pool.query<{ count: number; distinct_turns: number }>(
+      `SELECT count(*)::int AS count, count(DISTINCT turn_number)::int AS distinct_turns
+         FROM turns WHERE campaign_id = $1 AND turn_number = 3`,
+      [imported.campaignId]
+    );
+    expect(committed.rows).toEqual([{ count: 1, distinct_turns: 1 }]);
   });
 
   it("commits the accepted turn when illustration enqueue hits a database error", async () => {

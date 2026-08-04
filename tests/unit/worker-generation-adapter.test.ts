@@ -63,6 +63,7 @@ function claim(jobId: string): ClaimedGeneration {
 
 const pool = {} as DatabasePool;
 const config = {
+  workerGenerationConcurrency: 1,
   workerLeaseSeconds: 45,
   workerPollIntervalMs: 100,
   credentialEncryptionKey: "test-secret",
@@ -143,14 +144,13 @@ describe("worker generation application adapter", () => {
     await running;
   });
 
-  it("runs optional lanes in priority order while generation is active", async () => {
+  it("preserves prompt-resolution-image priority within the illustration lane", async () => {
     const controller = new AbortController();
     const execution = deferred<boolean>();
     const calls: string[] = [];
     let promptCalls = 0;
     let resolutionCalls = 0;
     let imageCalls = 0;
-    let chronicleCalls = 0;
 
     lane.illustrationPrompt.mockImplementation(async () => {
       calls.push("prompt");
@@ -167,15 +167,9 @@ describe("worker generation application adapter", () => {
       imageCalls += 1;
       return imageCalls === 1;
     });
-    lane.chronicle.mockImplementation(async () => {
-      calls.push("chronicle");
-      chronicleCalls += 1;
-      return chronicleCalls === 1;
-    });
+    lane.chronicle.mockResolvedValue(false);
     lane.asset.mockImplementation(async () => {
-      calls.push("asset");
-      controller.abort();
-      return true;
+      return false;
     });
     const generation: GenerationWorkerApplication = {
       claimNext: vi.fn(async () => claim("job-active")),
@@ -183,17 +177,16 @@ describe("worker generation application adapter", () => {
     };
 
     const running = runWorker(pool, config, controller.signal, { generation });
-    await vi.waitFor(() => expect(lane.asset).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(lane.image).toHaveBeenCalled());
 
-    expect(calls).toEqual([
+    expect(calls.slice(0, 6)).toEqual([
       "prompt",
       "prompt", "resolution",
-      "prompt", "resolution", "image",
-      "prompt", "resolution", "image", "chronicle",
-      "prompt", "resolution", "image", "chronicle", "asset"
+      "prompt", "resolution", "image"
     ]);
     expect(generation.claimNext).toHaveBeenCalledOnce();
 
+    controller.abort();
     execution.resolve(true);
     await running;
   });

@@ -1578,6 +1578,59 @@ integration("independent illustration pipeline", () => {
     }
   });
 
+  it("exhausts automatic image attempts without retrying narration or mutating its accepted story", async () => {
+    failImages = true;
+    try {
+      const imported = await campaign(2);
+      const storyJob = await generate(imported.campaignId);
+      const acceptedBeforeFailures = await acceptedStorySnapshot(imported.campaignId, storyJob.id);
+      const storyRequestCount = storyRequests.length;
+      const [imageJob] = await listCampaignImageJobs(pool, imported.campaignId);
+      expect(imageJob).toMatchObject({ status: "queued", attempts: 0, maxAttempts: 2 });
+
+      await expect(runImageJob(
+        pool,
+        "synthetic-image-exhaustion-first-worker",
+        30,
+        credentialSecret,
+        { root: assetRoot }
+      )).resolves.toBe(true);
+      await expect(getImageJob(pool, imageJob!.id)).resolves.toMatchObject({
+        status: "queued",
+        attempts: 1,
+        maxAttempts: 2,
+        errorCode: "image_generation_failed"
+      });
+      await pool.query("UPDATE image_jobs SET next_attempt_at = now() WHERE id = $1", [imageJob!.id]);
+
+      await expect(runImageJob(
+        pool,
+        "synthetic-image-exhaustion-final-worker",
+        30,
+        credentialSecret,
+        { root: assetRoot }
+      )).resolves.toBe(true);
+      await expect(getImageJob(pool, imageJob!.id)).resolves.toMatchObject({
+        status: "recoverable",
+        attempts: 2,
+        maxAttempts: 2,
+        errorCode: "image_generation_failed"
+      });
+      await expect(runImageJob(
+        pool,
+        "synthetic-image-exhaustion-extra-worker",
+        30,
+        credentialSecret,
+        { root: assetRoot }
+      )).resolves.toBe(false);
+
+      expect(await acceptedStorySnapshot(imported.campaignId, storyJob.id)).toEqual(acceptedBeforeFailures);
+      expect(storyRequests).toHaveLength(storyRequestCount);
+    } finally {
+      failImages = false;
+    }
+  });
+
   it("preserves the accepted story when the independent image endpoint fails", async () => {
     failImages = true;
     try {

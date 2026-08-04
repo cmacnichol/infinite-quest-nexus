@@ -103,6 +103,7 @@ function config(storageRoot: string): RuntimeConfig {
     allowMaintenanceMigrations: false,
     workerPollIntervalMs: 1000,
     workerLeaseSeconds: 60,
+    workerGenerationConcurrency: 1,
     legacyWebRoot: resolve("apps/web/public"),
     nextWebRoot: resolve("apps/web-next"),
     assetStorageDriver: "filesystem",

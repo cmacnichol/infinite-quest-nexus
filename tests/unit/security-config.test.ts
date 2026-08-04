@@ -18,7 +18,10 @@ const securitySettingNames = [
   "API_CONCURRENCY_IMPORT_REQUESTS",
   "TRUST_PROXY_HOPS",
   "LEGACY_WEB_ROOT",
-  "NEXT_WEB_ROOT"
+  "NEXT_WEB_ROOT",
+  "APP_ROLE",
+  "DATABASE_MAX_CONNECTIONS",
+  "WORKER_GENERATION_CONCURRENCY"
 ] as const;
 
 afterEach(() => {
@@ -93,4 +96,73 @@ describe("runtime security configuration", () => {
     process.env.API_CONCURRENCY_IMPORT_REQUESTS = "0";
     expect(() => loadRuntimeConfig()).toThrow("API_CONCURRENCY_IMPORT_REQUESTS");
   });
+});
+
+describe("worker concurrency configuration", () => {
+  it("defaults generation concurrency to one with role-safe pool capacities", () => {
+    minimumEnvironment();
+    process.env.APP_ROLE = "worker";
+
+    const worker = loadRuntimeConfig();
+    expect(worker.workerGenerationConcurrency).toBe(1);
+    expect(worker.databaseMaxConnections).toBe(8);
+
+    process.env.APP_ROLE = "all";
+    const all = loadRuntimeConfig();
+    expect(all.workerGenerationConcurrency).toBe(1);
+    expect(all.databaseMaxConnections).toBe(12);
+  });
+
+  it.each([1, 4])("accepts generation concurrency boundary %i", (concurrency) => {
+    minimumEnvironment();
+    process.env.APP_ROLE = "worker";
+    process.env.WORKER_GENERATION_CONCURRENCY = String(concurrency);
+
+    expect(loadRuntimeConfig().workerGenerationConcurrency).toBe(concurrency);
+  });
+
+  it.each(["0", "5", "1.5", "workers", " "])(
+    "rejects invalid generation concurrency %j instead of clamping",
+    (concurrency) => {
+      minimumEnvironment();
+      process.env.APP_ROLE = "worker";
+      process.env.WORKER_GENERATION_CONCURRENCY = concurrency;
+
+      expect(() => loadRuntimeConfig()).toThrow("WORKER_GENERATION_CONCURRENCY");
+    }
+  );
+
+  it.each([
+    { role: "worker", concurrency: 4, connections: 7, minimum: 8 },
+    { role: "all", concurrency: 4, connections: 11, minimum: 12 }
+  ] as const)(
+    "rejects $role pool capacity below $minimum and names both settings",
+    ({ role, concurrency, connections }) => {
+      minimumEnvironment();
+      process.env.APP_ROLE = role;
+      process.env.WORKER_GENERATION_CONCURRENCY = String(concurrency);
+      process.env.DATABASE_MAX_CONNECTIONS = String(connections);
+
+      expect(() => loadRuntimeConfig()).toThrow(
+        /DATABASE_MAX_CONNECTIONS.*WORKER_GENERATION_CONCURRENCY/u
+      );
+    }
+  );
+
+  it.each([
+    { role: "worker", concurrency: 4, connections: 8 },
+    { role: "all", concurrency: 4, connections: 12 }
+  ] as const)(
+    "accepts the exact $role pool-capacity boundary",
+    ({ role, concurrency, connections }) => {
+      minimumEnvironment();
+      process.env.APP_ROLE = role;
+      process.env.WORKER_GENERATION_CONCURRENCY = String(concurrency);
+      process.env.DATABASE_MAX_CONNECTIONS = String(connections);
+
+      const config = loadRuntimeConfig();
+      expect(config.workerGenerationConcurrency).toBe(concurrency);
+      expect(config.databaseMaxConnections).toBe(connections);
+    }
+  );
 });
