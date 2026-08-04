@@ -26,7 +26,7 @@ import type {
   AssetAdapterDependencies,
   ImageProviderAdapterDependencies,
   PromptRefinementAdapterDependencies
-} from "../../api/src/illustration-application-adapter.js";
+} from "./illustration-platform-adapter.js";
 
 export type IllustrationPlatformBindings = Readonly<{
   imageProvider: ImageProviderAdapterDependencies;

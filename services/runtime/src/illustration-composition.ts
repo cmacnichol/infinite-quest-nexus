@@ -20,7 +20,7 @@ import {
   createIllustrationAssetAdapter,
   createIllustrationImageProviderAdapter,
   createIllustrationPromptRefinementAdapter
-} from "../../api/src/illustration-application-adapter.js";
+} from "./illustration-platform-adapter.js";
 import { runImageJob } from "./illustration-image-job-adapter.js";
 import { runIllustrationResolutionJob } from "./illustration-resolution-job-adapter.js";
 import { runIllustrationPromptJob } from "./illustration-segment-job-adapter.js";

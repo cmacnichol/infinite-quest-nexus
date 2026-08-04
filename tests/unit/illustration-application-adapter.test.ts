@@ -6,7 +6,7 @@ import {
   createIllustrationAssetAdapter,
   createIllustrationImageProviderAdapter,
   createIllustrationPromptRefinementAdapter
-} from "../../services/api/src/illustration-application-adapter.js";
+} from "../../services/runtime/src/illustration-platform-adapter.js";
 import { createIllustrationGenerationTransactionPort } from "../../services/runtime/src/illustration-repository-bindings.js";
 
 const ownerUserId = "11111111-1111-4111-8111-111111111111";
@@ -16,9 +16,9 @@ const segmentId = "44444444-4444-4444-8444-444444444444";
 const providerProfileId = "55555555-5555-4555-8555-555555555555";
 
 describe("illustration provider adapters", () => {
-  it("does not bind provider or asset business services inside the API adapter", async () => {
+  it("does not bind provider or asset business services inside the runtime platform adapter", async () => {
     const source = await readFile(
-      new URL("../../services/api/src/illustration-application-adapter.ts", import.meta.url),
+      new URL("../../services/runtime/src/illustration-platform-adapter.ts", import.meta.url),
       "utf8",
     );
 

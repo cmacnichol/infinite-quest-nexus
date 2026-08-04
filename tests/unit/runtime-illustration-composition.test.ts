@@ -310,6 +310,15 @@ describe("createWorkerIllustrationApplication", () => {
     expect(source).not.toContain('from "../../api/src/illustration-segment-job-adapter.js"');
   });
 
+  it("14a4: does not compose illustration ports from an API business adapter", async () => {
+    const source = await readFile(
+      new URL("../../services/runtime/src/illustration-composition.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).not.toContain('from "../../api/src/illustration-application-adapter.js"');
+  });
+
   it("binds concrete provider, artifact, and asset ports into the separate worker application", () => {
     const pool = {} as DatabasePool;
     const store = { root: "/var/lib/infinitequest/assets" };

@@ -1,3 +1,6 @@
+// Concrete provider, artifact, and asset adapters belong to the runtime
+// composition layer. Their dependencies are supplied as typed ports so API
+// routes and application use cases remain platform-free.
 import type {
   IllustrationArtifactDownloadPort,
   IllustrationAssetPort,
