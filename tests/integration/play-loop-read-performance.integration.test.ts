@@ -20,6 +20,7 @@ type RouteMetric = {
   p50Ms: number;
   p95Ms: number;
   queryCount: number;
+  queryCounts: number[];
   sampleCount: number;
 };
 
@@ -33,6 +34,16 @@ integration("play-loop read performance", () => {
       benchmark: string;
       fixture: {
         campaigns: Record<string, { turns: number; generationJobs: number; imageJobs: number; chronicleMemories: number }>;
+      };
+      boundedReadEvidence: {
+        requestedLimit: number;
+        firstPageTurns: number;
+        middlePageTurns: number;
+        lastPageTurns: number;
+        firstPageHasCursor: boolean;
+        lastPageHasCursor: boolean;
+        syncInitialTurns: number;
+        syncInitialMode: string;
       };
       plans: Array<{ name: string; actualRows: number; executionTimeMs: number; nodeTypes: string[] }>;
       postgresVersion: string;
@@ -49,7 +60,18 @@ integration("play-loop read performance", () => {
       long: { turns: 2_000, generationJobs: 400, imageJobs: 100, chronicleMemories: 2_000 }
     });
 
-    const queryBudgets: Record<string, number> = {
+    expect(result.boundedReadEvidence).toEqual({
+      requestedLimit: 50,
+      firstPageTurns: 50,
+      middlePageTurns: 50,
+      lastPageTurns: 50,
+      firstPageHasCursor: true,
+      lastPageHasCursor: false,
+      syncInitialTurns: 50,
+      syncInitialMode: "replace"
+    });
+
+    const expectedQueryCounts: Record<string, number> = {
       "campaign-list": 1,
       dashboard: 2,
       "sync-replace": 6,
@@ -61,13 +83,14 @@ integration("play-loop read performance", () => {
       "generation-result": 2,
       "initial-hydration": 7
     };
-    expect(Object.keys(result.routes).sort()).toEqual(Object.keys(queryBudgets).sort());
-    for (const [name, queryBudget] of Object.entries(queryBudgets)) {
+    expect(Object.keys(result.routes).sort()).toEqual(Object.keys(expectedQueryCounts).sort());
+    for (const [name, expectedQueryCount] of Object.entries(expectedQueryCounts)) {
       const metric = result.routes[name];
       expect(metric, name).toBeDefined();
       expect(metric?.sampleCount, name).toBe(3);
       expect(metric?.errorRate, name).toBe(0);
-      expect(metric?.queryCount, name).toBeLessThanOrEqual(queryBudget);
+      expect(metric?.queryCount, name).toBe(expectedQueryCount);
+      expect(metric?.queryCounts, name).toEqual([expectedQueryCount]);
       expect(metric?.p50Ms, name).toBeGreaterThanOrEqual(0);
       expect(metric?.p95Ms, name).toBeGreaterThanOrEqual(metric?.p50Ms ?? 0);
       expect(metric?.payloadBytesP50, name).toBeGreaterThan(0);
