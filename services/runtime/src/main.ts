@@ -12,6 +12,7 @@ import { runRuntimeLifecycle } from "./lifecycle.js";
 import { createApiGenerationApplication } from "./generation-api-composition.js";
 import { createWorkerGenerationApplication } from "./generation-worker-composition.js";
 import { dispatchRuntimeRole } from "./runtime-role.js";
+import { createRuntimeGenerationEventSource } from "./generation-event-composition.js";
 
 const config = loadRuntimeConfig();
 const abortController = new AbortController();
@@ -32,12 +33,13 @@ await runRuntimeLifecycle(config, abortController, {
     })
   }),
   configureTransport: configureDefaultProviderTransport,
-  dispatchRole: (roleConfig, pool, signal) => dispatchRuntimeRole(roleConfig, pool, signal, {
+  createGenerationEvents: createRuntimeGenerationEventSource,
+  dispatchRole: (roleConfig, pool, signal, generationEvents) => dispatchRuntimeRole(roleConfig, pool, signal, {
     migrateDatabase,
     waitForDatabaseMigrations,
     createApiGeneration: createApiGenerationApplication,
     createWorkerGeneration: createWorkerGenerationApplication,
     buildServer,
     runWorker
-  })
+  }, generationEvents)
 });

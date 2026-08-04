@@ -1,11 +1,17 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
-import { GenerationApplicationError, type GenerationApplication } from "../../packages/application/src/index.js";
+import {
+  GenerationApplicationError,
+  type GenerationApplication,
+  type GenerationChanged,
+  type GenerationEventSource,
+  type GenerationEventSubscription
+} from "../../packages/application/src/index.js";
 import {
   apiErrorEnvelopeSchema,
   campaignBranchResponseSchema,
@@ -81,6 +87,7 @@ type MockPoolOptions = {
   rawGenerationError?: boolean;
   onGenerationJobRead?: () => void;
   streamReadFailure?: boolean;
+  streamReadFailureAfterReads?: number;
   streamSnapshots?: Array<Record<string, unknown>>;
 };
 
@@ -434,7 +441,9 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       if (options.missingJob) return { rows: [] };
       generationJobReads += 1;
       options.onGenerationJobRead?.();
-      if (options.streamReadFailure && generationJobReads > 1) throw new Error("generation job read failed");
+      if (options.streamReadFailure && generationJobReads > (options.streamReadFailureAfterReads ?? 1)) {
+        throw new Error("generation job read failed");
+      }
       const snapshot = options.streamSnapshots?.[Math.min(generationJobReads - 1, options.streamSnapshots.length - 1)];
       return { rows: [{ ...jobRow(options), ...snapshot }] };
     }
@@ -520,6 +529,49 @@ function injectedGenerationApplication(overrides: Partial<GenerationApplication>
     discard: unavailable,
     ...overrides
   } as unknown as GenerationApplication;
+}
+
+function controlledGenerationEvents(onSubscribe?: () => void): {
+  source: GenerationEventSource;
+  emit(change?: GenerationChanged): void;
+  close: ReturnType<typeof vi.fn>;
+  subscribe: ReturnType<typeof vi.fn>;
+} {
+  const queue: GenerationChanged[] = [];
+  const waiters: Array<(result: IteratorResult<GenerationChanged>) => void> = [];
+  let closed = false;
+  const close = vi.fn(async () => {
+    if (closed) return;
+    closed = true;
+    for (const resolveWaiter of waiters.splice(0)) resolveWaiter({ done: true, value: undefined });
+  });
+  const subscription: GenerationEventSubscription = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: async () => {
+          const queued = queue.shift();
+          if (queued) return { done: false as const, value: queued };
+          if (closed) return { done: true as const, value: undefined };
+          return new Promise<IteratorResult<GenerationChanged>>((resolveWaiter) => waiters.push(resolveWaiter));
+        }
+      };
+    },
+    close
+  };
+  const subscribe = vi.fn(async () => {
+    onSubscribe?.();
+    return subscription;
+  });
+  return {
+    source: { subscribe },
+    emit(change = { jobId: JOB_ID, version: crypto.randomUUID() }) {
+      const resolveWaiter = waiters.shift();
+      if (resolveWaiter) resolveWaiter({ done: false, value: change });
+      else queue.push(change);
+    },
+    close,
+    subscribe
+  };
 }
 
 describe("client API route contracts without PostgreSQL", () => {
@@ -742,11 +794,14 @@ describe("client API route contracts without PostgreSQL", () => {
     }
   });
 
-  it("does not emit a lease-only snapshot and closes cleanly on a later read failure", async () => {
+  it("uses notification hints without emitting a lease-only snapshot and closes subscriptions on terminal/error", async () => {
     const leaseRenewedAt = new Date("2026-08-01T12:00:05.000Z");
     const completedAt = new Date("2026-08-01T12:00:10.000Z");
+    const dedupeEvents = controlledGenerationEvents();
+    const failureEvents = controlledGenerationEvents();
     const dedupeApp = await buildServer(serverOptions({
       config: config(storageRoot),
+      generationEvents: dedupeEvents.source,
       pool: mockPool({
         streamSnapshots: [
           { status: "generating", updatedAt: NOW },
@@ -755,33 +810,71 @@ describe("client API route contracts without PostgreSQL", () => {
         ]
       })
     }));
-    const failureApp = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool({
-      streamSnapshots: [{ status: "generating" }],
-      streamReadFailure: true
-    }) }));
+    const failureApp = await buildServer(serverOptions({
+      config: config(storageRoot),
+      generationEvents: failureEvents.source,
+      pool: mockPool({
+        streamSnapshots: [{ status: "generating" }],
+        streamReadFailure: true,
+        streamReadFailureAfterReads: 2
+      })
+    }));
 
     try {
-      const dedupeResponse = await dedupeApp.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
+      const dedupeResponsePromise = dedupeApp.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
+      await expect.poll(() => dedupeEvents.subscribe.mock.calls.length).toBe(1);
+      dedupeEvents.emit();
+      dedupeEvents.emit({ jobId: JOB_ID, version: "duplicate-wakeup" });
+      const dedupeResponse = await dedupeResponsePromise;
       const frames = dedupeResponse.body.trim().split("\n\n").filter(Boolean).map((frame) => JSON.parse(frame.replace(/^data: /, "")));
       expect(frames).toHaveLength(2);
       expect(frames.map((frame) => generationStreamSnapshotSchema.parse(frame).status)).toEqual(["generating", "completed"]);
       expect(frames[0]).not.toHaveProperty("updatedAt");
+      expect(dedupeEvents.close).toHaveBeenCalledOnce();
 
-      const failureResponse = await failureApp.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
+      const failureResponsePromise = failureApp.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
+      await expect.poll(() => failureEvents.subscribe.mock.calls.length).toBe(1);
+      failureEvents.emit();
+      const failureResponse = await failureResponsePromise;
       const failureFrames = failureResponse.body.trim().split("\n\n").filter(Boolean).map((frame) => JSON.parse(frame.replace(/^data: /, "")));
       expect(failureResponse.statusCode).toBe(200);
       expect(failureFrames).toHaveLength(1);
       expect(generationStreamSnapshotSchema.parse(failureFrames[0]).status).toBe("generating");
       expect(failureResponse.body).not.toContain('"status":"failed"');
+      expect(failureEvents.close).toHaveBeenCalledOnce();
     } finally {
       await Promise.all([dedupeApp.close(), failureApp.close()]);
     }
   });
 
-  it("does not query a generation job after the stream disconnects during its poll sleep", async () => {
-    let generationJobReads = 0;
+  it("closes the subscription when the immediate post-registration scoped read fails", async () => {
+    const events = controlledGenerationEvents();
     const app = await buildServer(serverOptions({
       config: config(storageRoot),
+      generationEvents: events.source,
+      pool: mockPool({
+        streamSnapshots: [{ status: "generating" }],
+        streamReadFailure: true,
+        streamReadFailureAfterReads: 1
+      })
+    }));
+
+    try {
+      const response = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
+      expect(response.statusCode).toBe(500);
+      expect(events.subscribe).toHaveBeenCalledOnce();
+      expect(events.close).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("does not query a generation job after the stream disconnects while waiting for a hint", async () => {
+    let generationJobReads = 0;
+    const events = controlledGenerationEvents();
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot),
+      generationEvents: events.source,
       pool: mockPool({
         streamSnapshots: [{ status: "generating" }],
         onGenerationJobRead: () => { generationJobReads += 1; }
@@ -802,11 +895,80 @@ describe("client API route contracts without PostgreSQL", () => {
       });
       await new Promise((resolve) => setTimeout(resolve, 400));
 
-      expect(generationJobReads).toBe(1);
+      expect(generationJobReads).toBe(2);
+      expect(events.close).toHaveBeenCalledOnce();
     } finally {
       await app.close();
     }
   });
+
+  it("closes the subscribe race with first read, registration, and immediate second read", async () => {
+    const order: string[] = [];
+    let reads = 0;
+    const events = controlledGenerationEvents(() => {
+      order.push("subscribe");
+      events.emit({ jobId: JOB_ID, version: "notification-before-subscribe-return" });
+    });
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot),
+      generationEvents: events.source,
+      pool: mockPool({
+        streamSnapshots: [
+          { status: "generating" },
+          { status: "completed", resultTurnId: TURN_ID }
+        ],
+        onGenerationJobRead: () => {
+          reads += 1;
+          order.push(`read:${reads}`);
+        }
+      })
+    }));
+
+    try {
+      const response = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
+      const frames = response.body.trim().split("\n\n").filter(Boolean);
+      expect(order.slice(0, 3)).toEqual(["read:1", "subscribe", "read:2"]);
+      expect(frames).toHaveLength(1);
+      expect(generationStreamSnapshotSchema.parse(JSON.parse(frames[0]!.replace(/^data: /, ""))).status)
+        .toBe("completed");
+      expect(events.close).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("reconciles authoritative state within 15 seconds when a notification is dropped", async () => {
+    let generationJobReads = 0;
+    const events = controlledGenerationEvents();
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot),
+      generationEvents: events.source,
+      pool: mockPool({
+        streamSnapshots: [
+          { status: "generating" },
+          { status: "generating" },
+          { status: "completed", resultTurnId: TURN_ID }
+        ],
+        onGenerationJobRead: () => { generationJobReads += 1; }
+      })
+    }));
+
+    try {
+      const startedAt = Date.now();
+      const response = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
+      const elapsedMs = Date.now() - startedAt;
+      const frames = response.body.trim().split("\n\n").filter(Boolean)
+        .map((frame) => generationStreamSnapshotSchema.parse(JSON.parse(frame.replace(/^data: /, ""))));
+
+      expect(frames.map(({ status }) => status)).toEqual(["generating", "completed"]);
+      expect(generationJobReads).toBe(3);
+      expect(elapsedMs).toBeGreaterThanOrEqual(14_500);
+      expect(elapsedMs).toBeLessThan(17_000);
+      expect(events.close).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  }, 20_000);
 
   it("serializes adopted generation mutation routes through their shared schemas", async () => {
     const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool() }));

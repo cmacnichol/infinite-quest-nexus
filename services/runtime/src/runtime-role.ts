@@ -1,5 +1,6 @@
 import type {
   GenerationApplication,
+  GenerationEventSource,
   GenerationWorkerApplication
 } from "../../../packages/application/src/index.js";
 import type { DatabasePool, RuntimeConfig } from "../../../packages/database/src/index.js";
@@ -78,15 +79,17 @@ export async function dispatchRuntimeRole(
   config: RuntimeConfig,
   pool: DatabasePool,
   signal: AbortSignal,
-  dependencies: RuntimeRoleDependencies
+  dependencies: RuntimeRoleDependencies,
+  generationEvents: GenerationEventSource | undefined
 ): Promise<void> {
   await prepareDatabase(config, pool, dependencies);
 
   if (config.role === "migrate") return;
 
   if (config.role === "api") {
+    if (!generationEvents) throw new Error("The API role requires a generation event source.");
     const generation = dependencies.createApiGeneration(pool);
-    const server = await dependencies.buildServer({ config, pool, generation });
+    const server = await dependencies.buildServer({ config, pool, generation, generationEvents });
     await server.listen({ host: config.host, port: config.port });
     await waitForAbort(signal);
     await server.close();
@@ -100,11 +103,13 @@ export async function dispatchRuntimeRole(
   }
 
   const apiGeneration = dependencies.createApiGeneration(pool);
+  if (!generationEvents) throw new Error("The all role requires a generation event source.");
   const workerGeneration = dependencies.createWorkerGeneration(pool, config.credentialEncryptionKey);
   const server = await dependencies.buildServer({
     config,
     pool,
-    generation: apiGeneration
+    generation: apiGeneration,
+    generationEvents
   });
   await server.listen({ host: config.host, port: config.port });
   await dependencies.runWorker(pool, config, signal, { generation: workerGeneration });

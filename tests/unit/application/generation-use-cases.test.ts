@@ -7,6 +7,8 @@ import {
   type GenerationClaimRepository,
   type GenerationCommandRepository,
   type GenerationExecutor,
+  type GenerationEventSource,
+  type GenerationEventSubscription,
   type GenerationApplicationErrorDetails
 } from "../../../packages/application/src/index.js";
 import type {
@@ -171,5 +173,29 @@ describe("generation application use cases", () => {
     expectTypeOf<Parameters<ReturnType<typeof createGenerationApplication>["getJob"]>[0]>()
       .toMatchTypeOf<Readonly<{ ownerUserId: string; jobId: string }>>();
     expectTypeOf<typeof appendClaim>().toMatchTypeOf<ClaimedGeneration>();
+  });
+
+  test("defines a platform-free owner/campaign/job-scoped generation event port", async () => {
+    const expected = Object.freeze({ jobId, version: "opaque-version-7" });
+    const subscription: GenerationEventSubscription = {
+      async *[Symbol.asyncIterator]() {
+        yield expected;
+      },
+      close: async () => undefined
+    };
+    const source: GenerationEventSource = {
+      subscribe: async (scope) => {
+        expect(scope).toEqual({ ownerUserId, campaignId, jobId });
+        return subscription;
+      }
+    };
+
+    const opened = await source.subscribe({ ownerUserId, campaignId, jobId });
+    await expect(opened[Symbol.asyncIterator]().next()).resolves.toEqual({
+      done: false,
+      value: expected
+    });
+    expectTypeOf<Parameters<GenerationEventSource["subscribe"]>[0]>()
+      .toEqualTypeOf<Readonly<{ ownerUserId: string; campaignId: string; jobId: string }>>();
   });
 });

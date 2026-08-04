@@ -7,7 +7,12 @@ import fastifyMultipart from "@fastify/multipart";
 import { z } from "zod";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import type { GenerationApplication } from "../../../packages/application/src/index.js";
+import type {
+  GenerationApplication,
+  GenerationChanged,
+  GenerationEventSource,
+  GenerationEventSubscription
+} from "../../../packages/application/src/index.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import { createLoggerOptions, logger } from "../../../packages/logger/src/index.js";
 import { characterLegacyText, effectiveCampaignCharacter } from "../../../packages/domain/src/world-characters.js";
@@ -166,6 +171,7 @@ export type BuildServerOptions = {
   config: RuntimeConfig;
   pool: DatabasePool;
   generation: GenerationApplication;
+  generationEvents: GenerationEventSource;
 };
 
 const uuidSchema = z.uuid();
@@ -284,6 +290,27 @@ function generationStreamSnapshot(value: unknown) {
   return parseResponseProjection(generationStreamSnapshotSchema, { ...value as object, ...generationPublicError(value) });
 }
 
+const GENERATION_STREAM_RECONCILIATION_MS = 15_000;
+const TERMINAL_GENERATION_STATUSES = new Set(["completed", "failed", "recoverable", "discarded", "cancelled"]);
+
+async function generationStreamWakeup(
+  pendingHint: Promise<IteratorResult<GenerationChanged>>
+): Promise<Readonly<{ kind: "hint"; result: IteratorResult<GenerationChanged> }> | Readonly<{ kind: "reconcile" }>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const reconciliation = new Promise<Readonly<{ kind: "reconcile" }>>((resolveWakeup) => {
+    timer = setTimeout(() => resolveWakeup({ kind: "reconcile" }), GENERATION_STREAM_RECONCILIATION_MS);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([
+      pendingHint.then((result) => ({ kind: "hint" as const, result })),
+      reconciliation
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function generationLifecycleLogContext(
   pool: DatabasePool,
   ownerUserId: string,
@@ -298,7 +325,7 @@ async function generationLifecycleLogContext(
   return result.rows[0] || null;
 }
 
-export async function buildServer({ config, pool, generation }: BuildServerOptions): Promise<FastifyInstance> {
+export async function buildServer({ config, pool, generation, generationEvents }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: createLoggerOptions(),
     bodyLimit: config.security.apiDefaultBodyLimitBytes,
@@ -921,8 +948,32 @@ export async function buildServer({ config, pool, generation }: BuildServerOptio
     let snapshotsSent = 0;
     let finalStatus = "client_closed";
     let isClosed = false;
-    request.raw.on("close", () => { isClosed = true; });
+    let subscription: GenerationEventSubscription | undefined;
+    let closePromise: Promise<void> | undefined;
+    const closeSubscription = (): Promise<void> => {
+      if (!subscription) return Promise.resolve();
+      closePromise ??= subscription.close();
+      return closePromise;
+    };
+    const markClientClosed = (): void => {
+      isClosed = true;
+      void closeSubscription();
+    };
+    request.raw.on("close", markClientClosed);
+    reply.raw.on("close", markClientClosed);
+
+    const firstJob = generationStreamSnapshot(await generationAdapter.getGenerationJob(ownerScope, jobId));
+    subscription = await generationEvents.subscribe({
+      ownerUserId: ownerScope.ownerUserId,
+      campaignId: firstJob.campaignId,
+      jobId
+    });
+    if (isClosed) await closeSubscription();
     let job = generationStreamSnapshot(await generationAdapter.getGenerationJob(ownerScope, jobId));
+    if (job.campaignId !== firstJob.campaignId) {
+      await closeSubscription();
+      throw Object.assign(new Error("Generation job changed campaign scope while opening its stream."), { statusCode: 404 });
+    }
 
     logger.info({
       event: "turn_generation_stream_connected",
@@ -936,6 +987,8 @@ export async function buildServer({ config, pool, generation }: BuildServerOptio
       if (typeof reply.raw.flushHeaders === "function") reply.raw.flushHeaders();
 
       let lastSentJson = "";
+      const hints = subscription[Symbol.asyncIterator]();
+      let pendingHint = hints.next();
       while (!isClosed) {
         const currentJson = JSON.stringify(job);
         if (currentJson !== lastSentJson) {
@@ -943,14 +996,24 @@ export async function buildServer({ config, pool, generation }: BuildServerOptio
           reply.raw.write(`data: ${currentJson}\n\n`);
           snapshotsSent += 1;
         }
-        if (["completed", "failed", "recoverable", "discarded", "cancelled"].includes(job.status)) {
+        if (TERMINAL_GENERATION_STATUSES.has(job.status)) {
           finalStatus = job.status;
           break;
         }
-        await new Promise((resolve) => setTimeout(resolve, 350));
-        if (isClosed) break;
         try {
+          const wakeup = await generationStreamWakeup(pendingHint);
+          if (wakeup.kind === "hint") {
+            if (wakeup.result.done) {
+              if (!isClosed) finalStatus = "stream_error";
+              break;
+            }
+            pendingHint = hints.next();
+          }
+          if (isClosed) break;
           job = generationStreamSnapshot(await generationAdapter.getGenerationJob(ownerScope, jobId));
+          if (job.campaignId !== firstJob.campaignId) {
+            throw new Error("Generation job left its authorized stream scope.");
+          }
         } catch (error) {
           if (isClosed) break;
           finalStatus = "stream_error";
@@ -964,6 +1027,7 @@ export async function buildServer({ config, pool, generation }: BuildServerOptio
         }
       }
     } finally {
+      await closeSubscription();
       logger.info({
         event: "turn_generation_stream_closed",
         correlationId: request.id,

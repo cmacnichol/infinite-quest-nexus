@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
   GenerationApplication,
+  GenerationEventSource,
   GenerationWorkerApplication
 } from "../../packages/application/src/index.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
@@ -13,6 +14,7 @@ import {
 const pool = {} as DatabasePool;
 const apiGeneration = { kind: "api-generation" } as unknown as GenerationApplication;
 const workerGeneration = { kind: "worker-generation" } as unknown as GenerationWorkerApplication;
+const generationEvents = { kind: "generation-events" } as unknown as GenerationEventSource;
 
 function config(role: RuntimeConfig["role"]): RuntimeConfig {
   return {
@@ -51,7 +53,7 @@ describe("runtime role generation composition", () => {
     const controller = new AbortController();
     const { server, values } = dependencies(controller);
 
-    await dispatchRuntimeRole(config("api"), pool, controller.signal, values);
+    await dispatchRuntimeRole(config("api"), pool, controller.signal, values, generationEvents);
 
     expect(values.createApiGeneration).toHaveBeenCalledOnce();
     expect(values.createApiGeneration).toHaveBeenCalledWith(pool);
@@ -60,7 +62,8 @@ describe("runtime role generation composition", () => {
     expect(values.buildServer).toHaveBeenCalledWith({
       config: expect.objectContaining({ role: "api" }),
       pool,
-      generation: apiGeneration
+      generation: apiGeneration,
+      generationEvents
     });
     expect(values.runWorker).not.toHaveBeenCalled();
     expect(server.close).toHaveBeenCalledOnce();
@@ -70,7 +73,7 @@ describe("runtime role generation composition", () => {
     const controller = new AbortController();
     const { values } = dependencies(controller);
 
-    await dispatchRuntimeRole(config("worker"), pool, controller.signal, values);
+    await dispatchRuntimeRole(config("worker"), pool, controller.signal, values, undefined);
 
     expect(values.waitForDatabaseMigrations).toHaveBeenCalledWith(
       pool,
@@ -95,7 +98,7 @@ describe("runtime role generation composition", () => {
     const controller = new AbortController();
     const { server, values } = dependencies(controller);
 
-    await dispatchRuntimeRole(config("all"), pool, controller.signal, values);
+    await dispatchRuntimeRole(config("all"), pool, controller.signal, values, generationEvents);
 
     expect(values.createApiGeneration).toHaveBeenCalledOnce();
     expect(values.createApiGeneration).toHaveBeenCalledWith(pool);
@@ -104,7 +107,8 @@ describe("runtime role generation composition", () => {
     expect(values.buildServer).toHaveBeenCalledWith({
       config: expect.objectContaining({ role: "all" }),
       pool,
-      generation: apiGeneration
+      generation: apiGeneration,
+      generationEvents
     });
     expect(values.runWorker).toHaveBeenCalledWith(
       pool,
@@ -119,7 +123,7 @@ describe("runtime role generation composition", () => {
     const controller = new AbortController();
     const { values } = dependencies(controller);
 
-    await dispatchRuntimeRole(config("migrate"), pool, controller.signal, values);
+    await dispatchRuntimeRole(config("migrate"), pool, controller.signal, values, undefined);
 
     expect(values.migrateDatabase).toHaveBeenCalledWith(
       pool,
