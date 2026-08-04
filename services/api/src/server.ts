@@ -764,7 +764,19 @@ export async function buildServer({ config, pool, generation, generationEvents }
               recovery.id AS "recoveryId", recovery.status AS "recoveryStatus", recovery.operation_kind AS "recoveryOperationKind",
               recovery.expected_turn_number AS "recoveryExpectedTurnNumber", recovery.attempts AS "recoveryAttempts",
               recovery.error_code AS "recoveryErrorCode", recovery.error_message AS "recoveryErrorMessage", recovery.result_turn_id AS "recoveryResultTurnId",
-              recovery.replacement_turn_id AS "recoveryReplacementTurnId"
+              recovery.replacement_turn_id AS "recoveryReplacementTurnId",
+              latest_turn.id AS "latestTurnId", latest_turn.turn_number AS "latestTurnNumber",
+              (recovery.result_turn_id IS NOT NULL AND EXISTS (
+                SELECT 1
+                  FROM (
+                    SELECT recent_turn.id
+                      FROM turns recent_turn
+                     WHERE recent_turn.campaign_id = c.id AND recent_turn.owner_user_id = c.owner_user_id
+                     ORDER BY recent_turn.turn_number DESC, recent_turn.id DESC
+                     LIMIT 50
+                  ) recent_turn_window
+                 WHERE recent_turn_window.id = recovery.result_turn_id
+              )) AS "recoveryResultIsRecent"
          FROM campaigns c
          JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
          JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
@@ -784,6 +796,12 @@ export async function buildServer({ config, pool, generation, generationEvents }
               AND status IN ('recoverable','failed','completed')
             ORDER BY updated_at DESC, id DESC LIMIT 1
          ) recovery ON true
+         LEFT JOIN LATERAL (
+           SELECT id, turn_number
+             FROM turns
+            WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
+            ORDER BY turn_number DESC, id DESC LIMIT 1
+         ) latest_turn ON true
         WHERE c.id = $1 AND c.owner_user_id = $2`,
       [uuidSchema.parse(request.params.campaignId), ownerUserId]
     );
@@ -847,14 +865,7 @@ export async function buildServer({ config, pool, generation, generationEvents }
       createdAt: row.pendingGenerationCreatedAt,
       updatedAt: row.pendingGenerationUpdatedAt
     } : null;
-    const turnPage = await readTurnPage(pool, ownerUserId, campaign.id, undefined, 50);
-    const costs = await turnReportedCosts(pool, ownerUserId, turnPage.turns.map((turn) => turn.id));
-    const turns = {
-      campaignId: campaign.id,
-      turns: turnPage.turns.map((turn) => ({ ...turn, narration: formatNarrationParagraphs(turn.narration), reportedCost: costs.get(turn.id) || null })),
-      nextCursor: turnPage.nextCursor
-    };
-    const generationRecovery = row.recoveryId && !turns.turns.some((turn) => turn.id === row.recoveryResultTurnId) ? {
+    const generationRecovery = row.recoveryId && !row.recoveryResultIsRecent ? {
       id: row.recoveryId,
       status: row.recoveryStatus,
       operationKind: row.recoveryOperationKind,
@@ -866,7 +877,7 @@ export async function buildServer({ config, pool, generation, generationEvents }
     } : null;
     const syncToken = sha256(stableStringify({
       ownerUserId, campaign, world, playerConfig,
-      latestTurnId: turns.turns.at(-1)?.id ?? null, latestTurnNumber: turns.turns.at(-1)?.turnNumber ?? null,
+      latestTurnId: row.latestTurnId ?? null, latestTurnNumber: row.latestTurnNumber ?? null,
       pendingGenerationId: pendingGeneration?.id ?? null, pendingGenerationStatus: pendingGeneration?.status ?? null,
       pendingGenerationUpdatedAt: pendingGeneration?.updatedAt ?? null,
       recoveryId: generationRecovery?.id ?? null, recoveryStatus: generationRecovery?.status ?? null,
@@ -874,10 +885,25 @@ export async function buildServer({ config, pool, generation, generationEvents }
       recoveryReplacementTurnId: generationRecovery?.replacementTurnId ?? null
     }));
     const unchanged = syncRequest.since === syncToken;
+    if (unchanged) {
+      return parseResponseProjection(campaignSyncStatusSchema, {
+        ...campaign, campaign, world, playerConfig, pendingGeneration, syncToken,
+        turnWindowMode: "unchanged",
+        turns: null,
+        generationRecovery
+      });
+    }
+    const turnPage = await readTurnPage(pool, ownerUserId, campaign.id, undefined, 50);
+    const costs = await turnReportedCosts(pool, ownerUserId, turnPage.turns.map((turn) => turn.id));
+    const turns = {
+      campaignId: campaign.id,
+      turns: turnPage.turns.map((turn) => ({ ...turn, narration: formatNarrationParagraphs(turn.narration), reportedCost: costs.get(turn.id) || null })),
+      nextCursor: turnPage.nextCursor
+    };
     return parseResponseProjection(campaignSyncStatusSchema, {
       ...campaign, campaign, world, playerConfig, pendingGeneration, syncToken,
-      turnWindowMode: unchanged ? "unchanged" : "replace",
-      turns: unchanged ? null : turns,
+      turnWindowMode: "replace",
+      turns,
       generationRecovery
     });
   });

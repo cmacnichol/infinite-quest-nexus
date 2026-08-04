@@ -179,12 +179,13 @@ integration("durable Story Engine integration", () => {
 
   async function campaign(
     storyLength?: "brief" | "standard" | "long" | "extended",
-    title?: string
+    title?: string,
+    targetPool = pool
   ) {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = title ?? `Generated campaign ${crypto.randomUUID()}`;
     if (storyLength) fixture.settings.storyLength = storyLength;
-    return importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "generation.story", story: fixture }));
+    return importLegacyStory(targetPool, storyImportRequestSchema.parse({ sourceName: "generation.story", story: fixture }));
   }
 
   async function queue(campaignId: string, action = "Open Location Gamma.") {
@@ -2161,12 +2162,13 @@ integration("durable Story Engine integration", () => {
     const foreignOwner = await pool.query<{ id: string }>(
       "INSERT INTO users (display_name, status) VALUES ('Cancellation foreign owner', 'active') RETURNING id"
     );
+    const foreignPool = createDatabasePool(databaseUrl!, 2);
     let foreignJob: { id: string };
     try {
       await pool.query("UPDATE users SET system_key = NULL WHERE id = $1", [originalOwner.rows[0]!.id]);
       await pool.query("UPDATE users SET system_key = 'initial-owner' WHERE id = $1", [foreignOwner.rows[0]!.id]);
-      const foreignCampaign = await campaign(undefined, `Foreign cancellation campaign ${crypto.randomUUID()}`);
-      const foreignProvider = await createProvider(pool, {
+      const foreignCampaign = await campaign(undefined, `Foreign cancellation campaign ${crypto.randomUUID()}`, foreignPool);
+      const foreignProvider = await createProvider(foreignPool, {
         name: `Foreign cancellation provider ${crypto.randomUUID()}`,
         providerType: "openai_compatible",
         providerRole: "text",
@@ -2178,13 +2180,14 @@ integration("durable Story Engine integration", () => {
         enabled: true,
         configuration: {}
       }, credentialSecret);
-      foreignJob = await enqueueGeneration(pool, foreignCampaign.campaignId, generationRequestSchema.parse({
+      foreignJob = await enqueueGeneration(foreignPool, foreignCampaign.campaignId, generationRequestSchema.parse({
         action: "Foreign generation.",
         providerProfileId: foreignProvider.id,
         idempotencyKey: crypto.randomUUID(),
         context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
       }));
     } finally {
+      await foreignPool.end();
       await pool.query("UPDATE users SET system_key = NULL WHERE id = $1", [foreignOwner.rows[0]!.id]);
       await pool.query("UPDATE users SET system_key = 'initial-owner' WHERE id = $1", [originalOwner.rows[0]!.id]);
     }

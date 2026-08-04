@@ -84,6 +84,7 @@ type MockPoolOptions = {
   missingJob?: boolean;
   missingSync?: boolean;
   onInitialOwnerRead?: () => void;
+  onQuery?: (sql: string) => void;
   rawGenerationError?: boolean;
   onGenerationJobRead?: () => void;
   streamReadFailure?: boolean;
@@ -190,6 +191,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
   let userDisplayName = "Initial Owner";
   const query = async (queryInput: unknown, params: unknown[] = []) => {
     const sql = String(queryInput).replaceAll(/\s+/g, " ").trim();
+    options.onQuery?.(sql);
     if (["BEGIN", "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "COMMIT", "ROLLBACK", "SAVEPOINT enqueue_generation_insert"].includes(sql)) return { rows: [] };
     if (sql.startsWith("SELECT id FROM users")) {
       options.onInitialOwnerRead?.();
@@ -404,7 +406,10 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       recoveryErrorCode: null,
       recoveryErrorMessage: null,
       recoveryResultTurnId: "99999999-9999-4999-8999-999999999999",
-      recoveryReplacementTurnId: TURN_ID
+      recoveryReplacementTurnId: TURN_ID,
+      recoveryResultIsRecent: false,
+      latestTurnId: TURN_ID,
+      latestTurnNumber: 2
     }] };
 
     if (sql.includes('AS "historyVersion"') && sql.includes("FROM turns")) return { rows: [{ historyVersion: `1:2:${TURN_ID}` }] };
@@ -584,6 +589,32 @@ describe("client API route contracts without PostgreSQL", () => {
 
   afterAll(async () => {
     await rm(storageRoot, { recursive: true, force: true });
+  });
+
+  it("short-circuits an unchanged campaign sync after its single status query", async () => {
+    const statements: string[] = [];
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot),
+      pool: mockPool({ onQuery: (sql) => statements.push(sql) })
+    }));
+    try {
+      const initial = campaignSyncStatusSchema.parse((await app.inject({
+        method: "GET",
+        url: `/api/v1/campaigns/${CAMPAIGN_ID}/sync-status`
+      })).json());
+      statements.length = 0;
+
+      const unchanged = campaignSyncStatusSchema.parse((await app.inject({
+        method: "GET",
+        url: `/api/v1/campaigns/${CAMPAIGN_ID}/sync-status?since=${initial.syncToken}`
+      })).json());
+
+      expect(unchanged).toMatchObject({ turnWindowMode: "unchanged", turns: null });
+      expect(statements).toHaveLength(1);
+      expect(statements[0]).toContain('latest_turn.id AS "latestTurnId"');
+    } finally {
+      await app.close();
+    }
   });
 
   it("serializes adopted read routes through their shared response schemas", async () => {

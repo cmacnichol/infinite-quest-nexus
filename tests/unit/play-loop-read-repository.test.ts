@@ -25,6 +25,26 @@ function turn(id: string, turnNumber: number) {
 }
 
 describe("play-loop turn pages", () => {
+  it("fingerprints long histories without aggregating every turn id", async () => {
+    const statements: string[] = [];
+    const query = async (statement: unknown) => {
+      const sql = String(statement);
+      statements.push(sql);
+      if (sql.includes("historyVersion")) return { rows: [{ historyVersion: `2:2:${LATEST_ID}` }] };
+      return { rows: [turn(LATEST_ID, 2), turn(FIRST_ID, 1)] };
+    };
+    const pool = {
+      connect: async () => ({ query, release: () => undefined })
+    } as unknown as DatabasePool;
+
+    await readTurnPage(pool, OWNER_ID, CAMPAIGN_ID, undefined, 50);
+
+    const fingerprint = statements.find((statement) => statement.includes("historyVersion"));
+    expect(fingerprint).toContain("ORDER BY latest_turn.turn_number DESC, latest_turn.id DESC");
+    expect(fingerprint).toContain("LIMIT 1");
+    expect(fingerprint).not.toContain("ARRAY_AGG");
+  });
+
   it("rejects a cursor after retry-latest replaces the current history boundary", async () => {
     let latestId = LATEST_ID;
     const query = async (statement: unknown) => {

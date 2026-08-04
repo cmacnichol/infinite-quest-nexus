@@ -60,3 +60,113 @@ Task 12's reference C0 run on 2026-08-04 produced:
 | 4 | 83.736372 / 85.421612 | 7.6185% | 140.479 | 60.035 / 136.239 | 8 / 8 | 4 | 1 / 1 / 1 |
 
 Concurrency `1` and `2` stayed below the 5% rerun threshold. Concurrency `4` measured 7.6185% in its first batch, so the benchmark ran three batches and selected batch `0` by median throughput; the selected batch's CV remaining above 5% is reported rather than concealed. Every selected batch completed 360 generation jobs and 90 jobs in each optional lane, respected the configured provider and lane limits, and passed the duplicate-turn guard. These numbers are a regression reference for the stated fixture, not a universal production capacity promise; repeat the benchmark against the intended deployment provider and database before raising concurrency there.
+
+## Play-Loop Read Verification and Benchmark
+
+Task 13b protects the bounded B4a/Task 13a-R read contracts without changing
+their request schemas, response projections, cursor format, sync-token format,
+polling behavior, or SSE behavior. Run the focused unit and real-PostgreSQL
+coverage with:
+
+```sh
+pnpm vitest run tests/unit/database-pool.test.ts tests/unit/play-loop-read-repository.test.ts tests/unit/client-api-routes.test.ts
+pnpm vitest run --config vitest.integration.config.ts tests/integration/play-loop-read-performance.integration.test.ts tests/integration/gameplay.integration.test.ts tests/integration/dashboard-stats.integration.test.ts tests/integration/generation.integration.test.ts
+```
+
+The repeatable benchmark is `scripts/benchmark-play-loop.mjs`. It creates and
+drops an isolated PostgreSQL database, migrates it, and seeds three owned
+campaigns from fixture seed `task-13b-c0-play-loop-v1`:
+
+| Fixture | Accepted turns | Generation jobs | Image jobs | Chronicle memories |
+| --- | ---: | ---: | ---: | ---: |
+| Small | 12 | 4 | 3 | 12 |
+| 200-turn | 200 | 40 | 20 | 200 |
+| Long-running | 2,000 | 400 | 100 | 2,000 |
+
+Each run uses 5 warmups and 30 measured samples by default. It records p50/p95
+latency, coefficient of variation, p50/p95 response bytes, error rate, exact SQL
+query counts, PostgreSQL version, fixture cardinalities, bounded-page evidence,
+and summarized `EXPLAIN (ANALYZE, BUFFERS)` results. It walks the long campaign's
+first, middle, and last cursor pages; measures both replacement and unchanged
+sync; and covers campaign list, dashboard, generation polling/result, and the
+initial list-plus-sync Story Player hydration path. Use lower sample counts only
+for local harness debugging:
+
+```sh
+PLAY_LOOP_BENCHMARK_WARMUPS=1 PLAY_LOOP_BENCHMARK_SAMPLES=3 pnpm exec tsx scripts/benchmark-play-loop.mjs
+```
+
+Route query counts are steady-state counts after the benchmark resolves the
+process-lifetime initial-owner bridge once. The first request made by a newly
+started process can add that one owner query; subsequent requests on the same
+pool use the cached UUID.
+
+Run the reference measurement in the actual C0 process profile:
+
+```sh
+docker run --rm \
+  --cpus 2 --memory 4g --memory-swap 4g --network host \
+  --env-file .env.test.local -e LOG_LEVEL=silent \
+  --user "$(id -u):$(id -g)" \
+  -v "${PWD:?}:/workspace" -w /workspace \
+  node:24-bookworm \
+  ./node_modules/.bin/tsx scripts/benchmark-play-loop.mjs
+```
+
+The run is valid only when `profile.targetSatisfied` is `true`,
+`availableCpuCount` is `2`, `cgroupMemoryLimitGiB` is `4`, every error rate is
+zero, fixture cardinalities match the table above, and query counts are stable
+across all samples. The PostgreSQL service is the deterministic external test
+dependency; the C0 constraint applies to the API/benchmark process.
+
+Task 13b's paired C0 reference runs on 2026-08-04 used Node 24.19.0 and
+PostgreSQL 18.4. The baseline retained the original sync and history-fingerprint
+queries; the post-change run used the one-query unchanged-sync fast path and the
+bounded latest-ID fingerprint lookup. Both used the same migrated fixture and
+5/30 warmup/sample configuration:
+
+| Route | Baseline p50 / p95 (ms) | Post p50 / p95 (ms) | Post CV | Response p50 / p95 (bytes) | Post SQL queries |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Campaign list | 2.649 / 4.119 | 2.905 / 3.818 | 13.7793% | 2,625 / 2,625 | 1 |
+| Dashboard | 2.757 / 3.510 | 3.012 / 5.099 | 31.9089% | 1,007 / 1,007 | 2 |
+| Sync — replacement | 10.017 / 13.466 | 6.652 / 9.272 | 19.6069% | 33,912 / 33,912 | 6 |
+| Sync — unchanged | 7.568 / 9.556 | 3.861 / 6.710 | 28.1190% | 2,947 / 2,947 | 1 (baseline: 6) |
+| History — first | 5.866 / 7.409 | 3.313 / 5.863 | 35.1030% | 30,971 / 30,971 | 5 |
+| History — middle | 3.859 / 6.666 | 3.468 / 5.459 | 22.1075% | 30,971 / 30,971 | 5 |
+| History — last | 5.745 / 7.288 | 5.256 / 6.008 | 18.4909% | 30,186 / 30,186 | 5 |
+| Generation poll | 0.944 / 1.501 | 1.245 / 1.611 | 16.6915% | 760 / 760 | 1 |
+| Generation result | 2.101 / 2.609 | 2.590 / 3.049 | 10.2181% | 961 / 961 | 2 |
+| Initial hydration | 11.013 / 13.197 | 10.375 / 13.897 | 18.5190% | 36,537 / 36,537 | 7 |
+
+The changed hot paths clear the 10% regression guardrail: replacement sync p95
+improved 31.1%, unchanged sync p95 improved 29.8% while eliminating five SQL
+statements, and first/middle/last history p95 improved 20.9%/18.1%/17.6%.
+Unchanged route payloads remain byte-for-byte stable because B4b freezes the
+public projections. Dashboard and generation-result p95 moved by more than 10%
+in this paired run even though neither query changed; their reported CV and a
+second post-change run (3.896 ms and 3.630 ms p95 respectively) show host-level
+variance rather than a hidden query-count or payload regression. Treat those
+absolute numbers as evidence to repeat, not as proof that an unrelated route
+became slower. The approved deterministic targets are the query counts in the
+table, zero errors, the recorded response bounds, and no greater than 10%
+regression for a route whose implementation changes in a future patch.
+
+The long fixture returned exactly 50 turns for first, middle, last, and initial
+sync windows; the first page had a cursor and the last did not. No hot route had
+a network-level N+1 query count. The generation result intentionally performs a
+second, batched reported-cost query. The measured service tree contains 100
+`initialOwnerId(` call sites; the lookup now coalesces in-flight and sequential
+reads per actual pool/client object, while rejected lookups are evicted and
+separate pools/databases remain isolated.
+
+The summarized plans did not justify migration 0053. The history fingerprint
+removed the all-ID aggregate sort: execution moved from 1.028 ms and 330 shared
+hit blocks to 0.584 ms and 251 shared hit blocks, with zero shared reads/writes
+and zero temporary blocks. The post-change sync-status statement completed in
+0.356 ms with 164 shared hit blocks and no physical or temporary I/O; its added
+bounded latest-turn/recovery checks use the existing turn ordering index. The
+campaign-list and history-page plans completed in 1.728 ms and 0.320 ms. Adding
+another turn or generation-job index at these cardinalities would impose write
+amplification on every accepted turn/job without removing a demonstrated slow
+scan. Consequently no index or rollback migration was added; rerun this profile
+against production-scale cardinalities before revisiting that decision.

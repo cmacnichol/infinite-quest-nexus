@@ -50,9 +50,15 @@ function decodeCursor(value: string, campaignId: string, historyVersion: string)
 
 async function currentHistoryVersion(client: DatabaseClient, ownerUserId: string, campaignId: string): Promise<string> {
   const result = await client.query<{ historyVersion: string }>(
-    `SELECT COUNT(*)::integer::text || ':' || COALESCE(MAX(turn_number), 0)::text || ':' || COALESCE((ARRAY_AGG(id ORDER BY turn_number DESC, id DESC))[1]::text, '') AS "historyVersion"
-       FROM turns
-      WHERE owner_user_id = $1 AND campaign_id = $2`,
+    `SELECT COUNT(*)::integer::text || ':' || COALESCE(MAX(turn_number), 0)::text || ':' || COALESCE((
+              SELECT latest_turn.id::text
+                FROM turns latest_turn
+               WHERE latest_turn.owner_user_id = $1 AND latest_turn.campaign_id = $2
+               ORDER BY latest_turn.turn_number DESC, latest_turn.id DESC
+               LIMIT 1
+            ), '') AS "historyVersion"
+       FROM turns history_turn
+      WHERE history_turn.owner_user_id = $1 AND history_turn.campaign_id = $2`,
     [ownerUserId, campaignId]
   );
   return result.rows[0]?.historyVersion || "0:0:";
