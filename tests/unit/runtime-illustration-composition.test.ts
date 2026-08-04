@@ -66,17 +66,28 @@ describe("createIllustrationWorkerExecutor", () => {
 });
 
 describe("createWorkerIllustrationApplication", () => {
-  it("binds the concrete lane adapter behind the separate worker application", () => {
+  it("binds concrete provider, artifact, and asset ports into the separate worker application", () => {
     const pool = {} as DatabasePool;
     const store = { root: "/var/lib/infinitequest/assets" };
     const lanes = {} as IllustrationWorkerLanes;
     const executor = {} as IllustrationWorkerExecutor;
+    const ports = {
+      imageProvider: { executeImage: vi.fn() },
+      promptRefinement: { refinePrompt: vi.fn() },
+      artifactDownload: { downloadArtifact: vi.fn() },
+      assets: {
+        persistTurnIllustration: vi.fn(),
+        persistWorldCover: vi.fn(),
+        bindSegmentAsset: vi.fn()
+      }
+    };
     const application = {} as IllustrationWorkerApplication;
     const factories = {
       createLanes: vi.fn(() => lanes),
       createExecutor: vi.fn(() => executor),
-      createApplication: vi.fn(() => application)
-    } satisfies WorkerIllustrationCompositionFactories;
+      createApplication: vi.fn(() => application),
+      createPorts: vi.fn(() => ports)
+    } as unknown as WorkerIllustrationCompositionFactories;
 
     expect(createWorkerIllustrationApplication(
       pool,
@@ -84,8 +95,10 @@ describe("createWorkerIllustrationApplication", () => {
       store,
       factories
     )).toBe(application);
+    expect((factories as unknown as { createPorts: ReturnType<typeof vi.fn> }).createPorts)
+      .toHaveBeenCalledWith(pool, "credential-secret", store);
     expect(factories.createLanes).toHaveBeenCalledWith(pool, "credential-secret", store);
     expect(factories.createExecutor).toHaveBeenCalledWith(lanes);
-    expect(factories.createApplication).toHaveBeenCalledWith(executor);
+    expect(factories.createApplication).toHaveBeenCalledWith({ executor, ports });
   });
 });

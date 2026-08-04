@@ -19,18 +19,12 @@ import {
   type DatabasePool
 } from "../../../packages/database/src/pool.js";
 import {
-  callTextProvider,
-  pollImageProvider,
-  submitImageProvider,
+  type callTextProvider,
+  type pollImageProvider,
+  type submitImageProvider,
   type ImageProviderArtifact
 } from "../../../packages/story-engine/src/index.js";
 import {
-  persistTurnImage,
-  persistWorldCover,
-  type FilesystemAssetStore
-} from "./asset-service.js";
-import {
-  downloadArtifact,
   enqueueAcceptedTurnIllustration,
   enqueueIllustration,
   enqueueWorldCover,
@@ -45,11 +39,6 @@ import {
   getTurnIllustrationResolution,
   rematchTurnIllustration
 } from "./illustration-resolution-service.js";
-import {
-  loadImageProvider,
-  loadTextProvider,
-  recordProviderHealth
-} from "./provider-service.js";
 import {
   buildIllustrationRefinementInput,
   createProvisionalSegment,
@@ -68,54 +57,87 @@ import {
   type SegmentConfigRow
 } from "./segmented-illustration-service.js";
 
-type ImageProviderAdapterDependencies = Readonly<{
-  loadImageProvider: typeof loadImageProvider;
+export type ImageProviderAdapterDependencies = Readonly<{
+  loadImageProvider(
+    pool: DatabasePool,
+    ownerUserId: string,
+    providerProfileId: string,
+    credentialSecret: string,
+    model: string,
+  ): Promise<Parameters<typeof submitImageProvider>[0]>;
   submitImageProvider: typeof submitImageProvider;
   pollImageProvider: typeof pollImageProvider;
-  recordProviderHealth: typeof recordProviderHealth;
+  recordProviderHealth(
+    pool: DatabasePool,
+    ownerUserId: string,
+    providerProfileId: string,
+    healthy: boolean,
+    errorMessage?: string,
+  ): Promise<void>;
 }>;
 
-type PromptRefinementAdapterDependencies = Readonly<{
-  loadTextProvider: typeof loadTextProvider;
+export type PromptRefinementAdapterDependencies = Readonly<{
+  loadTextProvider(
+    pool: DatabasePool,
+    ownerUserId: string,
+    providerProfileId: string,
+    credentialSecret: string,
+    model: string,
+  ): Promise<Parameters<typeof callTextProvider>[0]>;
   callTextProvider: typeof callTextProvider;
-  recordProviderHealth: typeof recordProviderHealth;
+  recordProviderHealth: ImageProviderAdapterDependencies["recordProviderHealth"];
 }>;
 
-type ArtifactDownloadAdapterDependencies = Readonly<{
-  downloadArtifact: typeof downloadArtifact;
+export type ArtifactDownloadAdapterDependencies = Readonly<{
+  downloadArtifact(
+    artifact: ImageProviderArtifact,
+    timeoutMs: number,
+    allowPrivateHosts: boolean,
+  ): Promise<Readonly<{ bytes: Uint8Array; mimeType: string }>>;
 }>;
 
-type AssetAdapterDependencies = Readonly<{
+export type IllustrationAssetStore = Readonly<{ root: string }>;
+
+type PersistedIllustrationAsset = Readonly<{ id: string }>;
+
+type IllustrationAssetGenerationContext = Readonly<{
+  imageJobId: string;
+  targetType: "turn_illustration" | "world_cover" | "streaming_illustration";
+  variantIndex: number;
+  prompt: string;
+  providerProfileId: string;
+  providerType: string;
+  model: string;
+  generationParameters: Readonly<Record<string, unknown>>;
+}>;
+
+export type AssetAdapterDependencies = Readonly<{
   transaction<T>(
     pool: DatabasePool,
     work: (client: DatabaseClient) => Promise<T>,
   ): Promise<T>;
-  persistTurnImage: typeof persistTurnImage;
-  persistWorldCover: typeof persistWorldCover;
+  persistTurnImage(
+    client: DatabaseClient,
+    store: IllustrationAssetStore,
+    ownerUserId: string,
+    campaignId: string,
+    turnId: string | null,
+    bytes: Buffer,
+    mimeType: string,
+    options: Readonly<{
+      generationContext: IllustrationAssetGenerationContext;
+      attachReference: boolean;
+    }>,
+  ): Promise<PersistedIllustrationAsset>;
+  persistWorldCover(
+    client: DatabaseClient,
+    store: IllustrationAssetStore,
+    ownerUserId: string,
+    bytes: Buffer,
+    mimeType: string,
+    options: Readonly<{ generationContext: IllustrationAssetGenerationContext }>,
+  ): Promise<PersistedIllustrationAsset>;
 }>;
-
-const imageProviderDependencies: ImageProviderAdapterDependencies = {
-  loadImageProvider,
-  submitImageProvider,
-  pollImageProvider,
-  recordProviderHealth
-};
-
-const promptRefinementDependencies: PromptRefinementAdapterDependencies = {
-  loadTextProvider,
-  callTextProvider,
-  recordProviderHealth
-};
-
-const artifactDownloadDependencies: ArtifactDownloadAdapterDependencies = {
-  downloadArtifact
-};
-
-const assetAdapterDependencies: AssetAdapterDependencies = {
-  transaction: withTransaction,
-  persistTurnImage,
-  persistWorldCover
-};
 
 function sanitizedProviderMetadata(
   metadata: Readonly<Record<string, unknown>> | undefined,
@@ -161,7 +183,7 @@ function completedImageResult(
 export function createIllustrationImageProviderAdapter(
   pool: DatabasePool,
   credentialSecret: string,
-  dependencies: ImageProviderAdapterDependencies = imageProviderDependencies,
+  dependencies: ImageProviderAdapterDependencies,
 ): IllustrationImageProviderPort {
   return {
     async executeImage(request) {
@@ -254,7 +276,7 @@ export function createIllustrationImageProviderAdapter(
 export function createIllustrationPromptRefinementAdapter(
   pool: DatabasePool,
   credentialSecret: string,
-  dependencies: PromptRefinementAdapterDependencies = promptRefinementDependencies,
+  dependencies: PromptRefinementAdapterDependencies,
 ): IllustrationPromptRefinementPort {
   return {
     async refinePrompt(request) {
@@ -303,7 +325,7 @@ export function createIllustrationPromptRefinementAdapter(
 }
 
 export function createIllustrationArtifactDownloadAdapter(
-  dependencies: ArtifactDownloadAdapterDependencies = artifactDownloadDependencies,
+  dependencies: ArtifactDownloadAdapterDependencies,
 ): IllustrationArtifactDownloadPort {
   return {
     async downloadArtifact(request) {
@@ -380,8 +402,8 @@ async function loadAssetGenerationContext(
 
 export function createIllustrationAssetAdapter(
   pool: DatabasePool,
-  store: FilesystemAssetStore,
-  dependencies: AssetAdapterDependencies = assetAdapterDependencies,
+  store: IllustrationAssetStore,
+  dependencies: AssetAdapterDependencies,
 ): IllustrationAssetPort {
   return {
     persistTurnIllustration: (input) => dependencies.transaction(pool, async (client) => {

@@ -139,10 +139,6 @@ export interface IllustrationWorkerExecutor {
   runNextIllustration(request: IllustrationWorkerRequest): Promise<boolean>;
 }
 
-export interface IllustrationWorkerApplication {
-  runNextIllustration(request: IllustrationWorkerRequest): Promise<boolean>;
-}
-
 /**
  * Temporary 14a -> 14d binding. It deliberately exposes only image execution;
  * text-provider credentials and response chains cannot flow through this port.
@@ -220,3 +216,27 @@ export interface IllustrationArtifactDownloadPort {
     mimeType: string;
   }>>;
 }
+
+export type IllustrationWorkerPorts = Readonly<{
+  imageProvider: IllustrationImageProviderPort;
+  promptRefinement: IllustrationPromptRefinementPort;
+  artifactDownload: IllustrationArtifactDownloadPort;
+  assets: IllustrationAssetPort;
+}>;
+
+export type IllustrationWorkerApplicationDependencies = Readonly<{
+  executor: IllustrationWorkerExecutor;
+  ports: IllustrationWorkerPorts;
+}>;
+
+/**
+ * The worker application owns the execution boundary and the concrete ports
+ * that image, refinement, artifact, and asset handlers require. Task 14a3
+ * will switch the live lanes to these methods; 14a2 deliberately does not.
+ */
+export interface IllustrationWorkerApplication
+  extends IllustrationWorkerExecutor,
+    IllustrationImageProviderPort,
+    IllustrationPromptRefinementPort,
+    IllustrationArtifactDownloadPort,
+    IllustrationAssetPort {}

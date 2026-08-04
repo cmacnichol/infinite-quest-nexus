@@ -334,19 +334,59 @@ describe("illustration application use cases", () => {
     ]);
   });
 
-  test("keeps the worker application separate and exposes one illustration lane operation", async () => {
+  test("keeps the worker application separate and exposes its bound illustration ports", async () => {
     const calls: unknown[] = [];
+    const imageResult = { status: "completed" } as Awaited<ReturnType<IllustrationImageProviderPort["executeImage"]>>;
     const executor: IllustrationWorkerExecutor = {
       runNextIllustration: async (request) => {
         calls.push(request);
         return true;
       }
     };
-    const application = createIllustrationWorkerApplication(executor);
+    const ports = {
+      imageProvider: {
+        executeImage: async (request: unknown) => {
+          calls.push(request);
+          return imageResult;
+        }
+      },
+      promptRefinement: { refinePrompt: async () => { throw new Error("not invoked"); } },
+      artifactDownload: { downloadArtifact: async () => { throw new Error("not invoked"); } },
+      assets: {
+        persistTurnIllustration: async () => { throw new Error("not invoked"); },
+        persistWorldCover: async () => { throw new Error("not invoked"); },
+        bindSegmentAsset: async () => { throw new Error("not invoked"); }
+      }
+    } as Parameters<typeof createIllustrationWorkerApplication>[0]["ports"];
+    const application = createIllustrationWorkerApplication({ executor, ports });
     const request = Object.freeze({ workerId: "worker-a", leaseSeconds: 30 });
+    const imageRequest = Object.freeze({
+      ownerUserId,
+      jobId,
+      providerProfileId: "99999999-9999-4999-8999-999999999999",
+      model: "image-model",
+      prompt: "A moonlit observatory.",
+      generationRevision: 1,
+      idempotencyKey: `${jobId}:1`,
+      imageCount: 1 as const,
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "auto" as const,
+      outputFormat: "png" as const,
+      remoteJobId: null
+    });
 
     await expect(application.runNextIllustration(request)).resolves.toBe(true);
-    expect(calls).toEqual([request]);
+    await expect(application.executeImage(imageRequest)).resolves.toBe(imageResult);
+    expect(calls).toEqual([request, imageRequest]);
+    expect(application).toMatchObject({
+      executeImage: expect.any(Function),
+      refinePrompt: expect.any(Function),
+      downloadArtifact: expect.any(Function),
+      persistTurnIllustration: expect.any(Function),
+      persistWorldCover: expect.any(Function),
+      bindSegmentAsset: expect.any(Function)
+    });
   });
 
   test("requires owner-scoped resource inputs and keeps text refinement distinct from image execution", () => {

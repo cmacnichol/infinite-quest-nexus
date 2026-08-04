@@ -2,7 +2,7 @@ import type {
   IllustrationApplication,
   IllustrationApplicationDependencies,
   IllustrationWorkerApplication,
-  IllustrationWorkerExecutor
+  IllustrationWorkerApplicationDependencies
 } from "./ports.js";
 
 export function createIllustrationApplication(
@@ -49,9 +49,15 @@ export function createIllustrationApplication(
 }
 
 export function createIllustrationWorkerApplication(
-  executor: IllustrationWorkerExecutor,
+  dependencies: IllustrationWorkerApplicationDependencies,
 ): IllustrationWorkerApplication {
   return {
-    runNextIllustration: (request) => executor.runNextIllustration(request)
+    runNextIllustration: (request) => dependencies.executor.runNextIllustration(request),
+    executeImage: (request) => dependencies.ports.imageProvider.executeImage(request),
+    refinePrompt: (request) => dependencies.ports.promptRefinement.refinePrompt(request),
+    downloadArtifact: (request) => dependencies.ports.artifactDownload.downloadArtifact(request),
+    persistTurnIllustration: (input) => dependencies.ports.assets.persistTurnIllustration(input),
+    persistWorldCover: (input) => dependencies.ports.assets.persistWorldCover(input),
+    bindSegmentAsset: (input) => dependencies.ports.assets.bindSegmentAsset(input)
   };
 }

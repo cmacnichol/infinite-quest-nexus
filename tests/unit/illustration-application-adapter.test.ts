@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import type { DatabaseClient, DatabasePool } from "../../packages/database/src/pool.js";
 import {
@@ -14,6 +15,16 @@ const segmentId = "44444444-4444-4444-8444-444444444444";
 const providerProfileId = "55555555-5555-4555-8555-555555555555";
 
 describe("illustration provider adapters", () => {
+  it("does not bind provider or asset business services inside the API adapter", async () => {
+    const source = await readFile(
+      new URL("../../services/api/src/illustration-application-adapter.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).not.toContain('from "./provider-service.js"');
+    expect(source).not.toContain('from "./asset-service.js"');
+  });
+
   it("keeps image submission and remote polling on the image-provider path", async () => {
     const provider = { id: providerProfileId, providerRole: "image", providerType: "openai_compatible" };
     const loadImageProvider = vi.fn(async () => provider);
