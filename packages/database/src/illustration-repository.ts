@@ -1,6 +1,7 @@
 import type {
   IllustrationApplicationDependencies,
   IllustrationConfigRepository,
+  IllustrationGenerationTransactionPort,
   IllustrationJobRepository,
   IllustrationResolutionRepository,
   IllustrationSegmentRepository,
@@ -14,6 +15,7 @@ export type IllustrationRepositoryFactories = Readonly<{
   createSegmentRepository(pool: DatabasePool): IllustrationSegmentRepository;
   createResolutionRepository(pool: DatabasePool): IllustrationResolutionRepository;
   createStreamingRepository(pool: DatabasePool): IllustrationStreamingRepository;
+  createGenerationTransactionPort(pool: DatabasePool): IllustrationGenerationTransactionPort;
 }>;
 
 /**
@@ -29,6 +31,7 @@ export function createPostgresIllustrationRepositories(
     jobs: factories.createJobRepository(pool),
     segments: factories.createSegmentRepository(pool),
     resolutions: factories.createResolutionRepository(pool),
-    streaming: factories.createStreamingRepository(pool)
+    streaming: factories.createStreamingRepository(pool),
+    transaction: factories.createGenerationTransactionPort(pool)
   };
 }

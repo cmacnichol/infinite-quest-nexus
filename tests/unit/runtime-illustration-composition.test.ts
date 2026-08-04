@@ -1,9 +1,11 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import type {
   IllustrationApplication,
   IllustrationApplicationDependencies,
   IllustrationWorkerApplication,
-  IllustrationWorkerExecutor
+  IllustrationWorkerExecutor,
+  IllustrationWorkerStateMachinePort
 } from "../../packages/application/src/index.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import {
@@ -40,7 +42,11 @@ describe("createIllustrationWorkerExecutor", () => {
     const prompt = vi.fn(async () => false);
     const resolution = vi.fn(async () => true);
     const image = vi.fn(async () => true);
-    const executor = createIllustrationWorkerExecutor({ prompt, resolution, image });
+    const executor = createIllustrationWorkerExecutor({
+      runPromptHandler: prompt,
+      runResolutionHandler: resolution,
+      runImageHandler: image
+    } as never);
     const request = { workerId: "worker-a", leaseSeconds: 30 };
 
     await expect(executor.runNextIllustration(request)).resolves.toBe(true);
@@ -57,7 +63,11 @@ describe("createIllustrationWorkerExecutor", () => {
       image: async () => { order.push("image"); return false; }
     };
 
-    await expect(createIllustrationWorkerExecutor(lanes).runNextIllustration({
+    await expect(createIllustrationWorkerExecutor({
+      runPromptHandler: lanes.prompt,
+      runResolutionHandler: lanes.resolution,
+      runImageHandler: lanes.image
+    } as never).runNextIllustration({
       workerId: "worker-b",
       leaseSeconds: 45
     })).resolves.toBe(false);
@@ -66,6 +76,17 @@ describe("createIllustrationWorkerExecutor", () => {
 });
 
 describe("createWorkerIllustrationApplication", () => {
+  it.skip("14a3: owns the live illustration lane without importing the retired API job services", async () => {
+    const source = await readFile(
+      new URL("../../services/runtime/src/illustration-composition.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).not.toContain('from "../../api/src/image-service.js"');
+    expect(source).not.toContain('from "../../api/src/illustration-resolution-service.js"');
+    expect(source).not.toContain('from "../../api/src/segmented-illustration-service.js"');
+  });
+
   it("binds concrete provider, artifact, and asset ports into the separate worker application", () => {
     const pool = {} as DatabasePool;
     const store = { root: "/var/lib/infinitequest/assets" };
@@ -81,9 +102,11 @@ describe("createWorkerIllustrationApplication", () => {
         bindSegmentAsset: vi.fn()
       }
     };
+    const state = {} as IllustrationWorkerStateMachinePort;
     const application = {} as IllustrationWorkerApplication;
     const factories = {
       createLanes: vi.fn(() => lanes),
+      createState: vi.fn(() => state),
       createExecutor: vi.fn(() => executor),
       createApplication: vi.fn(() => application),
       createPorts: vi.fn(() => ports)
@@ -98,7 +121,8 @@ describe("createWorkerIllustrationApplication", () => {
     expect((factories as unknown as { createPorts: ReturnType<typeof vi.fn> }).createPorts)
       .toHaveBeenCalledWith(pool, "credential-secret", store);
     expect(factories.createLanes).toHaveBeenCalledWith(pool, "credential-secret", store);
-    expect(factories.createExecutor).toHaveBeenCalledWith(lanes);
-    expect(factories.createApplication).toHaveBeenCalledWith({ executor, ports });
+    expect(factories.createState).toHaveBeenCalledWith(lanes);
+    expect(factories.createExecutor).toHaveBeenCalledWith(state);
+    expect(factories.createApplication).toHaveBeenCalledWith({ executor, ports, state });
   });
 });

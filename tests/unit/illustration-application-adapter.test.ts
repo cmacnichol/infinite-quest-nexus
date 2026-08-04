@@ -4,6 +4,7 @@ import type { DatabaseClient, DatabasePool } from "../../packages/database/src/p
 import {
   createIllustrationArtifactDownloadAdapter,
   createIllustrationAssetAdapter,
+  createIllustrationGenerationTransactionPort,
   createIllustrationImageProviderAdapter,
   createIllustrationPromptRefinementAdapter
 } from "../../services/api/src/illustration-application-adapter.js";
@@ -195,6 +196,48 @@ describe("illustration artifact download adapter", () => {
       allowPrivateHosts: true,
       maximumBytes: 3
     })).rejects.toMatchObject({ code: "image_too_large", permanent: true });
+  });
+});
+
+describe("illustration generation transaction adapter", () => {
+  it("uses the caller-owned transaction for streaming configuration rather than opening another pool transaction", async () => {
+    const query = vi.fn(async () => ({
+      rows: [{
+        enabled: true,
+        source_policy: "generate_only",
+        matching_scope: "world",
+        confidence_profile: "balanced",
+        repetition_window: 5,
+        provider_profile_id: providerProfileId,
+        model: "image-model",
+        size: "1024x1024",
+        aspect_ratio: "1:1",
+        quality: "auto",
+        output_format: "png",
+        max_attempts: 3,
+        segment_word_count: 500,
+        images_per_segment: 1,
+        segment_prompt_mode: "direct",
+        refinement_prompt: "",
+        updated_at: new Date("2026-08-04T12:00:00.000Z"),
+        campaign_image_provider_id: providerProfileId,
+        campaign_text_provider_id: null
+      }]
+    }));
+    const database = { query } as unknown as DatabaseClient;
+    const adapter = createIllustrationGenerationTransactionPort();
+
+    await expect(adapter.loadStreamingIllustrationConfig(database, { ownerUserId, campaignId }))
+      .resolves.toMatchObject({
+        enabled: true,
+        providerProfileId,
+        campaignImageProviderProfileId: providerProfileId,
+        campaignTextProviderProfileId: null
+    });
+    expect(query).toHaveBeenCalledOnce();
+    const [statement, parameters] = query.mock.calls[0] as unknown as [string, unknown[]];
+    expect(statement).toContain("FROM campaign_illustration_configs");
+    expect(parameters).toEqual([campaignId, ownerUserId]);
   });
 });
 

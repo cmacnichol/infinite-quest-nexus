@@ -12,6 +12,8 @@ import {
   type IllustrationResolutionRepository,
   type IllustrationSegmentRepository,
   type IllustrationStreamingRepository,
+  type IllustrationGenerationTransactionPort,
+  type IllustrationWorkerStateMachinePort,
   type IllustrationWorkerExecutor
 } from "../../../packages/application/src/index.js";
 import type {
@@ -234,7 +236,8 @@ describe("illustration application use cases", () => {
       jobs,
       segments,
       resolutions,
-      streaming
+      streaming,
+      transaction: {} as IllustrationGenerationTransactionPort
     });
 
     const campaignScope = Object.freeze({ ownerUserId, campaignId });
@@ -358,7 +361,11 @@ describe("illustration application use cases", () => {
         bindSegmentAsset: async () => { throw new Error("not invoked"); }
       }
     } as Parameters<typeof createIllustrationWorkerApplication>[0]["ports"];
-    const application = createIllustrationWorkerApplication({ executor, ports });
+    const application = createIllustrationWorkerApplication({
+      executor,
+      ports,
+      state: {} as IllustrationWorkerStateMachinePort
+    });
     const request = Object.freeze({ workerId: "worker-a", leaseSeconds: 30 });
     const imageRequest = Object.freeze({
       ownerUserId,
@@ -387,6 +394,135 @@ describe("illustration application use cases", () => {
       persistWorldCover: expect.any(Function),
       bindSegmentAsset: expect.any(Function)
     });
+  });
+
+  test("forwards every typed worker state operation and transaction-scoped generation callback", async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const database = Object.freeze({ kind: "accepted-turn-transaction" });
+    const state: IllustrationWorkerStateMachinePort = {
+      claimNextPromptJob: async (...args) => {
+        calls.push({ method: "claimNextPromptJob", args });
+        return null;
+      },
+      claimNextResolutionJob: async (...args) => {
+        calls.push({ method: "claimNextResolutionJob", args });
+        return null;
+      },
+      claimNextImageJob: async (...args) => {
+        calls.push({ method: "claimNextImageJob", args });
+        return null;
+      },
+      loadClaimedJob: async (...args) => {
+        calls.push({ method: "loadClaimedJob", args });
+        return null;
+      },
+      heartbeatClaim: async (...args) => {
+        calls.push({ method: "heartbeatClaim", args });
+        return false;
+      },
+      transitionClaim: async (...args) => {
+        calls.push({ method: "transitionClaim", args });
+        return false;
+      },
+      scheduleRetry: async (...args) => {
+        calls.push({ method: "scheduleRetry", args });
+        return false;
+      },
+      resolvePrompt: async (...args) => {
+        calls.push({ method: "resolvePrompt", args });
+        return null;
+      },
+      runPromptHandler: async (...args) => {
+        calls.push({ method: "runPromptHandler", args });
+        return false;
+      },
+      runResolutionHandler: async (...args) => {
+        calls.push({ method: "runResolutionHandler", args });
+        return false;
+      },
+      runImageHandler: async (...args) => {
+        calls.push({ method: "runImageHandler", args });
+        return false;
+      }
+    };
+    const transaction: IllustrationGenerationTransactionPort = {
+      loadStreamingIllustrationConfig: async (...args) => {
+        calls.push({ method: "loadStreamingIllustrationConfig", args });
+        return {} as never;
+      },
+      createProvisionalSet: async (...args) => {
+        calls.push({ method: "createProvisionalSet", args });
+        return null;
+      },
+      createProvisionalSegment: async (...args) => {
+        calls.push({ method: "createProvisionalSegment", args });
+        return false;
+      },
+      promoteProvisionalSet: async (...args) => {
+        calls.push({ method: "promoteProvisionalSet", args });
+      },
+      orphanProvisionalSet: async (...args) => {
+        calls.push({ method: "orphanProvisionalSet", args });
+      },
+      enqueueAcceptedTurnIllustrationSegments: async (...args) => {
+        calls.push({ method: "enqueueAcceptedTurnIllustrationSegments", args });
+        return null;
+      }
+    };
+    const executor: IllustrationWorkerExecutor = { runNextIllustration: async () => false };
+    const ports = {
+      imageProvider: { executeImage: async () => ({}) as never },
+      promptRefinement: { refinePrompt: async () => ({}) as never },
+      artifactDownload: { downloadArtifact: async () => ({}) as never },
+      assets: {
+        persistTurnIllustration: async () => ({ assetId: jobId }),
+        persistWorldCover: async () => ({ assetId: jobId }),
+        bindSegmentAsset: async () => false
+      }
+    } as Parameters<typeof createIllustrationWorkerApplication>[0]["ports"];
+    const worker = createIllustrationWorkerApplication({ executor, ports, state });
+    const application = createIllustrationApplication({
+      config: {} as IllustrationConfigRepository,
+      jobs: {} as IllustrationJobRepository,
+      segments: {} as IllustrationSegmentRepository,
+      resolutions: {} as IllustrationResolutionRepository,
+      streaming: {} as IllustrationStreamingRepository,
+      transaction
+    });
+    const workerRequest = Object.freeze({ workerId: "worker-a", leaseSeconds: 30 });
+    const workerScope = Object.freeze({ ownerUserId, jobId, workerId: "worker-a", leaseSeconds: 30, family: "image" as const });
+    const campaignScope = Object.freeze({ ownerUserId, campaignId });
+    const generationScope = Object.freeze({ ownerUserId, campaignId, generationJobId });
+    const provisionalScope = Object.freeze({ ...generationScope, setId });
+    const promotedScope = Object.freeze({ ...generationScope, turnId });
+
+    await worker.claimNextPromptJob(workerRequest);
+    await worker.claimNextResolutionJob(workerRequest);
+    await worker.claimNextImageJob(workerRequest);
+    await worker.loadClaimedJob(workerScope);
+    await worker.heartbeatClaim(workerScope);
+    await worker.transitionClaim(workerScope, { status: "generating" });
+    await worker.scheduleRetry(workerScope, { code: "temporary", message: "retry" });
+    await worker.resolvePrompt(workerScope);
+    await worker.runPromptHandler(workerRequest);
+    await worker.runResolutionHandler(workerRequest);
+    await worker.runImageHandler(workerRequest);
+    await application.generation.loadStreamingIllustrationConfig(database, campaignScope);
+    await application.generation.createProvisionalSet(database, generationScope, {});
+    await application.generation.createProvisionalSegment(database, provisionalScope, {} as never);
+    await application.generation.promoteProvisionalSet(database, promotedScope, {} as never);
+    await application.generation.orphanProvisionalSet(database, generationScope);
+    await application.generation.enqueueAcceptedTurnIllustrationSegments(database, promotedScope);
+
+    expect(calls.map((call) => call.method)).toEqual([
+      "claimNextPromptJob", "claimNextResolutionJob", "claimNextImageJob", "loadClaimedJob",
+      "heartbeatClaim", "transitionClaim", "scheduleRetry", "resolvePrompt", "runPromptHandler",
+      "runResolutionHandler", "runImageHandler", "loadStreamingIllustrationConfig", "createProvisionalSet",
+      "createProvisionalSegment", "promoteProvisionalSet", "orphanProvisionalSet",
+      "enqueueAcceptedTurnIllustrationSegments"
+    ]);
+    expect(calls.filter((call) => call.method.includes("Provisional") || call.method.includes("IllustrationConfig")
+      || call.method === "enqueueAcceptedTurnIllustrationSegments").every((call) => call.args[0] === database)).toBe(true);
   });
 
   test("requires owner-scoped resource inputs and keeps text refinement distinct from image execution", () => {

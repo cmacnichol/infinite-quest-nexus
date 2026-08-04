@@ -6,6 +6,7 @@ import type {
   IllustrationImageArtifact,
   IllustrationImageExecutionResult,
   IllustrationImageProviderPort,
+  IllustrationGenerationTransactionPort,
   IllustrationPromptRefinementPort,
   StreamingIllustrationConfig,
   TurnIllustrationResolution
@@ -586,6 +587,59 @@ function segmentConfig(config: StreamingIllustrationConfig): SegmentConfigRow {
 }
 
 /**
+ * Transaction-scoped generation callbacks. The caller supplies the existing
+ * accepted-turn transaction; this adapter never opens a second transaction.
+ * Task 14a3 will replace the legacy generation collaborators with this port.
+ */
+export function createIllustrationGenerationTransactionPort(): IllustrationGenerationTransactionPort {
+  return {
+    loadStreamingIllustrationConfig: async (database, scope) => streamingConfig(await loadConfig(
+      database as DatabaseClient,
+      scope.ownerUserId,
+      scope.campaignId,
+    )),
+    createProvisionalSet: (database, scope, request) => createProvisionalSet(
+      database as DatabaseClient,
+      scope.ownerUserId,
+      scope.campaignId,
+      scope.generationJobId,
+      request.visualReference,
+    ),
+    createProvisionalSegment: (database, scope, request) => createProvisionalSegment(
+      database as DatabaseClient,
+      scope.ownerUserId,
+      scope.campaignId,
+      scope.generationJobId,
+      scope.setId,
+      request.segment,
+      segmentConfig(request.config),
+      request.visualReference,
+    ),
+    promoteProvisionalSet: (database, scope, request) => promoteProvisionalSet(
+      database as DatabaseClient,
+      scope.ownerUserId,
+      scope.generationJobId,
+      scope.turnId,
+      scope.campaignId,
+      request.finalNarration,
+      segmentConfig(request.config),
+      request.visualReference,
+    ),
+    orphanProvisionalSet: (database, scope) => orphanProvisionalSet(
+      database as DatabaseClient,
+      scope.ownerUserId,
+      scope.generationJobId,
+    ),
+    enqueueAcceptedTurnIllustrationSegments: (database, scope) => enqueueAcceptedTurnIllustrationSegments(
+      database as DatabaseClient,
+      scope.ownerUserId,
+      scope.campaignId,
+      scope.turnId,
+    )
+  };
+}
+
+/**
  * Temporary 14a2 bridge around the established PostgreSQL operations. Task
  * 14a3 switches callers to these repositories and can then reduce the legacy
  * service exports without changing the application contracts again.
@@ -742,6 +796,7 @@ export function createIllustrationRepositoryFactories(): IllustrationRepositoryF
         scope.ownerUserId,
         scope.generationJobId,
       )
-    })
+    }),
+    createGenerationTransactionPort: () => createIllustrationGenerationTransactionPort()
   };
 }

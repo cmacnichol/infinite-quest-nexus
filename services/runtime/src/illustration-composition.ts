@@ -6,6 +6,7 @@ import {
   type IllustrationWorkerApplication,
   type IllustrationWorkerApplicationDependencies,
   type IllustrationWorkerExecutor,
+  type IllustrationWorkerStateMachinePort,
   type IllustrationWorkerPorts,
   type IllustrationWorkerRequest
 } from "../../../packages/application/src/index.js";
@@ -53,13 +54,13 @@ export type IllustrationWorkerLanes = Readonly<{
 }>;
 
 export function createIllustrationWorkerExecutor(
-  lanes: IllustrationWorkerLanes,
+  state: IllustrationWorkerStateMachinePort,
 ): IllustrationWorkerExecutor {
   return {
     async runNextIllustration(request) {
-      if (await lanes.prompt(request)) return true;
-      if (await lanes.resolution(request)) return true;
-      return lanes.image(request);
+      if (await state.runPromptHandler(request)) return true;
+      if (await state.runResolutionHandler(request)) return true;
+      return state.runImageHandler(request);
     }
   };
 }
@@ -75,7 +76,8 @@ export type WorkerIllustrationCompositionFactories = Readonly<{
     credentialSecret: string,
     store: FilesystemAssetStore,
   ): IllustrationWorkerLanes;
-  createExecutor(lanes: IllustrationWorkerLanes): IllustrationWorkerExecutor;
+  createState(lanes: IllustrationWorkerLanes): IllustrationWorkerStateMachinePort;
+  createExecutor(state: IllustrationWorkerStateMachinePort): IllustrationWorkerExecutor;
   createApplication(dependencies: IllustrationWorkerApplicationDependencies): IllustrationWorkerApplication;
 }>;
 
@@ -101,6 +103,25 @@ export function createIllustrationWorkerPorts(
   };
 }
 
+function deferredStateMachine(lanes: IllustrationWorkerLanes): IllustrationWorkerStateMachinePort {
+  const deferred = async (): Promise<never> => {
+    throw new Error("Illustration worker state operations are not live until the Task 14a3 cutover.");
+  };
+  return {
+    claimNextPromptJob: deferred,
+    claimNextResolutionJob: deferred,
+    claimNextImageJob: deferred,
+    loadClaimedJob: deferred,
+    heartbeatClaim: deferred,
+    transitionClaim: deferred,
+    scheduleRetry: deferred,
+    resolvePrompt: deferred,
+    runPromptHandler: lanes.prompt,
+    runResolutionHandler: lanes.resolution,
+    runImageHandler: lanes.image
+  };
+}
+
 const workerFactories: WorkerIllustrationCompositionFactories = {
   createPorts: createIllustrationWorkerPorts,
   createLanes: (pool, credentialSecret, store) => ({
@@ -123,6 +144,7 @@ const workerFactories: WorkerIllustrationCompositionFactories = {
       store,
     )
   }),
+  createState: deferredStateMachine,
   createExecutor: createIllustrationWorkerExecutor,
   createApplication: createIllustrationWorkerUseCases
 };
@@ -135,6 +157,7 @@ export function createWorkerIllustrationApplication(
 ): IllustrationWorkerApplication {
   const ports = factories.createPorts(pool, credentialSecret, store);
   const lanes = factories.createLanes(pool, credentialSecret, store);
-  const executor = factories.createExecutor(lanes);
-  return factories.createApplication({ executor, ports });
+  const state = factories.createState(lanes);
+  const executor = factories.createExecutor(state);
+  return factories.createApplication({ executor, ports, state });
 }

@@ -276,6 +276,47 @@ export type IllustrationWorkerRequest = Readonly<{
   leaseSeconds: number;
 }>;
 
+export type IllustrationWorkerJobFamily = "prompt" | "resolution" | "image";
+
+export type IllustrationWorkerJobScope = IllustrationOwnerScope & Readonly<{
+  jobId: string;
+  workerId: string;
+  leaseSeconds: number;
+  family: IllustrationWorkerJobFamily;
+}>;
+
+export type ClaimedIllustrationWorkerJob = IllustrationWorkerJobScope & Readonly<{
+  campaignId: string | null;
+  turnId: string | null;
+  worldId: string | null;
+  attempts: number;
+  maxAttempts: number;
+}>;
+
+export type IllustrationWorkerJobTransition = Readonly<{
+  status: "generating" | "provider_pending" | "downloading" | "completed" | "recoverable" | "failed" | "cancelled";
+  metadata?: Readonly<Record<string, unknown>>;
+}>;
+
+export type IllustrationWorkerRetry = Readonly<{
+  code: string;
+  message: string;
+  retryAt?: string;
+}>;
+
+export type IllustrationWorkerPromptResolution = Readonly<{
+  prompt: string;
+  providerProfileId: string | null;
+  model: string | null;
+}>;
+
+/**
+ * Platform-neutral transaction token. Application code must pass this opaque
+ * value through to one transaction-scoped adapter rather than opening a second
+ * transaction while an accepted turn is being committed.
+ */
+export type IllustrationTransactionContext = object;
+
 export type IllustrationImageExecutionRequest = ImageJobScope & Readonly<{
   providerProfileId: string;
   model: string;

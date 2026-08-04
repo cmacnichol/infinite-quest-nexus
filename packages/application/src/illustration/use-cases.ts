@@ -44,7 +44,20 @@ export function createIllustrationApplication(
       dependencies.streaming.createProvisionalSegment(scope, request),
     promoteProvisionalSet: (scope, request) =>
       dependencies.streaming.promoteProvisionalSet(scope, request),
-    orphanProvisionalSet: (scope) => dependencies.streaming.orphanProvisionalSet(scope)
+    orphanProvisionalSet: (scope) => dependencies.streaming.orphanProvisionalSet(scope),
+    generation: {
+      loadStreamingIllustrationConfig: (database, scope) =>
+        dependencies.transaction.loadStreamingIllustrationConfig(database, scope),
+      createProvisionalSet: (database, scope, request) =>
+        dependencies.transaction.createProvisionalSet(database, scope, request),
+      createProvisionalSegment: (database, scope, request) =>
+        dependencies.transaction.createProvisionalSegment(database, scope, request),
+      promoteProvisionalSet: (database, scope, request) =>
+        dependencies.transaction.promoteProvisionalSet(database, scope, request),
+      orphanProvisionalSet: (database, scope) => dependencies.transaction.orphanProvisionalSet(database, scope),
+      enqueueAcceptedTurnIllustrationSegments: (database, scope) =>
+        dependencies.transaction.enqueueAcceptedTurnIllustrationSegments(database, scope)
+    }
   };
 }
 
@@ -53,6 +66,17 @@ export function createIllustrationWorkerApplication(
 ): IllustrationWorkerApplication {
   return {
     runNextIllustration: (request) => dependencies.executor.runNextIllustration(request),
+    claimNextPromptJob: (request) => dependencies.state.claimNextPromptJob(request),
+    claimNextResolutionJob: (request) => dependencies.state.claimNextResolutionJob(request),
+    claimNextImageJob: (request) => dependencies.state.claimNextImageJob(request),
+    loadClaimedJob: (scope) => dependencies.state.loadClaimedJob(scope),
+    heartbeatClaim: (scope) => dependencies.state.heartbeatClaim(scope),
+    transitionClaim: (scope, transition) => dependencies.state.transitionClaim(scope, transition),
+    scheduleRetry: (scope, retry) => dependencies.state.scheduleRetry(scope, retry),
+    resolvePrompt: (scope) => dependencies.state.resolvePrompt(scope),
+    runPromptHandler: (request) => dependencies.state.runPromptHandler(request),
+    runResolutionHandler: (request) => dependencies.state.runResolutionHandler(request),
+    runImageHandler: (request) => dependencies.state.runImageHandler(request),
     executeImage: (request) => dependencies.ports.imageProvider.executeImage(request),
     refinePrompt: (request) => dependencies.ports.promptRefinement.refinePrompt(request),
     downloadArtifact: (request) => dependencies.ports.artifactDownload.downloadArtifact(request),

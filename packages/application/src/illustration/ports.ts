@@ -21,7 +21,13 @@ import type {
   IllustrationSegmentImageResult,
   IllustrationSegmentRequest,
   IllustrationSegmentSetResult,
+  IllustrationTransactionContext,
+  IllustrationWorkerJobScope,
+  IllustrationWorkerJobTransition,
+  IllustrationWorkerPromptResolution,
   IllustrationWorkerRequest,
+  IllustrationWorkerRetry,
+  ClaimedIllustrationWorkerJob,
   ImageJobScope,
   PromoteProvisionalIllustrationRequest,
   PromotedIllustrationScope,
@@ -120,12 +126,49 @@ export interface IllustrationStreamingRepository {
   orphanProvisionalSet(scope: GenerationIllustrationScope): Promise<void>;
 }
 
+/**
+ * Generation owns the outer accepted-turn transaction. These callbacks keep
+ * illustration reads and writes inside that caller-owned transaction so
+ * optional image work cannot split authoritative turn acceptance into a second
+ * commit.
+ */
+export interface IllustrationGenerationTransactionPort {
+  loadStreamingIllustrationConfig(
+    database: IllustrationTransactionContext,
+    scope: CampaignIllustrationScope,
+  ): Promise<StreamingIllustrationConfig>;
+  createProvisionalSet(
+    database: IllustrationTransactionContext,
+    scope: GenerationIllustrationScope,
+    request: ProvisionalIllustrationSetRequest,
+  ): Promise<string | null>;
+  createProvisionalSegment(
+    database: IllustrationTransactionContext,
+    scope: ProvisionalSegmentScope,
+    request: ProvisionalIllustrationSegmentRequest,
+  ): Promise<boolean>;
+  promoteProvisionalSet(
+    database: IllustrationTransactionContext,
+    scope: PromotedIllustrationScope,
+    request: PromoteProvisionalIllustrationRequest,
+  ): Promise<void>;
+  orphanProvisionalSet(
+    database: IllustrationTransactionContext,
+    scope: GenerationIllustrationScope,
+  ): Promise<void>;
+  enqueueAcceptedTurnIllustrationSegments(
+    database: IllustrationTransactionContext,
+    scope: TurnIllustrationScope,
+  ): Promise<IllustrationSegmentSetResult | null>;
+}
+
 export type IllustrationApplicationDependencies = Readonly<{
   config: IllustrationConfigRepository;
   jobs: IllustrationJobRepository;
   segments: IllustrationSegmentRepository;
   resolutions: IllustrationResolutionRepository;
   streaming: IllustrationStreamingRepository;
+  transaction: IllustrationGenerationTransactionPort;
 }>;
 
 export interface IllustrationApplication
@@ -133,10 +176,31 @@ export interface IllustrationApplication
     IllustrationJobRepository,
     IllustrationSegmentRepository,
     IllustrationResolutionRepository,
-    IllustrationStreamingRepository {}
+    IllustrationStreamingRepository {
+  readonly generation: IllustrationGenerationTransactionPort;
+}
 
 export interface IllustrationWorkerExecutor {
   runNextIllustration(request: IllustrationWorkerRequest): Promise<boolean>;
+}
+
+/**
+ * Typed state-machine surface for the three durable illustration job families.
+ * Claim fencing and status transitions remain authoritative database work; they
+ * are deliberately separate from provider, artifact, and asset ports.
+ */
+export interface IllustrationWorkerStateMachinePort {
+  claimNextPromptJob(request: IllustrationWorkerRequest): Promise<ClaimedIllustrationWorkerJob | null>;
+  claimNextResolutionJob(request: IllustrationWorkerRequest): Promise<ClaimedIllustrationWorkerJob | null>;
+  claimNextImageJob(request: IllustrationWorkerRequest): Promise<ClaimedIllustrationWorkerJob | null>;
+  loadClaimedJob(scope: IllustrationWorkerJobScope): Promise<ClaimedIllustrationWorkerJob | null>;
+  heartbeatClaim(scope: IllustrationWorkerJobScope): Promise<boolean>;
+  transitionClaim(scope: IllustrationWorkerJobScope, transition: IllustrationWorkerJobTransition): Promise<boolean>;
+  scheduleRetry(scope: IllustrationWorkerJobScope, retry: IllustrationWorkerRetry): Promise<boolean>;
+  resolvePrompt(scope: IllustrationWorkerJobScope): Promise<IllustrationWorkerPromptResolution | null>;
+  runPromptHandler(request: IllustrationWorkerRequest): Promise<boolean>;
+  runResolutionHandler(request: IllustrationWorkerRequest): Promise<boolean>;
+  runImageHandler(request: IllustrationWorkerRequest): Promise<boolean>;
 }
 
 /**
@@ -227,6 +291,7 @@ export type IllustrationWorkerPorts = Readonly<{
 export type IllustrationWorkerApplicationDependencies = Readonly<{
   executor: IllustrationWorkerExecutor;
   ports: IllustrationWorkerPorts;
+  state: IllustrationWorkerStateMachinePort;
 }>;
 
 /**
@@ -236,6 +301,7 @@ export type IllustrationWorkerApplicationDependencies = Readonly<{
  */
 export interface IllustrationWorkerApplication
   extends IllustrationWorkerExecutor,
+    IllustrationWorkerStateMachinePort,
     IllustrationImageProviderPort,
     IllustrationPromptRefinementPort,
     IllustrationArtifactDownloadPort,
