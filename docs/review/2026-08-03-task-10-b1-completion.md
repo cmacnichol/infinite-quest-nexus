@@ -2,7 +2,7 @@
 
 **Audit date:** 2026-08-04
 
-**Status:** implementation evidence passed; independent Task 10f review pending
+**Status:** review correction evidence passed; independent Task 10f re-review pending
 
 **Frozen range:**
 `885bcdeaa52a1c1286d044f34275c7cf40159bbb..4e3e701d2b1e1f5b2250c3d89875fd032b505966`
@@ -282,7 +282,35 @@ The implementation/correction chain is:
 
 Checkpoint reviews for 10a, 10b, 10c1, 10c2, 10c3, 10d, and 10e are recorded
 as approved in the SDD ledger after their correction rounds. The Task 10f
-independent full-range reviewer result is intentionally pending in this draft.
+independent full-range reviewer requested corrections for findings #0288 and
+#0289. Finding #0289 is addressed below with active real-PostgreSQL regression
+coverage. Finding #0288 identified stale pickup wording outside the Task
+10f-specific plan block; that unrelated, user-authored plan hunk was preserved
+under the correction scope and remains for its owning plan update.
+
+### Fix round 1 — accepted-story/image independence
+
+The image-pipeline integration suite now proves all three required acceptance
+invariants through production applications and a real PostgreSQL database:
+
+1. With illustrations disabled, story generation completes and commits the
+   accepted turn, campaign-state revision, and Chronicle fiction memory while
+   creating no image job, illustration set or segment, prompt job, or resolution
+   job.
+2. With a configured model that the deterministic image transport rejects as
+   incompatible, image processing ends unsuccessfully while the accepted story
+   job ID/result, turn IDs/count/narration/state snapshots, campaign state, and
+   Chronicle rows remain byte-for-byte equivalent to the pre-processing
+   snapshot.
+3. After an unsuccessful image attempt, `retryImageJob` runs the same image job
+   independently to completion while the original generation-job inventory,
+   accepted turn/state/Chronicle snapshot, and text-provider request count stay
+   unchanged. No narration generation is re-enqueued.
+
+The TDD red run initially produced two failures and one pass: the disabled mode
+exposed an invalid text-request-count assumption, and the incompatible model
+completed because the fixture did not yet model rejection. The corrected green
+run passed all three targeted tests. No production implementation changed.
 
 ## Fresh verification
 
@@ -299,11 +327,13 @@ Commands executed on 2026-08-04:
 | Command | Result |
 | --- | --- |
 | focused six-file Task 10 unit command | 6 files, 91 passed, 0 failed, 0 skipped |
-| focused five-file Task 10 PostgreSQL integration command | 5 files, 96 passed, 0 failed, 0 skipped |
+| three focused image-independence regressions | 1 file, 3 passed, 0 failed; 19 tests filtered by the explicit name pattern |
+| complete image-pipeline PostgreSQL suite | 1 file, 22 passed, 0 failed, 0 skipped |
+| focused five-file Task 10 PostgreSQL integration command | 5 files, 99 passed, 0 failed, 0 skipped |
 | `pnpm check` | passed; repository boundary/data checks inspected 577 candidate files; all package, web, root TypeScript, and JavaScript checks passed |
 | `pnpm build` | passed; TypeScript and both Vite builds passed; legacy bundle 245.83 kB (67.60 kB gzip), next entry 1.12 kB (0.59 kB gzip) |
 | `pnpm test:unit` | 93 files, 1,114 passed, 0 failed, 0 skipped |
-| `pnpm test:integration` | 19 files, 222 passed, 0 failed, 0 skipped |
+| `pnpm test:integration` | 19 files, 225 passed, 0 failed, 0 skipped |
 | `git diff --check` | passed |
 | per-file `pjm precheck` | passed before every Task 10f document edit |
 

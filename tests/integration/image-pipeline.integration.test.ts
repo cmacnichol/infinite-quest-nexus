@@ -12,7 +12,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
-import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
+import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, retryImageJob, runImageJob, setIllustrationConfig } from "../../services/api/src/image-service.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { listAssets, persistOriginalImage, queryAssets, readAssetDerivative, runAssetMetadataBackfill, selectTurnIllustration, selectWorldCover, updateAssetMetadata } from "../../services/api/src/asset-service.js";
@@ -91,6 +91,7 @@ integration("independent illustration pipeline", () => {
   const imageRequests: Array<Record<string, unknown>> = [];
   const refinementRequests: Array<Record<string, unknown>> = [];
   const sogniRequests: Array<{ body: Record<string, unknown>; idempotencyKey: string }> = [];
+  const storyRequests: Array<Record<string, unknown>> = [];
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
@@ -126,6 +127,11 @@ integration("independent illustration pipeline", () => {
         }
         if (request.url?.endsWith("/images/generations")) {
           imageRequests.push(parsed);
+          if (parsed.model === "synthetic-text-only-model") {
+            response.writeHead(422, { "content-type": "application/json" });
+            response.end(JSON.stringify({ error: { message: "The selected model cannot generate images." } }));
+            return;
+          }
           if (failImages) {
             response.writeHead(503, { "content-type": "application/json" });
             response.end(JSON.stringify({ error: { message: "Synthetic image endpoint unavailable." } }));
@@ -153,6 +159,7 @@ integration("independent illustration pipeline", () => {
           }));
           return;
         }
+        storyRequests.push(parsed);
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({
           id: crypto.randomUUID(),
@@ -241,6 +248,65 @@ integration("independent illustration pipeline", () => {
       await runImageJob(pool, `${workerPrefix}-${index}`, 30, credentialSecret, { root: assetRoot });
     }
     return getImageJob(pool, jobId);
+  }
+
+  async function acceptedStorySnapshot(campaignId: string, generationJobId: string) {
+    const [generation, turns, state, memories, generationJobs] = await Promise.all([
+      pool.query(
+        "SELECT id, status, result_turn_id FROM generation_jobs WHERE id = $1 AND campaign_id = $2",
+        [generationJobId, campaignId]
+      ),
+      pool.query(
+        `SELECT id, turn_number, narration, choices, state_snapshot_private
+           FROM turns WHERE campaign_id = $1 ORDER BY turn_number, id`,
+        [campaignId]
+      ),
+      pool.query(
+        `SELECT campaigns.active_turn_number, campaign_state.revision,
+                campaign_state.scratchpad_private, campaign_state.trackers,
+                campaign_state.event_triggers, campaign_state.pending_event_triggers,
+                campaign_state.rpg_stats
+           FROM campaigns
+           JOIN campaign_state ON campaign_state.campaign_id = campaigns.id
+          WHERE campaigns.id = $1`,
+        [campaignId]
+      ),
+      pool.query(
+        `SELECT id, turn_id, ordinal, memory_kind, content
+           FROM chronicle_memories WHERE campaign_id = $1 ORDER BY ordinal, memory_kind, id`,
+        [campaignId]
+      ),
+      pool.query(
+        `SELECT id, status, result_turn_id
+           FROM generation_jobs WHERE campaign_id = $1 ORDER BY created_at, id`,
+        [campaignId]
+      )
+    ]);
+    return {
+      generation: generation.rows,
+      turns: turns.rows,
+      state: state.rows,
+      memories: memories.rows,
+      generationJobs: generationJobs.rows
+    };
+  }
+
+  async function illustrationWorkCounts(campaignId: string) {
+    return pool.query<{
+      image_jobs: number;
+      illustration_sets: number;
+      illustration_segments: number;
+      prompt_jobs: number;
+      resolution_jobs: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::integer FROM image_jobs WHERE campaign_id = $1) AS image_jobs,
+         (SELECT count(*)::integer FROM turn_illustration_sets WHERE campaign_id = $1) AS illustration_sets,
+         (SELECT count(*)::integer FROM turn_illustration_segments WHERE campaign_id = $1) AS illustration_segments,
+         (SELECT count(*)::integer FROM illustration_prompt_jobs WHERE campaign_id = $1) AS prompt_jobs,
+         (SELECT count(*)::integer FROM illustration_resolution_jobs WHERE campaign_id = $1) AS resolution_jobs`,
+      [campaignId]
+    ).then((result) => result.rows[0]!);
   }
 
   async function installInsertBarrier(table: string, predicate: string) {
@@ -1420,6 +1486,96 @@ integration("independent illustration pipeline", () => {
     const providerJobs = await pool.query("SELECT id FROM image_jobs WHERE turn_id = $1", [turnId]);
     expect(providerJobs.rowCount).toBe(1);
     await pool.query("UPDATE image_jobs SET status = 'cancelled' WHERE turn_id = $1", [turnId]);
+  });
+
+  it("commits accepted story state and Chronicle memory without illustration work when illustrations are disabled", async () => {
+    const imported = await campaign();
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      enabled: false,
+      sourcePolicy: "off",
+      providerProfileId: null,
+      model: ""
+    }));
+    const storyJob = await generate(imported.campaignId);
+
+    const accepted = await acceptedStorySnapshot(imported.campaignId, storyJob.id);
+    expect(accepted.generation).toEqual([{
+      id: storyJob.id,
+      status: "completed",
+      result_turn_id: expect.any(String)
+    }]);
+    const resultTurnId = accepted.generation[0]!.result_turn_id;
+    expect(accepted.turns).toHaveLength(3);
+    expect(accepted.turns.at(-1)).toMatchObject({
+      id: resultTurnId,
+      turn_number: 3,
+      narration: expect.stringContaining("Synthetic Location Image opens beneath a quiet violet sky.")
+    });
+    expect(accepted.state).toEqual([expect.objectContaining({
+      active_turn_number: 3,
+      revision: 1,
+      scratchpad_private: "Synthetic fiction continuity only."
+    })]);
+    expect(accepted.memories.some((memory) => memory.turn_id === resultTurnId && memory.memory_kind === "turn_fiction")).toBe(true);
+    expect(await illustrationWorkCounts(imported.campaignId)).toEqual({
+      image_jobs: 0,
+      illustration_sets: 0,
+      illustration_segments: 0,
+      prompt_jobs: 0,
+      resolution_jobs: 0
+    });
+  });
+
+  it("leaves an accepted story unchanged when its configured image model is incompatible", async () => {
+    const imported = await campaign(1);
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      enabled: true,
+      sourcePolicy: "generate_only",
+      providerProfileId: imageProviderId,
+      model: "synthetic-text-only-model",
+      maxAttempts: 1,
+      segmentWordCount: 100,
+      imagesPerSegment: 1,
+      segmentPromptMode: "direct"
+    }));
+    const storyJob = await generate(imported.campaignId);
+    const acceptedBefore = await acceptedStorySnapshot(imported.campaignId, storyJob.id);
+    const [imageJob] = await listCampaignImageJobs(pool, imported.campaignId);
+    expect(imageJob).toMatchObject({ status: "queued", model: "synthetic-text-only-model" });
+
+    const unsuccessful = await processThroughTerminal(imageJob!.id, "synthetic-incompatible-model-worker");
+
+    expect(["recoverable", "failed"]).toContain(unsuccessful.status);
+    expect(imageRequests.at(-1)).toMatchObject({ model: "synthetic-text-only-model" });
+    expect(await acceptedStorySnapshot(imported.campaignId, storyJob.id)).toEqual(acceptedBefore);
+  });
+
+  it("retries an unsuccessful image independently without rerunning or mutating its accepted story", async () => {
+    failImages = true;
+    try {
+      const imported = await campaign(1);
+      const storyJob = await generate(imported.campaignId);
+      const [imageJob] = await listCampaignImageJobs(pool, imported.campaignId);
+      expect(imageJob).toMatchObject({ status: "queued", model: "synthetic-image-model" });
+      expect(await processThroughTerminal(imageJob!.id, "synthetic-image-retry-failure-worker"))
+        .toMatchObject({ status: "recoverable", errorCode: "image_generation_failed" });
+      const acceptedBeforeRetry = await acceptedStorySnapshot(imported.campaignId, storyJob.id);
+      const storyRequestCount = storyRequests.length;
+
+      failImages = false;
+      await expect(retryImageJob(pool, imageJob!.id)).resolves.toMatchObject({
+        id: imageJob!.id,
+        status: "queued",
+        attempts: 0
+      });
+      await expect(processThroughTerminal(imageJob!.id, "synthetic-image-retry-success-worker"))
+        .resolves.toMatchObject({ status: "completed", assetUrl: expect.stringMatching(/^\/api\/v1\/assets\//) });
+
+      expect(await acceptedStorySnapshot(imported.campaignId, storyJob.id)).toEqual(acceptedBeforeRetry);
+      expect(storyRequests).toHaveLength(storyRequestCount);
+    } finally {
+      failImages = false;
+    }
   });
 
   it("preserves the accepted story when the independent image endpoint fails", async () => {
