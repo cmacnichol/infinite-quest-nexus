@@ -50,21 +50,33 @@ export async function startNextGeneration(
   };
 }
 
-function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
+type DisposableWait = Readonly<{
+  promise: Promise<void>;
+  dispose(): void;
+}>;
+
+function createDisposableWait(milliseconds: number, signal: AbortSignal): DisposableWait {
+  let dispose: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
     if (signal.aborted) return resolve();
+    let settled = false;
     let timeout!: ReturnType<typeof setTimeout>;
-    const onAbort = () => {
+    const settle = () => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
-      signal.removeEventListener("abort", onAbort);
+      signal.removeEventListener("abort", settle);
       resolve();
     };
-    timeout = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, milliseconds);
-    signal.addEventListener("abort", onAbort, { once: true });
+    timeout = setTimeout(settle, milliseconds);
+    signal.addEventListener("abort", settle, { once: true });
+    dispose = settle;
   });
+  return { promise, dispose: () => dispose() };
+}
+
+function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
+  return createDisposableWait(milliseconds, signal).promise;
 }
 
 type ActiveLane = {
@@ -231,10 +243,15 @@ export async function runWorker(
     if (active.length === 0) {
       await wait(waitMilliseconds, signal);
     } else {
-      await Promise.race([
-        ...active,
-        wait(waitMilliseconds, signal).then(() => false)
-      ]);
+      const pollWait = createDisposableWait(waitMilliseconds, signal);
+      try {
+        await Promise.race([
+          ...active,
+          pollWait.promise.then(() => false)
+        ]);
+      } finally {
+        pollWait.dispose();
+      }
       // A lane may complete synchronously (for example, a local queue scan or
       // deterministic provider double). Yield one macrotask so timers, abort,
       // and other replicas are not starved by an all-microtask refill loop.

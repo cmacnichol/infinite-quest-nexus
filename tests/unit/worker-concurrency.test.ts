@@ -204,6 +204,42 @@ describe("worker concurrency scheduler", () => {
     expect(removeAbortListener).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 
+  it("disposes each losing poll wait when active work completes instantly", async () => {
+    const controller = new AbortController();
+    const addAbortListener = vi.spyOn(controller.signal, "addEventListener");
+    const removeAbortListener = vi.spyOn(controller.signal, "removeEventListener");
+    let illustrationCalls = 0;
+    let outstandingPollListeners = -1;
+    const optionalLanes: WorkerOptionalLanes = {
+      illustration: vi.fn(async () => {
+        illustrationCalls += 1;
+        if (illustrationCalls === 25) {
+          outstandingPollListeners = addAbortListener.mock.calls.length
+            - removeAbortListener.mock.calls.length;
+          controller.abort();
+        }
+        return true;
+      }),
+      chronicle: vi.fn(async () => true),
+      asset: vi.fn(async () => true)
+    };
+    const generation: GenerationWorkerApplication = {
+      claimNext: vi.fn(async () => null),
+      executeClaimed: vi.fn(async () => false)
+    };
+
+    await runWorker(pool, {
+      ...workerConfig(1),
+      workerPollIntervalMs: 60_000
+    }, controller.signal, {
+      generation,
+      optionalLanes
+    });
+
+    expect(illustrationCalls).toBe(25);
+    expect(outstandingPollListeners).toBeLessThanOrEqual(1);
+  });
+
   it("isolates an optional-lane rejection and continues refilling every other lane", async () => {
     const controller = new AbortController();
     let illustrationCalls = 0;
