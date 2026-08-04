@@ -4,7 +4,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import {
-  createPostgresGenerationExecutionRepository
+  createPostgresGenerationExecutionRepository,
+  type GenerationLeaseScope
 } from "../../packages/database/src/generation-execution-repository.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -73,6 +74,44 @@ integration("PostgreSQL generation execution repository", () => {
         context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
       })
     );
+  }
+
+  function attemptInput(scope: GenerationLeaseScope, attemptNumber = 1) {
+    return {
+      ...scope,
+      attemptNumber,
+      recoveryKind: "initial",
+      requestMetadata: { model: "execution-repository-model" },
+      responseMetadata: { outputLimited: false },
+      providerResponseId: crypto.randomUUID(),
+      finishReason: "stop",
+      rawOutput: "A safe fictional response.",
+      validationErrors: [],
+      overwrite: true
+    };
+  }
+
+  async function recordAttemptRaceState(
+    settled: () => boolean,
+    blockerPid: number
+  ): Promise<"blocked" | "settled" | "timeout"> {
+    for (let index = 0; index < 500; index += 1) {
+      if (settled()) return "settled";
+      const activity = await pool.query<{ blocked: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND pid <> pg_backend_pid()
+              AND query LIKE '%INSERT INTO generation_attempts%'
+              AND wait_event_type = 'Lock'
+              AND $1 = ANY(pg_blocking_pids(pid))
+         ) AS blocked`,
+        [blockerPid]
+      );
+      if (activity.rows[0]?.blocked) return "blocked";
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    return "timeout";
   }
 
   it("claims a minimal job once and reclaims an expired lease without an initial-owner lookup", async () => {
@@ -156,6 +195,11 @@ integration("PostgreSQL generation execution repository", () => {
     await expect(repository.saveOrchestration(scope, { roll: null })).resolves.toBe(true);
     await expect(repository.markGenerating(scope)).resolves.toBe(true);
     await expect(repository.markGenerating(scope)).resolves.toBe(false);
+    await expect(repository.recordAttempt(attemptInput(scope))).resolves.toBeUndefined();
+    await expect(repository.recordAttempt(attemptInput({
+      ...scope,
+      workerId: "foreign-worker"
+    }, 2))).rejects.toMatchObject({ code: "generation_cancelled" });
     await expect(repository.savePartialNarration(scope, "A safe fictional preview.")).resolves.toBe(true);
     await expect(repository.saveStreamingSegments(scope, { provisionalSetId: null })).resolves.toBe(true);
     await expect(repository.markValidating(scope)).resolves.toBe(true);
@@ -188,5 +232,119 @@ integration("PostgreSQL generation execution repository", () => {
       orchestration_private: { roll: null },
       streaming_segments_state: { provisionalSetId: null }
     }] });
+    await expect(pool.query<{ attempt_number: number }>(
+      "SELECT attempt_number FROM generation_attempts WHERE generation_job_id = $1",
+      [queued.id]
+    )).resolves.toMatchObject({ rows: [{ attempt_number: 1 }] });
+  });
+
+  it("does not overwrite attempt metadata after cancellation wins the row-lock race", async () => {
+    const imported = await campaign();
+    const queued = await queue(imported.campaignId, "Cancel the stale attempt recorder.");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "cancelled-attempt-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const scope = {
+      jobId: queued.id,
+      ownerUserId,
+      workerId: "cancelled-attempt-worker"
+    };
+    await expect(repository.recordAttempt(attemptInput(scope))).resolves.toBeUndefined();
+    const cancellation = await pool.connect();
+    let settled = false;
+    let attemptOutcome: Promise<{ status: "resolved" } | { status: "rejected"; error: unknown }> | undefined;
+    try {
+      await cancellation.query("BEGIN");
+      const blockerPid = (await cancellation.query<{ pid: number }>(
+        "SELECT pg_backend_pid() AS pid"
+      )).rows[0]!.pid;
+      await cancellation.query(
+        `UPDATE generation_jobs
+            SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL
+          WHERE id = $1 AND owner_user_id = $2`,
+        [queued.id, ownerUserId]
+      );
+      attemptOutcome = repository.recordAttempt({
+        ...attemptInput(scope),
+        responseMetadata: { outputLimited: true },
+        rawOutput: "Stale output that must not overwrite the admitted attempt."
+      }).then(
+        () => ({ status: "resolved" as const }),
+        (error: unknown) => ({ status: "rejected" as const, error })
+      ).finally(() => { settled = true; });
+
+      expect(await recordAttemptRaceState(() => settled, blockerPid)).toBe("blocked");
+      await cancellation.query("COMMIT");
+    } finally {
+      await cancellation.query("ROLLBACK").catch(() => undefined);
+      cancellation.release();
+    }
+
+    await expect(attemptOutcome).resolves.toMatchObject({
+      status: "rejected",
+      error: { code: "generation_cancelled" }
+    });
+    await expect(pool.query(
+      "SELECT raw_output FROM generation_attempts WHERE generation_job_id = $1",
+      [queued.id]
+    )).resolves.toMatchObject({ rows: [{ raw_output: "A safe fictional response." }] });
+  });
+
+  it("rejects a stale attempt recorder after expired-lease reclaim wins the row-lock race", async () => {
+    const imported = await campaign();
+    const queued = await queue(imported.campaignId, "Reclaim the stale attempt recorder.");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "expired-attempt-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const staleScope = {
+      jobId: queued.id,
+      ownerUserId,
+      workerId: "expired-attempt-worker"
+    };
+    await expect(repository.markGenerating(staleScope)).resolves.toBe(true);
+    await pool.query(
+      "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+      [queued.id]
+    );
+
+    const reclaim = await pool.connect();
+    let settled = false;
+    let attemptOutcome: Promise<{ status: "resolved" } | { status: "rejected"; error: unknown }> | undefined;
+    try {
+      await reclaim.query("BEGIN");
+      const blockerPid = (await reclaim.query<{ pid: number }>(
+        "SELECT pg_backend_pid() AS pid"
+      )).rows[0]!.pid;
+      const reclaimed = await reclaim.query<{ id: string }>(
+        `UPDATE generation_jobs
+            SET status = 'assessing', attempts = attempts + 1,
+                lease_owner = 'replacement-attempt-worker',
+                lease_expires_at = now() + interval '30 seconds'
+          WHERE id = $1 AND owner_user_id = $2
+            AND status = 'generating' AND lease_expires_at < now()
+          RETURNING id`,
+        [queued.id, ownerUserId]
+      );
+      expect(reclaimed.rows).toEqual([{ id: queued.id }]);
+      attemptOutcome = repository.recordAttempt(attemptInput(staleScope)).then(
+        () => ({ status: "resolved" as const }),
+        (error: unknown) => ({ status: "rejected" as const, error })
+      ).finally(() => { settled = true; });
+
+      expect(await recordAttemptRaceState(() => settled, blockerPid)).toBe("blocked");
+      await reclaim.query("COMMIT");
+    } finally {
+      await reclaim.query("ROLLBACK").catch(() => undefined);
+      reclaim.release();
+    }
+
+    await expect(attemptOutcome).resolves.toMatchObject({
+      status: "rejected",
+      error: { code: "generation_cancelled" }
+    });
+    await expect(pool.query(
+      "SELECT id FROM generation_attempts WHERE generation_job_id = $1",
+      [queued.id]
+    )).resolves.toMatchObject({ rows: [] });
   });
 });

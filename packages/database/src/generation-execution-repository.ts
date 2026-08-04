@@ -717,13 +717,17 @@ export function createPostgresGenerationExecutionRepository(
 
     async recordAttempt(input) {
       const result = await pool.query(
-        `INSERT INTO generation_attempts (
+        `WITH authorized_job AS MATERIALIZED (
+           SELECT id FROM generation_jobs
+            WHERE id = $2 AND owner_user_id = $1 AND lease_owner = $11
+              AND status IN ('assessing','generating','validating','committing')
+            FOR UPDATE
+         )
+         INSERT INTO generation_attempts (
            owner_user_id, generation_job_id, attempt_number, recovery_kind, request_metadata,
            response_metadata, provider_response_id, finish_reason, raw_output, validation_errors, completed_at
          ) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()
-             FROM generation_jobs
-            WHERE id = $2 AND owner_user_id = $1 AND lease_owner = $11
-              AND status IN ('assessing','generating','validating','committing')
+             FROM authorized_job
          ON CONFLICT (generation_job_id, attempt_number) DO UPDATE SET
            response_metadata = CASE WHEN $12 THEN EXCLUDED.response_metadata ELSE generation_attempts.response_metadata END,
            provider_response_id = CASE WHEN $12 THEN EXCLUDED.provider_response_id ELSE generation_attempts.provider_response_id END,
