@@ -17,7 +17,9 @@ import {
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import {
   CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
-  chronicleContentHash
+  chronicleContentHash,
+  modelAwareEmbeddingPrefixes,
+  providerModelFingerprint
 } from "../../packages/domain/src/chronicle-memory-helpers.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -34,6 +36,8 @@ integration("PostgreSQL Chronicle contract matrix", () => {
   });
 
   afterEach(async () => {
+    await pool.query("DROP TRIGGER IF EXISTS chronicle_claim_race_delay_trigger ON chronicle_jobs");
+    await pool.query("DROP FUNCTION IF EXISTS chronicle_claim_race_delay()");
     await pool.query("DELETE FROM campaigns");
     await pool.query("DELETE FROM provider_profiles");
     await pool.query("DELETE FROM world_versions");
@@ -95,6 +99,54 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     return result.rows[0]!.id;
   }
 
+  async function configureEmbedding(
+    campaignId: string,
+    providerId: string,
+    model: string,
+    documentPrefix: string | null = null,
+    queryPrefix: string | null = null,
+  ) {
+    await pool.query(
+      `INSERT INTO campaign_memory_configs
+         (campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id,
+          embedding_model, embedding_document_prefix, embedding_query_prefix)
+       VALUES ($1,$2,true,$3,$4,$5,$6)`,
+      [campaignId, ownerUserId, providerId, model, documentPrefix, queryPrefix]
+    );
+  }
+
+  function embeddingFingerprint(
+    model: string,
+    documentPrefix: string | null = null,
+    queryPrefix: string | null = null,
+  ) {
+    return providerModelFingerprint({
+      providerType: "openai_compatible",
+      baseUrl: "http://provider.invalid/v1",
+      model,
+      configuration: {},
+      protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION
+    }, modelAwareEmbeddingPrefixes(model, documentPrefix, queryPrefix));
+  }
+
+  async function installClaimRaceDelay() {
+    await pool.query(`
+      CREATE FUNCTION chronicle_claim_race_delay() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.status = 'running' AND NEW.lease_owner LIKE 'race-%' THEN
+          PERFORM pg_sleep(0.2);
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await pool.query(`
+      CREATE TRIGGER chronicle_claim_race_delay_trigger
+      BEFORE UPDATE ON chronicle_jobs
+      FOR EACH ROW EXECUTE FUNCTION chronicle_claim_race_delay()
+    `);
+  }
+
   it("skips a locked oldest row and claims the next eligible job", async () => {
     const oldest = await campaignFixture("locked oldest");
     const next = await campaignFixture("next oldest");
@@ -131,6 +183,63 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     expect(second?.jobId).toBe(secondJobId);
     if (!second) throw new Error("second fixture job was not claimed");
     await expect(state.completeClaim(second, { progress: {} })).resolves.toBe(true);
+  });
+
+  it("returns one safe no-claim when simultaneous workers contend for queued siblings", async () => {
+    const fixture = await campaignFixture("simultaneous sibling claim");
+    await jobFixture(fixture.campaignId, "reindex_campaign", "2000-02-03T00:00:00Z");
+    await jobFixture(fixture.campaignId, "embed_campaign", "2000-02-04T00:00:00Z");
+    await installClaimRaceDelay();
+    const { state } = createPostgresChronicleWorkerAdapters(pool);
+
+    const results = await Promise.allSettled([
+      state.claimNext({ workerId: "race-queued-a", leaseSeconds: 30 }),
+      state.claimNext({ workerId: "race-queued-b", leaseSeconds: 30 })
+    ]);
+    expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+    const claims = results.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
+    expect(claims).toHaveLength(1);
+    await expect(pool.query<{ running: string; queued: string }>(
+      `SELECT
+         count(*) FILTER (WHERE status = 'running')::text AS running,
+         count(*) FILTER (WHERE status = 'queued')::text AS queued
+       FROM chronicle_jobs WHERE campaign_id = $1`,
+      [fixture.campaignId]
+    )).resolves.toMatchObject({ rows: [{ running: "1", queued: "1" }] });
+  });
+
+  it("returns one safe no-claim when an expired job races its queued sibling", async () => {
+    const fixture = await campaignFixture("expired sibling claim");
+    const expiredJobId = await jobFixture(
+      fixture.campaignId,
+      "reindex_campaign",
+      "2000-02-05T00:00:00Z",
+      "running"
+    );
+    await pool.query(
+      `UPDATE chronicle_jobs
+          SET lease_owner = 'expired-sibling-worker', lease_expires_at = now() - interval '1 second'
+        WHERE id = $1`,
+      [expiredJobId]
+    );
+    await jobFixture(fixture.campaignId, "embed_campaign", "2000-02-06T00:00:00Z");
+    await installClaimRaceDelay();
+    const { state } = createPostgresChronicleWorkerAdapters(pool);
+
+    const results = await Promise.allSettled([
+      state.claimNext({ workerId: "race-expired-a", leaseSeconds: 30 }),
+      state.claimNext({ workerId: "race-expired-b", leaseSeconds: 30 })
+    ]);
+    expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+    const claims = results.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
+    expect(claims).toEqual([expect.objectContaining({ jobId: expiredJobId })]);
+    await expect(pool.query<{ running: string; queued: string }>(
+      `SELECT
+         count(*) FILTER (WHERE status = 'running')::text AS running,
+         count(*) FILTER (WHERE status = 'queued')::text AS queued
+       FROM chronicle_jobs WHERE campaign_id = $1`,
+      [fixture.campaignId]
+    )).resolves.toMatchObject({ rows: [{ running: "1", queued: "1" }] });
   });
 
   it("claims the oldest eligible queued job before a newer expired lease", async () => {
@@ -237,9 +346,156 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     await expect(state.completeClaim(claim, { progress: {} })).resolves.toBe(true);
   });
 
+  it("rejects a first embedding batch that skips unrecorded progress", async () => {
+    const fixture = await campaignFixture("first batch gap");
+    const providerId = await providerFixture("first batch gap");
+    await configureEmbedding(fixture.campaignId, providerId, "first-batch-gap-model");
+    const jobId = await jobFixture(fixture.campaignId, "embed_campaign", "2000-06-15T00:00:00Z");
+    const memory = await pool.query<{ id: string; content: string }>(
+      `INSERT INTO chronicle_memories
+         (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate)
+       VALUES ($1,$2,$3,'campaign_summary',1,'gap batch',2) RETURNING id, content`,
+      [ownerUserId, fixture.campaignId, fixture.worldVersionId]
+    );
+    const { state } = createPostgresChronicleWorkerAdapters(pool);
+    const claim = await state.claimNext({ workerId: "gap-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(jobId);
+    if (!claim) throw new Error("gap fixture job was not claimed");
+    const batches = createPostgresChronicleEmbeddingBatchPort(pool, {
+      async recordCost(database, _provider, scope) {
+        await (database as DatabaseClient).query(
+          `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, correlation_id, details)
+           VALUES ($1,$2,'chronicle_batch_cost',$3,'{}'::jsonb)`,
+          [scope.ownerUserId, scope.campaignId, scope.chronicleJobId]
+        );
+        return null;
+      }
+    });
+
+    await expect(batches.commitClaimBatch(claim, {
+      provider: {
+        id: providerId,
+        model: "first-batch-gap-model",
+        providerType: "openai_compatible",
+        baseUrl: "http://provider.invalid/v1"
+      },
+      providerFingerprint: embeddingFingerprint("first-batch-gap-model"),
+      protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
+      memories: [{
+        ...memory.rows[0]!,
+        contentHash: chronicleContentHash(memory.rows[0]!.content)
+      }],
+      result: {
+        embeddings: [[0.1, 0.2]],
+        responseId: "first-batch-gap-response",
+        usage: {},
+        reportedCost: null
+      },
+      processed: 2,
+      total: 2
+    })).rejects.toMatchObject({ statusCode: 400 });
+    await expect(pool.query<{ embedded: boolean }>(
+      "SELECT embedding IS NOT NULL AS embedded FROM chronicle_memories WHERE id = $1",
+      [memory.rows[0]!.id]
+    )).resolves.toMatchObject({ rows: [{ embedded: false }] });
+    await expect(pool.query<{ progress: Record<string, unknown> }>(
+      "SELECT progress FROM chronicle_jobs WHERE id = $1",
+      [jobId]
+    )).resolves.toMatchObject({ rows: [{ progress: {} }] });
+    await expect(pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM activity_events WHERE correlation_id = $1",
+      [jobId]
+    )).resolves.toMatchObject({ rows: [{ count: "0" }] });
+  });
+
+  it.each(["provider", "model", "fingerprint", "configuration"] as const)(
+    "rejects a first embedding batch after campaign %s drift with no partial writes",
+    async (drift) => {
+      const fixture = await campaignFixture(`configuration ${drift}`);
+      const providerId = await providerFixture(`configuration ${drift}`);
+      const otherProviderId = await providerFixture(`configuration ${drift} other`);
+      const model = "configuration-anchor-model";
+      const documentPrefix = "document: ";
+      const queryPrefix = "query: ";
+      await configureEmbedding(fixture.campaignId, providerId, model, documentPrefix, queryPrefix);
+      const jobId = await jobFixture(fixture.campaignId, "embed_campaign", "2000-06-20T00:00:00Z");
+      const memory = await pool.query<{ id: string; content: string }>(
+        `INSERT INTO chronicle_memories
+           (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate)
+         VALUES ($1,$2,$3,'campaign_summary',1,'configuration batch',2) RETURNING id, content`,
+        [ownerUserId, fixture.campaignId, fixture.worldVersionId]
+      );
+      const { state } = createPostgresChronicleWorkerAdapters(pool);
+      const claim = await state.claimNext({ workerId: `configuration-${drift}-worker`, leaseSeconds: 30 });
+      expect(claim?.jobId).toBe(jobId);
+      if (!claim) throw new Error("configuration fixture job was not claimed");
+      const batches = createPostgresChronicleEmbeddingBatchPort(pool, {
+        async recordCost(database, _provider, scope) {
+          await (database as DatabaseClient).query(
+            `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, correlation_id, details)
+             VALUES ($1,$2,'chronicle_batch_cost',$3,'{}'::jsonb)`,
+            [scope.ownerUserId, scope.campaignId, scope.chronicleJobId]
+          );
+          return null;
+        }
+      });
+      const configuredProvider = {
+        id: providerId,
+        model,
+        providerType: "openai_compatible",
+        baseUrl: "http://provider.invalid/v1"
+      };
+      const input = {
+        provider: drift === "provider"
+          ? { ...configuredProvider, id: otherProviderId }
+          : drift === "model"
+            ? { ...configuredProvider, model: "changed-model" }
+            : configuredProvider,
+        providerFingerprint: drift === "fingerprint"
+          ? "changed-provider-model-hash"
+          : embeddingFingerprint(model, documentPrefix, queryPrefix),
+        protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
+        memories: [{
+          ...memory.rows[0]!,
+          contentHash: chronicleContentHash(memory.rows[0]!.content)
+        }],
+        result: {
+          embeddings: [[0.1, 0.2]],
+          responseId: `configuration-${drift}-response`,
+          usage: {},
+          reportedCost: null
+        },
+        processed: 1,
+        total: 1
+      } as const;
+      if (drift === "configuration") {
+        await pool.query(
+          `UPDATE campaign_memory_configs SET embedding_query_prefix = 'changed-query: '
+            WHERE campaign_id = $1 AND owner_user_id = $2`,
+          [fixture.campaignId, ownerUserId]
+        );
+      }
+
+      await expect(batches.commitClaimBatch(claim, input)).rejects.toMatchObject({ statusCode: 400 });
+      await expect(pool.query<{ embedded: boolean }>(
+        "SELECT embedding IS NOT NULL AS embedded FROM chronicle_memories WHERE id = $1",
+        [memory.rows[0]!.id]
+      )).resolves.toMatchObject({ rows: [{ embedded: false }] });
+      await expect(pool.query<{ progress: Record<string, unknown> }>(
+        "SELECT progress FROM chronicle_jobs WHERE id = $1",
+        [jobId]
+      )).resolves.toMatchObject({ rows: [{ progress: {} }] });
+      await expect(pool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM activity_events WHERE correlation_id = $1",
+        [jobId]
+      )).resolves.toMatchObject({ rows: [{ count: "0" }] });
+    }
+  );
+
   it("commits embeddings, attributed cost, and guarded progress in one batch transaction", async () => {
     const fixture = await campaignFixture("atomic batch");
     const providerId = await providerFixture("atomic batch");
+    await configureEmbedding(fixture.campaignId, providerId, "atomic-batch-model");
     const jobId = await jobFixture(fixture.campaignId, "embed_campaign", "2000-07-01T00:00:00Z");
     const memories = await pool.query<{ id: string; content: string }>(
       `INSERT INTO chronicle_memories
@@ -271,7 +527,7 @@ integration("PostgreSQL Chronicle contract matrix", () => {
       providerType: "openai_compatible",
       baseUrl: "http://provider.invalid/v1"
     };
-    const providerFingerprint = "atomic-provider-model-hash";
+    const providerFingerprint = embeddingFingerprint(provider.model);
 
     await expect(batches.commitClaimBatch(claim, {
       provider,
@@ -392,6 +648,7 @@ integration("PostgreSQL Chronicle contract matrix", () => {
   it("rolls back a whole embedding batch when cost attribution fails", async () => {
     const fixture = await campaignFixture("batch rollback");
     const providerId = await providerFixture("batch rollback");
+    await configureEmbedding(fixture.campaignId, providerId, "batch-rollback-model");
     const jobId = await jobFixture(fixture.campaignId, "embed_campaign", "2000-08-01T00:00:00Z");
     const memory = await pool.query<{ id: string; content: string }>(
       `INSERT INTO chronicle_memories
@@ -421,7 +678,7 @@ integration("PostgreSQL Chronicle contract matrix", () => {
         providerType: "openai_compatible",
         baseUrl: "http://provider.invalid/v1"
       },
-      providerFingerprint: "batch-rollback-hash",
+      providerFingerprint: embeddingFingerprint("batch-rollback-model"),
       protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
       memories: [{
         ...memory.rows[0]!,

@@ -28,6 +28,7 @@ import {
   chronicleContentHash,
   embeddingEligibility,
   modelAwareEmbeddingPrefixes,
+  providerModelFingerprint,
   sanitizeChronicleFictionString,
   sanitizeChronicleFictionValue,
   sanitizeChronicleMemoryLines
@@ -1629,6 +1630,9 @@ export function createPostgresChronicleWorkerStatePort(pool: DatabasePool): Chro
           `WITH candidate AS (
              SELECT j.id
                FROM chronicle_jobs j
+               JOIN campaigns claim_campaign
+                 ON claim_campaign.id = j.campaign_id
+                AND claim_campaign.owner_user_id = j.owner_user_id
               WHERE (j.status = 'queued' OR (j.status = 'running' AND j.lease_expires_at < now()))
                 AND NOT EXISTS (
                   SELECT 1 FROM chronicle_jobs active
@@ -1636,7 +1640,7 @@ export function createPostgresChronicleWorkerStatePort(pool: DatabasePool): Chro
                      AND active.lease_expires_at >= now() AND active.id <> j.id
                 )
               ORDER BY j.created_at, j.id
-              FOR UPDATE SKIP LOCKED
+              FOR UPDATE OF j, claim_campaign SKIP LOCKED
               LIMIT 1
            )
            UPDATE chronicle_jobs j
@@ -1733,6 +1737,16 @@ type ChronicleEmbeddingBatchMemoryRow = Readonly<{
   content: string;
 }>;
 
+type ChronicleEmbeddingConfigurationRow = Readonly<{
+  embedding_provider_profile_id: string;
+  embedding_model: string;
+  embedding_document_prefix: string | null;
+  embedding_query_prefix: string | null;
+  provider_type: string;
+  base_url: string;
+  configuration: unknown;
+}>;
+
 function requiredProgressString(
   progress: Record<string, unknown>,
   key: string,
@@ -1787,25 +1801,62 @@ export function createPostgresChronicleEmbeddingBatchPort(
         const job = active.rows[0];
         if (!job) return false;
 
-        const provider = await client.query<{ id: string }>(
-          `SELECT id FROM provider_profiles
-            WHERE id = $1 AND owner_user_id = $2 AND enabled = true
-              AND provider_role IN ('embedding','text')`,
-          [input.provider.id, scope.ownerUserId]
+        const configuration = await client.query<ChronicleEmbeddingConfigurationRow>(
+          `SELECT memory_config.embedding_provider_profile_id, memory_config.embedding_model,
+                  memory_config.embedding_document_prefix, memory_config.embedding_query_prefix,
+                  provider.provider_type, provider.base_url, provider.configuration
+             FROM campaign_memory_configs memory_config
+             JOIN provider_profiles provider
+               ON provider.id = memory_config.embedding_provider_profile_id
+              AND provider.owner_user_id = memory_config.owner_user_id
+            WHERE memory_config.campaign_id = $1 AND memory_config.owner_user_id = $2
+              AND memory_config.embedding_enabled = true AND provider.enabled = true
+              AND provider.provider_role IN ('embedding','text')
+            FOR SHARE OF memory_config, provider`,
+          [scope.campaignId, scope.ownerUserId]
         );
-        if (!provider.rows[0]) throw invalid("Chronicle embedding provider is unavailable for this owner.");
+        const selected = configuration.rows[0];
+        if (!selected) throw invalid("Chronicle embedding configuration is unavailable for this campaign.");
+        if (input.provider.id !== selected.embedding_provider_profile_id
+          || input.provider.model !== selected.embedding_model) {
+          throw invalid("Chronicle embedding provider or model changed during the claimed job.");
+        }
+        const prefixes = modelAwareEmbeddingPrefixes(
+          selected.embedding_model,
+          selected.embedding_document_prefix,
+          selected.embedding_query_prefix
+        );
+        const configuredProvider: ChronicleTransactionEmbeddingProvider = {
+          id: selected.embedding_provider_profile_id,
+          model: selected.embedding_model,
+          providerType: selected.provider_type,
+          baseUrl: selected.base_url,
+          configuration: selected.configuration
+        };
+        const configuredFingerprint = providerModelFingerprint({
+          ...configuredProvider,
+          protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION
+        }, prefixes);
+        const inputFingerprint = providerModelFingerprint({
+          ...input.provider,
+          protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION
+        }, prefixes);
+        if (input.providerFingerprint !== configuredFingerprint
+          || inputFingerprint !== configuredFingerprint) {
+          throw invalid("Chronicle embedding provider fingerprint changed during the claimed job.");
+        }
 
-        requiredProgressString(job.progress, "embeddingProviderProfileId", input.provider.id);
-        requiredProgressString(job.progress, "embeddingModel", input.provider.model);
-        requiredProgressString(job.progress, "embeddingProviderFingerprint", input.providerFingerprint);
+        requiredProgressString(job.progress, "embeddingProviderProfileId", configuredProvider.id);
+        requiredProgressString(job.progress, "embeddingModel", configuredProvider.model);
+        requiredProgressString(job.progress, "embeddingProviderFingerprint", configuredFingerprint);
         requiredProgressString(job.progress, "embeddingProtocolVersion", input.protocolVersion);
         const previousDimensions = job.progress.embeddingDimensions;
         if (previousDimensions !== undefined && previousDimensions !== dimensions) {
           throw invalid("Chronicle embedding dimensions changed during the claimed job.");
         }
-        const previousProcessed = job.progress.embedded;
-        if (previousProcessed !== undefined
-          && (!Number.isSafeInteger(previousProcessed) || previousProcessed !== input.processed - input.memories.length)) {
+        const previousProcessed = job.progress.embedded === undefined ? 0 : job.progress.embedded;
+        if (!Number.isSafeInteger(previousProcessed)
+          || previousProcessed !== input.processed - input.memories.length) {
           throw invalid("Chronicle embedding batch progress is stale.");
         }
         const previousTotal = job.progress.total;
@@ -1855,14 +1906,14 @@ export function createPostgresChronicleEmbeddingBatchPort(
               AND memory.campaign_id = $10
               AND memory.world_version_id = $11
               AND memory.content = batch.content`,
-          [ids, input.provider.id, input.provider.model, dimensions, input.providerFingerprint,
+          [ids, configuredProvider.id, configuredProvider.model, dimensions, configuredFingerprint,
             vectors, hashes, contents, scope.ownerUserId, scope.campaignId, scope.worldVersionId]
         );
         if (updated.rowCount !== input.memories.length) {
           throw invalid("Chronicle embedding batch did not update its complete claimed scope.");
         }
 
-        await dependencies.recordCost(client, input.provider, {
+        await dependencies.recordCost(client, configuredProvider, {
           ownerUserId: scope.ownerUserId,
           campaignId: scope.campaignId,
           chronicleJobId: scope.jobId,
@@ -1872,9 +1923,9 @@ export function createPostgresChronicleEmbeddingBatchPort(
           embedded: input.processed,
           total: input.total,
           embeddingDimensions: dimensions,
-          embeddingProviderProfileId: input.provider.id,
-          embeddingModel: input.provider.model,
-          embeddingProviderFingerprint: input.providerFingerprint,
+          embeddingProviderProfileId: configuredProvider.id,
+          embeddingModel: configuredProvider.model,
+          embeddingProviderFingerprint: configuredFingerprint,
           embeddingProtocolVersion: input.protocolVersion
         };
         const heartbeat = await client.query(
