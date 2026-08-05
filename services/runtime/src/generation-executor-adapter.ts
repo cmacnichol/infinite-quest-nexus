@@ -472,18 +472,19 @@ async function callCampaignTextProvider(
       storyOperation: operation
     });
     const transportError = providerTransportErrorDetails(error);
-    const rawErrorCode = transportError?.transportCode || errorCodeFrom(error);
+    const rawErrorCode = transportError
+      ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
+      : errorCodeFrom(error);
     const errorCode = rawErrorCode ? safeLogErrorCode(rawErrorCode) : null;
     logger.warn({
       event: "turn_generation_provider_failed",
       ...generationLogContext(job),
       storyOperation: operation,
-      providerType: provider.providerType,
-      requestedModel: provider.model,
       streaming: typeof request.onChunk === "function",
       recovery: Boolean(request.recoveryInput),
       errorName: error instanceof Error ? error.name : "Error",
       ...(errorCode ? { errorCode } : {}),
+      ...(transportError ? { providerCategory: transportError.causeCategory } : {}),
       transportTimedOut: Boolean(transportError?.timedOut),
       durationMs: Date.now() - startedAt
     });

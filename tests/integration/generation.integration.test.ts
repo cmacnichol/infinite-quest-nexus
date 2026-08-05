@@ -745,7 +745,12 @@ integration("durable Story Engine integration", () => {
             && (record.event === "turn_generation_provider_failed" || record.event === "turn_generation_failed");
         });
       expect(events).toEqual(expect.arrayContaining([
-        expect.objectContaining({ event: "turn_generation_provider_failed", errorCode: "transport_failure" }),
+        expect.objectContaining({
+          event: "turn_generation_provider_failed",
+          errorCode: "provider_transport_error",
+          providerCategory: "transport",
+          transportTimedOut: false
+        }),
         expect.objectContaining({ event: "turn_generation_failed", errorCode: "provider_transport_error" })
       ]));
       for (const event of events) {
@@ -757,6 +762,12 @@ integration("durable Story Engine integration", () => {
           jobAttempt: 1
         });
       }
+      const serializedEvents = JSON.stringify(events);
+      expect(serializedEvents).not.toContain("openai_compatible");
+      expect(serializedEvents).not.toContain("unavailable-model");
+      expect(serializedEvents).not.toContain("transport_failure");
+      expect(events).not.toContainEqual(expect.objectContaining({ providerType: expect.anything() }));
+      expect(events).not.toContainEqual(expect.objectContaining({ requestedModel: expect.anything() }));
       expect(await pool.query(
         `SELECT t.id, t.narration, c.active_turn_number
            FROM turns t JOIN campaigns c ON c.id = t.campaign_id
