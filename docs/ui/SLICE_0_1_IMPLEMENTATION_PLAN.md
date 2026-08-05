@@ -7317,6 +7317,19 @@ Split this domain internally:
    contract requires them. Add real-PostgreSQL adapter tests for foreign-owner
    invisibility, published-version immutability, deletion blockers, transfer
    provenance, rewind/branch authority, and progress expiry.
+
+   **14c2 execution split (required):** 14c2a adds caller-owned transaction,
+   world, and campaign-lifecycle adapters plus owner/locking/publication/
+   blocker/migration coverage. 14c2b adds campaign authority and state adapters
+   (sync, state, player config, rewind, branch) with fences, rollback, bounded
+   reader reuse, and provenance coverage. 14c2c adds transfer and character
+   adapters; organizer/provider work stays behind a named 14d-owned typed port.
+   14c2d adds dashboard, session, progress expiry, and the typed world-generation
+   collaborator seam, then runs the combined real-PostgreSQL adapter matrix and
+   full parity verification. Each is additive, independently committed and
+   reviewed; none edits routes/runtime/worker/legacy services or uses throwing
+   placeholders, anonymous callbacks, nested transaction wrappers, credentials,
+   or provider transport. 14c3 may consume only the final combined factories.
 3. **14c3 — atomic composition and transport cutover.** Create named API
    adapters plus `services/runtime/src/world-campaign-composition.ts`, bind every
    `OwnerScope` at Fastify composition, and cut over all listed routes and any
