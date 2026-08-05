@@ -89,7 +89,7 @@ contain this plan.
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | **Complete** | `e2a15e6` through `c7c8353`; contracts, cutover, durability, privacy, ownership, and all 18 Fastify route-parity gates independently approved |
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
-| Task 14d | B5d — providers and prompt configuration (removes none) | **In progress** | 14d1 contracts and ownership inventory are next |
+| Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
 | Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
@@ -7633,6 +7633,22 @@ audit showing zero old provider/prompt/cost authority and zero temporary 14d
 bridges, plus full `pnpm check`, build, unit, integration, diff, precheck, and
 independent review.
 
+**14d4 completion (2026-08-05):** Audit commits `53e23f0` and correction
+`6197b14` complete the provider/prompt/intent/cost extraction. The
+real-PostgreSQL four-role matrix proves that endpoint, encrypted credential,
+inventory, model selection/default, state, health, timeout, and retry policy
+remain independent across text, image, embedding, and intent profiles; changing
+or deleting the text profile does not affect the image profile. The audit also
+proves explicit embedding-only fallback, illustration failure independence,
+owner isolation, pinned-transport inventory, transactional owner/campaign prompt
+chain invalidation, and the absence of old provider authority and temporary 14d
+bridges. A review correction removes provider type/model/private transport data
+from the generation-consumer log path. The only remaining cross-role allowlist
+edge is the worker-to-API asset service import, explicitly owned by Task 14e.
+Final verification passed 1,249 unit tests, 345 real-PostgreSQL integration
+tests, `pnpm check`, build, diff, and precheck; the correction re-review found
+no Critical or Important findings. **Task 14d is complete; 14e is next.**
+
 ### Task 14e — B5e: imports, exports, archives, and assets
 
 **Current sources owned:** `asset-service.ts`, `asset-archive-service.ts`,
@@ -7677,9 +7693,9 @@ round trips, and no private campaign/export fixture enters source control.
 - [x] Chronicle extraction keeps accepted turns/campaign state authoritative,
   keeps summaries/embeddings rebuildable and campaign-scoped, and prevents any
   prompt/retrieval cross-campaign access.
-- [ ] World/campaign extraction preserves immutable world-version pins, explicit
+- [x] World/campaign extraction preserves immutable world-version pins, explicit
   migration/promotion, non-null owner scope, and append-only accepted turns.
-- [ ] Provider extraction never shares text/image secrets or silently falls back
+- [x] Provider extraction never shares text/image secrets or silently falls back
   between roles. Import/export extraction assigns imports to the server-resolved
   user and treats portable source IDs as provenance only, never authorization.
 - [ ] Every domain adds pure use-case tests, adapter contract tests, real-
@@ -8150,10 +8166,10 @@ behavior once the corresponding replacement behavior exists.
 ```
 
 **C0 through C8 are complete** (Tasks 1-9, including C1a, C2a, C3a, C4a, 7P,
-and C6 stages 7a-7d); B1 through B5c are also complete. **Task 14d (B5d) is
-active:** its provider/prompt/cost contract and ownership inventory is the
-current implementation checkpoint. The backend-first sequence continues B5d →
-B5e → 14f. Task 14f remains the explicit UI authorization gate.
+and C6 stages 7a-7d); B1 through B5d are also complete. **Task 14e (B5e) is
+next:** it extracts imports, exports, archives, and assets, including the final
+worker-to-API asset allowlist edge. The backend-first sequence continues B5e →
+14f. Task 14f remains the explicit UI authorization gate.
 No backend package or UI task runs in parallel with that declared sequence unless
 this plan is deliberately revised and re-reviewed.
 
