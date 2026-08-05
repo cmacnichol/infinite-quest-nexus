@@ -7510,15 +7510,82 @@ prompt-library, turn-intent, cost-attribution, network-policy, lifecycle,
 generation, image, memory, and world-generation tests plus new pure
 application/repository/adapter suites.
 
-14d1 freezes role-discriminated text/image/embedding/intent profiles and prompt
-snapshot/version use cases. 14d2 binds encrypted credentials and the pinned
-provider transport without putting secrets in application commands, logs, or
-public errors. 14d3 switches routes and every temporary consumer, then removes
-all provider/prompt/cost temporary bindings and old callable services. 14d4
-proves text and image base URLs, tokens, inventories, selected models, health,
-timeouts, and retry policies remain independent; no missing image profile falls
-back to text; prompt-protocol changes invalidate chains explicitly; and provider
-queries are owner-isolated.
+**14d1 — contracts and ownership inventory (additive only).** Freeze one
+role-discriminated application contract for `text`, `image`, `embedding`, and
+`intent` provider profiles; distinguish a client-safe profile view, a
+server-side credential-reference record, a selected provider/model resolution,
+and a transport-ready provider lease. Public views and route responses must
+never contain plaintext credentials, encrypted credential material, nonces,
+authentication tags, or unredacted stored configuration. Preserve the existing
+write round-trip only for configuration deliberately supplied in that same
+create/update request; all reads and omitted-update fields use the sanitizer.
+Define owner-scoped profile list/create/update/delete/default, model-inventory,
+health-recording, prompt-library list/preview/override/reset, immutable prompt
+snapshot/version, turn-intent classification, and cost-attribution/read use
+cases. Commands carry an explicit `OwnerScope`; API routes bind the
+server-resolved initial owner and worker callbacks receive only a
+database-derived owner. Application contracts receive neither a credential
+secret nor a transport-ready profile. Freeze typed prompt/cost collaborator
+ports for generation, illustration, Chronicle, world generation, character
+organization, Infinite Worlds, and the two temporary 14c bridges. Inventory
+every current caller and assign it to API, worker, or one named 14d composition
+consumer before adding code. Text and image profiles are fully independent;
+embedding may retain its documented existing text-profile fallback only through
+an explicit embedding resolution result, while image and intent must never fall
+back to text implicitly.
+
+**14d2 — PostgreSQL, credential, and transport adapters (additive only).**
+Implement owner-scoped provider, prompt, and cost repositories with one
+caller-owned command transaction for default selection, profile mutation,
+prompt override mutation, and cost attribution. Preserve default-per-role
+locking, enabled checks, provider-role validation, normalized base URLs,
+text-context output reserve validation, provider-health transitions, and the
+existing Chronicle embedding invalidation/requeue behavior. Persist encrypted
+credential fields only in the database adapter; decryption and the pinned
+provider transport live behind a runtime-only credential/transport adapter and
+must not be observable from application views, logs, diagnostics, or safe HTTP
+errors. Prompt snapshots must be owner/campaign scoped, deterministic, and
+carry the protocol version used to invalidate incompatible model chains. Cost
+reads must remain campaign/turn/owner scoped and retain category/currency
+semantics. Add pure contract/use-case tests and real-PostgreSQL coverage for
+owner invisibility, concurrent default changes, redaction/write behavior,
+role/model resolution, prompt-version changes, health updates, and cost
+isolation; do not switch routes or consumers yet.
+
+**14d3 — atomic API/worker cutover and legacy removal.** Create named API and
+worker provider-application composition plus a thin API transport adapter.
+Migrate provider and prompt routes, generation API/worker composition,
+illustration adapters/platform bindings, Chronicle bindings, turn-intent,
+world/campaign generation, character organization, and Infinite Worlds to the
+new ports in one reviewed checkpoint. API handlers retain only validation,
+server-resolved owner binding, and response/status projection; worker loops
+retain scheduling only. Replace the two Task 14c temporary bridges with the
+named 14d provider/prompt application collaborators, then remove their
+allowlist entries. Delete or reduce `provider-service.ts`,
+`prompt-library-service.ts`, `turn-intent-service.ts`, and `cost-service.ts`
+only after every production and test caller is migrated; no old callable
+authority, anonymous compatibility callback, API-to-worker implementation
+import, or browser-supplied owner may remain. Preserve Task 14a illustration
+and Task 14b Chronicle behavior without moving their domain state back into
+provider code.
+
+**14d4 — parity, security, and completion audit.** Prove independently for
+text, image, embedding, and intent profiles that base URL, credential,
+inventory, selected model, enabled/default state, health, timeout, and retry
+policy do not cross roles. Changing or removing a text profile must not alter
+an image profile; a missing/unavailable image profile must defer/fail only the
+image job and never invoke or disclose text credentials. Exercise the explicit
+embedding fallback separately, and assert no implicit text fallback for image
+or intent. Verify safe route errors/logs/responses exclude secrets and provider
+internals; prompt-protocol changes invalidate chains explicitly; model
+inventory/transport uses the pinned network policy; and provider, prompt,
+intent, and cost reads are owner-isolated. Run real Fastify route parity, API
+and worker composition, image-independence, generation/Chronicle/world-
+generation/character/Infinite Worlds, provider-network-policy, and
+real-PostgreSQL transaction matrices. Finish with a function/import/allowlist
+audit showing zero old provider/prompt/cost authority and zero temporary 14d
+bridges, plus full `pnpm check`, build, unit, integration, diff, precheck, and
+independent review.
 
 ### Task 14e — B5e: imports, exports, archives, and assets
 
