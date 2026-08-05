@@ -40,14 +40,18 @@ function portableWorld(): OwnerBoundIdempotentPortableWorldApplicationPort {
   };
 }
 
-function preview(kind: PortableImportPreviewCommand["kind"]): PortableImportPreviewCommand {
+function preview(
+  kind: PortableImportPreviewCommand["kind"],
+  destination: unknown,
+): PortableImportPreviewCommand {
   return {
     ownerUserId,
     kind,
     stagedInput,
+    destination,
     sourceInstallationId: toPortableSourceInstallationId("foreign-installation"),
     importedRecordId: toPortableImportedRecordId("foreign-record")
-  };
+  } as PortableImportPreviewCommand;
 }
 
 function commit(kind: PortableImportCommitCommand["kind"]): PortableImportCommitCommand {
@@ -65,7 +69,7 @@ function dependencies(worlds = portableWorld()): ImportApplicationDependencies {
   return {
     worlds,
     archives: {
-      previewPortableImport: vi.fn(async (command) => ({ previewHandle: toPortablePreviewHandle(`preview-${command.kind}`), kind: command.kind, expiresAt: "2026-08-05T13:00:00.000Z", cleanupOwner: "application" as const, diagnostics: [] })),
+      previewPortableImport: vi.fn(async (command) => ({ previewHandle: toPortablePreviewHandle(`preview-${command.kind}`, command.destination), kind: command.kind, destination: command.destination, expiresAt: "2026-08-05T13:00:00.000Z", cleanupOwner: "application" as const, diagnostics: [] })),
       commitPortableImport: vi.fn(async () => ({ importedRecordId: toPortableImportedRecordId("record-1"), duplicate: false, diagnostics: [] })),
       exportCampaignArchive: vi.fn(async () => ({ retrieval: toPortableArchiveExportRetrieval("archive-retrieval-1"), contentType: "application/zip" as const, byteLength: 3 })),
       downloadPortableExport: vi.fn(async () => ({ content: new Uint8Array([1, 2, 3]), contentType: "application/zip" as const })),
@@ -85,22 +89,55 @@ describe("portable import application contracts", () => {
   });
 
   it.each([
-    ["legacy_story", { kind: "campaign", campaignId }],
-    ["campaign_zip", { kind: "campaign", campaignId }],
-    ["infinite_worlds", { kind: "world", worldId }],
-    ["cyoa", { kind: "world_version", worldId, worldVersionId }]
-  ] as const)("preserves opaque staged input and required destination for %s", async (kind, destination) => {
+    ["campaign_zip", { kind: "embedded", operation: "create_world" }],
+    ["campaign_zip", { kind: "existing_world_version", worldId, worldVersionId }],
+    ["story_text", { kind: "existing_world_version", worldId, worldVersionId }],
+    ["cyoa", { kind: "create_world" }],
+    ["world_json", { kind: "create_world" }],
+    ["world_text", { kind: "create_world" }]
+  ] as const)("binds opaque staged input and preview destination for %s", async (kind, destination) => {
     const archives = dependencies().archives;
     const application = createImportApplication({ worlds: portableWorld(), archives });
-    const transaction = {} as ImportTransactionContext;
-    const previewCommand = preview(kind);
-    const commitCommand = commit(kind);
+    const previewCommand = preview(kind, destination);
 
-    await expect(application.previewPortableImport(previewCommand)).resolves.toMatchObject({ kind });
-    await application.commitPortableImport(transaction, commitCommand);
+    const result = await application.previewPortableImport(previewCommand);
 
     expect(archives.previewPortableImport).toHaveBeenCalledWith(previewCommand);
-    expect(archives.commitPortableImport).toHaveBeenCalledWith(transaction, expect.objectContaining({ destination }));
+    expect(result.destination).toEqual(destination);
+    expect(result.previewHandle).toEqual(toPortablePreviewHandle(`preview-${kind}`, destination));
+  });
+
+  it("rejects invalid preview destinations before issuing a preview token", async () => {
+    const archives = dependencies().archives;
+    const application = createImportApplication({ worlds: portableWorld(), archives });
+
+    await expect(application.previewPortableImport(preview("campaign_zip", {
+      kind: "existing_world_version", worldId, worldVersionId: ""
+    }))).rejects.toMatchObject({ code: "import_scope_required" });
+    await expect(application.previewPortableImport(preview("story_text", {
+      kind: "create_world"
+    }))).rejects.toMatchObject({ code: "import_scope_required" });
+    await expect(application.previewPortableImport(preview("world_json", {
+      kind: "existing_world_version", worldId, worldVersionId
+    }))).rejects.toMatchObject({ code: "import_scope_required" });
+    await expect(application.previewPortableImport(preview("cyoa", {
+      kind: "existing_world_version", worldId, worldVersionId
+    }))).rejects.toMatchObject({ code: "import_scope_required" });
+    expect(archives.previewPortableImport).not.toHaveBeenCalled();
+  });
+
+  it("requires an explicit create-world destination for the owner-bound World JSON preview", async () => {
+    const worlds = portableWorld();
+    const application = createImportApplication(dependencies(worlds));
+    const request = {} as never;
+
+    await application.previewWorldJson({ ownerUserId, request, destination: { kind: "create_world" } });
+    expect(worlds.previewWorldImport).toHaveBeenCalledWith(request);
+    await expect(application.previewWorldJson({
+      ownerUserId,
+      request,
+      destination: { kind: "existing_world_version", worldId, worldVersionId } as never
+    })).rejects.toMatchObject({ code: "import_scope_required" });
   });
 
   it("returns and consumes an opaque safe export retrieval capability", async () => {
@@ -132,7 +169,7 @@ describe("portable import application contracts", () => {
     const transaction = {} as ImportTransactionContext;
     const request = {} as never;
 
-    await expect(application.previewPortableImport({ ...preview("legacy_story"), ownerUserId: "" })).rejects.toMatchObject({ code: "owner_scope_required" });
+    await expect(application.previewPortableImport({ ...preview("legacy_story", { kind: "existing_world_version", worldId, worldVersionId }), ownerUserId: "" })).rejects.toMatchObject({ code: "owner_scope_required" });
     await expect(application.commitPortableImport(transaction, {
       ownerUserId,
       kind: "campaign_zip",
@@ -144,7 +181,11 @@ describe("portable import application contracts", () => {
     await expect(application.downloadPortableExport({ ownerUserId, campaignId: "", worldId, worldVersionId }, toPortableArchiveExportRetrieval("download"))).rejects.toMatchObject({ code: "import_scope_required" });
     await expect(application.cleanupPreview({ ownerUserId: "", previewHandle: toPortablePreviewHandle("cleanup") })).rejects.toMatchObject({ code: "owner_scope_required" });
     await expect(application.exportWorldJson({ ownerUserId, worldId: "" })).rejects.toMatchObject({ code: "import_scope_required" });
-    await expect(application.previewWorldJson({ ownerUserId: "", request })).rejects.toMatchObject({ code: "owner_scope_required" });
+    await expect(application.previewWorldJson({
+      ownerUserId: "",
+      request,
+      destination: { kind: "create_world" }
+    })).rejects.toMatchObject({ code: "owner_scope_required" });
     await expect(application.commitWorldJson({ ownerUserId, request, idempotencyKey: "" })).rejects.toMatchObject({ code: "idempotency_key_required" });
   });
 

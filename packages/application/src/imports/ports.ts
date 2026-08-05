@@ -14,7 +14,9 @@ import type {
 
 /** Adapter boundary for archive/file work. It returns safe views only, never paths or caught exceptions. */
 export interface PortableArchivePort {
-  previewPortableImport(command: PortableImportPreviewCommand): Promise<PortableImportPreviewView>;
+  previewPortableImport<Command extends PortableImportPreviewCommand>(
+    command: Command,
+  ): Promise<PortableImportPreviewView<Command>>;
   commitPortableImport(
     database: ImportTransactionContext,
     command: PortableImportCommitCommand,

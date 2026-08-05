@@ -19,6 +19,22 @@ function requireOwner(scope: ImportOwnerScope): void {
 function requirePreview(command: PortableImportPreviewCommand): void {
   requireOwner(command);
   if (!nonBlank(command.stagedInput)) throw new ImportApplicationError("import_scope_required");
+  if (command.kind === "campaign_zip") {
+    if (command.destination.kind === "embedded" && command.destination.operation === "create_world") return;
+    if (command.destination.kind === "existing_world_version"
+      && nonBlank(command.destination.worldId)
+      && nonBlank(command.destination.worldVersionId)) return;
+    throw new ImportApplicationError("import_scope_required");
+  }
+  if (command.kind === "legacy_story" || command.kind === "story_text") {
+    if (command.destination.kind === "existing_world_version"
+      && nonBlank(command.destination.worldId)
+      && nonBlank(command.destination.worldVersionId)) return;
+    throw new ImportApplicationError("import_scope_required");
+  }
+  if (command.destination.kind !== "create_world") {
+    throw new ImportApplicationError("import_scope_required");
+  }
 }
 
 function requireCommit(command: PortableImportCommitCommand): void {
@@ -79,6 +95,9 @@ export function createImportApplication(dependencies: ImportApplicationDependenc
     },
     previewWorldJson: async (command) => {
       requireOwner(command);
+      if (command.destination.kind !== "create_world") {
+        throw new ImportApplicationError("import_scope_required");
+      }
       return dependencies.worlds.previewWorldImport(command.request);
     },
     commitWorldJson: async (command) => {
