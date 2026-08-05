@@ -220,8 +220,10 @@ describe("illustration artifact download adapter", () => {
 
 describe("illustration generation transaction adapter", () => {
   it("uses the caller-owned transaction for streaming configuration rather than opening another pool transaction", async () => {
-    const query = vi.fn(async () => ({
-      rows: [{
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ id: campaignId }] })
+      .mockResolvedValueOnce({
+        rows: [{
         enabled: true,
         source_policy: "generate_only",
         matching_scope: "world",
@@ -241,8 +243,8 @@ describe("illustration generation transaction adapter", () => {
         updated_at: new Date("2026-08-04T12:00:00.000Z"),
         campaign_image_provider_id: providerProfileId,
         campaign_text_provider_id: null
-      }]
-    }));
+        }]
+      });
     const database = { query } as unknown as DatabaseClient;
     const adapter = createIllustrationGenerationTransactionPort();
 
@@ -253,8 +255,8 @@ describe("illustration generation transaction adapter", () => {
         campaignImageProviderProfileId: providerProfileId,
         campaignTextProviderProfileId: null
     });
-    expect(query).toHaveBeenCalledOnce();
-    const [statement, parameters] = query.mock.calls[0] as unknown as [string, unknown[]];
+    expect(query).toHaveBeenCalledTimes(2);
+    const [statement, parameters] = query.mock.calls[1] as unknown as [string, unknown[]];
     expect(statement).toContain("FROM campaign_illustration_configs");
     expect(parameters).toEqual([campaignId, ownerUserId]);
   });
