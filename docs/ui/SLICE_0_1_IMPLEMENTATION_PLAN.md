@@ -87,7 +87,7 @@ contain this plan.
 | Task 12 | B3 — worker concurrency and fair lanes | **Complete** | Implementation `312ebaa`, correction `57147c7`, docs `8593e3e`; scoped implementation review plus clean correction re-review; full unit 1,150/1,150, implementation full PostgreSQL 232/232, correction-relevant PostgreSQL 68/68; C0 concurrency 1/2/4 benchmark and duplicate-turn guard passed |
 | Task 13b | B4b — play-loop read profiling/optimization | **Complete** | Implementation `1d6b766`, correction `ff7f56e`; scoped review and correction re-review approved; full unit 1,156/1,156, full PostgreSQL 234/234, C0 read benchmark passed |
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | **Complete** | `e2a15e6` through `c7c8353`; contracts, cutover, durability, privacy, ownership, and all 18 Fastify route-parity gates independently approved |
-| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | In progress — 14b1 complete; 14b2 split before implementation | `3e0dc8b`, remediation `6f77f74`; independent re-review approved; 14b2a helper extraction is next |
+| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | In progress — 14b1/14b2a complete | `3e0dc8b`, `6f77f74`, `5d0c3c2`; independent 14b2a review approved; 14b2b direct bindings are next |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | Not started | — |
 | Task 14d | B5d — providers and prompt configuration (removes none) | Not started | — |
 | Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
@@ -7086,6 +7086,24 @@ transaction/worker ports, and safe errors; **14b2a** helper extraction and
 parity; **14b2b** direct PostgreSQL/runtime bindings; **14b2c** real-PostgreSQL
 contract matrix; **14b3** atomic cutover/removal; **14b4** route, worker/race,
 authority/rebuild, safety, and static completion audit.
+
+**Task 14b2a verification (2026-08-05, complete):** `5d0c3c2` extracts the
+reusable Chronicle helper boundary without moving live service, route, worker,
+repository, runtime-composition, allowlist, callback, or transaction ownership.
+The retained service delegates campaign/world-version row validation,
+accepted-turn fiction filtering, canonical fact and entity catalogue
+construction, fiction sanitization, embedding eligibility, model-aware
+fingerprinting, and the fixed public error projection to named application or
+domain helpers. Focused parity tests prove rejected/private/mechanic content
+cannot enter accepted fiction or memory values, direct callers reject mismatched
+campaign/world-version rows, canonical facts preserve entity attribution and
+deduplication, fingerprints normalize provider URLs, and public failures redact
+provider-like diagnostics. Fresh controller verification passed **20/20 focused
+tests across five files**, `pnpm check` (620 repository/data-safety candidates),
+and `pnpm build`; diff and precheck passed. The independent scoped reviewer
+approved the exact `fbed296..5d0c3c2` range. **14b2b** is next; the uncommitted
+repository/runtime scaffold is not evidence of completion and must directly bind
+all caller-owned transaction operations before it may be committed.
 
 ### Task 14c — B5c: identity, worlds, versions, and campaigns
 
