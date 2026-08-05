@@ -234,6 +234,10 @@ integration("illustration HTTP route parity", () => {
     const imageJob = await app.inject({ method: "GET", url: `/api/v1/image-jobs/${imageJobId}` });
     expect(imageJob.statusCode).toBe(200);
     expect(imageJob.json()).toMatchObject({ id: imageJobId, campaignId: imported.campaignId, status: "queued" });
+    const queuedRetry = await app.inject({ method: "POST", url: `/api/v1/image-jobs/${imageJobId}/retry` });
+    expect(queuedRetry.statusCode).toBe(409);
+    const missingRetry = await app.inject({ method: "POST", url: `/api/v1/image-jobs/${crypto.randomUUID()}/retry` });
+    expect(missingRetry.statusCode).toBe(404);
     await pool.query("UPDATE image_jobs SET status = 'failed' WHERE id = $1", [imageJobId]);
     const retry = await app.inject({ method: "POST", url: `/api/v1/image-jobs/${imageJobId}/retry` });
     expect(retry.statusCode).toBe(202);
