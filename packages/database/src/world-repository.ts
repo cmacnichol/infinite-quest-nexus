@@ -1,6 +1,11 @@
 import type {
+  CampaignCreateView,
+  CampaignListSource,
   CampaignMigrationSource,
   CampaignRepositoryPort,
+  CampaignUpdateSource,
+  PlayableCharacterSummaryItemView,
+  PlayableCharacterSummaryView,
   WorldCampaignErrorDetails,
   WorldCampaignRepositoryResult,
   WorldCampaignTransitionFailureReason,
@@ -19,9 +24,18 @@ import type { OwnerScope } from "../../application/src/generation/types.js";
 import {
   canonicalizeWorldContent,
   WORLD_CONTENT_SCHEMA_VERSION,
+  worldContentSchema,
   type WorldContent
 } from "../../contracts/src/world-library.js";
+import { normalizeCampaignTrackers } from "../../domain/src/campaign-trackers.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
+import {
+  assessWorldCampaignReadiness,
+  campaignCharacterSeed,
+  campaignProfileFromCharacter,
+  characterSnapshot,
+  resolvePlayableCharacters
+} from "../../domain/src/world-characters.js";
 import type { DatabasePool } from "./pool.js";
 import {
   createPostgresWorldCampaignTransactionPort,
@@ -41,7 +55,16 @@ type PostgresWorldRepository = Pick<
   | "deleteWorldVersion"
 >;
 
-type PostgresCampaignMigrationRepository = Pick<CampaignRepositoryPort, "migrateCampaignWorldVersion">;
+type PostgresCampaignRepository = Pick<
+  CampaignRepositoryPort,
+  | "listCampaigns"
+  | "createCampaign"
+  | "updateCampaign"
+  | "deleteCampaign"
+  | "listWorldVersionPlayableCharacters"
+  | "getWorldVersionPlayableCharacterSummary"
+  | "migrateCampaignWorldVersion"
+>;
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? null);
@@ -82,7 +105,10 @@ function failure(
     : { ok: false, failure: { reason, details } };
 }
 
-function notFound(reason: "world_not_found" | "world_version_not_found", details: { worldId?: string; worldVersionId?: string }): never {
+function notFound(
+  reason: "world_not_found" | "world_version_not_found" | "campaign_not_found",
+  details: { worldId?: string; worldVersionId?: string; campaignId?: string },
+): never {
   throw new WorldCampaignApplicationError("not_found", reason, details);
 }
 
@@ -465,6 +491,12 @@ function createPostgresWorldRepository(): PostgresWorldRepository {
       const row = world.rows[0];
       if (!row) return failure("world_not_found", { worldId: scope.worldId });
       if (row.title !== request.expectedTitle) return failure("invalid_transition", { worldId: scope.worldId });
+      await client.query(
+        `SELECT id FROM world_versions
+          WHERE world_id = $1 AND owner_user_id = $2
+          ORDER BY id FOR UPDATE`,
+        [scope.worldId, scope.ownerUserId]
+      );
       const dependencies = await client.query<{
         campaigns: number;
         campaign_migrations: number;
@@ -640,8 +672,265 @@ function createPostgresWorldRepository(): PostgresWorldRepository {
   };
 }
 
-function createPostgresCampaignMigrationRepository(): PostgresCampaignMigrationRepository {
+function createPostgresCampaignRepository(): PostgresCampaignRepository {
   return {
+    async listCampaigns(transaction, scope): Promise<CampaignListSource> {
+      const client = worldCampaignDatabaseClient(transaction);
+      const result = await client.query<CampaignListSource["campaigns"][number]>(
+        `SELECT c.id, c.title, c.status, c.active_turn_number AS "activeTurnNumber",
+                c.created_at AS "createdAt", c.updated_at AS "updatedAt",
+                c.story_length_profile AS "storyLengthProfile",
+                c.turn_control_style AS "turnControlStyle",
+                c.selected_character_id AS "selectedCharacterId",
+                COALESCE(c.character_profile->>'name', c.character_snapshot->>'name') AS "selectedCharacterName",
+                w.id AS "worldId", w.title AS "worldTitle", c.world_version_id AS "worldVersionId",
+                c.text_provider_profile_id AS "textProviderProfileId",
+                c.image_provider_profile_id AS "imageProviderProfileId",
+                wv.version_number AS "worldVersionNumber", latest.version_number AS "latestWorldVersionNumber",
+                (latest.version_number > wv.version_number) AS "worldUpdateAvailable",
+                COALESCE(costs.information, '[]'::jsonb) AS "costInformation"
+           FROM campaigns c
+           JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
+           JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
+           JOIN LATERAL (
+             SELECT version_number FROM world_versions
+              WHERE world_id = w.id AND owner_user_id = c.owner_user_id
+              ORDER BY version_number DESC LIMIT 1
+           ) latest ON true
+           LEFT JOIN LATERAL (
+             SELECT jsonb_agg(jsonb_build_object(
+               'currency', totals.currency,
+               'amount', totals.amount,
+               'textGenerationAmount', totals.text_generation_amount,
+               'imageGenerationAmount', totals.image_generation_amount,
+               'memoryAmount', totals.memory_amount
+             ) ORDER BY totals.currency) AS information
+               FROM (
+                 SELECT currency, sum(amount)::text AS amount,
+                        coalesce(sum(amount) FILTER (WHERE category = 'story'), 0)::text AS text_generation_amount,
+                        coalesce(sum(amount) FILTER (WHERE category = 'image'), 0)::text AS image_generation_amount,
+                        coalesce(sum(amount) FILTER (WHERE category = 'memory'), 0)::text AS memory_amount
+                   FROM provider_cost_events
+                  WHERE owner_user_id = c.owner_user_id AND campaign_id = c.id
+                  GROUP BY currency
+               ) totals
+           ) costs ON true
+          WHERE c.owner_user_id = $1
+          ORDER BY (c.status = 'archived'), c.updated_at DESC`,
+        [scope.ownerUserId]
+      );
+      return { campaigns: result.rows };
+    },
+    async createCampaign(transaction, scope, request) {
+      const client = worldCampaignDatabaseClient(transaction);
+      const version = await client.query<{ content: WorldContent; world_id: string; version_number: number }>(
+        `SELECT wv.content, wv.world_id, wv.version_number
+           FROM world_versions wv
+           JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = wv.owner_user_id
+          WHERE wv.id = $1 AND wv.owner_user_id = $2
+          FOR KEY SHARE OF wv`,
+        [request.worldVersionId, scope.ownerUserId]
+      );
+      const source = version.rows[0];
+      if (!source) return failure("world_version_not_found", { worldVersionId: request.worldVersionId });
+      const content = worldContentSchema.parse(source.content);
+      const readiness = assessWorldCampaignReadiness(content);
+      if (!readiness.ready) {
+        return failure("invalid_transition", { worldVersionId: request.worldVersionId });
+      }
+      let seed: ReturnType<typeof campaignCharacterSeed>;
+      try {
+        seed = campaignCharacterSeed(content, request.selectedCharacterId);
+      } catch {
+        return failure("invalid_transition", { worldVersionId: request.worldVersionId });
+      }
+      const snapshot = characterSnapshot(seed.character);
+      const campaignProfile = campaignProfileFromCharacter(seed.character);
+      const campaign = await client.query<{ id: string }>(
+        `INSERT INTO campaigns (
+           owner_user_id, world_version_id, title, story_length_profile, turn_control_style,
+           selected_character_id, character_snapshot, character_profile, character_profile_revision, legacy_settings
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+        [scope.ownerUserId, request.worldVersionId, request.title, request.storyLengthProfile,
+          request.turnControlStyle, seed.character.id, json(snapshot), campaignProfile ? json(campaignProfile) : null,
+          campaignProfile ? 1 : 0, json({ useRpgStats: seed.rpgStats.length > 0 })]
+      );
+      const campaignId = campaign.rows[0]?.id;
+      if (!campaignId) throw new Error("Could not create campaign.");
+      if (campaignProfile) {
+        await client.query(
+          `INSERT INTO campaign_character_profile_edits (
+             owner_user_id, campaign_id, revision, previous_profile, next_profile, edit_source
+           ) VALUES ($1,$2,1,NULL,$3,'world_version_seed')`,
+          [scope.ownerUserId, campaignId, json(campaignProfile)]
+        );
+      }
+      const defaultTrackers = normalizeCampaignTrackers(seed.defaultTriggers);
+      const initialTrackers = normalizeCampaignTrackers(
+        Array.isArray(content.defaults?.trackers) && content.defaults.trackers.length > 0
+          ? content.defaults.trackers
+          : defaultTrackers
+      );
+      await client.query(
+        `INSERT INTO campaign_state (
+           campaign_id, owner_user_id, trackers, default_triggers, event_triggers, rpg_stats,
+           import_provenance, initial_state_snapshot
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [
+          campaignId,
+          scope.ownerUserId,
+          json(initialTrackers),
+          json(defaultTrackers),
+          json(content.eventTriggers),
+          json(seed.rpgStats),
+          json({
+            sourceType: "world_library",
+            worldId: source.world_id,
+            worldVersionId: request.worldVersionId,
+            selectedCharacterId: seed.character.id
+          }),
+          json({
+            scratchpad: "",
+            trackers: initialTrackers,
+            eventTriggers: content.eventTriggers,
+            pendingEventTriggers: [],
+            rpgStats: seed.rpgStats
+          })
+        ]
+      );
+      return success<CampaignCreateView>({
+        id: campaignId,
+        title: request.title,
+        status: "active",
+        activeTurnNumber: 0,
+        storyLengthProfile: request.storyLengthProfile,
+        turnControlStyle: request.turnControlStyle,
+        worldId: source.world_id,
+        worldVersionId: request.worldVersionId,
+        worldVersionNumber: source.version_number,
+        selectedCharacterId: seed.character.id,
+        selectedCharacterName: seed.character.name,
+        textProviderProfileId: null,
+        imageProviderProfileId: null
+      });
+    },
+    async updateCampaign(transaction, scope, request) {
+      const client = worldCampaignDatabaseClient(transaction);
+      for (const [profileId, role] of [
+        [request.textProviderProfileId, "text"],
+        [request.imageProviderProfileId, "image"]
+      ] as const) {
+        if (!profileId) continue;
+        const provider = await client.query(
+          `SELECT 1 FROM provider_profiles
+            WHERE id = $1 AND owner_user_id = $2 AND provider_role = $3 AND enabled = true`,
+          [profileId, scope.ownerUserId, role]
+        );
+        if (!provider.rowCount) return failure("invalid_transition", { campaignId: scope.campaignId });
+      }
+      const updated = await client.query<CampaignUpdateSource>(
+        `UPDATE campaigns SET title = COALESCE($3, title), status = COALESCE($4, status),
+             text_provider_profile_id = CASE WHEN $5 THEN $6 ELSE text_provider_profile_id END,
+             image_provider_profile_id = CASE WHEN $7 THEN $8 ELSE image_provider_profile_id END,
+             story_length_profile = COALESCE($9, story_length_profile),
+             turn_control_style = COALESCE($10, turn_control_style), updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2
+          RETURNING id, title, status, active_turn_number AS "activeTurnNumber",
+            text_provider_profile_id AS "textProviderProfileId",
+            image_provider_profile_id AS "imageProviderProfileId",
+            story_length_profile AS "storyLengthProfile", turn_control_style AS "turnControlStyle",
+            updated_at AS "updatedAt"`,
+        [scope.campaignId, scope.ownerUserId, request.title ?? null, request.status ?? null,
+          request.textProviderProfileId !== undefined, request.textProviderProfileId ?? null,
+          request.imageProviderProfileId !== undefined, request.imageProviderProfileId ?? null,
+          request.storyLengthProfile ?? null, request.turnControlStyle ?? null]
+      );
+      const row = updated.rows[0];
+      if (!row) return failure("campaign_not_found", { campaignId: scope.campaignId });
+      if (request.imageProviderProfileId !== undefined) {
+        const effectiveImage = await client.query<{ id: string; default_model: string }>(
+          `SELECT id, default_model FROM provider_profiles
+            WHERE owner_user_id = $1 AND provider_role = 'image' AND enabled = true
+              AND ($2::uuid IS NULL OR id = $2)
+            ORDER BY CASE WHEN id = $2 THEN 0 WHEN is_default THEN 1 ELSE 2 END, name
+            LIMIT 1`,
+          [scope.ownerUserId, request.imageProviderProfileId]
+        );
+        const profile = effectiveImage.rows[0];
+        if (profile) {
+          await client.query(
+            `UPDATE campaign_illustration_configs SET provider_profile_id = $3,
+               model = COALESCE(NULLIF($4, ''), model), updated_at = now()
+              WHERE campaign_id = $1 AND owner_user_id = $2`,
+            [scope.campaignId, scope.ownerUserId, profile.id, profile.default_model]
+          );
+        }
+      }
+      return success(row);
+    },
+    async deleteCampaign(transaction, scope, request) {
+      const client = worldCampaignDatabaseClient(transaction);
+      const campaign = await client.query<{ title: string }>(
+        "SELECT title FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE",
+        [scope.campaignId, scope.ownerUserId]
+      );
+      const row = campaign.rows[0];
+      if (!row) return failure("campaign_not_found", { campaignId: scope.campaignId });
+      if (row.title !== request.expectedTitle) return failure("invalid_transition", { campaignId: scope.campaignId });
+      const active = await client.query<{ kind: string; count: number }>(
+        `SELECT kind, count(*)::int AS count FROM (
+           SELECT 'generation' AS kind FROM generation_jobs
+            WHERE campaign_id = $1 AND owner_user_id = $2
+              AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
+           UNION ALL
+           SELECT 'illustration' AS kind FROM image_jobs
+            WHERE campaign_id = $1 AND owner_user_id = $2
+              AND status IN ('queued','generating','provider_pending','downloading')
+           UNION ALL
+           SELECT 'illustration_resolution' AS kind FROM illustration_resolution_jobs
+            WHERE campaign_id = $1 AND owner_user_id = $2
+              AND status IN ('queued','matching','recoverable','generation_queued')
+           UNION ALL
+           SELECT 'memory' AS kind FROM chronicle_jobs
+            WHERE campaign_id = $1 AND owner_user_id = $2 AND status IN ('queued','running')
+         ) work GROUP BY kind ORDER BY kind`,
+        [scope.campaignId, scope.ownerUserId]
+      );
+      const blockers = active.rows.map(({ kind, count }) => `${kind}:${Number(count)}`);
+      if (blockers.length > 0) return failure("deletion_blocked", { campaignId: scope.campaignId, blockers });
+      await client.query(
+        "DELETE FROM imports WHERE campaign_id = $1 AND owner_user_id = $2",
+        [scope.campaignId, scope.ownerUserId]
+      );
+      await client.query(
+        "DELETE FROM campaigns WHERE id = $1 AND owner_user_id = $2",
+        [scope.campaignId, scope.ownerUserId]
+      );
+      return success(undefined);
+    },
+    async getWorldVersionPlayableCharacterSummary(transaction, scope): Promise<PlayableCharacterSummaryView> {
+      const client = worldCampaignDatabaseClient(transaction);
+      const result = await client.query<{ content: WorldContent }>(
+        `SELECT content FROM world_versions
+          WHERE id = $1 AND world_id = $2 AND owner_user_id = $3`,
+        [scope.worldVersionId, scope.worldId, scope.ownerUserId]
+      );
+      const row = result.rows[0];
+      if (!row) notFound("world_version_not_found", { worldId: scope.worldId, worldVersionId: scope.worldVersionId });
+      const content = worldContentSchema.parse(row.content);
+      return {
+        characters: resolvePlayableCharacters(content).map((character) => ({
+          id: character.id,
+          name: character.name,
+          rpgStatCount: character.rpgStats.length,
+          defaultTriggerCount: character.defaultTriggers.length
+        })),
+        readiness: assessWorldCampaignReadiness(content)
+      };
+    },
+    async listWorldVersionPlayableCharacters(transaction, scope): Promise<readonly PlayableCharacterSummaryItemView[]> {
+      return (await this.getWorldVersionPlayableCharacterSummary(transaction, scope)).characters;
+    },
     async migrateCampaignWorldVersion(transaction, scope, request) {
       const client = worldCampaignDatabaseClient(transaction);
       const campaign = await client.query<{ world_version_id: string; world_id: string; version_number: number }>(
@@ -717,6 +1006,6 @@ export function createPostgresWorldRepositoryAdapters(pool: DatabasePool) {
   return Object.freeze({
     transaction: createPostgresWorldCampaignTransactionPort(pool),
     worlds: createPostgresWorldRepository(),
-    campaigns: createPostgresCampaignMigrationRepository()
+    campaigns: createPostgresCampaignRepository()
   });
 }
