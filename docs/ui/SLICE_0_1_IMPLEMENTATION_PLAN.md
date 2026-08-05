@@ -7409,6 +7409,16 @@ Split this domain internally:
    world-generation collaborator seam) is next.** No route/runtime/worker/
    legacy-service/provider cutover occurred.
 
+   **14c2d completion (2026-08-05):** `bb1be54` adds owner-scoped dashboard,
+   session-profile, and world-generation progress adapters together with the
+   provider-free world-generation collaborator seam; correction `4716b36`
+   restores legacy blank-error projection parity. Final review approved with
+   zero findings. Evidence: focused real-PostgreSQL 9/9, combined 14c2 matrix
+   55/55, full unit 1,238/1,238, full integration 326/326, `pnpm check`, build,
+   diff, and precheck passed. **14c2 is complete; 14c3 atomic composition and
+   transport cutover is next.** No route/runtime/worker/legacy-service/provider
+   cutover occurred in 14c2.
+
 3. **14c3 — atomic composition and transport cutover.** Create named API
    adapters plus `services/runtime/src/world-campaign-composition.ts`, bind every
    `OwnerScope` at Fastify composition, and cut over all listed routes and any
