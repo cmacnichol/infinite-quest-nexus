@@ -120,9 +120,7 @@ function privateFailure(): ChronicleClaimFailure {
 }
 
 /**
- * Owns only the typed lifecycle seam. The legacy work body remains a named
- * runtime binding until the atomic 14b3 consumer cutover moves it behind the
- * repository and embedding ports.
+ * Owns the typed lifecycle seam around the runtime-owned Chronicle work body.
  */
 export function createChronicleWorkerExecutor(
   dependencies: ChronicleWorkerExecutorDependencies,

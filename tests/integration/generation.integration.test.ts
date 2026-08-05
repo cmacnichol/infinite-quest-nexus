@@ -15,7 +15,7 @@ import { createWorkerGenerationApplication } from "../../services/runtime/src/ge
 import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { runWorker } from "../../services/worker/src/worker.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
-import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/api/src/memory-service.js";
+import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/runtime/src/chronicle-platform-service.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
 import { getCampaignRuntimeState, updateCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
 import { logger } from "../../packages/logger/src/index.js";

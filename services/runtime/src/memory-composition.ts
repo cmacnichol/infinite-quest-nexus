@@ -11,9 +11,10 @@ import {
   type ChronicleGenerationTransactionDependencies
 } from "../../../packages/database/src/chronicle-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
+import { logProviderTransportError } from "../../../packages/story-engine/src/providers.js";
 import { createChronicleWorkerExecutor } from "./chronicle-platform-adapter.js";
 import { createChroniclePlatformBindings } from "./chronicle-platform-bindings.js";
-import { runChronicleJob } from "../../api/src/memory-service.js";
+import { runClaimedChronicleJob } from "./chronicle-platform-service.js";
 
 export type ApiMemoryCompositionDependencies = Readonly<{
   credentialSecret: string;
@@ -70,16 +71,27 @@ export function createRepositoryBackedChronicleExecutor(
   return createChronicleWorkerExecutor({ ...adapters, ...compatibility });
 }
 
-/**
- * The worker consumes only the typed application. The legacy job body remains
- * temporarily encapsulated in runtime composition while its final execution
- * algorithm is moved behind the direct Chronicle worker ports.
- */
+/** The worker claims through the direct Chronicle state port and dispatches
+ * the runtime-owned body only after that lease has been established. */
 export function createLiveWorkerMemoryApplication(
   pool: DatabasePool,
   credentialSecret: string,
 ): MemoryWorkerApplication {
-  return {
-    runNextChronicle: ({ workerId, leaseSeconds }) => runChronicleJob(pool, workerId, leaseSeconds, credentialSecret)
-  } as MemoryWorkerApplication;
+  const adapters = createPostgresChronicleWorkerAdapters(pool);
+  const executor = createChronicleWorkerExecutor({
+    ...adapters,
+    runClaim: async (claim) => {
+      await runClaimedChronicleJob(pool, {
+        id: claim.jobId,
+        owner_user_id: claim.ownerUserId,
+        campaign_id: claim.campaignId,
+        job_type: claim.jobType,
+        work_version: claim.workVersion,
+        worker_id: claim.workerId,
+        lease_seconds: claim.leaseSeconds
+      }, credentialSecret, adapters.state, claim);
+    },
+    logProviderTransportError
+  });
+  return createMemoryWorkerApplication({ ...adapters, executor });
 }

@@ -41,7 +41,7 @@ import {
   updateCampaign,
   updateWorldDraft
 } from "../../services/api/src/world-service.js";
-import { buildContextPreview } from "../../services/api/src/memory-service.js";
+import { buildContextPreview } from "../../services/runtime/src/chronicle-platform-service.js";
 import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { previewCampaignWorldTransfer, transferCampaignWorld } from "../../services/api/src/campaign-transfer-service.js";
 import {

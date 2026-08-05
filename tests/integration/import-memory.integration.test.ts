@@ -19,7 +19,7 @@ import {
   rebuildCampaignMemories,
   runChronicleJob,
   setCampaignEmbeddingConfig
-} from "../../services/api/src/memory-service.js";
+} from "../../services/runtime/src/chronicle-platform-service.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;

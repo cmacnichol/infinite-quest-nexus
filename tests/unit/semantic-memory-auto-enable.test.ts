@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { autoEnableCampaignEmbeddingIfAvailable, resolveCampaignEmbeddingProviderId } from "../../services/api/src/memory-service.js";
+import { autoEnableCampaignEmbeddingIfAvailable, resolveCampaignEmbeddingProviderId } from "../../services/runtime/src/chronicle-platform-service.js";
 import { DEFAULT_EMBEDDING_MODEL } from "../../packages/contracts/src/memory.js";
 
 describe("Semantic memory auto-enabling on campaign creation", () => {

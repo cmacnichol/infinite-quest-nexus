@@ -24,8 +24,9 @@ import {
 } from "../../../packages/domain/src/entity-references.js";
 import { characterNarrativeContext } from "../../../packages/domain/src/world-characters.js";
 import { requireCampaignWorldVersionScope } from "../../../packages/application/src/memory/helpers.js";
-import { loadEmbeddingProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
-import { recordProfileCost } from "./cost-service.js";
+import type { ChronicleLeaseScope, ChronicleWorkerStatePort } from "../../../packages/application/src/memory/index.js";
+import { loadEmbeddingProvider, recordProviderHealth, resolveEffectiveProviderId } from "../../api/src/provider-service.js";
+import { recordProfileCost } from "../../api/src/cost-service.js";
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? null);
@@ -1573,35 +1574,34 @@ export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserI
   return turns.rows.length;
 }
 
-export async function runChronicleJob(pool: DatabasePool, workerId: string, leaseSeconds: number, credentialSecret = ""): Promise<boolean> {
-  const claimed = await withTransaction(pool, async (client) => {
-    const result = await client.query<{ id: string; owner_user_id: string; campaign_id: string; job_type: "reindex_campaign" | "embed_campaign"; work_version: number }>(
-      `WITH candidate AS (
-         SELECT j.id FROM chronicle_jobs j
-          WHERE (j.status = 'queued' OR (j.status = 'running' AND j.lease_expires_at < now()))
-            AND NOT EXISTS (
-              SELECT 1 FROM chronicle_jobs active
-               WHERE active.campaign_id = j.campaign_id AND active.status = 'running'
-                 AND active.lease_expires_at >= now() AND active.id <> j.id
-            )
-          ORDER BY CASE WHEN j.status = 'running' THEN 0 ELSE 1 END, j.created_at
-          FOR UPDATE SKIP LOCKED
-          LIMIT 1
-       )
-       UPDATE chronicle_jobs j
-          SET status = 'running', attempts = attempts + 1, lease_owner = $1,
-              lease_expires_at = now() + ($2::text || ' seconds')::interval,
-              progress = '{}'::jsonb, updated_at = now()
-         FROM candidate
-        WHERE j.id = candidate.id
-       RETURNING j.id, j.owner_user_id, j.campaign_id, j.job_type, j.work_version`,
-      [workerId, leaseSeconds]
-    );
-    return result.rows[0] ?? null;
-  });
-  if (!claimed) return false;
+export type RuntimeChronicleClaim = Readonly<{
+  id: string;
+  owner_user_id: string;
+  campaign_id: string;
+  job_type: "reindex_campaign" | "embed_campaign";
+  work_version: number;
+  worker_id: string;
+  lease_seconds: number;
+}>;
 
+/**
+ * Executes a claim already leased by the runtime worker application. The
+ * claim/lease transition remains in the direct Chronicle state port; this
+ * platform body only performs the scoped rebuild or embedding work.
+ */
+export async function runClaimedChronicleJob(
+  pool: DatabasePool,
+  claimed: RuntimeChronicleClaim,
+  credentialSecret = "",
+  state?: ChronicleWorkerStatePort,
+  lease?: ChronicleLeaseScope,
+): Promise<boolean> {
+  const { worker_id: workerId, lease_seconds: leaseSeconds } = claimed;
   const heartbeat = setInterval(() => {
+    if (state && lease) {
+      void state.heartbeatClaim(lease).catch(() => undefined);
+      return;
+    }
     void pool.query(
       `UPDATE chronicle_jobs SET lease_expires_at = now() + ($3::text || ' seconds')::interval, updated_at = now()
         WHERE id = $1 AND lease_owner = $2 AND status = 'running'`,
@@ -1616,15 +1616,22 @@ export async function runChronicleJob(pool: DatabasePool, workerId: string, leas
       ? { embedded: details.embedded + details.skipped, total: details.embedded + details.skipped,
           updated: details.embedded, skipped: details.skipped }
       : { rebuilt: details.memoryCount };
-    const completed = await pool.query<{ id: string; status: string }>(
-      `UPDATE chronicle_jobs SET
-              status = CASE WHEN work_version > $3 THEN 'queued' ELSE 'completed' END,
-              completed_at = CASE WHEN work_version > $3 THEN NULL ELSE now() END,
-              progress = $4::jsonb, updated_at = now(), lease_owner = NULL, lease_expires_at = NULL, error_message = NULL
-        WHERE id = $1 AND lease_owner = $2`,
-      [claimed.id, workerId, claimed.work_version, json(finalProgress)]
+    const completed = state && lease
+      ? await state.completeClaim(lease, { progress: finalProgress })
+      : (await pool.query<{ id: string; status: string }>(
+        `UPDATE chronicle_jobs SET
+                status = CASE WHEN work_version > $3 THEN 'queued' ELSE 'completed' END,
+                completed_at = CASE WHEN work_version > $3 THEN NULL ELSE now() END,
+                progress = $4::jsonb, updated_at = now(), lease_owner = NULL, lease_expires_at = NULL, error_message = NULL
+          WHERE id = $1 AND lease_owner = $2`,
+        [claimed.id, workerId, claimed.work_version, json(finalProgress)]
+      )).rowCount === 1;
+    if (!completed) throw new Error("Chronicle job lease was lost before completion could be recorded.");
+    const completion = await pool.query<{ status: string }>(
+      "SELECT status FROM chronicle_jobs WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3",
+      [claimed.id, claimed.owner_user_id, claimed.campaign_id]
     );
-    if (!completed.rowCount) throw new Error("Chronicle job lease was lost before completion could be recorded.");
+    const completedStatus = completion.rows[0]?.status === "completed";
     await pool.query(
       `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, correlation_id, details)
        VALUES ($1,$2,$3,$4,$5)`,
@@ -1632,7 +1639,7 @@ export async function runChronicleJob(pool: DatabasePool, workerId: string, leas
         claimed.job_type === "reindex_campaign" ? "chronicle_reindexed" : "chronicle_embedded",
         claimed.id, json(details)]
     );
-    if (claimed.job_type === "reindex_campaign" && completed.rows[0]?.status === "completed") await enqueueEmbeddingReindex(pool, claimed.campaign_id);
+    if (claimed.job_type === "reindex_campaign" && completedStatus) await enqueueEmbeddingReindex(pool, claimed.campaign_id);
     if (claimed.job_type === "embed_campaign" && "providerProfileId" in details) {
       await recordProviderHealth(pool, claimed.owner_user_id, details.providerProfileId, true);
       const current = await embeddingConfig(pool, claimed.owner_user_id, claimed.campaign_id);
@@ -1667,14 +1674,54 @@ export async function runChronicleJob(pool: DatabasePool, workerId: string, leas
         ).catch(() => undefined);
       }
     }
-    await pool.query(
-      `UPDATE chronicle_jobs SET status = 'failed', error_message = $2, updated_at = now(),
-              lease_owner = NULL, lease_expires_at = NULL
-        WHERE id = $1 AND lease_owner = $3`,
-      [claimed.id, error instanceof Error ? error.message.slice(0, 4000) : String(error).slice(0, 4000), workerId]
-    );
+    if (state && lease) {
+      await state.failClaim(lease, { diagnosticCode: "chronicle_execution_failed" });
+    } else {
+      await pool.query(
+        `UPDATE chronicle_jobs SET status = 'failed', error_message = $2, updated_at = now(),
+                lease_owner = NULL, lease_expires_at = NULL
+          WHERE id = $1 AND lease_owner = $3`,
+        [claimed.id, error instanceof Error ? error.message.slice(0, 4000) : String(error).slice(0, 4000), workerId]
+      );
+    }
   } finally {
     clearInterval(heartbeat);
   }
   return true;
+}
+
+/** Compatibility entry for direct runtime tests; live worker composition uses
+ * `runClaimedChronicleJob` after the direct state port claims the lease. */
+export async function runChronicleJob(pool: DatabasePool, workerId: string, leaseSeconds: number, credentialSecret = ""): Promise<boolean> {
+  const claimed = await withTransaction(pool, async (client) => {
+    const result = await client.query<{ id: string; owner_user_id: string; campaign_id: string; job_type: "reindex_campaign" | "embed_campaign"; work_version: number }>(
+      `WITH candidate AS (
+         SELECT j.id FROM chronicle_jobs j
+          WHERE (j.status = 'queued' OR (j.status = 'running' AND j.lease_expires_at < now()))
+            AND NOT EXISTS (
+              SELECT 1 FROM chronicle_jobs active
+               WHERE active.campaign_id = j.campaign_id AND active.status = 'running'
+                 AND active.lease_expires_at >= now() AND active.id <> j.id
+            )
+          ORDER BY CASE WHEN j.status = 'running' THEN 0 ELSE 1 END, j.created_at
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+       )
+       UPDATE chronicle_jobs j
+          SET status = 'running', attempts = attempts + 1, lease_owner = $1,
+              lease_expires_at = now() + ($2::text || ' seconds')::interval,
+              progress = '{}'::jsonb, updated_at = now()
+         FROM candidate
+        WHERE j.id = candidate.id
+       RETURNING j.id, j.owner_user_id, j.campaign_id, j.job_type, j.work_version`,
+      [workerId, leaseSeconds]
+    );
+    return result.rows[0] ?? null;
+  });
+  if (!claimed) return false;
+  return runClaimedChronicleJob(pool, {
+    ...claimed,
+    worker_id: workerId,
+    lease_seconds: leaseSeconds
+  }, credentialSecret);
 }

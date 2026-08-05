@@ -22,7 +22,7 @@ const log = vi.hoisted(() => ({
 vi.mock("../../services/api/src/asset-service.js", () => ({
   runAssetMetadataBackfill: lane.asset
 }));
-vi.mock("../../services/api/src/memory-service.js", () => ({
+vi.mock("../../services/runtime/src/chronicle-platform-service.js", () => ({
   runChronicleJob: lane.chronicle
 }));
 vi.mock("../../services/runtime/src/illustration-segment-job-adapter.js", () => ({
