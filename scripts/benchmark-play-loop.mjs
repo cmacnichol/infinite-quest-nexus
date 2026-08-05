@@ -444,9 +444,18 @@ async function benchmarkDatabase(pool, databaseUrl, settings, dependencies) {
   const seeded = await seedFixtures(pool, dependencies);
   const tracker = createQueryTracker();
   const measuredPool = trackedPool(pool, tracker);
+  const providerTransport = dependencies.createProviderTransport({
+    policy: dependencies.createProviderNetworkPolicy({ allowlist: [] })
+  });
   const memory = dependencies.createApiMemoryApplication(measuredPool, {
     credentialSecret: "play-loop-benchmark-only"
   });
+  const providers = dependencies.createProviderApplicationAdapter(
+    dependencies.createApiProviderApplicationComposition(measuredPool, {
+      credentialSecret: "play-loop-benchmark-only",
+      transport: providerTransport
+    })
+  );
   const app = await dependencies.buildServer({
     config: runtimeConfig(databaseUrl),
     pool: measuredPool,
@@ -455,7 +464,8 @@ async function benchmarkDatabase(pool, databaseUrl, settings, dependencies) {
     worldCampaign: dependencies.createApiWorldCampaignApplication(measuredPool, {
       credentialSecret: "play-loop-benchmark-only"
     }),
-    generationEvents: inertGenerationEvents()
+    generationEvents: inertGenerationEvents(),
+    providers
   });
   try {
     await dependencies.initialOwnerId(measuredPool);
@@ -592,6 +602,7 @@ async function benchmarkDatabase(pool, databaseUrl, settings, dependencies) {
     };
   } finally {
     await app.close();
+    await providerTransport.close();
   }
 }
 
@@ -611,14 +622,30 @@ export async function runPlayLoopBenchmark(options = {}) {
     100,
     "PLAY_LOOP_BENCHMARK_SAMPLES"
   );
-  const [poolModule, migrateModule, importModule, serverModule, compositionModule, memoryCompositionModule, worldCampaignCompositionModule] = await Promise.all([
+  const [
+    poolModule,
+    migrateModule,
+    importModule,
+    serverModule,
+    compositionModule,
+    memoryCompositionModule,
+    worldCampaignCompositionModule,
+    providerCompositionModule,
+    providerAdapterModule,
+    providerTransportModule,
+    providerNetworkPolicyModule
+  ] = await Promise.all([
     import("../packages/database/src/pool.ts"),
     import("../packages/database/src/migrate.ts"),
     import("../services/api/src/import-service.ts"),
     import("../services/api/src/server.ts"),
     import("../services/runtime/src/generation-api-composition.ts"),
     import("../services/runtime/src/memory-composition.ts"),
-    import("../services/runtime/src/world-campaign-composition.ts")
+    import("../services/runtime/src/world-campaign-composition.ts"),
+    import("../services/runtime/src/provider-application-composition.ts"),
+    import("../services/api/src/provider-application-adapter.ts"),
+    import("../packages/story-engine/src/provider-transport.ts"),
+    import("../packages/security/src/provider-network-policy.ts")
   ]);
   const adminPool = poolModule.createDatabasePool(databaseUrl, 1);
   const databaseName = temporaryDatabaseName();
@@ -636,7 +663,11 @@ export async function runPlayLoopBenchmark(options = {}) {
       buildServer: serverModule.buildServer,
       createApiGenerationApplication: compositionModule.createApiGenerationApplication,
       createApiMemoryApplication: memoryCompositionModule.createApiMemoryApplication,
-      createApiWorldCampaignApplication: worldCampaignCompositionModule.createApiWorldCampaignApplication
+      createApiWorldCampaignApplication: worldCampaignCompositionModule.createApiWorldCampaignApplication,
+      createApiProviderApplicationComposition: providerCompositionModule.createApiProviderApplicationComposition,
+      createProviderApplicationAdapter: providerAdapterModule.createProviderApplicationAdapter,
+      createProviderTransport: providerTransportModule.createProviderTransport,
+      createProviderNetworkPolicy: providerNetworkPolicyModule.createProviderNetworkPolicy
     });
     const cpuCount = availableParallelism();
     const memoryLimitGiB = cgroupMemoryLimitGiB();

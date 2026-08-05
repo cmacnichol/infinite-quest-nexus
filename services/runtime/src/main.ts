@@ -19,6 +19,11 @@ import { dispatchRuntimeRole } from "./runtime-role.js";
 import { createRuntimeGenerationEventSource } from "./generation-event-composition.js";
 import { createApiMemoryApplication, createWorkerMemoryApplication } from "./memory-composition.js";
 import { createApiWorldCampaignApplication } from "./world-campaign-composition.js";
+import {
+  createApiProviderApplicationComposition,
+  createWorkerProviderApplicationComposition
+} from "./provider-application-composition.js";
+import { createProviderApplicationAdapter } from "../../api/src/provider-application-adapter.js";
 
 const config = loadRuntimeConfig();
 const abortController = new AbortController();
@@ -40,9 +45,18 @@ await runRuntimeLifecycle(config, abortController, {
   }),
   configureTransport: configureDefaultProviderTransport,
   createGenerationEvents: createRuntimeGenerationEventSource,
-  dispatchRole: (roleConfig, pool, signal, generationEvents) => dispatchRuntimeRole(roleConfig, pool, signal, {
+  dispatchRole: (roleConfig, pool, signal, providerTransport, generationEvents) => dispatchRuntimeRole(roleConfig, pool, signal, {
     migrateDatabase,
     waitForDatabaseMigrations,
+    createApiProviders: (pool, credentialSecret, transport) => createApiProviderApplicationComposition(
+      pool,
+      { credentialSecret, transport }
+    ),
+    createWorkerProviders: (pool, credentialSecret, transport) => createWorkerProviderApplicationComposition(
+      pool,
+      { credentialSecret, transport }
+    ),
+    createProviderApiAdapter: createProviderApplicationAdapter,
     createApiGeneration: createApiGenerationApplication,
     createApiIllustration: createApiIllustrationApplication,
     createApiMemory: (pool, credentialSecret) => createApiMemoryApplication(pool, { credentialSecret }),
@@ -61,5 +75,5 @@ await runRuntimeLifecycle(config, abortController, {
     ),
     buildServer,
     runWorker
-  }, generationEvents)
+  }, providerTransport, generationEvents)
 });

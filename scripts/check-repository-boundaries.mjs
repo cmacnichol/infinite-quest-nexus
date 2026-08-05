@@ -35,17 +35,14 @@ const RETIRED_WORLD_CAMPAIGN_AUTHORITY = [
   "services/api/src/world-generator-service.ts",
   "services/api/src/world-service.ts"
 ];
-const TASK_14D_PROVIDER_BRIDGE_IMPORTERS = new Map([
-  ["task-14d-character-profile-organizer-bridge", new Set([
-    "services/runtime/src/world-campaign-composition.ts"
-  ])],
-  ["task-14d-world-generation-bridge", new Set([
-    "services/api/src/infinite-worlds-import-service.ts",
-    "services/runtime/src/world-campaign-composition.ts"
-  ])]
-]);
 const REQUIRED_WORLD_CAMPAIGN_BOUNDARIES = [
-  "packages/database/src/play-loop-read-repository.ts",
+  "packages/database/src/play-loop-read-repository.ts"
+];
+const RETIRED_PROVIDER_AUTHORITY = [
+  "services/api/src/provider-service.ts",
+  "services/api/src/prompt-library-service.ts",
+  "services/api/src/turn-intent-service.ts",
+  "services/api/src/cost-service.ts",
   "services/api/src/task-14d-character-profile-organizer-bridge.ts",
   "services/api/src/task-14d-world-generation-bridge.ts"
 ];
@@ -129,19 +126,15 @@ for (const retiredFile of RETIRED_WORLD_CAMPAIGN_AUTHORITY) {
   }
 }
 
-for (const requiredFile of REQUIRED_WORLD_CAMPAIGN_BOUNDARIES) {
-  if (normalizedText(requiredFile) === null) {
-    violations.push(`${requiredFile}: required Task 14c/14d boundary is missing`);
+for (const retiredFile of RETIRED_PROVIDER_AUTHORITY) {
+  if (normalizedText(retiredFile) !== null) {
+    violations.push(`${retiredFile}: retired Task 14d authority must not remain callable`);
   }
 }
 
-for (const file of files.filter((candidate) => /^(?:packages|services)\/.*\.(?:js|mjs|ts)$/u.test(candidate))) {
-  const text = normalizedText(file);
-  if (text === null) continue;
-  for (const [bridgeName, allowedImporters] of TASK_14D_PROVIDER_BRIDGE_IMPORTERS) {
-    if (text.includes(bridgeName) && !allowedImporters.has(file)) {
-      violations.push(`${file}: ${bridgeName} may only be imported by its explicit runtime/platform consumers`);
-    }
+for (const requiredFile of REQUIRED_WORLD_CAMPAIGN_BOUNDARIES) {
+  if (normalizedText(requiredFile) === null) {
+    violations.push(`${requiredFile}: required Task 14c/14d boundary is missing`);
   }
 }
 

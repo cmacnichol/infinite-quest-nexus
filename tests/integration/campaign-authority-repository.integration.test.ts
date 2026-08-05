@@ -14,7 +14,7 @@ import {
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
-import { turnReportedCosts } from "../../services/api/src/cost-service.js";
+import { turnReportedCosts } from "../../services/runtime/src/provider-cost-adapter.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;

@@ -11,17 +11,17 @@ import {
   type GenerationExecutionRepository
 } from "../../../packages/database/src/generation-execution-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import { loadTextProvider } from "../../api/src/provider-service.js";
+import { loadTextProvider } from "./provider-runtime-adapter.js";
 import {
   attributeGenerationCostsToTurn,
   recordProfileCost,
   turnReportedCosts
-} from "../../api/src/cost-service.js";
+} from "./provider-cost-adapter.js";
 import {
   promptFromSnapshot,
   promptProtocolVersion,
   resolvePromptSnapshot
-} from "../../api/src/prompt-library-service.js";
+} from "./provider-prompt-adapter.js";
 import {
   createGenerationExecutor,
   type GenerationExecutionCollaborators,

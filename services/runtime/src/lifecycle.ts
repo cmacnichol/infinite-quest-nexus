@@ -12,6 +12,7 @@ export type RuntimeLifecycleDependencies = {
     config: RuntimeConfig,
     pool: DatabasePool,
     signal: AbortSignal,
+    providerTransport: ProviderTransport,
     generationEvents: RuntimeGenerationEventSource | undefined
   ): Promise<void>;
 };
@@ -31,7 +32,7 @@ export async function runRuntimeLifecycle(
       generationEvents = dependencies.createGenerationEvents(config, pool);
       await generationEvents.start();
     }
-    await dependencies.dispatchRole(config, pool, abortController.signal, generationEvents);
+    await dependencies.dispatchRole(config, pool, abortController.signal, providerTransport, generationEvents);
   } finally {
     try {
       if (providerTransport) await providerTransport.close();

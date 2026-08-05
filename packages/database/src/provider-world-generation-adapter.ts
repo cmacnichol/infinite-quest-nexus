@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import type { WorldGenerationProgressUpdate } from "../../../packages/application/src/world-campaign/index.js";
+import type { DatabasePool } from "./pool.js";
+import type { WorldGenerationProgressUpdate } from "../../application/src/world-campaign/index.js";
 import {
   canonicalizeWorldContent,
   characterProfileSchema,
@@ -12,31 +12,31 @@ import {
   type PlayableCharacterGenerationPreviewRequest,
   type WorldGenerationPreviewRequest,
   type WorldContent
-} from "../../../packages/contracts/src/world-library.js";
+} from "../../contracts/src/world-library.js";
 import {
   CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION,
   buildPlayableCharacterGenerationPrompt,
   normalizeGeneratedPlayableCharacter,
   playableCharacterRecoveryInput
-} from "../../../packages/domain/src/character-authoring.js";
+} from "../../domain/src/character-authoring.js";
 import {
   generatedCharacterNameKey,
   generatedWorldIssues,
   parseCompleteGeneratedWorld,
   projectGeneratedWorldIssues
-} from "../../../packages/domain/src/generated-world.js";
-import { buildTemplateWorldPrompt, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
-import { ProviderDestinationNotAllowedError } from "../../../packages/security/src/provider-network-policy.js";
-import { ProviderResponseTooLargeError } from "../../../packages/story-engine/src/provider-response.js";
+} from "../../domain/src/generated-world.js";
+import { buildTemplateWorldPrompt, type TemplateWorldInput } from "../../domain/src/world-template.js";
+import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
+import { ProviderResponseTooLargeError } from "../../story-engine/src/provider-response.js";
 import {
   callTextProvider,
   extractJsonObject,
   providerTransportErrorDetails,
   type ProviderResult
-} from "../../../packages/story-engine/src/index.js";
-import { logger } from "../../../packages/logger/src/index.js";
-import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
-import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
+} from "../../story-engine/src/index.js";
+import { logger } from "../../logger/src/index.js";
+import { loadTextProvider, resolveEffectiveProviderId } from "./provider-runtime-adapter.js";
+import { promptFromSnapshot, resolvePromptSnapshot } from "./provider-prompt-adapter.js";
 
 const coerceText = (val: unknown): string => {
   if (val === null || val === undefined) return "";

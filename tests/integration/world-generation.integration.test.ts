@@ -16,7 +16,7 @@ import {
   createProviderTransport,
   type ProviderTransport
 } from "../../packages/story-engine/src/provider-transport.js";
-import { createProvider } from "../../services/api/src/provider-service.js";
+import { createProvider } from "../../services/runtime/src/provider-runtime-adapter.js";
 import { logger } from "../../packages/logger/src/index.js";
 import {
   activeProgressMap,

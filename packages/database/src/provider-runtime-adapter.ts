@@ -1,8 +1,8 @@
-import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
-import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
-import { sogniIllustrationProviderConfigSchema, sogniSdkIllustrationProviderConfigSchema, type ProviderProfileInput, type ProviderProfileUpdate, type ProviderTextRequest } from "../../../packages/contracts/src/generation.js";
-import { sanitizeSensitiveConfiguration } from "../../../packages/domain/src/redaction.js";
-import { callTextProvider, decryptCredential, encryptCredential, discoverEmbeddingModels, discoverImageModels, discoverModels, logProviderTransportError, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
+import type { DatabaseClient, DatabasePool } from "./pool.js";
+import { initialOwnerId, withTransaction } from "./pool.js";
+import { sogniIllustrationProviderConfigSchema, sogniSdkIllustrationProviderConfigSchema, type ProviderProfileInput, type ProviderProfileUpdate, type ProviderTextRequest } from "../../contracts/src/generation.js";
+import { sanitizeSensitiveConfiguration } from "../../domain/src/redaction.js";
+import { callTextProvider, decryptCredential, encryptCredential, discoverEmbeddingModels, discoverImageModels, discoverModels, logProviderTransportError, type TextProviderProfile } from "../../story-engine/src/index.js";
 
 type ProviderRow = {
   id: string;

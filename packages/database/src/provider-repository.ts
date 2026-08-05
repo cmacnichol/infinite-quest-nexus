@@ -359,6 +359,7 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
 export type PrivateProviderCredentialRow = Readonly<{
   ownerUserId: string;
   providerProfileId: string;
+  name: string;
   providerRole: ProviderRole;
   providerType: ProviderType;
   baseUrl: string;
@@ -386,6 +387,7 @@ export async function loadPrivateProviderCredentialRow(
   return {
     ownerUserId,
     providerProfileId: row.id,
+    name: row.name,
     providerRole: row.provider_role,
     providerType: row.provider_type,
     baseUrl: row.base_url,

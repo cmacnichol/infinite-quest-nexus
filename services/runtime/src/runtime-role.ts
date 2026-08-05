@@ -10,7 +10,10 @@ import type {
 } from "../../../packages/application/src/index.js";
 import type { DatabasePool, RuntimeConfig } from "../../../packages/database/src/index.js";
 import type { BuildServerOptions } from "../../api/src/server.js";
+import type { ProviderApiTransportAdapter } from "../../api/src/provider-application-adapter.js";
 import type { WorkerDependencies } from "../../worker/src/worker.js";
+import type { ProviderTransport } from "../../../packages/story-engine/src/provider-transport.js";
+import type { ProviderApplicationComposition } from "./provider-application-composition.js";
 import { logger } from "../../../packages/logger/src/index.js";
 
 type RuntimeServer = {
@@ -29,6 +32,17 @@ export type RuntimeRoleDependencies = Readonly<{
     migrationDirectory: string,
     timeoutMs: number
   ): Promise<void>;
+  createApiProviders(
+    pool: DatabasePool,
+    credentialSecret: string,
+    transport: ProviderTransport
+  ): ProviderApplicationComposition;
+  createWorkerProviders(
+    pool: DatabasePool,
+    credentialSecret: string,
+    transport: ProviderTransport
+  ): ProviderApplicationComposition;
+  createProviderApiAdapter(composition: ProviderApplicationComposition): ProviderApiTransportAdapter;
   createApiGeneration(pool: DatabasePool): GenerationApplication;
   createApiIllustration(pool: DatabasePool): IllustrationApplication;
   createApiMemory(pool: DatabasePool, credentialSecret: string): MemoryApplication;
@@ -99,6 +113,7 @@ export async function dispatchRuntimeRole(
   pool: DatabasePool,
   signal: AbortSignal,
   dependencies: RuntimeRoleDependencies,
+  providerTransport: ProviderTransport,
   generationEvents: GenerationEventSource | undefined
 ): Promise<void> {
   await prepareDatabase(config, pool, dependencies);
@@ -111,8 +126,13 @@ export async function dispatchRuntimeRole(
     const illustration = dependencies.createApiIllustration(pool);
     const memory = dependencies.createApiMemory(pool, config.credentialEncryptionKey);
     const worldCampaign = dependencies.createApiWorldCampaign(pool, config.credentialEncryptionKey);
+    const providers = dependencies.createProviderApiAdapter(dependencies.createApiProviders(
+      pool,
+      config.credentialEncryptionKey,
+      providerTransport
+    ));
     const server = await dependencies.buildServer({
-      config, pool, generation, illustration, memory, generationEvents, worldCampaign
+      config, pool, generation, illustration, memory, providers, generationEvents, worldCampaign
     });
     await server.listen({ host: config.host, port: config.port });
     await waitForAbort(signal);
@@ -121,6 +141,7 @@ export async function dispatchRuntimeRole(
   }
 
   if (config.role === "worker") {
+    dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport);
     const illustration = dependencies.createApiIllustration(pool);
     const memory = dependencies.createApiMemory(pool, config.credentialEncryptionKey);
     const generation = dependencies.createWorkerGeneration(pool, config.credentialEncryptionKey, illustration, memory);
@@ -141,6 +162,12 @@ export async function dispatchRuntimeRole(
   const illustration = dependencies.createApiIllustration(pool);
   const memory = dependencies.createApiMemory(pool, config.credentialEncryptionKey);
   const worldCampaign = dependencies.createApiWorldCampaign(pool, config.credentialEncryptionKey);
+  const providers = dependencies.createProviderApiAdapter(dependencies.createApiProviders(
+    pool,
+    config.credentialEncryptionKey,
+    providerTransport
+  ));
+  dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport);
   if (!generationEvents) throw new Error("The all role requires a generation event source.");
   const workerGeneration = dependencies.createWorkerGeneration(pool, config.credentialEncryptionKey, illustration, memory);
   const workerIllustration = dependencies.createWorkerIllustration(
@@ -149,7 +176,7 @@ export async function dispatchRuntimeRole(
     config.assetStorageRoot
   );
   const server = await dependencies.buildServer({
-    config, pool, generation: apiGeneration, illustration, memory, generationEvents, worldCampaign
+    config, pool, generation: apiGeneration, illustration, memory, providers, generationEvents, worldCampaign
   });
   await server.listen({ host: config.host, port: config.port });
   await dependencies.runWorker(pool, config, signal, {

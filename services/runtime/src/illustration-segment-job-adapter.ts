@@ -24,10 +24,10 @@ import {
   containsMechanicsLanguage,
   logProviderTransportError
 } from "../../../packages/story-engine/src/index.js";
-import { recordProfileCost } from "../../api/src/cost-service.js";
+import { recordProfileCost } from "./provider-cost-adapter.js";
 import { insertImageJob } from "./illustration-image-job-adapter.js";
-import { loadTextProvider, resolveEffectiveProviderId } from "../../api/src/provider-service.js";
-import { promptFromSnapshot, resolvePromptSnapshot } from "../../api/src/prompt-library-service.js";
+import { loadTextProvider, resolveEffectiveProviderId } from "./provider-runtime-adapter.js";
+import { promptFromSnapshot, resolvePromptSnapshot } from "./provider-prompt-adapter.js";
 
 export type SegmentConfigRow = {
   enabled: boolean;
@@ -1034,7 +1034,7 @@ export async function runIllustrationPromptJob(
     let prompt: string;
     let responseId = "";
     let portMetadata: Readonly<Record<string, unknown>> | null = null;
-    let legacyProvider: Awaited<ReturnType<typeof loadTextProvider>> | null = null;
+    let provider: Awaited<ReturnType<typeof loadTextProvider>> | null = null;
     let legacyResult: Awaited<ReturnType<typeof callTextProvider>> | null = null;
     if (refinementPort) {
       const result = await refinementPort.refinePrompt({
@@ -1052,14 +1052,14 @@ export async function runIllustrationPromptJob(
       responseId = String(result.metadata.responseId || "");
       portMetadata = result.metadata;
     } else {
-      legacyProvider = await loadTextProvider(
+      provider = await loadTextProvider(
         pool,
         claimed.owner_user_id,
         claimed.provider_profile_id,
         credentialSecret,
         claimed.requested_model
       );
-      legacyResult = await callTextProvider(legacyProvider, {
+      legacyResult = await callTextProvider(provider, {
         systemPrompt: promptFromSnapshot(claimed.prompt_snapshot, "illustration_refinement"),
         input: buildIllustrationRefinementInput(segment.source_text, storyContext)
       });
@@ -1090,7 +1090,7 @@ export async function runIllustrationPromptJob(
         [claimed.id, workerId, responseId]
       );
       if (!refinementPort) {
-        await recordProfileCost(client, legacyProvider!, {
+        await recordProfileCost(client, provider!, {
           ownerUserId: claimed.owner_user_id,
           campaignId: claimed.campaign_id,
           turnId: claimed.turn_id,

@@ -8,7 +8,7 @@ import { readTurnPage } from "../../packages/database/src/play-loop-read-reposit
 import { buildServer } from "../../services/api/src/server.js";
 import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
 import { serverOptions } from "../helpers/build-server-options.js";
-import { createProvider } from "../../services/api/src/provider-service.js";
+import { createProvider } from "../../services/runtime/src/provider-runtime-adapter.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { runImageJob } from "../../services/runtime/src/illustration-image-job-adapter.js";
 import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";

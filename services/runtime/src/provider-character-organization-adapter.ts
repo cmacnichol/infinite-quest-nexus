@@ -10,8 +10,8 @@ import {
   type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
 import { callTextProvider, extractJsonObject } from "../../../packages/story-engine/src/index.js";
-import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
-import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
+import { loadTextProvider, resolveEffectiveProviderId } from "./provider-runtime-adapter.js";
+import { promptFromSnapshot, resolvePromptSnapshot } from "./provider-prompt-adapter.js";
 
 export const CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION = "character-profile-organizer-v2";
 

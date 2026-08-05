@@ -25,8 +25,15 @@ import {
 } from "../../../packages/story-engine/src/index.js";
 
 export type RuntimeProviderAdapter = Readonly<{
+  transport: ProviderTransport;
   leases: ProviderRuntimeLeasePort;
   inventory: ProviderModelInventoryPort;
+  loadProvider(
+    scope: Readonly<{ ownerUserId: string }>,
+    providerProfileId: string,
+    providerRole: ProviderRole,
+    model?: string,
+  ): Promise<TextProviderProfile & Readonly<{ id: string; name: string }>>;
   storeCredential(ownerUserId: string, providerProfileId: string, credential: string | null): Promise<void>;
   discoverCandidateModelsWithCredential(
     candidate: ProviderCandidate,
@@ -190,8 +197,20 @@ export function createRuntimeProviderAdapter(options: Readonly<{
   }
 
   return {
+    transport: options.transport,
     leases,
     inventory,
+    async loadProvider(scope, providerProfileId, providerRole, model) {
+      const row = await load(scope.ownerUserId, providerProfileId);
+      if (row.providerRole !== providerRole) {
+        throw Object.assign(new Error(`Enabled ${providerRole} provider profile not found.`), { statusCode: 404 });
+      }
+      return {
+        ...transportProfile(row, model?.trim() || row.defaultModel),
+        id: row.providerProfileId,
+        name: row.name
+      };
+    },
     discoverCandidateModelsWithCredential: discoverCandidateModels,
     async storeCredential(ownerUserId, providerProfileId, credential) {
       const encrypted = credential?.trim()

@@ -42,6 +42,7 @@ describe("runtime provider transport lifecycle", () => {
       expect.objectContaining({ role: "api" }),
       pool,
       expect.any(AbortSignal),
+      transport,
       generationEvents
     );
   });
@@ -88,6 +89,7 @@ describe("runtime provider transport lifecycle", () => {
       expect.objectContaining({ role }),
       pool,
       expect.any(AbortSignal),
+      transport,
       undefined
     );
   });

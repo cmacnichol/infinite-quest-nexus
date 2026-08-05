@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { publicProvider } from "../../services/api/src/provider-service.js";
+import { publicProvider } from "../../services/runtime/src/provider-runtime-adapter.js";
 
 describe("publicProvider", () => {
   it("preserves legitimate provider configuration values in write responses", () => {

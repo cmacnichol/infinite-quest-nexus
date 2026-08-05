@@ -7,7 +7,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { generationRequestSchema, generationRetryLatestRequestSchema, illustrationConfigSchema } from "../../packages/contracts/src/generation.js";
 import { setIllustrationConfig } from "../../services/runtime/src/illustration-image-job-adapter.js";
-import { createProvider } from "../../services/api/src/provider-service.js";
+import { createProvider } from "../../services/runtime/src/provider-runtime-adapter.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { createWorkerGenerationApplication } from "../../services/runtime/src/generation-worker-composition.js";
 import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
@@ -23,7 +23,7 @@ import {
   getCampaignRuntimeState,
   updateCampaignRuntimeState
 } from "../helpers/memory-aware-services.js";
-import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
+import { getCampaignCostSummary } from "../../services/runtime/src/provider-cost-adapter.js";
 import { logger } from "../../packages/logger/src/index.js";
 import {
   apiMemoryApplication,

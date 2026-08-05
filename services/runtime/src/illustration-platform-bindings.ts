@@ -19,8 +19,8 @@ import {
   loadImageProvider,
   loadTextProvider,
   recordProviderHealth
-} from "../../api/src/provider-service.js";
-import { recordProviderCost, type CostAttribution } from "../../api/src/cost-service.js";
+} from "./provider-runtime-adapter.js";
+import { recordProviderCost, type CostAttribution } from "./provider-cost-adapter.js";
 import type {
   ArtifactDownloadAdapterDependencies,
   AssetAdapterDependencies,
@@ -38,9 +38,8 @@ export type IllustrationPlatformBindings = Readonly<{
 }>;
 
 /**
- * Runtime is the only composition layer that binds legacy provider and asset
- * services to illustration adapters. The API adapter remains independent of
- * those business services until their Task 14d/14e extractions.
+ * Runtime is the only composition layer that binds provider and asset
+ * adapters to illustration ports.
  */
 export function createIllustrationPlatformBindings(
   _pool: DatabasePool,

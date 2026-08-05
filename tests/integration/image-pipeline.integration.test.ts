@@ -15,7 +15,7 @@ import { createApiGenerationApplication } from "../../services/runtime/src/gener
 import { createWorkerIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, retryImageJob, runImageJob, setIllustrationConfig } from "../../services/runtime/src/illustration-image-job-adapter.js";
 import { createWorld, getWorld, importLegacyStory } from "../helpers/memory-aware-services.js";
-import { createProvider } from "../../services/api/src/provider-service.js";
+import { createProvider } from "../../services/runtime/src/provider-runtime-adapter.js";
 import { listAssets, persistOriginalImage, queryAssets, readAssetDerivative, runAssetMetadataBackfill, selectTurnIllustration, selectWorldCover, updateAssetMetadata } from "../../services/api/src/asset-service.js";
 import { getTurnIllustrationResolution, runIllustrationResolutionJob } from "../../services/runtime/src/illustration-resolution-job-adapter.js";
 import {
@@ -28,7 +28,7 @@ import {
   regenerateSegmentIllustration,
   runIllustrationPromptJob
 } from "../../services/runtime/src/illustration-segment-job-adapter.js";
-import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
+import { getCampaignCostSummary } from "../../services/runtime/src/provider-cost-adapter.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;

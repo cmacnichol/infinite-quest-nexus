@@ -22,8 +22,6 @@ import {
   type ProviderHealthDiagnosticCode,
   type ProviderRuntimeLeasePort,
   type SafeProviderConfiguration,
-  type Task14dCharacterProfileOrganizerBridgePort,
-  type Task14dWorldGenerationBridgePort,
   type TurnCostScope,
   type WorldGenerationCostPort,
   type WorldGenerationPromptPort
@@ -438,9 +436,3 @@ expectTypeOf<CharacterOrganizationPromptPort>().toBeObject();
 expectTypeOf<CharacterOrganizationCostPort>().toBeObject();
 expectTypeOf<InfiniteWorldsPromptPort>().toBeObject();
 expectTypeOf<InfiniteWorldsCostPort>().toBeObject();
-expectTypeOf<keyof Task14dWorldGenerationBridgePort>().toEqualTypeOf<
-  "generateWorldPreview" | "generatePlayableCharacterPreview" | "generatePlayableCharacter"
->();
-expectTypeOf<keyof Task14dCharacterProfileOrganizerBridgePort>().toEqualTypeOf<
-  "organizeCampaignCharacterProfile" | "organizeWorldCharacterProfile"
->();

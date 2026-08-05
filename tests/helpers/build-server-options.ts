@@ -6,11 +6,42 @@ import type {
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { createApiMemoryApplication } from "../../services/runtime/src/memory-composition.js";
+import type { ProviderApiTransportAdapter } from "../../services/api/src/provider-application-adapter.js";
 
 export type ServerOptionsOverrides = Readonly<
   Pick<BuildServerOptions, "config" | "pool"> &
-  Partial<Pick<BuildServerOptions, "generation" | "illustration" | "memory" | "generationEvents" | "worldCampaign">>
+  Partial<Pick<BuildServerOptions, "generation" | "illustration" | "memory" | "generationEvents" | "worldCampaign" | "providers">>
 >;
+
+export const inertProviders = {
+  application: {
+    getTurnCosts: async () => new Map(),
+    getCampaignCostSummary: async (scope: { campaignId: string }) => ({
+      campaignId: scope.campaignId,
+      hasReportedCosts: false,
+      totals: []
+    }),
+    classifyTurnIntent: async () => ({
+      classificationId: "88888888-8888-4888-8888-888888888888",
+      classification: "action",
+      resolvedMode: "action",
+      confidenceBand: "ambiguous",
+      providerSource: "campaign_fallback",
+      expiresAt: "2026-08-01T12:00:00.000Z"
+    })
+  },
+  list: async () => [{
+    id: "66666666-6666-4666-8666-666666666666",
+    name: "Test provider",
+    providerType: "openai_compatible",
+    providerRole: "text"
+  }],
+  listPromptLibrary: async (_ownerUserId: string, campaignId?: string) => ({
+    catalogVersion: "prompt-library-v1",
+    campaignId: campaignId ?? null,
+    templates: []
+  })
+} as unknown as ProviderApiTransportAdapter;
 
 const inertGenerationEvents: GenerationEventSource = {
   async subscribe() {
@@ -341,6 +372,7 @@ export function serverOptions(overrides: ServerOptionsOverrides): BuildServerOpt
       credentialSecret: overrides.config.credentialEncryptionKey
     }),
     worldCampaign: overrides.worldCampaign ?? testWorldCampaignApplication(),
+    providers: overrides.providers ?? inertProviders,
     generationEvents: overrides.generationEvents ?? inertGenerationEvents
   };
 }

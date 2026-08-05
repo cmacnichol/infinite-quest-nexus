@@ -20,6 +20,7 @@ import { createApiGenerationApplication } from "../../services/runtime/src/gener
 import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
 import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { apiMemoryApplication } from "../helpers/memory-applications.js";
+import { inertProviders } from "../helpers/build-server-options.js";
 
 const { Client } = pg;
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -306,6 +307,7 @@ integration("generation job notification delivery", () => {
       generation: createApiGenerationApplication(countedPool),
       illustration: createApiIllustrationApplication(countedPool),
       memory: apiMemoryApplication(countedPool),
+      providers: inertProviders,
       worldCampaign: createApiWorldCampaignApplication(countedPool, { credentialSecret: runtimeConfig(3).credentialEncryptionKey }),
       generationEvents: source
     });
@@ -370,6 +372,7 @@ integration("generation job notification delivery", () => {
       generation: createApiGenerationApplication(routePool),
       illustration: createApiIllustrationApplication(routePool),
       memory: apiMemoryApplication(routePool),
+      providers: inertProviders,
       worldCampaign: createApiWorldCampaignApplication(routePool, { credentialSecret: runtimeConfig(3).credentialEncryptionKey }),
       generationEvents: source
     });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { providerProfileInputSchema } from "../../packages/contracts/src/generation.js";
-import { resolveDefaultIntentProviderId } from "../../services/api/src/provider-service.js";
+import { resolveDefaultIntentProviderId } from "../../services/runtime/src/provider-runtime-adapter.js";
 
 describe("turn intent provider role", () => {
   it("accepts an independently configured intent profile", () => {

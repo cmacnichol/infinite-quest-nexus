@@ -7,9 +7,9 @@ import {
   promptTemplateOverrideSchema,
   type PromptSnapshot,
   type PromptTemplateKey
-} from "../../../packages/contracts/src/prompt-library.js";
+} from "../../contracts/src/prompt-library.js";
 import { z } from "zod";
-import { initialOwnerId, type DatabaseClient, type DatabasePool } from "../../../packages/database/src/pool.js";
+import { initialOwnerId, type DatabaseClient, type DatabasePool } from "./pool.js";
 import {
   buildEventExtensionPrompt,
   buildEventTriggerPrompt,
@@ -17,7 +17,7 @@ import {
   buildSceneCoveragePrompt,
   buildStoryUserPrompt,
   buildTurnIntentPrompt
-} from "../../../packages/story-engine/src/index.js";
+} from "../../story-engine/src/index.js";
 type Database = DatabasePool | DatabaseClient;
 
 type OverrideRow = { prompt_key: PromptTemplateKey; content: string; campaign_id: string | null; updated_at: string };

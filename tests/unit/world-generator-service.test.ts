@@ -17,7 +17,7 @@ import {
   type TemplateWorldGenerationDependencies,
   type WorldGenerationProviderDependencies,
   worldGenerationFailureDiagnostic
-} from "../../services/api/src/task-14d-world-generation-bridge.js";
+} from "../../services/runtime/src/provider-world-generation-adapter.js";
 
 function profile() {
   return {

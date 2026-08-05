@@ -1,7 +1,7 @@
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { callEmbeddingProvider, logProviderTransportError, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
-import { recordProfileCost } from "../../api/src/cost-service.js";
-import { loadEmbeddingProvider, recordProviderHealth } from "../../api/src/provider-service.js";
+import { recordProfileCost } from "./provider-cost-adapter.js";
+import { loadEmbeddingProvider, recordProviderHealth } from "./provider-runtime-adapter.js";
 import {
   createChronicleEmbeddingProviderPort,
   type ChronicleEmbeddingProvider,
@@ -12,7 +12,7 @@ import {
 type EnabledProfileRow = Readonly<{ id: string; is_default: boolean }>;
 
 /**
- * Temporary 14d-owned profile selection binding. Dedicated embedding profiles
+ * Dedicated embedding profiles
  * are authoritative whenever any are enabled. Text is considered only when
  * that dedicated inventory is empty; image roles are never queried.
  */

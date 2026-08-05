@@ -26,23 +26,23 @@ import { createPostgresWorldRepositoryAdapters } from "../../../packages/databas
 import {
   organizeCampaignCharacterProfileForOwner,
   organizeWorldCharacterProfileForOwner
-} from "../../api/src/task-14d-character-profile-organizer-bridge.js";
-import { turnReportedCosts } from "../../api/src/cost-service.js";
-import { resolveEffectiveProviderId } from "../../api/src/provider-service.js";
+} from "./provider-character-organization-adapter.js";
+import { turnReportedCosts } from "./provider-cost-adapter.js";
+import { resolveEffectiveProviderId } from "./provider-runtime-adapter.js";
 import {
   generatePlayableCharacterForOwner,
   generatePlayableCharacterPreviewForOwner,
   generateTemplateWorld,
   generateWorldPreviewForOwner
-} from "../../api/src/task-14d-world-generation-bridge.js";
+} from "./provider-world-generation-adapter.js";
 import { createChroniclePlatformBindings } from "./chronicle-platform-bindings.js";
 
 export type WorldCampaignCompositionDependencies = Readonly<{
   credentialSecret: string;
 }>;
 
-/** Temporary 14d-owned provider/prompt binding; remove when Task 14d supplies its application port. */
-export function createTask14dCharacterProfileOrganizer(
+/** Binds owner-scoped provider and prompt collaborators to character organization. */
+export function createProviderCharacterProfileOrganizer(
   pool: DatabasePool,
   credentialSecret: string,
 ): CharacterProfileOrganizerPort {
@@ -70,8 +70,8 @@ async function unwrapTransition<T>(result: WorldCampaignRepositoryResult<T>): Pr
   return result.value;
 }
 
-/** Temporary 14d-owned provider/prompt binding; provider profiles and credentials never cross the port. */
-export function createTask14dWorldGenerationCollaborator(
+/** Binds owner-scoped provider and prompt collaborators to world generation. */
+export function createProviderWorldGenerationCollaborator(
   pool: DatabasePool,
   credentialSecret: string,
   transaction: ReturnType<typeof createPostgresWorldRepositoryAdapters>["transaction"],
@@ -147,11 +147,11 @@ export function createApiWorldCampaignApplication(
     sync: authorityAdapters.sync,
     turnPages,
     characters: createPostgresCharacterProfileRepository(),
-    characterOrganizer: createTask14dCharacterProfileOrganizer(pool, dependencies.credentialSecret),
+    characterOrganizer: createProviderCharacterProfileOrganizer(pool, dependencies.credentialSecret),
     transfers: createPostgresCampaignTransferRepository({ memory }),
     dashboard: createPostgresDashboardRepository(),
     sessionProfile: createPostgresSessionProfileRepository(),
-    worldGeneration: createTask14dWorldGenerationCollaborator(
+    worldGeneration: createProviderWorldGenerationCollaborator(
       pool,
       dependencies.credentialSecret,
       worldAdapters.transaction,

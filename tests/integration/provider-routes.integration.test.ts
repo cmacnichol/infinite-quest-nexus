@@ -5,6 +5,10 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { serverOptions } from "../helpers/build-server-options.js";
+import { createProviderNetworkPolicy } from "../../packages/security/src/provider-network-policy.js";
+import { createProviderTransport, type ProviderTransport } from "../../packages/story-engine/src/provider-transport.js";
+import { createApiProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
+import { createProviderApplicationAdapter } from "../../services/api/src/provider-application-adapter.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -26,6 +30,7 @@ const baseProviderInput = {
 integration("provider route configuration redaction", () => {
   let pool: DatabasePool;
   let app: Awaited<ReturnType<typeof buildServer>>;
+  let transport: ProviderTransport;
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 3);
@@ -84,12 +89,18 @@ integration("provider route configuration redaction", () => {
         trustProxyHops: 0
       }
     };
-    app = await buildServer(serverOptions({ config, pool }));
+    transport = createProviderTransport({ policy: createProviderNetworkPolicy({ allowlist: [] }) });
+    const providers = createProviderApplicationAdapter(createApiProviderApplicationComposition(pool, {
+      credentialSecret: config.credentialEncryptionKey,
+      transport
+    }));
+    app = await buildServer(serverOptions({ config, pool, providers }));
   });
 
   afterAll(async () => {
     await pool.query("DELETE FROM provider_profiles WHERE name LIKE $1", [`${baseProviderInput.name}%`]);
     await app.close();
+    await transport.close();
     await pool.end();
   });
 
@@ -100,7 +111,9 @@ integration("provider route configuration redaction", () => {
         accessToken: "legitimate-nested-value",
         apiUrl: "https://api.example.test"
       },
-      projectId: "project-1"
+      projectId: "project-1",
+      defaultWidth: 768,
+      httpReferer: "https://nexus.example.test"
     };
 
     const response = await app.inject({
@@ -116,7 +129,7 @@ integration("provider route configuration redaction", () => {
 
     expect(response.statusCode).toBe(201);
     expect(response.json()).toMatchObject({
-      configuration,
+      configuration: { defaultWidth: 768, httpReferer: "https://nexus.example.test" },
       hasApiKey: true
     });
     expect(response.json()).not.toHaveProperty("apiKey");
@@ -141,7 +154,8 @@ integration("provider route configuration redaction", () => {
         accessToken: "updated-nested-value",
         apiUrl: "https://updated.example.test"
       },
-      projectId: "after-patch"
+      projectId: "after-patch",
+      defaultWidth: 1024
     };
     const response = await app.inject({
       method: "PATCH",
@@ -151,7 +165,7 @@ integration("provider route configuration redaction", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      configuration,
+      configuration: { defaultWidth: 1024 },
       hasApiKey: true
     });
     expect(response.json()).not.toHaveProperty("apiKey");
@@ -171,7 +185,8 @@ integration("provider route configuration redaction", () => {
             accessToken: "nested-secret",
             apiUrl: "https://api.example.test"
           },
-          projectId: "project-2"
+          projectId: "project-2",
+          defaultWidth: 640
         }
       }
     });
@@ -183,13 +198,12 @@ integration("provider route configuration redaction", () => {
     const provider = response.json().providers.find((candidate: { id: string }) => candidate.id === created.json().id);
     expect(provider).toMatchObject({
       configuration: {
-        nested: { apiUrl: "https://api.example.test" },
-        projectId: "project-2"
+        defaultWidth: 640
       },
       hasApiKey: true
     });
     expect(provider.configuration).not.toHaveProperty("apiKey");
-    expect(provider.configuration.nested).not.toHaveProperty("accessToken");
+    expect(provider.configuration).not.toHaveProperty("nested");
     expect(provider).not.toHaveProperty("apiKey");
   });
 
@@ -204,7 +218,8 @@ integration("provider route configuration redaction", () => {
         configuration: {
           apiKey: "stored-secondary-secret",
           nested: { accessToken: "stored-nested-secret" },
-          projectId: "project-3"
+          projectId: "project-3",
+          defaultWidth: 512
         }
       }
     });
@@ -218,9 +233,9 @@ integration("provider route configuration redaction", () => {
 
     expect(response.statusCode).toBe(200);
     const provider = response.json();
-    expect(provider.configuration).toMatchObject({ projectId: "project-3" });
+    expect(provider.configuration).toMatchObject({ defaultWidth: 512 });
     expect(provider.configuration).not.toHaveProperty("apiKey");
-    expect(provider.configuration.nested).not.toHaveProperty("accessToken");
+    expect(provider.configuration).not.toHaveProperty("nested");
   });
 
   it("redacts stored configuration from PUT .../default responses", async () => {
@@ -234,7 +249,8 @@ integration("provider route configuration redaction", () => {
         configuration: {
           apiKey: "stored-secondary-secret",
           nested: { accessToken: "stored-nested-secret" },
-          projectId: "project-4"
+          projectId: "project-4",
+          defaultWidth: 896
         }
       }
     });
@@ -247,8 +263,8 @@ integration("provider route configuration redaction", () => {
 
     expect(response.statusCode).toBe(200);
     const provider = response.json();
-    expect(provider.configuration).toMatchObject({ projectId: "project-4" });
+    expect(provider.configuration).toMatchObject({ defaultWidth: 896 });
     expect(provider.configuration).not.toHaveProperty("apiKey");
-    expect(provider.configuration.nested).not.toHaveProperty("accessToken");
+    expect(provider.configuration).not.toHaveProperty("nested");
   });
 });

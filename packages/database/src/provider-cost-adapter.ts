@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
-import type { ReportedProviderCost, TextProviderProfile } from "../../../packages/story-engine/src/providers.js";
-import { initialOwnerId } from "../../../packages/database/src/pool.js";
+import type { DatabaseClient, DatabasePool } from "./pool.js";
+import type { ReportedProviderCost, TextProviderProfile } from "../../story-engine/src/providers.js";
+import { initialOwnerId } from "./pool.js";
 
 export type CostCategory = "story" | "image" | "memory";
 

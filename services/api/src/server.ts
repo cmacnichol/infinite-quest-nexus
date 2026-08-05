@@ -90,24 +90,25 @@ import { readTurnPage } from "../../../packages/database/src/play-loop-read-repo
 import { userProfileUpdateSchema } from "../../../packages/contracts/src/users.js";
 import { assetListQuerySchema, assetMetadataUpdateSchema } from "../../../packages/contracts/src/assets.js";
 import {
+  promptTemplateKeySchema,
+  promptTemplateOverrideSchema
+} from "../../../packages/contracts/src/prompt-library.js";
+import {
   campaignTransferCommitRequestSchema,
   campaignTransferPreviewRequestSchema
 } from "../../../packages/contracts/src/campaign-transfer.js";
 import { previewLegacyStoryImport } from "./import-service.js";
 import { getImportProgress, importInfiniteWorlds, previewInfiniteWorldsImport } from "./infinite-worlds-import-service.js";
-import { listPromptLibrary, previewPromptTemplate, resetPromptOverride, savePromptOverride } from "./prompt-library-service.js";
 import { createMemoryApplicationAdapter } from "./memory-application-adapter.js";
 import {
   createOwnerBoundPortableWorldApplicationPort,
   createWorldCampaignApplicationAdapter
 } from "./world-campaign-application-adapter.js";
 import { queryAssets, readAsset, readAssetDerivative, selectTurnIllustration, selectWorldCover, updateAssetMetadata, type FilesystemAssetStore } from "./asset-service.js";
-import { createProvider, deleteProvider, discoverUnsavedProviderModels, generateProviderText, listProviders, providerModels, setDefaultProvider, updateProvider } from "./provider-service.js";
+import type { ProviderApiTransportAdapter } from "./provider-application-adapter.js";
 import { createGenerationApplicationAdapter } from "./generation-application-adapter.js";
 import { createGenerationRouteLifecycle, type GenerationLifecycleLogContext } from "./generation-route-lifecycle.js";
 import { safeTurnInput } from "./turn-input-safety.js";
-import { getCampaignCostSummary, turnReportedCosts } from "./cost-service.js";
-import { classifyTurnInput } from "./turn-intent-service.js";
 import { applicationMetadata } from "./app-metadata.js";
 import { installRequestSecurity } from "./request-security.js";
 import { registerArchiveRoutes } from "./archive-routes.js";
@@ -120,6 +121,7 @@ export type BuildServerOptions = {
   memory: MemoryApplication;
   generationEvents: GenerationEventSource;
   worldCampaign: import("../../../packages/application/src/world-campaign/index.js").WorldCampaignApplication;
+  providers: ProviderApiTransportAdapter;
 };
 
 const uuidSchema = z.uuid();
@@ -273,7 +275,7 @@ async function generationLifecycleLogContext(
   return result.rows[0] || null;
 }
 
-export async function buildServer({ config, pool, generation, illustration, memory, generationEvents, worldCampaign }: BuildServerOptions): Promise<FastifyInstance> {
+export async function buildServer({ config, pool, generation, illustration, memory, generationEvents, worldCampaign, providers }: BuildServerOptions): Promise<FastifyInstance> {
   const illustrationTurnScope = async (turnId: string) => {
     const ownerUserId = await initialOwnerId(pool);
     const result = await pool.query<{ campaign_id: string }>(
@@ -475,42 +477,81 @@ export async function buildServer({ config, pool, generation, illustration, memo
 
   app.get("/api/v1/prompt-library", async (request) => {
     const query = z.object({ campaignId: z.uuid().optional() }).parse(request.query);
-    return listPromptLibrary(pool, query.campaignId);
+    return providers.listPromptLibrary(await initialOwnerId(pool), query.campaignId);
   });
-  app.put("/api/v1/prompt-library/overrides", async (request) => ({ library: await savePromptOverride(pool, request.body) }));
-  app.delete("/api/v1/prompt-library/overrides", async (request) => ({ library: await resetPromptOverride(pool, request.body) }));
-  app.post("/api/v1/prompt-library/preview", async (request) => previewPromptTemplate(request.body));
+  app.put("/api/v1/prompt-library/overrides", async (request) => ({
+    library: await providers.savePromptOverride(
+      await initialOwnerId(pool),
+      (() => {
+        const body = promptTemplateOverrideSchema.parse(request.body);
+        return {
+          key: body.key,
+          content: body.content,
+          scope: body.scope,
+          ...(body.campaignId === undefined ? {} : { campaignId: body.campaignId })
+        };
+      })()
+    )
+  }));
+  app.delete("/api/v1/prompt-library/overrides", async (request) => {
+    const body = z.object({
+      key: promptTemplateKeySchema,
+      scope: z.enum(["application", "campaign"]),
+      campaignId: z.uuid().optional()
+    }).parse(request.body);
+    return {
+      library: await providers.resetPromptOverride(
+        await initialOwnerId(pool),
+        {
+          key: body.key,
+          scope: body.scope,
+          ...(body.campaignId === undefined ? {} : { campaignId: body.campaignId })
+        }
+      )
+    };
+  });
+  app.post("/api/v1/prompt-library/preview", async (request) => {
+    const body = z.object({ key: promptTemplateKeySchema, content: z.string().trim().min(1).max(16_000) })
+      .parse(request.body);
+    return providers.previewPrompt(await initialOwnerId(pool), body);
+  });
 
-  app.get("/api/v1/providers", async () => parseResponseProjection(providerListResponseSchema, { providers: await listProviders(pool) }));
+  app.get("/api/v1/providers", async () => parseResponseProjection(providerListResponseSchema, {
+    providers: await providers.list(await initialOwnerId(pool))
+  }));
 
   app.post("/api/v1/providers", async (request, reply) => {
     const input = providerProfileInputSchema.parse(request.body);
-    const provider = await createProvider(pool, input, config.credentialEncryptionKey);
+    const provider = await providers.create(await initialOwnerId(pool), input);
     return reply.code(201).send(provider);
   });
 
   app.get<{ Params: { providerId: string } }>("/api/v1/providers/:providerId/models", async (request) => ({
-    models: await providerModels(pool, uuidSchema.parse(request.params.providerId), config.credentialEncryptionKey)
+    models: await providers.models(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId))
   }));
 
   app.put<{ Params: { providerId: string } }>("/api/v1/providers/:providerId/default", async (request) => (
-    setDefaultProvider(pool, uuidSchema.parse(request.params.providerId))
+    providers.setDefault(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId))
   ));
 
   app.patch<{ Params: { providerId: string } }>("/api/v1/providers/:providerId", async (request) => (
-    updateProvider(pool, uuidSchema.parse(request.params.providerId), providerProfileUpdateSchema.parse(request.body), config.credentialEncryptionKey)
+    providers.update(
+      await initialOwnerId(pool),
+      uuidSchema.parse(request.params.providerId),
+      providerProfileUpdateSchema.parse(request.body)
+    )
   ));
 
   app.post("/api/v1/provider-text/generate", async (request) => (
-    generateProviderText(pool, providerTextRequestSchema.parse(request.body), config.credentialEncryptionKey)
+    providers.generateText(await initialOwnerId(pool), providerTextRequestSchema.parse(request.body))
   ));
 
   app.post("/api/v1/providers/discover-models", async (request) => ({
-    models: await discoverUnsavedProviderModels(providerProfileInputSchema.parse(request.body))
+    models: await providers.discoverModels(await initialOwnerId(pool), providerProfileInputSchema.parse(request.body))
   }));
 
   app.delete<{ Params: { providerId: string } }>("/api/v1/providers/:providerId", async (request) => (
-    deleteProvider(pool, uuidSchema.parse(request.params.providerId))
+    providers.delete(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId))
   ));
 
   app.post("/api/v1/imports/legacy-story/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => (
@@ -783,7 +824,11 @@ export async function buildServer({ config, pool, generation, illustration, memo
     const campaignId = uuidSchema.parse(request.params.campaignId);
     const pageRequest = turnPageRequestSchema.parse(request.query);
     const page = await readTurnPage(pool, ownerUserId, campaignId, pageRequest.before, pageRequest.limit ?? 50);
-    const costs = await turnReportedCosts(pool, ownerUserId, page.turns.map((turn) => turn.id));
+    const costs = await providers.application.getTurnCosts({
+      ownerUserId,
+      campaignId,
+      turnIds: page.turns.map((turn) => turn.id)
+    });
     return parseResponseProjection(turnListResponseSchema, {
       campaignId,
       turns: page.turns.map((turn) => ({
@@ -818,7 +863,10 @@ export async function buildServer({ config, pool, generation, illustration, memo
   ));
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/cost-summary", async (request) => (
-    getCampaignCostSummary(pool, uuidSchema.parse(request.params.campaignId))
+    providers.application.getCampaignCostSummary({
+      ownerUserId: await initialOwnerId(pool),
+      campaignId: uuidSchema.parse(request.params.campaignId)
+    })
   ));
 
   app.get<{ Params: { campaignId: string }; Querystring: { since?: string } }>("/api/v1/campaigns/:campaignId/sync-status", async (request) => {
@@ -868,14 +916,15 @@ export async function buildServer({ config, pool, generation, illustration, memo
     )
   ));
 
-  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/turn-input/classify", async (request) => (
-    parseResponseProjection(turnInputClassificationResponseSchema, await classifyTurnInput(
-      pool,
-      uuidSchema.parse(request.params.campaignId),
-      turnInputClassificationRequestSchema.parse(request.body),
-      config.credentialEncryptionKey
-    ))
-  ));
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/turn-input/classify", async (request) => {
+    const body = turnInputClassificationRequestSchema.parse(request.body);
+    return parseResponseProjection(turnInputClassificationResponseSchema, await providers.application.classifyTurnIntent({
+      ownerUserId: await initialOwnerId(pool),
+      campaignId: uuidSchema.parse(request.params.campaignId),
+      text: body.text,
+      ...(body.preferredFallback === undefined ? {} : { preferredFallback: body.preferredFallback })
+    }));
+  });
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations", async (request, reply) => {
     const campaignId = uuidSchema.parse(request.params.campaignId);

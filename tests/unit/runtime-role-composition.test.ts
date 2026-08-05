@@ -11,6 +11,9 @@ import type {
 } from "../../packages/application/src/index.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
+import type { ProviderTransport } from "../../packages/story-engine/src/provider-transport.js";
+import type { ProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
+import type { ProviderApiTransportAdapter } from "../../services/api/src/provider-application-adapter.js";
 import {
   dispatchRuntimeRole,
   type RuntimeRoleDependencies
@@ -25,6 +28,10 @@ const memory = { kind: "memory" } as unknown as MemoryApplication;
 const workerMemory = { kind: "worker-memory" } as unknown as MemoryWorkerApplication;
 const worldCampaign = { kind: "world-campaign" } as unknown as WorldCampaignApplication;
 const generationEvents = { kind: "generation-events" } as unknown as GenerationEventSource;
+const providerTransport = { kind: "provider-transport" } as unknown as ProviderTransport;
+const apiProviders = { kind: "api-providers" } as unknown as ProviderApplicationComposition;
+const workerProviders = { kind: "worker-providers" } as unknown as ProviderApplicationComposition;
+const providerApiAdapter = { kind: "provider-api-adapter" } as unknown as ProviderApiTransportAdapter;
 
 function config(role: RuntimeConfig["role"]): RuntimeConfig {
   return {
@@ -50,6 +57,9 @@ function dependencies(controller: AbortController) {
     values: {
       buildServer: vi.fn(async () => server),
       createApiGeneration: vi.fn(() => apiGeneration),
+      createApiProviders: vi.fn(() => apiProviders),
+      createWorkerProviders: vi.fn(() => workerProviders),
+      createProviderApiAdapter: vi.fn(() => providerApiAdapter),
       createApiIllustration: vi.fn(() => illustration),
       createApiMemory: vi.fn(() => memory),
       createApiWorldCampaign: vi.fn(() => worldCampaign),
@@ -68,7 +78,7 @@ describe("runtime role generation composition", () => {
     const controller = new AbortController();
     const { server, values } = dependencies(controller);
 
-    await dispatchRuntimeRole(config("api"), pool, controller.signal, values, generationEvents);
+    await dispatchRuntimeRole(config("api"), pool, controller.signal, values, providerTransport, generationEvents);
 
     expect(values.createApiGeneration).toHaveBeenCalledOnce();
     expect(values.createApiGeneration).toHaveBeenCalledWith(pool);
@@ -82,6 +92,7 @@ describe("runtime role generation composition", () => {
       generation: apiGeneration,
       illustration,
       memory,
+      providers: providerApiAdapter,
       generationEvents,
       worldCampaign
     });
@@ -93,7 +104,7 @@ describe("runtime role generation composition", () => {
     const controller = new AbortController();
     const { values } = dependencies(controller);
 
-    await dispatchRuntimeRole(config("worker"), pool, controller.signal, values, undefined);
+    await dispatchRuntimeRole(config("worker"), pool, controller.signal, values, providerTransport, undefined);
 
     expect(values.waitForDatabaseMigrations).toHaveBeenCalledWith(
       pool,
@@ -119,7 +130,7 @@ describe("runtime role generation composition", () => {
     const controller = new AbortController();
     const { server, values } = dependencies(controller);
 
-    await dispatchRuntimeRole(config("all"), pool, controller.signal, values, generationEvents);
+    await dispatchRuntimeRole(config("all"), pool, controller.signal, values, providerTransport, generationEvents);
 
     expect(values.createApiGeneration).toHaveBeenCalledOnce();
     expect(values.createApiGeneration).toHaveBeenCalledWith(pool);
@@ -133,6 +144,7 @@ describe("runtime role generation composition", () => {
       generation: apiGeneration,
       illustration,
       memory,
+      providers: providerApiAdapter,
       generationEvents,
       worldCampaign
     });
@@ -149,7 +161,7 @@ describe("runtime role generation composition", () => {
     const controller = new AbortController();
     const { values } = dependencies(controller);
 
-    await dispatchRuntimeRole(config("migrate"), pool, controller.signal, values, undefined);
+    await dispatchRuntimeRole(config("migrate"), pool, controller.signal, values, providerTransport, undefined);
 
     expect(values.migrateDatabase).toHaveBeenCalledWith(
       pool,

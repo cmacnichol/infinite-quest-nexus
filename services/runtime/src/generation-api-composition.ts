@@ -5,8 +5,8 @@ import {
 } from "../../../packages/application/src/index.js";
 import { createPostgresGenerationCommandRepository } from "../../../packages/database/src/generation-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import { turnReportedCosts } from "../../api/src/cost-service.js";
-import { promptProtocolVersion, resolvePromptSnapshot } from "../../api/src/prompt-library-service.js";
+import { turnReportedCosts } from "./provider-cost-adapter.js";
+import { promptProtocolVersion, resolvePromptSnapshot } from "./provider-prompt-adapter.js";
 
 export type ApiGenerationCompositionFactories = Readonly<{
   createCommandRepository(pool: DatabasePool): GenerationCommandRepository;

@@ -20,14 +20,14 @@ import {
 } from "../../../packages/domain/src/infinite-worlds.js";
 import { callTextProvider, containsMechanicsLanguage, extractJsonObject } from "../../../packages/story-engine/src/index.js";
 import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js";
-import { loadTextProvider } from "./provider-service.js";
+import { loadTextProvider } from "../../../packages/database/src/provider-runtime-adapter.js";
 import type { FilesystemAssetStore } from "./asset-service.js";
 import { resolvePlayableCharacters } from "../../../packages/domain/src/world-characters.js";
 import { extractCyoaLayers, parseCyoaExport } from "../../../packages/domain/src/world-template.js";
 import {
   generateTemplateWorld,
   worldGenerationFailureDiagnostic
-} from "./task-14d-world-generation-bridge.js";
+} from "../../../packages/database/src/provider-world-generation-adapter.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import type { PromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
@@ -36,7 +36,7 @@ import type { PortableWorldApplicationPort } from "../../../packages/application
 import {
   promptFromSnapshot,
   resolvePromptSnapshot
-} from "./prompt-library-service.js";
+} from "../../../packages/database/src/provider-prompt-adapter.js";
 
 
 export type ImportProgressReport = {

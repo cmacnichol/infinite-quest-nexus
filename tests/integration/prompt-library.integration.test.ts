@@ -8,7 +8,7 @@ import {
   resetPromptOverride,
   resolvePromptSnapshot,
   savePromptOverride
-} from "../../services/api/src/prompt-library-service.js";
+} from "../../services/runtime/src/provider-prompt-adapter.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;

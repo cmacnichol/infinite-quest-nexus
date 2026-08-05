@@ -15,7 +15,7 @@ import {
 } from "../../services/runtime/src/illustration-repository-bindings.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { insertImageJob } from "../../services/runtime/src/illustration-image-job-adapter.js";
-import { createProvider } from "../../services/api/src/provider-service.js";
+import { createProvider } from "../../services/runtime/src/provider-runtime-adapter.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
