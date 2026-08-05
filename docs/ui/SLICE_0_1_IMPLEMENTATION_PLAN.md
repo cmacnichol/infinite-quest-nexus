@@ -87,7 +87,7 @@ contain this plan.
 | Task 12 | B3 — worker concurrency and fair lanes | **Complete** | Implementation `312ebaa`, correction `57147c7`, docs `8593e3e`; scoped implementation review plus clean correction re-review; full unit 1,150/1,150, implementation full PostgreSQL 232/232, correction-relevant PostgreSQL 68/68; C0 concurrency 1/2/4 benchmark and duplicate-turn guard passed |
 | Task 13b | B4b — play-loop read profiling/optimization | **Complete** | Implementation `1d6b766`, correction `ff7f56e`; scoped review and correction re-review approved; full unit 1,156/1,156, full PostgreSQL 234/234, C0 read benchmark passed |
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | **Complete** | `e2a15e6` through `c7c8353`; contracts, cutover, durability, privacy, ownership, and all 18 Fastify route-parity gates independently approved |
-| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; controller 1,228 unit/270 integration/check/build/diff/precheck passed |
+| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | Not started | — |
 | Task 14d | B5d — providers and prompt configuration (removes none) | Not started | — |
 | Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
@@ -7248,19 +7248,90 @@ portion of `generation-service.ts`, `campaign-transfer-service.ts`,
 routes. `play-loop-read-repository.ts` remains the B4a/B4b read adapter and is
 consumed rather than duplicated.
 
-Split this domain internally: **14c1** creates platform-free world/version,
-campaign, campaign-state, character-profile, dashboard, and session-owner use
-cases plus exact owner-scoped ports; **14c2** creates focused PostgreSQL adapters
-(`world-repository.ts`, `campaign-repository.ts`,
-`campaign-state-repository.ts`, and `world-generation-repository.ts`) and
-provider/memory collaborator adapters; **14c3** cuts over CRUD/publication,
-fork/import/export, campaign create/update/delete, character/profile/state,
-sync/rewind/branch/transfer, dashboard/session, and world/character generation
-routes; **14c4** removes the old callable implementations and performs parity
-review. Create API adapters and `services/runtime/src/world-campaign-composition.ts`;
-cover world-library, world-generation, progress, gameplay, campaign-transfer,
-state-correction, dashboard, user-profile, and client-route suites plus new
-pure application/repository/adapter tests.
+**Ownership boundary (frozen before 14c1):** 14c owns reusable-world and
+campaign semantics, including portable **world JSON** preview/import/export
+(`previewWorldImport`, `importWorld`, and `exportWorld`) because they create or
+read a world/version aggregate. Task 14e owns archive/asset/filesystem I/O,
+legacy-story and Infinite Worlds imports, and campaign/archive export. Thus 14c
+may depend on an opaque portable-world payload port but must not open archives,
+stream multipart input, resolve filesystem paths, or take over 14e's import
+records. Task 14e must consume the named 14c world-import/export application
+port rather than reimplement world/version persistence.
+
+**Complete current-state inventory (must be re-measured at every checkpoint):**
+
+- `world-service.ts`: world list/get/create/draft-update/publish/status/fork;
+  world JSON preview/import/export; campaign list/create/update/delete;
+  playable-character reads; world/world-version deletion; and explicit campaign
+  world-version migration. All become named 14c application methods or
+  repository operations; no callable business export remains at 14c4.
+- `campaign-state-service.ts`: effective-state edit, runtime-state read, and
+  state correction. `generation-service.ts` contributes only player-config
+  sync, rewind, and branch; all three become campaign application methods and
+  its legacy callable exports are removed at 14c4.
+- `character-profile-service.ts`: campaign profile get/update/organize and
+  world-draft organizer. Its provider/prompt interaction is a 14c port only;
+  credential loading, selected-model resolution, transport, and prompt snapshot
+  implementation remain 14d-owned.
+- `campaign-transfer-service.ts`: preview/commit transfer with idempotency,
+  source/target ownership, migration history, and replacement/turn provenance.
+- `world-generator-service.ts` and `world-generation-progress-service.ts`:
+  preview and playable-character generation plus create/update/read/expired
+  progress cleanup. Progress expiry is an application/repository operation,
+  not a hidden Fastify request side effect. Generation uses a typed 14c
+  collaborator port; no credential or text-profile object crosses the
+  application boundary.
+- `dashboard-service.ts` and `user-service.ts`: dashboard projection and
+  server-resolved session-profile read/update. Initial-user bootstrap stays in
+  database migrations/configuration, while session/profile use cases take an
+  explicit `OwnerScope`.
+- The direct `/api/v1/campaigns/:campaignId/sync-status` SQL assembly in
+  `server.ts` is a required `getCampaignSyncStatus` 14c use case plus a
+  repository read port. It composes the existing `play-loop-read-repository.ts`
+  turn-page port; it must not duplicate cursor, snapshot, or bounded-read logic.
+
+Every former `initialOwnerId` call in the inventory is replaced by an explicit
+server-resolved `OwnerScope` at the Fastify composition boundary. This does not
+authorize caller-supplied identity: the resolver remains server-only and the
+worker gets only a claimed, database-derived owner scope. Each temporary 14c
+provider/prompt/memory collaborator must be named in the runtime composition
+with its producing task and deletion owner (normally 14d for provider/prompt
+implementations); anonymous compatibility callbacks are prohibited.
+
+Split this domain internally:
+
+1. **14c1 — application contracts and pure use cases.** Create platform-free
+   world/version, campaign lifecycle, campaign state, campaign sync, character
+   profile, transfer, dashboard, session-profile, world-generation, and progress
+   types/ports/use cases. Freeze command/read transaction ownership, `OwnerScope`,
+   error/result mapping, and collaborator interfaces. Add pure tests for
+   immutable publication, explicit migration/promotion, append-only/replacement
+   facts, owner isolation, and transition errors. Do not route-cut over or leave
+   fallback callbacks in this checkpoint.
+2. **14c2 — PostgreSQL and collaborator adapters.** Create focused
+   `world-repository.ts`, `campaign-repository.ts`,
+   `campaign-state-repository.ts`, `world-generation-repository.ts`, and the
+   sync/session/dashboard/character/transfer adapters as needed. Use one
+   caller-owned transaction client for each atomic command; preserve advisory
+   locking/idempotency and use read-only/repeatable snapshots where the current
+   contract requires them. Add real-PostgreSQL adapter tests for foreign-owner
+   invisibility, published-version immutability, deletion blockers, transfer
+   provenance, rewind/branch authority, and progress expiry.
+3. **14c3 — atomic composition and transport cutover.** Create named API
+   adapters plus `services/runtime/src/world-campaign-composition.ts`, bind every
+   `OwnerScope` at Fastify composition, and cut over all listed routes and any
+   worker/world-generation caller in one reviewed checkpoint. Fastify retains
+   validation, status/response projection, and transport-only archive handling;
+   it contains no business SQL or state assembly. Move `/sync-status` to the
+   application, preserve the B4 read-repository contract, and prove real Fastify
+   route parity for every inventory item.
+4. **14c4 — legacy removal and parity audit.** Delete/reduce old callable
+   implementations only after 14c3 is green. Search all API/runtime/worker
+   imports and exports, record a disposition for every inventory function, and
+   prove no legacy world/campaign/profile/state/generation service remains
+   reachable. Run the named world-library, world-generation/progress, gameplay,
+   campaign-transfer, state-correction, dashboard, user-profile, client-route,
+   pure-use-case, adapter-contract, and real-PostgreSQL suites.
 
 The initial-user resolver is injected at the Fastify boundary; no request field,
 header, email, display name, or provider identity is accepted as authority.
@@ -7268,8 +7339,9 @@ Initial-user bootstrap remains idempotent and credential-free. Preserve non-null
 ownership, immutable published versions, explicit campaign migration/promotion,
 append-only accepted turns, durable replacement provenance, and deletion
 blockers. On completion, the three campaign-operation `initialOwnerId` lookups
-recorded by 10c3 have moved to route composition and
-`generation-service.ts` has no remaining callable responsibility.
+recorded by 10c3 and every 14c-inventory ownership lookup have moved to explicit
+composition-scoped authority, and `generation-service.ts` has no remaining
+callable responsibility.
 
 ### Task 14d — B5d: providers, prompts, intent, and cost
 
