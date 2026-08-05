@@ -7390,6 +7390,16 @@ Split this domain internally:
    and diff checks. **14c2b-branch is next**; no route/runtime/worker/legacy
    service cutover occurred.
 
+   **14c2b-branch completion (2026-08-05):** `caa6dd1` adds the additive,
+   caller-owned campaign-branch repository operation. It copies accepted
+   history/state with merged durable branch and append/replacement provenance,
+   keeps source campaign state/history immutable, and deliberately does not
+   clone operational jobs, costs, or recovery records. The final independent
+   review approved with zero findings; real-PostgreSQL coverage passed 26/26
+   twice with `pnpm check` and diff checks. **14c2 is complete; 14c2c
+   (transfer and characters) is next.** No route/runtime/worker/legacy-service
+   cutover occurred.
+
 3. **14c3 — atomic composition and transport cutover.** Create named API
    adapters plus `services/runtime/src/world-campaign-composition.ts`, bind every
    `OwnerScope` at Fastify composition, and cut over all listed routes and any
