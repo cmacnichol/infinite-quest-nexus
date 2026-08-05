@@ -88,9 +88,25 @@ export function embeddingEligibility(config: Readonly<{
   return { eligible: true };
 }
 
+function stripBracketedMechanics(value: string): Readonly<{
+  text: string;
+  removedSegments: number;
+}> {
+  let removedSegments = 0;
+  const text = value.replace(
+    /\[\[?(?:roll|dice|check|score|target|modifier|difficulty)\b[^\]\r\n]{0,500}\]\]?/gi,
+    () => {
+      removedSegments += 1;
+      return "";
+    }
+  ).replace(/[ \t]+(?=[.!?,;:]|$)/g, " ").trim();
+  return { text, removedSegments };
+}
+
 export function sanitizeChronicleFictionString(value: unknown, maximumCharacters = 4000): string {
   if (typeof value !== "string") return "";
-  return truncateAtBoundary(stripMechanicsLeakage(value).text, maximumCharacters);
+  const bracketed = stripBracketedMechanics(value);
+  return truncateAtBoundary(stripMechanicsLeakage(bracketed.text).text, maximumCharacters);
 }
 
 export function sanitizeChronicleFictionValue(value: unknown, depth = 0): unknown {
@@ -131,8 +147,10 @@ export function buildAcceptedTurnFictionMemory(
   removedMechanicsSegments: number;
 }> | null {
   if (!turn.accepted) return null;
-  const action = stripMechanicsLeakage(typeof turn.action === "string" ? turn.action.trim() : "");
-  const narration = stripMechanicsLeakage(typeof turn.narration === "string" ? turn.narration.trim() : "");
+  const bracketedAction = stripBracketedMechanics(typeof turn.action === "string" ? turn.action.trim() : "");
+  const bracketedNarration = stripBracketedMechanics(typeof turn.narration === "string" ? turn.narration.trim() : "");
+  const action = stripMechanicsLeakage(bracketedAction.text);
+  const narration = stripMechanicsLeakage(bracketedNarration.text);
   const content = [
     `Turn ${ordinal}`,
     action.text ? `Player action: ${action.text}` : "",
@@ -142,8 +160,10 @@ export function buildAcceptedTurnFictionMemory(
     content,
     tokenEstimate: estimateTokens(content),
     entities: extractEntities(`${action.text}\n${narration.text}`),
-    sanitized: action.changed || narration.changed,
+    sanitized: action.changed || narration.changed
+      || bracketedAction.removedSegments > 0 || bracketedNarration.removedSegments > 0,
     removedMechanicsSegments: action.removedSegments + narration.removedSegments
+      + bracketedAction.removedSegments + bracketedNarration.removedSegments
   };
 }
 

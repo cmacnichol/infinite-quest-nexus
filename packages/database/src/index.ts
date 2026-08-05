@@ -1,4 +1,5 @@
 export * from "./config.js";
+export * from "./chronicle-repository.js";
 export * from "./generation-repository.js";
 export * from "./generation-execution-repository.js";
 export * from "./illustration-repository.js";

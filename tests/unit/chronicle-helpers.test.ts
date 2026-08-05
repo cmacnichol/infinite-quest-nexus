@@ -79,6 +79,21 @@ describe("Chronicle helper parity", () => {
     });
   });
 
+  it("removes bracketed roll and check directives from derived fiction strings", () => {
+    expect(sanitizeChronicleMemoryLines([
+      "The Moon Warden wakes. [[ROLL 1d20=20]]",
+      "Find the silver key. [CHECK dexterity]"
+    ])).toEqual([
+      "The Moon Warden wakes.",
+      "Find the silver key."
+    ]);
+    expect(buildAcceptedTurnFictionMemory({
+      accepted: true,
+      action: "Open the gate. [[ROLL 1d20=20]]",
+      narration: "The gate opens. [CHECK dexterity]"
+    }, 4)?.content).toBe("Turn 4\nPlayer action: Open the gate.\nNarration: The gate opens.");
+  });
+
   it("shares embedding eligibility, stable provider fingerprints, and fixed safe error projections with direct ports", () => {
     expect(embeddingEligibility({ enabled: true, providerProfileId: "embedding-1", model: "nomic-embed-text" })).toEqual({ eligible: true });
     expect(embeddingEligibility({ enabled: true, providerProfileId: null, model: "nomic-embed-text" }))
