@@ -7,6 +7,7 @@ import {
   createChroniclePlatformBindings,
   resolveChronicleEmbeddingProviderId
 } from "../../services/runtime/src/chronicle-platform-bindings.js";
+import { createChronicleClaimExecution } from "../../services/runtime/src/chronicle-worker-execution.js";
 import {
   createApiMemoryApplication
 } from "../../services/runtime/src/memory-composition.js";
@@ -209,6 +210,128 @@ describe("Chronicle runtime adapters", () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(["false", "rejection"] as const)(
+    "preserves healthy provider state when a late heartbeat %s loses the lease",
+    async (heartbeatFailure) => {
+      vi.useFakeTimers();
+      const claim = {
+        jobId: `job-late-heartbeat-${heartbeatFailure}`,
+        ownerUserId: "owner-1",
+        campaignId: "campaign-1",
+        worldVersionId: "world-version-1",
+        jobType: "embed_campaign" as const,
+        workVersion: 1,
+        workerId: "worker-1",
+        leaseSeconds: 3
+      };
+      let releaseHealthyWrite!: () => void;
+      let markHealthyWriteStarted!: () => void;
+      const healthyWriteStarted = new Promise<void>((resolve) => {
+        markHealthyWriteStarted = resolve;
+      });
+      const healthyWriteHeld = new Promise<void>((resolve) => {
+        releaseHealthyWrite = resolve;
+      });
+      const providerHealth = { status: "degraded", consecutiveFailures: 2 };
+      const recordHealth = vi.fn(async (
+        _pool: unknown,
+        _scope: unknown,
+        healthy: boolean,
+      ) => {
+        if (healthy) {
+          providerHealth.status = "healthy";
+          providerHealth.consecutiveFailures = 0;
+          markHealthyWriteStarted();
+          await healthyWriteHeld;
+          return;
+        }
+        providerHealth.consecutiveFailures += 1;
+        providerHealth.status = providerHealth.consecutiveFailures >= 3 ? "unavailable" : "degraded";
+      });
+      const state = {
+        claimNext: vi.fn().mockResolvedValue(claim),
+        loadClaimedJob: vi.fn().mockResolvedValue(null),
+        heartbeatClaim: vi.fn().mockImplementation(() => heartbeatFailure === "false"
+          ? Promise.resolve(false)
+          : Promise.reject(new Error("late heartbeat transport failure"))),
+        completeClaim: vi.fn().mockResolvedValue(true),
+        requeueClaim: vi.fn(),
+        failClaim: vi.fn()
+      };
+      const execution = createChronicleClaimExecution({} as never, {
+        retrieval: { loadForClaim: vi.fn() },
+        embeddings: {
+          resolve: vi.fn(),
+          load: vi.fn().mockResolvedValue({
+            id: "provider-1",
+            model: "embed-v1",
+            providerType: "openai",
+            baseUrl: "https://example.test"
+          }),
+          fingerprint: vi.fn().mockResolvedValue("fingerprint"),
+          embed: vi.fn().mockResolvedValue({
+            embeddings: [[0.1]], responseId: "response", usage: {}, reportedCost: null
+          }),
+          recordHealth,
+          recordCost: vi.fn(),
+          logDiagnostic: vi.fn()
+        },
+        batches: { commitClaimBatch: vi.fn().mockResolvedValue(true) },
+        generation: {
+          autoEnableCampaignEmbedding: vi.fn(),
+          buildContextPreview: vi.fn(),
+          storeDerivedTurnMemories: vi.fn(),
+          writeAcceptedTurnFiction: vi.fn(),
+          rebuildCampaignMemories: vi.fn(),
+          enqueueEmbeddingReindex: vi.fn()
+        },
+        credentialSecret: "secret"
+      });
+      const logProviderTransportError = vi.fn();
+      const executor = createChronicleWorkerExecutor({
+        state,
+        retrieval: { loadForClaim: vi.fn().mockResolvedValue({
+          config: {
+            enabled: true,
+            providerProfileId: "provider-1",
+            model: "embed-v1",
+            batchSize: 1
+          },
+          memories: [{ id: "11111111-1111-4111-8111-111111111111", content: "First memory" }],
+          totalMemories: 1,
+          batchLimit: 1,
+          nextCursor: null
+        }) },
+        execution,
+        logProviderTransportError
+      });
+
+      try {
+        const running = executor.runNextChronicle({
+          workerId: "worker-1", leaseSeconds: 3, retrieval: { batchLimit: 1 }
+        });
+        await healthyWriteStarted;
+        expect(providerHealth).toEqual({ status: "healthy", consecutiveFailures: 0 });
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        releaseHealthyWrite();
+        await expect(running).resolves.toBe(true);
+
+        expect(providerHealth).toEqual({ status: "healthy", consecutiveFailures: 0 });
+        expect(recordHealth).toHaveBeenCalledTimes(1);
+        expect(state.completeClaim).toHaveBeenCalledOnce();
+        expect(state.completeClaim).toHaveBeenCalledWith(claim, {
+          progress: { retryReason: "work_version_changed" }
+        });
+        expect(state.failClaim).not.toHaveBeenCalled();
+        expect(logProviderTransportError).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
 
   it("selects a dedicated enabled embedding profile before text and never queries image roles", async () => {
     const roles: string[] = [];

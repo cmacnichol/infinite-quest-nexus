@@ -75,50 +75,53 @@ async function executeChronicleClaim(
   const prefixes = modelAwareEmbeddingPrefixes(config.model, config.documentPrefix ?? null, config.queryPrefix ?? null);
   const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
   throwIfLeaseLost(lifecycle);
+  const providerScope = {
+    ownerUserId: claim.ownerUserId,
+    providerProfileId: config.providerProfileId,
+    model: config.model
+  };
   let processed = 0;
-  try {
-    while (true) {
-      throwIfLeaseLost(lifecycle);
-      const memories = batchMemories(retrieval);
-      if (memories.length) {
-        const result = await dependencies.embeddings.embed(provider, memories.map((memory) => `${prefixes.documentPrefix}${memory.content}`));
-        throwIfLeaseLost(lifecycle);
-        if (result.embeddings.length !== memories.length) throw new Error("Embedding provider returned an incomplete Chronicle batch.");
-        const nextProcessed = processed + memories.length;
-        const committed = await dependencies.batches.commitClaimBatch(claim, {
-          provider,
-          providerFingerprint: fingerprint,
-          protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
-          memories,
-          result,
-          processed: nextProcessed,
-          total: first.totalMemories
-        });
-        if (!committed) throw new Error("Chronicle job lease was lost during embedding batch commit.");
-        processed = nextProcessed;
-      }
-      if (!retrieval.nextCursor) break;
-      throwIfLeaseLost(lifecycle);
-      retrieval = await dependencies.retrieval.loadForClaim(claim, {
-        batchLimit: retrieval.batchLimit,
-        cursor: retrieval.nextCursor
-      });
-      if (retrieval.totalMemories < processed) throw new Error("Chronicle retrieval total regressed during a claim.");
-    }
-    await dependencies.embeddings.recordHealth(pool, {
-      ownerUserId: claim.ownerUserId,
-      providerProfileId: config.providerProfileId,
-      model: config.model
-    }, true);
+  while (true) {
     throwIfLeaseLost(lifecycle);
-  } catch (error) {
-    await dependencies.embeddings.recordHealth(pool, {
-      ownerUserId: claim.ownerUserId,
-      providerProfileId: config.providerProfileId,
-      model: config.model
-    }, false, "chronicle_embedding_failed").catch(() => undefined);
-    throw error;
+    const memories = batchMemories(retrieval);
+    if (memories.length) {
+      let result: Awaited<ReturnType<ChronicleEmbeddingProviderPort["embed"]>>;
+      try {
+        result = await dependencies.embeddings.embed(provider, memories.map((memory) => `${prefixes.documentPrefix}${memory.content}`));
+        if (result.embeddings.length !== memories.length) throw new Error("Embedding provider returned an incomplete Chronicle batch.");
+      } catch (error) {
+        await dependencies.embeddings.recordHealth(
+          pool,
+          providerScope,
+          false,
+          "chronicle_embedding_failed"
+        ).catch(() => undefined);
+        throw error;
+      }
+      throwIfLeaseLost(lifecycle);
+      const nextProcessed = processed + memories.length;
+      const committed = await dependencies.batches.commitClaimBatch(claim, {
+        provider,
+        providerFingerprint: fingerprint,
+        protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
+        memories,
+        result,
+        processed: nextProcessed,
+        total: first.totalMemories
+      });
+      if (!committed) throw new Error("Chronicle job lease was lost during embedding batch commit.");
+      processed = nextProcessed;
+    }
+    if (!retrieval.nextCursor) break;
+    throwIfLeaseLost(lifecycle);
+    retrieval = await dependencies.retrieval.loadForClaim(claim, {
+      batchLimit: retrieval.batchLimit,
+      cursor: retrieval.nextCursor
+    });
+    if (retrieval.totalMemories < processed) throw new Error("Chronicle retrieval total regressed during a claim.");
   }
+  await dependencies.embeddings.recordHealth(pool, providerScope, true);
+  throwIfLeaseLost(lifecycle);
   return { embedded: processed, skipped: 0, total: first.totalMemories };
 }
 
