@@ -7368,6 +7368,18 @@ Split this domain internally:
    deletion, rollback, and cross-owner isolation. Each remains additive and
    independently committed/reviewed; 14c3 may consume them only after both are
    green.
+
+   **14c2b-state completion (2026-08-05):** `83d75e3` adds owner-scoped
+   effective/runtime-state reads, revision-fenced corrections, and
+   revision-fenced player-config synchronization. Correction `d4dae94`
+   preserves snapshot-only canonical facts when no active fact rows exist and
+   makes all fixture cleanup exact-ID, transactional, FK-ordered, and
+   repeatable. The final re-review approved with zero findings. Evidence: the
+   focused real-PostgreSQL matrix passed 14/14 twice consecutively, full unit
+   and integration suites passed 1,238/1,238 and 294/294, and `pnpm check`,
+   diff, and precheck passed. **14c2b-history (rewind and branch) is next**;
+   no route/runtime/worker/legacy-service cutover occurred.
+
 3. **14c3 — atomic composition and transport cutover.** Create named API
    adapters plus `services/runtime/src/world-campaign-composition.ts`, bind every
    `OwnerScope` at Fastify composition, and cut over all listed routes and any
