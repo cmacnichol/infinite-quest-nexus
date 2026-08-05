@@ -35,6 +35,17 @@ import type {
   UpdateProviderProfileCommand
 } from "./types.js";
 import type { OwnerScope } from "../generation/types.js";
+import type {
+  CampaignScope,
+  CharacterProfileOrganizationRequest,
+  CharacterProfileOrganizationView,
+  GeneratedPlayableCharacterView,
+  GeneratedWorldPreviewView,
+  PlayableCharacterGenerationPreviewRequest,
+  PlayableCharacterGenerationRequest,
+  WorldGenerationPreviewRequest,
+  WorldScope
+} from "../world-campaign/types.js";
 
 export interface ProviderProfilePort {
   listProfiles(scope: OwnerScope): Promise<readonly ProviderProfileView[]>;
@@ -202,18 +213,30 @@ export interface InfiniteWorldsCostPort {
 
 /** Exact temporary 14c seam; 14d3 owns replacing and deleting its bridge. */
 export interface Task14dWorldGenerationBridgePort {
-  generateWorld(input: WorldProviderConsumerScope & Readonly<{
-    generationId: string;
-    request: Readonly<Record<string, unknown>>;
-  }>): Promise<Readonly<Record<string, unknown>>>;
+  generateWorldPreview(
+    scope: OwnerScope,
+    request: WorldGenerationPreviewRequest,
+  ): Promise<GeneratedWorldPreviewView>;
+  generatePlayableCharacterPreview(
+    scope: OwnerScope,
+    request: PlayableCharacterGenerationPreviewRequest,
+  ): Promise<GeneratedPlayableCharacterView>;
+  generatePlayableCharacter(
+    scope: WorldScope,
+    request: PlayableCharacterGenerationRequest,
+  ): Promise<GeneratedPlayableCharacterView>;
 }
 
 /** Exact temporary 14c seam; 14d3 owns replacing and deleting its bridge. */
 export interface Task14dCharacterProfileOrganizerBridgePort {
-  organizeCharacter(input: WorldProviderConsumerScope & Readonly<{
-    characterId: string;
-    request: Readonly<Record<string, unknown>>;
-  }>): Promise<Readonly<Record<string, unknown>>>;
+  organizeCampaignCharacterProfile(
+    scope: CampaignScope,
+    request: CharacterProfileOrganizationRequest,
+  ): Promise<CharacterProfileOrganizationView>;
+  organizeWorldCharacterProfile(
+    scope: WorldScope,
+    request: CharacterProfileOrganizationRequest,
+  ): Promise<CharacterProfileOrganizationView>;
 }
 
 export type ProviderApplicationDependencies = Readonly<{

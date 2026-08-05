@@ -6,11 +6,64 @@ import type {
   ImmutablePromptSnapshot,
   PromptSnapshotEntry,
   PromptSnapshotVersion,
-  SafeProviderConfiguration
+  SafeProviderConfiguration,
+  SafeProviderConfigurationFields
 } from "./types.js";
 
 function freezeConfiguration(configuration: SafeProviderConfiguration): SafeProviderConfiguration {
-  return Object.freeze({ ...configuration });
+  return Object.freeze({ ...configuration }) as SafeProviderConfiguration;
+}
+
+const BOOLEAN_CONFIGURATION_KEYS = new Set([
+  "streaming",
+  "streamingSupport",
+  "modelDiscoveryEnabled",
+  "allowPrivateArtifactHosts"
+]);
+const NUMBER_CONFIGURATION_KEYS = new Set([
+  "defaultWidth",
+  "defaultHeight",
+  "defaultImageCount",
+  "defaultSteps",
+  "defaultGuidance",
+  "defaultSeed",
+  "defaultPreviewCount",
+  "pollIntervalMs",
+  "maximumPollIntervalMs",
+  "generationTimeoutMs",
+  "maximumAttempts"
+]);
+const STRING_CONFIGURATION_KEYS = new Set([
+  "httpReferer",
+  "defaultAspectRatio",
+  "defaultSizePreset",
+  "defaultSampler",
+  "defaultScheduler"
+]);
+
+function isSafeConfigurationEntry(key: string, value: unknown): boolean {
+  if (BOOLEAN_CONFIGURATION_KEYS.has(key)) return typeof value === "boolean";
+  if (NUMBER_CONFIGURATION_KEYS.has(key)) return typeof value === "number" && Number.isFinite(value);
+  if (STRING_CONFIGURATION_KEYS.has(key)) return typeof value === "string";
+  if (key === "network") return value === "fast" || value === "relaxed";
+  if (key === "tokenType") return value === "auto" || value === "sogni" || value === "spark";
+  if (key === "contentFilter") return value === "enabled" || value === "disabled";
+  if (key === "defaultOutputFormat") return value === "png" || value === "jpeg" || value === "webp";
+  if (key === "defaultQuality") {
+    return value === "auto" || value === "low" || value === "medium" || value === "high";
+  }
+  return false;
+}
+
+/** Projects untrusted or stored configuration onto the closed safe contract. */
+export function toSafeProviderConfiguration(configuration: unknown): SafeProviderConfiguration {
+  const source = configuration && typeof configuration === "object" && !Array.isArray(configuration)
+    ? configuration as Readonly<Record<string, unknown>>
+    : {};
+  const safeFields = Object.fromEntries(
+    Object.entries(source).filter(([key, value]) => isSafeConfigurationEntry(key, value)),
+  ) as SafeProviderConfigurationFields;
+  return Object.freeze(safeFields) as SafeProviderConfiguration;
 }
 
 function immutablePromptSnapshot(version: PromptSnapshotVersion): PromptSnapshotVersion {

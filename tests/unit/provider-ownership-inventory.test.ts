@@ -1,6 +1,27 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
+import type {
+  CharacterOrganizationCostPort,
+  CharacterOrganizationPromptPort,
+  ChronicleCostPort,
+  ChroniclePromptPort,
+  GenerationCostPort,
+  GenerationPromptPort,
+  IllustrationPromptPort,
+  InfiniteWorldsCostPort,
+  InfiniteWorldsPromptPort,
+  ProviderApplication,
+  ProviderCostPort,
+  ProviderIllustrationCostPort,
+  ProviderResolutionPort,
+  ProviderRuntimeLeasePort,
+  Task14dCharacterProfileOrganizerBridgePort,
+  Task14dWorldGenerationBridgePort,
+  TurnIntentClassificationPort,
+  WorldGenerationCostPort,
+  WorldGenerationPromptPort
+} from "../../packages/application/src/providers/index.js";
 
 const repositoryRoot = join(import.meta.dirname, "../..");
 const servicesRoot = join(repositoryRoot, "services");
@@ -12,10 +33,32 @@ const legacyModules = [
 ] as const;
 
 type LegacyModule = (typeof legacyModules)[number];
+type FuturePortCatalog = Readonly<{
+  CharacterOrganizationCostPort: CharacterOrganizationCostPort;
+  CharacterOrganizationPromptPort: CharacterOrganizationPromptPort;
+  ChronicleCostPort: ChronicleCostPort;
+  ChroniclePromptPort: ChroniclePromptPort;
+  GenerationCostPort: GenerationCostPort;
+  GenerationPromptPort: GenerationPromptPort;
+  IllustrationPromptPort: IllustrationPromptPort;
+  InfiniteWorldsCostPort: InfiniteWorldsCostPort;
+  InfiniteWorldsPromptPort: InfiniteWorldsPromptPort;
+  ProviderApplication: ProviderApplication;
+  ProviderCostPort: ProviderCostPort;
+  ProviderIllustrationCostPort: ProviderIllustrationCostPort;
+  ProviderResolutionPort: ProviderResolutionPort;
+  ProviderRuntimeLeasePort: ProviderRuntimeLeasePort;
+  Task14dCharacterProfileOrganizerBridgePort: Task14dCharacterProfileOrganizerBridgePort;
+  Task14dWorldGenerationBridgePort: Task14dWorldGenerationBridgePort;
+  TurnIntentClassificationPort: TurnIntentClassificationPort;
+  WorldGenerationCostPort: WorldGenerationCostPort;
+  WorldGenerationPromptPort: WorldGenerationPromptPort;
+}>;
+type FuturePortName = keyof FuturePortCatalog;
 type OwnershipEntry = Readonly<{
   authority: "api" | "worker" | "composition";
   consumer: string;
-  futurePorts: readonly string[];
+  futurePorts: readonly FuturePortName[];
   legacyModules: readonly LegacyModule[];
 }>;
 

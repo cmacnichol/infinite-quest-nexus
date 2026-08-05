@@ -12,20 +12,58 @@ export type ProviderRole = "text" | "image" | "embedding" | "intent";
 export type DirectProviderRole = Exclude<ProviderRole, "embedding">;
 export type ProviderHealthStatus = "unknown" | "healthy" | "degraded" | "unavailable";
 
-export type SafeProviderConfigurationValue =
-  | string
-  | number
-  | boolean
-  | null
-  | readonly SafeProviderConfigurationValue[]
-  | Readonly<{ [key: string]: SafeProviderConfigurationValue }>;
-
 /**
- * Configuration admitted to application contracts has already crossed a
- * sanitizer/validator boundary. Credentials and encrypted credential fields
- * are never configuration values.
+ * Exhaustive public/runtime-safe provider settings. Adapters must reject or
+ * discard every other stored key before constructing an application value.
+ * Keeping this closed makes credential, encryption, and raw-error keys
+ * unrepresentable rather than relying on a caller to remember redaction.
  */
-export type SafeProviderConfiguration = Readonly<Record<string, SafeProviderConfigurationValue>>;
+export type SafeProviderConfigurationFields = Readonly<{
+  streaming?: boolean;
+  streamingSupport?: boolean;
+  httpReferer?: string;
+  modelDiscoveryEnabled?: boolean;
+  network?: "fast" | "relaxed";
+  tokenType?: "auto" | "sogni" | "spark";
+  contentFilter?: "enabled" | "disabled";
+  defaultWidth?: number;
+  defaultHeight?: number;
+  defaultAspectRatio?: string;
+  defaultSizePreset?: string;
+  defaultOutputFormat?: "png" | "jpeg" | "webp";
+  defaultQuality?: "auto" | "low" | "medium" | "high";
+  defaultImageCount?: number;
+  defaultSteps?: number;
+  defaultGuidance?: number;
+  defaultSeed?: number;
+  defaultSampler?: string;
+  defaultScheduler?: string;
+  defaultPreviewCount?: number;
+  pollIntervalMs?: number;
+  maximumPollIntervalMs?: number;
+  generationTimeoutMs?: number;
+  maximumAttempts?: number;
+  allowPrivateArtifactHosts?: boolean;
+}>;
+
+declare const safeProviderConfigurationBrand: unique symbol;
+
+/** Construct only with `toSafeProviderConfiguration` after crossing an untrusted boundary. */
+export type SafeProviderConfiguration = SafeProviderConfigurationFields & Readonly<{
+  [safeProviderConfigurationBrand]: true;
+}>;
+
+/** Stable diagnostic categories only; never substitute a raw provider error. */
+export type ProviderHealthDiagnosticCode =
+  | "authentication_failed"
+  | "invalid_response"
+  | "model_unavailable"
+  | "network_policy_denied"
+  | "provider_unavailable"
+  | "rate_limited"
+  | "request_timeout"
+  | "transport_failure"
+  | "unknown_failure";
 
 export type ProviderHealthView = Readonly<{
   status: ProviderHealthStatus;
@@ -225,7 +263,7 @@ export type ProviderHealthRecord = OwnerScope & Readonly<{
   providerProfileId: string;
   outcome: "healthy" | "failed";
   /** Stable private diagnostic category, never a raw provider error or endpoint. */
-  diagnosticCode?: string;
+  diagnosticCode?: ProviderHealthDiagnosticCode;
 }>;
 
 export type ApplicationPromptScope = OwnerScope & Readonly<{
@@ -368,7 +406,10 @@ export type CampaignCostSummaryView = Readonly<{
 }>;
 
 export type CampaignCostScope = OwnerScope & Readonly<{ campaignId: string }>;
-export type TurnCostScope = OwnerScope & Readonly<{ turnIds: readonly string[] }>;
+export type TurnCostScope = OwnerScope & Readonly<{
+  campaignId: string;
+  turnIds: readonly string[];
+}>;
 export type GenerationCostAttributionScope = OwnerScope & Readonly<{
   campaignId: string;
   generationJobId: string;

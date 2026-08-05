@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   createProviderApplication,
+  toSafeProviderConfiguration,
   type CharacterOrganizationCostPort,
   type CharacterOrganizationPromptPort,
   type ChronicleCostPort,
@@ -18,9 +19,12 @@ import {
   type ProviderApplicationDependencies,
   type ProviderProfileChanges,
   type ProviderProfileView,
+  type ProviderHealthDiagnosticCode,
   type ProviderRuntimeLeasePort,
+  type SafeProviderConfiguration,
   type Task14dCharacterProfileOrganizerBridgePort,
   type Task14dWorldGenerationBridgePort,
+  type TurnCostScope,
   type WorldGenerationCostPort,
   type WorldGenerationPromptPort
 } from "../../packages/application/src/providers/index.js";
@@ -39,7 +43,7 @@ const textProfile: ProviderProfileView = {
   maxOutputTokens: 4_096,
   temperature: 0.8,
   requestTimeoutMs: 300_000,
-  configuration: { compatibility: "responses" },
+  configuration: toSafeProviderConfiguration({ streaming: true }),
   enabled: true,
   isDefault: true,
   hasCredential: false,
@@ -191,7 +195,7 @@ describe("provider application contracts", () => {
       maxOutputTokens: 4_096,
       temperature: 0.8,
       requestTimeoutMs: 300_000,
-      configuration: {},
+      configuration: toSafeProviderConfiguration({}),
       enabled: true,
       isDefault: false
     });
@@ -232,7 +236,10 @@ describe("provider application contracts", () => {
       generationJobId: "00000000-0000-4000-8000-000000000050",
       turnId: "00000000-0000-4000-8000-000000000060"
     });
-    await application.getTurnCosts({ ...owner, turnIds: ["00000000-0000-4000-8000-000000000060"] });
+    await application.getTurnCosts({
+      ...campaignScope,
+      turnIds: ["00000000-0000-4000-8000-000000000060"]
+    });
     await application.getCampaignCostSummary(campaignScope);
 
     expect(ports.profiles.deleteProfile).toHaveBeenCalledWith({ ...owner, providerProfileId: textProfile.id });
@@ -272,7 +279,7 @@ describe("provider application contracts", () => {
       maxOutputTokens: 4_096,
       temperature: 0.8,
       requestTimeoutMs: 300_000,
-      configuration: { compatibility: "responses" },
+      configuration: toSafeProviderConfiguration({ streaming: true }),
       enabled: true,
       isDefault: true
     };
@@ -281,7 +288,7 @@ describe("provider application contracts", () => {
     const updatedWithConfiguration = await application.updateProfile({
       ...owner,
       providerProfileId: textProfile.id,
-      changes: { configuration: { compatibility: "chat_completions" } }
+      changes: { configuration: toSafeProviderConfiguration({ streaming: false }) }
     });
     const updatedWithoutConfiguration = await application.updateProfile({
       ...owner,
@@ -291,11 +298,11 @@ describe("provider application contracts", () => {
 
     expect(created.configurationProjection).toEqual({
       kind: "same_request_echo",
-      configuration: { compatibility: "responses" }
+      configuration: { streaming: true }
     });
     expect(updatedWithConfiguration.configurationProjection).toEqual({
       kind: "same_request_echo",
-      configuration: { compatibility: "chat_completions" }
+      configuration: { streaming: false }
     });
     expect(updatedWithoutConfiguration.configurationProjection).toEqual({ kind: "sanitized_read" });
   });
@@ -308,6 +315,19 @@ describe("provider application contracts", () => {
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.snapshot)).toBe(true);
     expect(Object.isFrozen(result.snapshot.story_system)).toBe(true);
+  });
+
+  it("constructs safe configuration by retaining only reviewed keys and value shapes", () => {
+    const configuration = toSafeProviderConfiguration({
+      streaming: true,
+      maximumAttempts: 3,
+      apiKey: "must-not-cross",
+      credentialNonce: "must-not-cross",
+      lastHealthError: "raw provider failure"
+    });
+
+    expect(configuration).toEqual({ streaming: true, maximumAttempts: 3 });
+    expect(Object.isFrozen(configuration)).toBe(true);
   });
 
   it("models embedding text fallback explicitly while direct roles cannot cross roles", async () => {
@@ -347,6 +367,26 @@ type ProhibitedUpdateKey = Extract<
 
 expectTypeOf<ProhibitedCreateCommandKey>().toEqualTypeOf<never>();
 expectTypeOf<ProhibitedUpdateKey>().toEqualTypeOf<never>();
+
+type ProhibitedSafeConfigurationKey = Extract<
+  "apiKey" | "secret" | "token" | "encryptedApiKey" | "credentialNonce" |
+  "credentialAuthTag" | "credentialKeyVersion" | "lastHealthError",
+  keyof SafeProviderConfiguration
+>;
+type ArbitraryConfigurationKeyIsRepresentable =
+  "unreviewedProviderSetting" extends keyof SafeProviderConfiguration ? true : false;
+type StoredConfigurationRecordIsRepresentable =
+  Readonly<Record<string, unknown>> extends SafeProviderConfiguration ? true : false;
+type ArbitraryDiagnosticIsRepresentable = string extends ProviderHealthDiagnosticCode ? true : false;
+
+expectTypeOf<ProhibitedSafeConfigurationKey>().toEqualTypeOf<never>();
+expectTypeOf<ArbitraryConfigurationKeyIsRepresentable>().toEqualTypeOf<false>();
+expectTypeOf<StoredConfigurationRecordIsRepresentable>().toEqualTypeOf<false>();
+expectTypeOf<ArbitraryDiagnosticIsRepresentable>().toEqualTypeOf<false>();
+
+// @ts-expect-error Turn-cost reads are always campaign-scoped as well as owner-scoped.
+const invalidTurnCostScope: TurnCostScope = { ...owner, turnIds: [] };
+void invalidTurnCostScope;
 
 const imageResolution: DirectProviderResolution<"image"> = {
   status: "resolved",
@@ -398,5 +438,9 @@ expectTypeOf<CharacterOrganizationPromptPort>().toBeObject();
 expectTypeOf<CharacterOrganizationCostPort>().toBeObject();
 expectTypeOf<InfiniteWorldsPromptPort>().toBeObject();
 expectTypeOf<InfiniteWorldsCostPort>().toBeObject();
-expectTypeOf<Task14dWorldGenerationBridgePort>().toBeObject();
-expectTypeOf<Task14dCharacterProfileOrganizerBridgePort>().toBeObject();
+expectTypeOf<keyof Task14dWorldGenerationBridgePort>().toEqualTypeOf<
+  "generateWorldPreview" | "generatePlayableCharacterPreview" | "generatePlayableCharacter"
+>();
+expectTypeOf<keyof Task14dCharacterProfileOrganizerBridgePort>().toEqualTypeOf<
+  "organizeCampaignCharacterProfile" | "organizeWorldCharacterProfile"
+>();
