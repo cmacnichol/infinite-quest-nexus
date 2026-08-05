@@ -27,6 +27,18 @@ export type PortablePreviewHandle = string & Readonly<{
   [portablePreviewHandleBrand]: true;
 }>;
 
+/** Opaque repository-issued staged input handle. It cannot be typed as a filesystem path. */
+declare const portableStagedInputBrand: unique symbol;
+export type PortableStagedInput = string & Readonly<{
+  [portableStagedInputBrand]: true;
+}>;
+
+/** Opaque export capability; transport can redeem it without learning a private archive path. */
+declare const portableArchiveExportRetrievalBrand: unique symbol;
+export type PortableArchiveExportRetrieval = string & Readonly<{
+  [portableArchiveExportRetrievalBrand]: true;
+}>;
+
 export type PortableImportKind = "campaign_zip" | "legacy_story" | "infinite_worlds" | "cyoa";
 export type PortableArchiveDiagnosticCode =
   | "archive_cleanup_required"
@@ -44,11 +56,17 @@ export type PortableArchiveDiagnosticCode =
   | "import_invalid"
   | "transaction_unavailable";
 
-export type PortableImportPreviewCommand = ImportOwnerScope & Readonly<{
-  kind: PortableImportKind;
+type PortableImportPreviewBase = ImportOwnerScope & Readonly<{
+  stagedInput: PortableStagedInput;
   sourceInstallationId?: PortableSourceInstallationId;
   importedRecordId?: PortableImportedRecordId;
 }>;
+
+export type PortableImportPreviewCommand =
+  | (PortableImportPreviewBase & Readonly<{ kind: "legacy_story" }>)
+  | (PortableImportPreviewBase & Readonly<{ kind: "campaign_zip" }>)
+  | (PortableImportPreviewBase & Readonly<{ kind: "infinite_worlds" }>)
+  | (PortableImportPreviewBase & Readonly<{ kind: "cyoa" }>);
 
 export type PortableImportPreviewView = Readonly<{
   previewHandle: PortablePreviewHandle;
@@ -58,11 +76,33 @@ export type PortableImportPreviewView = Readonly<{
   diagnostics: readonly PortableArchiveDiagnosticCode[];
 }>;
 
-export type PortableImportCommitCommand = ImportOwnerScope & Readonly<{
+export type CampaignImportDestination = Readonly<{
+  kind: "campaign";
   campaignId: string;
+}>;
+
+export type WorldImportDestination = Readonly<{
+  kind: "world";
+  worldId: string;
+}>;
+
+export type WorldVersionImportDestination = Readonly<{
+  kind: "world_version";
+  worldId: string;
+  worldVersionId: string;
+}>;
+
+type PortableImportCommitBase = ImportOwnerScope & Readonly<{
   previewHandle: PortablePreviewHandle;
   idempotencyKey: string;
 }>;
+
+/** Each family names a local, owner-scoped destination; portable provenance never selects local records. */
+export type PortableImportCommitCommand =
+  | (PortableImportCommitBase & Readonly<{ kind: "legacy_story"; destination: CampaignImportDestination }>)
+  | (PortableImportCommitBase & Readonly<{ kind: "campaign_zip"; destination: CampaignImportDestination }>)
+  | (PortableImportCommitBase & Readonly<{ kind: "infinite_worlds"; destination: WorldImportDestination }>)
+  | (PortableImportCommitBase & Readonly<{ kind: "cyoa"; destination: WorldVersionImportDestination }>);
 
 export type PortableImportCommitView = Readonly<{
   importedRecordId: PortableImportedRecordId;
@@ -79,9 +119,14 @@ export type ImportTransactionContext = object;
 
 /** Safe download projection; adapter-private staging/final paths and errors are intentionally absent. */
 export type PortableArchiveExportView = Readonly<{
-  archiveId: string;
+  retrieval: PortableArchiveExportRetrieval;
   contentType: "application/zip" | "application/json";
   byteLength: number;
+}>;
+
+export type PortableArchiveDownloadView = Readonly<{
+  content: Uint8Array;
+  contentType: PortableArchiveExportView["contentType"];
 }>;
 
 export type WorldJsonExportCommand = ImportOwnerScope & Readonly<{
@@ -113,4 +158,12 @@ export function toPortableImportedRecordId(value: string): PortableImportedRecor
 
 export function toPortablePreviewHandle(value: string): PortablePreviewHandle {
   return opaque(value, "portable_preview_handle_invalid") as PortablePreviewHandle;
+}
+
+export function toPortableStagedInput(value: string): PortableStagedInput {
+  return opaque(value, "portable_staged_input_invalid") as PortableStagedInput;
+}
+
+export function toPortableArchiveExportRetrieval(value: string): PortableArchiveExportRetrieval {
+  return opaque(value, "portable_archive_export_retrieval_invalid") as PortableArchiveExportRetrieval;
 }

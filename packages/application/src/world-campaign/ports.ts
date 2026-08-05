@@ -202,6 +202,23 @@ export interface PortableWorldApplicationPort {
   importWorld(request: WorldImportRequest): Promise<WorldImportResultView>;
 }
 
+/**
+ * Owner-bound extension for portable transports that need durable replay
+ * semantics. It preserves the existing world authority instead of exposing a
+ * repository or world SQL surface to imports/exports.
+ */
+export type PortableWorldIdempotentImportCommand = Readonly<{
+  request: WorldImportRequest;
+  idempotencyKey: string;
+}>;
+
+export interface OwnerBoundIdempotentPortableWorldApplicationPort
+  extends PortableWorldApplicationPort {
+  importWorldIdempotent(
+    command: PortableWorldIdempotentImportCommand,
+  ): Promise<WorldImportResultView>;
+}
+
 export interface WorldCampaignApplication {
   listWorlds(scope: OwnerScope): Promise<WorldListView>;
   getWorld(scope: WorldScope): Promise<WorldAggregateView>;

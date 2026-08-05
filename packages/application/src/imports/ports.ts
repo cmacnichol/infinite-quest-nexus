@@ -1,6 +1,8 @@
-import type { PortableWorldApplicationPort } from "../world-campaign/ports.js";
+import type { OwnerBoundIdempotentPortableWorldApplicationPort } from "../world-campaign/ports.js";
 import type {
   CampaignArchiveScope,
+  PortableArchiveDownloadView,
+  PortableArchiveExportRetrieval,
   ImportTransactionContext,
   PortableArchiveExportView,
   PortableImportCommitCommand,
@@ -18,11 +20,15 @@ export interface PortableArchivePort {
     command: PortableImportCommitCommand,
   ): Promise<PortableImportCommitView>;
   exportCampaignArchive(scope: CampaignArchiveScope): Promise<PortableArchiveExportView>;
+  downloadPortableExport(
+    scope: CampaignArchiveScope,
+    retrieval: PortableArchiveExportRetrieval,
+  ): Promise<PortableArchiveDownloadView>;
   cleanupPreview(command: PortablePreviewCleanupCommand): Promise<void>;
 }
 
 /** Existing owner-bound world authority: 14e must consume it instead of recreating world/version SQL. */
-export type WorldJsonPortablePort = PortableWorldApplicationPort;
+export type WorldJsonPortablePort = OwnerBoundIdempotentPortableWorldApplicationPort;
 
 export type ImportApplicationDependencies = Readonly<{
   worlds: WorldJsonPortablePort;
