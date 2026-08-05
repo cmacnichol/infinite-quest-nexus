@@ -1,4 +1,5 @@
 import {
+  campaignBranchSchema,
   campaignRewindSchema,
   campaignRuntimeStateContentSchema,
   campaignRuntimeStateSchema,
@@ -27,7 +28,10 @@ import type {
 } from "../../application/src/world-campaign/index.js";
 import { WorldCampaignApplicationError } from "../../application/src/world-campaign/index.js";
 import type { MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
-import { normalizeCampaignTrackers } from "../../domain/src/campaign-trackers.js";
+import {
+  normalizeCampaignStateSnapshot,
+  normalizeCampaignTrackers
+} from "../../domain/src/campaign-trackers.js";
 import { characterLegacyText, effectiveCampaignCharacter } from "../../domain/src/world-characters.js";
 import { containsMechanicsLanguage, sha256, stableStringify } from "../../domain/src/text.js";
 import { formatNarrationParagraphs } from "../../story-engine/src/narration-formatting.js";
@@ -40,12 +44,15 @@ import {
 
 export type CampaignSyncAdapterCollaborators = Readonly<{
   turnPages: BoundedCampaignTurnPagePort;
-  memory: Pick<MemoryGenerationTransactionPort, "enqueueEmbeddingReindex" | "rebuildCampaignMemories">;
+  memory: Pick<
+    MemoryGenerationTransactionPort,
+    "autoEnableCampaignEmbedding" | "enqueueEmbeddingReindex" | "rebuildCampaignMemories"
+  >;
 }>;
 
 type PostgresCampaignAuthorityRepository = Pick<
   CampaignRepositoryPort,
-  "rewindCampaign" | "syncPlayerCampaignConfig"
+  "branchCampaign" | "rewindCampaign" | "syncPlayerCampaignConfig"
 >;
 
 const campaignPlayerConfigSyncRequestSchema = playerCampaignConfigSchema.extend({
@@ -55,6 +62,41 @@ const campaignPlayerConfigSyncRequestSchema = playerCampaignConfigSchema.extend(
 const campaignRewindRequestSchema = campaignRewindSchema.extend({
   expectedCurrentTurnNumber: z.coerce.number().int().min(0),
   expectedStateRevision: z.coerce.number().int().min(0)
+});
+
+const campaignBranchRequestSchema = campaignBranchSchema;
+
+const branchCampaignRowSchema = z.object({
+  activeTurnNumber: z.number().int().min(0),
+  worldVersionId: z.uuid(),
+  title: z.string().trim().min(1),
+  storyLengthProfile: z.enum(["brief", "standard", "long", "extended"]),
+  turnControlStyle: z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]),
+  selectedCharacterId: z.string().nullable(),
+  characterSnapshot: z.record(z.string(), z.unknown()).nullable(),
+  characterProfile: z.record(z.string(), z.unknown()).nullable(),
+  characterProfileRevision: z.number().int().min(0),
+  legacySettings: z.record(z.string(), z.unknown()),
+  textProviderProfileId: z.uuid().nullable(),
+  imageProviderProfileId: z.uuid().nullable(),
+  stateRevision: z.number().int().min(0),
+  defaultTriggers: z.unknown(),
+  initialStateSnapshot: z.record(z.string(), z.unknown()),
+  importProvenance: z.record(z.string(), z.unknown())
+});
+
+const branchTurnRowSchema = z.object({
+  id: z.uuid(),
+  turnNumber: z.number().int().positive(),
+  stateSnapshotPrivate: z.record(z.string(), z.unknown()),
+  modelMetadata: z.record(z.string(), z.unknown()),
+  importMetadata: z.record(z.string(), z.unknown())
+});
+
+const branchStateEditRowSchema = z.object({
+  effectiveTurnNumber: z.number().int().min(0),
+  revision: z.number().int().positive(),
+  stateSnapshotPrivate: z.record(z.string(), z.unknown())
 });
 
 type CampaignStateRow = {
@@ -481,6 +523,346 @@ function createPostgresCampaignAuthorityRepository(
   collaborators: Pick<CampaignSyncAdapterCollaborators, "memory">,
 ): PostgresCampaignAuthorityRepository {
   return {
+    async branchCampaign(transaction, scope, request) {
+      const client = worldCampaignDatabaseClient(transaction);
+      const parsed = parseBoundary(campaignBranchRequestSchema, request, "invalid_request", scope);
+      const sourceResult = await client.query<Record<string, unknown>>(
+        `SELECT c.active_turn_number AS "activeTurnNumber",
+                c.world_version_id AS "worldVersionId", c.title,
+                c.story_length_profile AS "storyLengthProfile",
+                c.turn_control_style AS "turnControlStyle",
+                c.selected_character_id AS "selectedCharacterId",
+                c.character_snapshot AS "characterSnapshot",
+                c.character_profile AS "characterProfile",
+                c.character_profile_revision AS "characterProfileRevision",
+                c.legacy_settings AS "legacySettings",
+                c.text_provider_profile_id AS "textProviderProfileId",
+                c.image_provider_profile_id AS "imageProviderProfileId",
+                cs.revision AS "stateRevision", cs.default_triggers AS "defaultTriggers",
+                cs.initial_state_snapshot AS "initialStateSnapshot",
+                cs.import_provenance AS "importProvenance"
+           FROM campaigns c
+           JOIN campaign_state cs
+             ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
+          WHERE c.id = $1 AND c.owner_user_id = $2
+          FOR UPDATE OF c, cs`,
+        [scope.campaignId, scope.ownerUserId]
+      );
+      if (!sourceResult.rows[0]) {
+        return failure("campaign_not_found", { campaignId: scope.campaignId });
+      }
+      const source = parseBoundary(
+        branchCampaignRowSchema,
+        sourceResult.rows[0],
+        "unavailable",
+        scope
+      );
+      if (parsed.expectedCurrentTurnNumber !== undefined
+        && parsed.expectedCurrentTurnNumber !== source.activeTurnNumber) {
+        return failure("active_turn_changed", {
+          campaignId: scope.campaignId,
+          expectedTurnNumber: parsed.expectedCurrentTurnNumber,
+          actualTurnNumber: source.activeTurnNumber
+        });
+      }
+      if (parsed.targetTurnNumber > source.activeTurnNumber) {
+        return failure("invalid_transition", {
+          campaignId: scope.campaignId,
+          expectedTurnNumber: parsed.targetTurnNumber,
+          actualTurnNumber: source.activeTurnNumber
+        });
+      }
+
+      const sourceTurnsResult = parsed.targetTurnNumber === 0
+        ? { rows: [] as Record<string, unknown>[] }
+        : await client.query<Record<string, unknown>>(
+          `SELECT id, turn_number AS "turnNumber",
+                  state_snapshot_private AS "stateSnapshotPrivate",
+                  model_metadata AS "modelMetadata", import_metadata AS "importMetadata"
+             FROM turns
+            WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number <= $3
+            ORDER BY turn_number
+            FOR SHARE`,
+          [scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+        );
+      const sourceTurns = sourceTurnsResult.rows.map((row) => parseBoundary(
+        branchTurnRowSchema,
+        row,
+        "unavailable",
+        scope
+      ));
+      if (sourceTurns.length !== parsed.targetTurnNumber
+        || sourceTurns.some((turn, index) => turn.turnNumber !== index + 1)) {
+        return failure("invalid_transition", {
+          campaignId: scope.campaignId,
+          expectedTurnNumber: parsed.targetTurnNumber
+        });
+      }
+
+      const sourceEditsResult = await client.query<Record<string, unknown>>(
+        `SELECT effective_turn_number AS "effectiveTurnNumber", revision,
+                state_snapshot_private AS "stateSnapshotPrivate"
+           FROM campaign_state_edits
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND effective_turn_number <= $3
+          ORDER BY revision
+          FOR SHARE`,
+        [scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+      );
+      const sourceEdits = sourceEditsResult.rows.map((row) => parseBoundary(
+        branchStateEditRowSchema,
+        row,
+        "unavailable",
+        scope
+      ));
+      const targetTurn = sourceTurns.at(-1);
+      const targetEdit = [...sourceEdits]
+        .reverse()
+        .find((edit) => edit.effectiveTurnNumber === parsed.targetTurnNumber);
+      const targetSnapshot = targetEdit?.stateSnapshotPrivate
+        ?? targetTurn?.stateSnapshotPrivate
+        ?? source.initialStateSnapshot;
+      const materializedTarget = runtimeStateContent({
+        ...targetSnapshot,
+        scratchpad: typeof targetSnapshot.scratchpad === "string" ? targetSnapshot.scratchpad : "",
+        trackers: targetSnapshot.trackers ?? [],
+        eventTriggers: targetSnapshot.eventTriggers ?? [],
+        pendingEventTriggers: targetSnapshot.pendingEventTriggers ?? [],
+        rpgStats: targetSnapshot.rpgStats ?? []
+      }, undefined, scope);
+      const branchId = crypto.randomUUID();
+      const branchProvenance = {
+        sourceType: "nexus_campaign_branch",
+        branchId,
+        parentCampaignId: scope.campaignId,
+        branchTurnNumber: parsed.targetTurnNumber,
+        ...(source.importProvenance.branch === undefined
+          ? {}
+          : { parent: source.importProvenance.branch })
+      };
+      const title = parsed.title?.trim()
+        || `${source.title} (Branch Turn ${parsed.targetTurnNumber})`;
+      const branchCampaign = await client.query<{ id: string }>(
+        `INSERT INTO campaigns (
+           owner_user_id, world_version_id, title, status, active_turn_number,
+           story_length_profile, turn_control_style, selected_character_id,
+           character_snapshot, character_profile, character_profile_revision,
+           legacy_settings, text_provider_profile_id, image_provider_profile_id
+         ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         RETURNING id`,
+        [
+          scope.ownerUserId,
+          source.worldVersionId,
+          title,
+          parsed.targetTurnNumber,
+          source.storyLengthProfile,
+          source.turnControlStyle,
+          source.selectedCharacterId,
+          json(source.characterSnapshot),
+          source.characterProfile === null ? null : json(source.characterProfile),
+          source.characterProfile === null ? 0 : 1,
+          json(source.legacySettings),
+          source.textProviderProfileId,
+          source.imageProviderProfileId
+        ]
+      );
+      const branchCampaignId = branchCampaign.rows[0]?.id;
+      if (!branchCampaignId) invalidBoundaryData("unavailable", scope);
+
+      if (source.characterProfile !== null) {
+        await client.query(
+          `INSERT INTO campaign_character_profile_edits (
+             owner_user_id, campaign_id, revision, previous_profile, next_profile, edit_source
+           ) VALUES ($1,$2,1,NULL,$3,'branch')`,
+          [scope.ownerUserId, branchCampaignId, json(source.characterProfile)]
+        );
+      }
+      const branchStateRevision = sourceEdits.reduce(
+        (revision, edit) => Math.max(revision, edit.revision),
+        0
+      );
+      const initialStateSnapshot = normalizeCampaignStateSnapshot(source.initialStateSnapshot);
+      await client.query(
+        `INSERT INTO campaign_state (
+           campaign_id, owner_user_id, scratchpad_private, scratchpad_safe_for_prompt,
+           trackers, default_triggers, event_triggers, pending_event_triggers, rpg_stats,
+           import_provenance, initial_state_snapshot, revision
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [
+          branchCampaignId,
+          scope.ownerUserId,
+          materializedTarget.scratchpad,
+          targetEdit !== undefined
+            || typeof targetTurn?.modelMetadata.promptProtocolVersion === "string",
+          json(materializedTarget.trackers),
+          json(normalizeCampaignTrackers(source.defaultTriggers)),
+          json(materializedTarget.eventTriggers),
+          json(materializedTarget.pendingEventTriggers),
+          json(materializedTarget.rpgStats),
+          json({ ...source.importProvenance, branch: branchProvenance }),
+          json(initialStateSnapshot),
+          branchStateRevision
+        ]
+      );
+      if (sourceEdits.length) {
+        await client.query(
+          `INSERT INTO campaign_state_edits (
+             owner_user_id, campaign_id, effective_turn_number, revision,
+             state_snapshot_private, changed_fields, created_at
+           )
+           SELECT owner_user_id, $1, effective_turn_number, revision,
+                  state_snapshot_private, changed_fields, created_at
+             FROM campaign_state_edits
+            WHERE campaign_id = $2 AND owner_user_id = $3 AND effective_turn_number <= $4
+            ORDER BY revision`,
+          [branchCampaignId, scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+        );
+      }
+      await client.query(
+        `INSERT INTO campaign_illustration_configs (
+           campaign_id, owner_user_id, enabled, source_policy, matching_scope,
+           confidence_profile, repetition_window, provider_profile_id, model, size,
+           aspect_ratio, quality, output_format, max_attempts, segment_word_count,
+           images_per_segment, segment_prompt_mode, refinement_prompt
+         )
+         SELECT $1, owner_user_id, enabled, source_policy, matching_scope,
+                confidence_profile, repetition_window, provider_profile_id, model, size,
+                aspect_ratio, quality, output_format, max_attempts, segment_word_count,
+                images_per_segment, segment_prompt_mode, refinement_prompt
+           FROM campaign_illustration_configs
+          WHERE campaign_id = $2 AND owner_user_id = $3
+         ON CONFLICT DO NOTHING`,
+        [branchCampaignId, scope.campaignId, scope.ownerUserId]
+      );
+      await client.query(
+        `INSERT INTO campaign_memory_configs (
+           campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id,
+           embedding_model, embedding_batch_size, embedding_document_prefix,
+           embedding_query_prefix
+         )
+         SELECT $1, owner_user_id, embedding_enabled, embedding_provider_profile_id,
+                embedding_model, embedding_batch_size, embedding_document_prefix,
+                embedding_query_prefix
+           FROM campaign_memory_configs
+          WHERE campaign_id = $2 AND owner_user_id = $3
+         ON CONFLICT DO NOTHING`,
+        [branchCampaignId, scope.campaignId, scope.ownerUserId]
+      );
+      await collaborators.memory.autoEnableCampaignEmbedding(client, {
+        ownerUserId: scope.ownerUserId,
+        campaignId: branchCampaignId,
+        worldVersionId: source.worldVersionId
+      });
+
+      if (parsed.targetTurnNumber > 0) {
+        await client.query(
+          `INSERT INTO turns (
+             campaign_id, owner_user_id, turn_number, source_turn_id, action,
+             input_mode, input_mode_source, narration, choices, custom_action_suggestion,
+             image_prompt, image_url, mechanics_private, state_snapshot_private,
+             model_metadata, import_metadata, accepted_at, created_at
+           )
+           SELECT $1, turn.owner_user_id, turn.turn_number, turn.source_turn_id, turn.action,
+                  turn.input_mode, turn.input_mode_source, turn.narration, turn.choices,
+                  turn.custom_action_suggestion, turn.image_prompt, turn.image_url,
+                  turn.mechanics_private, turn.state_snapshot_private, turn.model_metadata,
+                  turn.import_metadata || jsonb_build_object(
+                    'branch',
+                    jsonb_build_object(
+                      'sourceType', 'nexus_campaign_branch',
+                      'branchId', $5::text,
+                      'parentCampaignId', $2::text,
+                      'sourceTurnId', turn.id::text,
+                      'sourceTurnNumber', turn.turn_number,
+                      'operationKind', provenance.operation_kind,
+                      'replacementTurnId', provenance.replacement_turn_id
+                    ) || CASE WHEN turn.import_metadata ? 'branch'
+                              THEN jsonb_build_object('parent', turn.import_metadata->'branch')
+                              ELSE '{}'::jsonb END
+                  ),
+                  turn.accepted_at, turn.created_at
+             FROM turns turn
+             LEFT JOIN LATERAL (
+               SELECT job.operation_kind, job.replacement_turn_id
+                 FROM generation_jobs job
+                WHERE job.campaign_id = turn.campaign_id
+                  AND job.owner_user_id = turn.owner_user_id
+                  AND job.result_turn_id = turn.id
+                  AND job.status = 'completed'
+                ORDER BY job.completed_at DESC NULLS LAST, job.created_at DESC, job.id DESC
+                LIMIT 1
+             ) provenance ON true
+            WHERE turn.campaign_id = $2::uuid AND turn.owner_user_id = $3
+              AND turn.turn_number <= $4
+            ORDER BY turn.turn_number`,
+          [branchCampaignId, scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber, branchId]
+        );
+        await client.query(
+          `INSERT INTO summary_checkpoints (
+             owner_user_id, campaign_id, through_turn, summary_kind, content,
+             token_estimate, created_at
+           )
+           SELECT owner_user_id, $1, through_turn, summary_kind, content,
+                  token_estimate, created_at
+             FROM summary_checkpoints
+            WHERE campaign_id = $2 AND owner_user_id = $3 AND through_turn <= $4`,
+          [branchCampaignId, scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+        );
+        await client.query(
+          `INSERT INTO asset_references (
+             owner_user_id, asset_id, campaign_id, turn_id, asset_role, created_at
+           )
+           SELECT source_ref.owner_user_id, source_ref.asset_id, $1, target_turn.id,
+                  source_ref.asset_role, source_ref.created_at
+             FROM asset_references source_ref
+             JOIN turns source_turn
+               ON source_turn.id = source_ref.turn_id
+              AND source_turn.campaign_id = source_ref.campaign_id
+              AND source_turn.owner_user_id = source_ref.owner_user_id
+             JOIN turns target_turn
+               ON target_turn.campaign_id = $1
+              AND target_turn.owner_user_id = source_ref.owner_user_id
+              AND target_turn.turn_number = source_turn.turn_number
+            WHERE source_ref.campaign_id = $2 AND source_ref.owner_user_id = $3
+              AND source_turn.turn_number <= $4
+           ON CONFLICT DO NOTHING`,
+          [branchCampaignId, scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+        );
+      }
+      await client.query(
+        `INSERT INTO asset_references (
+           owner_user_id, asset_id, campaign_id, turn_id, asset_role, created_at
+         )
+         SELECT owner_user_id, asset_id, $1, NULL, asset_role, created_at
+           FROM asset_references
+          WHERE campaign_id = $2 AND owner_user_id = $3 AND turn_id IS NULL
+         ON CONFLICT DO NOTHING`,
+        [branchCampaignId, scope.campaignId, scope.ownerUserId]
+      );
+
+      const memoryScope = {
+        ownerUserId: scope.ownerUserId,
+        campaignId: branchCampaignId,
+        worldVersionId: source.worldVersionId
+      };
+      await collaborators.memory.rebuildCampaignMemories(client, memoryScope);
+      await collaborators.memory.enqueueEmbeddingReindex(client, memoryScope);
+      await client.query(
+        `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, details)
+         VALUES ($1,$2,'campaign_branched',$3)`,
+        [scope.ownerUserId, branchCampaignId, json({
+          parentCampaignId: scope.campaignId,
+          branchTurnNumber: parsed.targetTurnNumber,
+          branchId
+        })]
+      );
+      return success({
+        id: branchCampaignId,
+        title,
+        activeTurnNumber: parsed.targetTurnNumber,
+        worldVersionId: source.worldVersionId
+      });
+    },
+
     async rewindCampaign(transaction, scope, request) {
       const client = worldCampaignDatabaseClient(transaction);
       const parsed = parseBoundary(campaignRewindRequestSchema, request, "invalid_request", scope);

@@ -37,6 +37,7 @@ integration("PostgreSQL campaign sync adapters", () => {
   const stateEditIds: string[] = [];
   const checkpointIds: string[] = [];
   const memoryIds: string[] = [];
+  const branchCampaignIds: string[] = [];
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
@@ -59,6 +60,7 @@ integration("PostgreSQL campaign sync adapters", () => {
     const createdStateEditIds = [...stateEditIds];
     const createdCheckpointIds = [...checkpointIds];
     const createdMemoryIds = [...memoryIds];
+    const createdBranchCampaignIds = [...branchCampaignIds];
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -82,6 +84,9 @@ integration("PostgreSQL campaign sync adapters", () => {
       }
       if (createdGenerationJobIds.length) {
         await client.query("DELETE FROM generation_jobs WHERE id = ANY($1::uuid[])", [createdGenerationJobIds]);
+      }
+      if (createdBranchCampaignIds.length) {
+        await client.query("DELETE FROM campaigns WHERE id = ANY($1::uuid[])", [createdBranchCampaignIds]);
       }
       if (fixtures.length) {
         await client.query("DELETE FROM imports WHERE id = ANY($1::uuid[])", [fixtures.map(({ importId }) => importId)]);
@@ -107,6 +112,7 @@ integration("PostgreSQL campaign sync adapters", () => {
       stateEditIds.splice(0, createdStateEditIds.length);
       checkpointIds.splice(0, createdCheckpointIds.length);
       memoryIds.splice(0, createdMemoryIds.length);
+      branchCampaignIds.splice(0, createdBranchCampaignIds.length);
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -153,6 +159,28 @@ integration("PostgreSQL campaign sync adapters", () => {
                           FROM image_jobs WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id), '[]') AS "imageJobs",
               coalesce((SELECT jsonb_agg(jsonb_build_array(id, status, turn_id) ORDER BY id)
                           FROM illustration_resolution_jobs WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id), '[]') AS "resolutionJobs"
+         FROM campaigns c
+         JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
+        WHERE c.id = $1 AND c.owner_user_id = $2`,
+      [campaignId, ownerUserId]
+    );
+    return snapshot.rows[0];
+  }
+
+  async function branchSourceSnapshot(campaignId: string) {
+    const snapshot = await pool.query<{
+      campaign: Record<string, unknown>;
+      state: Record<string, unknown>;
+      turns: unknown;
+      generationJobs: unknown;
+    }>(
+      `SELECT to_jsonb(c) AS campaign, to_jsonb(cs) AS state,
+              coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY t.turn_number)
+                          FROM turns t
+                         WHERE t.campaign_id = c.id AND t.owner_user_id = c.owner_user_id), '[]') AS turns,
+              coalesce((SELECT jsonb_agg(to_jsonb(g) ORDER BY g.created_at, g.id)
+                          FROM generation_jobs g
+                         WHERE g.campaign_id = c.id AND g.owner_user_id = c.owner_user_id), '[]') AS "generationJobs"
          FROM campaigns c
          JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
         WHERE c.id = $1 AND c.owner_user_id = $2`,
@@ -265,6 +293,347 @@ integration("PostgreSQL campaign sync adapters", () => {
       ok: false,
       failure: { reason: "campaign_not_found" }
     });
+  });
+
+  it("keeps branch authority invisible outside the explicit owner scope", async () => {
+    const imported = await createCampaignFixture();
+    const foreignUserId = await createForeignUserFixture("Foreign branch owner");
+    const adapters = createAdapters();
+
+    await expect(adapters.transaction.command((transaction) => adapters.campaigns.branchCampaign(
+      transaction,
+      { ownerUserId: foreignUserId, campaignId: imported.campaignId },
+      {
+        targetTurnNumber: 1,
+        expectedCurrentTurnNumber: 2
+      }
+    ))).resolves.toMatchObject({
+      ok: false,
+      failure: { reason: "campaign_not_found" }
+    });
+  });
+
+  it("creates an owner-scoped branch with durable lineage while leaving its source unchanged", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    await pool.query(
+      `UPDATE campaign_state
+          SET import_provenance = $3
+        WHERE owner_user_id = $1 AND campaign_id = $2`,
+      [ownerUserId, imported.campaignId, JSON.stringify({
+        world: { source: "branch-matrix-world" },
+        story: { source: "branch-matrix-story" }
+      })]
+    );
+    const sourceBefore = await branchSourceSnapshot(imported.campaignId);
+    const targetState = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope, 1));
+
+    const branched = await adapters.transaction.command((transaction) => adapters.campaigns.branchCampaign(
+      transaction,
+      scope,
+      {
+        targetTurnNumber: 1,
+        title: "Authority Branch",
+        expectedCurrentTurnNumber: 2
+      }
+    ));
+    expect(branched).toMatchObject({
+      ok: true,
+      value: {
+        id: expect.any(String),
+        title: "Authority Branch",
+        activeTurnNumber: 1,
+        worldVersionId: imported.worldVersionId
+      }
+    });
+    if (!branched.ok) throw new Error("Expected campaign branch creation to succeed.");
+    branchCampaignIds.push(branched.value.id);
+
+    const target = await pool.query<{
+      ownerUserId: string;
+      activeTurnNumber: number;
+      worldVersionId: string;
+      revision: number;
+      scratchpadPrivate: string;
+      importProvenance: Record<string, unknown>;
+      turnNumber: number;
+      sourceTurnId: string | null;
+      sourceAcceptedTurnId: string;
+      turnImportMetadata: Record<string, unknown>;
+      eventDetails: Record<string, unknown>;
+    }>(
+      `SELECT c.owner_user_id AS "ownerUserId", c.active_turn_number AS "activeTurnNumber",
+              c.world_version_id AS "worldVersionId", cs.revision,
+              cs.scratchpad_private AS "scratchpadPrivate",
+              cs.import_provenance AS "importProvenance", t.turn_number AS "turnNumber",
+              t.source_turn_id AS "sourceTurnId",
+              source_turn.id AS "sourceAcceptedTurnId", t.import_metadata AS "turnImportMetadata",
+              event.details AS "eventDetails"
+         FROM campaigns c
+         JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
+         JOIN turns t ON t.campaign_id = c.id AND t.owner_user_id = c.owner_user_id
+         JOIN turns source_turn
+           ON source_turn.campaign_id = $3 AND source_turn.owner_user_id = c.owner_user_id
+          AND source_turn.turn_number = t.turn_number
+         JOIN activity_events event
+           ON event.campaign_id = c.id AND event.owner_user_id = c.owner_user_id
+          AND event.event_type = 'campaign_branched'
+        WHERE c.id = $1 AND c.owner_user_id = $2`,
+      [branched.value.id, ownerUserId, imported.campaignId]
+    );
+    expect(target.rows).toHaveLength(1);
+    expect(target.rows[0]).toMatchObject({
+      ownerUserId,
+      activeTurnNumber: 1,
+      worldVersionId: imported.worldVersionId,
+      revision: 0,
+      scratchpadPrivate: targetState.scratchpad,
+      importProvenance: {
+        world: { source: "branch-matrix-world" },
+        story: { source: "branch-matrix-story" },
+        branch: {
+          sourceType: "nexus_campaign_branch",
+          branchId: expect.any(String),
+          parentCampaignId: imported.campaignId,
+          branchTurnNumber: 1
+        }
+      },
+      turnNumber: 1,
+      turnImportMetadata: {
+        branch: {
+          sourceType: "nexus_campaign_branch",
+          branchId: expect.any(String),
+          parentCampaignId: imported.campaignId,
+          sourceTurnId: target.rows[0]!.sourceAcceptedTurnId,
+          sourceTurnNumber: 1,
+          operationKind: null,
+          replacementTurnId: null
+        }
+      },
+      eventDetails: {
+        parentCampaignId: imported.campaignId,
+        branchTurnNumber: 1,
+        branchId: expect.any(String)
+      }
+    });
+    expect((target.rows[0]!.importProvenance.branch as { branchId: string }).branchId)
+      .toBe((target.rows[0]!.turnImportMetadata.branch as { branchId: string }).branchId);
+    expect((target.rows[0]!.eventDetails as { branchId: string }).branchId)
+      .toBe((target.rows[0]!.importProvenance.branch as { branchId: string }).branchId);
+    expect(await branchSourceSnapshot(imported.campaignId)).toEqual(sourceBefore);
+  });
+
+  it("rejects stale fences and future or missing branch targets without creating a branch", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const sourceBefore = await branchSourceSnapshot(imported.campaignId);
+    const countBefore = await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM campaigns WHERE owner_user_id = $1",
+      [ownerUserId]
+    );
+
+    await expect(adapters.transaction.command((transaction) => adapters.campaigns.branchCampaign(
+      transaction,
+      scope,
+      { targetTurnNumber: 1, expectedCurrentTurnNumber: 1 }
+    ))).resolves.toEqual({
+      ok: false,
+      failure: {
+        reason: "active_turn_changed",
+        details: {
+          campaignId: imported.campaignId,
+          expectedTurnNumber: 1,
+          actualTurnNumber: 2
+        }
+      }
+    });
+    await expect(adapters.transaction.command((transaction) => adapters.campaigns.branchCampaign(
+      transaction,
+      scope,
+      { targetTurnNumber: 3, expectedCurrentTurnNumber: 2 }
+    ))).resolves.toEqual({
+      ok: false,
+      failure: {
+        reason: "invalid_transition",
+        details: {
+          campaignId: imported.campaignId,
+          expectedTurnNumber: 3,
+          actualTurnNumber: 2
+        }
+      }
+    });
+    expect(await branchSourceSnapshot(imported.campaignId)).toEqual(sourceBefore);
+    await expect(pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM campaigns WHERE owner_user_id = $1",
+      [ownerUserId]
+    )).resolves.toMatchObject({ rows: [{ count: countBefore.rows[0]!.count }] });
+
+    const missing = await createCampaignFixture();
+    await pool.query(
+      "DELETE FROM turns WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = 1",
+      [ownerUserId, missing.campaignId]
+    );
+    const missingBaseline = await branchSourceSnapshot(missing.campaignId);
+    const countBeforeMissing = await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM campaigns WHERE owner_user_id = $1",
+      [ownerUserId]
+    );
+    await expect(adapters.transaction.command((transaction) => adapters.campaigns.branchCampaign(
+      transaction,
+      { ownerUserId, campaignId: missing.campaignId },
+      { targetTurnNumber: 1, expectedCurrentTurnNumber: 2 }
+    ))).resolves.toEqual({
+      ok: false,
+      failure: {
+        reason: "invalid_transition",
+        details: { campaignId: missing.campaignId, expectedTurnNumber: 1 }
+      }
+    });
+    expect(await branchSourceSnapshot(missing.campaignId)).toEqual(missingBaseline);
+    await expect(pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM campaigns WHERE owner_user_id = $1",
+      [ownerUserId]
+    )).resolves.toMatchObject({ rows: [{ count: countBeforeMissing.rows[0]!.count }] });
+  });
+
+  it("preserves accepted append and replacement provenance without cloning operational jobs", async () => {
+    const imported = await createCampaignFixture();
+    const providerId = await createProviderFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const turns = await pool.query<{ id: string; turnNumber: number }>(
+      `SELECT id, turn_number AS "turnNumber" FROM turns
+        WHERE owner_user_id = $1 AND campaign_id = $2 ORDER BY turn_number`,
+      [ownerUserId, imported.campaignId]
+    );
+    const firstTurn = turns.rows.find((turn) => turn.turnNumber === 1)!;
+    const secondTurn = turns.rows.find((turn) => turn.turnNumber === 2)!;
+    const replacementTurnId = crypto.randomUUID();
+    await pool.query(
+      `UPDATE turns
+          SET source_turn_id = CASE turn_number WHEN 1 THEN 'legacy-source-one' ELSE 'legacy-source-two' END,
+              import_metadata = jsonb_build_object('fixtureMarker', 'preserved-' || turn_number::text)
+        WHERE owner_user_id = $1 AND campaign_id = $2`,
+      [ownerUserId, imported.campaignId]
+    );
+    const jobs = await pool.query<{ id: string }>(
+      `INSERT INTO generation_jobs (
+         owner_user_id, campaign_id, provider_profile_id, idempotency_key,
+         expected_turn_number, action, status, requested_model, completed_at,
+         operation_kind, replacement_turn_id, result_turn_id, base_turn_number
+       ) VALUES
+         ($1,$2,$3,$4,1,'Accepted append','completed','fixture-model',now(),'append',NULL,$6,0),
+         ($1,$2,$3,$5,2,'Accepted replacement','completed','fixture-model',now(),'replace_latest',$7,$8,1)
+       RETURNING id`,
+      [
+        ownerUserId,
+        imported.campaignId,
+        providerId,
+        crypto.randomUUID(),
+        crypto.randomUUID(),
+        firstTurn.id,
+        replacementTurnId,
+        secondTurn.id
+      ]
+    );
+    generationJobIds.push(...jobs.rows.map((row) => row.id));
+    const sourceBefore = await branchSourceSnapshot(imported.campaignId);
+
+    const branched = await adapters.transaction.command((transaction) => adapters.campaigns.branchCampaign(
+      transaction,
+      scope,
+      { targetTurnNumber: 2, expectedCurrentTurnNumber: 2 }
+    ));
+    if (!branched.ok) throw new Error("Expected provenance branch creation to succeed.");
+    branchCampaignIds.push(branched.value.id);
+
+    const branchTurns = await pool.query<{
+      turnNumber: number;
+      sourceTurnId: string | null;
+      importMetadata: Record<string, unknown>;
+    }>(
+      `SELECT turn_number AS "turnNumber", source_turn_id AS "sourceTurnId",
+              import_metadata AS "importMetadata"
+         FROM turns WHERE owner_user_id = $1 AND campaign_id = $2 ORDER BY turn_number`,
+      [ownerUserId, branched.value.id]
+    );
+    expect(branchTurns.rows).toEqual([
+      {
+        turnNumber: 1,
+        sourceTurnId: "legacy-source-one",
+        importMetadata: {
+          fixtureMarker: "preserved-1",
+          branch: {
+            sourceType: "nexus_campaign_branch",
+            branchId: expect.any(String),
+            parentCampaignId: imported.campaignId,
+            sourceTurnId: firstTurn.id,
+            sourceTurnNumber: 1,
+            operationKind: "append",
+            replacementTurnId: null
+          }
+        }
+      },
+      {
+        turnNumber: 2,
+        sourceTurnId: "legacy-source-two",
+        importMetadata: {
+          fixtureMarker: "preserved-2",
+          branch: {
+            sourceType: "nexus_campaign_branch",
+            branchId: expect.any(String),
+            parentCampaignId: imported.campaignId,
+            sourceTurnId: secondTurn.id,
+            sourceTurnNumber: 2,
+            operationKind: "replace_latest",
+            replacementTurnId
+          }
+        }
+      }
+    ]);
+    await expect(pool.query(
+      "SELECT id FROM generation_jobs WHERE owner_user_id = $1 AND campaign_id = $2",
+      [ownerUserId, branched.value.id]
+    )).resolves.toMatchObject({ rows: [] });
+    expect(await branchSourceSnapshot(imported.campaignId)).toEqual(sourceBefore);
+  });
+
+  it("rolls back every branch write after a deterministic mid-command collaborator failure", async () => {
+    const imported = await createCampaignFixture();
+    const baseMemory = memoryGeneration(pool);
+    const adapters = createAdapters({
+      ...baseMemory,
+      async rebuildCampaignMemories() {
+        throw new Error("injected branch rebuild failure");
+      }
+    });
+    const sourceBefore = await branchSourceSnapshot(imported.campaignId);
+    const countBefore = await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM campaigns WHERE owner_user_id = $1",
+      [ownerUserId]
+    );
+
+    await expect(adapters.transaction.command((transaction) => adapters.campaigns.branchCampaign(
+      transaction,
+      { ownerUserId, campaignId: imported.campaignId },
+      { targetTurnNumber: 1, expectedCurrentTurnNumber: 2 }
+    ))).rejects.toThrow("injected branch rebuild failure");
+
+    expect(await branchSourceSnapshot(imported.campaignId)).toEqual(sourceBefore);
+    await expect(pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM campaigns WHERE owner_user_id = $1",
+      [ownerUserId]
+    )).resolves.toMatchObject({ rows: [{ count: countBefore.rows[0]!.count }] });
+    await expect(pool.query(
+      `SELECT c.id FROM campaigns c
+        JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
+       WHERE c.owner_user_id = $1
+         AND cs.import_provenance->'branch'->>'parentCampaignId' = $2`,
+      [ownerUserId, imported.campaignId]
+    )).resolves.toMatchObject({ rows: [] });
   });
 
   it("rewinds accepted history and authoritative state when both fences match", async () => {
