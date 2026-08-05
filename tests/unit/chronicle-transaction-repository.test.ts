@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
+  createPostgresChronicleConfigurationRepository,
   createPostgresChronicleGenerationTransactionPort,
+  createPostgresChronicleJobRepository,
   createPostgresChronicleWorkerStatePort,
   type ChronicleTransactionEmbeddingPort
 } from "../../packages/database/src/chronicle-repository.js";
@@ -505,5 +507,140 @@ describe("PostgreSQL Chronicle worker state port", () => {
     })).resolves.toBe(true);
 
     expect(job.status).toBe("queued");
+  });
+});
+
+describe("PostgreSQL Chronicle embedding configuration policy", () => {
+  const input = {
+    enabled: true,
+    providerProfileId: "embedding-profile",
+    model: "embed-v1",
+    batchSize: 16,
+    documentPrefix: null,
+    queryPrefix: null
+  } as const;
+
+  it("rejects an image provider before persisting embedding configuration", async () => {
+    let persisted = false;
+    const pool = databaseClient((sql) => {
+      if (sql.includes("SELECT world_version_id FROM campaigns")) {
+        return { rows: [{ world_version_id: scope.worldVersionId }] };
+      }
+      if (sql.includes("provider_role = 'embedding'")) return { rows: [] };
+      if (sql.includes("SELECT provider_role FROM provider_profiles")) {
+        return { rows: [{ provider_role: "image" }] };
+      }
+      if (sql.includes("INSERT INTO campaign_memory_configs")) {
+        persisted = true;
+        return { rows: [{
+          embedding_enabled: true,
+          embedding_provider_profile_id: "image-profile",
+          embedding_model: "embed-v1",
+          embedding_batch_size: 16,
+          embedding_document_prefix: null,
+          embedding_query_prefix: null
+        }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }) as unknown as DatabasePool;
+    const configuration = createPostgresChronicleConfigurationRepository(pool);
+
+    await expect(configuration.setEmbeddingConfig(scope, {
+      ...input,
+      providerProfileId: "image-profile"
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(persisted).toBe(false);
+  });
+
+  it("rejects a text provider while a dedicated embedding provider is enabled", async () => {
+    let persisted = false;
+    const pool = databaseClient((sql) => {
+      if (sql.includes("SELECT world_version_id FROM campaigns")) {
+        return { rows: [{ world_version_id: scope.worldVersionId }] };
+      }
+      if (sql.includes("provider_role = 'embedding'")) {
+        return { rows: [{ id: "embedding-profile", is_default: true }] };
+      }
+      if (sql.includes("SELECT provider_role FROM provider_profiles")) {
+        return { rows: [{ provider_role: "text" }] };
+      }
+      if (sql.includes("INSERT INTO campaign_memory_configs")) {
+        persisted = true;
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }) as unknown as DatabasePool;
+    const configuration = createPostgresChronicleConfigurationRepository(pool);
+
+    await expect(configuration.setEmbeddingConfig(scope, {
+      ...input,
+      providerProfileId: "text-profile"
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(persisted).toBe(false);
+  });
+
+  it("persists the enabled dedicated default when the provider is omitted", async () => {
+    let persistedProviderId: unknown;
+    const pool = databaseClient((sql, values) => {
+      if (sql.includes("SELECT world_version_id FROM campaigns")) {
+        return { rows: [{ world_version_id: scope.worldVersionId }] };
+      }
+      if (sql.includes("provider_role = 'embedding'")) {
+        return { rows: [{ id: "embedding-default", is_default: true }] };
+      }
+      if (sql.includes("INSERT INTO campaign_memory_configs")) {
+        persistedProviderId = values[3];
+        return { rows: [{
+          embedding_enabled: true,
+          embedding_provider_profile_id: values[3],
+          embedding_model: "embed-v1",
+          embedding_batch_size: 16,
+          embedding_document_prefix: null,
+          embedding_query_prefix: null
+        }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }) as unknown as DatabasePool;
+    const configuration = createPostgresChronicleConfigurationRepository(pool);
+
+    await expect(configuration.setEmbeddingConfig(scope, {
+      ...input,
+      providerProfileId: null
+    })).resolves.toMatchObject({ providerProfileId: "embedding-default" });
+    expect(persistedProviderId).toBe("embedding-default");
+  });
+
+  it("rejects a stored text fallback before enqueue when a dedicated provider is enabled", async () => {
+    let enqueued = false;
+    const pool = databaseClient((sql) => {
+      if (sql.includes("SELECT world_version_id FROM campaigns")) {
+        return { rows: [{ world_version_id: scope.worldVersionId }] };
+      }
+      if (sql.includes("FROM campaign_memory_configs")) {
+        return { rows: [{
+          embedding_enabled: true,
+          embedding_provider_profile_id: "text-profile",
+          embedding_model: "embed-v1",
+          embedding_batch_size: 16,
+          embedding_document_prefix: null,
+          embedding_query_prefix: null
+        }] };
+      }
+      if (sql.includes("provider_role = 'embedding'")) {
+        return { rows: [{ id: "embedding-profile", is_default: true }] };
+      }
+      if (sql.includes("SELECT provider_role FROM provider_profiles")) {
+        return { rows: [{ provider_role: "text" }] };
+      }
+      if (sql.includes("INSERT INTO chronicle_jobs")) {
+        enqueued = true;
+        return { rows: [{ id: "job-1" }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }) as unknown as DatabasePool;
+    const jobs = createPostgresChronicleJobRepository(pool);
+
+    await expect(jobs.enqueueEmbeddingReindex(scope)).rejects.toMatchObject({ statusCode: 400 });
+    expect(enqueued).toBe(false);
   });
 });

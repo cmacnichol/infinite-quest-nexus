@@ -11,7 +11,10 @@ import {
   createApiMemoryApplication,
   createWorkerMemoryApplication
 } from "../../services/runtime/src/memory-composition.js";
-import { createMemoryWorkerApplication } from "../../packages/application/src/memory/index.js";
+import {
+  createMemoryWorkerApplication,
+  type ChronicleWorkerStatePort
+} from "../../packages/application/src/memory/index.js";
 import type { DatabaseClient, DatabasePool } from "../../packages/database/src/pool.js";
 
 describe("Chronicle runtime adapters", () => {
@@ -230,6 +233,52 @@ describe("Chronicle runtime adapters", () => {
     expect(logProviderTransportError).toHaveBeenCalledWith(expect.any(Error), expect.objectContaining({
       chronicleJobId: "job-1", campaignId: "campaign-1"
     }));
+  });
+
+  it("terminalizes a claimed job when bounded retrieval fails before dispatch", async () => {
+    let durableStatus: "queued" | "running" | "failed" = "queued";
+    const claim = {
+      jobId: "job-retrieval-1",
+      ownerUserId: "owner-1",
+      campaignId: "campaign-1",
+      worldVersionId: "world-version-1",
+      jobType: "embed_campaign" as const,
+      workVersion: 1,
+      workerId: "worker-1",
+      leaseSeconds: 30
+    };
+    const state: ChronicleWorkerStatePort = {
+      claimNext: async () => {
+        durableStatus = "running";
+        return claim;
+      },
+      loadClaimedJob: async () => claim,
+      heartbeatClaim: async () => true,
+      completeClaim: async () => false,
+      requeueClaim: async () => false,
+      failClaim: async (failedClaim) => {
+        if (durableStatus !== "running" || failedClaim.jobId !== claim.jobId) return false;
+        durableStatus = "failed";
+        return true;
+      }
+    };
+    const executor = createChronicleWorkerExecutor({
+      state,
+      retrieval: {
+        loadForClaim: async () => {
+          throw new Error("database connection interrupted");
+        }
+      },
+      runClaim: async () => {
+        throw new Error("dispatch must not run after retrieval failure");
+      },
+      logProviderTransportError: () => undefined
+    });
+
+    await expect(executor.runNextChronicle({
+      workerId: "worker-1", leaseSeconds: 30, retrieval: { batchLimit: 8 }
+    })).resolves.toBe(true);
+    expect(durableStatus).toBe("failed");
   });
 
   it("records embedding health and cost through the supplied caller transaction", async () => {

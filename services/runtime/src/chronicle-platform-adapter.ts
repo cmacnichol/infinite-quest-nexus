@@ -127,8 +127,12 @@ function privateFailure(): ChronicleClaimFailure {
 export function createChronicleWorkerExecutor(
   dependencies: ChronicleWorkerExecutorDependencies,
 ): ChronicleWorkerExecutor {
-  const runClaimed = async (claim: ChronicleLeaseScope): Promise<boolean> => {
+  const executeClaim = async (
+    claim: ChronicleLeaseScope,
+    prepare: () => Promise<void> = async () => undefined,
+  ): Promise<boolean> => {
     try {
+      await prepare();
       await dependencies.runClaim(claim);
       return true;
     } catch (error) {
@@ -142,6 +146,7 @@ export function createChronicleWorkerExecutor(
       return true;
     }
   };
+  const runClaimed = (claim: ChronicleLeaseScope): Promise<boolean> => executeClaim(claim);
 
   return {
     async runNextChronicle(request: ChronicleWorkerRunRequest): Promise<boolean> {
@@ -150,9 +155,11 @@ export function createChronicleWorkerExecutor(
         leaseSeconds: request.leaseSeconds
       });
       if (!claim) return false;
-      // Validate the bounded retrieval contract before dispatching the job.
-      await dependencies.retrieval.loadForClaim(claim, request.retrieval);
-      return runClaimed(claim);
+      return executeClaim(claim, async () => {
+        // Validate the bounded retrieval contract inside the same lease-fenced
+        // failure path that owns dispatch and terminalization.
+        await dependencies.retrieval.loadForClaim(claim, request.retrieval);
+      });
     },
     runClaimed
   };

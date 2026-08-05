@@ -1396,13 +1396,79 @@ async function loadConfig(pool: DatabasePool | DatabaseClient, scope: CampaignMe
   return configView(result.rows[0]);
 }
 
+type EnabledProviderCandidate = Readonly<{
+  id: string;
+  is_default: boolean;
+}>;
+
+function preferredProviderId(candidates: readonly EnabledProviderCandidate[]): string | null {
+  if (candidates.length === 1 || candidates[0]?.is_default) return candidates[0]?.id ?? null;
+  return null;
+}
+
+async function resolvePermittedEmbeddingProviderId(
+  database: DatabasePool | DatabaseClient,
+  scope: CampaignMemoryScope,
+  selectedProviderProfileId: string | null,
+): Promise<string | null> {
+  const dedicated = await database.query<EnabledProviderCandidate>(
+    `SELECT id, is_default FROM provider_profiles
+      WHERE owner_user_id = $1 AND provider_role = 'embedding' AND enabled = true
+      ORDER BY is_default DESC, name, id`,
+    [scope.ownerUserId]
+  );
+  if (selectedProviderProfileId) {
+    const selected = await database.query<{ provider_role: string }>(
+      `SELECT provider_role FROM provider_profiles
+        WHERE id = $1 AND owner_user_id = $2 AND enabled = true`,
+      [selectedProviderProfileId, scope.ownerUserId]
+    );
+    const role = selected.rows[0]?.provider_role;
+    if (role !== "embedding" && role !== "text") {
+      throw invalid("Select an enabled embedding provider. Text fallback is available only when no embedding provider is enabled.");
+    }
+    if (role === "text" && dedicated.rows.length) {
+      throw invalid("Select an enabled embedding provider. Text fallback is available only when no embedding provider is enabled.");
+    }
+    return selectedProviderProfileId;
+  }
+  if (dedicated.rows.length) return preferredProviderId(dedicated.rows);
+
+  const campaign = await database.query<{ text_provider_profile_id: string | null }>(
+    `SELECT text_provider_profile_id FROM campaigns
+      WHERE id = $1 AND owner_user_id = $2`,
+    [scope.campaignId, scope.ownerUserId]
+  );
+  const campaignTextProviderId = campaign.rows[0]?.text_provider_profile_id;
+  if (campaignTextProviderId) {
+    const selectedText = await database.query<{ id: string }>(
+      `SELECT id FROM provider_profiles
+        WHERE id = $1 AND owner_user_id = $2 AND provider_role = 'text' AND enabled = true`,
+      [campaignTextProviderId, scope.ownerUserId]
+    );
+    if (selectedText.rows[0]) return selectedText.rows[0].id;
+  }
+  const text = await database.query<EnabledProviderCandidate>(
+    `SELECT id, is_default FROM provider_profiles
+      WHERE owner_user_id = $1 AND provider_role = 'text' AND enabled = true
+      ORDER BY is_default DESC, name, id`,
+    [scope.ownerUserId]
+  );
+  return preferredProviderId(text.rows);
+}
+
 export function createPostgresChronicleConfigurationRepository(pool: DatabasePool): MemoryConfigurationRepository {
   return {
     getEmbeddingConfig: (scope) => loadConfig(pool, scope),
     async setEmbeddingConfig(scope, input: CampaignEmbeddingConfig) {
       await requireCampaign(pool, scope);
-      if (input.enabled && !input.providerProfileId) {
-        throw invalid("An enabled embedding provider profile is required.");
+      const providerProfileId = await resolvePermittedEmbeddingProviderId(
+        pool,
+        scope,
+        input.providerProfileId
+      );
+      if (input.enabled && !providerProfileId) {
+        throw invalid("Add a text or embedding provider before enabling semantic memory.");
       }
       const result = await pool.query<EmbeddingConfigRow>(
         `INSERT INTO campaign_memory_configs (
@@ -1419,7 +1485,7 @@ export function createPostgresChronicleConfigurationRepository(pool: DatabasePoo
            updated_at = now()
          RETURNING embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
                    embedding_document_prefix, embedding_query_prefix`,
-        [scope.campaignId, scope.ownerUserId, input.enabled, input.providerProfileId, input.model,
+        [scope.campaignId, scope.ownerUserId, input.enabled, providerProfileId, input.model,
           input.batchSize, input.documentPrefix ?? null, input.queryPrefix ?? null]
       );
       return configView(result.rows[0]);
@@ -1463,7 +1529,21 @@ export function createPostgresChronicleJobRepository(pool: DatabasePool): Chroni
     enqueueChronicleReindex: (scope) => enqueue(scope, "reindex_campaign"),
     async enqueueEmbeddingReindex(scope) {
       const config = await loadConfig(pool, scope);
-      if (!config.enabled || !config.providerProfileId || !config.model) return null;
+      if (!config.enabled || !config.model) return null;
+      const providerProfileId = await resolvePermittedEmbeddingProviderId(
+        pool,
+        scope,
+        config.providerProfileId ?? null
+      );
+      if (!providerProfileId) return null;
+      if (providerProfileId !== config.providerProfileId) {
+        await pool.query(
+          `UPDATE campaign_memory_configs
+              SET embedding_provider_profile_id = $3, updated_at = now()
+            WHERE campaign_id = $1 AND owner_user_id = $2`,
+          [scope.campaignId, scope.ownerUserId, providerProfileId]
+        );
+      }
       return enqueue(scope, "embed_campaign");
     },
     async getJob(scope) {
