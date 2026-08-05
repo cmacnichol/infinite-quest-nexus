@@ -1,22 +1,29 @@
-import { createHash } from "node:crypto";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import { DEFAULT_EMBEDDING_MODEL, type CampaignEmbeddingConfig, type CompressionLevel, type MemoryContextQuery } from "../../../packages/contracts/src/memory.js";
-import { compressTurnMemory, buildTurnFictionMemory } from "../../../packages/story-engine/src/chronicle.js";
+import { compressTurnMemory } from "../../../packages/story-engine/src/chronicle.js";
 import { callEmbeddingProvider, logProviderTransportError } from "../../../packages/story-engine/src/providers.js";
-import { estimateTokens, stableStringify, stripMechanicsLeakage, truncateAtBoundary } from "../../../packages/domain/src/text.js";
+import { estimateTokens, stableStringify, truncateAtBoundary } from "../../../packages/domain/src/text.js";
+import { canonicalFactDeduplicationKey } from "../../../packages/domain/src/canonical-facts.js";
 import {
-  buildCanonicalFactProjection,
-  canonicalFactDeduplicationKey
-} from "../../../packages/domain/src/canonical-facts.js";
+  buildAcceptedTurnFictionMemory,
+  buildCanonicalChronicleFacts,
+  buildChronicleEntityCatalog,
+  chronicleContentHash as contentHash,
+  modelAwareEmbeddingPrefixes as modelAwarePrefixes,
+  providerModelFingerprint as providerFingerprint,
+  sanitizeChronicleFictionString as sanitizedFictionString,
+  sanitizeChronicleFictionValue as sanitizedFictionValue,
+  sanitizeChronicleMemoryLines as sanitizedMemoryLines
+} from "../../../packages/domain/src/chronicle-memory-helpers.js";
 import {
-  buildScopedEntityCatalog,
   expandEntityQuery,
   matchEntityReferences,
   resolveEntityMetadata,
   type EntityReference
 } from "../../../packages/domain/src/entity-references.js";
 import { characterNarrativeContext } from "../../../packages/domain/src/world-characters.js";
+import { requireCampaignWorldVersionScope } from "../../../packages/application/src/memory/helpers.js";
 import { loadEmbeddingProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-service.js";
 import { recordProfileCost } from "./cost-service.js";
 
@@ -76,39 +83,12 @@ type EmbeddingConfigRow = {
   updated_at: Date;
 };
 
-function contentHash(content: string): string {
-  return createHash("sha256").update(content).digest("hex");
-}
-
 function budgetTokenEstimate(text: string): number {
   return Math.max(estimateTokens(text), Math.ceil(text.length / 3));
 }
 
 function vectorLiteral(vector: number[]): string {
   return `[${vector.join(",")}]`;
-}
-
-function modelAwarePrefixes(model: string, documentPrefix: string | null, queryPrefix: string | null) {
-  const nomic = /(?:^|[\/_-])nomic(?:[\/_-]|$)/i.test(model);
-  return {
-    documentPrefix: documentPrefix ?? (nomic ? "search_document: " : ""),
-    queryPrefix: queryPrefix ?? (nomic ? "search_query: " : ""),
-    automatic: documentPrefix === null && queryPrefix === null
-  };
-}
-
-function providerFingerprint(
-  provider: Awaited<ReturnType<typeof loadEmbeddingProvider>>,
-  prefixes: ReturnType<typeof modelAwarePrefixes>
-): string {
-  return contentHash(stableStringify({
-    providerType: provider.providerType,
-    baseUrl: provider.baseUrl.replace(/\/+$/, ""),
-    model: provider.model,
-    configuration: provider.configuration ?? {},
-    documentPrefix: prefixes.documentPrefix,
-    queryPrefix: prefixes.queryPrefix
-  }));
 }
 
 function publicEmbeddingConfig(row?: EmbeddingConfigRow) {
@@ -303,27 +283,6 @@ export type ChronicleMetrics = {
 
 type ChronicleMetricCounts = Omit<ChronicleMetrics, "semanticHealth">;
 
-function sanitizedFictionString(value: unknown, maximumCharacters = 4000): string {
-  if (typeof value !== "string") return "";
-  return truncateAtBoundary(stripMechanicsLeakage(value).text, maximumCharacters);
-}
-
-function sanitizedFictionValue(value: unknown, depth = 0): unknown {
-  if (depth > 5) return undefined;
-  if (typeof value === "string") return sanitizedFictionString(value, 2000);
-  if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
-  if (Array.isArray(value)) return value.slice(0, 200).map((entry) => sanitizedFictionValue(entry, depth + 1));
-  if (!value || typeof value !== "object") return undefined;
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([key, entry]) => {
-    const normalizedKey = key.replaceAll(/[^a-z]/gi, "").toLocaleLowerCase();
-    if (["stat", "stats", "statistic", "statistics"].includes(normalizedKey)
-      || ["roll", "dice", "check", "score", "target", "modifier", "difficulty", "reasoning", "diagnostic"]
-        .some((prefix) => normalizedKey.startsWith(prefix))) return [];
-    const sanitized = sanitizedFictionValue(entry, depth + 1);
-    return sanitized === undefined || sanitized === "" ? [] : [[key, sanitized]];
-  }));
-}
-
 function relevanceTerms(query: string): string[] {
   return [...new Set(query.toLocaleLowerCase().match(/[\p{L}\p{N}_'-]{3,}/gu) ?? [])].slice(0, 64);
 }
@@ -430,8 +389,11 @@ async function campaignScope(client: DatabaseClient | DatabasePool, ownerUserId:
     [campaignId, ownerUserId]
   );
   const campaign = result.rows[0];
-  if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
-  return campaign;
+  return requireCampaignWorldVersionScope({
+    ownerUserId,
+    campaignId,
+    worldVersionId: campaign?.world_version_id ?? ""
+  }, campaign);
 }
 
 async function allMemories(
@@ -809,7 +771,7 @@ export async function buildContextPreview(
     campaign.scratchpad_safe_for_prompt = scope.scratchpadSafeForPrompt === true;
     campaign.trackers = Array.isArray(scope.stateOverride.trackers) ? scope.stateOverride.trackers : [];
   }
-  const entityCatalog = buildScopedEntityCatalog({
+  const entityCatalog = buildChronicleEntityCatalog({
     worldContent: campaign.world_content,
     characterSnapshot: campaign.character_snapshot,
     characterProfile: campaign.character_profile
@@ -1019,13 +981,6 @@ export type DerivedStoryMemory = {
   entityCatalog?: EntityReference[];
 };
 
-function sanitizedMemoryLines(values: string[] | undefined, limit = 100): string[] {
-  return [...new Set((values ?? []).flatMap((value) => {
-    const sanitized = sanitizedFictionString(value, 4000);
-    return sanitized ? [sanitized] : [];
-  }))].slice(0, limit);
-}
-
 type ProjectedFactRow = {
   id: string;
   source_turn_id: string;
@@ -1093,32 +1048,15 @@ async function projectCanonicalFacts(
   ordinal: number,
   derived: DerivedStoryMemory
 ): Promise<void> {
-  const legacyFacts = sanitizedMemoryLines(derived.canonicalFacts);
-  const structuredUpdates = (derived.canonicalFactUpdates ?? []).flatMap((update) => {
-    const content = sanitizedFictionString(update.content, 4000);
-    return content ? [{ content, supersedesFactIds: [...new Set(update.supersedesFactIds ?? [])].slice(0, 100) }] : [];
-  });
-  const sourceUpdates = structuredUpdates.length
-    ? structuredUpdates
-    : legacyFacts.map((content) => ({ content, supersedesFactIds: [] as string[] }));
-  const uniqueUpdates = new Map<string, { content: string; supersedesFactIds: string[] }>();
-  for (const update of sourceUpdates) {
-    const key = canonicalFactDeduplicationKey(update.content);
-    if (!uniqueUpdates.has(key)) uniqueUpdates.set(key, update);
-  }
-  const updates = [...uniqueUpdates.values()];
-  const entityCatalog = derived.entityCatalog ?? [];
-  const projections = buildCanonicalFactProjection(updates.map((update, factIndex) => ({
+  const projections = buildCanonicalChronicleFacts({
     campaignId,
-    sourceTurnId: turnId,
-    factIndex,
-    content: update.content
-  })));
+    turnId,
+    entityCatalog: derived.entityCatalog ?? [],
+    ...(derived.canonicalFacts ? { canonicalFacts: derived.canonicalFacts } : {}),
+    ...(derived.canonicalFactUpdates ? { canonicalFactUpdates: derived.canonicalFactUpdates } : {})
+  });
   const affectedTurnIds = new Set<string>([turnId]);
-  for (let index = 0; index < projections.length; index += 1) {
-    const projection = projections[index]!;
-    const update = updates[index]!;
-    const entityMetadata = resolveEntityMetadata(projection.content, entityCatalog);
+  for (const projection of projections) {
     await client.query(
       `INSERT INTO campaign_canonical_facts (
          id, owner_user_id, campaign_id, world_version_id, source_turn_id, source_turn_number,
@@ -1129,22 +1067,22 @@ async function projectCanonicalFacts(
          entities = EXCLUDED.entities, entity_ids = EXCLUDED.entity_ids,
          metadata = EXCLUDED.metadata, updated_at = now()`,
       [projection.id, ownerUserId, campaignId, worldVersionId, turnId, ordinal, projection.factIndex,
-        projection.content, canonicalFactDeduplicationKey(projection.content),
-        entityMetadata.entities, entityMetadata.entityIds,
+        projection.content, projection.normalizedContent,
+        projection.entities, projection.entityIds,
         json({ generatedFromAcceptedTurn: true })]
     );
-    if (update.supersedesFactIds.length) {
+    if (projection.supersedesFactIds.length) {
       const superseded = await client.query<{ id: string; source_turn_id: string }>(
         `UPDATE campaign_canonical_facts
             SET valid_until_turn = $4, superseded_by_fact_id = $5, updated_at = now()
           WHERE owner_user_id = $1 AND campaign_id = $2 AND id = ANY($3::uuid[])
             AND source_turn_number < $4 AND valid_until_turn IS NULL
         RETURNING id, source_turn_id`,
-        [ownerUserId, campaignId, update.supersedesFactIds, ordinal, projection.id]
+        [ownerUserId, campaignId, projection.supersedesFactIds, ordinal, projection.id]
       );
       superseded.rows.forEach((fact) => affectedTurnIds.add(fact.source_turn_id));
       const matched = new Set(superseded.rows.map((fact) => fact.id));
-      const unmatched = update.supersedesFactIds.filter((id) => !matched.has(id));
+      const unmatched = projection.supersedesFactIds.filter((id) => !matched.has(id));
       if (unmatched.length) {
         await client.query(
           `UPDATE campaign_canonical_facts
@@ -1187,7 +1125,7 @@ export async function storeDerivedTurnMemories(
   const threads = sanitizedMemoryLines(derived.openThreads);
   if (!derived.entityCatalog) {
     const scope = await campaignScope(client, ownerUserId, campaignId);
-    derived.entityCatalog = buildScopedEntityCatalog({
+    derived.entityCatalog = buildChronicleEntityCatalog({
       worldContent: scope.world_content,
       characterSnapshot: scope.character_snapshot,
       characterProfile: scope.character_profile
@@ -1378,7 +1316,7 @@ export async function projectCampaignStateCorrection(
   }
 ): Promise<void> {
   const scope = await campaignScope(client, ownerUserId, campaignId);
-  const entityCatalog = buildScopedEntityCatalog({
+  const entityCatalog = buildChronicleEntityCatalog({
     worldContent: scope.world_content,
     characterSnapshot: scope.character_snapshot,
     characterProfile: scope.character_profile
@@ -1515,7 +1453,7 @@ export async function projectCampaignStateCorrection(
 
 export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserId: string, campaignId: string): Promise<number> {
   const scope = await campaignScope(client, ownerUserId, campaignId);
-  const entityCatalog = buildScopedEntityCatalog({
+  const entityCatalog = buildChronicleEntityCatalog({
     worldContent: scope.world_content,
     characterSnapshot: scope.character_snapshot,
     characterProfile: scope.character_profile
@@ -1552,7 +1490,8 @@ export async function rebuildCampaignMemories(client: DatabaseClient, ownerUserI
     [ownerUserId, campaignId]
   );
   for (const turn of turns.rows) {
-    const memory = buildTurnFictionMemory({ action: turn.action, narration: turn.narration }, turn.turn_number);
+    const memory = buildAcceptedTurnFictionMemory({ accepted: true, action: turn.action, narration: turn.narration }, turn.turn_number);
+    if (!memory) throw new Error("Accepted turn fiction memory was unexpectedly excluded.");
     const entityMetadata = resolveEntityMetadata(memory.content, entityCatalog);
     await client.query(
       `INSERT INTO chronicle_memories (
