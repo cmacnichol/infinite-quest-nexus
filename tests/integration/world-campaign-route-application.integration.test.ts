@@ -150,6 +150,75 @@ integration("world campaign Fastify production application cutover", () => {
   const notFound = (error: unknown) => error instanceof WorldCampaignApplicationError
     && error.kind === "not_found";
 
+  function expectUnavailableProviderResponse(
+    response: Awaited<ReturnType<FastifyInstance["inject"]>>,
+    code: "default_text_provider_unavailable" | "text_provider_unavailable",
+    message: string
+  ): void {
+    expect(response.statusCode).toBe(409);
+    const body = response.json();
+    expect(body.correlationId).toEqual(expect.any(String));
+    expect(body).toEqual({
+      error: "Error",
+      message: `${message} Correlation ID: ${body.correlationId}.`,
+      correlationId: body.correlationId,
+      details: { code }
+    });
+  }
+
+  async function withTextProvidersUnavailable<T>(operation: () => Promise<T>): Promise<T> {
+    const fixtureId = crypto.randomUUID();
+    const snapshot = await pool.query<{ id: string; enabled: boolean; is_default: boolean }>(
+      `SELECT id, enabled, is_default
+         FROM provider_profiles
+        WHERE owner_user_id = $1 AND provider_role = 'text'
+        ORDER BY id`,
+      [ownerUserId]
+    );
+    try {
+      await pool.query(
+        `UPDATE provider_profiles
+            SET is_default = false
+          WHERE owner_user_id = $1 AND provider_role = 'text'`,
+        [ownerUserId]
+      );
+      await pool.query(
+        `INSERT INTO provider_profiles (
+           id, owner_user_id, name, provider_type, provider_role, base_url,
+           default_model, request_timeout_ms, enabled, is_default
+         ) VALUES ($1, $2, $3, 'openai_compatible', 'text', 'http://127.0.0.1:1',
+           '14c3-unreachable', 5000, true, true)`,
+        [fixtureId, ownerUserId, `14c3 provider contaminant ${fixtureId}`]
+      );
+      await pool.query(
+        `UPDATE provider_profiles
+            SET enabled = false, is_default = false
+          WHERE owner_user_id = $1 AND provider_role = 'text'`,
+        [ownerUserId]
+      );
+      const selection = await pool.query<{ enabled_count: string }>(
+        `SELECT count(*)::text AS enabled_count
+           FROM provider_profiles
+          WHERE owner_user_id = $1 AND provider_role = 'text' AND enabled = true`,
+        [ownerUserId]
+      );
+      if (selection.rows[0]?.enabled_count !== "0") {
+        throw new Error("Task 14c3 provider fixture failed to establish an unavailable text-provider selection.");
+      }
+      return await operation();
+    } finally {
+      await pool.query("DELETE FROM provider_profiles WHERE id = $1 AND owner_user_id = $2", [fixtureId, ownerUserId]);
+      for (const profile of snapshot.rows) {
+        await pool.query(
+          `UPDATE provider_profiles
+              SET enabled = $3, is_default = $4
+            WHERE id = $1 AND owner_user_id = $2`,
+          [profile.id, ownerUserId, profile.enabled, profile.is_default]
+        );
+      }
+    }
+  }
+
   async function cleanupTrackedResources(): Promise<void> {
     for (const campaign of trackedCampaigns.splice(0).reverse()) {
       await pool.query(
@@ -368,22 +437,34 @@ integration("world campaign Fastify production application cutover", () => {
         payload: { expectedRevision: revision, character: worldContent(title).playableCharacters[0] }
       }
     ] as const;
-    const providerBackedResponses = [];
-    for (const request of providerBackedRequests) {
-      providerBackedResponses.push(await app.inject(request));
-    }
+    const providerBackedResponses = await withTextProvidersUnavailable(async () => {
+      const responses = [];
+      for (const request of providerBackedRequests) {
+        responses.push(await app.inject(request));
+      }
+      return responses;
+    });
     const providerFailureModes = [
-      { statuses: [409, 502], unavailableCode: "default_text_provider_unavailable" },
-      { statuses: [409, 500], unavailableCode: "default_text_provider_unavailable" },
-      { statuses: [409, 500], unavailableCode: "default_text_provider_unavailable" },
-      { statuses: [409, 500], unavailableCode: "text_provider_unavailable" }
+      {
+        code: "default_text_provider_unavailable",
+        message: "Add a text provider or mark one as default in Provider Management before generating a world."
+      },
+      {
+        code: "default_text_provider_unavailable",
+        message: "Add a text provider or mark one as default in Provider Management before generating a character."
+      },
+      {
+        code: "default_text_provider_unavailable",
+        message: "Add a text provider or mark one as default in Provider Management before generating a character."
+      },
+      {
+        code: "text_provider_unavailable",
+        message: "No enabled text provider is available to organize this profile."
+      }
     ] as const;
     providerBackedResponses.forEach((response, index) => {
       const expected = providerFailureModes[index]!;
-      expect(expected.statuses).toContain(response.statusCode);
-      if (response.statusCode === 409) {
-        expect(response.json()).toMatchObject({ details: { code: expected.unavailableCode } });
-      }
+      expectUnavailableProviderResponse(response, expected.code, expected.message);
     });
 
     const progress = await app.inject({
@@ -554,15 +635,16 @@ integration("world campaign Fastify production application cutover", () => {
     expect(update.statusCode).toBe(200);
     expect(update.json()).toMatchObject({ campaignId: source.campaign.id, revision: 1 });
 
-    const organize = await app.inject({
+    const organize = await withTextProvidersUnavailable(() => app.inject({
       method: "POST",
       url: `/api/v1/campaigns/${source.campaign.id}/character-profile/organize`,
       payload: { expectedRevision: 1, character: worldContent(sourceWorld.title).playableCharacters[0] }
-    });
-    expect([409, 500]).toContain(organize.statusCode);
-    if (organize.statusCode === 409) {
-      expect(organize.json()).toMatchObject({ details: { code: "text_provider_unavailable" } });
-    }
+    }));
+    expectUnavailableProviderResponse(
+      organize,
+      "text_provider_unavailable",
+      "No enabled text provider is available to organize this profile."
+    );
 
     const transferTitle = `14c3 transferred ${crypto.randomUUID()}`;
     const preview = await app.inject({

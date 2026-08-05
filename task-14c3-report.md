@@ -27,6 +27,11 @@ The first post-implementation review identified two Important findings:
    PostgreSQL application path or exclude a transport fallback to legacy
    business SQL.
 
+The second review found that the production-composed matrix still accepted raw
+500/502 provider failures for the five temporary Task 14d routes. Those
+expectations depended on whatever text-provider profile happened to be present
+instead of proving the established safe unavailable response.
+
 No legacy removal was authorized by this correction.
 
 ## Corrections implemented
@@ -71,9 +76,17 @@ be exported even when the request supplies that foreign UUID in the spoofed
 header; the route returns the owner-scoped `world_version_not_found` response.
 This also detects an ownerless or direct legacy export fallback.
 
-The temporary Task 14d routes deliberately preserve their current production
-error projections in this checkpoint. Provider/prompt behavior and error
-normalization are not moved into Task 14c3.
+The temporary Task 14d routes now run inside a controlled unavailable-provider
+fixture. It snapshots existing initial-owner text-profile selection flags,
+adds a deliberate enabled/default unreachable contaminant, disables every text
+profile during the HTTP calls, verifies that no enabled text selection remains,
+then removes the contaminant and restores the snapshot in `finally`. This
+proves the test cannot drift into the raw provider transport merely because a
+profile exists. All five routes require the exact safe 409 public envelope,
+including the expected message, correlation ID, and either
+`default_text_provider_unavailable` or `text_provider_unavailable` code.
+Production route behavior was not changed; Task 14d still owns provider and
+prompt replacement.
 
 ## Inventory disposition
 
@@ -101,7 +114,10 @@ Correction-focused evidence:
 - production Fastify/PostgreSQL route matrix: 8/8 tests passed;
 - route matrix request count: 46;
 - whole-world, exact-version, spoofed-header, and foreign-owner export cases
-  passed.
+  passed; and
+- provider-fixture TDD first reproduced raw 502/500 responses from the
+  contaminant profile, then two consecutive focused real-PostgreSQL runs passed
+  8/8 with exact safe 409 assertions for all five temporary provider routes.
 
 Final verification evidence:
 
