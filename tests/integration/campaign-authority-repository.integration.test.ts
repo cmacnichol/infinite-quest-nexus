@@ -13,6 +13,7 @@ import {
 } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
+import { turnReportedCosts } from "../../services/api/src/cost-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -32,7 +33,7 @@ integration("PostgreSQL campaign sync adapters", () => {
   });
 
   function createAdapters() {
-    const turnPages = createPostgresBoundedCampaignTurnPageAdapter(pool);
+    const turnPages = createPostgresBoundedCampaignTurnPageAdapter(pool, { turnReportedCosts });
     return createPostgresCampaignAuthorityAdapters(pool, { turnPages });
   }
 
@@ -80,5 +81,66 @@ integration("PostgreSQL campaign sync adapters", () => {
     expect(latest.nextCursor).toEqual(expect.any(String));
     const earlier = await adapters.turnPages.readTurnPage(scope, { before: latest.nextCursor!, limit: 1 });
     expect(earlier.turns.map((turn) => turn.turnNumber)).toEqual([1]);
+  });
+
+  it("preserves the established owner-scoped reported cost in normal and sync turn pages", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const turn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = 2",
+      [ownerUserId, imported.campaignId]
+    );
+    const turnId = turn.rows[0]!.id;
+    await pool.query(
+      `INSERT INTO provider_cost_events (
+         owner_user_id, campaign_id, turn_id, provider_type, category, operation,
+         requested_model, resolved_model, amount, currency, usage_metadata
+       ) VALUES ($1,$2,$3,'openai_compatible','story','story_turn','fixture-model',
+                 'fixture-model',0.125,'USD','{}'::jsonb)`,
+      [ownerUserId, imported.campaignId, turnId]
+    );
+    const expectedCost = {
+      amount: "0.125000000000",
+      currency: "USD",
+      byCategory: { story: "0.125000000000", image: "0", memory: "0" }
+    };
+
+    expect((await turnReportedCosts(pool, ownerUserId, [turnId])).get(turnId)).toEqual(expectedCost);
+    const syncPage = await adapters.turnPages.readTurnPage(scope, { before: undefined, limit: 1 });
+    expect(syncPage.turns[0]?.reportedCost).toEqual(expectedCost);
+  });
+
+  it("rejects malformed persisted playable characters at the database boundary", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    await pool.query(
+      `UPDATE world_versions
+          SET content = jsonb_set(content, '{playableCharacters}',
+            '[{"id":"","name":7,"characterText":false}]'::jsonb)
+        WHERE id = (SELECT world_version_id FROM campaigns WHERE id = $1 AND owner_user_id = $2)`,
+      [imported.campaignId, ownerUserId]
+    );
+
+    await expect(adapters.transaction.read((transaction) => adapters.sync.readCampaignSyncSnapshot(
+      transaction,
+      { ownerUserId, campaignId: imported.campaignId }
+    ))).rejects.toMatchObject({ kind: "unavailable", reason: "invalid_transition" });
+  });
+
+  it("rejects other malformed persisted nested sync data without returning a partial projection", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    await pool.query(
+      `UPDATE campaign_state
+          SET trackers = '[{"id":"","name":9,"value":{},"rules":[]}]'::jsonb
+        WHERE campaign_id = $1 AND owner_user_id = $2`,
+      [imported.campaignId, ownerUserId]
+    );
+
+    await expect(adapters.transaction.read((transaction) => adapters.sync.readCampaignSyncSnapshot(
+      transaction,
+      { ownerUserId, campaignId: imported.campaignId }
+    ))).rejects.toMatchObject({ kind: "unavailable", reason: "invalid_transition" });
   });
 });

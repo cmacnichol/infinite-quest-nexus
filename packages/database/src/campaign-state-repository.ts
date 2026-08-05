@@ -1,11 +1,12 @@
 import {
   PUBLIC_GENERATION_FAILURE_CODE,
-  PUBLIC_GENERATION_FAILURE_MESSAGE,
-  campaignTrackerSchema,
-  playerEventTriggerSchema,
-  playerRpgStatSchema
+  PUBLIC_GENERATION_FAILURE_MESSAGE
 } from "../../contracts/src/generation.js";
-import { turnSummarySchema } from "../../contracts/src/client-api.js";
+import { z } from "zod";
+import {
+  campaignSyncSourceProjectionSchema,
+  turnSummarySchema
+} from "../../contracts/src/client-api.js";
 import type {
   BoundedCampaignTurnPagePort,
   CampaignSyncRepositoryPort,
@@ -24,6 +25,22 @@ import {
 
 export type CampaignSyncAdapterCollaborators = Readonly<{
   turnPages: BoundedCampaignTurnPagePort;
+}>;
+
+type CampaignTurnReportedCost = Readonly<{
+  amount: string;
+  currency: string;
+  byCategory: Readonly<Record<"story" | "image" | "memory", string>>;
+}>;
+
+export type CampaignTurnReportedCostReader = (
+  client: DatabasePool,
+  ownerUserId: string,
+  turnIds: string[]
+) => Promise<Map<string, CampaignTurnReportedCost>>;
+
+export type CampaignTurnPageAdapterCollaborators = Readonly<{
+  turnReportedCosts: CampaignTurnReportedCostReader;
 }>;
 
 type CampaignSyncRow = {
@@ -185,15 +202,15 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
         characterSnapshot: row.characterSnapshot,
         characterProfile: row.characterProfile,
         characterProfileRevision: row.characterProfileRevision,
-        rpgStats: playerRpgStatSchema.array().parse(row.rpgStats || []),
-        trackers: campaignTrackerSchema.array().parse(row.trackers || []),
-        eventTriggers: playerEventTriggerSchema.array().parse(row.eventTriggers || []),
+        rpgStats: row.rpgStats ?? [],
+        trackers: row.trackers ?? [],
+        eventTriggers: row.eventTriggers ?? [],
         useRpgStats: Boolean(settings.useRpgStats),
         suppressEventTriggers: Boolean(settings.suppressEventTriggers)
       };
       const pendingBase = row.pendingGenerationId && row.pendingGenerationStatus
-        && row.pendingGenerationExpectedTurnNumber && row.pendingGenerationCreatedAt
-        && row.pendingGenerationUpdatedAt
+        && row.pendingGenerationExpectedTurnNumber !== null && row.pendingGenerationCreatedAt !== null
+        && row.pendingGenerationUpdatedAt !== null
         ? {
           id: row.pendingGenerationId,
           status: row.pendingGenerationStatus,
@@ -214,7 +231,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
           }
           : null;
       const recoveryBase = row.recoveryId && row.recoveryStatus
-        && row.recoveryExpectedTurnNumber && row.recoveryAttempts !== null
+        && row.recoveryExpectedTurnNumber !== null && row.recoveryAttempts !== null
         && !row.recoveryResultIsRecent
         ? {
           id: row.recoveryId,
@@ -234,11 +251,31 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
             replacementTurnId: row.recoveryReplacementTurnId
           }
           : null;
+      let projection;
+      try {
+        projection = campaignSyncSourceProjectionSchema.parse({
+          ...campaign,
+          campaign,
+          world,
+          playerConfig,
+          pendingGeneration,
+          generationRecovery
+        });
+      } catch (error) {
+        if (error instanceof z.ZodError) {
+          throw new WorldCampaignApplicationError(
+            "unavailable",
+            "invalid_transition",
+            { campaignId: scope.campaignId }
+          );
+        }
+        throw error;
+      }
       const syncToken = sha256(stableStringify({
         ownerUserId: scope.ownerUserId,
-        campaign,
-        world,
-        playerConfig,
+        campaign: projection.campaign,
+        world: projection.world,
+        playerConfig: projection.playerConfig,
         latestTurnId: row.latestTurnId,
         latestTurnNumber: row.latestTurnNumber,
         pendingGenerationId: pendingGeneration?.id ?? null,
@@ -251,14 +288,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
       }));
       return {
         syncToken,
-        projection: {
-          ...campaign,
-          campaign,
-          world,
-          playerConfig,
-          pendingGeneration,
-          generationRecovery
-        }
+        projection
       };
     }
   };
@@ -266,6 +296,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
 
 export function createPostgresBoundedCampaignTurnPageAdapter(
   pool: DatabasePool,
+  collaborators: CampaignTurnPageAdapterCollaborators,
 ): BoundedCampaignTurnPagePort {
   return {
     async readTurnPage(scope, request) {
@@ -276,11 +307,16 @@ export function createPostgresBoundedCampaignTurnPageAdapter(
         request.before,
         request.limit
       );
+      const reportedCosts = await collaborators.turnReportedCosts(
+        pool,
+        scope.ownerUserId,
+        page.turns.map((turn) => turn.id)
+      );
       return {
         turns: page.turns.map((turn) => turnSummarySchema.parse({
           ...turn,
           narration: formatNarrationParagraphs(turn.narration),
-          reportedCost: null
+          reportedCost: reportedCosts.get(turn.id) ?? null
         })),
         nextCursor: page.nextCursor
       };

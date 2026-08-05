@@ -230,7 +230,7 @@ export const generationRecoverySchema = z.discriminatedUnion("operationKind", [
   })
 ]);
 
-const campaignSyncStatusBaseSchema = campaignSyncCampaignSchema.extend({
+export const campaignSyncSourceProjectionSchema = campaignSyncCampaignSchema.extend({
   campaign: campaignSyncCampaignSchema,
   world: z.object({
     id: z.uuid(),
@@ -258,8 +258,11 @@ const campaignSyncStatusBaseSchema = campaignSyncCampaignSchema.extend({
     suppressEventTriggers: z.boolean()
   }),
   pendingGeneration: pendingGenerationSchema.nullable(),
-  syncToken: z.string().min(1),
   generationRecovery: generationRecoverySchema.nullable()
+});
+
+const campaignSyncStatusBaseSchema = campaignSyncSourceProjectionSchema.extend({
+  syncToken: z.string().min(1)
 });
 
 export const turnSummarySchema = z.object({
