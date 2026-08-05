@@ -93,8 +93,7 @@ export function projectCampaignArchiveAssets(rows: readonly ArchiveAssetSourceRo
 }
 
 export async function collectCampaignArchiveAssets(client: DatabaseClient, ownerUserId: string, campaignId: string, worldVersionId: string, worldId: string): Promise<CampaignAssetInventory> {
-  const relationshipResults = await Promise.all([
-    client.query<ArchiveAssetBindingRow>(`SELECT r.asset_id,
+  const assetReferences = await client.query<ArchiveAssetBindingRow>(`SELECT r.asset_id,
       CASE
         WHEN r.asset_role = 'turn_illustration' AND r.turn_id IS NOT NULL THEN jsonb_build_object('role','turn_illustration','campaignId',r.campaign_id,'turnId',r.turn_id)
         WHEN r.asset_role = 'turn_illustration' THEN jsonb_build_object('role','campaign_asset','campaignId',r.campaign_id)
@@ -102,21 +101,21 @@ export async function collectCampaignArchiveAssets(client: DatabaseClient, owner
         ELSE jsonb_build_object('role','campaign_asset','campaignId',r.campaign_id)
       END AS binding
       FROM asset_references r
-      WHERE r.owner_user_id=$1 AND r.campaign_id=$2`, [ownerUserId, campaignId]),
-    client.query<ArchiveAssetBindingRow>(`SELECT s.asset_id, jsonb_build_object('role','illustration_segment_variant','campaignId',seg.campaign_id,'turnId',seg.turn_id,'segmentId',seg.id,'variantIndex',s.variant_index) AS binding
+      WHERE r.owner_user_id=$1 AND r.campaign_id=$2`, [ownerUserId, campaignId]);
+  const segmentAssets = await client.query<ArchiveAssetBindingRow>(`SELECT s.asset_id, jsonb_build_object('role','illustration_segment_variant','campaignId',seg.campaign_id,'turnId',seg.turn_id,'segmentId',seg.id,'variantIndex',s.variant_index) AS binding
       FROM turn_illustration_segment_assets s
       JOIN turn_illustration_segments seg ON seg.id=s.segment_id AND seg.owner_user_id=s.owner_user_id
       JOIN turns t ON t.id=seg.turn_id AND t.campaign_id=seg.campaign_id AND t.owner_user_id=seg.owner_user_id
-     WHERE s.owner_user_id=$1 AND seg.campaign_id=$2`, [ownerUserId, campaignId]),
-    client.query<ArchiveCampaignImageJobRow>(`SELECT j.asset_id, j.target_type, j.campaign_id, j.turn_id
+     WHERE s.owner_user_id=$1 AND seg.campaign_id=$2`, [ownerUserId, campaignId]);
+  const campaignImageJobs = await client.query<ArchiveCampaignImageJobRow>(`SELECT j.asset_id, j.target_type, j.campaign_id, j.turn_id
       FROM image_jobs j
      WHERE j.owner_user_id=$1 AND j.status='completed' AND j.asset_id IS NOT NULL
        AND j.campaign_id=$2
-       AND (j.target_type='streaming_illustration' OR (j.target_type='turn_illustration' AND j.turn_id IS NOT NULL))`, [ownerUserId, campaignId]),
-    client.query<ArchiveAssetBindingRow>(`SELECT w.cover_asset_id AS asset_id, jsonb_build_object('role','world_cover','worldId',w.id) AS binding
+       AND (j.target_type='streaming_illustration' OR (j.target_type='turn_illustration' AND j.turn_id IS NOT NULL))`, [ownerUserId, campaignId]);
+  const worldCover = await client.query<ArchiveAssetBindingRow>(`SELECT w.cover_asset_id AS asset_id, jsonb_build_object('role','world_cover','worldId',w.id) AS binding
       FROM worlds w
-     WHERE w.id=$2 AND w.owner_user_id=$1 AND w.cover_asset_id IS NOT NULL`, [ownerUserId, worldId]),
-    client.query<ArchiveAssetBindingRow>(`SELECT c.asset_id, jsonb_build_object('role','generation_context','campaignId',c.campaign_id,'worldId',c.world_id,'worldVersionId',c.world_version_id,'turnId',c.turn_id,'sourceContextId',c.id) AS binding
+     WHERE w.id=$2 AND w.owner_user_id=$1 AND w.cover_asset_id IS NOT NULL`, [ownerUserId, worldId]);
+  const generationContexts = await client.query<ArchiveAssetBindingRow>(`SELECT c.asset_id, jsonb_build_object('role','generation_context','campaignId',c.campaign_id,'worldId',c.world_id,'worldVersionId',c.world_version_id,'turnId',c.turn_id,'sourceContextId',c.id) AS binding
       FROM asset_generation_contexts c
       LEFT JOIN campaigns cp ON cp.id=c.campaign_id AND cp.owner_user_id=c.owner_user_id
       LEFT JOIN worlds w ON w.id=c.world_id AND w.owner_user_id=c.owner_user_id
@@ -129,8 +128,7 @@ export async function collectCampaignArchiveAssets(client: DatabaseClient, owner
        AND (c.world_id IS NULL OR w.id IS NOT NULL)
        AND (c.world_version_id IS NULL OR v.id IS NOT NULL)
        AND (c.turn_id IS NULL OR t.id IS NOT NULL)
-       AND c.asset_id IS NOT NULL`, [ownerUserId, campaignId, worldVersionId, worldId])
-  ]);
+       AND c.asset_id IS NOT NULL`, [ownerUserId, campaignId, worldVersionId, worldId]);
   const turnPointers = await client.query<{ id: string; image_url: string }>(
     `SELECT id, image_url FROM turns WHERE owner_user_id=$1 AND campaign_id=$2 AND image_url <> '' ORDER BY id`,
     [ownerUserId, campaignId]
@@ -145,7 +143,6 @@ export async function collectCampaignArchiveAssets(client: DatabaseClient, owner
     if (!current.some((existing) => bindingKey(existing) === bindingKey(binding))) current.push(binding);
     bindingMap.set(assetId, current);
   };
-  const [assetReferences, segmentAssets, campaignImageJobs, worldCover, generationContexts] = relationshipResults;
   for (const relationships of [assetReferences, segmentAssets, worldCover, generationContexts]) {
     for (const row of relationships.rows) addBinding(row.asset_id, row.binding);
   }

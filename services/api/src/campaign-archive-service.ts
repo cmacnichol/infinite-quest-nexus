@@ -210,26 +210,24 @@ export async function captureCampaignArchiveSnapshot(pool: DatabasePool, campaig
     const maxTurn = turns.at(-1)?.turn_number ?? 0;
     if (Number(maxTurn) !== Number(campaign.active_turn_number)) throw exportError("Accepted turns do not match the campaign active turn number.");
     const values = [ownerUserId, campaignId];
-    const [profileEdits, stateEdits, migrations, illustrationConfigRows, illustrationSets, illustrationSegments, costs, memories, summaries] = await Promise.all([
-      queryRows(client, "SELECT id,revision,previous_profile,next_profile,edit_source,created_at FROM campaign_character_profile_edits WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY revision", values),
-      queryRows(client, "SELECT id,effective_turn_number,revision,state_snapshot_private,changed_fields,created_at FROM campaign_state_edits WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY revision", values),
-      queryRows(client, "SELECT id,from_world_version_id,to_world_version_id,note,created_at FROM campaign_world_migrations WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY created_at,id", values),
-      queryRows(client, "SELECT enabled,source_policy,matching_scope,confidence_profile,repetition_window,model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,images_per_segment,segment_prompt_mode,refinement_prompt,created_at,updated_at FROM campaign_illustration_configs WHERE owner_user_id=$1 AND campaign_id=$2", values),
-      queryRows(client, "SELECT id,turn_id,source_text_hash,segment_word_count,images_per_segment,prompt_mode,status,is_active,character_visual_reference,created_at,completed_at FROM turn_illustration_sets WHERE owner_user_id=$1 AND campaign_id=$2 AND turn_id IS NOT NULL ORDER BY created_at,id", values),
-      queryRows(client, `SELECT seg.id,seg.illustration_set_id,seg.turn_id,seg.ordinal,seg.start_offset,seg.end_offset,seg.start_word,seg.end_word,
-                               seg.source_text,seg.source_text_hash,seg.direct_prompt,seg.resolved_prompt,seg.prompt_source,seg.status,seg.created_at,seg.updated_at
-                          FROM turn_illustration_segments seg
-                          JOIN turn_illustration_sets illustration_set
-                            ON illustration_set.id=seg.illustration_set_id
-                           AND illustration_set.owner_user_id=seg.owner_user_id
-                           AND illustration_set.campaign_id=seg.campaign_id
-                           AND illustration_set.turn_id=seg.turn_id
-                         WHERE seg.owner_user_id=$1 AND seg.campaign_id=$2 AND seg.turn_id IS NOT NULL
-                         ORDER BY seg.illustration_set_id,seg.ordinal`, values),
-      queryRows(client, "SELECT id,turn_id,local_call_id,provider_type,category,operation,requested_model,resolved_model,trim(trailing '.' from trim(trailing '0' from amount::text)) AS amount,currency,usage_metadata,occurred_at,created_at FROM provider_cost_events WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY occurred_at,id", values),
-      queryRows(client, "SELECT id,turn_id,memory_kind,ordinal,content,token_estimate,importance,entities,entity_ids,metadata,created_at,updated_at FROM chronicle_memories WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY ordinal,id", values),
-      queryRows(client, "SELECT id,summary_kind,through_turn,content,created_at FROM summary_checkpoints WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY through_turn,id", values)
-    ]);
+    const profileEdits = await queryRows(client, "SELECT id,revision,previous_profile,next_profile,edit_source,created_at FROM campaign_character_profile_edits WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY revision", values);
+    const stateEdits = await queryRows(client, "SELECT id,effective_turn_number,revision,state_snapshot_private,changed_fields,created_at FROM campaign_state_edits WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY revision", values);
+    const migrations = await queryRows(client, "SELECT id,from_world_version_id,to_world_version_id,note,created_at FROM campaign_world_migrations WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY created_at,id", values);
+    const illustrationConfigRows = await queryRows(client, "SELECT enabled,source_policy,matching_scope,confidence_profile,repetition_window,model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,images_per_segment,segment_prompt_mode,refinement_prompt,created_at,updated_at FROM campaign_illustration_configs WHERE owner_user_id=$1 AND campaign_id=$2", values);
+    const illustrationSets = await queryRows(client, "SELECT id,turn_id,source_text_hash,segment_word_count,images_per_segment,prompt_mode,status,is_active,character_visual_reference,created_at,completed_at FROM turn_illustration_sets WHERE owner_user_id=$1 AND campaign_id=$2 AND turn_id IS NOT NULL ORDER BY created_at,id", values);
+    const illustrationSegments = await queryRows(client, `SELECT seg.id,seg.illustration_set_id,seg.turn_id,seg.ordinal,seg.start_offset,seg.end_offset,seg.start_word,seg.end_word,
+                             seg.source_text,seg.source_text_hash,seg.direct_prompt,seg.resolved_prompt,seg.prompt_source,seg.status,seg.created_at,seg.updated_at
+                        FROM turn_illustration_segments seg
+                        JOIN turn_illustration_sets illustration_set
+                          ON illustration_set.id=seg.illustration_set_id
+                         AND illustration_set.owner_user_id=seg.owner_user_id
+                         AND illustration_set.campaign_id=seg.campaign_id
+                         AND illustration_set.turn_id=seg.turn_id
+                       WHERE seg.owner_user_id=$1 AND seg.campaign_id=$2 AND seg.turn_id IS NOT NULL
+                       ORDER BY seg.illustration_set_id,seg.ordinal`, values);
+    const costs = await queryRows(client, "SELECT id,turn_id,local_call_id,provider_type,category,operation,requested_model,resolved_model,trim(trailing '.' from trim(trailing '0' from amount::text)) AS amount,currency,usage_metadata,occurred_at,created_at FROM provider_cost_events WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY occurred_at,id", values);
+    const memories = await queryRows(client, "SELECT id,turn_id,memory_kind,ordinal,content,token_estimate,importance,entities,entity_ids,metadata,created_at,updated_at FROM chronicle_memories WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY ordinal,id", values);
+    const summaries = await queryRows(client, "SELECT id,summary_kind,through_turn,content,created_at FROM summary_checkpoints WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY through_turn,id", values);
     const legacy = await client.query<{ content: unknown; through_turn: number }>(
       "SELECT content,through_turn FROM summary_checkpoints WHERE owner_user_id=$1 AND campaign_id=$2 AND summary_kind='legacy_full_history' ORDER BY through_turn DESC,created_at DESC LIMIT 1", values
     );

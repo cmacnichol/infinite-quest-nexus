@@ -365,6 +365,23 @@ integration("campaign archive export", () => {
     )).rows[0]!;
   }
 
+  it("captures a campaign archive snapshot without queuing queries on its transaction client", async () => {
+    const warnings: Error[] = [];
+    const recordWarning = (warning: Error) => {
+      if (warning.message.includes("Calling client.query() when the client is already executing a query")) {
+        warnings.push(warning);
+      }
+    };
+    process.on("warning", recordWarning);
+    try {
+      await captureCampaignArchiveSnapshot(pool, campaignId);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      process.off("warning", recordWarning);
+    }
+    expect(warnings).toEqual([]);
+  });
+
   secureGeneratedStagingIt("[secure generated staging] exports only the selected campaign and pinned world version as a deterministic manifest archive", async () => {
     const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
     const repeated = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });

@@ -2274,46 +2274,76 @@ integration("durable Story Engine integration", () => {
       expect(await getGenerationJob(pool, job.id)).toMatchObject({ status });
     }
 
-    const originalOwner = await pool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'");
+    const initialOwner = await pool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'");
     const foreignOwner = await pool.query<{ id: string }>(
       "INSERT INTO users (display_name, status) VALUES ('Cancellation foreign owner', 'active') RETURNING id"
     );
-    const foreignPool = createDatabasePool(databaseUrl!, 2);
-    let foreignJob: { id: string };
+    let foreignJobId = "";
+    let foreignCampaignId = "";
+    let foreignProviderId = "";
+    let foreignWorldId = "";
+    let foreignWorldVersionId = "";
     try {
-      await pool.query("UPDATE users SET system_key = NULL WHERE id = $1", [originalOwner.rows[0]!.id]);
-      await pool.query("UPDATE users SET system_key = 'initial-owner' WHERE id = $1", [foreignOwner.rows[0]!.id]);
-      const foreignCampaign = await campaign(undefined, `Foreign cancellation campaign ${crypto.randomUUID()}`, foreignPool);
-      const foreignProvider = await createProvider(foreignPool, {
-        name: `Foreign cancellation provider ${crypto.randomUUID()}`,
-        providerType: "openai_compatible",
-        providerRole: "text",
-        baseUrl,
-        defaultModel: "deterministic-mock",
-        contextWindowTokens: 32768,
-        maxOutputTokens: 4096,
-        temperature: 0,
-        enabled: true,
-        configuration: {}
-      }, credentialSecret);
-      foreignJob = await enqueueGeneration(foreignPool, foreignCampaign.campaignId, generationRequestSchema.parse({
-        action: "Foreign generation.",
-        providerProfileId: foreignProvider.id,
-        idempotencyKey: crypto.randomUUID(),
-        context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
-      }));
+      const foreignWorld = await pool.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id, title) VALUES ($1, $2) RETURNING id",
+        [foreignOwner.rows[0]!.id, `Foreign cancellation world ${crypto.randomUUID()}`]
+      );
+      foreignWorldId = foreignWorld.rows[0]!.id;
+      const foreignWorldVersion = await pool.query<{ id: string }>(
+        "INSERT INTO world_versions (world_id, owner_user_id, version_number, content) VALUES ($1, $2, 1, '{}'::jsonb) RETURNING id",
+        [foreignWorldId, foreignOwner.rows[0]!.id]
+      );
+      foreignWorldVersionId = foreignWorldVersion.rows[0]!.id;
+      const foreignCampaign = await pool.query<{ id: string }>(
+        "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1, $2, $3) RETURNING id",
+        [foreignOwner.rows[0]!.id, foreignWorldVersionId, `Foreign cancellation campaign ${crypto.randomUUID()}`]
+      );
+      foreignCampaignId = foreignCampaign.rows[0]!.id;
+      await pool.query("INSERT INTO campaign_state (campaign_id, owner_user_id) VALUES ($1, $2)", [foreignCampaignId, foreignOwner.rows[0]!.id]);
+      const foreignProvider = await pool.query<{ id: string }>(
+        `INSERT INTO provider_profiles (
+           owner_user_id, name, provider_type, provider_role, base_url, default_model,
+           context_window_tokens, max_output_tokens, temperature, request_timeout_ms, configuration, enabled
+         ) VALUES ($1, $2, 'openai_compatible', 'text', $3, 'deterministic-mock', 32768, 4096, 0, 300000, '{}'::jsonb, true)
+         RETURNING id`,
+        [foreignOwner.rows[0]!.id, `Foreign cancellation provider ${crypto.randomUUID()}`, baseUrl]
+      );
+      foreignProviderId = foreignProvider.rows[0]!.id;
+      const queuedForeignJob = await pool.query<{ id: string }>(
+        `INSERT INTO generation_jobs (
+           owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number, action,
+           requested_model, context_options, prompt_protocol_version, prompt_snapshot
+         ) VALUES ($1, $2, $3, $4, 1, 'Foreign generation.', 'deterministic-mock', '{}'::jsonb, 'story-v1', '{}'::jsonb)
+         RETURNING id`,
+        [foreignOwner.rows[0]!.id, foreignCampaignId, foreignProviderId, crypto.randomUUID()]
+      );
+      foreignJobId = queuedForeignJob.rows[0]!.id;
+      await expect(cancelGeneration(pool, foreignJobId)).rejects.toMatchObject({
+        kind: "not_found",
+        details: { jobId: foreignJobId }
+      });
+      const foreignStatus = await pool.query<{
+        status: string;
+        owner_user_id: string;
+        campaign_id: string;
+        provider_profile_id: string;
+      }>("SELECT status, owner_user_id, campaign_id, provider_profile_id FROM generation_jobs WHERE id = $1", [foreignJobId]);
+      expect(foreignStatus.rows).toEqual([{
+        status: "queued",
+        owner_user_id: foreignOwner.rows[0]!.id,
+        campaign_id: foreignCampaignId,
+        provider_profile_id: foreignProviderId
+      }]);
+      await expect(pool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'"))
+        .resolves.toMatchObject({ rows: [{ id: initialOwner.rows[0]!.id }] });
     } finally {
-      await foreignPool.end();
-      await pool.query("UPDATE users SET system_key = NULL WHERE id = $1", [foreignOwner.rows[0]!.id]);
-      await pool.query("UPDATE users SET system_key = 'initial-owner' WHERE id = $1", [originalOwner.rows[0]!.id]);
+      if (foreignJobId) await pool.query("DELETE FROM generation_jobs WHERE id = $1", [foreignJobId]);
+      if (foreignProviderId) await pool.query("DELETE FROM provider_profiles WHERE id = $1", [foreignProviderId]);
+      if (foreignCampaignId) await pool.query("DELETE FROM campaigns WHERE id = $1", [foreignCampaignId]);
+      if (foreignWorldVersionId) await pool.query("DELETE FROM world_versions WHERE id = $1", [foreignWorldVersionId]);
+      if (foreignWorldId) await pool.query("DELETE FROM worlds WHERE id = $1", [foreignWorldId]);
+      await pool.query("DELETE FROM users WHERE id = $1", [foreignOwner.rows[0]!.id]);
     }
-    await expect(cancelGeneration(pool, foreignJob!.id)).rejects.toMatchObject({
-      kind: "not_found",
-      details: { jobId: foreignJob!.id }
-    });
-    const foreignStatus = await pool.query<{ status: string }>("SELECT status FROM generation_jobs WHERE id = $1", [foreignJob!.id]);
-    expect(foreignStatus.rows).toEqual([{ status: "queued" }]);
-    await pool.query("UPDATE generation_jobs SET status = 'discarded' WHERE id = $1", [foreignJob!.id]);
   });
 
   it("reuses the persisted private roll when a recoverable story job is retried", async () => {
