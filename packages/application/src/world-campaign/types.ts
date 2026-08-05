@@ -7,7 +7,7 @@ import type {
   CampaignCreateRequest,
   CampaignListResponse,
   CampaignRewindResponse,
-  CampaignRewindRequest,
+  CampaignRewindRequest as ContractCampaignRewindRequest,
   CampaignRuntimeState,
   CampaignRuntimeStateContent,
   CampaignRuntimeStateUpdate,
@@ -369,6 +369,10 @@ export type CampaignPlayerConfigSyncView = Readonly<{
 export type CampaignPlayerConfigSyncRequest = Readonly<PlayerCampaignConfig & {
   expectedStateRevision: number;
 }>;
+export type CampaignRewindRequest = Readonly<Omit<ContractCampaignRewindRequest, "expectedCurrentTurnNumber"> & {
+  expectedCurrentTurnNumber: number;
+  expectedStateRevision: number;
+}>;
 export type CampaignRewindView = DeepReadonly<CampaignRewindResponse>;
 export type CampaignBranchView = DeepReadonly<CampaignBranchResponse>;
 export type CampaignStateEditView = Readonly<{
@@ -520,7 +524,6 @@ export type {
   CampaignBranchRequest,
   CampaignCharacterProfileUpdate,
   CampaignCreateRequest,
-  CampaignRewindRequest,
   CampaignRuntimeStateUpdate,
   CampaignTransferCommitRequest,
   CampaignTransferPreviewRequest,

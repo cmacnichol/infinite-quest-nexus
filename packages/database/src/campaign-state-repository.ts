@@ -1,4 +1,5 @@
 import {
+  campaignRewindSchema,
   campaignRuntimeStateContentSchema,
   campaignRuntimeStateSchema,
   campaignRuntimeStateUpdateSchema,
@@ -39,12 +40,20 @@ import {
 
 export type CampaignSyncAdapterCollaborators = Readonly<{
   turnPages: BoundedCampaignTurnPagePort;
-  memory: Pick<MemoryGenerationTransactionPort, "rebuildCampaignMemories">;
+  memory: Pick<MemoryGenerationTransactionPort, "enqueueEmbeddingReindex" | "rebuildCampaignMemories">;
 }>;
 
-type PostgresCampaignPlayerConfigRepository = Pick<CampaignRepositoryPort, "syncPlayerCampaignConfig">;
+type PostgresCampaignAuthorityRepository = Pick<
+  CampaignRepositoryPort,
+  "rewindCampaign" | "syncPlayerCampaignConfig"
+>;
 
 const campaignPlayerConfigSyncRequestSchema = playerCampaignConfigSchema.extend({
+  expectedStateRevision: z.coerce.number().int().min(0)
+});
+
+const campaignRewindRequestSchema = campaignRewindSchema.extend({
+  expectedCurrentTurnNumber: z.coerce.number().int().min(0),
   expectedStateRevision: z.coerce.number().int().min(0)
 });
 
@@ -468,8 +477,224 @@ function createPostgresCampaignStateRepository(
   };
 }
 
-function createPostgresCampaignPlayerConfigRepository(): PostgresCampaignPlayerConfigRepository {
+function createPostgresCampaignAuthorityRepository(
+  collaborators: Pick<CampaignSyncAdapterCollaborators, "memory">,
+): PostgresCampaignAuthorityRepository {
   return {
+    async rewindCampaign(transaction, scope, request) {
+      const client = worldCampaignDatabaseClient(transaction);
+      const parsed = parseBoundary(campaignRewindRequestSchema, request, "invalid_request", scope);
+      const current = await loadStateRow(client, scope, true);
+      if (!current) return failure("campaign_not_found", { campaignId: scope.campaignId });
+      if (current.activeTurnNumber !== parsed.expectedCurrentTurnNumber) {
+        return failure("active_turn_changed", {
+          campaignId: scope.campaignId,
+          expectedTurnNumber: parsed.expectedCurrentTurnNumber,
+          actualTurnNumber: current.activeTurnNumber
+        });
+      }
+      if (current.revision !== parsed.expectedStateRevision) {
+        return failure("state_revision_changed", {
+          campaignId: scope.campaignId,
+          expectedStateRevision: parsed.expectedStateRevision,
+          actualStateRevision: current.revision
+        });
+      }
+      if (parsed.targetTurnNumber > current.activeTurnNumber) {
+        return failure("invalid_transition", {
+          campaignId: scope.campaignId,
+          expectedTurnNumber: parsed.targetTurnNumber,
+          actualTurnNumber: current.activeTurnNumber
+        });
+      }
+
+      let targetSnapshot: Record<string, unknown>;
+      let targetModelMetadata: Record<string, unknown> | null = null;
+      if (parsed.targetTurnNumber === 0) {
+        targetSnapshot = current.initialStateSnapshot;
+      } else {
+        const target = await client.query<{
+          stateSnapshotPrivate: Record<string, unknown>;
+          modelMetadata: Record<string, unknown> | null;
+        }>(
+          `SELECT state_snapshot_private AS "stateSnapshotPrivate",
+                  model_metadata AS "modelMetadata"
+             FROM turns
+            WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number = $3
+            FOR UPDATE`,
+          [scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+        );
+        if (!target.rows[0]) {
+          return failure("invalid_transition", {
+            campaignId: scope.campaignId,
+            expectedTurnNumber: parsed.targetTurnNumber
+          });
+        }
+        targetSnapshot = target.rows[0].stateSnapshotPrivate;
+        targetModelMetadata = target.rows[0].modelMetadata;
+      }
+      if (!targetSnapshot || typeof targetSnapshot !== "object" || Array.isArray(targetSnapshot)) {
+        invalidBoundaryData("unavailable", scope);
+      }
+      const targetEdit = await client.query<{ stateSnapshotPrivate: Record<string, unknown> }>(
+        `SELECT state_snapshot_private AS "stateSnapshotPrivate"
+           FROM campaign_state_edits
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND effective_turn_number = $3
+          ORDER BY revision DESC
+          LIMIT 1`,
+        [scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+      );
+      const editedSnapshot = targetEdit.rows[0]?.stateSnapshotPrivate;
+      if (editedSnapshot !== undefined) {
+        if (!editedSnapshot || typeof editedSnapshot !== "object" || Array.isArray(editedSnapshot)) {
+          invalidBoundaryData("unavailable", scope);
+        }
+        targetSnapshot = editedSnapshot;
+      }
+      const materializedTarget = runtimeStateContent({
+        ...targetSnapshot,
+        scratchpad: typeof targetSnapshot.scratchpad === "string" ? targetSnapshot.scratchpad : "",
+        trackers: targetSnapshot.trackers ?? [],
+        eventTriggers: Array.isArray(targetSnapshot.eventTriggers)
+          ? targetSnapshot.eventTriggers
+          : current.eventTriggers,
+        pendingEventTriggers: Array.isArray(targetSnapshot.pendingEventTriggers)
+          ? targetSnapshot.pendingEventTriggers
+          : [],
+        rpgStats: Array.isArray(targetSnapshot.rpgStats) ? targetSnapshot.rpgStats : current.rpgStats
+      }, undefined, scope);
+      const stateSnapshot = {
+        scratchpad: materializedTarget.scratchpad,
+        trackers: materializedTarget.trackers,
+        eventTriggers: materializedTarget.eventTriggers,
+        pendingEventTriggers: materializedTarget.pendingEventTriggers,
+        rpgStats: materializedTarget.rpgStats
+      };
+      if (parsed.targetTurnNumber === current.activeTurnNumber) {
+        return success({
+          campaignId: scope.campaignId,
+          activeTurnNumber: current.activeTurnNumber,
+          discardedTurnCount: 0,
+          stateSnapshot
+        });
+      }
+
+      const activeGeneration = await client.query(
+        `SELECT id FROM generation_jobs
+          WHERE campaign_id = $1 AND owner_user_id = $2
+            AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
+          LIMIT 1 FOR UPDATE`,
+        [scope.campaignId, scope.ownerUserId]
+      );
+      const futureIllustrations = await client.query<{ status: string }>(
+        `SELECT status FROM image_jobs
+          WHERE campaign_id = $1 AND owner_user_id = $2
+            AND turn_id IN (
+              SELECT id FROM turns
+               WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number > $3
+            )
+          FOR UPDATE`,
+        [scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+      );
+      const futureResolutions = await client.query<{ status: string }>(
+        `SELECT status FROM illustration_resolution_jobs
+          WHERE campaign_id = $1 AND owner_user_id = $2
+            AND turn_id IN (
+              SELECT id FROM turns
+               WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number > $3
+            )
+          FOR UPDATE`,
+        [scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+      );
+      const activeChronicle = await client.query(
+        `SELECT id FROM chronicle_jobs
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND status = 'running'
+          LIMIT 1 FOR UPDATE`,
+        [scope.campaignId, scope.ownerUserId]
+      );
+      if (activeGeneration.rowCount
+        || futureIllustrations.rows.some((row) => ["queued", "generating", "provider_pending", "downloading"].includes(row.status))
+        || futureResolutions.rows.some((row) => ["queued", "matching", "recoverable", "generation_queued"].includes(row.status))
+        || activeChronicle.rowCount) {
+        return failure("invalid_transition", { campaignId: scope.campaignId });
+      }
+
+      const discardedTurnCount = current.activeTurnNumber - parsed.targetTurnNumber;
+      await client.query(
+        `DELETE FROM generation_jobs
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND expected_turn_number > $3`,
+        [scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+      );
+      await client.query(
+        `DELETE FROM campaign_state_edits
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND effective_turn_number > $3`,
+        [scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+      );
+      await client.query(
+        `DELETE FROM turns
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number > $3`,
+        [scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+      );
+      await client.query(
+        `DELETE FROM summary_checkpoints
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND through_turn > $3`,
+        [scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+      );
+      await client.query(
+        `DELETE FROM chronicle_jobs
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND status <> 'running'`,
+        [scope.campaignId, scope.ownerUserId]
+      );
+      const memoryScope = {
+        ownerUserId: scope.ownerUserId,
+        campaignId: scope.campaignId,
+        worldVersionId: current.worldVersionId
+      };
+      await collaborators.memory.rebuildCampaignMemories(client, memoryScope);
+      await collaborators.memory.enqueueEmbeddingReindex(client, memoryScope);
+      await client.query(
+        "DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2",
+        [scope.campaignId, scope.ownerUserId]
+      );
+      await client.query(
+        `UPDATE campaign_state
+            SET scratchpad_private = $3, scratchpad_safe_for_prompt = $4,
+                trackers = $5, event_triggers = $6, pending_event_triggers = $7,
+                rpg_stats = $8, revision = revision + 1, updated_at = now()
+          WHERE campaign_id = $1 AND owner_user_id = $2`,
+        [
+          scope.campaignId,
+          scope.ownerUserId,
+          stateSnapshot.scratchpad,
+          editedSnapshot !== undefined || typeof targetModelMetadata?.promptProtocolVersion === "string",
+          json(stateSnapshot.trackers),
+          json(stateSnapshot.eventTriggers),
+          json(stateSnapshot.pendingEventTriggers),
+          json(stateSnapshot.rpgStats)
+        ]
+      );
+      await client.query(
+        `UPDATE campaigns SET active_turn_number = $3, updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2`,
+        [scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+      );
+      await client.query(
+        `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, details)
+         VALUES ($1,$2,'campaign_rewound',$3)`,
+        [scope.ownerUserId, scope.campaignId, json({
+          fromTurnNumber: current.activeTurnNumber,
+          targetTurnNumber: parsed.targetTurnNumber,
+          discardedTurnCount
+        })]
+      );
+      return success({
+        campaignId: scope.campaignId,
+        activeTurnNumber: parsed.targetTurnNumber,
+        discardedTurnCount,
+        stateSnapshot
+      });
+    },
+
     async syncPlayerCampaignConfig(transaction, scope, request) {
       const client = worldCampaignDatabaseClient(transaction);
       const config = parseBoundary(
@@ -852,7 +1077,7 @@ export function createPostgresCampaignAuthorityAdapters(
   return {
     transaction: createPostgresWorldCampaignTransactionPort(pool),
     state: createPostgresCampaignStateRepository(collaborators),
-    campaigns: createPostgresCampaignPlayerConfigRepository(),
+    campaigns: createPostgresCampaignAuthorityRepository(collaborators),
     sync: createPostgresCampaignSyncRepository(),
     turnPages: collaborators.turnPages
   };

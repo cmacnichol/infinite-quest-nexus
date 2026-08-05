@@ -167,6 +167,146 @@ integration("PostgreSQL campaign sync adapters", () => {
     ))).resolves.toMatchObject({ ok: false, failure: { reason: "campaign_not_found" } });
   });
 
+  it("keeps rewind authority invisible outside the explicit owner scope", async () => {
+    const imported = await createCampaignFixture();
+    const foreignUserId = await createForeignUserFixture("Foreign rewind owner");
+    const adapters = createAdapters();
+    const campaigns = adapters.campaigns;
+
+    await expect(adapters.transaction.command((transaction) => campaigns.rewindCampaign(
+      transaction,
+      { ownerUserId: foreignUserId, campaignId: imported.campaignId },
+      {
+        targetTurnNumber: 1,
+        expectedCurrentTurnNumber: 2,
+        expectedStateRevision: 0
+      }
+    ))).resolves.toMatchObject({
+      ok: false,
+      failure: { reason: "campaign_not_found" }
+    });
+  });
+
+  it("rewinds accepted history and authoritative state when both fences match", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const campaigns = adapters.campaigns;
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const before = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope));
+    const target = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope, 1));
+
+    const rewound = await adapters.transaction.command((transaction) => campaigns.rewindCampaign(
+      transaction,
+      scope,
+      {
+        targetTurnNumber: 1,
+        expectedCurrentTurnNumber: before.activeTurnNumber,
+        expectedStateRevision: before.revision
+      }
+    ));
+
+    expect(rewound).toMatchObject({
+      ok: true,
+      value: {
+        campaignId: imported.campaignId,
+        activeTurnNumber: 1,
+        discardedTurnCount: 1,
+        stateSnapshot: {
+          scratchpad: target.scratchpad,
+          trackers: target.trackers,
+          rpgStats: target.rpgStats,
+          eventTriggers: target.eventTriggers,
+          pendingEventTriggers: target.pendingEventTriggers
+        }
+      }
+    });
+    await expect(pool.query<{
+      activeTurnNumber: number;
+      revision: number;
+      turnNumbers: number[];
+    }>(
+      `SELECT c.active_turn_number AS "activeTurnNumber", cs.revision,
+              array_agg(t.turn_number ORDER BY t.turn_number)::int[] AS "turnNumbers"
+         FROM campaigns c
+         JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
+         JOIN turns t ON t.campaign_id = c.id AND t.owner_user_id = c.owner_user_id
+        WHERE c.id = $1 AND c.owner_user_id = $2
+        GROUP BY c.active_turn_number, cs.revision`,
+      [imported.campaignId, ownerUserId]
+    )).resolves.toMatchObject({
+      rows: [{ activeTurnNumber: 1, revision: before.revision + 1, turnNumbers: [1] }]
+    });
+  });
+
+  it("rejects stale rewind fences without mutating history or state", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const campaigns = adapters.campaigns;
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const before = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope));
+
+    const staleTurn = await adapters.transaction.command((transaction) => campaigns.rewindCampaign(
+      transaction,
+      scope,
+      {
+        targetTurnNumber: 1,
+        expectedCurrentTurnNumber: before.activeTurnNumber - 1,
+        expectedStateRevision: before.revision
+      }
+    ));
+    expect(staleTurn).toEqual({
+      ok: false,
+      failure: {
+        reason: "active_turn_changed",
+        details: {
+          campaignId: imported.campaignId,
+          expectedTurnNumber: before.activeTurnNumber - 1,
+          actualTurnNumber: before.activeTurnNumber
+        }
+      }
+    });
+
+    const staleRevision = await adapters.transaction.command((transaction) => campaigns.rewindCampaign(
+      transaction,
+      scope,
+      {
+        targetTurnNumber: 1,
+        expectedCurrentTurnNumber: before.activeTurnNumber,
+        expectedStateRevision: before.revision + 1
+      }
+    ));
+    expect(staleRevision).toEqual({
+      ok: false,
+      failure: {
+        reason: "state_revision_changed",
+        details: {
+          campaignId: imported.campaignId,
+          expectedStateRevision: before.revision + 1,
+          actualStateRevision: before.revision
+        }
+      }
+    });
+    await expect(pool.query<{
+      activeTurnNumber: number;
+      revision: number;
+      turnCount: number;
+    }>(
+      `SELECT c.active_turn_number AS "activeTurnNumber", cs.revision,
+              count(t.id)::int AS "turnCount"
+         FROM campaigns c
+         JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
+         JOIN turns t ON t.campaign_id = c.id AND t.owner_user_id = c.owner_user_id
+        WHERE c.id = $1 AND c.owner_user_id = $2
+        GROUP BY c.active_turn_number, cs.revision`,
+      [imported.campaignId, ownerUserId]
+    )).resolves.toMatchObject({
+      rows: [{ activeTurnNumber: before.activeTurnNumber, revision: before.revision, turnCount: 2 }]
+    });
+  });
+
   it("loads validated current, historical, and effective edited campaign state", async () => {
     const imported = await createCampaignFixture();
     const adapters = createAdapters();
