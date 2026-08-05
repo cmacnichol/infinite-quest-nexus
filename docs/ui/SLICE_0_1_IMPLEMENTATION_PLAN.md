@@ -87,7 +87,7 @@ contain this plan.
 | Task 12 | B3 — worker concurrency and fair lanes | **Complete** | Implementation `312ebaa`, correction `57147c7`, docs `8593e3e`; scoped implementation review plus clean correction re-review; full unit 1,150/1,150, implementation full PostgreSQL 232/232, correction-relevant PostgreSQL 68/68; C0 concurrency 1/2/4 benchmark and duplicate-turn guard passed |
 | Task 13b | B4b — play-loop read profiling/optimization | **Complete** | Implementation `1d6b766`, correction `ff7f56e`; scoped review and correction re-review approved; full unit 1,156/1,156, full PostgreSQL 234/234, C0 read benchmark passed |
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | **Complete** | `e2a15e6` through `c7c8353`; contracts, cutover, durability, privacy, ownership, and all 18 Fastify route-parity gates independently approved |
-| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | Ready — corrected checkpoints | Readiness audit completed 2026-08-05; 14b1 contracts/inventory is next |
+| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | In progress — 14b1 complete | `3e0dc8b`, remediation `6f77f74`; independent re-review approved; 14b2 adapters are next |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | Not started | — |
 | Task 14d | B5d — providers and prompt configuration (removes none) | Not started | — |
 | Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
