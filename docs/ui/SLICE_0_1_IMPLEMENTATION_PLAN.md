@@ -88,8 +88,8 @@ contain this plan.
 | Task 13b | B4b — play-loop read profiling/optimization | **Complete** | Implementation `1d6b766`, correction `ff7f56e`; scoped review and correction re-review approved; full unit 1,156/1,156, full PostgreSQL 234/234, C0 read benchmark passed |
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | **Complete** | `e2a15e6` through `c7c8353`; contracts, cutover, durability, privacy, ownership, and all 18 Fastify route-parity gates independently approved |
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
-| Task 14c | B5c — worlds, versions, campaign management (removes none) | **In progress** | 14c1–14c3 contracts, PostgreSQL adapters, and atomic route/runtime cutover are complete and independently reviewed; 14c4 legacy-removal and parity audit is active |
-| Task 14d | B5d — providers and prompt configuration (removes none) | Not started | — |
+| Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
+| Task 14d | B5d — providers and prompt configuration (removes none) | **In progress** | 14d1 contracts and ownership inventory are next |
 | Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
@@ -7454,6 +7454,22 @@ remaining Important findings. **14c4 is next:** it must remove the legacy
 callable authority and update its direct test callers without deleting the
 explicit 14d provider/prompt bridges.
 
+**14c4 completion (2026-08-05):** `7919741` removes all nine retired Task
+14c authority service modules and migrates their direct callers/tests to the
+world/campaign application and repository boundaries. It moves the only
+remaining provider/prompt behavior into two explicitly named, narrowly
+allowlisted Task 14d bridges: character organization and world/template/
+playable-character generation. The B4 bounded turn reader, Task 14e campaign
+archive/export ownership, and legacy/CYOA/Infinite Worlds import behavior
+remain intact. The repository boundary gate now verifies retired modules are
+absent, bridge consumers are restricted to runtime composition plus the named
+Infinite Worlds path, and required B4/bridge boundaries remain present. A
+parity correction canonicalizes copied branch state-edit snapshots as well as
+materialized campaign state, with regression coverage. Verification passed
+`pnpm check`, build, 1,239 unit tests, 337 integration tests, diff, and
+precheck; the independent review found no Critical, Important, or Minor
+findings. **Task 14c is complete; 14d is next.**
+
 **14c1 completion (2026-08-05):** Commits `dc1de51`, `80a0941`, `2a7748f`,
 and `99ef161` establish the additive `packages/application/src/world-campaign`
 boundary. It has explicit owner-scoped ports/use cases, transaction ownership,
@@ -8021,9 +8037,9 @@ behavior once the corresponding replacement behavior exists.
 ```
 
 **C0 through C8 are complete** (Tasks 1-9, including C1a, C2a, C3a, C4a, 7P,
-and C6 stages 7a-7d); B1 through B5b are also complete. **Task 14c (B5c) is
-active:** 14c1 through 14c3 are complete, and 14c4 is the current
-implementation checkpoint. The backend-first sequence continues 14c4 → B5d →
+and C6 stages 7a-7d); B1 through B5c are also complete. **Task 14d (B5d) is
+active:** its provider/prompt/cost contract and ownership inventory is the
+current implementation checkpoint. The backend-first sequence continues B5d →
 B5e → 14f. Task 14f remains the explicit UI authorization gate.
 No backend package or UI task runs in parallel with that declared sequence unless
 this plan is deliberately revised and re-reviewed.
