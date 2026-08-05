@@ -2,9 +2,17 @@ import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { worldContentSchema, WORLD_CONTENT_SCHEMA_VERSION } from "../../packages/contracts/src/world-library.js";
 import {
+  createPostgresChronicleGenerationTransactionPort
+} from "../../packages/database/src/chronicle-repository.js";
+import {
   createPostgresWorldRepositoryAdapters
 } from "../../packages/database/src/world-repository.js";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import {
+  createDatabasePool,
+  initialOwnerId,
+  type DatabaseClient,
+  type DatabasePool
+} from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -46,8 +54,11 @@ integration("PostgreSQL world campaign repository adapters", () => {
   });
 
   afterEach(async () => {
+    await pool.query("DROP TRIGGER IF EXISTS campaign_migration_target_race_trigger ON campaign_world_migrations");
+    await pool.query("DROP FUNCTION IF EXISTS block_campaign_migration_target_race()");
     await pool.query("DELETE FROM campaigns");
     await pool.query("DELETE FROM campaign_world_transfers");
+    await pool.query("DELETE FROM provider_profiles");
     await pool.query("DELETE FROM world_versions");
     await pool.query("DELETE FROM world_drafts");
     await pool.query("DELETE FROM worlds");
@@ -62,6 +73,30 @@ integration("PostgreSQL world campaign repository adapters", () => {
   function unwrap<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
     if (!result.ok) throw new Error("repository fixture transition failed");
     return result.value;
+  }
+
+  function createAdapters() {
+    const memory = createPostgresChronicleGenerationTransactionPort({
+      credentialSecret: "",
+      embeddings: {
+        async resolve(database, scope) {
+          const selected = await (database as DatabaseClient).query<{ id: string }>(
+            `SELECT id FROM provider_profiles
+              WHERE owner_user_id = $1 AND provider_role = 'embedding' AND enabled = true
+              ORDER BY is_default DESC, name, id LIMIT 1`,
+            [scope.ownerUserId]
+          );
+          return selected.rows[0]?.id ?? null;
+        },
+        async load() { throw new Error("provider loading is outside this repository test"); },
+        async embed() { throw new Error("provider transport is outside this repository test"); },
+        async fingerprint() { throw new Error("provider fingerprinting is outside this repository test"); },
+        async recordHealth() {},
+        async recordCost() { return null; },
+        logDiagnostic() {}
+      }
+    });
+    return createPostgresWorldRepositoryAdapters(pool, { memory });
   }
 
   async function createFixtureWorld(
@@ -118,7 +153,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
       [`Foreign world owner ${crypto.randomUUID()}`]
     );
     const foreignOwnerUserId = foreignOwner.rows[0]!.id;
-    const adapters = createPostgresWorldRepositoryAdapters(pool);
+    const adapters = createAdapters();
     const ownTitle = `Adapter world ${crypto.randomUUID()}`;
     const foreignTitle = `Foreign adapter world ${crypto.randomUUID()}`;
 
@@ -167,7 +202,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
   });
 
   it("rolls back repository writes when the caller-owned command transaction fails", async () => {
-    const adapters = createPostgresWorldRepositoryAdapters(pool);
+    const adapters = createAdapters();
     const title = `Rolled back adapter world ${crypto.randomUUID()}`;
 
     await expect(adapters.transaction.command(async (transaction) => {
@@ -188,7 +223,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
   });
 
   it("locks draft revisions and keeps published content immutable across status changes and forks", async () => {
-    const adapters = createPostgresWorldRepositoryAdapters(pool);
+    const adapters = createAdapters();
     const fixture = await createFixtureWorld(adapters, "Locked immutable world");
     const stale = await adapters.transaction.command((transaction) => adapters.worlds.updateWorldDraft(
       transaction,
@@ -273,7 +308,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
   });
 
   it("blocks referenced deletions before deleting unreferenced versions and worlds", async () => {
-    const adapters = createPostgresWorldRepositoryAdapters(pool);
+    const adapters = createAdapters();
     const fixture = await createFixtureWorld(adapters, "Deletion blocker world");
     const first = await publishFixtureWorld(
       adapters,
@@ -323,7 +358,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
   });
 
   it("migrates a campaign only to a newer version of its current owner-scoped world", async () => {
-    const adapters = createPostgresWorldRepositoryAdapters(pool);
+    const adapters = createAdapters();
     const fixture = await createFixtureWorld(adapters, "Migration world");
     const first = await publishFixtureWorld(adapters, fixture.created.id, fixture.created.draftRevision, "Version one");
     const saved = unwrap(await adapters.transaction.command((transaction) => adapters.worlds.updateWorldDraft(
@@ -403,7 +438,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
   });
 
   it("owns the complete campaign lifecycle and playable-character reads", async () => {
-    const adapters = createPostgresWorldRepositoryAdapters(pool);
+    const adapters = createAdapters();
     const foreign = await pool.query<{ id: string }>(
       "INSERT INTO users (display_name, status) VALUES ($1, 'active') RETURNING id",
       [`Foreign campaign owner ${crypto.randomUUID()}`]
@@ -525,8 +560,76 @@ integration("PostgreSQL world campaign repository adapters", () => {
     expect((await pool.query("SELECT id FROM campaigns WHERE id = $1", [ownCampaign.created.id])).rowCount).toBe(0);
   });
 
+  it("auto-enables eligible campaign embedding inside the caller-owned creation transaction", async () => {
+    const adapters = createAdapters();
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id, name, provider_type, provider_role, base_url, default_model, is_default
+       ) VALUES ($1,$2,'openai_compatible','embedding','http://provider.invalid/v1',$3,true)
+       RETURNING id`,
+      [ownerUserId, `Campaign embedding ${crypto.randomUUID()}`, "campaign-embedding-model"]
+    );
+    const providerProfileId = provider.rows[0]!.id;
+    const world = await createFixtureWorld(adapters, "Campaign embedding world");
+    const version = await publishFixtureWorld(
+      adapters,
+      world.created.id,
+      world.created.draftRevision,
+      "Campaign embedding version"
+    );
+    const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "Embedded campaign");
+
+    const enabled = await pool.query<{
+      embedding_enabled: boolean;
+      embedding_provider_profile_id: string;
+      embedding_model: string;
+      job_type: string;
+      status: string;
+    }>(
+      `SELECT config.embedding_enabled, config.embedding_provider_profile_id, config.embedding_model,
+              job.job_type, job.status
+         FROM campaign_memory_configs config
+         JOIN chronicle_jobs job
+           ON job.campaign_id = config.campaign_id AND job.owner_user_id = config.owner_user_id
+        WHERE config.campaign_id = $1 AND config.owner_user_id = $2`,
+      [campaign.created.id, ownerUserId]
+    );
+    expect(enabled.rows[0]).toEqual({
+      embedding_enabled: true,
+      embedding_provider_profile_id: providerProfileId,
+      embedding_model: "campaign-embedding-model",
+      job_type: "embed_campaign",
+      status: "queued"
+    });
+
+    let rolledBackCampaignId = "";
+    await expect(adapters.transaction.command(async (transaction) => {
+      const created = unwrap(await adapters.campaigns.createCampaign(
+        transaction,
+        { ownerUserId },
+        {
+          worldVersionId: version.worldVersionId,
+          title: `Rolled back embedded campaign ${crypto.randomUUID()}`,
+          storyLengthProfile: "standard",
+          turnControlStyle: "flexible_auto"
+        }
+      ));
+      rolledBackCampaignId = created.id;
+      throw new Error("synthetic campaign creation rollback");
+    })).rejects.toThrow("synthetic campaign creation rollback");
+    expect(rolledBackCampaignId).not.toBe("");
+    const rolledBack = await pool.query<{ campaigns: string; configs: string; jobs: string }>(
+      `SELECT
+         (SELECT count(*)::text FROM campaigns WHERE id = $1) AS campaigns,
+         (SELECT count(*)::text FROM campaign_memory_configs WHERE campaign_id = $1) AS configs,
+         (SELECT count(*)::text FROM chronicle_jobs WHERE campaign_id = $1) AS jobs`,
+      [rolledBackCampaignId]
+    );
+    expect(rolledBack.rows[0]).toEqual({ campaigns: "0", configs: "0", jobs: "0" });
+  });
+
   it("blocks campaign deletion while durable work remains active", async () => {
-    const adapters = createPostgresWorldRepositoryAdapters(pool);
+    const adapters = createAdapters();
     const world = await createFixtureWorld(adapters, "Campaign deletion work world");
     const version = await publishFixtureWorld(adapters, world.created.id, world.created.draftRevision, "Work blocker version");
     const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "Work blocker campaign");
@@ -547,7 +650,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
   });
 
   it("serializes world deletion with concurrent campaign creation and returns a typed blocker", async () => {
-    const adapters = createPostgresWorldRepositoryAdapters(pool);
+    const adapters = createAdapters();
     const world = await createFixtureWorld(adapters, "Concurrent deletion world");
     const version = await publishFixtureWorld(
       adapters,
@@ -595,6 +698,116 @@ integration("PostgreSQL world campaign repository adapters", () => {
     } finally {
       if (writerOpen) await campaignWriter.query("ROLLBACK");
       campaignWriter.release();
+    }
+  });
+
+  it("serializes target-version deletion with campaign migration and returns a typed blocker", async () => {
+    const adapters = createAdapters();
+    const world = await createFixtureWorld(adapters, "Concurrent migration world");
+    const first = await publishFixtureWorld(
+      adapters,
+      world.created.id,
+      world.created.draftRevision,
+      "Concurrent migration version one"
+    );
+    const saved = unwrap(await adapters.transaction.command((transaction) => adapters.worlds.updateWorldDraft(
+      transaction,
+      { ownerUserId, worldId: world.created.id },
+      { expectedRevision: first.draftRevision, content: content(world.title, "Concurrent Two") }
+    )));
+    const second = await publishFixtureWorld(
+      adapters,
+      world.created.id,
+      saved.revision,
+      "Concurrent migration version two"
+    );
+    const campaign = await pool.query<{ id: string }>(
+      "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1,$2,$3) RETURNING id",
+      [ownerUserId, first.worldVersionId, `Concurrent migration campaign ${crypto.randomUUID()}`]
+    );
+    const campaignId = campaign.rows[0]!.id;
+    await pool.query(
+      `CREATE FUNCTION block_campaign_migration_target_race() RETURNS trigger
+       LANGUAGE plpgsql AS $$
+       BEGIN
+         PERFORM pg_advisory_xact_lock(hashtext(NEW.to_world_version_id::text));
+         RETURN NEW;
+       END
+       $$`
+    );
+    await pool.query(
+      `CREATE TRIGGER campaign_migration_target_race_trigger
+       BEFORE INSERT ON campaign_world_migrations
+       FOR EACH ROW EXECUTE FUNCTION block_campaign_migration_target_race()`
+    );
+
+    const blocker = await pool.connect();
+    let blockerOpen = false;
+    try {
+      await blocker.query("BEGIN");
+      blockerOpen = true;
+      const blockerBackend = await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const blockerPid = blockerBackend.rows[0]!.pid;
+      await blocker.query("SELECT pg_advisory_xact_lock(hashtext($1))", [second.worldVersionId]);
+
+      const migration = adapters.transaction.command((transaction) => adapters.campaigns.migrateCampaignWorldVersion(
+        transaction,
+        { ownerUserId, campaignId },
+        { worldVersionId: second.worldVersionId, note: "coordinated target race" }
+      ));
+      let migrationPid: number | null = null;
+      for (let attempt = 0; attempt < 100 && migrationPid === null; attempt += 1) {
+        const waiting = await pool.query<{ pid: number }>(
+          `SELECT pid FROM pg_stat_activity
+            WHERE $1::int = ANY(pg_blocking_pids(pid))
+              AND query LIKE '%INSERT INTO campaign_world_migrations%'
+            LIMIT 1`,
+          [blockerPid]
+        );
+        migrationPid = waiting.rows[0]?.pid ?? null;
+        if (migrationPid === null) await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+      }
+      expect(migrationPid).not.toBeNull();
+
+      const deletion = adapters.transaction.command((transaction) => adapters.worlds.deleteWorldVersion(
+        transaction,
+        { ownerUserId, worldId: world.created.id, worldVersionId: second.worldVersionId },
+        { confirmation: "DELETE", expectedVersionNumber: second.versionNumber }
+      ));
+      let deletionWaitingOnMigration = false;
+      for (let attempt = 0; attempt < 100 && !deletionWaitingOnMigration; attempt += 1) {
+        const waiting = await pool.query<{ waiting: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+              WHERE $1::int = ANY(pg_blocking_pids(pid))
+           ) AS waiting`,
+          [migrationPid]
+        );
+        deletionWaitingOnMigration = waiting.rows[0]?.waiting === true;
+        if (!deletionWaitingOnMigration) await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+      }
+
+      await blocker.query("COMMIT");
+      blockerOpen = false;
+      const [migrationOutcome, deletionOutcome] = await Promise.allSettled([migration, deletion]);
+      expect(deletionWaitingOnMigration).toBe(true);
+      expect(migrationOutcome).toMatchObject({
+        status: "fulfilled",
+        value: { ok: true, value: { toWorldVersionId: second.worldVersionId } }
+      });
+      expect(deletionOutcome).toMatchObject({
+        status: "fulfilled",
+        value: {
+          ok: false,
+          failure: {
+            reason: "deletion_blocked",
+            details: { blockers: ["current_campaigns:1", "campaign_migrations:1"] }
+          }
+        }
+      });
+    } finally {
+      if (blockerOpen) await blocker.query("ROLLBACK");
+      blocker.release();
     }
   });
 });

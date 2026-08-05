@@ -21,6 +21,7 @@ import type {
 } from "../../application/src/world-campaign/index.js";
 import { WorldCampaignApplicationError } from "../../application/src/world-campaign/index.js";
 import type { OwnerScope } from "../../application/src/generation/types.js";
+import type { MemoryGenerationTransactionPort } from "../../application/src/memory/ports.js";
 import {
   canonicalizeWorldContent,
   WORLD_CONTENT_SCHEMA_VERSION,
@@ -65,6 +66,15 @@ type PostgresCampaignRepository = Pick<
   | "getWorldVersionPlayableCharacterSummary"
   | "migrateCampaignWorldVersion"
 >;
+
+export type CampaignCreationMemoryCollaborator = Pick<
+  MemoryGenerationTransactionPort,
+  "autoEnableCampaignEmbedding"
+>;
+
+export type WorldRepositoryCollaborators = Readonly<{
+  memory: CampaignCreationMemoryCollaborator;
+}>;
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? null);
@@ -672,7 +682,9 @@ function createPostgresWorldRepository(): PostgresWorldRepository {
   };
 }
 
-function createPostgresCampaignRepository(): PostgresCampaignRepository {
+function createPostgresCampaignRepository(
+  collaborators: WorldRepositoryCollaborators,
+): PostgresCampaignRepository {
   return {
     async listCampaigns(transaction, scope): Promise<CampaignListSource> {
       const client = worldCampaignDatabaseClient(transaction);
@@ -798,6 +810,11 @@ function createPostgresCampaignRepository(): PostgresCampaignRepository {
           })
         ]
       );
+      await collaborators.memory.autoEnableCampaignEmbedding(client, {
+        ownerUserId: scope.ownerUserId,
+        campaignId,
+        worldVersionId: request.worldVersionId
+      });
       return success<CampaignCreateView>({
         id: campaignId,
         title: request.title,
@@ -943,7 +960,9 @@ function createPostgresCampaignRepository(): PostgresCampaignRepository {
       const current = campaign.rows[0];
       if (!current) return failure("campaign_not_found", { campaignId: scope.campaignId });
       const target = await client.query<{ id: string; world_id: string; version_number: number }>(
-        "SELECT id, world_id, version_number FROM world_versions WHERE id = $1 AND owner_user_id = $2",
+        `SELECT id, world_id, version_number FROM world_versions
+          WHERE id = $1 AND owner_user_id = $2
+          FOR KEY SHARE`,
         [request.worldVersionId, scope.ownerUserId]
       );
       const next = target.rows[0];
@@ -1002,10 +1021,13 @@ function createPostgresCampaignRepository(): PostgresCampaignRepository {
   };
 }
 
-export function createPostgresWorldRepositoryAdapters(pool: DatabasePool) {
+export function createPostgresWorldRepositoryAdapters(
+  pool: DatabasePool,
+  collaborators: WorldRepositoryCollaborators,
+) {
   return Object.freeze({
     transaction: createPostgresWorldCampaignTransactionPort(pool),
     worlds: createPostgresWorldRepository(),
-    campaigns: createPostgresCampaignRepository()
+    campaigns: createPostgresCampaignRepository(collaborators)
   });
 }
