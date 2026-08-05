@@ -88,7 +88,7 @@ contain this plan.
 | Task 13b | B4b — play-loop read profiling/optimization | **Complete** | Implementation `1d6b766`, correction `ff7f56e`; scoped review and correction re-review approved; full unit 1,156/1,156, full PostgreSQL 234/234, C0 read benchmark passed |
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | **Complete** | `e2a15e6` through `c7c8353`; contracts, cutover, durability, privacy, ownership, and all 18 Fastify route-parity gates independently approved |
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
-| Task 14c | B5c — worlds, versions, campaign management (removes none) | **In progress** | 14c1 contracts (`dc1de51`–`99ef161`) and 14c2a world/campaign-lifecycle adapters (`7ccf786`, `dc73210`, `9a8387d`) are complete and independently reviewed; 14c2b campaign authority/state adapters are active |
+| Task 14c | B5c — worlds, versions, campaign management (removes none) | **In progress** | 14c1–14c3 contracts, PostgreSQL adapters, and atomic route/runtime cutover are complete and independently reviewed; 14c4 legacy-removal and parity audit is active |
 | Task 14d | B5d — providers and prompt configuration (removes none) | Not started | — |
 | Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
@@ -7435,6 +7435,25 @@ Split this domain internally:
    campaign-transfer, state-correction, dashboard, user-profile, client-route,
    pure-use-case, adapter-contract, and real-PostgreSQL suites.
 
+**14c3 completion (2026-08-05):** `331c74d`, `6df771c`, and `31c8d1f`
+create the named API adapter and API/all-role runtime composition, bind the
+server-resolved owner at the Fastify boundary, and route the complete world,
+campaign, state, transfer, dashboard, session/profile, generation-progress,
+and portable-world JSON inventory through `WorldCampaignApplication`. The
+bounded `/turns` reader remains the established B4 adapter, while
+`/sync-status` is application-owned. Infinite Worlds JSON preview/import and
+world export consume the owner-bound portable-world port. The two temporary
+provider/prompt collaborators are explicit 14d-owned bridges; no credential or
+provider-profile object crosses the application boundary. The correction round
+completed owner-safe portable export parity and made unavailable-provider route
+expectations deterministic. The production-composed Fastify/PostgreSQL matrix
+covered all eight inventory families, the focused matrix passed twice, and the
+full verification passed 1,239 unit tests, 337 integration tests, `pnpm
+check`, build, diff, and precheck. The final independent review found no
+remaining Important findings. **14c4 is next:** it must remove the legacy
+callable authority and update its direct test callers without deleting the
+explicit 14d provider/prompt bridges.
+
 **14c1 completion (2026-08-05):** Commits `dc1de51`, `80a0941`, `2a7748f`,
 and `99ef161` establish the additive `packages/application/src/world-campaign`
 boundary. It has explicit owner-scoped ports/use cases, transaction ownership,
@@ -8003,9 +8022,9 @@ behavior once the corresponding replacement behavior exists.
 
 **C0 through C8 are complete** (Tasks 1-9, including C1a, C2a, C3a, C4a, 7P,
 and C6 stages 7a-7d); B1 through B5b are also complete. **Task 14c (B5c) is
-active:** 14c1 and 14c2a are complete, and 14c2b is the current implementation
-checkpoint. The backend-first sequence continues 14c2b → 14c2c → 14c2d → 14c3
-→ 14c4 → B5d → B5e → 14f. Task 14f remains the explicit UI authorization gate.
+active:** 14c1 through 14c3 are complete, and 14c4 is the current
+implementation checkpoint. The backend-first sequence continues 14c4 → B5d →
+B5e → 14f. Task 14f remains the explicit UI authorization gate.
 No backend package or UI task runs in parallel with that declared sequence unless
 this plan is deliberately revised and re-reviewed.
 
