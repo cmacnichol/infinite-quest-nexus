@@ -10,6 +10,7 @@ import type {
   CampaignListView,
   CampaignMigrationSource,
   CampaignMigrationView,
+  CampaignPlayerConfigSyncRequest,
   CampaignPlayerConfigSyncView,
   CampaignRewindRequest,
   CampaignRewindView,
@@ -37,7 +38,6 @@ import type {
   DashboardView,
   GeneratedPlayableCharacterView,
   GeneratedWorldPreviewView,
-  PlayerCampaignConfig,
   PlayableCharacterSummaryItemView,
   PlayableCharacterSummaryView,
   PlayableCharacterGenerationPreviewRequest,
@@ -111,7 +111,7 @@ export interface CampaignRepositoryPort {
   listWorldVersionPlayableCharacters(transaction: WorldCampaignReadContext, scope: WorldVersionScope): Promise<readonly PlayableCharacterSummaryItemView[]>;
   getWorldVersionPlayableCharacterSummary(transaction: WorldCampaignReadContext, scope: WorldVersionScope): Promise<PlayableCharacterSummaryView>;
   migrateCampaignWorldVersion(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignWorldMigrationRequest): Promise<WorldCampaignRepositoryResult<CampaignMigrationSource>>;
-  syncPlayerCampaignConfig(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: PlayerCampaignConfig): Promise<WorldCampaignRepositoryResult<CampaignPlayerConfigSyncView>>;
+  syncPlayerCampaignConfig(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignPlayerConfigSyncRequest): Promise<WorldCampaignRepositoryResult<CampaignPlayerConfigSyncView>>;
   rewindCampaign(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignRewindRequest): Promise<WorldCampaignRepositoryResult<CampaignRewindView>>;
   branchCampaign(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignBranchRequest): Promise<WorldCampaignRepositoryResult<CampaignBranchView>>;
 }
@@ -207,7 +207,7 @@ export interface WorldCampaignApplication {
   listWorldVersionPlayableCharacters(scope: WorldVersionScope): Promise<readonly PlayableCharacterSummaryItemView[]>;
   getWorldVersionPlayableCharacterSummary(scope: WorldVersionScope): Promise<PlayableCharacterSummaryView>;
   migrateCampaignWorldVersion(scope: CampaignScope, request: CampaignWorldMigrationRequest): Promise<CampaignMigrationView>;
-  syncPlayerCampaignConfig(scope: CampaignScope, request: PlayerCampaignConfig): Promise<CampaignPlayerConfigSyncView>;
+  syncPlayerCampaignConfig(scope: CampaignScope, request: CampaignPlayerConfigSyncRequest): Promise<CampaignPlayerConfigSyncView>;
   rewindCampaign(scope: CampaignScope, request: CampaignRewindRequest): Promise<CampaignRewindView>;
   branchCampaign(scope: CampaignScope, request: CampaignBranchRequest): Promise<CampaignBranchView>;
   loadEffectiveCampaignStateEdit(scope: CampaignScope): Promise<CampaignStateEditView>;

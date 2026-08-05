@@ -13,6 +13,7 @@ import {
 } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
+import { memoryGeneration } from "../helpers/memory-applications.js";
 import { turnReportedCosts } from "../../services/api/src/cost-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -34,7 +35,10 @@ integration("PostgreSQL campaign sync adapters", () => {
 
   function createAdapters() {
     const turnPages = createPostgresBoundedCampaignTurnPageAdapter(pool, { turnReportedCosts });
-    return createPostgresCampaignAuthorityAdapters(pool, { turnPages });
+    return createPostgresCampaignAuthorityAdapters(pool, {
+      turnPages,
+      memory: memoryGeneration(pool)
+    });
   }
 
   async function createCampaignFixture() {
@@ -69,6 +73,329 @@ integration("PostgreSQL campaign sync adapters", () => {
       transaction,
       { ownerUserId: foreign.rows[0]!.id, campaignId: imported.campaignId }
     ))).rejects.toMatchObject({ reason: "campaign_not_found" });
+  });
+
+  it("keeps campaign runtime state invisible outside the explicit owner scope", async () => {
+    const imported = await createCampaignFixture();
+    const foreign = await pool.query<{ id: string }>(
+      "INSERT INTO users (display_name, status) VALUES ($1, 'active') RETURNING id",
+      [`Foreign state owner ${crypto.randomUUID()}`]
+    );
+    const adapters = createAdapters();
+
+    const foreignScope = { ownerUserId: foreign.rows[0]!.id, campaignId: imported.campaignId };
+    await expect(adapters.transaction.read((transaction) => adapters.state.getCampaignRuntimeState(
+      transaction,
+      foreignScope
+    ))).rejects.toMatchObject({ reason: "campaign_not_found" });
+    await expect(adapters.transaction.command((transaction) => adapters.state.updateCampaignRuntimeState(
+      transaction,
+      foreignScope,
+      {
+        expectedTurnNumber: 2,
+        expectedRevision: 0,
+        continuitySummary: "No foreign state may be written.",
+        openThreads: [],
+        canonicalFacts: [],
+        scratchpad: "",
+        trackers: [],
+        rpgStats: [],
+        eventTriggers: [],
+        pendingEventTriggers: []
+      }
+    ))).resolves.toMatchObject({ ok: false, failure: { reason: "campaign_not_found" } });
+    await expect(adapters.transaction.command((transaction) => adapters.campaigns.syncPlayerCampaignConfig(
+      transaction,
+      foreignScope,
+      {
+        expectedTurnNumber: 2,
+        expectedStateRevision: 0,
+        useRpgStats: false,
+        suppressEventTriggers: false,
+        rpgStats: [],
+        eventTriggers: [],
+        pendingEventTriggers: []
+      }
+    ))).resolves.toMatchObject({ ok: false, failure: { reason: "campaign_not_found" } });
+  });
+
+  it("loads validated current, historical, and effective edited campaign state", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const current = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope));
+    const historical = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope, 1));
+
+    expect(current).toMatchObject({
+      campaignId: imported.campaignId,
+      activeTurnNumber: 2,
+      viewedTurnNumber: 2,
+      isCurrent: true,
+      revision: 0
+    });
+    expect(current.updatedAt).toBeInstanceOf(Date);
+    expect(historical).toMatchObject({
+      campaignId: imported.campaignId,
+      activeTurnNumber: 2,
+      viewedTurnNumber: 1,
+      isCurrent: false,
+      revision: 0
+    });
+    expect(historical.updatedAt).toBeInstanceOf(Date);
+
+    const corrected = await adapters.transaction.command((transaction) =>
+      adapters.state.updateCampaignRuntimeState(transaction, scope, {
+        expectedTurnNumber: current.activeTurnNumber,
+        expectedRevision: current.revision,
+        continuitySummary: "The beacon now burns with a steady blue flame.",
+        openThreads: ["Learn who restored the beacon."],
+        canonicalFacts: current.canonicalFacts,
+        scratchpad: current.scratchpad,
+        trackers: current.trackers,
+        rpgStats: current.rpgStats,
+        eventTriggers: current.eventTriggers,
+        pendingEventTriggers: current.pendingEventTriggers
+      }));
+    expect(corrected).toMatchObject({ ok: true, value: { revision: 1 } });
+
+    const edit = await adapters.transaction.read((transaction) =>
+      adapters.state.loadEffectiveCampaignStateEdit(transaction, scope));
+    expect(edit).toMatchObject({
+      revision: 1,
+      effectiveTurnNumber: 2,
+      snapshot: {
+        continuitySummary: "The beacon now burns with a steady blue flame.",
+        openThreads: ["Learn who restored the beacon."]
+      }
+    });
+    expect(edit.updatedAt).toBeInstanceOf(Date);
+  });
+
+  it("updates campaign state only when both turn and state-revision fences match", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const before = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope));
+    const acceptedBefore = await pool.query<{ state_snapshot_private: unknown }>(
+      `SELECT state_snapshot_private FROM turns
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = $3`,
+      [ownerUserId, imported.campaignId, before.activeTurnNumber]
+    );
+    const request = {
+      expectedTurnNumber: before.activeTurnNumber,
+      expectedRevision: before.revision,
+      continuitySummary: "The keeper has opened the lower stair.",
+      openThreads: ["Search the flooded vault."],
+      canonicalFacts: before.canonicalFacts,
+      scratchpad: "The old lens remains hidden beneath the stair.",
+      trackers: before.trackers,
+      rpgStats: before.rpgStats,
+      eventTriggers: before.eventTriggers,
+      pendingEventTriggers: before.pendingEventTriggers
+    };
+
+    const updated = await adapters.transaction.command((transaction) =>
+      adapters.state.updateCampaignRuntimeState(transaction, scope, request));
+    expect(updated).toMatchObject({
+      ok: true,
+      value: {
+        campaignId: imported.campaignId,
+        activeTurnNumber: before.activeTurnNumber,
+        revision: before.revision + 1,
+        continuitySummary: request.continuitySummary
+      }
+    });
+    expect(updated.ok && updated.value.updatedAt).toBeInstanceOf(Date);
+
+    const staleRevision = await adapters.transaction.command((transaction) =>
+      adapters.state.updateCampaignRuntimeState(transaction, scope, {
+        ...request,
+        continuitySummary: "This stale edit must never persist."
+      }));
+    expect(staleRevision).toEqual({
+      ok: false,
+      failure: {
+        reason: "state_revision_changed",
+        details: {
+          campaignId: imported.campaignId,
+          expectedStateRevision: before.revision,
+          actualStateRevision: before.revision + 1
+        }
+      }
+    });
+
+    const staleTurn = await adapters.transaction.command((transaction) =>
+      adapters.state.updateCampaignRuntimeState(transaction, scope, {
+        ...request,
+        expectedTurnNumber: before.activeTurnNumber - 1,
+        expectedRevision: before.revision + 1
+      }));
+    expect(staleTurn).toEqual({
+      ok: false,
+      failure: {
+        reason: "active_turn_changed",
+        details: {
+          campaignId: imported.campaignId,
+          expectedTurnNumber: before.activeTurnNumber - 1,
+          actualTurnNumber: before.activeTurnNumber
+        }
+      }
+    });
+
+    const acceptedAfter = await pool.query<{ state_snapshot_private: unknown }>(
+      `SELECT state_snapshot_private FROM turns
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = $3`,
+      [ownerUserId, imported.campaignId, before.activeTurnNumber]
+    );
+    expect(acceptedAfter.rows[0]?.state_snapshot_private).toEqual(acceptedBefore.rows[0]?.state_snapshot_private);
+    await expect(pool.query<{ revision: number }>(
+      "SELECT revision FROM campaign_state WHERE owner_user_id = $1 AND campaign_id = $2",
+      [ownerUserId, imported.campaignId]
+    )).resolves.toMatchObject({ rows: [{ revision: before.revision + 1 }] });
+  });
+
+  it("rolls back invalid nested campaign-state corrections without partial writes", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const before = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope));
+
+    await expect(adapters.transaction.command((transaction) =>
+      adapters.state.updateCampaignRuntimeState(transaction, scope, {
+        expectedTurnNumber: before.activeTurnNumber,
+        expectedRevision: before.revision,
+        continuitySummary: before.continuitySummary,
+        openThreads: before.openThreads,
+        canonicalFacts: before.canonicalFacts,
+        scratchpad: before.scratchpad,
+        trackers: [{ id: "", name: 9, value: {}, rules: [] }],
+        rpgStats: before.rpgStats,
+        eventTriggers: before.eventTriggers,
+        pendingEventTriggers: before.pendingEventTriggers
+      } as never))).rejects.toMatchObject({ kind: "invalid_request", reason: "invalid_transition" });
+
+    const after = await pool.query<{ revision: number; trackers: unknown }>(
+      `SELECT revision, trackers FROM campaign_state
+        WHERE owner_user_id = $1 AND campaign_id = $2`,
+      [ownerUserId, imported.campaignId]
+    );
+    expect(after.rows[0]).toMatchObject({ revision: before.revision, trackers: before.trackers });
+    await expect(pool.query(
+      "SELECT id FROM campaign_state_edits WHERE owner_user_id = $1 AND campaign_id = $2",
+      [ownerUserId, imported.campaignId]
+    )).resolves.toMatchObject({ rowCount: 0 });
+  });
+
+  it("rejects a malformed persisted state snapshot at the database boundary", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    await pool.query(
+      `UPDATE turns SET state_snapshot_private = '"invalid-state-snapshot"'::jsonb
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = 2`,
+      [ownerUserId, imported.campaignId]
+    );
+
+    await expect(adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, {
+        ownerUserId,
+        campaignId: imported.campaignId
+      }))).rejects.toMatchObject({ kind: "unavailable", reason: "invalid_transition" });
+  });
+
+  it("syncs player configuration only when turn and state-revision fences match", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const before = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope));
+    const request = {
+      expectedTurnNumber: before.activeTurnNumber,
+      expectedStateRevision: before.revision,
+      useRpgStats: true,
+      suppressEventTriggers: true,
+      rpgStats: [{ id: "resolve", name: "Resolve", value: 7, note: "Steady" }],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    };
+
+    const synchronized = await adapters.transaction.command((transaction) =>
+      adapters.campaigns.syncPlayerCampaignConfig(transaction, scope, request));
+    expect(synchronized).toEqual({
+      ok: true,
+      value: {
+        campaignId: imported.campaignId,
+        activeTurnNumber: before.activeTurnNumber,
+        synchronized: true
+      }
+    });
+    const saved = await pool.query<{
+      legacy_settings: Record<string, unknown>;
+      revision: number;
+      rpg_stats: unknown;
+    }>(
+      `SELECT c.legacy_settings, cs.revision, cs.rpg_stats
+         FROM campaigns c
+         JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
+        WHERE c.id = $1 AND c.owner_user_id = $2`,
+      [imported.campaignId, ownerUserId]
+    );
+    expect(saved.rows[0]).toMatchObject({
+      legacy_settings: { useRpgStats: true, suppressEventTriggers: true },
+      revision: before.revision + 1,
+      rpg_stats: request.rpgStats
+    });
+
+    const stale = await adapters.transaction.command((transaction) =>
+      adapters.campaigns.syncPlayerCampaignConfig(transaction, scope, {
+        ...request,
+        useRpgStats: false,
+        suppressEventTriggers: false
+      }));
+    expect(stale).toEqual({
+      ok: false,
+      failure: {
+        reason: "state_revision_changed",
+        details: {
+          campaignId: imported.campaignId,
+          expectedStateRevision: before.revision,
+          actualStateRevision: before.revision + 1
+        }
+      }
+    });
+    const staleTurn = await adapters.transaction.command((transaction) =>
+      adapters.campaigns.syncPlayerCampaignConfig(transaction, scope, {
+        ...request,
+        expectedTurnNumber: before.activeTurnNumber - 1,
+        expectedStateRevision: before.revision + 1,
+        useRpgStats: false,
+        suppressEventTriggers: false
+      }));
+    expect(staleTurn).toEqual({
+      ok: false,
+      failure: {
+        reason: "active_turn_changed",
+        details: {
+          campaignId: imported.campaignId,
+          expectedTurnNumber: before.activeTurnNumber - 1,
+          actualTurnNumber: before.activeTurnNumber
+        }
+      }
+    });
+    const afterStale = await pool.query<{ legacy_settings: Record<string, unknown>; revision: number }>(
+      `SELECT c.legacy_settings, cs.revision
+         FROM campaigns c
+         JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
+        WHERE c.id = $1 AND c.owner_user_id = $2`,
+      [imported.campaignId, ownerUserId]
+    );
+    expect(afterStale.rows[0]).toMatchObject({
+      legacy_settings: { useRpgStats: true, suppressEventTriggers: true },
+      revision: before.revision + 1
+    });
   });
 
   it("returns raw-Date sync sources and delegates changed windows to the bounded reader", async () => {

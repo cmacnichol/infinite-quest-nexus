@@ -15,6 +15,7 @@ import {
   type CampaignListView,
   type CampaignListSource,
   type CampaignMigrationSource,
+  type CampaignPlayerConfigSyncRequest,
   type CampaignStateCorrectionSource,
   type CampaignStateEditView,
   type CampaignStateEditSource,
@@ -450,6 +451,7 @@ describe("world and campaign application use cases", () => {
     expectTypeOf<CampaignListView["campaigns"][number]["worldVersionId"]>().toEqualTypeOf<string>();
     expectTypeOf<CampaignListView["campaigns"][number]["updatedAt"]>().toEqualTypeOf<string>();
     expectTypeOf<CampaignUpdateView["turnControlStyle"]>().toEqualTypeOf<"action_only" | "flexible_auto" | "flexible_action" | "flexible_scene">();
+    expectTypeOf<CampaignPlayerConfigSyncRequest["expectedStateRevision"]>().toEqualTypeOf<number>();
     expectTypeOf<CampaignStateEditView["snapshot"]["canonicalFacts"]>().toMatchTypeOf<readonly unknown[]>();
     expectTypeOf<CharacterProfileView["revision"]>().toEqualTypeOf<number>();
     expectTypeOf<PlayableCharacterSummaryView["readiness"]["ready"]>().toEqualTypeOf<boolean>();

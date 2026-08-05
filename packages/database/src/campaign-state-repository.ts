@@ -1,6 +1,11 @@
 import {
+  campaignRuntimeStateContentSchema,
+  campaignRuntimeStateSchema,
+  campaignRuntimeStateUpdateSchema,
+  playerCampaignConfigSchema,
   PUBLIC_GENERATION_FAILURE_CODE,
-  PUBLIC_GENERATION_FAILURE_MESSAGE
+  PUBLIC_GENERATION_FAILURE_MESSAGE,
+  type CampaignRuntimeStateContent
 } from "../../contracts/src/generation.js";
 import { z } from "zod";
 import {
@@ -9,15 +14,24 @@ import {
 } from "../../contracts/src/client-api.js";
 import type {
   BoundedCampaignTurnPagePort,
+  CampaignRepositoryPort,
+  CampaignScope,
+  CampaignStateEditSource,
+  CampaignStateRepositoryPort,
   CampaignSyncRepositoryPort,
-  CampaignSyncSnapshotSource
+  CampaignSyncSnapshotSource,
+  WorldCampaignErrorDetails,
+  WorldCampaignRepositoryResult,
+  WorldCampaignTransitionFailureReason
 } from "../../application/src/world-campaign/index.js";
 import { WorldCampaignApplicationError } from "../../application/src/world-campaign/index.js";
+import type { MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
+import { normalizeCampaignTrackers } from "../../domain/src/campaign-trackers.js";
 import { characterLegacyText, effectiveCampaignCharacter } from "../../domain/src/world-characters.js";
-import { sha256, stableStringify } from "../../domain/src/text.js";
+import { containsMechanicsLanguage, sha256, stableStringify } from "../../domain/src/text.js";
 import { formatNarrationParagraphs } from "../../story-engine/src/narration-formatting.js";
 import { readTurnPage } from "./play-loop-read-repository.js";
-import type { DatabasePool } from "./pool.js";
+import type { DatabaseClient, DatabasePool } from "./pool.js";
 import {
   createPostgresWorldCampaignTransactionPort,
   worldCampaignDatabaseClient
@@ -25,7 +39,518 @@ import {
 
 export type CampaignSyncAdapterCollaborators = Readonly<{
   turnPages: BoundedCampaignTurnPagePort;
+  memory: Pick<MemoryGenerationTransactionPort, "rebuildCampaignMemories">;
 }>;
+
+type PostgresCampaignPlayerConfigRepository = Pick<CampaignRepositoryPort, "syncPlayerCampaignConfig">;
+
+const campaignPlayerConfigSyncRequestSchema = playerCampaignConfigSchema.extend({
+  expectedStateRevision: z.coerce.number().int().min(0)
+});
+
+type CampaignStateRow = {
+  activeTurnNumber: number;
+  worldVersionId: string;
+  revision: number;
+  scratchpadPrivate: string;
+  trackers: unknown;
+  rpgStats: unknown;
+  eventTriggers: unknown;
+  pendingEventTriggers: unknown;
+  initialStateSnapshot: Record<string, unknown>;
+  updatedAt: Date | string;
+};
+
+type CampaignStateEditRow = {
+  id: string;
+  revision: number;
+  effectiveTurnNumber: number;
+  stateSnapshotPrivate: Record<string, unknown>;
+  createdAt: Date | string;
+};
+
+type CanonicalFactRow = {
+  id: string;
+  content: string;
+  sourceTurnNumber: number;
+};
+
+function json(value: unknown): string {
+  return JSON.stringify(value ?? null);
+}
+
+function success<T>(value: T): WorldCampaignRepositoryResult<T> {
+  return { ok: true, value };
+}
+
+function failure(
+  reason: WorldCampaignTransitionFailureReason,
+  details?: WorldCampaignErrorDetails,
+): WorldCampaignRepositoryResult<never> {
+  return details === undefined
+    ? { ok: false, failure: { reason } }
+    : { ok: false, failure: { reason, details } };
+}
+
+function invalidBoundaryData(
+  kind: "invalid_request" | "unavailable",
+  scope: CampaignScope,
+): never {
+  throw new WorldCampaignApplicationError(kind, "invalid_transition", {
+    campaignId: scope.campaignId
+  });
+}
+
+function parseBoundary<T>(
+  schema: z.ZodType<T>,
+  value: unknown,
+  kind: "invalid_request" | "unavailable",
+  scope: CampaignScope,
+): T {
+  try {
+    return schema.parse(value);
+  } catch (error) {
+    if (error instanceof z.ZodError) invalidBoundaryData(kind, scope);
+    throw error;
+  }
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function persistedTrackers(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.some((entry) => entry && typeof entry === "object" && "id" in entry)
+    ? value
+    : normalizeCampaignTrackers(value);
+}
+
+function persistedCanonicalFacts(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.map((fact) => {
+    if (typeof fact === "string") return { id: null, content: fact };
+    return fact;
+  });
+}
+
+function runtimeStateContent(
+  snapshot: unknown,
+  canonicalFacts: readonly Readonly<{ id: string | null; content: string }>[] | undefined,
+  scope: CampaignScope,
+): CampaignRuntimeStateContent {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    invalidBoundaryData("unavailable", scope);
+  }
+  const source = snapshot as Record<string, unknown>;
+  const candidate = {
+    continuitySummary: source.continuitySummary ?? "",
+    openThreads: source.openThreads ?? [],
+    canonicalFacts: canonicalFacts ?? persistedCanonicalFacts(source.canonicalFacts ?? []),
+    scratchpad: source.scratchpad ?? "",
+    trackers: persistedTrackers(source.trackers ?? []),
+    rpgStats: source.rpgStats ?? [],
+    eventTriggers: source.eventTriggers ?? [],
+    pendingEventTriggers: source.pendingEventTriggers ?? []
+  };
+  return parseBoundary(campaignRuntimeStateContentSchema, candidate, "unavailable", scope);
+}
+
+function fictionFields(content: CampaignRuntimeStateContent): readonly string[] {
+  return [
+    content.continuitySummary,
+    ...content.openThreads,
+    ...content.canonicalFacts.map((fact) => fact.content),
+    content.scratchpad,
+    ...content.trackers.flatMap((tracker) => [tracker.name, tracker.value, tracker.rules])
+  ];
+}
+
+async function activeCanonicalFacts(
+  client: DatabaseClient | DatabasePool,
+  scope: CampaignScope,
+  throughTurnNumber: number,
+): Promise<CanonicalFactRow[]> {
+  const result = await client.query<CanonicalFactRow>(
+    `SELECT id, content, source_turn_number AS "sourceTurnNumber"
+       FROM campaign_canonical_facts
+      WHERE owner_user_id = $1 AND campaign_id = $2
+        AND valid_from_turn <= $3
+        AND (valid_until_turn IS NULL OR valid_until_turn > $3)
+      ORDER BY source_turn_number, source_fact_index`,
+    [scope.ownerUserId, scope.campaignId, throughTurnNumber]
+  );
+  return result.rows;
+}
+
+async function loadStateRow(
+  client: DatabaseClient | DatabasePool,
+  scope: CampaignScope,
+  lock = false,
+): Promise<CampaignStateRow | null> {
+  const result = await client.query<CampaignStateRow>(
+    `SELECT c.active_turn_number AS "activeTurnNumber", c.world_version_id AS "worldVersionId",
+            cs.revision, cs.scratchpad_private AS "scratchpadPrivate", cs.trackers,
+            cs.rpg_stats AS "rpgStats", cs.event_triggers AS "eventTriggers",
+            cs.pending_event_triggers AS "pendingEventTriggers",
+            cs.initial_state_snapshot AS "initialStateSnapshot", cs.updated_at AS "updatedAt"
+       FROM campaigns c
+       JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
+      WHERE c.id = $1 AND c.owner_user_id = $2
+      ${lock ? "FOR UPDATE OF c, cs" : ""}`,
+    [scope.campaignId, scope.ownerUserId]
+  );
+  return result.rows[0] ?? null;
+}
+
+async function loadEffectiveStateEdit(
+  client: DatabaseClient | DatabasePool,
+  scope: CampaignScope,
+  throughTurnNumber: number,
+): Promise<CampaignStateEditRow | null> {
+  const result = await client.query<CampaignStateEditRow>(
+    `SELECT id, revision, effective_turn_number AS "effectiveTurnNumber",
+            state_snapshot_private AS "stateSnapshotPrivate", created_at AS "createdAt"
+       FROM campaign_state_edits
+      WHERE owner_user_id = $1 AND campaign_id = $2 AND effective_turn_number <= $3
+      ORDER BY effective_turn_number DESC, revision DESC
+      LIMIT 1`,
+    [scope.ownerUserId, scope.campaignId, throughTurnNumber]
+  );
+  return result.rows[0] ?? null;
+}
+
+async function loadRuntimeState(
+  client: DatabaseClient | DatabasePool,
+  scope: CampaignScope,
+  requestedTurnNumber?: number,
+) {
+  const row = await loadStateRow(client, scope);
+  if (!row) {
+    throw new WorldCampaignApplicationError("not_found", "campaign_not_found", {
+      campaignId: scope.campaignId
+    });
+  }
+  const viewedTurnNumber = requestedTurnNumber ?? row.activeTurnNumber;
+  if (!Number.isInteger(viewedTurnNumber) || viewedTurnNumber < 0 || viewedTurnNumber > row.activeTurnNumber) {
+    throw new WorldCampaignApplicationError("stale_state", "active_turn_changed", {
+      campaignId: scope.campaignId,
+      expectedTurnNumber: viewedTurnNumber,
+      actualTurnNumber: row.activeTurnNumber
+    });
+  }
+  const historical = viewedTurnNumber > 0
+    ? await client.query<{ stateSnapshotPrivate: Record<string, unknown>; acceptedAt: Date | string }>(
+      `SELECT state_snapshot_private AS "stateSnapshotPrivate", accepted_at AS "acceptedAt"
+         FROM turns
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = $3`,
+      [scope.ownerUserId, scope.campaignId, viewedTurnNumber]
+    )
+    : null;
+  if (viewedTurnNumber > 0 && !historical?.rows[0]) {
+    throw new WorldCampaignApplicationError("not_found", "invalid_transition", {
+      campaignId: scope.campaignId,
+      expectedTurnNumber: viewedTurnNumber
+    });
+  }
+  const baseSnapshot = viewedTurnNumber === 0
+    ? row.initialStateSnapshot
+    : historical?.rows[0]?.stateSnapshotPrivate;
+  if (!baseSnapshot || typeof baseSnapshot !== "object" || Array.isArray(baseSnapshot)) {
+    invalidBoundaryData("unavailable", scope);
+  }
+  const edit = await loadEffectiveStateEdit(client, scope, viewedTurnNumber);
+  const exactEdit = edit?.effectiveTurnNumber === viewedTurnNumber ? edit : null;
+  const canonicalFacts = exactEdit
+    ? undefined
+    : (await activeCanonicalFacts(client, scope, viewedTurnNumber))
+      .map((fact) => ({ id: fact.id, content: fact.content }));
+  const materializedSnapshot = viewedTurnNumber === row.activeTurnNumber && !exactEdit
+    ? {
+      ...objectValue(baseSnapshot),
+      scratchpad: row.scratchpadPrivate,
+      trackers: row.trackers,
+      rpgStats: row.rpgStats,
+      eventTriggers: row.eventTriggers,
+      pendingEventTriggers: row.pendingEventTriggers
+    }
+    : baseSnapshot;
+  const content = runtimeStateContent(
+    exactEdit?.stateSnapshotPrivate ?? materializedSnapshot,
+    canonicalFacts,
+    scope
+  );
+  return parseBoundary(campaignRuntimeStateSchema, {
+    campaignId: scope.campaignId,
+    activeTurnNumber: row.activeTurnNumber,
+    viewedTurnNumber,
+    isCurrent: viewedTurnNumber === row.activeTurnNumber,
+    revision: row.revision,
+    updatedAt: exactEdit?.createdAt ?? historical?.rows[0]?.acceptedAt ?? row.updatedAt,
+    ...content
+  }, "unavailable", scope);
+}
+
+function createPostgresCampaignStateRepository(
+  collaborators: Pick<CampaignSyncAdapterCollaborators, "memory">,
+): CampaignStateRepositoryPort {
+  return {
+    async loadEffectiveCampaignStateEdit(transaction, scope): Promise<CampaignStateEditSource> {
+      const client = worldCampaignDatabaseClient(transaction);
+      const state = await loadStateRow(client, scope);
+      if (!state) {
+        throw new WorldCampaignApplicationError("not_found", "campaign_not_found", {
+          campaignId: scope.campaignId
+        });
+      }
+      const row = await loadEffectiveStateEdit(client, scope, state.activeTurnNumber);
+      if (!row) invalidBoundaryData("unavailable", scope);
+      return {
+        id: row.id,
+        revision: row.revision,
+        effectiveTurnNumber: row.effectiveTurnNumber,
+        snapshot: runtimeStateContent(row.stateSnapshotPrivate, undefined, scope),
+        updatedAt: row.createdAt
+      };
+    },
+
+    async getCampaignRuntimeState(transaction, scope, requestedTurnNumber) {
+      return loadRuntimeState(worldCampaignDatabaseClient(transaction), scope, requestedTurnNumber);
+    },
+
+    async updateCampaignRuntimeState(transaction, scope, request) {
+      const client = worldCampaignDatabaseClient(transaction);
+      const parsed = parseBoundary(campaignRuntimeStateUpdateSchema, request, "invalid_request", scope);
+      const content = campaignRuntimeStateContentSchema.parse(parsed);
+      if (fictionFields(content).some(containsMechanicsLanguage)) {
+        return failure("invalid_transition", { campaignId: scope.campaignId });
+      }
+      const current = await loadStateRow(client, scope, true);
+      if (!current) return failure("campaign_not_found", { campaignId: scope.campaignId });
+      if (current.activeTurnNumber !== parsed.expectedTurnNumber) {
+        return failure("active_turn_changed", {
+          campaignId: scope.campaignId,
+          expectedTurnNumber: parsed.expectedTurnNumber,
+          actualTurnNumber: current.activeTurnNumber
+        });
+      }
+      if (current.revision !== parsed.expectedRevision) {
+        return failure("state_revision_changed", {
+          campaignId: scope.campaignId,
+          expectedStateRevision: parsed.expectedRevision,
+          actualStateRevision: current.revision
+        });
+      }
+      const activeJob = await client.query(
+        `SELECT 1 FROM generation_jobs
+          WHERE campaign_id = $1 AND owner_user_id = $2
+            AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
+          LIMIT 1`,
+        [scope.campaignId, scope.ownerUserId]
+      );
+      if (activeJob.rowCount) return failure("invalid_transition", { campaignId: scope.campaignId });
+
+      const accepted = current.activeTurnNumber === 0
+        ? null
+        : await client.query<{ stateSnapshotPrivate: Record<string, unknown> }>(
+          `SELECT state_snapshot_private AS "stateSnapshotPrivate"
+             FROM turns
+            WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = $3`,
+          [scope.ownerUserId, scope.campaignId, current.activeTurnNumber]
+        );
+      const currentSnapshot = current.activeTurnNumber === 0
+        ? current.initialStateSnapshot
+        : accepted?.rows[0]?.stateSnapshotPrivate;
+      if (!currentSnapshot || typeof currentSnapshot !== "object" || Array.isArray(currentSnapshot)) {
+        invalidBoundaryData("unavailable", scope);
+      }
+
+      const existingFacts = await activeCanonicalFacts(client, scope, current.activeTurnNumber);
+      const existingById = new Map(existingFacts.map((fact) => [fact.id, fact]));
+      const usedIds = new Set<string>();
+      const correctedFacts: Array<{ id: string; content: string }> = [];
+      for (const fact of content.canonicalFacts) {
+        const existing = fact.id ? existingById.get(fact.id) : undefined;
+        if (fact.id && !existing) {
+          return failure("fact_not_found", { campaignId: scope.campaignId, factId: fact.id });
+        }
+        const id = existing && existing.content === fact.content
+          ? existing.id
+          : existing && existing.sourceTurnNumber === current.activeTurnNumber
+            ? existing.id
+            : crypto.randomUUID();
+        if (usedIds.has(id)) {
+          return failure("fact_id_conflict", { campaignId: scope.campaignId, factId: id });
+        }
+        usedIds.add(id);
+        correctedFacts.push({ id, content: fact.content });
+      }
+      const correctedContent = { ...content, canonicalFacts: correctedFacts };
+      const currentContent = runtimeStateContent({
+        ...objectValue(currentSnapshot),
+        scratchpad: current.scratchpadPrivate,
+        trackers: current.trackers,
+        rpgStats: current.rpgStats,
+        eventTriggers: current.eventTriggers,
+        pendingEventTriggers: current.pendingEventTriggers
+      }, existingFacts.map((fact) => ({ id: fact.id, content: fact.content })), scope);
+      const changedFields = (Object.keys(correctedContent) as Array<keyof CampaignRuntimeStateContent>)
+        .filter((field) => json(correctedContent[field]) !== json(currentContent[field]));
+      if (!changedFields.length) return success(await loadRuntimeState(client, scope));
+
+      const nextRevision = current.revision + 1;
+      const snapshot = { ...objectValue(currentSnapshot), ...correctedContent };
+      const editId = crypto.randomUUID();
+      await client.query(
+        `UPDATE campaign_state
+            SET scratchpad_private = $3, scratchpad_safe_for_prompt = true,
+                trackers = $4, rpg_stats = $5, event_triggers = $6,
+                pending_event_triggers = $7, revision = $8, updated_at = now()
+          WHERE campaign_id = $1 AND owner_user_id = $2`,
+        [
+          scope.campaignId,
+          scope.ownerUserId,
+          correctedContent.scratchpad,
+          json(correctedContent.trackers),
+          json(correctedContent.rpgStats),
+          json(correctedContent.eventTriggers),
+          json(correctedContent.pendingEventTriggers),
+          nextRevision
+        ]
+      );
+      if (current.activeTurnNumber === 0) {
+        await client.query(
+          `UPDATE campaign_state SET initial_state_snapshot = $3
+            WHERE campaign_id = $1 AND owner_user_id = $2`,
+          [scope.campaignId, scope.ownerUserId, json(snapshot)]
+        );
+      }
+      await client.query(
+        `INSERT INTO campaign_state_edits (
+           id, owner_user_id, campaign_id, effective_turn_number, revision,
+           state_snapshot_private, changed_fields
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          editId,
+          scope.ownerUserId,
+          scope.campaignId,
+          current.activeTurnNumber,
+          nextRevision,
+          json(snapshot),
+          json(changedFields)
+        ]
+      );
+      await collaborators.memory.rebuildCampaignMemories(client, {
+        ownerUserId: scope.ownerUserId,
+        campaignId: scope.campaignId,
+        worldVersionId: current.worldVersionId
+      });
+      await client.query(
+        "DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2",
+        [scope.campaignId, scope.ownerUserId]
+      );
+      await client.query(
+        `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, details)
+         VALUES ($1,$2,'campaign_state_edited',$3)`,
+        [scope.ownerUserId, scope.campaignId, json({
+          effectiveTurnNumber: current.activeTurnNumber,
+          fromRevision: current.revision,
+          toRevision: nextRevision,
+          changedFields
+        })]
+      );
+      return success(await loadRuntimeState(client, scope));
+    }
+  };
+}
+
+function createPostgresCampaignPlayerConfigRepository(): PostgresCampaignPlayerConfigRepository {
+  return {
+    async syncPlayerCampaignConfig(transaction, scope, request) {
+      const client = worldCampaignDatabaseClient(transaction);
+      const config = parseBoundary(
+        campaignPlayerConfigSyncRequestSchema,
+        request,
+        "invalid_request",
+        scope
+      );
+      const current = await loadStateRow(client, scope, true);
+      if (!current) return failure("campaign_not_found", { campaignId: scope.campaignId });
+      if (current.activeTurnNumber !== config.expectedTurnNumber) {
+        return failure("active_turn_changed", {
+          campaignId: scope.campaignId,
+          expectedTurnNumber: config.expectedTurnNumber,
+          actualTurnNumber: current.activeTurnNumber
+        });
+      }
+      if (current.revision !== config.expectedStateRevision) {
+        return failure("state_revision_changed", {
+          campaignId: scope.campaignId,
+          expectedStateRevision: config.expectedStateRevision,
+          actualStateRevision: current.revision
+        });
+      }
+      const activeJob = await client.query(
+        `SELECT 1 FROM generation_jobs
+          WHERE campaign_id = $1 AND owner_user_id = $2
+            AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
+          LIMIT 1`,
+        [scope.campaignId, scope.ownerUserId]
+      );
+      if (activeJob.rowCount) return failure("invalid_transition", { campaignId: scope.campaignId });
+
+      await client.query(
+        `UPDATE campaigns
+            SET legacy_settings = legacy_settings || $3::jsonb, updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2`,
+        [scope.campaignId, scope.ownerUserId, json({
+          useRpgStats: config.useRpgStats,
+          suppressEventTriggers: config.suppressEventTriggers
+        })]
+      );
+      await client.query(
+        `UPDATE campaign_state
+            SET rpg_stats = $3, event_triggers = $4, pending_event_triggers = $5,
+                revision = revision + 1, updated_at = now()
+          WHERE campaign_id = $1 AND owner_user_id = $2`,
+        [
+          scope.campaignId,
+          scope.ownerUserId,
+          json(config.rpgStats),
+          json(config.eventTriggers),
+          json(config.pendingEventTriggers)
+        ]
+      );
+      if (current.activeTurnNumber === 0) {
+        if (!current.initialStateSnapshot
+          || typeof current.initialStateSnapshot !== "object"
+          || Array.isArray(current.initialStateSnapshot)) {
+          invalidBoundaryData("unavailable", scope);
+        }
+        const initialStateSnapshot = {
+          ...objectValue(current.initialStateSnapshot),
+          scratchpad: current.scratchpadPrivate,
+          trackers: normalizeCampaignTrackers(current.trackers),
+          rpgStats: config.rpgStats,
+          eventTriggers: config.eventTriggers,
+          pendingEventTriggers: config.pendingEventTriggers
+        };
+        await client.query(
+          `UPDATE campaign_state SET initial_state_snapshot = $3
+            WHERE campaign_id = $1 AND owner_user_id = $2`,
+          [scope.campaignId, scope.ownerUserId, json(initialStateSnapshot)]
+        );
+      }
+      return success({
+        campaignId: scope.campaignId,
+        activeTurnNumber: current.activeTurnNumber,
+        synchronized: true
+      });
+    }
+  };
+}
 
 type CampaignTurnReportedCost = Readonly<{
   amount: string;
@@ -82,12 +607,6 @@ type CampaignSyncRow = {
   latestTurnId: string | null;
   latestTurnNumber: number | null;
 };
-
-function objectValue(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
-}
 
 function publicGenerationError(status: unknown) {
   return ["failed", "recoverable", "cancelled", "discarded"].includes(String(status))
@@ -330,6 +849,8 @@ export function createPostgresCampaignAuthorityAdapters(
 ) {
   return {
     transaction: createPostgresWorldCampaignTransactionPort(pool),
+    state: createPostgresCampaignStateRepository(collaborators),
+    campaigns: createPostgresCampaignPlayerConfigRepository(),
     sync: createPostgresCampaignSyncRepository(),
     turnPages: collaborators.turnPages
   };

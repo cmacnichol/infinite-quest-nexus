@@ -366,6 +366,9 @@ export type CampaignPlayerConfigSyncView = Readonly<{
   activeTurnNumber: number;
   synchronized: true;
 }>;
+export type CampaignPlayerConfigSyncRequest = Readonly<PlayerCampaignConfig & {
+  expectedStateRevision: number;
+}>;
 export type CampaignRewindView = DeepReadonly<CampaignRewindResponse>;
 export type CampaignBranchView = DeepReadonly<CampaignBranchResponse>;
 export type CampaignStateEditView = Readonly<{
