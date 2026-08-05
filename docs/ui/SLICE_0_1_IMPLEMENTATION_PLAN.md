@@ -7198,7 +7198,45 @@ re-review rounds approved all findings with no residual blocker. Fresh
 controller verification passed **1,228/1,228 unit tests**, **270/270
 real-PostgreSQL integration tests**, `pnpm check`, `pnpm build`, range diff
 checks, and project-memory prechecks. Task **14b is complete**; the Task 14c
-identity/world/campaign extraction is next after the correction-gate cleanup.
+identity/world/campaign extraction is the next backend domain.
+
+**Pre-14c correction gate (2026-08-05, complete):** These small but
+load-bearing verification corrections were required before beginning the
+identity/world/campaign extraction.
+
+1. **Initial-owner fixture isolation.** Replace the generation cancellation
+   test's temporary reassignment of the global `initial-owner` system key with
+   an explicit foreign-owner fixture. The test must create the foreign-owned
+   campaign, provider, and job under that stable foreign UUID while the normal
+   server-resolved initial owner remains unchanged. Prove the initial-owner
+   cache cannot make the foreign job visible, and use `finally` cleanup that
+   deletes only fixture-owned rows.
+2. **PostgreSQL client concurrency warning.** Reproduce the full-suite `pg`
+   warning that a client receives `query` while another query is executing;
+   capture its call site, trace the shared-client data flow, and remove the
+   overlap at the source. Add a focused regression that fails on the previous
+   overlap and confirm the focused and full integration commands complete with
+   no new warning. If the warning is emitted by external test infrastructure,
+   retain the diagnostic evidence and record an explicit, bounded follow-up
+   rather than silently accepting it.
+3. Keep this gate separate from Task 14c: it may improve test/setup plumbing
+   only and may not move world/campaign production ownership or defer the
+   identity isolation proof into a later extraction checkpoint.
+
+**Pre-14c correction verification (2026-08-05, complete):** `2cb2795`
+replaces the global `initial-owner` system-key swap with an explicit foreign
+owner/world/version/campaign/provider/job fixture; the stable server-resolved
+initial owner receives a safe `not_found`, the foreign job remains queued, and
+fixture cleanup deletes only its dependent rows. It also traces the `pg`
+concurrent-query deprecation to `captureCampaignArchiveSnapshot` issuing
+parallel reads on its one repeatable-read transaction client, and sequences
+those reads (including the nested asset archive reads) through the same client.
+A real-PostgreSQL regression observes the target warning rather than
+suppressing it. The implementation was independently reviewed with no Critical
+or Important findings. Fresh controller verification passed **271/271
+integration tests with `--trace-deprecation` and no pg concurrent-query
+warning**, `pnpm check`, `pnpm build`, diff checks, and project-memory
+prechecks. Task **14c may now begin**.
 
 ### Task 14c — B5c: identity, worlds, versions, and campaigns
 
