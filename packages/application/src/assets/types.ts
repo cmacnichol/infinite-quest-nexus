@@ -7,6 +7,8 @@ export type CampaignAssetScope = AssetOwnerScope & Readonly<{ campaignId: string
 export type TurnAssetScope = CampaignAssetScope & Readonly<{ turnId: string }>;
 export type WorldAssetScope = AssetOwnerScope & Readonly<{ worldId: string; assetId: string }>;
 export type WorldVersionAssetScope = WorldAssetScope & Readonly<{ worldVersionId: string }>;
+export type TurnAssetSelectionScope = AssetOwnerScope & Readonly<{ campaignId: string; turnId: string }>;
+export type WorldAssetSelectionScope = AssetOwnerScope & Readonly<{ worldId: string }>;
 
 /** Opaque context supplied by the transaction owner; adapters must not open a nested transaction. */
 export type AssetTransactionContext = object;
@@ -48,13 +50,52 @@ export type AssetContentView = Readonly<{
 }>;
 
 export type AssetSelectionCommand = Readonly<{
+  /** `null` is an explicit authorized clear; omitted is invalid and must not clear a selection. */
+  assetId: string | null;
   idempotencyKey: string;
 }>;
 
 export type AssetSelectionView = Readonly<{
-  assetId: string;
+  assetId: string | null;
   selected: boolean;
 }>;
+
+/** Owner-scoped metadata mutation; later adapters preserve its optimistic revision semantics. */
+export type AssetMetadataUpdateCommand = Readonly<{
+  expectedRevision: number;
+  title?: string;
+  caption?: string;
+  notes?: string;
+  tags?: readonly string[];
+  reuseScope?: "private" | "campaign" | "world" | "owner_library" | "shared";
+  automaticReuseEnabled?: boolean;
+  reviewStatus?: "unreviewed" | "eligible" | "restricted" | "blocked";
+  contentCategories?: readonly string[];
+  favorite?: boolean;
+  archived?: boolean;
+  idempotencyKey: string;
+}>;
+
+export type AssetMetadataUpdateView = Readonly<{
+  assetId: string;
+  metadataRevision: number;
+}>;
+
+/** Safe delivery intent; neither variant includes a storage path, stream, or raw failure. */
+export type AssetDeliveryRequest =
+  | Readonly<{ kind: "original" }>
+  | Readonly<{ kind: "derivative"; derivativeKind: "thumbnail" }>;
+
+type AssetDeliveryDescriptorBase = Readonly<{
+  assetId: string;
+  mimeType: AssetLibraryItemView["mimeType"];
+  byteLength: number;
+  etag: string;
+}>;
+
+export type AssetDeliveryDescriptor =
+  | (AssetDeliveryDescriptorBase & Readonly<{ kind: "original"; derivativeKind: null }>)
+  | (AssetDeliveryDescriptorBase & Readonly<{ kind: "derivative"; derivativeKind: "thumbnail" }>);
 
 /** The worker receives this only from a repository claim, never from an API payload. */
 export type AssetMetadataBackfillClaim = AssetScope & Readonly<{

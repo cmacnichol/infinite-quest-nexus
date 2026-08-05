@@ -1,16 +1,20 @@
 import type {
   AssetContentView,
+  AssetDeliveryDescriptor,
+  AssetDeliveryRequest,
   AssetLibraryQuery,
   AssetLibraryView,
   AssetMetadataBackfillClaim,
   AssetMetadataBackfillClaimRequest,
   AssetMetadataBackfillResult,
+  AssetMetadataUpdateCommand,
+  AssetMetadataUpdateView,
   AssetScope,
   AssetSelectionCommand,
   AssetSelectionView,
   AssetTransactionContext,
-  TurnAssetScope,
-  WorldAssetScope
+  TurnAssetSelectionScope,
+  WorldAssetSelectionScope
 } from "./types.js";
 import type { AssetOwnerScope } from "./types.js";
 
@@ -22,12 +26,13 @@ export interface AssetLibraryPort {
 
 /** Selection is separate from listing so each mutation carries its target scope and idempotency key. */
 export interface AssetSelectionPort {
-  selectTurnIllustration(scope: TurnAssetScope, command: AssetSelectionCommand): Promise<AssetSelectionView>;
-  selectWorldCover(scope: WorldAssetScope, command: AssetSelectionCommand): Promise<AssetSelectionView>;
+  selectTurnIllustration(scope: TurnAssetSelectionScope, command: AssetSelectionCommand): Promise<AssetSelectionView>;
+  selectWorldCover(scope: WorldAssetSelectionScope, command: AssetSelectionCommand): Promise<AssetSelectionView>;
 }
 
-/** Caller-owned transaction binding for worker metadata persistence. */
+/** Owner-scoped metadata changes plus caller-owned transaction binding for worker metadata persistence. */
 export interface AssetMetadataBackfillPort {
+  updateAssetMetadata(scope: AssetScope, command: AssetMetadataUpdateCommand): Promise<AssetMetadataUpdateView>;
   claimNextMetadataBackfill(request: AssetMetadataBackfillClaimRequest): Promise<AssetMetadataBackfillClaim | null>;
   backfillMetadata(
     database: AssetTransactionContext,
@@ -35,10 +40,16 @@ export interface AssetMetadataBackfillPort {
   ): Promise<AssetMetadataBackfillResult>;
 }
 
+/** Describes a safe original or derivative response without exposing storage implementation details. */
+export interface AssetDeliveryPort {
+  describeAssetDelivery(scope: AssetScope, request: AssetDeliveryRequest): Promise<AssetDeliveryDescriptor>;
+}
+
 export type AssetApplicationDependencies = Readonly<{
   library: AssetLibraryPort;
   selection: AssetSelectionPort;
   metadata: AssetMetadataBackfillPort;
+  delivery: AssetDeliveryPort;
 }>;
 
-export interface AssetApplication extends AssetLibraryPort, AssetSelectionPort, AssetMetadataBackfillPort {}
+export interface AssetApplication extends AssetLibraryPort, AssetSelectionPort, AssetMetadataBackfillPort, AssetDeliveryPort {}

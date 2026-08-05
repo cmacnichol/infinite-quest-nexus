@@ -16,12 +16,23 @@ import {
   type PortableImportCommitCommandFor,
   type PortableImportPreviewCommand
 } from "../../packages/application/src/imports/index.js";
+import { createFakePortableArchiveStagingPort } from "../../packages/application/src/imports/portable-archive-staging-fake.js";
+import type {
+  PortableArchiveStagingPort,
+  PortableArchiveUploadCapability
+} from "../../packages/application/src/imports/portable-archive-staging.js";
+import type * as PublicPortableImportContracts from "../../packages/application/src/imports/index.js";
 
 const ownerUserId = "11111111-1111-4111-8111-111111111111";
 const campaignId = "22222222-2222-4222-8222-222222222222";
 const worldId = "33333333-3333-4333-8333-333333333333";
 const worldVersionId = "44444444-4444-4444-8444-444444444444";
 const stagedInput = toPortableStagedInput("staged-import-1");
+
+// @ts-expect-error The staging port accepts only a server-bound capability, never a caller owner payload.
+const callerOwnedUpload: PortableArchiveUploadCapability = { ownerUserId, byteLength: 1 };
+// @ts-expect-error The adapter-private staging seam must not be published from the portable import barrel.
+type PublicStagingPort = PublicPortableImportContracts.PortableArchiveStagingPort;
 
 function portableWorld(): OwnerBoundIdempotentPortableWorldApplicationPort {
   const imports = new Map<string, { request: unknown; result: { importId: string; worldId: string; worldVersionId: string; duplicate: boolean } }>();
@@ -68,6 +79,21 @@ function dependencies(worlds = portableWorld()): ImportApplicationDependencies {
 }
 
 describe("portable import application contracts", () => {
+  it("mints an opaque staged input only from a bounded owner-bound upload capability", async () => {
+    const fake = createFakePortableArchiveStagingPort({ maximumByteLength: 3 });
+    const port: PortableArchiveStagingPort = fake.port;
+    const upload = fake.issueOwnerBoundUpload({ ownerUserId }, 3);
+
+    const staged = await port.stagePortableArchive(upload);
+
+    expect(fake.isStagedForOwner(staged, { ownerUserId })).toBe(true);
+    expect(() => fake.issueOwnerBoundUpload({ ownerUserId }, 4)).toThrow("archive_size_limit_exceeded");
+    // @ts-expect-error Portable staged inputs expose no caller owner, path, stream, or raw error field.
+    const leakedOwner = staged.ownerUserId;
+    expect(leakedOwner).toBeUndefined();
+    expect(callerOwnedUpload).toBeDefined();
+  });
+
   it("uses the existing owner-bound portable world port for World JSON export", async () => {
     const worlds = portableWorld();
     const application = createImportApplication(dependencies(worlds));

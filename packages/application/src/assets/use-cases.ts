@@ -2,10 +2,11 @@ import type { AssetApplication, AssetApplicationDependencies } from "./ports.js"
 import type {
   AssetMetadataBackfillClaim,
   AssetMetadataBackfillClaimRequest,
+  AssetMetadataUpdateCommand,
   AssetScope,
   AssetTransactionContext,
-  TurnAssetScope,
-  WorldAssetScope
+  TurnAssetSelectionScope,
+  WorldAssetSelectionScope
 } from "./types.js";
 import type { AssetOwnerScope } from "./types.js";
 
@@ -35,6 +36,20 @@ function requireWorker(request: AssetMetadataBackfillClaimRequest): void {
   }
 }
 
+function requireMetadataUpdate(command: AssetMetadataUpdateCommand): void {
+  if (!Number.isInteger(command.expectedRevision) || command.expectedRevision <= 0 || !nonBlank(command.idempotencyKey)) {
+    throw new AssetApplicationError("asset_scope_required");
+  }
+  const { expectedRevision: _expectedRevision, idempotencyKey: _idempotencyKey, ...changes } = command;
+  if (Object.keys(changes).length === 0) throw new AssetApplicationError("asset_scope_required");
+}
+
+function requireSelectionAsset(command: Readonly<{ assetId?: string | null }>): void {
+  if (!("assetId" in command) || (command.assetId !== null && !nonBlank(command.assetId))) {
+    throw new AssetApplicationError("asset_scope_required");
+  }
+}
+
 /** Pure delegation boundary: transactions, storage, and image decoding stay in later adapters. */
 export function createAssetApplication(dependencies: AssetApplicationDependencies): AssetApplication {
   return {
@@ -46,19 +61,33 @@ export function createAssetApplication(dependencies: AssetApplicationDependencie
       requireAsset(scope);
       return dependencies.library.readAsset(scope);
     },
-    selectTurnIllustration: async (scope: TurnAssetScope, command) => {
-      requireAsset(scope);
+    selectTurnIllustration: async (scope: TurnAssetSelectionScope, command) => {
+      requireOwner(scope);
       if (!nonBlank(scope.campaignId) || !nonBlank(scope.turnId) || !nonBlank(command.idempotencyKey)) {
         throw new AssetApplicationError("asset_scope_required");
       }
+      requireSelectionAsset(command);
       return dependencies.selection.selectTurnIllustration(scope, command);
     },
-    selectWorldCover: async (scope: WorldAssetScope, command) => {
-      requireAsset(scope);
+    selectWorldCover: async (scope: WorldAssetSelectionScope, command) => {
+      requireOwner(scope);
       if (!nonBlank(scope.worldId) || !nonBlank(command.idempotencyKey)) {
         throw new AssetApplicationError("asset_scope_required");
       }
+      requireSelectionAsset(command);
       return dependencies.selection.selectWorldCover(scope, command);
+    },
+    updateAssetMetadata: async (scope, command) => {
+      requireAsset(scope);
+      requireMetadataUpdate(command);
+      return dependencies.metadata.updateAssetMetadata(scope, command);
+    },
+    describeAssetDelivery: async (scope, request) => {
+      requireAsset(scope);
+      if (request.kind === "derivative" && request.derivativeKind !== "thumbnail") {
+        throw new AssetApplicationError("asset_scope_required");
+      }
+      return dependencies.delivery.describeAssetDelivery(scope, request);
     },
     claimNextMetadataBackfill: async (request) => {
       requireWorker(request);
