@@ -452,6 +452,9 @@ async function benchmarkDatabase(pool, databaseUrl, settings, dependencies) {
     pool: measuredPool,
     generation: dependencies.createApiGenerationApplication(measuredPool),
     memory,
+    worldCampaign: dependencies.createApiWorldCampaignApplication(measuredPool, {
+      credentialSecret: "play-loop-benchmark-only"
+    }),
     generationEvents: inertGenerationEvents()
   });
   try {
@@ -608,13 +611,14 @@ export async function runPlayLoopBenchmark(options = {}) {
     100,
     "PLAY_LOOP_BENCHMARK_SAMPLES"
   );
-  const [poolModule, migrateModule, importModule, serverModule, compositionModule, memoryCompositionModule] = await Promise.all([
+  const [poolModule, migrateModule, importModule, serverModule, compositionModule, memoryCompositionModule, worldCampaignCompositionModule] = await Promise.all([
     import("../packages/database/src/pool.ts"),
     import("../packages/database/src/migrate.ts"),
     import("../services/api/src/import-service.ts"),
     import("../services/api/src/server.ts"),
     import("../services/runtime/src/generation-api-composition.ts"),
-    import("../services/runtime/src/memory-composition.ts")
+    import("../services/runtime/src/memory-composition.ts"),
+    import("../services/runtime/src/world-campaign-composition.ts")
   ]);
   const adminPool = poolModule.createDatabasePool(databaseUrl, 1);
   const databaseName = temporaryDatabaseName();
@@ -631,7 +635,8 @@ export async function runPlayLoopBenchmark(options = {}) {
       importLegacyStory: importModule.importLegacyStory,
       buildServer: serverModule.buildServer,
       createApiGenerationApplication: compositionModule.createApiGenerationApplication,
-      createApiMemoryApplication: memoryCompositionModule.createApiMemoryApplication
+      createApiMemoryApplication: memoryCompositionModule.createApiMemoryApplication,
+      createApiWorldCampaignApplication: worldCampaignCompositionModule.createApiWorldCampaignApplication
     });
     const cpuCount = availableParallelism();
     const memoryLimitGiB = cgroupMemoryLimitGiB();

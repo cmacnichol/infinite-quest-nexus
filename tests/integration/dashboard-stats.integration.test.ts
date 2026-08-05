@@ -4,6 +4,7 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { getDashboardStats } from "../../services/api/src/dashboard-service.js";
 import { buildServer } from "../../services/api/src/server.js";
+import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
 import { serverOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 
@@ -71,7 +72,13 @@ integration("dashboard statistics integration", () => {
         trustProxyHops: 0
       }
     };
-    app = await buildServer(serverOptions({ config, pool }));
+    app = await buildServer(serverOptions({
+      config,
+      pool,
+      worldCampaign: createApiWorldCampaignApplication(pool, {
+        credentialSecret: config.credentialEncryptionKey
+      })
+    }));
   });
 
   afterAll(async () => {

@@ -8,6 +8,15 @@ import { infiniteWorldsImportRequestSchema } from "../../packages/contracts/src/
 import { WORLD_CONTENT_SCHEMA_VERSION } from "../../packages/contracts/src/world-library.js";
 import { previewInfiniteWorldsImport } from "../../services/api/src/infinite-worlds-import-service.js";
 
+const unusedPortableWorld = {
+  async previewWorldImport(): Promise<never> {
+    throw new Error("Portable-world preview should not be called for this invalid source.");
+  },
+  async importWorld(): Promise<never> {
+    throw new Error("Portable-world import should not be called during preview.");
+  }
+};
+
 describe("Infinite Worlds import conversion", () => {
   it("retains every character with isolated percentile skills and trackers", () => {
     const converted = convertInfiniteWorldsWorld({
@@ -51,7 +60,7 @@ describe("Infinite Worlds import conversion", () => {
       sourceText: JSON.stringify({ title: "Empty Roster", possibleCharacters: [] })
     });
 
-    const preview = await previewInfiniteWorldsImport({} as never, request);
+    const preview = await previewInfiniteWorldsImport({} as never, request, unusedPortableWorld);
 
     expect(preview).toMatchObject({
       kind: "world_json",
@@ -69,7 +78,7 @@ describe("Infinite Worlds import conversion", () => {
       sourceText: `${marker}{`
     });
 
-    const preview = await previewInfiniteWorldsImport({} as never, request);
+    const preview = await previewInfiniteWorldsImport({} as never, request, unusedPortableWorld);
 
     expect(preview).toMatchObject({
       kind: "cyoa_json",

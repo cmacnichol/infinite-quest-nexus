@@ -770,6 +770,11 @@ export type WorldGenerationPreviewDependencies = {
   generateTemplateWorld: typeof generateTemplateWorld;
 };
 
+export type WorldGenerationProviderDependencies = Omit<
+  WorldGenerationPreviewDependencies,
+  "initialOwnerId"
+>;
+
 const worldGenerationPreviewDependencies: WorldGenerationPreviewDependencies = {
   initialOwnerId,
   resolveEffectiveProviderId,
@@ -778,13 +783,13 @@ const worldGenerationPreviewDependencies: WorldGenerationPreviewDependencies = {
   generateTemplateWorld
 };
 
-export async function generateWorldPreview(
+export async function generateWorldPreviewForOwner(
   pool: DatabasePool,
+  ownerUserId: string,
   request: WorldGenerationPreviewRequest,
   credentialSecret: string,
-  dependencies: WorldGenerationPreviewDependencies = worldGenerationPreviewDependencies
+  dependencies: WorldGenerationProviderDependencies = worldGenerationPreviewDependencies
 ): Promise<{ title: string; content: WorldContent }> {
-  const ownerUserId = await dependencies.initialOwnerId(pool);
   const providerProfileId = await dependencies.resolveEffectiveProviderId(pool, ownerUserId, "text");
   const progressKey = request.progressKey;
   if (progressKey) await dependencies.createWorldGenerationProgress(pool, ownerUserId, progressKey);
@@ -874,6 +879,21 @@ export async function generateWorldPreview(
   return generated;
 }
 
+export async function generateWorldPreview(
+  pool: DatabasePool,
+  request: WorldGenerationPreviewRequest,
+  credentialSecret: string,
+  dependencies: WorldGenerationPreviewDependencies = worldGenerationPreviewDependencies
+): Promise<{ title: string; content: WorldContent }> {
+  return generateWorldPreviewForOwner(
+    pool,
+    await dependencies.initialOwnerId(pool),
+    request,
+    credentialSecret,
+    dependencies
+  );
+}
+
 function characterGenerationError(message: string, statusCode: number, code: string): Error {
   return Object.assign(new Error(message), { statusCode, details: { code } });
 }
@@ -958,12 +978,12 @@ async function generatePlayableCharacterCandidate(
   }
 }
 
-export async function generatePlayableCharacterPreview(
+export async function generatePlayableCharacterPreviewForOwner(
   pool: DatabasePool,
+  ownerUserId: string,
   request: PlayableCharacterGenerationPreviewRequest,
   credentialSecret: string
 ) {
-  const ownerUserId = await initialOwnerId(pool);
   return generatePlayableCharacterCandidate(
     pool,
     ownerUserId,
@@ -973,13 +993,26 @@ export async function generatePlayableCharacterPreview(
   );
 }
 
-export async function generatePlayableCharacter(
+export async function generatePlayableCharacterPreview(
   pool: DatabasePool,
+  request: PlayableCharacterGenerationPreviewRequest,
+  credentialSecret: string
+) {
+  return generatePlayableCharacterPreviewForOwner(
+    pool,
+    await initialOwnerId(pool),
+    request,
+    credentialSecret
+  );
+}
+
+export async function generatePlayableCharacterForOwner(
+  pool: DatabasePool,
+  ownerUserId: string,
   worldId: string,
   request: PlayableCharacterGenerationRequest,
   credentialSecret: string
 ): Promise<{ character: ReturnType<typeof normalizeGeneratedPlayableCharacter> }> {
-  const ownerUserId = await initialOwnerId(pool);
   const result = await pool.query<{
     status: string;
     revision: number;
@@ -1004,6 +1037,21 @@ export async function generatePlayableCharacter(
     pool,
     ownerUserId,
     worldContentSchema.parse(draft.content),
+    request,
+    credentialSecret
+  );
+}
+
+export async function generatePlayableCharacter(
+  pool: DatabasePool,
+  worldId: string,
+  request: PlayableCharacterGenerationRequest,
+  credentialSecret: string
+): Promise<{ character: ReturnType<typeof normalizeGeneratedPlayableCharacter> }> {
+  return generatePlayableCharacterForOwner(
+    pool,
+    await initialOwnerId(pool),
+    worldId,
     request,
     credentialSecret
   );

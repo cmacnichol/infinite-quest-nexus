@@ -6,7 +6,8 @@ import type {
   IllustrationApplication,
   IllustrationWorkerApplication,
   MemoryApplication,
-  MemoryWorkerApplication
+  MemoryWorkerApplication,
+  WorldCampaignApplication
 } from "../../packages/application/src/index.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
@@ -22,6 +23,7 @@ const illustration = { kind: "illustration" } as unknown as IllustrationApplicat
 const workerIllustration = { kind: "worker-illustration" } as unknown as IllustrationWorkerApplication;
 const memory = { kind: "memory" } as unknown as MemoryApplication;
 const workerMemory = { kind: "worker-memory" } as unknown as MemoryWorkerApplication;
+const worldCampaign = { kind: "world-campaign" } as unknown as WorldCampaignApplication;
 const generationEvents = { kind: "generation-events" } as unknown as GenerationEventSource;
 
 function config(role: RuntimeConfig["role"]): RuntimeConfig {
@@ -50,6 +52,7 @@ function dependencies(controller: AbortController) {
       createApiGeneration: vi.fn(() => apiGeneration),
       createApiIllustration: vi.fn(() => illustration),
       createApiMemory: vi.fn(() => memory),
+      createApiWorldCampaign: vi.fn(() => worldCampaign),
       createWorkerMemory: vi.fn(() => workerMemory),
       createWorkerIllustration: vi.fn(() => workerIllustration),
       createWorkerGeneration: vi.fn(() => workerGeneration),
@@ -69,6 +72,8 @@ describe("runtime role generation composition", () => {
 
     expect(values.createApiGeneration).toHaveBeenCalledOnce();
     expect(values.createApiGeneration).toHaveBeenCalledWith(pool);
+    expect(values.createApiWorldCampaign).toHaveBeenCalledOnce();
+    expect(values.createApiWorldCampaign).toHaveBeenCalledWith(pool, "role-secret");
     expect(values.createWorkerGeneration).not.toHaveBeenCalled();
     expect(values.buildServer).toHaveBeenCalledOnce();
     expect(values.buildServer).toHaveBeenCalledWith({
@@ -77,7 +82,8 @@ describe("runtime role generation composition", () => {
       generation: apiGeneration,
       illustration,
       memory,
-      generationEvents
+      generationEvents,
+      worldCampaign
     });
     expect(values.runWorker).not.toHaveBeenCalled();
     expect(server.close).toHaveBeenCalledOnce();
@@ -104,6 +110,7 @@ describe("runtime role generation composition", () => {
       { generation: workerGeneration, illustration: workerIllustration, memory: workerMemory }
     );
     expect(values.createApiGeneration).not.toHaveBeenCalled();
+    expect(values.createApiWorldCampaign).not.toHaveBeenCalled();
     expect(values.buildServer).not.toHaveBeenCalled();
     expect(values.migrateDatabase).not.toHaveBeenCalled();
   });
@@ -116,6 +123,8 @@ describe("runtime role generation composition", () => {
 
     expect(values.createApiGeneration).toHaveBeenCalledOnce();
     expect(values.createApiGeneration).toHaveBeenCalledWith(pool);
+    expect(values.createApiWorldCampaign).toHaveBeenCalledOnce();
+    expect(values.createApiWorldCampaign).toHaveBeenCalledWith(pool, "role-secret");
     expect(values.createWorkerGeneration).toHaveBeenCalledOnce();
     expect(values.createWorkerGeneration).toHaveBeenCalledWith(pool, "role-secret", illustration, memory);
     expect(values.buildServer).toHaveBeenCalledWith({
@@ -124,7 +133,8 @@ describe("runtime role generation composition", () => {
       generation: apiGeneration,
       illustration,
       memory,
-      generationEvents
+      generationEvents,
+      worldCampaign
     });
     expect(values.runWorker).toHaveBeenCalledWith(
       pool,
@@ -147,6 +157,7 @@ describe("runtime role generation composition", () => {
       { allowMaintenanceMigrations: true }
     );
     expect(values.createApiGeneration).not.toHaveBeenCalled();
+    expect(values.createApiWorldCampaign).not.toHaveBeenCalled();
     expect(values.createWorkerGeneration).not.toHaveBeenCalled();
     expect(values.buildServer).not.toHaveBeenCalled();
     expect(values.runWorker).not.toHaveBeenCalled();

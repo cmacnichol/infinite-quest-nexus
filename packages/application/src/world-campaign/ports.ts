@@ -78,6 +78,7 @@ import type {
   WorldStatusUpdateRequest,
   WorldStatusView,
   WorldVersionDeleteRequest,
+  WorldVersionLookupScope,
   WorldVersionScope
 } from "./types.js";
 import type { OwnerScope } from "../generation/types.js";
@@ -108,8 +109,8 @@ export interface CampaignRepositoryPort {
   createCampaign(transaction: WorldCampaignCommandContext, scope: OwnerScope, request: CampaignCreateRequest): Promise<WorldCampaignRepositoryResult<CampaignCreateView>>;
   updateCampaign(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignUpdateRequest): Promise<WorldCampaignRepositoryResult<CampaignUpdateSource>>;
   deleteCampaign(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: ResourceDeleteRequest): Promise<WorldCampaignRepositoryResult<void>>;
-  listWorldVersionPlayableCharacters(transaction: WorldCampaignReadContext, scope: WorldVersionScope): Promise<readonly PlayableCharacterSummaryItemView[]>;
-  getWorldVersionPlayableCharacterSummary(transaction: WorldCampaignReadContext, scope: WorldVersionScope): Promise<PlayableCharacterSummaryView>;
+  listWorldVersionPlayableCharacters(transaction: WorldCampaignReadContext, scope: WorldVersionLookupScope): Promise<readonly PlayableCharacterSummaryItemView[]>;
+  getWorldVersionPlayableCharacterSummary(transaction: WorldCampaignReadContext, scope: WorldVersionLookupScope): Promise<PlayableCharacterSummaryView>;
   migrateCampaignWorldVersion(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignWorldMigrationRequest): Promise<WorldCampaignRepositoryResult<CampaignMigrationSource>>;
   syncPlayerCampaignConfig(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignPlayerConfigSyncRequest): Promise<WorldCampaignRepositoryResult<CampaignPlayerConfigSyncView>>;
   rewindCampaign(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignRewindRequest): Promise<WorldCampaignRepositoryResult<CampaignRewindView>>;
@@ -186,6 +187,15 @@ export type WorldCampaignApplicationDependencies = Readonly<{
   progress: WorldGenerationProgressRepositoryPort;
 }>;
 
+/**
+ * Owner-bound portable-world seam consumed by Task 14e import transports.
+ * The composition root binds authority; archive/import callers cannot supply it.
+ */
+export interface PortableWorldApplicationPort {
+  previewWorldImport(request: WorldImportRequest): Promise<WorldImportPreviewView>;
+  importWorld(request: WorldImportRequest): Promise<WorldImportResultView>;
+}
+
 export interface WorldCampaignApplication {
   listWorlds(scope: OwnerScope): Promise<WorldListView>;
   getWorld(scope: WorldScope): Promise<WorldAggregateView>;
@@ -204,8 +214,8 @@ export interface WorldCampaignApplication {
   createCampaign(scope: OwnerScope, request: CampaignCreateRequest): Promise<CampaignCreateView>;
   updateCampaign(scope: CampaignScope, request: CampaignUpdateRequest): Promise<CampaignUpdateView>;
   deleteCampaign(scope: CampaignScope, request: ResourceDeleteRequest): Promise<void>;
-  listWorldVersionPlayableCharacters(scope: WorldVersionScope): Promise<readonly PlayableCharacterSummaryItemView[]>;
-  getWorldVersionPlayableCharacterSummary(scope: WorldVersionScope): Promise<PlayableCharacterSummaryView>;
+  listWorldVersionPlayableCharacters(scope: WorldVersionLookupScope): Promise<readonly PlayableCharacterSummaryItemView[]>;
+  getWorldVersionPlayableCharacterSummary(scope: WorldVersionLookupScope): Promise<PlayableCharacterSummaryView>;
   migrateCampaignWorldVersion(scope: CampaignScope, request: CampaignWorldMigrationRequest): Promise<CampaignMigrationView>;
   syncPlayerCampaignConfig(scope: CampaignScope, request: CampaignPlayerConfigSyncRequest): Promise<CampaignPlayerConfigSyncView>;
   rewindCampaign(scope: CampaignScope, request: CampaignRewindRequest): Promise<CampaignRewindView>;

@@ -279,13 +279,13 @@ async function organize(
   });
 }
 
-export async function organizeWorldCharacterProfile(
+export async function organizeWorldCharacterProfileForOwner(
   pool: DatabasePool,
+  ownerUserId: string,
   worldId: string,
   request: CharacterProfileOrganizationRequest,
   credentialSecret: string
 ) {
-  const ownerUserId = await initialOwnerId(pool);
   const result = await pool.query<{ status: string; revision: number; content: unknown }>(
     `SELECT worlds.status, world_drafts.revision, world_drafts.content
        FROM worlds JOIN world_drafts
@@ -301,6 +301,21 @@ export async function organizeWorldCharacterProfile(
   }
   const content = worldContentSchema.parse(draft.content);
   return organize(pool, ownerUserId, content, playableCharacterSchema.parse(request.character), credentialSecret);
+}
+
+export async function organizeWorldCharacterProfile(
+  pool: DatabasePool,
+  worldId: string,
+  request: CharacterProfileOrganizationRequest,
+  credentialSecret: string
+) {
+  return organizeWorldCharacterProfileForOwner(
+    pool,
+    await initialOwnerId(pool),
+    worldId,
+    request,
+    credentialSecret
+  );
 }
 
 export async function getCampaignCharacterProfile(pool: DatabasePool, campaignId: string) {
@@ -400,13 +415,13 @@ export async function updateCampaignCharacterProfile(
   });
 }
 
-export async function organizeCampaignCharacterProfile(
+export async function organizeCampaignCharacterProfileForOwner(
   pool: DatabasePool,
+  ownerUserId: string,
   campaignId: string,
   request: CharacterProfileOrganizationRequest,
   credentialSecret: string
 ) {
-  const ownerUserId = await initialOwnerId(pool);
   const result = await pool.query<{
     character_profile_revision: number;
     text_provider_profile_id: string | null;
@@ -443,5 +458,20 @@ export async function organizeCampaignCharacterProfile(
     }),
     credentialSecret,
     row.text_provider_profile_id
+  );
+}
+
+export async function organizeCampaignCharacterProfile(
+  pool: DatabasePool,
+  campaignId: string,
+  request: CharacterProfileOrganizationRequest,
+  credentialSecret: string
+) {
+  return organizeCampaignCharacterProfileForOwner(
+    pool,
+    await initialOwnerId(pool),
+    campaignId,
+    request,
+    credentialSecret
   );
 }

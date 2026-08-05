@@ -5,7 +5,8 @@ import type {
   IllustrationApplication,
   IllustrationWorkerApplication,
   MemoryApplication,
-  MemoryWorkerApplication
+  MemoryWorkerApplication,
+  WorldCampaignApplication
 } from "../../../packages/application/src/index.js";
 import type { DatabasePool, RuntimeConfig } from "../../../packages/database/src/index.js";
 import type { BuildServerOptions } from "../../api/src/server.js";
@@ -31,6 +32,7 @@ export type RuntimeRoleDependencies = Readonly<{
   createApiGeneration(pool: DatabasePool): GenerationApplication;
   createApiIllustration(pool: DatabasePool): IllustrationApplication;
   createApiMemory(pool: DatabasePool, credentialSecret: string): MemoryApplication;
+  createApiWorldCampaign(pool: DatabasePool, credentialSecret: string): WorldCampaignApplication;
   createWorkerIllustration(
     pool: DatabasePool,
     credentialSecret: string,
@@ -108,8 +110,9 @@ export async function dispatchRuntimeRole(
     const generation = dependencies.createApiGeneration(pool);
     const illustration = dependencies.createApiIllustration(pool);
     const memory = dependencies.createApiMemory(pool, config.credentialEncryptionKey);
+    const worldCampaign = dependencies.createApiWorldCampaign(pool, config.credentialEncryptionKey);
     const server = await dependencies.buildServer({
-      config, pool, generation, illustration, memory, generationEvents
+      config, pool, generation, illustration, memory, generationEvents, worldCampaign
     });
     await server.listen({ host: config.host, port: config.port });
     await waitForAbort(signal);
@@ -137,6 +140,7 @@ export async function dispatchRuntimeRole(
   const apiGeneration = dependencies.createApiGeneration(pool);
   const illustration = dependencies.createApiIllustration(pool);
   const memory = dependencies.createApiMemory(pool, config.credentialEncryptionKey);
+  const worldCampaign = dependencies.createApiWorldCampaign(pool, config.credentialEncryptionKey);
   if (!generationEvents) throw new Error("The all role requires a generation event source.");
   const workerGeneration = dependencies.createWorkerGeneration(pool, config.credentialEncryptionKey, illustration, memory);
   const workerIllustration = dependencies.createWorkerIllustration(
@@ -145,7 +149,7 @@ export async function dispatchRuntimeRole(
     config.assetStorageRoot
   );
   const server = await dependencies.buildServer({
-    config, pool, generation: apiGeneration, illustration, memory, generationEvents
+    config, pool, generation: apiGeneration, illustration, memory, generationEvents, worldCampaign
   });
   await server.listen({ host: config.host, port: config.port });
   await dependencies.runWorker(pool, config, signal, {

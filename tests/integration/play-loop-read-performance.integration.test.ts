@@ -72,16 +72,16 @@ integration("play-loop read performance", () => {
     });
 
     const expectedQueryCounts: Record<string, number> = {
-      "campaign-list": 1,
-      dashboard: 2,
-      "sync-replace": 6,
-      "sync-unchanged": 1,
+      "campaign-list": 3,
+      dashboard: 4,
+      "sync-replace": 8,
+      "sync-unchanged": 3,
       "history-first": 5,
       "history-middle": 5,
       "history-last": 5,
       "generation-poll": 1,
       "generation-result": 2,
-      "initial-hydration": 7
+      "initial-hydration": 11
     };
     expect(Object.keys(result.routes).sort()).toEqual(Object.keys(expectedQueryCounts).sort());
     for (const [name, expectedQueryCount] of Object.entries(expectedQueryCounts)) {

@@ -17,6 +17,8 @@ import type {
   WorldStatusSource,
   WorldAggregateSource,
   WorldListSource,
+  WorldImportPreviewView,
+  WorldImportResultView,
   WorldRepositoryPort
 } from "../../application/src/world-campaign/index.js";
 import { WorldCampaignApplicationError } from "../../application/src/world-campaign/index.js";
@@ -25,6 +27,7 @@ import type { MemoryGenerationTransactionPort } from "../../application/src/memo
 import {
   canonicalizeWorldContent,
   WORLD_CONTENT_SCHEMA_VERSION,
+  worldImportRequestSchema,
   worldContentSchema,
   type WorldContent
 } from "../../contracts/src/world-library.js";
@@ -52,6 +55,10 @@ type PostgresWorldRepository = Pick<
   | "publishWorld"
   | "updateWorldStatus"
   | "forkWorld"
+  | "exportWorld"
+  | "previewWorldImport"
+  | "importWorld"
+  | "promoteCampaignDiscoveries"
   | "deleteWorld"
   | "deleteWorldVersion"
 >;
@@ -100,6 +107,39 @@ function contentWithTitle(content: WorldContent, title: string): WorldContent {
     ...content,
     world: { ...content.world, title }
   });
+}
+
+const SENSITIVE_WORLD_KEYS = new Set([
+  "apikey",
+  "customapikey",
+  "lmstudioapikey",
+  "imageapikey",
+  "token",
+  "accesstoken",
+  "password",
+  "authorization",
+  "encryptedapikey",
+  "credentialnonce",
+  "credentialauthtag"
+]);
+
+function sanitizeWorldValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeWorldValue);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => !SENSITIVE_WORLD_KEYS.has(key.replaceAll(/[^a-z]/gi, "").toLowerCase()))
+    .map(([key, entry]) => [key, sanitizeWorldValue(entry)]));
+}
+
+function portableWorldContent(content: WorldContent, title: string): WorldContent {
+  return worldContentSchema.parse(sanitizeWorldValue(contentWithTitle(content, title)));
+}
+
+function validPortableWorldContent(content: WorldContent): boolean {
+  const legacyCharacter = typeof content.world.character === "string"
+    ? content.world.character.trim()
+    : "";
+  return legacyCharacter.length === 0 || content.playableCharacters.length > 0;
 }
 
 function success<T>(value: T): WorldCampaignRepositoryResult<T> {
@@ -279,6 +319,262 @@ function createPostgresWorldRepository(): PostgresWorldRepository {
         }),
         campaigns: campaigns.rows
       };
+    },
+    async exportWorld(transaction, scope) {
+      const client = worldCampaignDatabaseClient(transaction);
+      const result = await client.query<{
+        title: string;
+        content: WorldContent;
+      }>(
+        `SELECT w.title, wv.content
+           FROM worlds w
+           JOIN world_versions wv
+             ON wv.world_id = w.id AND wv.owner_user_id = w.owner_user_id
+          WHERE w.id = $1 AND w.owner_user_id = $2
+            AND ($3::uuid IS NULL OR wv.id = $3)
+          ORDER BY wv.version_number DESC
+          LIMIT 1`,
+        [scope.worldId, scope.ownerUserId, "worldVersionId" in scope ? scope.worldVersionId : null]
+      );
+      const row = result.rows[0];
+      if (!row) {
+        notFound("world_version_not_found", {
+          worldId: scope.worldId,
+          ...( "worldVersionId" in scope ? { worldVersionId: scope.worldVersionId } : {})
+        });
+      }
+      return {
+        format: "infinite-quest-world",
+        formatVersion: 1,
+        title: row.title,
+        content: portableWorldContent(worldContentSchema.parse(row.content), row.title)
+      };
+    },
+    async previewWorldImport(transaction, scope, input): Promise<WorldImportPreviewView> {
+      const client = worldCampaignDatabaseClient(transaction);
+      const request = worldImportRequestSchema.parse(input);
+      if (!validPortableWorldContent(request.worldExport.content)) {
+        throw new WorldCampaignApplicationError("invalid_request", "invalid_transition");
+      }
+      const content = portableWorldContent(request.worldExport.content, request.worldExport.title);
+      const sourceHash = `world:${sha256(stableStringify(content))}`;
+      const prior = await client.query<{ world_id: string | null }>(
+        `SELECT world_id FROM imports
+          WHERE owner_user_id = $1 AND source_hash = $2 AND status = 'completed'`,
+        [scope.ownerUserId, sourceHash]
+      );
+      return {
+        kind: "world",
+        title: request.worldExport.title,
+        duplicate: Boolean(prior.rows[0]?.world_id),
+        existingWorldId: prior.rows[0]?.world_id ?? null,
+        counts: {
+          entities: request.worldExport.content.entities.length,
+          relationships: request.worldExport.content.relationships.length,
+          triggers: request.worldExport.content.defaultTriggers.length + request.worldExport.content.eventTriggers.length
+        },
+        warnings: stableStringify(content) === stableStringify(request.worldExport.content)
+          ? []
+          : ["Credential-shaped fields will be removed before import."]
+      };
+    },
+    async importWorld(transaction, scope, input): Promise<WorldCampaignRepositoryResult<WorldImportResultView>> {
+      const client = worldCampaignDatabaseClient(transaction);
+      const request = worldImportRequestSchema.parse(input);
+      if (!validPortableWorldContent(request.worldExport.content)) {
+        return failure("invalid_transition");
+      }
+      const content = portableWorldContent(request.worldExport.content, request.worldExport.title);
+      const sourceHash = `world:${sha256(stableStringify(content))}`;
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+        `${scope.ownerUserId}:${sourceHash}`
+      ]);
+      const prior = await client.query<{
+        id: string;
+        world_id: string | null;
+        world_version_id: string | null;
+      }>(
+        `SELECT id, world_id, world_version_id FROM imports
+          WHERE owner_user_id = $1 AND source_hash = $2 AND status = 'completed'`,
+        [scope.ownerUserId, sourceHash]
+      );
+      const existing = prior.rows[0];
+      if (existing?.world_id && existing.world_version_id) {
+        return success({
+          importId: existing.id,
+          worldId: existing.world_id,
+          worldVersionId: existing.world_version_id,
+          duplicate: true
+        });
+      }
+      const world = await client.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id, title, status) VALUES ($1,$2,'active') RETURNING id",
+        [scope.ownerUserId, request.worldExport.title]
+      );
+      const worldId = world.rows[0]?.id;
+      if (!worldId) return failure("invalid_transition");
+      const version = await client.query<{ id: string }>(
+        `INSERT INTO world_versions (
+           world_id, owner_user_id, version_number, content, source_hash,
+           release_notes, created_from_revision
+         ) VALUES ($1,$2,1,$3,$4,'Imported portable world.',1)
+         RETURNING id`,
+        [worldId, scope.ownerUserId, json(content), sha256(stableStringify(content))]
+      );
+      const worldVersionId = version.rows[0]?.id;
+      if (!worldVersionId) return failure("invalid_transition");
+      await client.query(
+        `INSERT INTO world_drafts (
+           world_id, owner_user_id, based_on_world_version_id, revision, content
+         ) VALUES ($1,$2,$3,1,$4)`,
+        [worldId, scope.ownerUserId, worldVersionId, json(content)]
+      );
+      const importRow = await client.query<{ id: string }>(
+        `INSERT INTO imports (
+           owner_user_id, source_type, source_name, source_hash, status,
+           world_id, world_version_id, stats, completed_at
+         ) VALUES ($1,'world_json',$2,$3,'completed',$4,$5,$6,now())
+         RETURNING id`,
+        [
+          scope.ownerUserId,
+          request.sourceName,
+          sourceHash,
+          worldId,
+          worldVersionId,
+          json({ versionNumber: 1 })
+        ]
+      );
+      const importId = importRow.rows[0]?.id;
+      return importId
+        ? success({ importId, worldId, worldVersionId, duplicate: false })
+        : failure("invalid_transition");
+    },
+    async promoteCampaignDiscoveries(transaction, scope, request) {
+      const client = worldCampaignDatabaseClient(transaction);
+      const campaign = await client.query<{
+        world_version_id: string;
+      }>(
+        `SELECT world_version_id FROM campaigns
+          WHERE id = $1 AND owner_user_id = $2
+          FOR UPDATE`,
+        [scope.campaignId, scope.ownerUserId]
+      );
+      const currentWorldVersionId = campaign.rows[0]?.world_version_id;
+      if (!currentWorldVersionId) {
+        return failure("campaign_not_found", { campaignId: scope.campaignId });
+      }
+      if (currentWorldVersionId !== request.expectedWorldVersionId) {
+        return failure("promotion_requires_current_version", {
+          campaignId: scope.campaignId,
+          expectedWorldVersionId: request.expectedWorldVersionId,
+          actualWorldVersionId: currentWorldVersionId
+        });
+      }
+      const target = await client.query<{
+        status: "draft" | "active" | "archived";
+        revision: number;
+        content: WorldContent;
+      }>(
+        `SELECT w.status, wd.revision, wd.content
+           FROM worlds w
+           JOIN world_drafts wd
+             ON wd.world_id = w.id AND wd.owner_user_id = w.owner_user_id
+          WHERE w.id = $1 AND w.owner_user_id = $2
+          FOR UPDATE OF w, wd`,
+        [request.draftWorldId, scope.ownerUserId]
+      );
+      const draft = target.rows[0];
+      if (!draft) return failure("world_not_found", { worldId: request.draftWorldId });
+      if (draft.status === "archived") {
+        return failure("invalid_transition", { worldId: request.draftWorldId });
+      }
+      const factIds = [...new Set(request.discoveryFactIds)];
+      if (factIds.length === 0) return failure("invalid_transition", { campaignId: scope.campaignId });
+      const facts = await client.query<{
+        id: string;
+        source_turn_id: string;
+        source_turn_number: number;
+        content: string;
+      }>(
+        `SELECT id, source_turn_id, source_turn_number, content
+           FROM campaign_canonical_facts
+          WHERE owner_user_id = $1 AND campaign_id = $2
+            AND world_version_id = $3
+            AND id = ANY($4::uuid[])
+            AND valid_until_turn IS NULL
+            AND superseded_by_fact_id IS NULL
+          FOR KEY SHARE`,
+        [scope.ownerUserId, scope.campaignId, currentWorldVersionId, factIds]
+      );
+      const factsById = new Map(facts.rows.map((fact) => [fact.id, fact]));
+      const missingFactId = factIds.find((factId) => !factsById.has(factId));
+      if (missingFactId) return failure("fact_not_found", { campaignId: scope.campaignId, factId: missingFactId });
+      const content = worldContentSchema.parse(draft.content);
+      const defaults = { ...content.defaults };
+      const existing = Array.isArray(defaults.promotedCampaignDiscoveries)
+        ? defaults.promotedCampaignDiscoveries.filter((value): value is Record<string, unknown> => (
+          value !== null && typeof value === "object" && !Array.isArray(value)
+        ))
+        : [];
+      const existingFactIds = new Set(existing.map((value) => String(value.factId ?? "")));
+      const duplicateFactId = factIds.find((factId) => existingFactIds.has(factId));
+      if (duplicateFactId !== undefined) {
+        return failure("fact_already_replaced", {
+          campaignId: scope.campaignId,
+          factId: duplicateFactId
+        });
+      }
+      const promoted = factIds.map((factId) => {
+        const fact = factsById.get(factId)!;
+        return {
+          campaignId: scope.campaignId,
+          factId: fact.id,
+          sourceTurnId: fact.source_turn_id,
+          sourceTurnNumber: fact.source_turn_number,
+          sourceWorldVersionId: currentWorldVersionId,
+          content: fact.content
+        };
+      });
+      const nextRevision = draft.revision + 1;
+      const nextContent = canonicalizeWorldContent({
+        ...content,
+        defaults: {
+          ...defaults,
+          promotedCampaignDiscoveries: [...existing, ...promoted]
+        }
+      });
+      await client.query(
+        `UPDATE world_drafts
+            SET revision = $3, content = $4, updated_at = now()
+          WHERE world_id = $1 AND owner_user_id = $2`,
+        [request.draftWorldId, scope.ownerUserId, nextRevision, json(nextContent)]
+      );
+      await client.query(
+        `UPDATE worlds SET title = $3, updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2`,
+        [request.draftWorldId, scope.ownerUserId, nextContent.world.title]
+      );
+      await client.query(
+        `INSERT INTO activity_events (
+           owner_user_id, campaign_id, event_type, correlation_id, details
+         ) VALUES ($1,$2,'campaign_discoveries_promoted',$3,$4)`,
+        [
+          scope.ownerUserId,
+          scope.campaignId,
+          request.draftWorldId,
+          json({
+            draftWorldId: request.draftWorldId,
+            sourceWorldVersionId: currentWorldVersionId,
+            discoveryFactIds: factIds,
+            draftRevision: nextRevision
+          })
+        ]
+      );
+      return success({
+        worldId: request.draftWorldId,
+        draftRevision: nextRevision,
+        promotedFactCount: promoted.length
+      });
     },
     async createWorld(transaction, scope: OwnerScope, request: WorldCreateRequest) {
       const client = worldCampaignDatabaseClient(transaction);
@@ -929,11 +1225,11 @@ function createPostgresCampaignRepository(
       const client = worldCampaignDatabaseClient(transaction);
       const result = await client.query<{ content: WorldContent }>(
         `SELECT content FROM world_versions
-          WHERE id = $1 AND world_id = $2 AND owner_user_id = $3`,
-        [scope.worldVersionId, scope.worldId, scope.ownerUserId]
+          WHERE id = $1 AND owner_user_id = $2`,
+        [scope.worldVersionId, scope.ownerUserId]
       );
       const row = result.rows[0];
-      if (!row) notFound("world_version_not_found", { worldId: scope.worldId, worldVersionId: scope.worldVersionId });
+      if (!row) notFound("world_version_not_found", { worldVersionId: scope.worldVersionId });
       const content = worldContentSchema.parse(row.content);
       return {
         characters: resolvePlayableCharacters(content).map((character) => ({

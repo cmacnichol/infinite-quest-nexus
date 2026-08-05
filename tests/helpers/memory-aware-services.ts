@@ -7,6 +7,11 @@ import { transferCampaignWorld as transferCampaignWorldApplication } from "../..
 import { branchCampaign as branchCampaignApplication, rewindCampaign as rewindCampaignApplication } from "../../services/api/src/generation-service.js";
 import { importLegacyStory as importLegacyStoryApplication } from "../../services/api/src/import-service.js";
 import { importInfiniteWorlds as importInfiniteWorldsApplication } from "../../services/api/src/infinite-worlds-import-service.js";
+import {
+  createOwnerBoundPortableWorldApplicationPort,
+  createWorldCampaignApplicationAdapter
+} from "../../services/api/src/world-campaign-application-adapter.js";
+import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
 import { memoryGeneration } from "./memory-applications.js";
 import { apiMemoryApplication, workerMemoryApplication } from "./memory-applications.js";
 
@@ -80,9 +85,24 @@ export function importInfiniteWorlds(
   pool: DatabasePool,
   request: Parameters<typeof importInfiniteWorldsApplication>[1],
   credentialSecret: string,
-  assetStore?: Parameters<typeof importInfiniteWorldsApplication>[4],
+  assetStore?: Parameters<typeof importInfiniteWorldsApplication>[5],
 ) {
-  return importInfiniteWorldsApplication(pool, request, credentialSecret, memoryGeneration(pool), assetStore);
+  return importInfiniteWorldsApplication(
+    pool,
+    request,
+    credentialSecret,
+    memoryGeneration(pool),
+    portableWorldApplicationForTest(pool, credentialSecret),
+    assetStore
+  );
+}
+
+export function portableWorldApplicationForTest(pool: DatabasePool, credentialSecret: string) {
+  const adapter = createWorldCampaignApplicationAdapter(createApiWorldCampaignApplication(pool, { credentialSecret }));
+  return createOwnerBoundPortableWorldApplicationPort(
+    adapter,
+    async () => adapter.ownerScope(await initialOwnerId(pool))
+  );
 }
 
 export async function getChronicleMetrics(pool: DatabasePool, campaignId: string): Promise<ChronicleMetricsView> {

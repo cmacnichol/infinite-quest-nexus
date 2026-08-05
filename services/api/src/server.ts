@@ -17,7 +17,6 @@ import type {
 } from "../../../packages/application/src/index.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import { createLoggerOptions, logger } from "../../../packages/logger/src/index.js";
-import { characterLegacyText, effectiveCampaignCharacter } from "../../../packages/domain/src/world-characters.js";
 import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
 import {
@@ -87,7 +86,6 @@ import {
 } from "../../../packages/contracts/src/client-api.js";
 import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
 import { formatNarrationParagraphs } from "../../../packages/story-engine/src/narration-formatting.js";
-import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { readTurnPage } from "../../../packages/database/src/play-loop-read-repository.js";
 import { userProfileUpdateSchema } from "../../../packages/contracts/src/users.js";
 import { assetListQuerySchema, assetMetadataUpdateSchema } from "../../../packages/contracts/src/assets.js";
@@ -97,49 +95,20 @@ import {
 } from "../../../packages/contracts/src/campaign-transfer.js";
 import { previewLegacyStoryImport } from "./import-service.js";
 import { getImportProgress, importInfiniteWorlds, previewInfiniteWorldsImport } from "./infinite-worlds-import-service.js";
-import { getSessionUserProfile, updateSessionUserProfile } from "./user-service.js";
 import { listPromptLibrary, previewPromptTemplate, resetPromptOverride, savePromptOverride } from "./prompt-library-service.js";
 import { createMemoryApplicationAdapter } from "./memory-application-adapter.js";
+import {
+  createOwnerBoundPortableWorldApplicationPort,
+  createWorldCampaignApplicationAdapter
+} from "./world-campaign-application-adapter.js";
 import { queryAssets, readAsset, readAssetDerivative, selectTurnIllustration, selectWorldCover, updateAssetMetadata, type FilesystemAssetStore } from "./asset-service.js";
 import { createProvider, deleteProvider, discoverUnsavedProviderModels, generateProviderText, listProviders, providerModels, setDefaultProvider, updateProvider } from "./provider-service.js";
-import { branchCampaign, rewindCampaign, syncPlayerCampaignConfig } from "./generation-service.js";
 import { createGenerationApplicationAdapter } from "./generation-application-adapter.js";
 import { createGenerationRouteLifecycle, type GenerationLifecycleLogContext } from "./generation-route-lifecycle.js";
 import { safeTurnInput } from "./turn-input-safety.js";
-import { getCampaignRuntimeState, updateCampaignRuntimeState } from "./campaign-state-service.js";
-import {
-  createCampaign,
-  createWorld,
-  deleteCampaign,
-  deleteWorld,
-  deleteWorldVersion,
-  exportWorld,
-  forkWorld,
-  getWorldVersionPlayableCharacterSummary,
-  getWorld,
-  importWorld,
-  listCampaigns,
-  listWorlds,
-  migrateCampaignWorld,
-  previewWorldImport,
-  publishWorld,
-  updateCampaign,
-  updateWorld,
-  updateWorldDraft
-} from "./world-service.js";
-import { generatePlayableCharacter, generatePlayableCharacterPreview, generateWorldPreview } from "./world-generator-service.js";
-import { deleteExpiredWorldGenerationProgress, getWorldGenerationProgress } from "./world-generation-progress-service.js";
-import {
-  getCampaignCharacterProfile,
-  organizeCampaignCharacterProfile,
-  organizeWorldCharacterProfile,
-  updateCampaignCharacterProfile
-} from "./character-profile-service.js";
 import { getCampaignCostSummary, turnReportedCosts } from "./cost-service.js";
 import { classifyTurnInput } from "./turn-intent-service.js";
-import { previewCampaignWorldTransfer, transferCampaignWorld } from "./campaign-transfer-service.js";
 import { applicationMetadata } from "./app-metadata.js";
-import { getDashboardStats } from "./dashboard-service.js";
 import { installRequestSecurity } from "./request-security.js";
 import { registerArchiveRoutes } from "./archive-routes.js";
 
@@ -150,6 +119,7 @@ export type BuildServerOptions = {
   illustration: IllustrationApplication;
   memory: MemoryApplication;
   generationEvents: GenerationEventSource;
+  worldCampaign: import("../../../packages/application/src/world-campaign/index.js").WorldCampaignApplication;
 };
 
 const uuidSchema = z.uuid();
@@ -303,7 +273,7 @@ async function generationLifecycleLogContext(
   return result.rows[0] || null;
 }
 
-export async function buildServer({ config, pool, generation, illustration, memory, generationEvents }: BuildServerOptions): Promise<FastifyInstance> {
+export async function buildServer({ config, pool, generation, illustration, memory, generationEvents, worldCampaign }: BuildServerOptions): Promise<FastifyInstance> {
   const illustrationTurnScope = async (turnId: string) => {
     const ownerUserId = await initialOwnerId(pool);
     const result = await pool.query<{ campaign_id: string }>(
@@ -334,6 +304,20 @@ export async function buildServer({ config, pool, generation, illustration, memo
   });
   const memoryAdapter = createMemoryApplicationAdapter(pool, memory);
   const generationAdapter = createGenerationApplicationAdapter(generation);
+  const worldCampaignAdapter = createWorldCampaignApplicationAdapter(worldCampaign);
+  const resolveWorldCampaignOwnerScope = async () => worldCampaignAdapter.ownerScope(await initialOwnerId(pool));
+  const resolveWorldScope = async (worldId: string) => worldCampaignAdapter.worldScope(
+    (await resolveWorldCampaignOwnerScope()).ownerUserId,
+    worldId
+  );
+  const resolveCampaignScope = async (campaignId: string) => worldCampaignAdapter.campaignScope(
+    (await resolveWorldCampaignOwnerScope()).ownerUserId,
+    campaignId
+  );
+  const portableWorldApplication = createOwnerBoundPortableWorldApplicationPort(
+    worldCampaignAdapter,
+    resolveWorldCampaignOwnerScope
+  );
   const generationLifecycle = createGenerationRouteLifecycle({
     readContext: (ownerUserId, generationJobId) => generationLifecycleLogContext(pool, ownerUserId, generationJobId),
     logger
@@ -453,27 +437,40 @@ export async function buildServer({ config, pool, generation, illustration, memo
 
   app.get("/api/v1/meta", async () => parseResponseProjection(metaResponseSchema, { application: applicationMetadata() }));
 
-  app.get("/api/v1/dashboard/stats", async () => getDashboardStats(pool));
+  app.get("/api/v1/dashboard/stats", async () => {
+    const ownerScope = await resolveWorldCampaignOwnerScope();
+    return worldCampaignAdapter.run(() => worldCampaignAdapter.application.getDashboard(ownerScope));
+  });
 
   app.get("/api/v1/session", async () => {
-    const user = await getSessionUserProfile(pool);
+    const ownerScope = await resolveWorldCampaignOwnerScope();
+    const user = await worldCampaignAdapter.run(() => worldCampaignAdapter.application.getSessionProfile(ownerScope));
     return parseResponseProjection(sessionResponseSchema, { user, authentication: "deferred" });
   });
 
-  app.get("/api/v1/users/me", async () => ({ user: await getSessionUserProfile(pool) }));
-  app.get("/api/v1/user/profile", async () => ({ user: await getSessionUserProfile(pool) }));
+  const sessionProfile = async () => {
+    const ownerScope = await resolveWorldCampaignOwnerScope();
+    return worldCampaignAdapter.run(() => worldCampaignAdapter.application.getSessionProfile(ownerScope));
+  };
+  const updateSessionProfile = async (value: unknown) => {
+    const ownerScope = await resolveWorldCampaignOwnerScope();
+    const request = userProfileUpdateSchema.parse(value);
+    return worldCampaignAdapter.run(() => worldCampaignAdapter.application.updateSessionProfile(ownerScope, request));
+  };
+  app.get("/api/v1/users/me", async () => ({ user: await sessionProfile() }));
+  app.get("/api/v1/user/profile", async () => ({ user: await sessionProfile() }));
 
   app.patch("/api/v1/users/me/profile", async (request) => parseResponseProjection(userProfileResponseSchema, {
-    user: await updateSessionUserProfile(pool, userProfileUpdateSchema.parse(request.body))
+    user: await updateSessionProfile(request.body)
   }));
   app.put("/api/v1/users/me/profile", async (request) => ({
-    user: await updateSessionUserProfile(pool, userProfileUpdateSchema.parse(request.body))
+    user: await updateSessionProfile(request.body)
   }));
   app.patch("/api/v1/user/profile", async (request) => ({
-    user: await updateSessionUserProfile(pool, userProfileUpdateSchema.parse(request.body))
+    user: await updateSessionProfile(request.body)
   }));
   app.put("/api/v1/user/profile", async (request) => ({
-    user: await updateSessionUserProfile(pool, userProfileUpdateSchema.parse(request.body))
+    user: await updateSessionProfile(request.body)
   }));
 
   app.get("/api/v1/prompt-library", async (request) => {
@@ -521,16 +518,27 @@ export async function buildServer({ config, pool, generation, illustration, memo
   ));
 
   app.post("/api/v1/imports/world/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => (
-    previewWorldImport(pool, worldImportRequestSchema.parse(request.body))
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.previewWorldImport(
+      await resolveWorldCampaignOwnerScope(),
+      worldImportRequestSchema.parse(request.body)
+    ))
   ));
 
   app.post("/api/v1/imports/world", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request, reply) => {
-    const result = await importWorld(pool, worldImportRequestSchema.parse(request.body));
+    const ownerScope = await resolveWorldCampaignOwnerScope();
+    const result = await worldCampaignAdapter.run(() => worldCampaignAdapter.application.importWorld(
+      ownerScope,
+      worldImportRequestSchema.parse(request.body)
+    ));
     return reply.code(result.duplicate ? 200 : 201).send(result);
   });
 
   app.post("/api/v1/imports/infinite-worlds/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => (
-    previewInfiniteWorldsImport(pool, infiniteWorldsImportRequestSchema.parse(request.body))
+    previewInfiniteWorldsImport(
+      pool,
+      infiniteWorldsImportRequestSchema.parse(request.body),
+      portableWorldApplication
+    )
   ));
 
   app.post("/api/v1/imports/infinite-worlds", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request, reply) => {
@@ -539,6 +547,7 @@ export async function buildServer({ config, pool, generation, illustration, memo
       infiniteWorldsImportRequestSchema.parse(request.body),
       config.credentialEncryptionKey,
       memory.generation,
+      portableWorldApplication,
       assetStore
     );
     return reply.code(result.duplicate ? 200 : 201).send(result);
@@ -551,162 +560,225 @@ export async function buildServer({ config, pool, generation, illustration, memo
     return progress;
   });
 
-  app.get("/api/v1/worlds", async () => parseResponseProjection(worldListResponseSchema, { worlds: await listWorlds(pool) }));
+  app.get("/api/v1/worlds", async () => {
+    const ownerScope = await resolveWorldCampaignOwnerScope();
+    return parseResponseProjection(
+      worldListResponseSchema,
+      await worldCampaignAdapter.run(() => worldCampaignAdapter.application.listWorlds(ownerScope))
+    );
+  });
 
-  app.post("/api/v1/worlds", async (request, reply) => (
-    reply.code(201).send(parseResponseProjection(worldCreateResponseSchema, await createWorld(pool, worldCreateSchema.parse(request.body))))
-  ));
+  app.post("/api/v1/worlds", async (request, reply) => {
+    const ownerScope = await resolveWorldCampaignOwnerScope();
+    const result = await worldCampaignAdapter.run(() => worldCampaignAdapter.application.createWorld(
+      ownerScope,
+      worldCreateSchema.parse(request.body)
+    ));
+    return reply.code(201).send(parseResponseProjection(worldCreateResponseSchema, result));
+  });
 
-  app.post("/api/v1/worlds/generate-preview", async (request) => (
-    generateWorldPreview(
-      pool,
-      worldGenerationPreviewRequestSchema.parse(request.body),
-      config.credentialEncryptionKey
-    )
-  ));
+  app.post("/api/v1/worlds/generate-preview", async (request) => {
+    const ownerScope = await resolveWorldCampaignOwnerScope();
+    return worldCampaignAdapter.run(() => worldCampaignAdapter.application.generateWorldPreview(
+      ownerScope,
+      worldGenerationPreviewRequestSchema.parse(request.body)
+    ));
+  });
 
   app.get<{ Querystring: { key?: string } }>("/api/v1/worlds/generate-progress", async (request) => {
     const key = String(request.query.key || "").trim();
     if (!key) return { status: "unknown", phase: "unknown", progressPercent: 0, message: "" };
-    const ownerUserId = await initialOwnerId(pool);
+    const ownerScope = await resolveWorldCampaignOwnerScope();
     if (Date.now() - lastWorldGenerationProgressCleanupAt >= 60_000) {
       lastWorldGenerationProgressCleanupAt = Date.now();
-      await deleteExpiredWorldGenerationProgress(pool);
+      await worldCampaignAdapter.run(() => worldCampaignAdapter.application.deleteExpiredWorldGenerationProgress(
+        ownerScope,
+        new Date().toISOString()
+      ));
     }
-    const progress = await getWorldGenerationProgress(pool, ownerUserId, key);
+    const progress = await worldCampaignAdapter.run(() => worldCampaignAdapter.application.getWorldGenerationProgress({
+      ...ownerScope,
+      progressKey: key
+    }));
     return progress || { status: "unknown", phase: "unknown", progressPercent: 0, message: "" };
   });
 
-  app.post("/api/v1/worlds/playable-characters/generate-preview", async (request) => (
-    generatePlayableCharacterPreview(
-      pool,
-      playableCharacterGenerationPreviewRequestSchema.parse(request.body),
-      config.credentialEncryptionKey
-    )
-  ));
+  app.post("/api/v1/worlds/playable-characters/generate-preview", async (request) => {
+    const ownerScope = await resolveWorldCampaignOwnerScope();
+    return worldCampaignAdapter.run(() => worldCampaignAdapter.application.generatePlayableCharacterPreview(
+      ownerScope,
+      playableCharacterGenerationPreviewRequestSchema.parse(request.body)
+    ));
+  });
 
   app.get<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId", async (request) => (
-    getWorld(pool, uuidSchema.parse(request.params.worldId))
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.getWorld(
+      await resolveWorldScope(uuidSchema.parse(request.params.worldId))
+    ))
   ));
 
   app.put<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/draft", async (request) => (
-    updateWorldDraft(pool, uuidSchema.parse(request.params.worldId), worldDraftUpdateSchema.parse(request.body))
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.updateWorldDraft(
+      await resolveWorldScope(uuidSchema.parse(request.params.worldId)),
+      worldDraftUpdateSchema.parse(request.body)
+    ))
   ));
 
   app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/draft/playable-characters/generate", async (request) => (
-    generatePlayableCharacter(
-      pool,
-      uuidSchema.parse(request.params.worldId),
-      playableCharacterGenerationRequestSchema.parse(request.body),
-      config.credentialEncryptionKey
-    )
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.generatePlayableCharacter(
+      await resolveWorldScope(uuidSchema.parse(request.params.worldId)),
+      playableCharacterGenerationRequestSchema.parse(request.body)
+    ))
   ));
 
   app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/draft/playable-characters/organize", async (request) => (
-    organizeWorldCharacterProfile(
-      pool,
-      uuidSchema.parse(request.params.worldId),
-      characterProfileOrganizationRequestSchema.parse(request.body),
-      config.credentialEncryptionKey
-    )
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.organizeWorldCharacterProfile(
+      await resolveWorldScope(uuidSchema.parse(request.params.worldId)),
+      characterProfileOrganizationRequestSchema.parse(request.body)
+    ))
   ));
 
-  app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/publish", async (request, reply) => (
-    reply.code(201).send(await publishWorld(pool, uuidSchema.parse(request.params.worldId), worldPublishSchema.parse(request.body)))
-  ));
+  app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/publish", async (request, reply) => {
+    const result = await worldCampaignAdapter.run(async () => worldCampaignAdapter.application.publishWorld(
+      await resolveWorldScope(uuidSchema.parse(request.params.worldId)),
+      worldPublishSchema.parse(request.body)
+    ));
+    return reply.code(201).send(result);
+  });
 
   app.patch<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId", async (request) => (
-    updateWorld(pool, uuidSchema.parse(request.params.worldId), worldStatusUpdateSchema.parse(request.body))
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.updateWorldStatus(
+      await resolveWorldScope(uuidSchema.parse(request.params.worldId)),
+      worldStatusUpdateSchema.parse(request.body)
+    ))
   ));
 
   app.delete<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId", async (request) => (
-    deleteWorld(pool, uuidSchema.parse(request.params.worldId), resourceDeleteSchema.parse(request.body))
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.deleteWorld(
+      await resolveWorldScope(uuidSchema.parse(request.params.worldId)),
+      resourceDeleteSchema.parse(request.body)
+    ))
   ));
 
   app.delete<{ Params: { worldId: string; worldVersionId: string } }>("/api/v1/worlds/:worldId/versions/:worldVersionId", async (request) => (
-    deleteWorldVersion(
-      pool,
-      uuidSchema.parse(request.params.worldId),
-      uuidSchema.parse(request.params.worldVersionId),
-      worldVersionDeleteSchema.parse(request.body)
-    )
+    worldCampaignAdapter.run(async () => {
+      const ownerScope = await resolveWorldCampaignOwnerScope();
+      return worldCampaignAdapter.application.deleteWorldVersion(
+        worldCampaignAdapter.worldVersionScope(
+          ownerScope.ownerUserId,
+          uuidSchema.parse(request.params.worldId),
+          uuidSchema.parse(request.params.worldVersionId)
+        ),
+        worldVersionDeleteSchema.parse(request.body)
+      );
+    })
   ));
 
-  app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/fork", async (request, reply) => (
-    reply.code(201).send(await forkWorld(pool, uuidSchema.parse(request.params.worldId), worldForkSchema.parse(request.body)))
-  ));
+  app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/fork", async (request, reply) => {
+    const result = await worldCampaignAdapter.run(async () => worldCampaignAdapter.application.forkWorld(
+      await resolveWorldScope(uuidSchema.parse(request.params.worldId)),
+      worldForkSchema.parse(request.body)
+    ));
+    return reply.code(201).send(result);
+  });
 
   app.get<{ Params: { worldId: string }; Querystring: { worldVersionId?: string } }>("/api/v1/worlds/:worldId/export", async (request, reply) => {
     const versionId = request.query.worldVersionId ? uuidSchema.parse(request.query.worldVersionId) : undefined;
     return reply
       .header("content-disposition", 'attachment; filename="infinite-quest-world.json"')
-      .send(await exportWorld(pool, uuidSchema.parse(request.params.worldId), versionId));
+      .send(await worldCampaignAdapter.run(async () => {
+        const ownerScope = await resolveWorldCampaignOwnerScope();
+        const worldId = uuidSchema.parse(request.params.worldId);
+        const scope = versionId
+          ? worldCampaignAdapter.worldVersionScope(ownerScope.ownerUserId, worldId, versionId)
+          : worldCampaignAdapter.worldScope(ownerScope.ownerUserId, worldId);
+        return worldCampaignAdapter.application.exportWorld(scope);
+      }));
   });
 
   app.get("/api/v1/campaigns", async () => {
-    return parseResponseProjection(campaignListResponseSchema, { campaigns: await listCampaigns(pool) });
+    const ownerScope = await resolveWorldCampaignOwnerScope();
+    return parseResponseProjection(
+      campaignListResponseSchema,
+      await worldCampaignAdapter.run(() => worldCampaignAdapter.application.listCampaigns(ownerScope))
+    );
   });
 
   app.get<{ Params: { worldVersionId: string } }>("/api/v1/world-versions/:worldVersionId/playable-characters", async (request) => (
-    parseResponseProjection(playableCharacterListResponseSchema, await getWorldVersionPlayableCharacterSummary(pool, uuidSchema.parse(request.params.worldVersionId)))
+    worldCampaignAdapter.run(async () => {
+      const ownerScope = await resolveWorldCampaignOwnerScope();
+      return parseResponseProjection(
+        playableCharacterListResponseSchema,
+        await worldCampaignAdapter.application.getWorldVersionPlayableCharacterSummary({
+          ...ownerScope,
+          worldVersionId: uuidSchema.parse(request.params.worldVersionId)
+        })
+      );
+    })
   ));
 
-  app.post("/api/v1/campaigns", async (request, reply) => (
-    reply.code(201).send(parseResponseProjection(campaignCreateResponseSchema, await createCampaign(
-      pool,
-      campaignCreateSchema.parse(request.body),
-      memory.generation,
-    )))
-  ));
+  app.post("/api/v1/campaigns", async (request, reply) => {
+    const ownerScope = await resolveWorldCampaignOwnerScope();
+    const result = await worldCampaignAdapter.run(() => worldCampaignAdapter.application.createCampaign(
+      ownerScope,
+      campaignCreateSchema.parse(request.body)
+    ));
+    return reply.code(201).send(parseResponseProjection(campaignCreateResponseSchema, result));
+  });
 
   app.patch<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId", async (request) => (
-    updateCampaign(pool, uuidSchema.parse(request.params.campaignId), campaignUpdateSchema.parse(request.body))
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.updateCampaign(
+      await resolveCampaignScope(uuidSchema.parse(request.params.campaignId)),
+      campaignUpdateSchema.parse(request.body)
+    ))
   ));
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/character-profile", async (request) => (
-    getCampaignCharacterProfile(pool, uuidSchema.parse(request.params.campaignId))
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.getCampaignCharacterProfile(
+      await resolveCampaignScope(uuidSchema.parse(request.params.campaignId))
+    ))
   ));
 
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/character-profile", async (request) => (
-    updateCampaignCharacterProfile(
-      pool,
-      uuidSchema.parse(request.params.campaignId),
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.updateCampaignCharacterProfile(
+      await resolveCampaignScope(uuidSchema.parse(request.params.campaignId)),
       campaignCharacterProfileUpdateSchema.parse(request.body)
-    )
+    ))
   ));
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/character-profile/organize", async (request) => (
-    organizeCampaignCharacterProfile(
-      pool,
-      uuidSchema.parse(request.params.campaignId),
-      characterProfileOrganizationRequestSchema.parse(request.body),
-      config.credentialEncryptionKey
-    )
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.organizeCampaignCharacterProfile(
+      await resolveCampaignScope(uuidSchema.parse(request.params.campaignId)),
+      characterProfileOrganizationRequestSchema.parse(request.body)
+    ))
   ));
 
   app.delete<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId", async (request) => (
-    deleteCampaign(pool, uuidSchema.parse(request.params.campaignId), resourceDeleteSchema.parse(request.body))
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.deleteCampaign(
+      await resolveCampaignScope(uuidSchema.parse(request.params.campaignId)),
+      resourceDeleteSchema.parse(request.body)
+    ))
   ));
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/migrate-world", async (request) => (
-    migrateCampaignWorld(pool, uuidSchema.parse(request.params.campaignId), campaignWorldMigrationSchema.parse(request.body))
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.migrateCampaignWorldVersion(
+      await resolveCampaignScope(uuidSchema.parse(request.params.campaignId)),
+      campaignWorldMigrationSchema.parse(request.body)
+    ))
   ));
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/transfer-world/preview", async (request) => (
-    previewCampaignWorldTransfer(
-      pool,
-      uuidSchema.parse(request.params.campaignId),
+    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.previewCampaignWorldTransfer(
+      await resolveCampaignScope(uuidSchema.parse(request.params.campaignId)),
       campaignTransferPreviewRequestSchema.parse(request.body)
-    )
+    ))
   ));
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/transfer-world", async (request, reply) => {
-    const result = await transferCampaignWorld(
-      pool,
-      uuidSchema.parse(request.params.campaignId),
-      campaignTransferCommitRequestSchema.parse(request.body),
-      memory.generation,
-    );
+    const result = await worldCampaignAdapter.run(async () => worldCampaignAdapter.application.transferCampaignWorld(
+      await resolveCampaignScope(uuidSchema.parse(request.params.campaignId)),
+      campaignTransferCommitRequestSchema.parse(request.body)
+    ));
     return reply.code(result.reused ? 200 : 201).send(result);
   });
 
@@ -728,19 +800,24 @@ export async function buildServer({ config, pool, generation, illustration, memo
   });
 
   app.get<{ Params: { campaignId: string }; Querystring: { turnNumber?: string } }>("/api/v1/campaigns/:campaignId/state", async (request) => (
-    parseResponseProjection(campaignRuntimeStateResponseSchema, await getCampaignRuntimeState(
-      pool,
-      uuidSchema.parse(request.params.campaignId),
-      request.query.turnNumber === undefined ? undefined : z.coerce.number().int().min(0).parse(request.query.turnNumber)
+    worldCampaignAdapter.run(async () => parseResponseProjection(
+      campaignRuntimeStateResponseSchema,
+      await worldCampaignAdapter.application.getCampaignRuntimeState(
+        await resolveCampaignScope(uuidSchema.parse(request.params.campaignId)),
+        request.query.turnNumber === undefined
+          ? undefined
+          : z.coerce.number().int().min(0).parse(request.query.turnNumber)
+      )
     ))
   ));
 
   app.patch<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/state", async (request) => (
-    parseResponseProjection(campaignRuntimeStateResponseSchema, await updateCampaignRuntimeState(
-      pool,
-      uuidSchema.parse(request.params.campaignId),
-      campaignRuntimeStateUpdateSchema.parse(request.body),
-      memory.generation,
+    worldCampaignAdapter.run(async () => parseResponseProjection(
+      campaignRuntimeStateResponseSchema,
+      await worldCampaignAdapter.application.updateCampaignRuntimeState(
+        await resolveCampaignScope(uuidSchema.parse(request.params.campaignId)),
+        campaignRuntimeStateUpdateSchema.parse(request.body)
+      )
     ))
   ));
 
@@ -749,196 +826,48 @@ export async function buildServer({ config, pool, generation, illustration, memo
   ));
 
   app.get<{ Params: { campaignId: string }; Querystring: { since?: string } }>("/api/v1/campaigns/:campaignId/sync-status", async (request) => {
-    const ownerUserId = await initialOwnerId(pool);
-    const syncRequest = syncStatusRequestSchema.parse(request.query);
-    const result = await pool.query(
-      `SELECT c.id, c.title, c.active_turn_number AS "activeTurnNumber", c.world_version_id AS "worldVersionId",
-              c.story_length_profile AS "storyLengthProfile", c.updated_at AS "updatedAt",
-              c.turn_control_style AS "turnControlStyle",
-              c.selected_character_id AS "selectedCharacterId", c.character_snapshot AS "characterSnapshot",
-              c.character_profile AS "characterProfile", c.character_profile_revision AS "characterProfileRevision",
-              c.legacy_settings AS "legacySettings", c.status,
-              w.id AS "worldId", w.title AS "worldTitle", wv.version_number AS "worldVersionNumber",
-              wv.content AS "worldContent",
-              cs.rpg_stats AS "rpgStats", cs.event_triggers AS "eventTriggers", cs.trackers AS "trackers",
-              pending.id AS "pendingGenerationId", pending.status AS "pendingGenerationStatus",
-              pending.action AS "pendingGenerationAction", pending.operation_kind AS "pendingGenerationOperationKind",
-              pending.requested_input_mode AS "pendingRequestedInputMode",
-              pending.resolved_input_mode AS "pendingResolvedInputMode", pending.input_mode_source AS "pendingInputModeSource",
-              pending.expected_turn_number AS "pendingGenerationExpectedTurnNumber",
-              pending.replacement_turn_id AS "pendingGenerationReplacementTurnId",
-              pending.created_at AS "pendingGenerationCreatedAt", pending.updated_at AS "pendingGenerationUpdatedAt",
-              recovery.id AS "recoveryId", recovery.status AS "recoveryStatus", recovery.operation_kind AS "recoveryOperationKind",
-              recovery.expected_turn_number AS "recoveryExpectedTurnNumber", recovery.attempts AS "recoveryAttempts",
-              recovery.error_code AS "recoveryErrorCode", recovery.error_message AS "recoveryErrorMessage", recovery.result_turn_id AS "recoveryResultTurnId",
-              recovery.replacement_turn_id AS "recoveryReplacementTurnId",
-              latest_turn.id AS "latestTurnId", latest_turn.turn_number AS "latestTurnNumber",
-              (recovery.result_turn_id IS NOT NULL AND EXISTS (
-                SELECT 1
-                  FROM (
-                    SELECT recent_turn.id
-                      FROM turns recent_turn
-                     WHERE recent_turn.campaign_id = c.id AND recent_turn.owner_user_id = c.owner_user_id
-                     ORDER BY recent_turn.turn_number DESC, recent_turn.id DESC
-                     LIMIT 50
-                  ) recent_turn_window
-                 WHERE recent_turn_window.id = recovery.result_turn_id
-              )) AS "recoveryResultIsRecent"
-         FROM campaigns c
-         JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
-         JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
-         LEFT JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
-         LEFT JOIN LATERAL (
-           SELECT id, status, action, operation_kind, replacement_turn_id, requested_input_mode, resolved_input_mode, input_mode_source,
-                  expected_turn_number, created_at, updated_at
-             FROM generation_jobs
-            WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
-              AND status IN ('queued','replacement_queued','assessing','generating','validating','committing')
-            ORDER BY created_at DESC LIMIT 1
-         ) pending ON true
-         LEFT JOIN LATERAL (
-           SELECT id, status, operation_kind, expected_turn_number, attempts, error_code, error_message, result_turn_id, replacement_turn_id
-             FROM generation_jobs
-            WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
-              AND status IN ('recoverable','failed','completed')
-            ORDER BY updated_at DESC, id DESC LIMIT 1
-         ) recovery ON true
-         LEFT JOIN LATERAL (
-           SELECT id, turn_number
-             FROM turns
-            WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
-            ORDER BY turn_number DESC, id DESC LIMIT 1
-         ) latest_turn ON true
-        WHERE c.id = $1 AND c.owner_user_id = $2`,
-      [uuidSchema.parse(request.params.campaignId), ownerUserId]
-    );
-    const row = result.rows[0];
-    if (!row) {
-      throw Object.assign(new Error("Campaign not found."), {
-        name: "CampaignNotFoundError",
-        statusCode: 404,
-        details: { code: "campaign_not_found" }
-      });
-    }
-    const content = typeof row.worldContent === "string" ? JSON.parse(row.worldContent) : (row.worldContent || {});
-    const worldOverview = content.world || {};
-    const effectiveCharacter = effectiveCampaignCharacter(row.characterProfile, row.characterSnapshot);
-    const campaign = {
-      id: row.id,
-      title: row.title,
-      activeTurnNumber: row.activeTurnNumber,
-      worldVersionId: row.worldVersionId,
-      storyLengthProfile: row.storyLengthProfile,
-      updatedAt: row.updatedAt,
-      selectedCharacterId: row.selectedCharacterId,
-      selectedCharacterName: effectiveCharacter.name,
-      characterSnapshot: row.characterSnapshot,
-      characterProfile: row.characterProfile,
-      characterProfileRevision: row.characterProfileRevision,
-      status: row.status
-    };
-    const world = {
-      id: row.worldId,
-      title: row.worldTitle || worldOverview.title || "",
-      versionNumber: row.worldVersionNumber,
-      genre: worldOverview.genre || "",
-      tone: worldOverview.tone || "",
-      premise: worldOverview.premise || "",
-      backgroundStory: worldOverview.backgroundStory || "",
-      character: characterLegacyText(row.characterProfile, row.characterSnapshot) || "",
-      firstAction: worldOverview.firstAction || "",
-      rules: worldOverview.rules || "",
-      playableCharacters: content.playableCharacters || []
-    };
-    const playerConfig = {
-      selectedCharacterId: row.selectedCharacterId,
-      selectedCharacterName: effectiveCharacter.name,
-      characterSnapshot: row.characterSnapshot,
-      characterProfile: row.characterProfile,
-      characterProfileRevision: row.characterProfileRevision,
-      rpgStats: row.rpgStats || [],
-      trackers: row.trackers || [],
-      eventTriggers: row.eventTriggers || [],
-      useRpgStats: Boolean(row.legacySettings?.useRpgStats),
-      suppressEventTriggers: Boolean(row.legacySettings?.suppressEventTriggers)
-    };
-    const pendingGeneration = row.pendingGenerationId ? {
-      id: row.pendingGenerationId,
-      status: row.pendingGenerationStatus,
-      action: row.pendingGenerationAction,
-      operationKind: row.pendingGenerationOperationKind,
-      replacementTurnId: row.pendingGenerationReplacementTurnId,
-      expectedTurnNumber: row.pendingGenerationExpectedTurnNumber,
-      createdAt: row.pendingGenerationCreatedAt,
-      updatedAt: row.pendingGenerationUpdatedAt
-    } : null;
-    const generationRecovery = row.recoveryId && !row.recoveryResultIsRecent ? {
-      id: row.recoveryId,
-      status: row.recoveryStatus,
-      operationKind: row.recoveryOperationKind,
-      expectedTurnNumber: row.recoveryExpectedTurnNumber,
-      attempts: row.recoveryAttempts,
-      ...generationPublicError({ status: row.recoveryStatus }),
-      resultTurnId: row.recoveryResultTurnId,
-      replacementTurnId: row.recoveryReplacementTurnId
-    } : null;
-    const syncToken = sha256(stableStringify({
-      ownerUserId, campaign, world, playerConfig,
-      latestTurnId: row.latestTurnId ?? null, latestTurnNumber: row.latestTurnNumber ?? null,
-      pendingGenerationId: pendingGeneration?.id ?? null, pendingGenerationStatus: pendingGeneration?.status ?? null,
-      pendingGenerationUpdatedAt: pendingGeneration?.updatedAt ?? null,
-      recoveryId: generationRecovery?.id ?? null, recoveryStatus: generationRecovery?.status ?? null,
-      recoveryAttempts: generationRecovery?.attempts ?? null,
-      recoveryReplacementTurnId: generationRecovery?.replacementTurnId ?? null
-    }));
-    const unchanged = syncRequest.since === syncToken;
-    if (unchanged) {
-      return parseResponseProjection(campaignSyncStatusSchema, {
-        ...campaign, campaign, world, playerConfig, pendingGeneration, syncToken,
-        turnWindowMode: "unchanged",
-        turns: null,
-        generationRecovery
-      });
-    }
-    const turnPage = await readTurnPage(pool, ownerUserId, campaign.id, undefined, 50);
-    const costs = await turnReportedCosts(pool, ownerUserId, turnPage.turns.map((turn) => turn.id));
-    const turns = {
-      campaignId: campaign.id,
-      turns: turnPage.turns.map((turn) => ({ ...turn, narration: formatNarrationParagraphs(turn.narration), reportedCost: costs.get(turn.id) || null })),
-      nextCursor: turnPage.nextCursor
-    };
-    return parseResponseProjection(campaignSyncStatusSchema, {
-      ...campaign, campaign, world, playerConfig, pendingGeneration, syncToken,
-      turnWindowMode: "replace",
-      turns,
-      generationRecovery
-    });
+    const scope = await resolveCampaignScope(uuidSchema.parse(request.params.campaignId));
+    const result = await worldCampaignAdapter.run(() => worldCampaignAdapter.application.getCampaignSyncStatus(
+      scope,
+      syncStatusRequestSchema.parse(request.query)
+    ));
+    return parseResponseProjection(campaignSyncStatusSchema, result);
   });
-
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/player-config", async (request) => (
-    syncPlayerCampaignConfig(
-      pool,
-      uuidSchema.parse(request.params.campaignId),
-      playerCampaignConfigSchema.parse(request.body)
-    )
+    worldCampaignAdapter.run(async () => {
+      const scope = await resolveCampaignScope(uuidSchema.parse(request.params.campaignId));
+      const state = await worldCampaignAdapter.application.getCampaignRuntimeState(scope);
+      return worldCampaignAdapter.application.syncPlayerCampaignConfig(scope, {
+        ...playerCampaignConfigSchema.parse(request.body),
+        expectedStateRevision: state.revision
+      });
+    })
   ));
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/rewind", async (request) => (
-    parseResponseProjection(campaignRewindResponseSchema, await rewindCampaign(
-      pool,
-      uuidSchema.parse(request.params.campaignId),
-      campaignRewindSchema.parse(request.body),
-      memory.generation,
-    ))
+    worldCampaignAdapter.run(async () => {
+      const body = campaignRewindSchema.parse(request.body);
+      const scope = await resolveCampaignScope(uuidSchema.parse(request.params.campaignId));
+      const state = await worldCampaignAdapter.application.getCampaignRuntimeState(scope);
+      return parseResponseProjection(
+        campaignRewindResponseSchema,
+        await worldCampaignAdapter.application.rewindCampaign(scope, {
+          ...body,
+          expectedCurrentTurnNumber: body.expectedCurrentTurnNumber ?? state.activeTurnNumber,
+          expectedStateRevision: state.revision
+        })
+      );
+    })
   ));
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/branch", async (request, reply) => (
     reply.code(201).send(
-      parseResponseProjection(campaignBranchResponseSchema, await branchCampaign(
-        pool,
-        uuidSchema.parse(request.params.campaignId),
-        campaignBranchSchema.parse(request.body),
-        memory.generation,
+      await worldCampaignAdapter.run(async () => parseResponseProjection(
+        campaignBranchResponseSchema,
+        await worldCampaignAdapter.application.branchCampaign(
+          await resolveCampaignScope(uuidSchema.parse(request.params.campaignId)),
+          campaignBranchSchema.parse(request.body)
+        )
       ))
     )
   ));

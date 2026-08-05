@@ -17,6 +17,7 @@ import { generationStreamSnapshotSchema, type GenerationStreamSnapshot } from ".
 import { logger } from "../../packages/logger/src/index.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
+import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
 import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { apiMemoryApplication } from "../helpers/memory-applications.js";
 
@@ -305,6 +306,7 @@ integration("generation job notification delivery", () => {
       generation: createApiGenerationApplication(countedPool),
       illustration: createApiIllustrationApplication(countedPool),
       memory: apiMemoryApplication(countedPool),
+      worldCampaign: createApiWorldCampaignApplication(countedPool, { credentialSecret: runtimeConfig(3).credentialEncryptionKey }),
       generationEvents: source
     });
     let stream: Awaited<ReturnType<typeof openGenerationStream>> | undefined;
@@ -368,6 +370,7 @@ integration("generation job notification delivery", () => {
       generation: createApiGenerationApplication(routePool),
       illustration: createApiIllustrationApplication(routePool),
       memory: apiMemoryApplication(routePool),
+      worldCampaign: createApiWorldCampaignApplication(routePool, { credentialSecret: runtimeConfig(3).credentialEncryptionKey }),
       generationEvents: source
     });
     const streams: Array<Awaited<ReturnType<typeof openGenerationStream>>> = [];

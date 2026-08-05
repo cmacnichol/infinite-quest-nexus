@@ -6,6 +6,7 @@ import { createDatabasePool, type DatabasePool } from "../../packages/database/s
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
 import { buildServer } from "../../services/api/src/server.js";
+import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
 import { serverOptions } from "../helpers/build-server-options.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
@@ -137,7 +138,13 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     await migrateDatabase(pool, resolve("database/migrations"));
     providerTransport = installIntegrationProviderTransport();
     const config = makeConfig(databaseUrl!);
-    app = await buildServer(serverOptions({ config, pool }));
+    app = await buildServer(serverOptions({
+      config,
+      pool,
+      worldCampaign: createApiWorldCampaignApplication(pool, {
+        credentialSecret: config.credentialEncryptionKey
+      })
+    }));
 
     mockServer = createServer((req, res) => {
       let body = "";

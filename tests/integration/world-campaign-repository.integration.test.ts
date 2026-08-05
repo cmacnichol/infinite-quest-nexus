@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { worldContentSchema, WORLD_CONTENT_SCHEMA_VERSION } from "../../packages/contracts/src/world-library.js";
+import { worldImportRequestSchema } from "../../packages/contracts/src/world-library.js";
 import {
   createPostgresChronicleGenerationTransactionPort
 } from "../../packages/database/src/chronicle-repository.js";
@@ -58,6 +59,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
     await pool.query("DROP FUNCTION IF EXISTS block_campaign_migration_target_race()");
     await pool.query("DELETE FROM campaigns");
     await pool.query("DELETE FROM campaign_world_transfers");
+    await pool.query("DELETE FROM imports");
     await pool.query("DELETE FROM provider_profiles");
     await pool.query("DELETE FROM world_versions");
     await pool.query("DELETE FROM world_drafts");
@@ -495,11 +497,11 @@ integration("PostgreSQL world campaign repository adapters", () => {
 
     const characters = await adapters.transaction.read((transaction) => adapters.campaigns.listWorldVersionPlayableCharacters(
       transaction,
-      { ownerUserId, worldId: ownWorld.created.id, worldVersionId: ownVersion.worldVersionId }
+      { ownerUserId, worldVersionId: ownVersion.worldVersionId }
     ));
     const summary = await adapters.transaction.read((transaction) => adapters.campaigns.getWorldVersionPlayableCharacterSummary(
       transaction,
-      { ownerUserId, worldId: ownWorld.created.id, worldVersionId: ownVersion.worldVersionId }
+      { ownerUserId, worldVersionId: ownVersion.worldVersionId }
     ));
     expect(characters).toEqual([{ id: "character-one", name: "Character One", rpgStatCount: 1, defaultTriggerCount: 1 }]);
     expect(summary).toMatchObject({ characters, readiness: { ready: true, issues: [] } });
@@ -517,7 +519,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
     expect(foreignCreate).toMatchObject({ ok: false, failure: { reason: "world_version_not_found" } });
     await expect(adapters.transaction.read((transaction) => adapters.campaigns.getWorldVersionPlayableCharacterSummary(
       transaction,
-      { ownerUserId: foreignOwnerUserId, worldId: ownWorld.created.id, worldVersionId: ownVersion.worldVersionId }
+      { ownerUserId: foreignOwnerUserId, worldVersionId: ownVersion.worldVersionId }
     ))).rejects.toMatchObject({ reason: "world_version_not_found" });
 
     const foreignUpdate = await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(
@@ -809,5 +811,153 @@ integration("PostgreSQL world campaign repository adapters", () => {
       if (blockerOpen) await blocker.query("ROLLBACK");
       blocker.release();
     }
+  });
+
+  it("exports and idempotently imports portable worlds inside the explicit owner scope", async () => {
+    const adapters = createAdapters();
+    const source = await createFixtureWorld(adapters, "Portable source");
+    const published = await publishFixtureWorld(
+      adapters,
+      source.created.id,
+      source.created.draftRevision,
+      "Portable source release"
+    );
+
+    const exported = await adapters.transaction.read((transaction) => adapters.worlds.exportWorld(
+      transaction,
+      { ownerUserId, worldId: source.created.id, worldVersionId: published.worldVersionId }
+    ));
+    expect(exported).toMatchObject({
+      format: "infinite-quest-world",
+      formatVersion: 1,
+      title: source.title,
+      content: { world: { title: source.title } }
+    });
+
+    const request = worldImportRequestSchema.parse({
+      sourceName: "portable-world.json",
+      worldExport: exported
+    });
+    const firstPreview = await adapters.transaction.read((transaction) => adapters.worlds.previewWorldImport(
+      transaction,
+      { ownerUserId },
+      request
+    ));
+    expect(firstPreview).toMatchObject({ duplicate: false, existingWorldId: null, title: source.title });
+
+    const firstImport = await adapters.transaction.command((transaction) => adapters.worlds.importWorld(
+      transaction,
+      { ownerUserId },
+      request
+    ));
+    expect(firstImport).toMatchObject({ ok: true, value: { duplicate: false } });
+    if (!firstImport.ok) throw new Error("portable world import failed");
+
+    const duplicatePreview = await adapters.transaction.read((transaction) => adapters.worlds.previewWorldImport(
+      transaction,
+      { ownerUserId },
+      request
+    ));
+    expect(duplicatePreview).toMatchObject({
+      duplicate: true,
+      existingWorldId: firstImport.value.worldId
+    });
+
+    const duplicateImport = await adapters.transaction.command((transaction) => adapters.worlds.importWorld(
+      transaction,
+      { ownerUserId },
+      request
+    ));
+    expect(duplicateImport).toEqual({
+      ok: true,
+      value: { ...firstImport.value, duplicate: true }
+    });
+
+    const foreignOwner = await pool.query<{ id: string }>(
+      "INSERT INTO users (display_name, status) VALUES ($1, 'active') RETURNING id",
+      [`Portable foreign owner ${crypto.randomUUID()}`]
+    );
+    const foreignExport = adapters.transaction.read((transaction) => adapters.worlds.exportWorld(
+      transaction,
+      {
+        ownerUserId: foreignOwner.rows[0]!.id,
+        worldId: source.created.id,
+        worldVersionId: published.worldVersionId
+      }
+    ));
+    await expect(foreignExport).rejects.toMatchObject({
+      kind: "not_found",
+      reason: "world_version_not_found"
+    });
+  });
+
+  it("promotes selected active campaign discoveries into an owner-scoped reviewable draft", async () => {
+    const adapters = createAdapters();
+    const source = await createFixtureWorld(adapters, "Promotion source");
+    const published = await publishFixtureWorld(
+      adapters,
+      source.created.id,
+      source.created.draftRevision,
+      "Promotion source release"
+    );
+    const campaign = await createFixtureCampaign(adapters, published.worldVersionId, "Promotion campaign");
+    const target = await createFixtureWorld(adapters, "Promotion target");
+    const turn = await pool.query<{ id: string }>(
+      `INSERT INTO turns (owner_user_id, campaign_id, turn_number, narration)
+       VALUES ($1,$2,1,$3) RETURNING id`,
+      [ownerUserId, campaign.created.id, "The observatory reveals a hidden moon."]
+    );
+    const factId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO campaign_canonical_facts (
+         id, owner_user_id, campaign_id, world_version_id, source_turn_id,
+         source_turn_number, source_fact_index, content, normalized_content,
+         valid_from_turn
+       ) VALUES ($1,$2,$3,$4,$5,1,0,$6,$7,1)`,
+      [
+        factId,
+        ownerUserId,
+        campaign.created.id,
+        published.worldVersionId,
+        turn.rows[0]!.id,
+        "A hidden moon orbits beyond the observatory.",
+        "a hidden moon orbits beyond the observatory"
+      ]
+    );
+
+    const promoted = await adapters.transaction.command((transaction) => adapters.worlds.promoteCampaignDiscoveries(
+      transaction,
+      { ownerUserId, campaignId: campaign.created.id },
+      {
+        draftWorldId: target.created.id,
+        expectedWorldVersionId: published.worldVersionId,
+        discoveryFactIds: [factId]
+      }
+    ));
+    expect(promoted).toEqual({
+      ok: true,
+      value: {
+        worldId: target.created.id,
+        draftRevision: target.created.draftRevision + 1,
+        promotedFactCount: 1
+      }
+    });
+    const draft = await pool.query<{ revision: number; content: Record<string, unknown> }>(
+      "SELECT revision, content FROM world_drafts WHERE owner_user_id = $1 AND world_id = $2",
+      [ownerUserId, target.created.id]
+    );
+    expect(draft.rows[0]).toMatchObject({
+      revision: target.created.draftRevision + 1,
+      content: {
+        defaults: {
+          promotedCampaignDiscoveries: [{
+            campaignId: campaign.created.id,
+            factId,
+            sourceTurnId: turn.rows[0]!.id,
+            content: "A hidden moon orbits beyond the observatory."
+          }]
+        }
+      }
+    });
   });
 });

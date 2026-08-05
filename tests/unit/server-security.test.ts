@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import { buildServer } from "../../services/api/src/server.js";
-import { serverOptions } from "../helpers/build-server-options.js";
+import { serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { logger } from "../../packages/logger/src/index.js";
@@ -740,7 +740,7 @@ describe("API server security and CORS headers", () => {
     await app.close();
   });
 
-  it("reads world-generation progress through the owner-scoped database service", async () => {
+  it("reads world-generation progress through the owner-scoped application", async () => {
     const ownerUserId = "00000000-0000-0000-0000-000000000001";
     const progressKey = "world-gen-test";
     const mockPool = {
@@ -761,7 +761,18 @@ describe("API server security and CORS headers", () => {
         throw new Error(`Unexpected query: ${query}`);
       }
     } as unknown as DatabasePool;
-    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
+    const app = await buildServer(serverOptions({
+      config: makeConfig(),
+      pool: mockPool,
+      worldCampaign: testWorldCampaignApplication({
+        getWorldGenerationProgress: async () => ({
+          status: "processing",
+          phase: "generating_world",
+          progressPercent: 30,
+          message: "Synthesizing world overview and characters via LLM…"
+        })
+      })
+    }));
 
     const response = await app.inject({
       method: "GET",

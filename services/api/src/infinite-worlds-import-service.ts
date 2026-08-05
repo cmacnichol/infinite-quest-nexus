@@ -21,7 +21,6 @@ import {
 import { callTextProvider, containsMechanicsLanguage, extractJsonObject } from "../../../packages/story-engine/src/index.js";
 import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js";
 import { loadTextProvider } from "./provider-service.js";
-import { importWorld, previewWorldImport } from "./world-service.js";
 import type { FilesystemAssetStore } from "./asset-service.js";
 import { resolvePlayableCharacters } from "../../../packages/domain/src/world-characters.js";
 import { extractCyoaLayers, parseCyoaExport } from "../../../packages/domain/src/world-template.js";
@@ -33,6 +32,7 @@ import { logger } from "../../../packages/logger/src/index.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import type { PromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
 import type { MemoryGenerationTransactionPort } from "../../../packages/application/src/memory/index.js";
+import type { PortableWorldApplicationPort } from "../../../packages/application/src/world-campaign/index.js";
 import {
   promptFromSnapshot,
   resolvePromptSnapshot
@@ -368,7 +368,11 @@ async function enrichFinalTurn(pool: DatabasePool, request: InfiniteWorldsImport
   if (!containsMechanicsLanguage(metadata.image_prompt)) finalTurn.imagePrompt = metadata.image_prompt;
 }
 
-export async function previewInfiniteWorldsImport(pool: DatabasePool, request: InfiniteWorldsImportRequest) {
+export async function previewInfiniteWorldsImport(
+  pool: DatabasePool,
+  request: InfiniteWorldsImportRequest,
+  portableWorld: PortableWorldApplicationPort,
+) {
   const kind = resolveKind(request);
   if (kind === "cyoa_json") {
     let parsed;
@@ -412,7 +416,7 @@ export async function previewInfiniteWorldsImport(pool: DatabasePool, request: I
       };
     }
     const worldExport = convertInfiniteWorldsWorld(source);
-    const preview = await previewWorldImport(pool, { sourceName: request.sourceName, worldExport });
+    const preview = await portableWorld.previewWorldImport({ sourceName: request.sourceName, worldExport });
     return { ...preview, kind, valid: true, characters };
   }
   if (kind === "world_text") {
@@ -463,6 +467,7 @@ export async function importInfiniteWorlds(
   request: InfiniteWorldsImportRequest,
   credentialSecret: string,
   memory: MemoryGenerationTransactionPort,
+  portableWorld: PortableWorldApplicationPort,
   assetStore?: FilesystemAssetStore
 ) {
   const kind = resolveKind(request);
@@ -510,7 +515,7 @@ export async function importInfiniteWorlds(
         progressPercent: 95,
         message: "Saving generated world and character roster to authoritative storage…"
       });
-      const result = await importWorld(pool, { sourceName: request.sourceName, worldExport });
+      const result = await portableWorld.importWorld({ sourceName: request.sourceName, worldExport });
       activeProgressMap.set(progressKey, {
         status: "completed",
         phase: "completed",
@@ -543,7 +548,7 @@ export async function importInfiniteWorlds(
     const worldExport = kind === "world_json"
       ? convertInfiniteWorldsWorld(parseJsonText(request.sourceText))
       : await convertWorldText(pool, request, credentialSecret);
-    const result = await importWorld(pool, { sourceName: request.sourceName, worldExport });
+    const result = await portableWorld.importWorld({ sourceName: request.sourceName, worldExport });
     return { kind: "world" as const, ...result };
   }
   if (!request.targetWorldVersionId) throw Object.assign(new Error("Select a published target world before importing matching story text."), { statusCode: 400 });

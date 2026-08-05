@@ -51,6 +51,7 @@ export type WorldCampaignOwnerScope = OwnerScope;
 
 export type WorldScope = OwnerScope & Readonly<{ worldId: string }>;
 export type WorldVersionScope = WorldScope & Readonly<{ worldVersionId: string }>;
+export type WorldVersionLookupScope = OwnerScope & Readonly<{ worldVersionId: string }>;
 export type CampaignScope = OwnerScope & Readonly<{ campaignId: string }>;
 export type CampaignTurnScope = CampaignScope & Readonly<{ turnId: string }>;
 export type WorldGenerationProgressScope = OwnerScope & Readonly<{ progressKey: string }>;

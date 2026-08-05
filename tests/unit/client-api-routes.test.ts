@@ -37,7 +37,7 @@ import {
   worldListResponseSchema
 } from "../../packages/contracts/src/index.js";
 import { buildServer } from "../../services/api/src/server.js";
-import { serverOptions } from "../helpers/build-server-options.js";
+import { serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
 
 const OWNER_ID = "00000000-0000-4000-8000-000000000001";
 const CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
@@ -607,7 +607,7 @@ describe("client API route contracts without PostgreSQL", () => {
     await rm(storageRoot, { recursive: true, force: true });
   });
 
-  it("short-circuits an unchanged campaign sync after its single status query", async () => {
+  it("delegates unchanged campaign sync without transport-owned business SQL", async () => {
     const statements: string[] = [];
     const app = await buildServer(serverOptions({
       config: config(storageRoot),
@@ -626,8 +626,7 @@ describe("client API route contracts without PostgreSQL", () => {
       })).json());
 
       expect(unchanged).toMatchObject({ turnWindowMode: "unchanged", turns: null });
-      expect(statements).toHaveLength(1);
-      expect(statements[0]).toContain('latest_turn.id AS "latestTurnId"');
+      expect(statements).toEqual([]);
     } finally {
       await app.close();
     }
@@ -1260,7 +1259,19 @@ describe("client API route contracts without PostgreSQL", () => {
   });
 
   it("uses structured envelopes for sync 404s, initial SSE failures, and malformed service projections", async () => {
-    const missingSyncApp = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool({ missingSync: true }) }));
+    const missingSyncApp = await buildServer(serverOptions({
+      config: config(storageRoot),
+      pool: mockPool(),
+      worldCampaign: testWorldCampaignApplication({
+        getCampaignSyncStatus: async () => {
+          throw Object.assign(new Error("Campaign not found."), {
+            name: "CampaignNotFoundError",
+            statusCode: 404,
+            details: { code: "campaign_not_found" }
+          });
+        }
+      })
+    }));
     const missingJobApp = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool({ missingJob: true }) }));
     const malformedJobApp = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool({ malformedJob: true }) }));
     try {
