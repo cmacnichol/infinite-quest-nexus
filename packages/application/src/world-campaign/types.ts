@@ -1,28 +1,45 @@
 import type {
+  CampaignBranchResponse,
   CampaignBranchRequest,
   CampaignCharacterProfile,
   CampaignCharacterProfileUpdate,
+  CampaignCreateResponse,
   CampaignCreateRequest,
+  CampaignListResponse,
+  CampaignRewindResponse,
   CampaignRewindRequest,
   CampaignRuntimeState,
+  CampaignRuntimeStateContent,
   CampaignRuntimeStateUpdate,
+  CampaignSyncStatus,
+  CampaignTracker,
   CampaignTransferCommitRequest,
+  CampaignTransferFinding,
   CampaignTransferPreviewRequest,
   CampaignUpdateRequest,
   CampaignWorldMigrationRequest,
+  CharacterProfileOrganizationResult,
   CharacterProfileOrganizationRequest,
   PlayerCampaignConfig,
+  PlayerEventTrigger,
+  PlayerRpgStat,
+  PlayableCharacter,
   PlayableCharacterGenerationPreviewRequest,
   PlayableCharacterGenerationRequest,
+  PlayableCharacterListResponse,
   ResourceDeleteRequest,
   SyncStatusRequest,
+  TurnSummary,
   UserProfile,
   UserProfileUpdate,
+  WorldContent,
+  WorldCreateResponse,
   WorldCreateRequest,
   WorldDraftUpdateRequest,
   WorldForkRequest,
   WorldGenerationPreviewRequest,
   WorldImportRequest,
+  WorldListResponse,
   WorldPublishRequest,
   WorldStatusUpdateRequest,
   WorldVersionDeleteRequest
@@ -74,7 +91,26 @@ export type WorldCampaignTransitionFailureReason =
 
 export type WorldCampaignTransitionFailure = Readonly<{
   reason: WorldCampaignTransitionFailureReason;
-  details?: Readonly<Record<string, unknown>>;
+  details?: WorldCampaignErrorDetails;
+}>;
+
+export type WorldCampaignErrorDetails = Readonly<{
+  worldId?: string;
+  worldVersionId?: string;
+  targetWorldId?: string;
+  campaignId?: string;
+  factId?: string;
+  versionNumber?: number;
+  expectedDraftRevision?: number;
+  actualDraftRevision?: number;
+  expectedWorldVersionId?: string;
+  actualWorldVersionId?: string;
+  expectedTurnNumber?: number;
+  actualTurnNumber?: number;
+  expectedStateRevision?: number;
+  actualStateRevision?: number;
+  blockers?: readonly string[];
+  findings?: readonly CampaignTransferFinding[];
 }>;
 
 export type WorldCampaignRepositoryResult<T> =
@@ -87,7 +123,7 @@ export type DeepReadonly<T> =
       : T extends object ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
         : T;
 
-export type WorldDraftAggregate<Content extends Record<string, unknown> = Record<string, unknown>> = Readonly<{
+export type WorldDraftAggregate<Content extends object = WorldContent> = Readonly<{
   ownerUserId: string;
   worldId: string;
   draftRevision: number;
@@ -102,7 +138,7 @@ export type WorldPublicationRequest = Readonly<{
   publishedAt: string;
 }>;
 
-export type PublishedWorldVersion<Content extends Record<string, unknown> = Record<string, unknown>> = Readonly<{
+export type PublishedWorldVersion<Content extends object = WorldContent> = Readonly<{
   ownerUserId: string;
   worldId: string;
   worldVersionId: string;
@@ -164,16 +200,186 @@ export type ReplaceCampaignFactInput = Readonly<Omit<CampaignFact, "replacesFact
   replacesFactId: string;
 }>;
 
-export type WorldListView = Readonly<{ worlds: readonly Readonly<Record<string, unknown>>[] }>;
-export type WorldView = Readonly<Record<string, unknown>>;
-export type CampaignListView = Readonly<{ campaigns: readonly Readonly<Record<string, unknown>>[] }>;
-export type CampaignView = Readonly<Record<string, unknown>>;
-export type CampaignStateEditView = Readonly<Record<string, unknown>>;
-export type CampaignStateCorrectionView = CampaignRuntimeState;
-export type CharacterProfileView = CampaignCharacterProfile;
-export type DashboardView = Readonly<Record<string, unknown>>;
-export type SessionProfileView = UserProfile;
-export type WorldGenerationView = Readonly<Record<string, unknown>>;
+export type ApiTimestamp = string | Date;
+
+export type WorldListView = DeepReadonly<WorldListResponse>;
+
+export type PublishedWorldSummaryView = Readonly<{
+  id: string;
+  versionNumber: number;
+  sourceHash: string | null;
+  releaseNotes: string;
+  createdFromRevision: number;
+  publishedAt: ApiTimestamp;
+  createdAt: ApiTimestamp;
+  deletable: boolean;
+  deletionBlockers: Readonly<{
+    currentCampaigns: number;
+    campaignMigrations: number;
+    campaignTransfers: number;
+    chronicleMemories: number;
+    modelChains: number;
+  }>;
+  detachments: Readonly<{ drafts: number; forks: number; imports: number }>;
+}>;
+
+export type WorldCampaignReferenceView = Readonly<{
+  id: string;
+  title: string;
+  status: "active" | "archived";
+  activeTurnNumber: number;
+  worldVersionId: string;
+  worldVersionNumber: number;
+  selectedCharacterId: string | null;
+  selectedCharacterName: string | null;
+  turnControlStyle: CampaignUpdateRequest["turnControlStyle"];
+  updatedAt: ApiTimestamp;
+}>;
+
+export type WorldAggregateView = Readonly<{
+  id: string;
+  title: string;
+  status: "draft" | "active" | "archived";
+  imageUrl: string;
+  forkedFromWorldId: string | null;
+  forkedFromWorldVersionId: string | null;
+  createdAt: ApiTimestamp;
+  updatedAt: ApiTimestamp;
+  draftRevision: number | null;
+  draftContent: DeepReadonly<WorldContent> | null;
+  draftBasedOnWorldVersionId: string | null;
+  draftUpdatedAt: ApiTimestamp | null;
+  versions: readonly PublishedWorldSummaryView[];
+  campaigns: readonly WorldCampaignReferenceView[];
+}>;
+
+export type WorldCreateView = DeepReadonly<WorldCreateResponse>;
+export type WorldDraftUpdateView = Readonly<{
+  worldId: string;
+  title: string;
+  revision: number;
+  content: DeepReadonly<WorldContent>;
+  updatedAt: ApiTimestamp;
+}>;
+export type WorldPublicationView = Readonly<{
+  worldId: string;
+  worldVersionId: string;
+  versionNumber: number;
+  draftRevision: number;
+  publishedAt: ApiTimestamp;
+}>;
+export type WorldStatusView = Readonly<{
+  id: string;
+  title: string;
+  status: "draft" | "active" | "archived";
+  updatedAt: ApiTimestamp;
+}>;
+export type WorldForkView = Readonly<{
+  worldId: string;
+  sourceWorldId: string;
+  sourceWorldVersionId: string;
+  title: string;
+  revision: number;
+}>;
+export type WorldImportPreviewView = Readonly<{
+  kind: "world";
+  title: string;
+  duplicate: boolean;
+  existingWorldId: string | null;
+  counts: Readonly<{ entities: number; relationships: number; triggers: number }>;
+  warnings: readonly string[];
+}>;
+export type WorldImportResultView = Readonly<{
+  importId: string;
+  worldId: string;
+  worldVersionId: string;
+  duplicate: boolean;
+}>;
+export type WorldPromotionView = Readonly<{
+  worldId: string;
+  draftRevision: number;
+  promotedFactCount: number;
+}>;
+
+export type CampaignListView = DeepReadonly<CampaignListResponse>;
+export type CampaignCreateView = DeepReadonly<CampaignCreateResponse>;
+export type CampaignUpdateView = Readonly<{
+  id: string;
+  title: string;
+  status: "active" | "archived";
+  activeTurnNumber: number;
+  textProviderProfileId: string | null;
+  imageProviderProfileId: string | null;
+  storyLengthProfile: CampaignCreateResponse["storyLengthProfile"];
+  turnControlStyle: NonNullable<CampaignUpdateRequest["turnControlStyle"]>;
+  updatedAt: ApiTimestamp;
+}>;
+export type CampaignMigrationView = Readonly<{
+  migrationId: string;
+  campaignId: string;
+  fromWorldVersionId: string;
+  toWorldVersionId: string;
+  worldVersionNumber: number;
+  migratedAt: ApiTimestamp;
+}>;
+export type CampaignPlayerConfigSyncView = Readonly<{
+  campaignId: string;
+  activeTurnNumber: number;
+  synchronized: true;
+}>;
+export type CampaignRewindView = DeepReadonly<CampaignRewindResponse>;
+export type CampaignBranchView = DeepReadonly<CampaignBranchResponse>;
+export type CampaignStateEditView = Readonly<{
+  id: string;
+  revision: number;
+  effectiveTurnNumber: number;
+  snapshot: DeepReadonly<CampaignRuntimeStateContent>;
+}>;
+export type CampaignStateCorrectionView = DeepReadonly<CampaignRuntimeState>;
+
+export type CharacterProfileView = Readonly<{
+  campaignId: string;
+  characterId: string | null;
+  revision: number;
+  name: string;
+  profile: DeepReadonly<CampaignCharacterProfile["profile"]>;
+  storedProfile: DeepReadonly<CampaignCharacterProfile> | null;
+  inheritedFromSnapshot: boolean;
+  legacyCharacterText: string;
+  rpgStats: readonly DeepReadonly<PlayerRpgStat>[];
+  defaultTriggers: readonly DeepReadonly<PlayerEventTrigger | CampaignTracker>[];
+}>;
+export type CharacterProfileUpdateView = Readonly<{
+  campaignId: string;
+  revision: number;
+  name: string;
+  profile: DeepReadonly<CampaignCharacterProfile["profile"]>;
+}>;
+export type CharacterProfileOrganizationView = DeepReadonly<CharacterProfileOrganizationResult>;
+
+export type DashboardView = Readonly<{
+  worlds: Readonly<{ available: number; total: number; published: number; drafts: number; archived: number }>;
+  campaigns: Readonly<{ open: number; total: number; archived: number }>;
+  turns: Readonly<{ accepted: number }>;
+  providerCosts: Readonly<{
+    hasReportedCosts: boolean;
+    totals: readonly Readonly<{
+      providerProfileId: string | null;
+      providerName: string | null;
+      providerType: string;
+      category: "story" | "image" | "memory";
+      currency: string;
+      amount: string;
+      eventCount: number;
+      lastReportedAt: ApiTimestamp;
+    }>[];
+  }>;
+}>;
+export type SessionProfileView = DeepReadonly<UserProfile>;
+export type GeneratedWorldPreviewView = Readonly<{ title: string; content: DeepReadonly<WorldContent> }>;
+export type GeneratedPlayableCharacterView = Readonly<{ character: DeepReadonly<PlayableCharacter> }>;
+export type PlayableCharacterSummaryView = DeepReadonly<PlayableCharacterListResponse>;
+export type PlayableCharacterSummaryItemView = PlayableCharacterSummaryView["characters"][number];
 export type WorldGenerationProgressStatus = "processing" | "completed" | "failed";
 export type WorldGenerationProgressView = Readonly<{
   status: WorldGenerationProgressStatus;
@@ -183,20 +389,7 @@ export type WorldGenerationProgressView = Readonly<{
   errorMessage?: string;
 }>;
 
-export type BoundedCampaignTurn = Readonly<{
-  id: string;
-  turnNumber: number;
-  action: string;
-  inputMode: string;
-  inputModeSource: string;
-  narration: string;
-  choices: readonly string[];
-  customActionSuggestion: string;
-  imagePrompt: string;
-  imageUrl: string | null;
-  acceptedAt: string | Date;
-  reportedCost?: Readonly<Record<string, unknown>> | null;
-}>;
+export type BoundedCampaignTurn = DeepReadonly<TurnSummary>;
 
 export type BoundedCampaignTurnPage = Readonly<{
   turns: readonly BoundedCampaignTurn[];
@@ -210,26 +403,53 @@ export type BoundedCampaignTurnPageRequest = Readonly<{
 
 export type CampaignSyncSnapshot = Readonly<{
   syncToken: string;
-  projection: Readonly<Record<string, unknown>>;
+  projection: CampaignSyncProjection;
 }>;
 
-export type CampaignSyncStatusView = Readonly<Record<string, unknown>> & Readonly<{
-  syncToken: string;
-  turnWindowMode: "unchanged" | "replace";
-  turns: null | Readonly<{
+type UnchangedCampaignSyncStatus = Extract<CampaignSyncStatus, { turnWindowMode: "unchanged" }>;
+export type CampaignSyncProjection = DeepReadonly<
+  Omit<UnchangedCampaignSyncStatus, "syncToken" | "turnWindowMode" | "turns">
+>;
+export type CampaignSyncStatusView = DeepReadonly<CampaignSyncStatus>;
+
+export type PortableWorldPayload = DeepReadonly<WorldImportRequest["worldExport"]>;
+
+export type CampaignTransferView = Readonly<{
+  allowed: boolean;
+  source: Readonly<{
     campaignId: string;
-    turns: readonly BoundedCampaignTurn[];
-    nextCursor: string | null;
+    campaignTitle: string;
+    worldId: string;
+    worldTitle: string;
+    worldVersionId: string;
+    worldVersionNumber: number;
   }>;
+  target: Readonly<{ worldId: string; worldTitle: string; worldVersionId: string; worldVersionNumber: number }>;
+  proposedTitle: string;
+  counts: Readonly<{ turns: number; stateEdits: number; summaries: number; assets: number }>;
+  character: Readonly<{
+    id: string | null;
+    name: string | null;
+    targetMatches: readonly Readonly<{ id: string; name: string }>[];
+  }>;
+  findings: readonly DeepReadonly<CampaignTransferFinding>[];
+  expectedActiveTurnNumber: number;
+  expectedStateRevision: number;
+  sourceFingerprint: string;
 }>;
-
-export type PortableWorldPayload = Readonly<{
-  sourceName: string;
-  value: unknown;
+export type CampaignTransferResultView = Readonly<{
+  transferId: string;
+  sourceCampaignId: string;
+  targetCampaignId: string;
+  fromWorldVersionId: string;
+  targetWorldId: string;
+  targetWorldVersionId: string;
+  activeTurnNumber: number;
+  chronicleMemoryCount: number;
+  embeddingJobId: string | null;
+  warnings: readonly DeepReadonly<CampaignTransferFinding>[];
+  reused: boolean;
 }>;
-
-export type CampaignTransferView = Readonly<Record<string, unknown>>;
-export type CampaignTransferResultView = Readonly<Record<string, unknown>>;
 
 export type WorldGenerationProgressUpdate = Readonly<{
   status: WorldGenerationProgressStatus;

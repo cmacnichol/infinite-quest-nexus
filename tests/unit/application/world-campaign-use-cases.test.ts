@@ -10,10 +10,23 @@ import {
   replaceCampaignFact,
   type BoundedCampaignTurnPagePort,
   type CampaignScope,
+  type CampaignListView,
+  type CampaignStateEditView,
+  type CampaignSyncStatusView,
+  type CampaignTransferResultView,
+  type CampaignTransferView,
+  type CampaignUpdateView,
+  type CharacterProfileView,
+  type DashboardView,
+  type GeneratedPlayableCharacterView,
+  type GeneratedWorldPreviewView,
   type OwnerScope,
+  type PlayableCharacterSummaryView,
+  type WorldAggregateView,
   type WorldCampaignApplication,
   type WorldCampaignApplicationDependencies,
-  type WorldCampaignTransactionPort
+  type WorldCampaignTransactionPort,
+  type WorldListView
 } from "../../../packages/application/src/index.js";
 
 const ownerUserId = "11111111-1111-4111-8111-111111111111";
@@ -183,20 +196,66 @@ describe("world and campaign application use cases", () => {
     const dependencies = minimalDependencies(transaction, {
       readTurnPage: async () => ({ turns: [], nextCursor: null })
     });
+    const worldSummary = {
+      id: worldId,
+      title: "Glass Stars",
+      status: "draft" as const,
+      imageUrl: "",
+      forkedFromWorldId: null,
+      forkedFromWorldVersionId: null,
+      createdAt: "2026-08-05T10:00:00.000Z",
+      updatedAt: "2026-08-05T10:00:00.000Z",
+      draftRevision: 1,
+      draftUpdatedAt: "2026-08-05T10:00:00.000Z",
+      draftPreview: {
+        title: "Glass Stars",
+        genre: "science fantasy",
+        tone: "hopeful",
+        premise: "A glass observatory",
+        backgroundStory: "The stars remember.",
+        firstAction: "Open the dome."
+      },
+      latestVersionId: null,
+      latestVersionNumber: null,
+      latestPublishedAt: null,
+      latestPreview: null,
+      campaignCount: 0
+    };
     dependencies.worlds.listWorlds = async (_transaction, owner) => ({
-      worlds: owner.ownerUserId === ownerUserId ? [{ id: worldId }] : []
+      worlds: owner.ownerUserId === ownerUserId ? [worldSummary] : []
     });
     dependencies.worlds.createWorld = async (_transaction, owner) => ({
       ok: true,
-      value: { id: worldId, ownerUserId: owner.ownerUserId }
+      value: {
+        id: worldId,
+        title: "Glass Stars",
+        status: "draft",
+        imageUrl: "",
+        draftRevision: 1,
+        draftContent: { schemaVersion: 4 },
+        draftBasedOnWorldVersionId: null,
+        createdAt: "2026-08-05T10:00:00.000Z",
+        updatedAt: "2026-08-05T10:00:00.000Z"
+      }
     });
     const application = createWorldCampaignApplication(dependencies);
 
-    await expect(application.listWorlds({ ownerUserId })).resolves.toEqual({ worlds: [{ id: worldId }] });
+    const ownedWorlds = await application.listWorlds({ ownerUserId });
+    expect(ownedWorlds).toEqual({ worlds: [worldSummary] });
+    expect(Object.isFrozen(ownedWorlds)).toBe(true);
+    expect(Object.isFrozen(ownedWorlds.worlds)).toBe(true);
+    expect(Object.isFrozen(ownedWorlds.worlds[0])).toBe(true);
     await expect(application.listWorlds({ ownerUserId: "foreign-owner" })).resolves.toEqual({ worlds: [] });
     await expect(application.createWorld({ ownerUserId }, { title: "Glass Stars" } as never)).resolves.toEqual({
       id: worldId,
-      ownerUserId
+      title: "Glass Stars",
+      status: "draft",
+      imageUrl: "",
+      draftRevision: 1,
+      draftContent: { schemaVersion: 4 },
+      draftBasedOnWorldVersionId: null,
+      createdAt: "2026-08-05T10:00:00.000Z",
+      updatedAt: "2026-08-05T10:00:00.000Z"
     });
     await expect(application.listWorlds({ ownerUserId: "" })).rejects.toMatchObject({
       kind: "invalid_request",
@@ -227,22 +286,68 @@ describe("world and campaign application use cases", () => {
             customActionSuggestion: "",
             imagePrompt: "",
             imageUrl: null,
-            acceptedAt: "2026-08-05T10:00:00.000Z"
+            acceptedAt: "2026-08-05T10:00:00.000Z",
+            reportedCost: null
           }],
           nextCursor: "older-page"
         };
       }
     };
     const dependencies = minimalDependencies(transaction, turnPages);
+    const campaign = {
+      id: campaignId,
+      title: "Observatory Campaign",
+      activeTurnNumber: 1,
+      worldVersionId: currentVersionId,
+      storyLengthProfile: "standard" as const,
+      updatedAt: "2026-08-05T10:00:00.000Z",
+      selectedCharacterId: null,
+      selectedCharacterName: "",
+      characterSnapshot: null,
+      characterProfile: null,
+      characterProfileRevision: 0,
+      status: "active" as const
+    };
+    const syncProjection = {
+      ...campaign,
+      campaign,
+      world: {
+        id: worldId,
+        title: "Glass Stars",
+        versionNumber: 1,
+        genre: "science fantasy",
+        tone: "hopeful",
+        premise: "A glass observatory",
+        backgroundStory: "The stars remember.",
+        character: "",
+        firstAction: "Open the dome.",
+        rules: "",
+        playableCharacters: []
+      },
+      playerConfig: {
+        selectedCharacterId: null,
+        selectedCharacterName: "",
+        characterSnapshot: null,
+        characterProfile: null,
+        characterProfileRevision: 0,
+        rpgStats: [],
+        trackers: [],
+        eventTriggers: [],
+        useRpgStats: false,
+        suppressEventTriggers: false
+      },
+      pendingGeneration: null,
+      generationRecovery: null
+    };
     dependencies.sync.readCampaignSyncSnapshot = async () => ({
       syncToken: "sync-2",
-      projection: { campaignId }
+      projection: syncProjection
     });
     const application = createWorldCampaignApplication(dependencies);
     const scope = { ownerUserId, campaignId };
 
     await expect(application.getCampaignSyncStatus(scope, { since: "sync-1" })).resolves.toEqual({
-      campaignId,
+      ...syncProjection,
       syncToken: "sync-2",
       turnWindowMode: "replace",
       turns: {
@@ -252,12 +357,30 @@ describe("world and campaign application use cases", () => {
       }
     });
     await expect(application.getCampaignSyncStatus(scope, { since: "sync-2" })).resolves.toEqual({
-      campaignId,
+      ...syncProjection,
       syncToken: "sync-2",
       turnWindowMode: "unchanged",
       turns: null
     });
     expect(pageRequests).toEqual([{ scope, request: { before: undefined, limit: 50 } }]);
+  });
+
+  test("requires explicit readonly fields on every public domain projection", () => {
+    expectTypeOf<WorldListView["worlds"][number]["latestVersionId"]>().toEqualTypeOf<string | null>();
+    expectTypeOf<WorldAggregateView["versions"][number]["deletionBlockers"]["campaignTransfers"]>().toEqualTypeOf<number>();
+    expectTypeOf<CampaignListView["campaigns"][number]["worldVersionId"]>().toEqualTypeOf<string>();
+    expectTypeOf<CampaignUpdateView["turnControlStyle"]>().toEqualTypeOf<"action_only" | "flexible_auto" | "flexible_action" | "flexible_scene">();
+    expectTypeOf<CampaignStateEditView["snapshot"]["canonicalFacts"]>().toMatchTypeOf<readonly unknown[]>();
+    expectTypeOf<CharacterProfileView["revision"]>().toEqualTypeOf<number>();
+    expectTypeOf<PlayableCharacterSummaryView["readiness"]["ready"]>().toEqualTypeOf<boolean>();
+    expectTypeOf<CampaignTransferView["sourceFingerprint"]>().toEqualTypeOf<string>();
+    expectTypeOf<CampaignTransferResultView["reused"]>().toEqualTypeOf<boolean>();
+    expectTypeOf<DashboardView["providerCosts"]["totals"][number]["currency"]>().toEqualTypeOf<string>();
+    expectTypeOf<GeneratedWorldPreviewView["content"]["playableCharacters"]>().toMatchTypeOf<readonly unknown[]>();
+    expectTypeOf<GeneratedPlayableCharacterView["character"]["name"]>().toEqualTypeOf<string>();
+    expectTypeOf<CampaignSyncStatusView["campaign"]["activeTurnNumber"]>().toEqualTypeOf<number>();
+    expectTypeOf<CampaignSyncStatusView["world"]["playableCharacters"]>().toMatchTypeOf<readonly unknown[]>();
+    expectTypeOf<CampaignSyncStatusView["playerConfig"]["trackers"]>().toMatchTypeOf<readonly unknown[]>();
   });
 
   test("exposes the complete platform-free responsibility boundary", () => {

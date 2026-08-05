@@ -1,5 +1,6 @@
 import type {
   WorldCampaignApplicationErrorKind,
+  WorldCampaignErrorDetails,
   WorldCampaignTransitionFailure,
   WorldCampaignTransitionFailureReason
 } from "./types.js";
@@ -7,12 +8,12 @@ import type {
 export class WorldCampaignApplicationError extends Error {
   readonly kind: WorldCampaignApplicationErrorKind;
   readonly reason: WorldCampaignTransitionFailureReason;
-  readonly details: Readonly<Record<string, unknown>>;
+  readonly details: WorldCampaignErrorDetails;
 
   constructor(
     kind: WorldCampaignApplicationErrorKind,
     reason: WorldCampaignTransitionFailureReason,
-    details: Readonly<Record<string, unknown>> = {},
+    details: WorldCampaignErrorDetails = {},
   ) {
     super(reason);
     this.name = "WorldCampaignApplicationError";

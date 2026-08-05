@@ -13,6 +13,7 @@ import type {
   PublishedWorldVersion,
   ReplaceCampaignFactInput,
   WorldCampaignCommandContext,
+  WorldCampaignErrorDetails,
   WorldCampaignReadContext,
   WorldCampaignRepositoryResult,
   WorldDraftAggregate,
@@ -28,7 +29,7 @@ function success<T>(value: T): WorldCampaignRepositoryResult<T> {
 
 function failure(
   reason: Parameters<typeof mapWorldCampaignTransitionFailure>[0]["reason"],
-  details?: Readonly<Record<string, unknown>>,
+  details?: WorldCampaignErrorDetails,
 ): WorldCampaignRepositoryResult<never> {
   return details === undefined ? { ok: false, failure: { reason } } : { ok: false, failure: { reason, details } };
 }
@@ -36,6 +37,9 @@ function failure(
 function cloneAndFreeze<T>(value: T): DeepReadonly<T> {
   if (Array.isArray(value)) {
     return Object.freeze(value.map((item) => cloneAndFreeze(item))) as DeepReadonly<T>;
+  }
+  if (value instanceof Date) {
+    return Object.freeze(new Date(value.getTime())) as DeepReadonly<T>;
   }
   if (value !== null && typeof value === "object") {
     const clone: Record<string, unknown> = {};
@@ -45,7 +49,7 @@ function cloneAndFreeze<T>(value: T): DeepReadonly<T> {
   return value as DeepReadonly<T>;
 }
 
-export function publishWorldDraft<Content extends Record<string, unknown>>(
+export function publishWorldDraft<Content extends object>(
   draft: WorldDraftAggregate<Content>,
   request: WorldPublicationRequest,
 ): WorldCampaignRepositoryResult<PublishedWorldVersion<Content>> {
@@ -146,24 +150,28 @@ function requireOwnerScope(scope: OwnerScope): void {
   }
 }
 
-function unwrap<T>(result: WorldCampaignRepositoryResult<T>): T {
+function unwrap<T>(result: WorldCampaignRepositoryResult<T>): DeepReadonly<T> {
   if (!result.ok) throw mapWorldCampaignTransitionFailure(result.failure);
-  return result.value;
+  return cloneAndFreeze(result.value);
 }
 
 export function createWorldCampaignApplication(
   dependencies: WorldCampaignApplicationDependencies,
 ): WorldCampaignApplication {
-  const read = async <T>(scope: OwnerScope, work: (transaction: WorldCampaignReadContext) => Promise<T>): Promise<T> => {
+  const read = async <T>(scope: OwnerScope, work: (transaction: WorldCampaignReadContext) => Promise<T>): Promise<DeepReadonly<T>> => {
     requireOwnerScope(scope);
-    return dependencies.transaction.read(work);
+    return cloneAndFreeze(await dependencies.transaction.read(work));
   };
   const command = async <T>(scope: OwnerScope, work: (transaction: WorldCampaignCommandContext) => Promise<T>): Promise<T> => {
     requireOwnerScope(scope);
     return dependencies.transaction.command(work);
   };
-  const transition = <T>(scope: OwnerScope, work: (transaction: WorldCampaignCommandContext) => Promise<WorldCampaignRepositoryResult<T>>): Promise<T> =>
+  const transition = <T>(scope: OwnerScope, work: (transaction: WorldCampaignCommandContext) => Promise<WorldCampaignRepositoryResult<T>>): Promise<DeepReadonly<T>> =>
     command<WorldCampaignRepositoryResult<T>>(scope, work).then(unwrap);
+  const collaborate = async <T>(scope: OwnerScope, work: () => Promise<T>): Promise<DeepReadonly<T>> => {
+    requireOwnerScope(scope);
+    return cloneAndFreeze(await work());
+  };
 
   return {
     listWorlds: (scope) => read(scope, (database) => dependencies.worlds.listWorlds(database, scope)),
@@ -195,43 +203,28 @@ export function createWorldCampaignApplication(
     getCampaignSyncStatus: async (scope, request): Promise<CampaignSyncStatusView> => {
       const snapshot = await read(scope, (database) => dependencies.sync.readCampaignSyncSnapshot(database, scope));
       if (request.since === snapshot.syncToken) {
-        return Object.freeze({ ...snapshot.projection, syncToken: snapshot.syncToken, turnWindowMode: "unchanged", turns: null });
+        return cloneAndFreeze({ ...snapshot.projection, syncToken: snapshot.syncToken, turnWindowMode: "unchanged" as const, turns: null });
       }
       const page = await dependencies.turnPages.readTurnPage(scope, { before: undefined, limit: SYNC_TURN_WINDOW_LIMIT });
-      return Object.freeze({
+      return cloneAndFreeze({
         ...snapshot.projection,
         syncToken: snapshot.syncToken,
         turnWindowMode: "replace",
-        turns: Object.freeze({ campaignId: scope.campaignId, turns: page.turns, nextCursor: page.nextCursor })
+        turns: { campaignId: scope.campaignId, turns: page.turns, nextCursor: page.nextCursor }
       });
     },
     getCampaignCharacterProfile: (scope) => read(scope, (database) => dependencies.characters.getCampaignCharacterProfile(database, scope)),
     updateCampaignCharacterProfile: (scope, request) => transition(scope, (database) => dependencies.characters.updateCampaignCharacterProfile(database, scope, request)),
-    organizeCampaignCharacterProfile: (scope, request) => {
-      requireOwnerScope(scope);
-      return dependencies.characterOrganizer.organizeCampaignCharacterProfile(scope, request);
-    },
-    organizeWorldCharacterProfile: (scope, request) => {
-      requireOwnerScope(scope);
-      return dependencies.characterOrganizer.organizeWorldCharacterProfile(scope, request);
-    },
+    organizeCampaignCharacterProfile: (scope, request) => collaborate(scope, () => dependencies.characterOrganizer.organizeCampaignCharacterProfile(scope, request)),
+    organizeWorldCharacterProfile: (scope, request) => collaborate(scope, () => dependencies.characterOrganizer.organizeWorldCharacterProfile(scope, request)),
     previewCampaignWorldTransfer: (scope, request) => read(scope, (database) => dependencies.transfers.previewCampaignWorldTransfer(database, scope, request)),
     transferCampaignWorld: (scope, request) => transition(scope, (database) => dependencies.transfers.transferCampaignWorld(database, scope, request)),
     getDashboard: (scope) => read(scope, (database) => dependencies.dashboard.getDashboard(database, scope)),
     getSessionProfile: (scope) => read(scope, (database) => dependencies.sessionProfile.getSessionProfile(database, scope)),
     updateSessionProfile: (scope, request) => transition(scope, (database) => dependencies.sessionProfile.updateSessionProfile(database, scope, request)),
-    generateWorldPreview: (scope, request) => {
-      requireOwnerScope(scope);
-      return dependencies.worldGeneration.generateWorldPreview(scope, request);
-    },
-    generatePlayableCharacterPreview: (scope, request) => {
-      requireOwnerScope(scope);
-      return dependencies.worldGeneration.generatePlayableCharacterPreview(scope, request);
-    },
-    generatePlayableCharacter: (scope, request) => {
-      requireOwnerScope(scope);
-      return dependencies.worldGeneration.generatePlayableCharacter(scope, request);
-    },
+    generateWorldPreview: (scope, request) => collaborate(scope, () => dependencies.worldGeneration.generateWorldPreview(scope, request)),
+    generatePlayableCharacterPreview: (scope, request) => collaborate(scope, () => dependencies.worldGeneration.generatePlayableCharacterPreview(scope, request)),
+    generatePlayableCharacter: (scope, request) => collaborate(scope, () => dependencies.worldGeneration.generatePlayableCharacter(scope, request)),
     createWorldGenerationProgress: (scope) => transition(scope, (database) => dependencies.progress.createWorldGenerationProgress(database, scope)),
     updateWorldGenerationProgress: (scope, update) => transition(scope, (database) => dependencies.progress.updateWorldGenerationProgress(database, scope, update)),
     getWorldGenerationProgress: (scope) => read(scope, (database) => dependencies.progress.getWorldGenerationProgress(database, scope)),
