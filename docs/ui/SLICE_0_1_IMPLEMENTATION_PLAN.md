@@ -87,7 +87,7 @@ contain this plan.
 | Task 12 | B3 — worker concurrency and fair lanes | **Complete** | Implementation `312ebaa`, correction `57147c7`, docs `8593e3e`; scoped implementation review plus clean correction re-review; full unit 1,150/1,150, implementation full PostgreSQL 232/232, correction-relevant PostgreSQL 68/68; C0 concurrency 1/2/4 benchmark and duplicate-turn guard passed |
 | Task 13b | B4b — play-loop read profiling/optimization | **Complete** | Implementation `1d6b766`, correction `ff7f56e`; scoped review and correction re-review approved; full unit 1,156/1,156, full PostgreSQL 234/234, C0 read benchmark passed |
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | **Complete** | `e2a15e6` through `c7c8353`; contracts, cutover, durability, privacy, ownership, and all 18 Fastify route-parity gates independently approved |
-| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | In progress — 14b1/14b2a/14b2b/14b2c complete | `3e0dc8b`, `6f77f74`, `5d0c3c2`, `dae333d`, `261e224`, `aeeba49`, `92f03a7`; independent reviews approved; 14b3 atomic cutover is next |
+| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | In progress — 14b1/14b2a/14b2b/14b2c/14b3 complete | `3e0dc8b`, `6f77f74`, `5d0c3c2`, `dae333d`, `261e224`, `aeeba49`, `92f03a7`, `21f0722`, `ad9dbc1`, `2e5daa7`; independent reviews approved; 14b4 completion audit is next |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | Not started | — |
 | Task 14d | B5d — providers and prompt configuration (removes none) | Not started | — |
 | Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
@@ -7145,6 +7145,41 @@ tests**, the full **1,213-test** unit suite, `pnpm check`, `pnpm build`, range
 diff checks, and precheck; the scoped correction re-review approved the exact
 `aeeba49..92f03a7` range without new findings. The new direct batch seam is
 deliberately not live yet: **14b3** is the next atomic consumer cutover.
+
+**Task 14b3 verification (2026-08-05, complete):** `21f0722` and `ad9dbc1`
+began the consumer cutover; independent review rejected that range because it
+relocated the legacy Chronicle body, bypassed the guarded batch repository,
+reversed API/runtime composition, regressed metrics, retained optional
+fallbacks, and left the full unit suite red. Correction `2e5daa7` completes the
+atomic cutover: runtime now injects required API and worker memory applications;
+every generation, transfer, world, import, correction, rewind, branch, archive,
+and benchmark caller receives the exact transaction port; the worker executes
+bounded pages through guarded `commitClaimBatch`; stale work versions requeue;
+the full safe metrics/preview contract remains compatible with Nexus; and both
+the original and renamed legacy memory-service files and symbols are absent.
+The scoped correction re-review marked all five findings addressed with no new
+findings. Fresh controller verification passed **1,220/1,220 unit tests**,
+**264/264 real-PostgreSQL integration tests**, `pnpm check`, `pnpm build`,
+legacy-file/symbol deletion scans, boundary scans, range diff checks, and
+project-memory prechecks.
+
+**Task 14b4 — Chronicle completion audit (next):** Treat this as a separately
+briefed and reviewed audit checkpoint, not as inferred coverage from 14b3.
+Add executable real-Fastify/PostgreSQL parity for all six memory routes plus the
+generic job read, covering success, invalid input, missing/foreign scope,
+disabled conflicts, duplicate/retry behavior, resumable progress, and fixed
+safe public failures. Exercise the composed production worker through claim,
+bounded retrieval, heartbeat/reclaim, stale-work requeue, atomic vector/cost/
+progress commit, rebuild, failure, and completion races. Prove accepted turns
+and campaign state remain authoritative; rejected/incomplete generations write
+no Chronicle state; summaries and embeddings rebuild from authoritative rows;
+and retrieval/reindex cannot cross owner, campaign, world, or world-version
+scope. Re-run import, transfer, correction, rewind, branch, replacement, and
+accepted-fiction rehome coverage using caller-owned transactions. Finish with
+static audits proving no legacy memory symbol/file, cross-role memory allowlist
+entry, API-to-runtime import, anonymous replacement callback, or optional
+memory fallback remains. Record exact commands, pass/skip counts, base/head
+SHAs, and independent review before marking Task 14b complete or starting 14c.
 
 ### Task 14c — B5c: identity, worlds, versions, and campaigns
 
