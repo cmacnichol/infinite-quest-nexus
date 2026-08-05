@@ -87,7 +87,7 @@ contain this plan.
 | Task 12 | B3 — worker concurrency and fair lanes | **Complete** | Implementation `312ebaa`, correction `57147c7`, docs `8593e3e`; scoped implementation review plus clean correction re-review; full unit 1,150/1,150, implementation full PostgreSQL 232/232, correction-relevant PostgreSQL 68/68; C0 concurrency 1/2/4 benchmark and duplicate-turn guard passed |
 | Task 13b | B4b — play-loop read profiling/optimization | **Complete** | Implementation `1d6b766`, correction `ff7f56e`; scoped review and correction re-review approved; full unit 1,156/1,156, full PostgreSQL 234/234, C0 read benchmark passed |
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | **Complete** | `e2a15e6` through `c7c8353`; contracts, cutover, durability, privacy, ownership, and all 18 Fastify route-parity gates independently approved |
-| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | In progress — 14b1/14b2a complete | `3e0dc8b`, `6f77f74`, `5d0c3c2`; independent 14b2a review approved; 14b2b direct bindings are next |
+| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | In progress — 14b1/14b2a/14b2b complete | `3e0dc8b`, `6f77f74`, `5d0c3c2`, `dae333d`, `261e224`; independent reviews approved; 14b2c PostgreSQL matrix is next |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | Not started | — |
 | Task 14d | B5d — providers and prompt configuration (removes none) | Not started | — |
 | Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
@@ -7104,6 +7104,28 @@ and `pnpm build`; diff and precheck passed. The independent scoped reviewer
 approved the exact `fbed296..5d0c3c2` range. **14b2b** is next; the uncommitted
 repository/runtime scaffold is not evidence of completion and must directly bind
 all caller-owned transaction operations before it may be committed.
+
+**Task 14b2b verification (2026-08-05, complete):** `dae333d` binds all six
+`MemoryGenerationTransactionPort` operations directly to the exact
+caller-owned PostgreSQL client; no operation uses a `MemoryService` callback,
+compatibility factory, nested transaction, or pool fallback. The direct adapter
+preserves explicit owner/campaign/world-version scope, accepted-fiction and
+derived-memory sanitization, canonical facts/entity attribution, correction
+provenance (`source_state_edit_id` with null Chronicle turn provenance), safe
+preview diagnostics, and atomic stale-work-version requeue. Runtime bindings
+load/fingerprint/health/cost against the caller context and enforce enabled
+embedding profile priority, text fallback only without one, and image-profile
+exclusion. The first scoped review found two important defects; correction
+`261e224` moves post-claim retrieval/dispatch through the existing
+lease-fenced `failClaim` policy and enforces the same owner-scoped provider
+policy before configuration persistence and enqueue. The correction re-review
+approved both fixes with no new breakage. Fresh controller verification passed
+the **22/22** corrected adapter/repository tests, the full unit suite,
+`pnpm check`, `pnpm build`, diff checks, and precheck. The two
+`chronicle-repository` PostgreSQL cases are skipped without `TEST_DATABASE_URL`
+and are deliberately not counted as completion evidence: **14b2c** now owns
+the full real-PostgreSQL rollback, ownership, race, lease, and idempotence
+matrix before live consumer cutover.
 
 ### Task 14c — B5c: identity, worlds, versions, and campaigns
 
