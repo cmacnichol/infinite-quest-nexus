@@ -2,10 +2,10 @@
 
 ## Status
 
-Implemented and verified the first coherent additive Task 14c2a portion in
-commit `7ccf786` (`Add world repository adapters`). No legacy service, route,
-runtime, worker, portable archive, multipart, filesystem, or provider code was
-changed.
+Implemented and verified the requested additive Task 14c2a transaction, world,
+and campaign-lifecycle adapter portion in commits `7ccf786` and `dc73210`. No
+legacy service, route, runtime, worker, portable archive, multipart, filesystem,
+or provider transport code was changed.
 
 ## Implemented scope
 
@@ -22,7 +22,13 @@ changed.
   - immutable version publication and status update;
   - published-version fork;
   - world deletion and world-version deletion, including dependency blockers;
+  - campaign list, create, update, delete, and playable-character reads;
   - explicit campaign migration to a newer published version of the same world.
+- Campaign creation validates readiness and character selection, takes a key-
+  share lock on the published version, snapshots the selected character, and
+  initializes campaign state in the caller-owned transaction.
+- World deletion locks every owned published version before counting blockers
+  and deleting, closing the concurrent campaign-insert check/delete race.
 - Adapter source timestamps remain raw `Date` values. ISO canonicalization stays
   in the completed application layer.
 - Added the factory to the database package barrel.
@@ -54,9 +60,20 @@ pnpm vitest run --config vitest.integration.config.ts \
 Result: 1 passed and 3 failed. The failures were the expected missing adapter
 methods: `updateWorldDraft` and `publishWorld` were not functions.
 
+### Round-one correction RED
+
+The review-driven expansion produced a real-PostgreSQL RED with 5 passing and
+3 failing tests. Two failures showed the absent campaign lifecycle methods. The
+coordinated race test held an uncommitted campaign FK/key-share lock, proved the
+delete transaction was waiting through `pg_blocking_pids`, committed the writer,
+and observed raw PostgreSQL FK error `23503` from `deleteWorld`.
+
+A later response-parity RED proved that campaign creation omitted the selected
+`turnControlStyle`; the correction includes that field.
+
 ### GREEN
 
-The same real-PostgreSQL command passed 5/5 after the minimal implementation.
+The same real-PostgreSQL command passed 8/8 after the correction.
 It covers:
 
 - explicit-owner create/list and foreign-owner invisibility;
@@ -65,7 +82,15 @@ It covers:
 - draft revision locking, publication immutability, status, fork, and get;
 - referenced world/version deletion blockers and successful deletion;
 - cross-world migration rejection plus same-world newer-version migration,
-  persistence, audit row, and raw migration timestamp.
+  persistence, audit row, raw migration timestamp, and migration/transfer
+  deletion blockers;
+- owner-scoped campaign create/list/update/delete and playable-character reads;
+- campaign state initialization, active Chronicle-work deletion blocking, and
+  raw campaign list/update dates;
+- foreign-owner invisibility for world get/mutate/delete and campaign create,
+  list, update, delete, character reads, and migration;
+- deterministic world deletion/campaign creation serialization returning typed
+  `deletion_blocked` rather than a raw FK error.
 
 `pnpm check` initially found a local type-only helper error: a class constructor
 was passed to `Parameters<>`, causing 23 derivative `TS2345` errors. Typing the
@@ -74,11 +99,11 @@ no SQL or runtime behavior changed.
 
 ## Verification
 
-- Focused real-PostgreSQL adapter suite: 1 file, 5/5 passed.
-- `pnpm check`: passed; 639 repository/data-safety candidates checked.
+- Focused real-PostgreSQL adapter suite: 1 file, 8/8 passed.
+- `pnpm check`: passed; 640 repository/data-safety candidates checked.
 - `pnpm build`: passed, including both web builds.
 - `pnpm test:unit`: 107 files, 1,238/1,238 passed.
-- `pnpm test:integration`: 27 files, 276/276 passed.
+- `pnpm test:integration`: 27 files, 279/279 passed.
 - `git diff --check`: passed.
 - Projectmem prechecks for all changed files and the report: passed; no
   projectmem write tool was used.
@@ -86,18 +111,17 @@ no SQL or runtime behavior changed.
 ## Commits
 
 - `7ccf786` — `Add world repository adapters`
+- `dc73210` — `Complete campaign lifecycle adapters`
 
 ## Exact deferred scope
 
-The following remains Task 14c2a work; this recovery checkpoint does not claim
-14c2a complete:
+The following remains outside this requested Task 14c2a recovery portion:
 
-- campaign lifecycle adapter operations: list, create, update, delete;
-- world-version playable-character reads;
 - the persistence side of portable world JSON preview/import/export, while all
   archive, multipart, streaming, and filesystem I/O remains Task 14e-owned;
 - campaign-discovery promotion into a world draft;
-- broader owner/locking parity cases for those deferred operations.
+- broader parity cases for those deferred operations and blocker categories not
+  explicitly exercised by this focused matrix.
 
 All Task 14c2b work remains deferred: campaign sync/state, player configuration,
 rewind, branch, fences, rollback, provenance, and bounded reader reuse.
