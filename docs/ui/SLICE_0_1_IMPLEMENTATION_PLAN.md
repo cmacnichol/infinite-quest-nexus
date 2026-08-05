@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 contracts/inventory complete; 14e2 PostgreSQL and filesystem/archive adapters are next |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 initial contracts/inventory complete; 14e1R contract correction is next, then split 14e2 adapters |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -7709,24 +7709,70 @@ Promise-rejection, usable source/destination/retrieval, and preview-to-commit
 binding gaps. Verification passed 1,256 unit tests (2 expected skips),
 `pnpm check`, build, diff, and final independent re-review; no adapter,
 composition, route, worker, migration, or legacy-service behavior changed.
-**14e2 is next.**
+**14e1R is next; 14e2 begins only after its contract-completeness correction is
+reviewed.**
 
-**14e2 — PostgreSQL and filesystem/archive adapters (additive only).** Implement
-the owner-scoped database repositories and an archive/filesystem capability
-adapter behind the 14e1 ports. Streaming ingestion/extraction must enforce each
-entry and aggregate compressed/uncompressed limits, abort and clean up partial
-work deterministically, reject traversal, absolute paths, links/reparse points,
-and containment changes between inspection and open, and never rely on a path
-prefix alone. Verify MIME/signature and content hash before persistence; retain
-only allowlisted diagnostic categories rather than caught exception text. Keep
-filesystem staging/finalization and database mutation coordinated by an explicit
-transaction-aware cleanup protocol so rollback, retry, and crash recovery cannot
-publish an unowned or partial asset. Preserve established asset remapping,
-campaign archive/export, legacy Story, Infinite Worlds/CYOA, and image metadata
-behavior without moving their domain rules into transport. Add real-PostgreSQL
-contract matrices for owner isolation, source provenance, transaction rollback,
-idempotency, archive expiry/abort cleanup, and the worker-facing asset port; do
-not switch production composition or remove legacy authority yet.
+**14e1R — contract completeness correction (additive only).** The initial 14e1
+review froze portable preview/commit semantics but omitted three existing asset
+operations and the upload-to-staging seam needed to keep 14e3 behind the
+application boundary. Add owner-scoped asset metadata update, original/derivative
+delivery descriptor, and nullable clear-selection commands; `null` must mean an
+explicit authorized clear, not an omitted field. Add a named,
+adapter-private `PortableArchiveStagingPort` that accepts only a bounded
+owner-bound upload capability and mints an opaque `PortableStagedInput`; it
+must never expose a filesystem path, stream, raw error, or caller-supplied
+owner. Update pure fake-adapter and compile-time contract tests. Do not create
+filesystem/database adapters, switch API/worker composition, change routes, or
+cut over a consumer in 14e1R.
+
+**14e2 — PostgreSQL and filesystem/archive adapters (additive only).** Deliver
+the following sequential, independently reviewed checkpoints. Each adds only
+new adapter/composition-test code; no production route, worker, runtime
+illustration binding, allowlist, or legacy service changes until 14e3.
+
+**14e2a — secure filesystem/archive capability.** Implement the named staging,
+verified read/extract, immutable export-artifact, identity-safe cleanup, and
+safe-diagnostic capability behind the 14e1R port. Enforce per-entry and
+aggregate compressed/uncompressed limits and deterministic abort/partial-upload
+cleanup. Reject absolute/traversal paths, symlinks, junctions/reparse points,
+non-regular files, and containment changes between inspection and open. Never
+accept path-prefix validation as sufficient: canonicalize the root, inspect each
+segment, use descriptor-anchored operations plus pre/post identity checks where
+the platform supports them, and fail closed where an equivalent safe primitive
+is unavailable. Verify MIME/signature/content hash before publication; all
+errors crossing the capability are allowlisted diagnostic codes only. This
+checkpoint must replace the unsafe backfill semantics recorded in #0446:
+`technical_metadata` may retain an `AssetFilesystemDiagnosticCode`, never a
+caught exception message, path, or storage-driver detail. Reuse the established
+strong archive-I/O attack tests where possible, but do not treat a path
+preflight/recheck alone as a safe mutation guarantee.
+
+**14e2b — owner-scoped PostgreSQL repositories.** Implement
+`asset-repository.ts` for list/facets, metadata update, original/derivative
+descriptors, set/clear selection, worker backfill claim/lease/update, and
+owner/content-scoped asset references. Implement `import-repository.ts` for
+staged-input, destination-bound preview, retrieval, expiry/consumption,
+idempotency, and provenance records. All mutation locks and reads must be
+owner-scoped; worker owner comes from the claimed record, never a browser value.
+Use caller-owned transactions and a durable operation record: under the
+owner/content lock, record intent/reference and safe cleanup/finalization state;
+after rollback clean identity-safely, and after process loss let an owner-scoped
+reaper remove only unreferenced candidates under the same lock and identity
+checks. An orphan must remain unreadable through database owner scope. Preserve
+asset remapping, campaign export, legacy Story, Infinite Worlds/CYOA, and image
+metadata semantics without moving business rules into a transport layer.
+
+**14e2c — additive adapter contract matrix.** Compose the 14e2a capability and
+14e2b repositories in test-only/additive archive and illustration adapters.
+Prove real-PostgreSQL owner isolation, nullable selection clear, metadata and
+derivative delivery, backfill lease/race behavior, database-derived worker
+owner, enum-only diagnostic persistence, all eight preview/commit variants,
+foreign-handle denial, source provenance as non-authority, idempotency, expiry/
+supersede/abort cleanup, rollback/retry/crash-reaper recovery, and failed image
+asset persistence leaving no reachable partial file. Run campaign ZIP, legacy
+Story, Infinite Worlds/CYOA, asset remapping, and image metadata behavior
+through the new adapters. Do not change a production consumer or delete old
+authority in this checkpoint.
 
 **14e3 — atomic API/worker cutover and legacy removal.** Create named API and
 worker asset/import compositions and a thin archive API adapter. In one reviewed
