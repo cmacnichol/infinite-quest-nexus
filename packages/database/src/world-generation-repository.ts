@@ -287,7 +287,7 @@ export function createPostgresWorldGenerationProgressRepository(): WorldGenerati
         phase: row.phase,
         progressPercent: row.progress_percent,
         message: row.message,
-        ...(row.error_message === null ? {} : { errorMessage: row.error_message })
+        ...(row.error_message ? { errorMessage: row.error_message } : {})
       };
     },
 

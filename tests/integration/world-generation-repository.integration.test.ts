@@ -232,6 +232,57 @@ integration("world generation supporting PostgreSQL adapters", () => {
     ))).resolves.toBeNull();
   });
 
+  it("omits a persisted blank progress error while preserving non-empty errors", async () => {
+    const progressKey = `world-generation-error-${crypto.randomUUID()}`;
+    progressKeys.push(progressKey);
+    const createRepository = Reflect.get(repositoryModule, "createPostgresWorldGenerationProgressRepository");
+    expect(createRepository).toBeTypeOf("function");
+    const repository = createRepository() as WorldGenerationProgressRepositoryPort;
+    const transactions = createPostgresWorldCampaignTransactionPort(pool);
+    const scope = { ownerUserId, progressKey };
+
+    unwrap(await transactions.command((transaction) => repository.createWorldGenerationProgress(
+      transaction,
+      scope,
+    )));
+    unwrap(await transactions.command((transaction) => repository.updateWorldGenerationProgress(
+      transaction,
+      scope,
+      {
+        status: "processing",
+        phase: "generating",
+        progressPercent: 50,
+        message: "Generating",
+        errorMessage: ""
+      },
+    )));
+    expect(await transactions.read((transaction) => repository.getWorldGenerationProgress(
+      transaction,
+      scope,
+    ))).toEqual({
+      status: "processing",
+      phase: "generating",
+      progressPercent: 50,
+      message: "Generating"
+    });
+
+    unwrap(await transactions.command((transaction) => repository.updateWorldGenerationProgress(
+      transaction,
+      scope,
+      {
+        status: "failed",
+        phase: "failed",
+        progressPercent: 50,
+        message: "Generation failed",
+        errorMessage: "Provider unavailable"
+      },
+    )));
+    expect(await transactions.read((transaction) => repository.getWorldGenerationProgress(
+      transaction,
+      scope,
+    ))).toMatchObject({ errorMessage: "Provider unavailable" });
+  });
+
   it("rejects invalid or expired progress updates without mutation", async () => {
     const progressKey = `world-generation-invalid-${crypto.randomUUID()}`;
     progressKeys.push(progressKey);
