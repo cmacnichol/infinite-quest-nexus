@@ -7380,6 +7380,16 @@ Split this domain internally:
    diff, and precheck passed. **14c2b-history (rewind and branch) is next**;
    no route/runtime/worker/legacy-service cutover occurred.
 
+   **14c2b-rewind completion (2026-08-05):** `d211364` adds the additive,
+   caller-owned, owner-scoped rewind repository operation with exact active-turn
+   and state-revision fences. Test correction `825cf4a` proves invalid-target
+   no-mutation behavior, every active-work no-delete guard, deterministic
+   post-delete rollback, and target-bounded cleanup while retaining durable
+   replacement provenance. The correction re-review approved with zero
+   findings; focused real-PostgreSQL coverage passed 21/21 with `pnpm check`
+   and diff checks. **14c2b-branch is next**; no route/runtime/worker/legacy
+   service cutover occurred.
+
 3. **14c3 — atomic composition and transport cutover.** Create named API
    adapters plus `services/runtime/src/world-campaign-composition.ts`, bind every
    `OwnerScope` at Fastify composition, and cut over all listed routes and any
