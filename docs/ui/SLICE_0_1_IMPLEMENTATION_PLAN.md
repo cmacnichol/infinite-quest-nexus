@@ -7330,6 +7330,17 @@ Split this domain internally:
    reviewed; none edits routes/runtime/worker/legacy services or uses throwing
    placeholders, anonymous callbacks, nested transaction wrappers, credentials,
    or provider transport. 14c3 may consume only the final combined factories.
+
+   **14c2a completion (2026-08-05):** `7ccf786`, `dc73210`, and `9a8387d`
+   add caller-owned PostgreSQL transaction/world/campaign-lifecycle adapters;
+   the accompanying recovery evidence is in `4ddf393`, `1e52ca2`, and
+   `26df559`. Two correction rounds restored the complete lifecycle surface,
+   serialized world deletion and target-version migration against concurrent
+   writes, and preserved transaction-coupled Chronicle embedding bootstrap.
+   Final scoped review approved with zero findings. Focused real-PostgreSQL
+   coverage passed 10/10; the final implementation verification passed 1,238
+   unit tests, 281 integration tests, `pnpm check`, build, diff, and precheck.
+   14c2b is next; no route/runtime/worker/legacy-service cutover occurred.
 3. **14c3 — atomic composition and transport cutover.** Create named API
    adapters plus `services/runtime/src/world-campaign-composition.ts`, bind every
    `OwnerScope` at Fastify composition, and cut over all listed routes and any
