@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 contract and ownership inventory is next; readiness corrections recorded below |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -7672,16 +7672,73 @@ routes, asset archive/service/security, legacy/CYOA/Infinite Worlds import,
 campaign archive/transfer, migrations, and image-pipeline suites plus new pure
 application/repository/API-worker adapter tests.
 
-14e1 freezes asset library/selection/backfill and preview/commit/export use
-cases with explicit owner scope and opaque portable provenance. 14e2 implements
-PostgreSQL plus filesystem/archive adapters with bounded streaming, path
-containment, symlink/reparse rejection, hash/MIME verification, cleanup, and
-transactional ownership. 14e3 switches archive routes, imports, exports, image/
-world consumers, and worker backfill; removes the final asset allowlist entry
-and all temporary asset bindings; and removes old callable business services.
-14e4 proves aggregate archive caps, rollback/cleanup, owner assignment,
-cross-install source IDs never authorizing records, complete portable JSON/ZIP
-round trips, and no private campaign/export fixture enters source control.
+**14e1 — contracts and complete ownership inventory (additive only).** Freeze
+separate asset-library/selection/metadata-backfill and portable
+preview/commit/export application ports. Every command must carry an explicit
+`OwnerScope` plus the required campaign/world/version/asset scope; the API
+binds the server-resolved owner, while worker backfill receives only the
+database-derived owner for its claimed work. Model portable source installation
+IDs and imported-record IDs as opaque provenance, never as authorization or a
+foreign key usable without the local owner check. Define validated preview
+handles, idempotency semantics, caller-owned transaction context, cleanup
+ownership, bounded safe filesystem/archive diagnostic codes, and result views
+that cannot expose private archive paths or raw errors. World JSON must use the
+already owner-bound `PortableWorldApplicationPort` for export, preview, and
+commit; 14e must not recreate world/version SQL. Before adding adapters,
+inventory and disposition every current production caller: `server.ts` asset
+routes and direct legacy imports, `archive-routes.ts`, worker metadata backfill,
+runtime illustration image/composition/role bindings, archive/import/export
+services, `archive-io.ts`, and the final `service-helpers.ts` asset consumer.
+Assign each to API transport, worker scheduling, a named application
+composition, or a deletion in 14e3. Add pure contract/use-case tests and
+compile-time no-cross-role import coverage; no route, worker, or legacy-service
+cutover occurs in 14e1.
+
+**14e2 — PostgreSQL and filesystem/archive adapters (additive only).** Implement
+the owner-scoped database repositories and an archive/filesystem capability
+adapter behind the 14e1 ports. Streaming ingestion/extraction must enforce each
+entry and aggregate compressed/uncompressed limits, abort and clean up partial
+work deterministically, reject traversal, absolute paths, links/reparse points,
+and containment changes between inspection and open, and never rely on a path
+prefix alone. Verify MIME/signature and content hash before persistence; retain
+only allowlisted diagnostic categories rather than caught exception text. Keep
+filesystem staging/finalization and database mutation coordinated by an explicit
+transaction-aware cleanup protocol so rollback, retry, and crash recovery cannot
+publish an unowned or partial asset. Preserve established asset remapping,
+campaign archive/export, legacy Story, Infinite Worlds/CYOA, and image metadata
+behavior without moving their domain rules into transport. Add real-PostgreSQL
+contract matrices for owner isolation, source provenance, transaction rollback,
+idempotency, archive expiry/abort cleanup, and the worker-facing asset port; do
+not switch production composition or remove legacy authority yet.
+
+**14e3 — atomic API/worker cutover and legacy removal.** Create named API and
+worker asset/import compositions and a thin archive API adapter. In one reviewed
+checkpoint, migrate `server.ts` asset/import routes, `archive-routes.ts`,
+legacy Story and Infinite Worlds/CYOA preview/commit paths, campaign/world JSON
+and ZIP export, image/world consumers, runtime illustration bindings, and worker
+asset metadata backfill to the new ports. API code retains multipart parsing,
+validation, server-owner binding, and response mapping only; the worker retains
+scheduling only. Remove the worker-to-API asset import and its
+`CROSS_ROLE_IMPORT_ALLOWLIST` entry, every temporary runtime asset/filesystem
+binding, and the final `service-helpers.ts` consumer. Delete or reduce the old
+asset/import/archive callable services only after production-composed route and
+worker tests prove the replacements; no anonymous compatibility callback,
+browser-supplied owner, raw path, or raw filesystem error may remain.
+
+**14e4 — parity, security, and completion audit.** Re-measure the complete
+function/import/allowlist inventory and prove each old callable authority is
+deleted or reduced to documented transport/runtime work. Run pure use-case,
+adapter contract, real-Fastify, and real-PostgreSQL matrices covering
+cross-owner denial; local owner assignment; cross-install source IDs as
+provenance only; campaign/world/version scope; JSON and ZIP round trips;
+asset/hash/MIME remapping; entry/aggregate caps; malformed/truncated/aborted
+archives; traversal/link/reparse/containment attacks; transaction rollback,
+retry, expiry, and crash cleanup; image backfill; and no private campaign or
+export fixture in source control. Run full archive, asset, import-memory,
+campaign-transfer, CYOA/Infinite Worlds, image-pipeline, migration, and route
+suites plus check, build, diff, precheck, and independent review. Record the
+remaining cross-role allowlist count (it must be zero) and the exact safe
+diagnostic behavior for Task 14f.
 
 - [ ] Treat each numbered domain and its four frozen checkpoints as a
   separately briefed/reviewed commit series. Re-measure route/function/import
@@ -7724,11 +7781,11 @@ components, styles, browser visual tests, or any other `apps/web-next` UI work.
 - [ ] Verify API and worker roles have no implementation imports from one
   another across every extracted domain; record the exact boundary command and
   reviewed exceptions (normally none).
-- [ ] Prove both cleanup inventories reach zero: the five Task 14 cross-role
-  allowlist entries and every temporary runtime collaborator recorded by 10d or
-  Tasks 14a-14c. Run the boundary scanner, search runtime composition for each
-  recorded legacy symbol, and fail the audit on any anonymous replacement
-  callback or unowned exception.
+- [ ] Prove both cleanup inventories reach zero: the one remaining Task 14
+  cross-role asset allowlist entry and every temporary runtime collaborator
+  recorded by 10d or Tasks 14a-14c. Run the boundary scanner, search runtime
+  composition for each recorded legacy symbol, and fail the audit on any
+  anonymous replacement callback or unowned exception.
 - [ ] For every current business source named in the 14a-14e inventories, record
   one disposition: deleted, reduced to a transport adapter, or replaced by a
   named application/database/runtime module. Verify no old and new callable
@@ -7737,9 +7794,9 @@ components, styles, browser visual tests, or any other `apps/web-next` UI work.
   `app-metadata.ts` may remain only within their documented transport/runtime
   responsibilities.
 - [ ] **Assert `CROSS_ROLE_IMPORT_ALLOWLIST` is empty.** This is the crisp,
-  machine-checkable form of the criterion above. The list holds six entries
-  today: Task 10e removes `generation-service.js`, 14a removes three, 14b one,
-  and 14e one. If it is non-empty at this gate, some domain is incomplete
+  machine-checkable form of the criterion above. The list holds the one
+  Task-14e worker-to-API asset entry today; 14e must remove it. If it is
+  non-empty at this gate, some domain is incomplete
   regardless of what its report claims. Add a test asserting emptiness so the
   condition cannot regress after the audit.
 - [ ] Re-run all pure application, adapter contract, real-PostgreSQL,
