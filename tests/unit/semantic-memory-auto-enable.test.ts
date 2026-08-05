@@ -1,172 +1,110 @@
 import { describe, expect, it, vi } from "vitest";
-import { autoEnableCampaignEmbeddingIfAvailable, resolveCampaignEmbeddingProviderId } from "../../services/runtime/src/chronicle-platform-service.js";
+import type { ChronicleEmbeddingProviderPort } from "../../services/runtime/src/chronicle-platform-adapter.js";
+import { resolveChronicleEmbeddingProviderId } from "../../services/runtime/src/chronicle-platform-bindings.js";
+import { createPostgresChronicleGenerationTransactionPort } from "../../packages/database/src/chronicle-repository.js";
+import type { DatabaseClient } from "../../packages/database/src/pool.js";
 import { DEFAULT_EMBEDDING_MODEL } from "../../packages/contracts/src/memory.js";
+
+const scope = { ownerUserId: "owner-id", campaignId: "campaign-id", worldVersionId: "wv-1" };
 
 describe("Semantic memory auto-enabling on campaign creation", () => {
   it("resolves the dedicated embedding provider when one is enabled", async () => {
-    const mockClient = {
-      query: vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
-        if (sql.includes("FROM provider_profiles WHERE owner_user_id = $1 AND provider_role = 'embedding'")) {
-          return { rowCount: 1, rows: [{ id: "embed-provider-id" }] };
-        }
-        if (sql.includes("SELECT id, is_default FROM provider_profiles")) {
-          return { rows: [{ id: "embed-provider-id", is_default: true }] };
-        }
-        return { rows: [] };
-      })
-    } as any;
+    const database = {
+      query: vi.fn(async (sql: string) => sql.includes("provider_role = 'embedding'")
+        ? { rows: [{ id: "embed-provider-id", is_default: true }] }
+        : { rows: [] })
+    } as unknown as DatabaseClient;
 
-    const providerId = await resolveCampaignEmbeddingProviderId(mockClient, "owner-id", "campaign-id");
-    expect(providerId).toBe("embed-provider-id");
+    await expect(resolveChronicleEmbeddingProviderId(database, {
+      ownerUserId: scope.ownerUserId,
+      campaignId: scope.campaignId
+    })).resolves.toBe("embed-provider-id");
   });
 
-  it("falls back to the campaign's text provider when no dedicated embedding provider is available", async () => {
-    const mockClient = {
-      query: vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
-        if (sql.includes("FROM provider_profiles WHERE owner_user_id = $1 AND provider_role = 'embedding'")) {
-          return { rowCount: 0, rows: [] };
-        }
-        if (sql.includes("FROM campaigns WHERE id = $1")) {
+  it("falls back to the campaign's enabled text provider when no dedicated provider exists", async () => {
+    const database = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("provider_role = 'embedding'")) return { rows: [] };
+        if (sql.includes("SELECT text_provider_profile_id FROM campaigns")) {
           return { rows: [{ text_provider_profile_id: "text-provider-id" }] };
         }
-        if (sql.includes("SELECT id FROM provider_profiles WHERE id = $1 AND owner_user_id = $2 AND provider_role = $3")) {
+        if (sql.includes("provider_role = 'text' AND enabled = true") && sql.includes("id = $1")) {
           return { rows: [{ id: "text-provider-id" }] };
         }
         return { rows: [] };
       })
-    } as any;
+    } as unknown as DatabaseClient;
 
-    const providerId = await resolveCampaignEmbeddingProviderId(mockClient, "owner-id", "campaign-id");
-    expect(providerId).toBe("text-provider-id");
+    await expect(resolveChronicleEmbeddingProviderId(database, {
+      ownerUserId: scope.ownerUserId,
+      campaignId: scope.campaignId
+    })).resolves.toBe("text-provider-id");
   });
 
   it("returns null when no embedding or fallback provider is available", async () => {
-    const mockClient = {
-      query: vi.fn().mockImplementation(async (sql: string) => {
-        if (sql.includes("FROM provider_profiles WHERE owner_user_id = $1 AND provider_role = 'embedding'")) {
-          return { rowCount: 0, rows: [] };
-        }
-        if (sql.includes("FROM campaigns WHERE id = $1")) {
-          return { rows: [{ text_provider_profile_id: null }] };
-        }
-        if (sql.includes("SELECT id, is_default FROM provider_profiles")) {
-          return { rows: [] };
-        }
-        return { rows: [] };
-      })
-    } as any;
+    const database = {
+      query: vi.fn(async (sql: string) => sql.includes("SELECT text_provider_profile_id FROM campaigns")
+        ? { rows: [{ text_provider_profile_id: null }] }
+        : { rows: [] })
+    } as unknown as DatabaseClient;
 
-    const providerId = await resolveCampaignEmbeddingProviderId(mockClient, "owner-id", "campaign-id");
-    expect(providerId).toBeNull();
+    await expect(resolveChronicleEmbeddingProviderId(database, {
+      ownerUserId: scope.ownerUserId,
+      campaignId: scope.campaignId
+    })).resolves.toBeNull();
   });
 
-  it("auto-enables hybrid semantic memory and queues embed_campaign when a valid provider exists", async () => {
-    const queries: { sql: string; params?: unknown[] }[] = [];
-    const mockClient = {
-      query: vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
-        queries.push({ sql, params });
-        if (sql.includes("FROM users WHERE system_key = 'initial-owner'")) {
-          return { rows: [{ id: "owner-id" }] };
-        }
-        if (sql.includes("FROM campaigns c") || sql.includes("FROM campaigns WHERE id = $1")) {
-          return {
-            rows: [{
-              id: "campaign-id",
-              title: "Test Campaign",
-              active_turn_number: 0,
-              world_version_id: "wv-1",
-              world_content: {},
-              character_snapshot: null,
-              scratchpad_private: "",
-              scratchpad_safe_for_prompt: true,
-              trackers: []
-            }]
-          };
-        }
-        if (sql.includes("FROM provider_profiles WHERE owner_user_id = $1 AND provider_role = 'embedding'")) {
-          return { rowCount: 1, rows: [{ id: "embed-provider-1" }] };
-        }
-        if (sql.includes("SELECT id, is_default FROM provider_profiles WHERE owner_user_id = $1 AND provider_role = $2")) {
-          return { rows: [{ id: "embed-provider-1", is_default: true }] };
-        }
-        if (sql.includes("SELECT default_model FROM provider_profiles")) {
-          return { rows: [{ default_model: "custom-nomic-v1.5" }] };
-        }
+  it("auto-enables semantic memory and queues embed_campaign through the transaction port", async () => {
+    const queries: string[] = [];
+    const database = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(sql);
+        if (sql.startsWith("SELECT world_version_id FROM campaigns")) return { rows: [{ world_version_id: scope.worldVersionId }] };
+        if (sql.includes("SELECT default_model FROM provider_profiles")) return { rows: [{ default_model: "custom-nomic-v1.5" }] };
         if (sql.includes("INSERT INTO campaign_memory_configs")) {
-          return {
-            rows: [{
-              embedding_enabled: true,
-              embedding_provider_profile_id: "embed-provider-1",
-              embedding_model: "custom-nomic-v1.5",
-              embedding_batch_size: 16,
-              embedding_document_prefix: null,
-              embedding_query_prefix: null,
-              updated_at: new Date()
-            }]
-          };
-        }
-        if (sql.includes("FROM campaign_memory_configs WHERE campaign_id = $1")) {
-          return {
-            rows: [{
-              embedding_enabled: true,
-              embedding_provider_profile_id: "embed-provider-1",
-              embedding_model: "custom-nomic-v1.5",
-              embedding_batch_size: 16,
-              embedding_document_prefix: null,
-              embedding_query_prefix: null,
-              updated_at: new Date()
-            }]
-          };
-        }
-        if (sql.includes("INSERT INTO chronicle_jobs")) {
-          return { rows: [{ id: "job-123" }] };
+          return { rows: [{
+            embedding_enabled: true,
+            embedding_provider_profile_id: "embed-provider-1",
+            embedding_model: "custom-nomic-v1.5",
+            embedding_batch_size: 16,
+            embedding_document_prefix: null,
+            embedding_query_prefix: null
+          }] };
         }
         return { rows: [] };
       })
-    } as any;
+    } as unknown as DatabaseClient;
+    const embeddings = {
+      resolve: vi.fn().mockResolvedValue("embed-provider-1")
+    } as unknown as ChronicleEmbeddingProviderPort;
+    const memory = createPostgresChronicleGenerationTransactionPort({ credentialSecret: "secret", embeddings });
 
-    const config = await autoEnableCampaignEmbeddingIfAvailable(mockClient, "owner-id", "campaign-id");
-    expect(config.enabled).toBe(true);
-    expect(config.providerProfileId).toBe("embed-provider-1");
-    expect(config.model).toBe("custom-nomic-v1.5");
-
-    const insertConfig = queries.find((q) => q.sql.includes("INSERT INTO campaign_memory_configs"));
-    expect(insertConfig).toBeDefined();
-    expect(insertConfig?.sql).toContain("true");
-    expect(insertConfig?.params).toContain("embed-provider-1");
-    expect(insertConfig?.params).toContain("custom-nomic-v1.5");
-
-    const insertJob = queries.find((q) => q.sql.includes("INSERT INTO chronicle_jobs") && q.sql.includes("'embed_campaign'"));
-    expect(insertJob).toBeDefined();
+    await expect(memory.autoEnableCampaignEmbedding(database, scope)).resolves.toMatchObject({
+      enabled: true,
+      providerProfileId: "embed-provider-1",
+      model: "custom-nomic-v1.5"
+    });
+    expect(queries.some((sql) => sql.includes("INSERT INTO campaign_memory_configs"))).toBe(true);
+    expect(queries.some((sql) => sql.includes("INSERT INTO chronicle_jobs") && sql.includes("'embed_campaign'"))).toBe(true);
   });
 
-  it("does not enable hybrid semantic memory when no valid provider exists", async () => {
-    const queries: { sql: string; params?: unknown[] }[] = [];
-    const mockClient = {
-      query: vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
-        queries.push({ sql, params });
-        if (sql.includes("FROM provider_profiles WHERE owner_user_id = $1 AND provider_role = 'embedding'")) {
-          return { rowCount: 0, rows: [] };
-        }
-        if (sql.includes("FROM campaigns WHERE id = $1")) {
-          return { rows: [{ text_provider_profile_id: null }] };
-        }
-        if (sql.includes("SELECT id, is_default FROM provider_profiles")) {
-          return { rows: [] };
-        }
-        if (sql.includes("FROM campaign_memory_configs WHERE campaign_id = $1")) {
-          return { rows: [] };
-        }
+  it("keeps semantic memory disabled when provider selection returns null", async () => {
+    const queries: string[] = [];
+    const database = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(sql);
+        if (sql.startsWith("SELECT world_version_id FROM campaigns")) return { rows: [{ world_version_id: scope.worldVersionId }] };
         return { rows: [] };
       })
-    } as any;
+    } as unknown as DatabaseClient;
+    const embeddings = { resolve: vi.fn().mockResolvedValue(null) } as unknown as ChronicleEmbeddingProviderPort;
+    const memory = createPostgresChronicleGenerationTransactionPort({ credentialSecret: "secret", embeddings });
 
-    const config = await autoEnableCampaignEmbeddingIfAvailable(mockClient, "owner-id", "campaign-id");
-    expect(config.enabled).toBe(false);
-    expect(config.providerProfileId).toBeNull();
-    expect(config.model).toBe(DEFAULT_EMBEDDING_MODEL);
-
-    const insertConfig = queries.find((q) => q.sql.includes("INSERT INTO campaign_memory_configs"));
-    expect(insertConfig).toBeUndefined();
+    await expect(memory.autoEnableCampaignEmbedding(database, scope)).resolves.toMatchObject({
+      enabled: false,
+      providerProfileId: null,
+      model: DEFAULT_EMBEDDING_MODEL
+    });
+    expect(queries.some((sql) => sql.includes("INSERT INTO campaign_memory_configs"))).toBe(false);
   });
 });

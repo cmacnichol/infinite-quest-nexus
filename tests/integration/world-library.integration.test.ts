@@ -21,7 +21,6 @@ import {
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { campaignTransferCommitRequestSchema, campaignTransferPreviewRequestSchema } from "../../packages/contracts/src/campaign-transfer.js";
 import {
-  createCampaign,
   createWorld,
   deleteCampaign,
   deleteWorld,
@@ -41,9 +40,13 @@ import {
   updateCampaign,
   updateWorldDraft
 } from "../../services/api/src/world-service.js";
-import { buildContextPreview } from "../../services/runtime/src/chronicle-platform-service.js";
-import { importLegacyStory } from "../../services/api/src/import-service.js";
-import { previewCampaignWorldTransfer, transferCampaignWorld } from "../../services/api/src/campaign-transfer-service.js";
+import {
+  buildContextPreview,
+  createCampaign,
+  importLegacyStory,
+  transferCampaignWorld
+} from "../helpers/memory-aware-services.js";
+import { previewCampaignWorldTransfer } from "../../services/api/src/campaign-transfer-service.js";
 import {
   getCampaignCharacterProfile,
   updateCampaignCharacterProfile

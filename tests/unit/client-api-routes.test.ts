@@ -10,7 +10,8 @@ import {
   type GenerationApplication,
   type GenerationChanged,
   type GenerationEventSource,
-  type GenerationEventSubscription
+  type GenerationEventSubscription,
+  type MemoryApplication
 } from "../../packages/application/src/index.js";
 import {
   apiErrorEnvelopeSchema,
@@ -58,6 +59,16 @@ const RUNTIME_STATE = {
   eventTriggers: [],
   pendingEventTriggers: []
 };
+const inertRouteMemory = {
+  generation: {
+    autoEnableCampaignEmbedding: async () => ({ enabled: false, providerProfileId: null, model: "", batchSize: 16 }),
+    buildContextPreview: async () => ({}),
+    enqueueEmbeddingReindex: async () => null,
+    rebuildCampaignMemories: async () => 0,
+    storeDerivedTurnMemories: async () => undefined,
+    writeAcceptedTurnFiction: async () => undefined
+  }
+} as unknown as MemoryApplication;
 const WORLD_CONTENT = {
   world: {
     title: "Emerald Skies",
@@ -246,7 +257,12 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
     }] };
     if (sql.startsWith("SELECT id, revision, effective_turn_number, state_snapshot_private")) return { rows: [] };
     if (sql.startsWith("SELECT id, content, source_turn_number") && sql.includes("FROM campaign_canonical_facts")) return { rows: [] };
-    if (sql.startsWith("SELECT active_turn_number FROM campaigns") && sql.endsWith("FOR UPDATE")) return { rows: [{ active_turn_number: 2 }] };
+    if (sql.startsWith("SELECT active_turn_number, world_version_id FROM campaigns") && sql.endsWith("FOR UPDATE")) {
+      return { rows: [{ active_turn_number: 2, world_version_id: WORLD_VERSION_ID }] };
+    }
+    if (sql === "SELECT world_version_id FROM campaigns WHERE id = $1 AND owner_user_id = $2") {
+      return { rows: [{ world_version_id: WORLD_VERSION_ID }] };
+    }
     if (sql.startsWith("SELECT revision, scratchpad_private") && sql.includes("FROM campaign_state")) return { rows: [{
       revision: 1,
       scratchpad_private: RUNTIME_STATE.scratchpad,
@@ -618,7 +634,7 @@ describe("client API route contracts without PostgreSQL", () => {
   });
 
   it("serializes adopted read routes through their shared response schemas", async () => {
-    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool() }));
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), memory: inertRouteMemory }));
     try {
       expect(worldListResponseSchema.parse((await app.inject({ method: "GET", url: "/api/v1/worlds" })).json()).worlds).toHaveLength(1);
       expect(campaignListResponseSchema.parse((await app.inject({ method: "GET", url: "/api/v1/campaigns" })).json()).campaigns).toHaveLength(1);
@@ -682,7 +698,7 @@ describe("client API route contracts without PostgreSQL", () => {
   });
 
   it("serializes every remaining adopted success route through its shared response schema", async () => {
-    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool() }));
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), memory: inertRouteMemory }));
     const runtimeStateUpdate = {
       expectedTurnNumber: 2,
       expectedRevision: 1,

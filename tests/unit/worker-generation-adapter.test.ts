@@ -22,9 +22,6 @@ const log = vi.hoisted(() => ({
 vi.mock("../../services/api/src/asset-service.js", () => ({
   runAssetMetadataBackfill: lane.asset
 }));
-vi.mock("../../services/runtime/src/chronicle-platform-service.js", () => ({
-  runChronicleJob: lane.chronicle
-}));
 vi.mock("../../services/runtime/src/illustration-segment-job-adapter.js", () => ({
   runIllustrationPromptJob: lane.illustrationPrompt
 }));
@@ -37,6 +34,7 @@ vi.mock("../../services/runtime/src/illustration-image-job-adapter.js", () => ({
 vi.mock("../../packages/logger/src/index.js", () => ({ logger: log }));
 
 import { runWorker } from "../../services/worker/src/worker.js";
+import { inertWorkerIllustration, inertWorkerMemory } from "../helpers/memory-applications.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -101,7 +99,7 @@ describe("worker generation application adapter", () => {
     };
 
     let settled = false;
-    const running = runWorker(pool, config, controller.signal, { generation, optionalLanes: optionalLanes() })
+    const running = runWorker(pool, config, controller.signal, { generation, illustration: inertWorkerIllustration, memory: inertWorkerMemory, optionalLanes: optionalLanes() })
       .finally(() => { settled = true; });
 
     await vi.waitFor(() => expect(generation.executeClaimed).toHaveBeenCalledOnce());
@@ -137,7 +135,7 @@ describe("worker generation application adapter", () => {
         })
     };
 
-    const running = runWorker(pool, config, controller.signal, { generation, optionalLanes: optionalLanes() });
+    const running = runWorker(pool, config, controller.signal, { generation, illustration: inertWorkerIllustration, memory: inertWorkerMemory, optionalLanes: optionalLanes() });
 
     await vi.waitFor(() => expect(generation.executeClaimed).toHaveBeenCalledTimes(2));
     expect(generation.claimNext).toHaveBeenCalledTimes(2);
@@ -188,7 +186,7 @@ describe("worker generation application adapter", () => {
       executeClaimed: vi.fn(() => execution.promise)
     };
 
-    const running = runWorker(pool, config, controller.signal, { generation, optionalLanes: optionalLanes() });
+    const running = runWorker(pool, config, controller.signal, { generation, illustration: inertWorkerIllustration, memory: inertWorkerMemory, optionalLanes: optionalLanes() });
     await vi.waitFor(() => expect(lane.image).toHaveBeenCalled());
 
     expect(calls.slice(0, 6)).toEqual([

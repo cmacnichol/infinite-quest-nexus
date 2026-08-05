@@ -5,7 +5,8 @@ import type {
   GenerationCommandRepository,
   GenerationExecutor,
   GenerationWorkerApplication,
-  IllustrationApplication
+  IllustrationApplication,
+  MemoryApplication
 } from "../../packages/application/src/index.js";
 import type { GenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
@@ -61,6 +62,7 @@ describe("createWorkerGenerationApplication", () => {
     const executor = {} as GenerationExecutor;
     const application = {} as GenerationWorkerApplication;
     const illustration = {} as IllustrationApplication;
+    const memory = { generation: {} } as MemoryApplication;
     const collaborators = {} as never;
     const factories = {
       createApplication: vi.fn(() => application),
@@ -69,11 +71,11 @@ describe("createWorkerGenerationApplication", () => {
       createRepository: vi.fn(() => repository)
     } satisfies WorkerGenerationCompositionFactories;
 
-    const result = createWorkerGenerationApplication(pool, "credential-secret", illustration, factories);
+    const result = createWorkerGenerationApplication(pool, "credential-secret", illustration, memory, factories);
 
     expect(result).toBe(application);
     expect(factories.createCollaborators).toHaveBeenCalledOnce();
-    expect(factories.createCollaborators).toHaveBeenCalledWith(illustration, undefined);
+    expect(factories.createCollaborators).toHaveBeenCalledWith(illustration, memory);
     expect(factories.createRepository).toHaveBeenCalledOnce();
     expect(factories.createRepository).toHaveBeenCalledWith(pool);
     expect(factories.createExecutor).toHaveBeenCalledOnce();

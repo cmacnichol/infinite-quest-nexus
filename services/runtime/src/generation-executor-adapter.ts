@@ -642,11 +642,17 @@ async function executeLoadedGeneration(
         ownerUserId: job.owner_user_id,
         campaignId: job.campaign_id,
         worldVersionId: job.world_version_id ?? "",
-        request: { ...job.context_options, budgetTokens: safeContextBudget, query: safeAction },
+        request: {
+          ...job.context_options,
+          budgetTokens: safeContextBudget,
+          query: safeAction,
+          ...(job.operation_kind === "replace_latest"
+            ? { throughTurnNumber: job.base_turn_number ?? 0 }
+            : {})
+        },
         costAttribution: { generationJobId: job.id, operation: "retrieval_embedding" },
         ...(job.operation_kind === "replace_latest"
           ? {
-              throughTurnNumber: job.base_turn_number ?? 0,
               stateOverride: job.base_state_private,
               scratchpadSafeForPrompt: job.base_scratchpad_safe_for_prompt
             }

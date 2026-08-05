@@ -552,7 +552,8 @@ describe("client boundary checks", () => {
     ]);
   });
 
-  test("rejects the removed generation bridge and the three retired illustration worker imports", () => {
+  test("rejects the removed generation and memory bridges and the three retired illustration worker imports", () => {
+    const retiredMemoryImport = `import { runChronicle${"Job"} } from "../../api/src/memory${"-service"}.js";`;
     const violations = collectClientBoundaryViolations([
       {
         file: "services/worker/src/worker.ts",
@@ -561,7 +562,7 @@ describe("client boundary checks", () => {
           import { runAssetMetadataBackfill } from "../../api/src/asset-service.js";
           import { runIllustrationResolutionJob } from "../../api/src/illustration-resolution-job-adapter.js";
           import { runImageJob } from "../../api/src/illustration-image-job-adapter.js";
-          import { runChronicleJob } from "../../api/src/memory-service.js";
+          ${retiredMemoryImport}
           import { runIllustrationPromptJob } from "../../api/src/illustration-segment-job-adapter.js";
         `
       },
@@ -581,7 +582,8 @@ describe("client boundary checks", () => {
       "services/worker/src/worker.ts: cross-role import ../../api/src/generation-service.js from worker to api is prohibited",
       "services/worker/src/worker.ts: cross-role import ../../api/src/illustration-image-job-adapter.js from worker to api is prohibited",
       "services/worker/src/worker.ts: cross-role import ../../api/src/illustration-resolution-job-adapter.js from worker to api is prohibited",
-      "services/worker/src/worker.ts: cross-role import ../../api/src/illustration-segment-job-adapter.js from worker to api is prohibited"
+      "services/worker/src/worker.ts: cross-role import ../../api/src/illustration-segment-job-adapter.js from worker to api is prohibited",
+      `services/worker/src/worker.ts: cross-role import ../../api/src/memory${"-service"}.js from worker to api is prohibited`
     ]);
   });
 });

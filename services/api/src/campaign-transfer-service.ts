@@ -9,7 +9,7 @@ import { worldContentSchema, type WorldContent } from "../../../packages/contrac
 import { assessCampaignTransferCompatibility } from "../../../packages/domain/src/campaign-transfer.js";
 import { normalizeCampaignStateSnapshot, normalizeCampaignTrackers } from "../../../packages/domain/src/campaign-trackers.js";
 import { removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
-import { memoryApplicationForPool } from "./memory-application-adapter.js";
+import type { MemoryGenerationTransactionPort } from "../../../packages/application/src/memory/index.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
 function httpError(statusCode: number, message: string, details?: unknown): Error {
@@ -224,8 +224,8 @@ export async function previewCampaignWorldTransfer(pool: DatabasePool, campaignI
 }
 
 async function insertCampaignClone(
-  pool: DatabasePool,
   client: DatabaseClient,
+  memory: MemoryGenerationTransactionPort,
   ownerUserId: string,
   source: SourceRow,
   target: TargetRow,
@@ -340,7 +340,6 @@ async function insertCampaignClone(
       [ownerUserId, reference.asset_id, campaignId, mappedTurnId, reference.asset_role, reference.created_at]
     );
   }
-  const memory = memoryApplicationForPool(pool).generation;
   const memoryScope = { ownerUserId, campaignId, worldVersionId: target.id };
   const memoryCount = await memory.rebuildCampaignMemories(client, memoryScope);
   const embeddingJobId = await memory.enqueueEmbeddingReindex(client, memoryScope);
@@ -400,7 +399,12 @@ async function existingTransferResult(client: DatabaseClient, ownerUserId: strin
   };
 }
 
-export async function transferCampaignWorld(pool: DatabasePool, campaignId: string, request: CampaignTransferCommitRequest) {
+export async function transferCampaignWorld(
+  pool: DatabasePool,
+  campaignId: string,
+  request: CampaignTransferCommitRequest,
+  memory: MemoryGenerationTransactionPort,
+) {
   return withTransaction(pool, async (client) => {
     const ownerUserId = await initialOwnerId(client);
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${ownerUserId}:${request.idempotencyKey}`]);
@@ -427,7 +431,7 @@ export async function transferCampaignWorld(pool: DatabasePool, campaignId: stri
     }
     const transferId = crypto.randomUUID();
     const title = request.title || `${source.title} (${target.world_title})`;
-    const clone = await insertCampaignClone(pool, client, ownerUserId, source, target, title, transferId);
+    const clone = await insertCampaignClone(client, memory, ownerUserId, source, target, title, transferId);
     const warnings = findings.filter((finding) => finding.severity !== "blocking");
     await client.query(
       `INSERT INTO campaign_world_transfers (

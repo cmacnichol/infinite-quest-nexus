@@ -7,7 +7,7 @@ import {
 import { initialOwnerId, withTransaction, type DatabaseClient, type DatabasePool } from "../../../packages/database/src/pool.js";
 import { normalizeCampaignTrackers } from "../../../packages/domain/src/campaign-trackers.js";
 import { containsMechanicsLanguage } from "../../../packages/domain/src/text.js";
-import { memoryApplicationForPool } from "./memory-application-adapter.js";
+import type { MemoryGenerationTransactionPort } from "../../../packages/application/src/memory/index.js";
 
 type EffectiveCampaignStateEdit = {
   id: string;
@@ -181,7 +181,12 @@ function fictionFields(content: CampaignRuntimeStateContent): string[] {
   ];
 }
 
-export async function updateCampaignRuntimeState(pool: DatabasePool, campaignId: string, request: CampaignRuntimeStateUpdate) {
+export async function updateCampaignRuntimeState(
+  pool: DatabasePool,
+  campaignId: string,
+  request: CampaignRuntimeStateUpdate,
+  memory: MemoryGenerationTransactionPort,
+) {
   const content = campaignRuntimeStateContentSchema.parse(request);
   if (fictionFields(content).some(containsMechanicsLanguage)) {
     throw Object.assign(new Error("Edited continuity fields must contain fiction only, without game mechanics or engine diagnostics."), { statusCode: 400 });
@@ -275,7 +280,7 @@ export async function updateCampaignRuntimeState(pool: DatabasePool, campaignId:
        ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
       [editId, ownerUserId, campaignId, campaign.active_turn_number, nextRevision, json(snapshot), json(changedFields)]
     );
-    await memoryApplicationForPool(pool).generation.rebuildCampaignMemories(client, {
+    await memory.rebuildCampaignMemories(client, {
       ownerUserId,
       campaignId,
       worldVersionId: campaign.world_version_id

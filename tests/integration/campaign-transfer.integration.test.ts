@@ -4,8 +4,9 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { campaignCreateSchema, worldContentSchema, worldCreateSchema, worldPublishSchema } from "../../packages/contracts/src/world-library.js";
 import { campaignTransferCommitRequestSchema, campaignTransferPreviewRequestSchema } from "../../packages/contracts/src/campaign-transfer.js";
-import { createCampaign, createWorld, publishWorld } from "../../services/api/src/world-service.js";
-import { previewCampaignWorldTransfer, transferCampaignWorld } from "../../services/api/src/campaign-transfer-service.js";
+import { createWorld, publishWorld } from "../../services/api/src/world-service.js";
+import { previewCampaignWorldTransfer } from "../../services/api/src/campaign-transfer-service.js";
+import { createCampaign, transferCampaignWorld } from "../helpers/memory-aware-services.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;

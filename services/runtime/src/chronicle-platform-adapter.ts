@@ -1,7 +1,9 @@
 import type {
+  ChronicleClaimExecutionPort,
   ChronicleClaimFailure,
   ChronicleLeaseScope,
   ChronicleWorkerExecutor,
+  ChronicleWorkerRetrieval,
   ChronicleWorkerRetrievalPort,
   ChronicleWorkerRunRequest,
   ChronicleWorkerStatePort,
@@ -111,7 +113,7 @@ export function createChronicleEmbeddingProviderPort(
 export type ChronicleWorkerExecutorDependencies = Readonly<{
   state: ChronicleWorkerStatePort;
   retrieval: ChronicleWorkerRetrievalPort;
-  runClaim(claim: ChronicleLeaseScope): Promise<void>;
+  execution: ChronicleClaimExecutionPort;
   logProviderTransportError(error: unknown, context: Readonly<Record<string, unknown>>): void;
 }>;
 
@@ -127,13 +129,38 @@ export function createChronicleWorkerExecutor(
 ): ChronicleWorkerExecutor {
   const executeClaim = async (
     claim: ChronicleLeaseScope,
-    prepare: () => Promise<void> = async () => undefined,
+    prepare: () => Promise<ChronicleWorkerRetrieval> = async () => ({
+      config: { enabled: false, providerProfileId: null, model: "", batchSize: 1, documentPrefix: null, queryPrefix: null },
+      memories: [], totalMemories: 0, batchLimit: 1, nextCursor: null
+    }),
   ): Promise<boolean> => {
     try {
-      await prepare();
-      await dependencies.runClaim(claim);
+      const retrieval = await prepare();
+      const progress = await dependencies.execution.execute(claim, retrieval);
+      if (!await dependencies.state.completeClaim(claim, { progress })) {
+        throw new Error("Chronicle job lease was lost before completion could be recorded.");
+      }
       return true;
     } catch (error) {
+      let claimIsStale = false;
+      try {
+        claimIsStale = await dependencies.state.loadClaimedJob(claim) === null;
+      } catch {
+        // Preserve the original execution failure when the stale-claim probe
+        // cannot prove that newer work superseded this lease.
+      }
+      if (claimIsStale) {
+        try {
+          if (await dependencies.state.completeClaim(claim, {
+            progress: { retryReason: "work_version_changed" }
+          })) {
+            return true;
+          }
+        } catch {
+          // The guarded transition is best-effort here. If it cannot prove the
+          // newer work was requeued, use the ordinary private failure path.
+        }
+      }
       dependencies.logProviderTransportError(error, {
         chronicleJobId: claim.jobId,
         campaignId: claim.campaignId,
@@ -144,7 +171,10 @@ export function createChronicleWorkerExecutor(
       return true;
     }
   };
-  const runClaimed = (claim: ChronicleLeaseScope): Promise<boolean> => executeClaim(claim);
+  const runClaimed = (claim: ChronicleLeaseScope): Promise<boolean> => executeClaim(
+    claim,
+    () => dependencies.retrieval.loadForClaim(claim, { batchLimit: 128 }),
+  );
 
   return {
     async runNextChronicle(request: ChronicleWorkerRunRequest): Promise<boolean> {
@@ -156,7 +186,7 @@ export function createChronicleWorkerExecutor(
       return executeClaim(claim, async () => {
         // Validate the bounded retrieval contract inside the same lease-fenced
         // failure path that owns dispatch and terminalization.
-        await dependencies.retrieval.loadForClaim(claim, request.retrieval);
+        return dependencies.retrieval.loadForClaim(claim, request.retrieval);
       });
     },
     runClaimed

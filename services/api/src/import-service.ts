@@ -9,6 +9,7 @@ import { buildTurnFictionMemory, formatLegacySummary, turnNarration } from "../.
 import { estimateTokens, removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { campaignCharacterSeed, campaignProfileFromCharacter, characterSnapshot } from "../../../packages/domain/src/world-characters.js";
 import { buildScopedEntityCatalog, resolveEntityMetadata } from "../../../packages/domain/src/entity-references.js";
+import type { MemoryGenerationTransactionPort } from "../../../packages/application/src/memory/index.js";
 import { normalizeCampaignStateSnapshot, normalizeCampaignTrackers } from "../../../packages/domain/src/campaign-trackers.js";
 import {
   canonicalizeWorldContent,
@@ -19,7 +20,6 @@ import {
 } from "../../../packages/contracts/src/world-library.js";
 import { cleanupUnreferencedCreatedPaths, persistArchiveAssets, restoreAssetBindings, type ArchiveIdMap } from "./asset-archive-service.js";
 import { detectMimeType, lockOriginalImages, parseDataImage, persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
-import { memoryApplicationForPool } from "./memory-application-adapter.js";
 import { ArchiveError, rehydratePersistedStagedArchive } from "./archive-io.js";
 import { campaignArchiveApplicationVersion, cleanupArchivePreviewStaging, cleanupExpiredArchivePreviews, decodeCampaignArchive, portableWorldContentHash, type ArchiveCleanupLogger, type DecodedCampaignArchive } from "./campaign-archive-service.js";
 
@@ -537,6 +537,7 @@ async function matchingWorldVersion(client: DatabaseClient, ownerUserId: string,
 export async function importLegacyStory(
   pool: DatabasePool,
   request: StoryImportRequest,
+  memory: MemoryGenerationTransactionPort,
   assetStore?: FilesystemAssetStore,
   legacyAssets?: LegacyAssets
 ): Promise<StoryImportResult> {
@@ -858,7 +859,7 @@ export async function importLegacyStory(
       memoryCount += 1;
     }
 
-    await memoryApplicationForPool(pool).generation.autoEnableCampaignEmbedding(client, {
+    await memory.autoEnableCampaignEmbedding(client, {
       ownerUserId,
       campaignId,
       worldVersionId

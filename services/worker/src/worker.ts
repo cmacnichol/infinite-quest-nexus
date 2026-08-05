@@ -11,8 +11,8 @@ import { runAssetMetadataBackfill } from "../../api/src/asset-service.js";
 
 export type WorkerDependencies = Readonly<{
   generation: GenerationWorkerApplication;
-  illustration?: IllustrationWorkerApplication;
-  memory?: MemoryWorkerApplication;
+  illustration: IllustrationWorkerApplication;
+  memory: MemoryWorkerApplication;
   optionalLanes?: WorkerOptionalLanes;
 }>;
 
@@ -92,15 +92,9 @@ function defaultOptionalLanes(
   pool: DatabasePool,
   config: RuntimeConfig,
   workerId: string,
-  illustration: IllustrationWorkerApplication | undefined,
-  memory: MemoryWorkerApplication | undefined
+  illustration: IllustrationWorkerApplication,
+  memory: MemoryWorkerApplication
 ): WorkerOptionalLanes {
-  if (!illustration) {
-    throw new Error("The worker role requires an illustration application when default optional lanes are enabled.");
-  }
-  if (!memory) {
-    throw new Error("The worker role requires a Chronicle memory application when default optional lanes are enabled.");
-  }
   return {
     illustration: () => illustration.runNextIllustration({
       workerId,

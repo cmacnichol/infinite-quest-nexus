@@ -6,6 +6,7 @@ import { campaignArchiveCommitRequestSchema, campaignArchiveDestinationSchema, t
 import { storyImportRequestSchema } from "../../../packages/contracts/src/imports.js";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
+import type { MemoryGenerationTransactionPort } from "../../../packages/application/src/memory/index.js";
 import { exportCampaign, previewCampaignArchive } from "./campaign-archive-service.js";
 import { ArchiveError, inspectArchiveContainer, readVerifiedContainerEntry, removeArchivePath, stageArchiveUpload, type ArchiveLimits, type StagedArchive } from "./archive-io.js";
 import { type FilesystemAssetStore } from "./asset-service.js";
@@ -15,6 +16,7 @@ export type ArchiveRouteOptions = {
   pool: DatabasePool;
   config: RuntimeConfig;
   assetStore: FilesystemAssetStore;
+  memory: MemoryGenerationTransactionPort;
 };
 
 type CampaignArchiveUpload = {
@@ -168,7 +170,7 @@ async function receiveCampaignArchive(request: FastifyRequest, config: RuntimeCo
 
 async function legacyMultipartImport(request: FastifyRequest, options: ArchiveRouteOptions) {
   if (!request.isMultipart()) {
-    return importLegacyStory(options.pool, storyImportRequestSchema.parse(request.body), options.assetStore);
+    return importLegacyStory(options.pool, storyImportRequestSchema.parse(request.body), options.memory, options.assetStore);
   }
 
   const limits = legacyArchiveLimits(options.config);
@@ -219,7 +221,7 @@ async function legacyMultipartImport(request: FastifyRequest, options: ArchiveRo
       body = body && typeof body === "object" && !Array.isArray(body) ? { ...(body as Record<string, unknown>), ...(overrides as Record<string, unknown>) } : overrides;
     }
     if (!body) throw archiveUploadError("Multipart request missing required file or requestOverrides.");
-    return importLegacyStory(options.pool, storyImportRequestSchema.parse(body), options.assetStore, legacyAssets);
+    return importLegacyStory(options.pool, storyImportRequestSchema.parse(body), options.memory, options.assetStore, legacyAssets);
   } finally {
     if (staged) await removeArchivePath(options.config.archiveStorageRoot, staged.relativePath).catch(() => undefined);
   }

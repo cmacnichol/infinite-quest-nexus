@@ -31,6 +31,7 @@ import { sanitizePortableMetadata, type ArchiveAssetBinding, type ArchiveAssetRe
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { importLegacyStory, legacyWorldContent } from "../../services/api/src/import-service.js";
 import { ArchiveError, createArchiveStagingDirectory } from "../../services/api/src/archive-io.js";
+import type { MemoryGenerationTransactionPort } from "../../packages/application/src/memory/index.js";
 
 const pngBytes = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -54,6 +55,9 @@ const assetH = "77777777-1111-4777-8777-999999999999";
 const assetI = "88888888-1111-4888-8888-999999999999";
 const fuzzyOnlyAsset = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 const hash = createHash("sha256").update(pngBytes.toString("base64")).digest("hex");
+const inertImportMemory = {
+  autoEnableCampaignEmbedding: async () => ({})
+} as unknown as MemoryGenerationTransactionPort;
 
 const library = {
   title: "portable",
@@ -780,8 +784,8 @@ describe("asset archive portability", () => {
     };
 
     await Promise.all([
-      importLegacyStory(makePool(observedByImport[0]!), request, { root: "C:\\portable-assets" }, new Map([[assetA, pngBytes], [assetB, secondBytes]])),
-      importLegacyStory(makePool(observedByImport[1]!), request, { root: "C:\\portable-assets" }, new Map([[assetB, secondBytes], [assetA, pngBytes]]))
+      importLegacyStory(makePool(observedByImport[0]!), request, inertImportMemory, { root: "C:\\portable-assets" }, new Map([[assetA, pngBytes], [assetB, secondBytes]])),
+      importLegacyStory(makePool(observedByImport[1]!), request, inertImportMemory, { root: "C:\\portable-assets" }, new Map([[assetB, secondBytes], [assetA, pngBytes]]))
     ]);
 
     expect(observedByImport[0]).toHaveLength(4);
@@ -833,6 +837,7 @@ describe("asset archive portability", () => {
     await expect(importLegacyStory(
       { connect: async () => client } as never,
       request,
+      inertImportMemory,
       { root: "C:\\portable-assets" },
       new Map([
         ["legacy-photo", jpegBytes],
@@ -896,6 +901,7 @@ describe("asset archive portability", () => {
       await expect(importLegacyStory(
         { connect: async () => client } as never,
         request,
+        inertImportMemory,
         { root },
         new Map([[assetA, jpegBytes]])
       )).resolves.toMatchObject({ campaignId, stats: { turnCount: 1 } });

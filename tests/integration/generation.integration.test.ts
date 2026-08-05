@@ -6,19 +6,30 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { generationRequestSchema, generationRetryLatestRequestSchema, illustrationConfigSchema } from "../../packages/contracts/src/generation.js";
-import { importLegacyStory } from "../../services/api/src/import-service.js";
 import { setIllustrationConfig } from "../../services/runtime/src/illustration-image-job-adapter.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
-import { branchCampaign, rewindCampaign, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
+import { syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { createWorkerGenerationApplication } from "../../services/runtime/src/generation-worker-composition.js";
 import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { runWorker } from "../../services/worker/src/worker.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
-import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/runtime/src/chronicle-platform-service.js";
+import {
+  branchCampaign,
+  buildContextPreview,
+  importLegacyStory,
+  rewindCampaign,
+  setCampaignEmbeddingConfig,
+  updateCampaignRuntimeState
+} from "../helpers/memory-aware-services.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
-import { getCampaignRuntimeState, updateCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
+import { getCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
 import { logger } from "../../packages/logger/src/index.js";
+import {
+  apiMemoryApplication,
+  inertWorkerIllustration,
+  inertWorkerMemory
+} from "../helpers/memory-applications.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { createGenerationWorkflow } from "../../packages/client-core/src/index.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
@@ -444,11 +455,25 @@ integration("durable Story Engine integration", () => {
     };
     const workers = [
       runWorker(pool, schedulerConfig, controller.signal, {
-        generation: createWorkerGenerationApplication(pool, credentialSecret, createApiIllustrationApplication(pool)),
+        generation: createWorkerGenerationApplication(
+          pool,
+          credentialSecret,
+          createApiIllustrationApplication(pool),
+          apiMemoryApplication(pool, credentialSecret),
+        ),
+        illustration: inertWorkerIllustration,
+        memory: inertWorkerMemory,
         optionalLanes
       }),
       runWorker(pool, schedulerConfig, controller.signal, {
-        generation: createWorkerGenerationApplication(pool, credentialSecret, createApiIllustrationApplication(pool)),
+        generation: createWorkerGenerationApplication(
+          pool,
+          credentialSecret,
+          createApiIllustrationApplication(pool),
+          apiMemoryApplication(pool, credentialSecret),
+        ),
+        illustration: inertWorkerIllustration,
+        memory: inertWorkerMemory,
         optionalLanes
       })
     ];
@@ -486,7 +511,12 @@ integration("durable Story Engine integration", () => {
   it("reclaims a process-lost lease and fences the stale worker from a duplicate commit", async () => {
     const imported = await campaign();
     const job = await queue(imported.campaignId, "Recover this turn after simulated process loss.");
-    const lostWorker = createWorkerGenerationApplication(pool, credentialSecret, createApiIllustrationApplication(pool));
+    const lostWorker = createWorkerGenerationApplication(
+      pool,
+      credentialSecret,
+      createApiIllustrationApplication(pool),
+      apiMemoryApplication(pool, credentialSecret),
+    );
     const lostClaim = await lostWorker.claimNext({ workerId: "process-lost-worker", leaseSeconds: 30 });
     expect(lostClaim).toMatchObject({ jobId: job.id, attempts: 1 });
     await pool.query(

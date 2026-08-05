@@ -14,7 +14,7 @@ import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { createWorkerIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, retryImageJob, runImageJob, setIllustrationConfig } from "../../services/runtime/src/illustration-image-job-adapter.js";
-import { importLegacyStory } from "../../services/api/src/import-service.js";
+import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { listAssets, persistOriginalImage, queryAssets, readAssetDerivative, runAssetMetadataBackfill, selectTurnIllustration, selectWorldCover, updateAssetMetadata } from "../../services/api/src/asset-service.js";
 import { getTurnIllustrationResolution, runIllustrationResolutionJob } from "../../services/runtime/src/illustration-resolution-job-adapter.js";

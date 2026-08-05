@@ -32,6 +32,7 @@ import {
 import { logger } from "../../../packages/logger/src/index.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import type { PromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
+import type { MemoryGenerationTransactionPort } from "../../../packages/application/src/memory/index.js";
 import {
   promptFromSnapshot,
   resolvePromptSnapshot
@@ -461,6 +462,7 @@ export async function importInfiniteWorlds(
   pool: DatabasePool,
   request: InfiniteWorldsImportRequest,
   credentialSecret: string,
+  memory: MemoryGenerationTransactionPort,
   assetStore?: FilesystemAssetStore
 ) {
   const kind = resolveKind(request);
@@ -550,6 +552,11 @@ export async function importInfiniteWorlds(
   const selectedCharacterId = matchedStoryCharacterId(target.content, parsed.characterText, request.selectedCharacterId);
   const story = infiniteWorldsStoryToLegacyStory(parsed, target.content, request.sourceName, selectedCharacterId);
   await enrichFinalTurn(pool, request, story, credentialSecret);
-  const result = await importLegacyStory(pool, { sourceName: request.sourceName, story, targetWorldVersionId: request.targetWorldVersionId, selectedCharacterId }, assetStore);
+  const result = await importLegacyStory(
+    pool,
+    { sourceName: request.sourceName, story, targetWorldVersionId: request.targetWorldVersionId, selectedCharacterId },
+    memory,
+    assetStore,
+  );
   return { kind: "campaign" as const, ...result };
 }

@@ -28,7 +28,7 @@ import {
   resolvePlayableCharacters
 } from "../../../packages/domain/src/world-characters.js";
 import { resolveEffectiveProviderId } from "./provider-service.js";
-import { memoryApplicationForPool } from "./memory-application-adapter.js";
+import type { MemoryGenerationTransactionPort } from "../../../packages/application/src/memory/index.js";
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? null);
@@ -544,7 +544,11 @@ export async function listCampaigns(pool: DatabasePool) {
   return result.rows;
 }
 
-export async function createCampaign(pool: DatabasePool, request: CampaignCreateRequest) {
+export async function createCampaign(
+  pool: DatabasePool,
+  request: CampaignCreateRequest,
+  memory: MemoryGenerationTransactionPort,
+) {
   return withTransaction(pool, async (client) => {
     const ownerUserId = await initialOwnerId(client);
     const version = await client.query<{ content: WorldContent; world_id: string; version_number: number }>(
@@ -599,7 +603,7 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
         json({ scratchpad: "", trackers: initialTrackers, eventTriggers: content.eventTriggers, pendingEventTriggers: [], rpgStats: seed.rpgStats })
       ]
     );
-    await memoryApplicationForPool(pool).generation.autoEnableCampaignEmbedding(client, {
+    await memory.autoEnableCampaignEmbedding(client, {
       ownerUserId,
       campaignId,
       worldVersionId: request.worldVersionId

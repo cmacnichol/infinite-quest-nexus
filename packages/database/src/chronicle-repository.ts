@@ -1,6 +1,7 @@
 import type {
   CampaignMemoryScope,
   CampaignWorldVersionMemoryScope,
+  ChronicleMetricsView,
   ChronicleJobRepository,
   ChronicleJobView,
   ChronicleLeaseScope,
@@ -14,6 +15,7 @@ import type {
   MemoryQueryRepository,
   MemoryTransactionContext
 } from "../../application/src/memory/index.js";
+import { MEMORY_PUBLIC_FAILURE_MESSAGE } from "../../application/src/memory/index.js";
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
 import {
   DEFAULT_EMBEDDING_MODEL,
@@ -871,8 +873,10 @@ function campaignFictionCanon(campaign: ContextCampaignRow, maximumTokens: numbe
     campaignTitle: campaign.title,
     acceptedTurns: campaign.active_turn_number
   };
-  // scratchpad_private is never projected directly. Even when the state marks
-  // it prompt-safe, it may contain mechanics or private reasoning.
+  const scratchpad = campaign.scratchpad_safe_for_prompt
+    ? sanitizeChronicleFictionString(campaign.scratchpad_private, Math.max(400, Math.floor(maximumTokens * 1.8)))
+    : "";
+  if (scratchpad) result.continuityScratchpad = scratchpad;
   const trackers = Array.isArray(campaign.trackers) ? campaign.trackers : [];
   const accepted: unknown[] = [];
   for (const tracker of trackers.slice(0, 200)) {
@@ -907,8 +911,8 @@ async function loadContextCampaign(
       ? {}
       : { active_turn_number: scope.request.throughTurnNumber }),
     ...(scope.stateOverride ? {
-      scratchpad_private: "",
-      scratchpad_safe_for_prompt: false,
+      scratchpad_private: typeof scope.stateOverride.scratchpad === "string" ? scope.stateOverride.scratchpad : "",
+      scratchpad_safe_for_prompt: scope.scratchpadSafeForPrompt === true,
       trackers: Array.isArray(scope.stateOverride.trackers) ? scope.stateOverride.trackers : []
     } : {})
   };
@@ -991,7 +995,7 @@ function contextMetrics(row: ContextMetricRow): ContextMetrics {
 }
 
 async function loadContextMetrics(
-  client: DatabaseClient,
+  client: DatabasePool | DatabaseClient,
   scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
 ): Promise<ContextMetrics> {
   const result = await client.query<ContextMetricRow>(
@@ -1589,22 +1593,166 @@ export function createPostgresChronicleJobRepository(pool: DatabasePool): Chroni
   };
 }
 
-export function createPostgresChronicleQueryRepository(pool: DatabasePool): MemoryQueryRepository {
-  return {
-    async getMetrics(scope): Promise<MemoryPublicResult<Record<string, unknown>>> {
-      await requireCampaign(pool, scope);
-      const result = await pool.query<{ memory_count: string; token_estimate: string }>(
-        `SELECT count(*)::text AS memory_count, coalesce(sum(token_estimate), 0)::text AS token_estimate
+type MetricsEmbeddingConfigRow = EmbeddingConfigRow & Readonly<{ updated_at: Date }>;
+type MetricsProviderRow = Readonly<{
+  id: string;
+  name: string;
+  enabled: boolean;
+  health_status: "unknown" | "healthy" | "degraded" | "unavailable";
+}>;
+type MetricsJobRow = Readonly<{
+  id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  progress: ChronicleMetricsView["semanticHealth"]["progress"];
+  completed_at: Date | null;
+}>;
+
+async function semanticHealth(
+  pool: DatabasePool,
+  scope: CampaignWorldVersionMemoryScope,
+  metrics: Omit<ChronicleMetricsView, "semanticHealth">,
+): Promise<ChronicleMetricsView["semanticHealth"]> {
+  const configResult = await pool.query<MetricsEmbeddingConfigRow>(
+    `SELECT embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
+            embedding_document_prefix, embedding_query_prefix, updated_at
+       FROM campaign_memory_configs
+      WHERE campaign_id = $1 AND owner_user_id = $2`,
+    [scope.campaignId, scope.ownerUserId]
+  );
+  const config = configResult.rows[0];
+  const disabled: ChronicleMetricsView["semanticHealth"] = {
+    status: "disabled",
+    message: "Semantic memory is disabled. Chronicle is using lexical, entity, chronology, and recency retrieval.",
+    enabled: false,
+    providerProfileId: null,
+    providerName: "",
+    providerHealth: "unknown",
+    model: config?.embedding_model ?? "",
+    indexedMemories: 0,
+    totalMemories: metrics.memoryCount,
+    coveragePercent: 0,
+    jobId: null,
+    jobStatus: null,
+    progress: {},
+    errorMessage: "",
+    lastCompletedAt: null
+  };
+  if (!config?.embedding_enabled) return disabled;
+
+  const [providerResult, embeddedResult, jobResult] = await Promise.all([
+    config.embedding_provider_profile_id
+      ? pool.query<MetricsProviderRow>(
+        `SELECT id, name, enabled, health_status
+           FROM provider_profiles
+          WHERE id = $1 AND owner_user_id = $2 AND provider_role IN ('embedding','text')`,
+        [config.embedding_provider_profile_id, scope.ownerUserId]
+      )
+      : Promise.resolve({ rows: [] as MetricsProviderRow[] }),
+    config.embedding_provider_profile_id
+      ? pool.query<Readonly<{ content: string; embedding_content_hash: string | null }>>(
+        `SELECT content, embedding_content_hash
            FROM chronicle_memories
-          WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3`,
-        [scope.ownerUserId, scope.campaignId, scope.worldVersionId]
-      );
-      return { memoryCount: Number(result.rows[0]?.memory_count ?? 0), tokenEstimate: Number(result.rows[0]?.token_estimate ?? 0) };
+          WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
+            AND embedding IS NOT NULL AND embedding_provider_profile_id = $4 AND embedding_model = $5
+            AND embedding_provider_fingerprint IS NOT NULL`,
+        [scope.ownerUserId, scope.campaignId, scope.worldVersionId,
+          config.embedding_provider_profile_id, config.embedding_model]
+      )
+      : Promise.resolve({ rows: [] as Readonly<{ content: string; embedding_content_hash: string | null }>[] }),
+    pool.query<MetricsJobRow>(
+      `SELECT id, status, progress, completed_at
+         FROM chronicle_jobs
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND job_type = 'embed_campaign'
+        ORDER BY created_at DESC, updated_at DESC, id DESC LIMIT 1`,
+      [scope.ownerUserId, scope.campaignId]
+    )
+  ]);
+  const provider = providerResult.rows[0];
+  const indexedMemories = embeddedResult.rows.filter((row) => (
+    row.embedding_content_hash === chronicleContentHash(row.content)
+  )).length;
+  const coveragePercent = metrics.memoryCount
+    ? Math.min(100, Math.round(indexedMemories / metrics.memoryCount * 100))
+    : 100;
+  const job = jobResult.rows[0];
+  const base = {
+    enabled: true,
+    providerProfileId: config.embedding_provider_profile_id,
+    providerName: provider?.name ?? "",
+    providerHealth: provider?.health_status ?? ("unavailable" as const),
+    model: config.embedding_model,
+    indexedMemories,
+    totalMemories: metrics.memoryCount,
+    coveragePercent,
+    jobId: job?.id ?? null,
+    jobStatus: job?.status ?? null,
+    progress: job?.progress ?? {},
+    errorMessage: "",
+    lastCompletedAt: iso(job?.completed_at ?? null)
+  };
+  if (job?.status === "queued" || job?.status === "running") {
+    const completed = Number(job.progress?.embedded ?? 0);
+    const total = Number(job.progress?.total ?? metrics.memoryCount);
+    return {
+      ...base,
+      status: "indexing",
+      message: job.status === "queued"
+        ? "Semantic indexing is queued and waiting for a Chronicle worker."
+        : `Semantic indexing is running${total ? `: ${completed} of ${total} memories processed` : ""}.`
+    };
+  }
+  if (job?.status === "failed") {
+    return { ...base, status: "failed", message: MEMORY_PUBLIC_FAILURE_MESSAGE, errorMessage: MEMORY_PUBLIC_FAILURE_MESSAGE };
+  }
+  if (!provider || !provider.enabled || provider.health_status === "unavailable") {
+    return {
+      ...base,
+      status: "unavailable",
+      message: "The configured embedding provider is disabled or unavailable. Lexical Chronicle retrieval remains active."
+    };
+  }
+  const configIsFresh = Boolean(job?.completed_at && job.completed_at.getTime() >= config.updated_at.getTime());
+  if (!configIsFresh || coveragePercent < 100 || provider.health_status === "degraded") {
+    const reason = !configIsFresh
+      ? "The current semantic configuration has not completed indexing."
+      : provider.health_status === "degraded"
+        ? "The embedding provider is reporting degraded health."
+        : `${indexedMemories} of ${metrics.memoryCount} Chronicle memories are indexed.`;
+    return {
+      ...base,
+      status: "degraded",
+      message: `${reason} Lexical retrieval remains available while semantic coverage recovers.`
+    };
+  }
+  return {
+    ...base,
+    status: "healthy",
+    message: metrics.memoryCount
+      ? `All ${metrics.memoryCount} Chronicle memories are indexed with ${config.embedding_model}.`
+      : `Semantic memory is ready with ${config.embedding_model}; memories will be indexed as turns are accepted.`
+  };
+}
+
+export function createPostgresChronicleQueryRepository(
+  pool: DatabasePool,
+  transactionDependencies: ChronicleGenerationTransactionDependencies,
+): MemoryQueryRepository {
+  return {
+    async getMetrics(scope): Promise<MemoryPublicResult<ChronicleMetricsView>> {
+      await requireCampaign(pool, scope);
+      const metrics = await loadContextMetrics(pool, {
+        ...scope,
+        request: {
+          query: "",
+          recentTurns: 1,
+          compression: "summary",
+          budgetTokens: 1
+        }
+      });
+      return { ...metrics, semanticHealth: await semanticHealth(pool, scope, metrics) };
     },
-    async previewContext() {
-      // Detailed prompt assembly remains the named 14b3 legacy-body binding.
-      // This safe projection prevents raw provider/credential details escaping before cutover.
-      return { failure: { code: "memory_unavailable", message: "Chronicle memory is unavailable." } };
+    async previewContext(scope, request) {
+      return withTransaction(pool, (client) => buildContext(client, { ...scope, request }, transactionDependencies));
     }
   };
 }
@@ -1992,11 +2140,18 @@ export function createPostgresChronicleWorkerRetrievalPort(pool: DatabasePool): 
       );
       const rows = result.rows.slice(0, request.batchLimit);
       const tail = rows.at(-1);
+      const total = await pool.query<{ total: string }>(
+        `SELECT count(*)::text AS total
+           FROM chronicle_memories
+          WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3`,
+        [scope.ownerUserId, scope.campaignId, scope.worldVersionId]
+      );
       return {
         config: await loadConfig(pool, scope),
         memories: rows.map((row) => ({
           id: row.id, ordinal: row.ordinal, content: row.content, tokenEstimate: row.token_estimate, kind: row.memory_kind
         })),
+        totalMemories: Number(total.rows[0]?.total ?? 0),
         batchLimit: request.batchLimit,
         nextCursor: tail && result.rows.length > request.batchLimit ? `${tail.ordinal}:${tail.id}` : null
       };
@@ -2020,7 +2175,7 @@ export function createPostgresChronicleRepositories(
 ): MemoryApplicationDependencies {
   return {
     configuration: createPostgresChronicleConfigurationRepository(pool),
-    queries: createPostgresChronicleQueryRepository(pool),
+    queries: createPostgresChronicleQueryRepository(pool, transactionDependencies),
     jobs: createPostgresChronicleJobRepository(pool),
     transaction: createPostgresChronicleGenerationTransactionPort(transactionDependencies)
   };

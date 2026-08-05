@@ -361,7 +361,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
           world_content: { world: { rules: "The gate answers only to moonlight." } },
           character_snapshot: null,
           character_profile: null,
-          scratchpad_private: "diceResult: 20; the Moon Warden is alert",
+          scratchpad_private: "The Moon Warden is alert.",
           scratchpad_safe_for_prompt: true,
           trackers: [{ privateReasoning: "secret", label: "Gate is open" }]
         }] };
@@ -475,7 +475,10 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(preview).toMatchObject({
       campaign: { id: scope.campaignId, worldVersionId: scope.worldVersionId },
       retrieval: { mode: "hybrid", semanticAvailable: true },
-      scopes: { currentScene: { memoryId: "memory-1" } }
+      scopes: {
+        campaignCanon: { continuityScratchpad: "The Moon Warden is alert." },
+        currentScene: { memoryId: "memory-1" }
+      }
     });
     expect(JSON.stringify(preview)).not.toMatch(/diceResult|privateReasoning|credential-secret|embedding\.example/i);
   });

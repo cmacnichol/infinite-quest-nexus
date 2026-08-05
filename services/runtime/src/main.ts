@@ -17,7 +17,7 @@ import {
 } from "./illustration-composition.js";
 import { dispatchRuntimeRole } from "./runtime-role.js";
 import { createRuntimeGenerationEventSource } from "./generation-event-composition.js";
-import { createApiMemoryApplication, createLiveWorkerMemoryApplication } from "./memory-composition.js";
+import { createApiMemoryApplication, createWorkerMemoryApplication } from "./memory-composition.js";
 
 const config = loadRuntimeConfig();
 const abortController = new AbortController();
@@ -45,18 +45,17 @@ await runRuntimeLifecycle(config, abortController, {
     createApiGeneration: createApiGenerationApplication,
     createApiIllustration: createApiIllustrationApplication,
     createApiMemory: (pool, credentialSecret) => createApiMemoryApplication(pool, { credentialSecret }),
-    createWorkerMemory: createLiveWorkerMemoryApplication,
+    createWorkerMemory: createWorkerMemoryApplication,
     createWorkerIllustration: (pool, credentialSecret, assetStorageRoot) => createWorkerIllustrationApplication(
       pool,
       credentialSecret,
       { root: assetStorageRoot }
     ),
-    createWorkerGeneration: (pool, credentialSecret, illustration) => createWorkerGenerationApplication(
+    createWorkerGeneration: (pool, credentialSecret, illustration, memory) => createWorkerGenerationApplication(
       pool,
       credentialSecret,
       illustration,
-      undefined,
-      createApiMemoryApplication(pool, { credentialSecret })
+      memory
     ),
     buildServer,
     runWorker

@@ -214,14 +214,14 @@ async function insertProvider(pool, ownerUserId) {
   return id;
 }
 
-async function seedCampaign({ pool, importLegacyStory, storyTemplate, ownerUserId, providerProfileId, label, shape }) {
+async function seedCampaign({ pool, importLegacyStory, memory, storyTemplate, ownerUserId, providerProfileId, label, shape }) {
   const identity = randomBytes(8).toString("hex");
   const story = structuredClone(storyTemplate);
   story.world.title = `Play Loop ${label} ${identity}`;
   const imported = await importLegacyStory(pool, {
     sourceName: `play-loop-${label}-${identity}.json`,
     story
-  });
+  }, memory.generation);
   const { campaignId, worldId, worldVersionId } = imported;
 
   const client = await pool.connect();
@@ -336,11 +336,15 @@ async function seedFixtures(pool, dependencies) {
   const ownerUserId = await dependencies.initialOwnerId(pool);
   const providerProfileId = await insertProvider(pool, ownerUserId);
   const storyTemplate = JSON.parse(readFileSync(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+  const memory = dependencies.createApiMemoryApplication(pool, {
+    credentialSecret: "play-loop-benchmark-only"
+  });
   const campaigns = {};
   for (const [label, shape] of Object.entries(FIXTURE_SHAPES)) {
     campaigns[label] = await seedCampaign({
       pool,
       importLegacyStory: dependencies.importLegacyStory,
+      memory,
       storyTemplate,
       ownerUserId,
       providerProfileId,
@@ -440,10 +444,14 @@ async function benchmarkDatabase(pool, databaseUrl, settings, dependencies) {
   const seeded = await seedFixtures(pool, dependencies);
   const tracker = createQueryTracker();
   const measuredPool = trackedPool(pool, tracker);
+  const memory = dependencies.createApiMemoryApplication(measuredPool, {
+    credentialSecret: "play-loop-benchmark-only"
+  });
   const app = await dependencies.buildServer({
     config: runtimeConfig(databaseUrl),
     pool: measuredPool,
     generation: dependencies.createApiGenerationApplication(measuredPool),
+    memory,
     generationEvents: inertGenerationEvents()
   });
   try {
@@ -600,12 +608,13 @@ export async function runPlayLoopBenchmark(options = {}) {
     100,
     "PLAY_LOOP_BENCHMARK_SAMPLES"
   );
-  const [poolModule, migrateModule, importModule, serverModule, compositionModule] = await Promise.all([
+  const [poolModule, migrateModule, importModule, serverModule, compositionModule, memoryCompositionModule] = await Promise.all([
     import("../packages/database/src/pool.ts"),
     import("../packages/database/src/migrate.ts"),
     import("../services/api/src/import-service.ts"),
     import("../services/api/src/server.ts"),
-    import("../services/runtime/src/generation-api-composition.ts")
+    import("../services/runtime/src/generation-api-composition.ts"),
+    import("../services/runtime/src/memory-composition.ts")
   ]);
   const adminPool = poolModule.createDatabasePool(databaseUrl, 1);
   const databaseName = temporaryDatabaseName();
@@ -621,7 +630,8 @@ export async function runPlayLoopBenchmark(options = {}) {
       initialOwnerId: poolModule.initialOwnerId,
       importLegacyStory: importModule.importLegacyStory,
       buildServer: serverModule.buildServer,
-      createApiGenerationApplication: compositionModule.createApiGenerationApplication
+      createApiGenerationApplication: compositionModule.createApiGenerationApplication,
+      createApiMemoryApplication: memoryCompositionModule.createApiMemoryApplication
     });
     const cpuCount = availableParallelism();
     const memoryLimitGiB = cgroupMemoryLimitGiB();

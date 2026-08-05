@@ -36,7 +36,37 @@ export type EmbeddingConfigView = Readonly<{
   prefixesAutomatic?: boolean;
 }>;
 
-export type ChronicleMetricsView = Readonly<Record<string, unknown>>;
+export type ChronicleMetricsView = Readonly<{
+  turns: number;
+  completeHistoryCharacters: number;
+  estimatedCompleteHistoryTokens: number;
+  memoryCount: number;
+  memoryTokens: number;
+  embeddedMemories: number;
+  compressionEstimates: Readonly<{
+    full: number;
+    balanced: number;
+    compact: number;
+    summary: number;
+  }>;
+  semanticHealth: Readonly<{
+    status: "disabled" | "indexing" | "healthy" | "degraded" | "failed" | "unavailable";
+    message: string;
+    enabled: boolean;
+    providerProfileId: string | null;
+    providerName: string;
+    providerHealth: "unknown" | "healthy" | "degraded" | "unavailable";
+    model: string;
+    indexedMemories: number;
+    totalMemories: number;
+    coveragePercent: number;
+    jobId: string | null;
+    jobStatus: "queued" | "running" | "completed" | "failed" | null;
+    progress: Readonly<{ embedded?: number; total?: number; updated?: number; skipped?: number }>;
+    errorMessage: string;
+    lastCompletedAt: string | null;
+  }>;
+}>;
 export type ChronicleContextPreview = Readonly<Record<string, unknown>>;
 
 /** Fixed public projection: adapters must keep diagnostics and provider details private. */
@@ -165,6 +195,8 @@ export type ChronicleWorkerRetrieval = Readonly<{
   config: EmbeddingConfigView;
   /** Bounded, owner/campaign/world-version-scoped rows only. */
   memories: readonly Readonly<Record<string, unknown>>[];
+  /** Stable total used to guard exact embedding-batch progress. */
+  totalMemories: number;
   batchLimit: number;
   nextCursor: string | null;
 }>;

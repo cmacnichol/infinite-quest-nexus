@@ -13,7 +13,7 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import {
   createIllustrationRepositoryFactories
 } from "../../services/runtime/src/illustration-repository-bindings.js";
-import { importLegacyStory } from "../../services/api/src/import-service.js";
+import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { insertImageJob } from "../../services/runtime/src/illustration-image-job-adapter.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 

@@ -32,7 +32,7 @@ type WorkerGenerationRepository = GenerationClaimRepository & GenerationExecutio
 
 export type WorkerGenerationCompositionFactories = Readonly<{
   createRepository(pool: DatabasePool): WorkerGenerationRepository;
-  createCollaborators(illustration: IllustrationApplication, memory?: MemoryApplication): GenerationExecutionCollaborators;
+  createCollaborators(illustration: IllustrationApplication, memory: MemoryApplication): GenerationExecutionCollaborators;
   createExecutor(dependencies: GenerationExecutorDependencies): GenerationExecutor;
   createApplication(dependencies: Readonly<{
     claims: GenerationClaimRepository;
@@ -42,10 +42,10 @@ export type WorkerGenerationCompositionFactories = Readonly<{
 
 export function createGenerationExecutionCollaborators(
   illustration: IllustrationApplication,
-  memory?: MemoryApplication,
+  memory: MemoryApplication,
 ): GenerationExecutionCollaborators {
   return {
-    memory: memory?.generation ?? unavailableMemoryGenerationPort(),
+    memory: memory.generation,
     illustration: illustration.generation,
     loadTextProvider,
     resolvePromptSnapshot,
@@ -56,20 +56,6 @@ export function createGenerationExecutionCollaborators(
       await turnReportedCosts(database, ownerUserId, turnIds) as Map<string, unknown>,
     attributeGenerationCostsToTurn
   };
-}
-
-function unavailableMemoryGenerationPort(): MemoryApplication["generation"] {
-  const unavailable = async (): Promise<never> => {
-    throw new Error("The worker role requires a Chronicle memory application.");
-  };
-  return {
-    autoEnableCampaignEmbedding: unavailable,
-    buildContextPreview: unavailable,
-    enqueueEmbeddingReindex: unavailable,
-    rebuildCampaignMemories: unavailable,
-    storeDerivedTurnMemories: unavailable,
-    writeAcceptedTurnFiction: unavailable
-  } as MemoryApplication["generation"];
 }
 
 const productionFactories: WorkerGenerationCompositionFactories = {
@@ -83,8 +69,8 @@ export function createWorkerGenerationApplication(
   pool: DatabasePool,
   credentialSecret: string,
   illustration: IllustrationApplication,
+  memory: MemoryApplication,
   factories: WorkerGenerationCompositionFactories = productionFactories,
-  memory?: MemoryApplication,
 ): GenerationWorkerApplication {
   const repository = factories.createRepository(pool);
   const collaborators = factories.createCollaborators(illustration, memory);

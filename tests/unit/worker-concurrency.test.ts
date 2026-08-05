@@ -14,6 +14,7 @@ import {
   runWorker,
   type WorkerOptionalLanes
 } from "../../services/worker/src/worker.js";
+import { inertWorkerIllustration, inertWorkerMemory } from "../helpers/memory-applications.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -83,6 +84,8 @@ describe("worker concurrency scheduler", () => {
 
     const running = runWorker(pool, workerConfig(3), controller.signal, {
       generation,
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
       optionalLanes: idleOptionalLanes()
     });
 
@@ -146,6 +149,8 @@ describe("worker concurrency scheduler", () => {
 
     const running = runWorker(pool, workerConfig(2), controller.signal, {
       generation,
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
       optionalLanes
     });
 
@@ -188,6 +193,8 @@ describe("worker concurrency scheduler", () => {
 
     const running = runWorker(pool, workerConfig(1), controller.signal, {
       generation,
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
       optionalLanes
     });
     await new Promise<void>((resolve) => {
@@ -233,6 +240,8 @@ describe("worker concurrency scheduler", () => {
       workerPollIntervalMs: 60_000
     }, controller.signal, {
       generation,
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
       optionalLanes
     });
 
@@ -260,6 +269,8 @@ describe("worker concurrency scheduler", () => {
 
     await runWorker(pool, workerConfig(1), controller.signal, {
       generation,
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
       optionalLanes
     });
 
@@ -291,6 +302,8 @@ describe("worker concurrency scheduler", () => {
 
     const running = runWorker(pool, workerConfig(1), controller.signal, {
       generation,
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
       optionalLanes
     }).finally(() => { settled = true; });
 

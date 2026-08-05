@@ -148,7 +148,7 @@ export type BuildServerOptions = {
   pool: DatabasePool;
   generation: GenerationApplication;
   illustration: IllustrationApplication;
-  memory?: MemoryApplication;
+  memory: MemoryApplication;
   generationEvents: GenerationEventSource;
 };
 
@@ -332,11 +332,7 @@ export async function buildServer({ config, pool, generation, illustration, memo
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
-  const memoryAdapter = memory ? createMemoryApplicationAdapter(pool, memory) : null;
-  const requireMemoryAdapter = () => {
-    if (!memoryAdapter) throw new Error("The API role requires a Chronicle memory application.");
-    return memoryAdapter;
-  };
+  const memoryAdapter = createMemoryApplicationAdapter(pool, memory);
   const generationAdapter = createGenerationApplicationAdapter(generation);
   const generationLifecycle = createGenerationRouteLifecycle({
     readContext: (ownerUserId, generationJobId) => generationLifecycleLogContext(pool, ownerUserId, generationJobId),
@@ -380,7 +376,7 @@ export async function buildServer({ config, pool, generation, illustration, memo
       fieldSize: config.security.apiImportBodyLimitBytes
     }
   });
-  await app.register(registerArchiveRoutes, { pool, config, assetStore });
+  await app.register(registerArchiveRoutes, { pool, config, assetStore, memory: memory.generation });
   await app.register(fastifyStatic, {
     root: config.legacyWebRoot,
     prefix: "/nexus/",
@@ -542,6 +538,7 @@ export async function buildServer({ config, pool, generation, illustration, memo
       pool,
       infiniteWorldsImportRequestSchema.parse(request.body),
       config.credentialEncryptionKey,
+      memory.generation,
       assetStore
     );
     return reply.code(result.duplicate ? 200 : 201).send(result);
@@ -655,7 +652,11 @@ export async function buildServer({ config, pool, generation, illustration, memo
   ));
 
   app.post("/api/v1/campaigns", async (request, reply) => (
-    reply.code(201).send(parseResponseProjection(campaignCreateResponseSchema, await createCampaign(pool, campaignCreateSchema.parse(request.body))))
+    reply.code(201).send(parseResponseProjection(campaignCreateResponseSchema, await createCampaign(
+      pool,
+      campaignCreateSchema.parse(request.body),
+      memory.generation,
+    )))
   ));
 
   app.patch<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId", async (request) => (
@@ -703,7 +704,8 @@ export async function buildServer({ config, pool, generation, illustration, memo
     const result = await transferCampaignWorld(
       pool,
       uuidSchema.parse(request.params.campaignId),
-      campaignTransferCommitRequestSchema.parse(request.body)
+      campaignTransferCommitRequestSchema.parse(request.body),
+      memory.generation,
     );
     return reply.code(result.reused ? 200 : 201).send(result);
   });
@@ -737,7 +739,8 @@ export async function buildServer({ config, pool, generation, illustration, memo
     parseResponseProjection(campaignRuntimeStateResponseSchema, await updateCampaignRuntimeState(
       pool,
       uuidSchema.parse(request.params.campaignId),
-      campaignRuntimeStateUpdateSchema.parse(request.body)
+      campaignRuntimeStateUpdateSchema.parse(request.body),
+      memory.generation,
     ))
   ));
 
@@ -924,7 +927,8 @@ export async function buildServer({ config, pool, generation, illustration, memo
     parseResponseProjection(campaignRewindResponseSchema, await rewindCampaign(
       pool,
       uuidSchema.parse(request.params.campaignId),
-      campaignRewindSchema.parse(request.body)
+      campaignRewindSchema.parse(request.body),
+      memory.generation,
     ))
   ));
 
@@ -933,7 +937,8 @@ export async function buildServer({ config, pool, generation, illustration, memo
       parseResponseProjection(campaignBranchResponseSchema, await branchCampaign(
         pool,
         uuidSchema.parse(request.params.campaignId),
-        campaignBranchSchema.parse(request.body)
+        campaignBranchSchema.parse(request.body),
+        memory.generation,
       ))
     )
   ));
@@ -1273,7 +1278,7 @@ export async function buildServer({ config, pool, generation, illustration, memo
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/metrics", async (request) => {
     const ownerUserId = await initialOwnerId(pool);
-    return requireMemoryAdapter().metrics(ownerUserId, uuidSchema.parse(request.params.campaignId));
+    return memoryAdapter.metrics(ownerUserId, uuidSchema.parse(request.params.campaignId));
   });
 
   app.get<{ Params: { campaignId: string }; Querystring: Record<string, unknown> }>(
@@ -1281,36 +1286,36 @@ export async function buildServer({ config, pool, generation, illustration, memo
     async (request) => {
       const query = memoryContextQuerySchema.parse(request.query);
       const ownerUserId = await initialOwnerId(pool);
-      return requireMemoryAdapter().contextPreview(ownerUserId, uuidSchema.parse(request.params.campaignId), query);
+      return memoryAdapter.contextPreview(ownerUserId, uuidSchema.parse(request.params.campaignId), query);
     }
   );
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/reindex", async (request, reply) => {
     const ownerUserId = await initialOwnerId(pool);
-    return reply.code(202).send(await requireMemoryAdapter().reindex(ownerUserId, uuidSchema.parse(request.params.campaignId)));
+    return reply.code(202).send(await memoryAdapter.reindex(ownerUserId, uuidSchema.parse(request.params.campaignId)));
   });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/embedding-config", async (request) => (
-    requireMemoryAdapter().embeddingConfig(await initialOwnerId(pool), uuidSchema.parse(request.params.campaignId))
+    memoryAdapter.embeddingConfig(await initialOwnerId(pool), uuidSchema.parse(request.params.campaignId))
   ));
 
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/embedding-config", async (request) => {
     const campaignId = uuidSchema.parse(request.params.campaignId);
     const ownerUserId = await initialOwnerId(pool);
-    const saved = await requireMemoryAdapter().setEmbeddingConfig(ownerUserId, campaignId, campaignEmbeddingConfigSchema.parse(request.body));
-    const jobId = saved.enabled === true ? await requireMemoryAdapter().reindexEmbeddings(ownerUserId, campaignId) : null;
+    const saved = await memoryAdapter.setEmbeddingConfig(ownerUserId, campaignId, campaignEmbeddingConfigSchema.parse(request.body));
+    const jobId = saved.enabled === true ? await memoryAdapter.reindexEmbeddings(ownerUserId, campaignId) : null;
     return { ...saved, jobId };
   });
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/embeddings/reindex", async (request, reply) => {
-    const jobId = await requireMemoryAdapter().reindexEmbeddings(await initialOwnerId(pool), uuidSchema.parse(request.params.campaignId));
+    const jobId = await memoryAdapter.reindexEmbeddings(await initialOwnerId(pool), uuidSchema.parse(request.params.campaignId));
     if (!jobId) return reply.code(409).send({ error: "Not configured", message: "Enable semantic memory and select an embedding provider first." });
     return reply.code(202).send({ jobId, status: "queued" });
   });
 
   app.get<{ Params: { jobId: string } }>("/api/v1/jobs/:jobId", async (request, reply) => {
     try {
-      return await requireMemoryAdapter().job(await initialOwnerId(pool), uuidSchema.parse(request.params.jobId));
+      return await memoryAdapter.job(await initialOwnerId(pool), uuidSchema.parse(request.params.jobId));
     } catch (error) {
       if (statusCode(error) === 404) return reply.code(404).send({ error: "Not found", message: "Job not found." });
       throw error;

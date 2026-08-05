@@ -8,11 +8,9 @@ import {
   resolveChronicleEmbeddingProviderId
 } from "../../services/runtime/src/chronicle-platform-bindings.js";
 import {
-  createApiMemoryApplication,
-  createWorkerMemoryApplication
+  createApiMemoryApplication
 } from "../../services/runtime/src/memory-composition.js";
 import {
-  createMemoryWorkerApplication,
   type ChronicleWorkerStatePort
 } from "../../packages/application/src/memory/index.js";
 import type { DatabaseClient, DatabasePool } from "../../packages/database/src/pool.js";
@@ -219,7 +217,7 @@ describe("Chronicle runtime adapters", () => {
     const executor = createChronicleWorkerExecutor({
       state,
       retrieval: { loadForClaim: vi.fn().mockResolvedValue({ config: { enabled: true }, memories: [], batchLimit: 8, nextCursor: null }) },
-      runClaim: vi.fn().mockRejectedValue(new Error("https://embedding.example/token=private")),
+      execution: { execute: vi.fn().mockRejectedValue(new Error("https://embedding.example/token=private")) },
       logProviderTransportError
     });
 
@@ -269,9 +267,9 @@ describe("Chronicle runtime adapters", () => {
           throw new Error("database connection interrupted");
         }
       },
-      runClaim: async () => {
+      execution: { execute: async () => {
         throw new Error("dispatch must not run after retrieval failure");
-      },
+      } },
       logProviderTransportError: () => undefined
     });
 
@@ -279,6 +277,45 @@ describe("Chronicle runtime adapters", () => {
       workerId: "worker-1", leaseSeconds: 30, retrieval: { batchLimit: 8 }
     })).resolves.toBe(true);
     expect(durableStatus).toBe("failed");
+  });
+
+  it("requeues newer work through the guarded completion transition after a stale claim fails", async () => {
+    const claim = {
+      jobId: "job-stale-1",
+      ownerUserId: "owner-1",
+      campaignId: "campaign-1",
+      worldVersionId: "world-version-1",
+      jobType: "embed_campaign" as const,
+      workVersion: 1,
+      workerId: "worker-1",
+      leaseSeconds: 30
+    };
+    const state = {
+      claimNext: vi.fn().mockResolvedValue(claim),
+      loadClaimedJob: vi.fn().mockResolvedValue(null),
+      heartbeatClaim: vi.fn(),
+      completeClaim: vi.fn().mockResolvedValue(true),
+      requeueClaim: vi.fn(),
+      failClaim: vi.fn()
+    };
+    const logProviderTransportError = vi.fn();
+    const executor = createChronicleWorkerExecutor({
+      state,
+      retrieval: { loadForClaim: vi.fn().mockResolvedValue({
+        config: { enabled: true }, memories: [], totalMemories: 0, batchLimit: 8, nextCursor: null
+      }) },
+      execution: { execute: vi.fn().mockRejectedValue(new Error("Chronicle job lease was lost during embedding batch commit.")) },
+      logProviderTransportError
+    });
+
+    await expect(executor.runNextChronicle({
+      workerId: "worker-1", leaseSeconds: 30, retrieval: { batchLimit: 8 }
+    })).resolves.toBe(true);
+    expect(state.completeClaim).toHaveBeenCalledWith(claim, {
+      progress: { retryReason: "work_version_changed" }
+    });
+    expect(state.failClaim).not.toHaveBeenCalled();
+    expect(logProviderTransportError).not.toHaveBeenCalled();
   });
 
   it("records embedding health and cost through the supplied caller transaction", async () => {
@@ -329,21 +366,4 @@ describe("Chronicle runtime adapters", () => {
     }, result);
   });
 
-  it("composes the additive worker application from repository adapters without changing a live worker consumer", async () => {
-    const runNextChronicle = vi.fn().mockResolvedValue(false);
-    const createExecutor = vi.fn().mockReturnValue({ runNextChronicle, runClaimed: vi.fn() });
-    const application = createWorkerMemoryApplication({} as never, {
-      createExecutor,
-      createApplication: createMemoryWorkerApplication
-    });
-
-    await expect(application.runNextChronicle({
-      workerId: "worker-1", leaseSeconds: 30, retrieval: { batchLimit: 8 }
-    })).resolves.toBe(false);
-
-    expect(createExecutor).toHaveBeenCalledOnce();
-    expect(runNextChronicle).toHaveBeenCalledWith({
-      workerId: "worker-1", leaseSeconds: 30, retrieval: { batchLimit: 8 }
-    });
-  });
 });

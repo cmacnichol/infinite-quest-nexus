@@ -3,6 +3,7 @@ import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { createWorkerGenerationApplication } from "../../services/runtime/src/generation-worker-composition.js";
 import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { startNextGeneration } from "../../services/worker/src/worker.js";
+import { apiMemoryApplication } from "./memory-applications.js";
 
 const applications = new WeakMap<DatabasePool, Map<string, GenerationWorkerApplication>>();
 
@@ -22,7 +23,8 @@ function generationApplication(
   const application = createWorkerGenerationApplication(
     pool,
     credentialSecret,
-    createApiIllustrationApplication(pool)
+    createApiIllustrationApplication(pool),
+    apiMemoryApplication(pool, credentialSecret),
   );
   byCredential.set(credentialSecret, application);
   return application;

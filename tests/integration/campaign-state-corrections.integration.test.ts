@@ -4,9 +4,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { importLegacyStory } from "../../services/api/src/import-service.js";
-import { buildContextPreview } from "../../services/runtime/src/chronicle-platform-service.js";
-import { getCampaignRuntimeState, updateCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
+import { buildContextPreview, importLegacyStory, updateCampaignRuntimeState } from "../helpers/memory-aware-services.js";
+import { getCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;

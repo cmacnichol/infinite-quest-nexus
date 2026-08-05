@@ -6,7 +6,7 @@ import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
-import { importLegacyStory } from "../../services/api/src/import-service.js";
+import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { serverOptions } from "../helpers/build-server-options.js";

@@ -9,7 +9,7 @@ import { sha256 } from "../../packages/domain/src/index.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { turnReportedCosts } from "../../services/api/src/cost-service.js";
-import { importLegacyStory } from "../../services/api/src/import-service.js";
+import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { promptProtocolVersion, resolvePromptSnapshot } from "../../services/api/src/prompt-library-service.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
 

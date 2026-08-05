@@ -6,7 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
-import { getImportProgress, importInfiniteWorlds, previewInfiniteWorldsImport } from "../../services/api/src/infinite-worlds-import-service.js";
+import { getImportProgress, previewInfiniteWorldsImport } from "../../services/api/src/infinite-worlds-import-service.js";
+import { importInfiniteWorlds } from "../helpers/memory-aware-services.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;

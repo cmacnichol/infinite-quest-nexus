@@ -94,6 +94,14 @@ export interface ChronicleWorkerRetrievalPort {
   ): Promise<ChronicleWorkerRetrieval>;
 }
 
+/** Runtime-composed work body. Lifecycle ownership remains in the application executor. */
+export interface ChronicleClaimExecutionPort {
+  execute(
+    scope: ChronicleLeaseScope,
+    firstPage: ChronicleWorkerRetrieval,
+  ): Promise<Readonly<Record<string, unknown>>>;
+}
+
 export interface ChronicleWorkerExecutor {
   /**
    * Platform-free lane seam. The concrete 14b2 executor owns claim, heartbeat,

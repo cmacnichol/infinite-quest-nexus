@@ -20,9 +20,9 @@ import { createProvider } from "../../services/api/src/provider-service.js";
 import { logger } from "../../packages/logger/src/index.js";
 import {
   activeProgressMap,
-  getImportProgress,
-  importInfiniteWorlds
+  getImportProgress
 } from "../../services/api/src/infinite-worlds-import-service.js";
+import { importInfiniteWorlds } from "../helpers/memory-aware-services.js";
 import { generateWorldPreview } from "../../services/api/src/world-generator-service.js";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 import {
