@@ -30,6 +30,13 @@ integration("PostgreSQL campaign sync adapters", () => {
   }>> = [];
   const providerIds: string[] = [];
   const foreignUserIds: string[] = [];
+  const generationJobIds: string[] = [];
+  const imageJobIds: string[] = [];
+  const resolutionJobIds: string[] = [];
+  const chronicleJobIds: string[] = [];
+  const stateEditIds: string[] = [];
+  const checkpointIds: string[] = [];
+  const memoryIds: string[] = [];
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
@@ -45,9 +52,37 @@ integration("PostgreSQL campaign sync adapters", () => {
     const fixtures = [...importedFixtures];
     const createdProviderIds = [...providerIds];
     const createdForeignUserIds = [...foreignUserIds];
+    const createdGenerationJobIds = [...generationJobIds];
+    const createdImageJobIds = [...imageJobIds];
+    const createdResolutionJobIds = [...resolutionJobIds];
+    const createdChronicleJobIds = [...chronicleJobIds];
+    const createdStateEditIds = [...stateEditIds];
+    const createdCheckpointIds = [...checkpointIds];
+    const createdMemoryIds = [...memoryIds];
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      if (createdResolutionJobIds.length) {
+        await client.query("DELETE FROM illustration_resolution_jobs WHERE id = ANY($1::uuid[])", [createdResolutionJobIds]);
+      }
+      if (createdImageJobIds.length) {
+        await client.query("DELETE FROM image_jobs WHERE id = ANY($1::uuid[])", [createdImageJobIds]);
+      }
+      if (createdCheckpointIds.length) {
+        await client.query("DELETE FROM summary_checkpoints WHERE id = ANY($1::uuid[])", [createdCheckpointIds]);
+      }
+      if (createdMemoryIds.length) {
+        await client.query("DELETE FROM chronicle_memories WHERE id = ANY($1::uuid[])", [createdMemoryIds]);
+      }
+      if (createdStateEditIds.length) {
+        await client.query("DELETE FROM campaign_state_edits WHERE id = ANY($1::uuid[])", [createdStateEditIds]);
+      }
+      if (createdChronicleJobIds.length) {
+        await client.query("DELETE FROM chronicle_jobs WHERE id = ANY($1::uuid[])", [createdChronicleJobIds]);
+      }
+      if (createdGenerationJobIds.length) {
+        await client.query("DELETE FROM generation_jobs WHERE id = ANY($1::uuid[])", [createdGenerationJobIds]);
+      }
       if (fixtures.length) {
         await client.query("DELETE FROM imports WHERE id = ANY($1::uuid[])", [fixtures.map(({ importId }) => importId)]);
         await client.query("DELETE FROM campaigns WHERE id = ANY($1::uuid[])", [fixtures.map(({ campaignId }) => campaignId)]);
@@ -65,6 +100,13 @@ integration("PostgreSQL campaign sync adapters", () => {
       importedFixtures.splice(0, fixtures.length);
       providerIds.splice(0, createdProviderIds.length);
       foreignUserIds.splice(0, createdForeignUserIds.length);
+      generationJobIds.splice(0, createdGenerationJobIds.length);
+      imageJobIds.splice(0, createdImageJobIds.length);
+      resolutionJobIds.splice(0, createdResolutionJobIds.length);
+      chronicleJobIds.splice(0, createdChronicleJobIds.length);
+      stateEditIds.splice(0, createdStateEditIds.length);
+      checkpointIds.splice(0, createdCheckpointIds.length);
+      memoryIds.splice(0, createdMemoryIds.length);
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -73,12 +115,50 @@ integration("PostgreSQL campaign sync adapters", () => {
     }
   });
 
-  function createAdapters() {
+  function createAdapters(memory = memoryGeneration(pool)) {
     const turnPages = createPostgresBoundedCampaignTurnPageAdapter(pool, { turnReportedCosts });
     return createPostgresCampaignAuthorityAdapters(pool, {
       turnPages,
-      memory: memoryGeneration(pool)
+      memory
     });
+  }
+
+  async function authoritySnapshot(campaignId: string) {
+    const snapshot = await pool.query<{
+      activeTurnNumber: number;
+      revision: number;
+      turns: unknown;
+      stateEdits: unknown;
+      checkpoints: unknown;
+      memories: unknown;
+      chronicleJobs: unknown;
+      generationJobs: unknown;
+      imageJobs: unknown;
+      resolutionJobs: unknown;
+    }>(
+      `SELECT c.active_turn_number AS "activeTurnNumber", cs.revision,
+              coalesce((SELECT jsonb_agg(jsonb_build_array(id, turn_number) ORDER BY turn_number)
+                          FROM turns WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id), '[]') AS turns,
+              coalesce((SELECT jsonb_agg(jsonb_build_array(id, effective_turn_number, revision) ORDER BY revision)
+                          FROM campaign_state_edits WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id), '[]') AS "stateEdits",
+              coalesce((SELECT jsonb_agg(jsonb_build_array(id, through_turn) ORDER BY through_turn, id)
+                          FROM summary_checkpoints WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id), '[]') AS checkpoints,
+              coalesce((SELECT jsonb_agg(jsonb_build_array(id, turn_id, memory_kind) ORDER BY ordinal, id)
+                          FROM chronicle_memories WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id), '[]') AS memories,
+              coalesce((SELECT jsonb_agg(jsonb_build_array(id, status, job_type) ORDER BY id)
+                          FROM chronicle_jobs WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id), '[]') AS "chronicleJobs",
+              coalesce((SELECT jsonb_agg(jsonb_build_array(id, status, expected_turn_number, operation_kind, replacement_turn_id, result_turn_id) ORDER BY id)
+                          FROM generation_jobs WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id), '[]') AS "generationJobs",
+              coalesce((SELECT jsonb_agg(jsonb_build_array(id, status, turn_id) ORDER BY id)
+                          FROM image_jobs WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id), '[]') AS "imageJobs",
+              coalesce((SELECT jsonb_agg(jsonb_build_array(id, status, turn_id) ORDER BY id)
+                          FROM illustration_resolution_jobs WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id), '[]') AS "resolutionJobs"
+         FROM campaigns c
+         JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
+        WHERE c.id = $1 AND c.owner_user_id = $2`,
+      [campaignId, ownerUserId]
+    );
+    return snapshot.rows[0];
   }
 
   async function createCampaignFixture() {
@@ -305,6 +385,331 @@ integration("PostgreSQL campaign sync adapters", () => {
     )).resolves.toMatchObject({
       rows: [{ activeTurnNumber: before.activeTurnNumber, revision: before.revision, turnCount: 2 }]
     });
+  });
+
+  it("rejects invalid and missing rewind targets without mutating authority", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const before = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope));
+    const initial = await authoritySnapshot(imported.campaignId);
+
+    await expect(adapters.transaction.command((transaction) => adapters.campaigns.rewindCampaign(
+      transaction,
+      scope,
+      {
+        targetTurnNumber: before.activeTurnNumber + 1,
+        expectedCurrentTurnNumber: before.activeTurnNumber,
+        expectedStateRevision: before.revision
+      }
+    ))).resolves.toEqual({
+      ok: false,
+      failure: {
+        reason: "invalid_transition",
+        details: {
+          campaignId: imported.campaignId,
+          expectedTurnNumber: before.activeTurnNumber + 1,
+          actualTurnNumber: before.activeTurnNumber
+        }
+      }
+    });
+    expect(await authoritySnapshot(imported.campaignId)).toEqual(initial);
+
+    await pool.query(
+      "DELETE FROM turns WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number = 1",
+      [imported.campaignId, ownerUserId]
+    );
+    const missingTargetBaseline = await authoritySnapshot(imported.campaignId);
+    await expect(adapters.transaction.command((transaction) => adapters.campaigns.rewindCampaign(
+      transaction,
+      scope,
+      {
+        targetTurnNumber: 1,
+        expectedCurrentTurnNumber: before.activeTurnNumber,
+        expectedStateRevision: before.revision
+      }
+    ))).resolves.toEqual({
+      ok: false,
+      failure: {
+        reason: "invalid_transition",
+        details: { campaignId: imported.campaignId, expectedTurnNumber: 1 }
+      }
+    });
+    expect(await authoritySnapshot(imported.campaignId)).toEqual(missingTargetBaseline);
+  });
+
+  it("rejects every active campaign-work category without deleting authority", async () => {
+    const providerId = await createProviderFixture();
+    for (const category of ["generation", "image", "resolution", "chronicle"] as const) {
+      const imported = await createCampaignFixture();
+      const adapters = createAdapters();
+      const scope = { ownerUserId, campaignId: imported.campaignId };
+      const turn = await pool.query<{ id: string }>(
+        "SELECT id FROM turns WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number = 2",
+        [imported.campaignId, ownerUserId]
+      );
+      const turnId = turn.rows[0]!.id;
+      if (category === "generation") {
+        const job = await pool.query<{ id: string }>(
+          `INSERT INTO generation_jobs (
+             owner_user_id, campaign_id, provider_profile_id, idempotency_key,
+             expected_turn_number, action, status, requested_model
+           ) VALUES ($1,$2,$3,$4,3,'Blocked rewind generation','queued','fixture-model')
+           RETURNING id`,
+          [ownerUserId, imported.campaignId, providerId, crypto.randomUUID()]
+        );
+        generationJobIds.push(job.rows[0]!.id);
+      } else if (category === "image") {
+        const job = await pool.query<{ id: string }>(
+          `INSERT INTO image_jobs (
+             owner_user_id, campaign_id, turn_id, provider_profile_id, requested_model,
+             prompt, prompt_hash, status, provider_type, target_type
+           ) VALUES ($1,$2,$3,$4,'fixture-model','Blocked rewind image',$5,
+                     'queued','openai_compatible','turn_illustration')
+           RETURNING id`,
+          [ownerUserId, imported.campaignId, turnId, providerId, crypto.randomUUID()]
+        );
+        imageJobIds.push(job.rows[0]!.id);
+      } else if (category === "resolution") {
+        const job = await pool.query<{ id: string }>(
+          `INSERT INTO illustration_resolution_jobs (
+             owner_user_id, campaign_id, turn_id, source_policy, matching_scope,
+             confidence_profile, status
+           ) VALUES ($1,$2,$3,'library_only','campaign','balanced','queued')
+           RETURNING id`,
+          [ownerUserId, imported.campaignId, turnId]
+        );
+        resolutionJobIds.push(job.rows[0]!.id);
+      } else {
+        const updated = await pool.query<{ id: string }>(
+          `UPDATE chronicle_jobs
+              SET status = 'running', lease_owner = 'rewind-fixture',
+                  lease_expires_at = now() + interval '5 minutes'
+            WHERE id = (
+              SELECT id FROM chronicle_jobs
+               WHERE campaign_id = $1 AND owner_user_id = $2
+               ORDER BY created_at LIMIT 1
+            )
+          RETURNING id`,
+          [imported.campaignId, ownerUserId]
+        );
+        const job = updated.rows[0]
+          ? updated
+          : await pool.query<{ id: string }>(
+            `INSERT INTO chronicle_jobs (
+               owner_user_id, campaign_id, job_type, status, lease_owner, lease_expires_at
+             ) VALUES ($1,$2,'reindex_campaign','running','rewind-fixture',now() + interval '5 minutes')
+             RETURNING id`,
+            [ownerUserId, imported.campaignId]
+          );
+        chronicleJobIds.push(job.rows[0]!.id);
+      }
+
+      const baseline = await authoritySnapshot(imported.campaignId);
+      await expect(adapters.transaction.command((transaction) => adapters.campaigns.rewindCampaign(
+        transaction,
+        scope,
+        { targetTurnNumber: 1, expectedCurrentTurnNumber: 2, expectedStateRevision: 0 }
+      ))).resolves.toEqual({
+        ok: false,
+        failure: { reason: "invalid_transition", details: { campaignId: imported.campaignId } }
+      });
+      expect(await authoritySnapshot(imported.campaignId)).toEqual(baseline);
+    }
+  });
+
+  it("rolls back every rewind write when the caller-owned memory rebuild fails after deletion", async () => {
+    const imported = await createCampaignFixture();
+    const providerId = await createProviderFixture();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const baseAdapters = createAdapters();
+    const current = await baseAdapters.transaction.read((transaction) =>
+      baseAdapters.state.getCampaignRuntimeState(transaction, scope));
+    const stateEdit = await pool.query<{ id: string }>(
+      `INSERT INTO campaign_state_edits (
+         owner_user_id, campaign_id, effective_turn_number, revision,
+         state_snapshot_private, changed_fields
+       ) VALUES ($1,$2,2,1,$3,'["scratchpad"]') RETURNING id`,
+      [ownerUserId, imported.campaignId, JSON.stringify(current)]
+    );
+    stateEditIds.push(stateEdit.rows[0]!.id);
+    const checkpoint = await pool.query<{ id: string }>(
+      `INSERT INTO summary_checkpoints (
+         owner_user_id, campaign_id, through_turn, summary_kind, content, token_estimate
+       ) VALUES ($1,$2,2,'rewind-test','{"summary":"must roll back"}',4) RETURNING id`,
+      [ownerUserId, imported.campaignId]
+    );
+    checkpointIds.push(checkpoint.rows[0]!.id);
+    const generation = await pool.query<{ id: string }>(
+      `INSERT INTO generation_jobs (
+         owner_user_id, campaign_id, provider_profile_id, idempotency_key,
+         expected_turn_number, action, status, requested_model, completed_at
+       ) VALUES ($1,$2,$3,$4,2,'Rollback rewind generation','completed','fixture-model',now())
+       RETURNING id`,
+      [ownerUserId, imported.campaignId, providerId, crypto.randomUUID()]
+    );
+    generationJobIds.push(generation.rows[0]!.id);
+    const baseline = await authoritySnapshot(imported.campaignId);
+    const memory = memoryGeneration(pool);
+    const adapters = createAdapters({
+      ...memory,
+      async rebuildCampaignMemories() {
+        throw new Error("injected rewind rebuild failure");
+      }
+    });
+
+    await expect(adapters.transaction.command((transaction) => adapters.campaigns.rewindCampaign(
+      transaction,
+      scope,
+      { targetTurnNumber: 1, expectedCurrentTurnNumber: 2, expectedStateRevision: 0 }
+    ))).rejects.toThrow("injected rewind rebuild failure");
+    expect(await authoritySnapshot(imported.campaignId)).toEqual(baseline);
+  });
+
+  it("deletes only post-target derived rows while retaining accepted append and replacement provenance", async () => {
+    const imported = await createCampaignFixture();
+    const providerId = await createProviderFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const targetState = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope, 1));
+    const currentState = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope));
+    const turns = await pool.query<{ id: string; turnNumber: number }>(
+      `SELECT id, turn_number AS "turnNumber" FROM turns
+        WHERE campaign_id = $1 AND owner_user_id = $2 ORDER BY turn_number`,
+      [imported.campaignId, ownerUserId]
+    );
+    const retainedTurnId = turns.rows.find((turn) => turn.turnNumber === 1)!.id;
+    const discardedTurnId = turns.rows.find((turn) => turn.turnNumber === 2)!.id;
+
+    const edits = await pool.query<{ id: string }>(
+      `INSERT INTO campaign_state_edits (
+         owner_user_id, campaign_id, effective_turn_number, revision,
+         state_snapshot_private, changed_fields
+       ) VALUES
+         ($1,$2,1,1,$3,'["scratchpad"]'),
+         ($1,$2,2,2,$4,'["scratchpad"]')
+       RETURNING id`,
+      [ownerUserId, imported.campaignId, JSON.stringify(targetState), JSON.stringify(currentState)]
+    );
+    stateEditIds.push(...edits.rows.map((row) => row.id));
+    const retainedStateEditId = edits.rows[0]!.id;
+    const discardedStateEditId = edits.rows[1]!.id;
+    const checkpoints = await pool.query<{ id: string; throughTurn: number }>(
+      `INSERT INTO summary_checkpoints (
+         owner_user_id, campaign_id, through_turn, summary_kind, content, token_estimate
+       ) VALUES
+         ($1,$2,1,'rewind-test','{"summary":"retain"}',2),
+         ($1,$2,2,'rewind-test','{"summary":"discard"}',2)
+       RETURNING id, through_turn AS "throughTurn"`,
+      [ownerUserId, imported.campaignId]
+    );
+    checkpointIds.push(...checkpoints.rows.map((row) => row.id));
+    const retainedCheckpointId = checkpoints.rows.find((row) => row.throughTurn === 1)!.id;
+    const discardedCheckpointId = checkpoints.rows.find((row) => row.throughTurn === 2)!.id;
+    const durableReplacementTurnId = crypto.randomUUID();
+    const jobs = await pool.query<{
+      id: string;
+      operationKind: "append" | "replace_latest";
+      expectedTurnNumber: number;
+    }>(
+      `INSERT INTO generation_jobs (
+         owner_user_id, campaign_id, provider_profile_id, idempotency_key,
+         expected_turn_number, action, status, requested_model, completed_at,
+         operation_kind, replacement_turn_id, result_turn_id, base_turn_number
+       ) VALUES
+         ($1,$2,$3,$4,1,'Retained append','completed','fixture-model',now(),'append',NULL,$7,0),
+         ($1,$2,$3,$5,1,'Retained replacement','completed','fixture-model',now(),'replace_latest',$6,$7,0),
+         ($1,$2,$3,$8,2,'Discarded append','completed','fixture-model',now(),'append',NULL,$9,1)
+       RETURNING id, operation_kind AS "operationKind", expected_turn_number AS "expectedTurnNumber"`,
+      [
+        ownerUserId,
+        imported.campaignId,
+        providerId,
+        crypto.randomUUID(),
+        crypto.randomUUID(),
+        durableReplacementTurnId,
+        retainedTurnId,
+        crypto.randomUUID(),
+        discardedTurnId
+      ]
+    );
+    generationJobIds.push(...jobs.rows.map((row) => row.id));
+    const retainedJobIds = jobs.rows
+      .filter((job) => job.expectedTurnNumber === 1)
+      .map((job) => job.id)
+      .sort();
+    const discardedJobId = jobs.rows.find((job) => job.expectedTurnNumber === 2)!.id;
+    const chronicle = await pool.query<{ id: string }>(
+      `INSERT INTO chronicle_jobs (owner_user_id, campaign_id, job_type, status, completed_at)
+       VALUES ($1,$2,'embed_campaign','completed',now()) RETURNING id`,
+      [ownerUserId, imported.campaignId]
+    );
+    chronicleJobIds.push(chronicle.rows[0]!.id);
+    const memories = await pool.query<{ id: string }>(
+      `INSERT INTO chronicle_memories (
+         owner_user_id, campaign_id, world_version_id, turn_id, memory_kind,
+         ordinal, content, token_estimate, metadata
+       ) VALUES
+         ($1,$2,$3,$4,'campaign_summary',1,'Retained rewind memory',4,'{}'),
+         ($1,$2,$3,$5,'campaign_summary',2,'Discarded rewind memory',4,'{}')
+       RETURNING id`,
+      [ownerUserId, imported.campaignId, imported.worldVersionId, retainedTurnId, discardedTurnId]
+    );
+    memoryIds.push(...memories.rows.map((row) => row.id));
+
+    await expect(adapters.transaction.command((transaction) => adapters.campaigns.rewindCampaign(
+      transaction,
+      scope,
+      { targetTurnNumber: 1, expectedCurrentTurnNumber: 2, expectedStateRevision: 0 }
+    ))).resolves.toMatchObject({ ok: true, value: { activeTurnNumber: 1, discardedTurnCount: 1 } });
+
+    await expect(pool.query(
+      `SELECT id FROM turns WHERE campaign_id = $1 AND owner_user_id = $2 ORDER BY turn_number`,
+      [imported.campaignId, ownerUserId]
+    )).resolves.toMatchObject({ rows: [{ id: retainedTurnId }] });
+    await expect(pool.query(
+      "SELECT id FROM campaign_state_edits WHERE campaign_id = $1 AND owner_user_id = $2 ORDER BY revision",
+      [imported.campaignId, ownerUserId]
+    )).resolves.toMatchObject({ rows: [{ id: retainedStateEditId }] });
+    await expect(pool.query(
+      "SELECT id FROM summary_checkpoints WHERE campaign_id = $1 AND owner_user_id = $2 ORDER BY through_turn",
+      [imported.campaignId, ownerUserId]
+    )).resolves.toMatchObject({ rows: [{ id: retainedCheckpointId }] });
+    const survivingJobs = await pool.query<{
+      id: string;
+      operationKind: string;
+      replacementTurnId: string | null;
+    }>(
+      `SELECT id, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"
+         FROM generation_jobs WHERE campaign_id = $1 AND owner_user_id = $2 ORDER BY id`,
+      [imported.campaignId, ownerUserId]
+    );
+    expect(survivingJobs.rows.map((job) => job.id).sort()).toEqual(retainedJobIds);
+    expect(survivingJobs.rows).toContainEqual(expect.objectContaining({
+      operationKind: "replace_latest",
+      replacementTurnId: durableReplacementTurnId
+    }));
+    expect(survivingJobs.rows).not.toContainEqual(expect.objectContaining({ id: discardedJobId }));
+    await expect(pool.query("SELECT id FROM campaign_state_edits WHERE id = $1", [discardedStateEditId]))
+      .resolves.toMatchObject({ rows: [] });
+    await expect(pool.query("SELECT id FROM summary_checkpoints WHERE id = $1", [discardedCheckpointId]))
+      .resolves.toMatchObject({ rows: [] });
+    await expect(pool.query("SELECT id FROM chronicle_jobs WHERE id = $1", [chronicle.rows[0]!.id]))
+      .resolves.toMatchObject({ rows: [] });
+    await expect(pool.query(
+      `SELECT id FROM chronicle_memories
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_id = $3`,
+      [imported.campaignId, ownerUserId, discardedTurnId]
+    )).resolves.toMatchObject({ rows: [] });
+    const retainedMemories = await pool.query(
+      `SELECT id FROM chronicle_memories
+        WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_id = $3`,
+      [imported.campaignId, ownerUserId, retainedTurnId]
+    );
+    expect(retainedMemories.rowCount).toBeGreaterThan(0);
   });
 
   it("loads validated current, historical, and effective edited campaign state", async () => {
