@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 initial contracts/inventory complete; 14e1R contract correction is next, then split 14e2 adapters |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R contracts complete; 14e2a secure filesystem/archive capability is next |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -7724,6 +7724,19 @@ must never expose a filesystem path, stream, raw error, or caller-supplied
 owner. Update pure fake-adapter and compile-time contract tests. Do not create
 filesystem/database adapters, switch API/worker composition, change routes, or
 cut over a consumer in 14e1R.
+
+**14e1R completion (2026-08-05):** `88b482b` closes the contract-completeness
+gap found before adapter work. Asset commands now model authorized metadata
+update, safe discriminated original/derivative delivery descriptors, and an
+explicit nullable selection clear while rejecting omitted selection values. The
+named private `PortableArchiveStagingPort` accepts only a bounded owner-bound
+upload capability and mints opaque staged inputs without publishing paths,
+streams, raw errors, or caller identity. Focused asset/import/web-build tests
+passed 38/38; full unit verification passed 1,287 tests, along with check,
+build, diff, and precheck. The nested web-build test fixture was corrected only
+to satisfy the new discriminated descriptor contract. Independent review
+approved with no adapter, route, composition, worker, migration, legacy-service,
+or consumer cutover. **14e2a is next and owns #0446.**
 
 **14e2 — PostgreSQL and filesystem/archive adapters (additive only).** Deliver
 the following sequential, independently reviewed checkpoints. Each adds only
