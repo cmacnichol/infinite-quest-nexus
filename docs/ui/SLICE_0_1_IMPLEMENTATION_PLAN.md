@@ -7341,6 +7341,19 @@ Split this domain internally:
    coverage passed 10/10; the final implementation verification passed 1,238
    unit tests, 281 integration tests, `pnpm check`, build, diff, and precheck.
    14c2b is next; no route/runtime/worker/legacy-service cutover occurred.
+
+   **14c2b sync subcheckpoint completion (2026-08-05):** `c3023b5`,
+   `505023d`, and `e82f6b1` add the additive owner-scoped campaign-sync
+   repository and its bounded turn-page adapter. The sync snapshot stays inside
+   the caller-owned read transaction while changed windows delegate to the
+   established B4 reader; it does not recreate cursor or snapshot logic. The
+   correction rounds retain owner-scoped turn costs, validate the complete
+   database-derived projection, translate malformed persisted data safely, and
+   preserve numeric zero semantics. The final independent review found zero
+   findings; focused real-PostgreSQL coverage passed 7/7 with `pnpm check` and
+   diff checks. **14c2b remains active** for runtime-state, player-config,
+   rewind, and branch adapters; no route/runtime/worker/legacy-service cutover
+   occurred.
 3. **14c3 — atomic composition and transport cutover.** Create named API
    adapters plus `services/runtime/src/world-campaign-composition.ts`, bind every
    `OwnerScope` at Fastify composition, and cut over all listed routes and any
