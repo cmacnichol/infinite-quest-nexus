@@ -88,7 +88,7 @@ contain this plan.
 | Task 13b | B4b — play-loop read profiling/optimization | **Complete** | Implementation `1d6b766`, correction `ff7f56e`; scoped review and correction re-review approved; full unit 1,156/1,156, full PostgreSQL 234/234, C0 read benchmark passed |
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | **Complete** | `e2a15e6` through `c7c8353`; contracts, cutover, durability, privacy, ownership, and all 18 Fastify route-parity gates independently approved |
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
-| Task 14c | B5c — worlds, versions, campaign management (removes none) | Not started | — |
+| Task 14c | B5c — worlds, versions, campaign management (removes none) | **In progress** | 14c1 contracts (`dc1de51`–`99ef161`) and 14c2a world/campaign-lifecycle adapters (`7ccf786`, `dc73210`, `9a8387d`) are complete and independently reviewed; 14c2b campaign authority/state adapters are active |
 | Task 14d | B5d — providers and prompt configuration (removes none) | Not started | — |
 | Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
@@ -7923,12 +7923,13 @@ behavior once the corresponding replacement behavior exists.
                                                        UI authorized -> U1 -> U2 -> U3 -> U4 -> U5 -> U6
 ```
 
-**C0 through C5 and C7 through C8 are complete** (Tasks 1-6, 8, and 9,
-including C1a, C2a, C3a, and C4a); B4a and B4a-R are also complete. The next
-implementation is **Task 7P**, followed by 7a, 7b, 7c, and 7d. The backend-first
-sequence then runs B1, B2, B3, B4b, and B5a-B5e, with Task 14f as the explicit
-UI authorization gate. No backend package or UI task runs in parallel with that
-declared sequence unless this plan is deliberately revised and re-reviewed.
+**C0 through C8 are complete** (Tasks 1-9, including C1a, C2a, C3a, C4a, 7P,
+and C6 stages 7a-7d); B1 through B5b are also complete. **Task 14c (B5c) is
+active:** 14c1 and 14c2a are complete, and 14c2b is the current implementation
+checkpoint. The backend-first sequence continues 14c2b → 14c2c → 14c2d → 14c3
+→ 14c4 → B5d → B5e → 14f. Task 14f remains the explicit UI authorization gate.
+No backend package or UI task runs in parallel with that declared sequence unless
+this plan is deliberately revised and re-reviewed.
 
 **C6 does not gate C8 — this was previously drawn as `C6 -> C8` and is
 corrected.** Task 9 never consumes the C6 stores or selectors. C6's consumers
