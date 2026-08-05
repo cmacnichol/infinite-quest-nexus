@@ -10,6 +10,8 @@ import type {
   ChronicleJobView,
   ChronicleLeaseScope,
   ChronicleMetricsView,
+  ChronicleWorkerRetrievalRequest,
+  ChronicleWorkerRunRequest,
   ChronicleWorkerRetrieval,
   ClaimedChronicleJob,
   DerivedStoryMemory,
@@ -17,6 +19,7 @@ import type {
   EmbeddingConfigView,
   MemoryContextPreviewRequest,
   MemoryEmbeddingConfigInput,
+  MemoryGenerationContextPreviewScope,
   MemoryPublicResult,
   MemoryTransactionContext,
   MemoryWorkerClaimRequest,
@@ -52,6 +55,10 @@ export interface MemoryGenerationTransactionPort {
     database: MemoryTransactionContext,
     scope: CampaignWorldVersionMemoryScope,
   ): Promise<EmbeddingConfigView>;
+  buildContextPreview(
+    database: MemoryTransactionContext,
+    scope: MemoryGenerationContextPreviewScope,
+  ): Promise<ChronicleContextPreview>;
   enqueueEmbeddingReindex(
     database: MemoryTransactionContext,
     scope: CampaignWorldVersionMemoryScope,
@@ -81,10 +88,18 @@ export interface ChronicleWorkerStatePort {
 }
 
 export interface ChronicleWorkerRetrievalPort {
-  loadForClaim(scope: ChronicleLeaseScope): Promise<ChronicleWorkerRetrieval>;
+  loadForClaim(
+    scope: ChronicleLeaseScope,
+    request: ChronicleWorkerRetrievalRequest,
+  ): Promise<ChronicleWorkerRetrieval>;
 }
 
 export interface ChronicleWorkerExecutor {
+  /**
+   * Platform-free lane seam. The concrete 14b2 executor owns claim, heartbeat,
+   * retrieval, terminal transition, and safe diagnostics behind these ports.
+   */
+  runNextChronicle(request: ChronicleWorkerRunRequest): Promise<boolean>;
   runClaimed(claim: ClaimedChronicleJob): Promise<boolean>;
 }
 

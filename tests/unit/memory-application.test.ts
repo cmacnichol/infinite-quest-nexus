@@ -31,6 +31,7 @@ describe("MemoryApplication", () => {
       },
       transaction: {
         autoEnableCampaignEmbedding: vi.fn().mockResolvedValue({ enabled: true }),
+        buildContextPreview: vi.fn().mockResolvedValue({ scopes: { campaignCanon: [] } }),
         enqueueEmbeddingReindex: vi.fn().mockResolvedValue("embedding-1"),
         rebuildCampaignMemories: vi.fn().mockResolvedValue(3),
         storeDerivedTurnMemories: vi.fn().mockResolvedValue(undefined),
@@ -57,10 +58,11 @@ describe("MemoryApplication", () => {
     expect(dependencies.jobs.getJob).toHaveBeenCalledWith({ ownerUserId: scope.ownerUserId, jobId: "chronicle-1" });
   });
 
-  it("keeps all five generation memory operations on the caller-owned transaction", async () => {
+  it("keeps all six generation memory operations on the caller-owned transaction", async () => {
     const transaction = { transactionId: "outer-transaction" };
     const callbacks = {
       autoEnableCampaignEmbedding: vi.fn().mockResolvedValue({ enabled: true }),
+      buildContextPreview: vi.fn().mockResolvedValue({ scopes: { campaignCanon: [] } }),
       enqueueEmbeddingReindex: vi.fn().mockResolvedValue("embedding-1"),
       rebuildCampaignMemories: vi.fn().mockResolvedValue(2),
       storeDerivedTurnMemories: vi.fn().mockResolvedValue(undefined),
@@ -74,6 +76,19 @@ describe("MemoryApplication", () => {
     });
 
     await application.generation.autoEnableCampaignEmbedding(transaction, scope);
+    await application.generation.buildContextPreview(transaction, {
+      ...scope,
+      request: {
+        budgetTokens: 32_000,
+        compression: "auto",
+        query: "safe action",
+        recentTurns: 8
+      },
+      costAttribution: {
+        generationJobId: "generation-1",
+        operation: "retrieval_embedding"
+      }
+    });
     await application.generation.enqueueEmbeddingReindex(transaction, scope);
     await application.generation.rebuildCampaignMemories(transaction, scope);
     await application.generation.storeDerivedTurnMemories(transaction, {
@@ -93,11 +108,24 @@ describe("MemoryApplication", () => {
     for (const callback of Object.values(callbacks)) {
       expect(callback).toHaveBeenCalledWith(transaction, expect.anything());
     }
+    expect(callbacks.buildContextPreview).toHaveBeenCalledWith(transaction, {
+      ...scope,
+      request: {
+        budgetTokens: 32_000,
+        compression: "auto",
+        query: "safe action",
+        recentTurns: 8
+      },
+      costAttribution: {
+        generationJobId: "generation-1",
+        operation: "retrieval_embedding"
+      }
+    });
   });
 });
 
 describe("MemoryWorkerApplication", () => {
-  it("delegates claim, lease, requeue, rebuild, and retrieval ports with a claimed scope", async () => {
+  it("runs one bounded Chronicle worker lifecycle through the worker executor seam", async () => {
     const dependencies: MemoryWorkerApplicationDependencies = {
       state: {
         claimNext: vi.fn().mockResolvedValue({
@@ -110,8 +138,18 @@ describe("MemoryWorkerApplication", () => {
         failClaim: vi.fn().mockResolvedValue(true),
         requeueClaim: vi.fn().mockResolvedValue(true)
       },
-      retrieval: { loadForClaim: vi.fn().mockResolvedValue({ config: { enabled: true }, memories: [] }) },
-      executor: { runClaimed: vi.fn().mockResolvedValue(true) }
+      retrieval: {
+        loadForClaim: vi.fn().mockResolvedValue({
+          config: { enabled: true },
+          memories: [],
+          nextCursor: null,
+          batchLimit: 25
+        })
+      },
+      executor: {
+        runClaimed: vi.fn().mockResolvedValue(true),
+        runNextChronicle: vi.fn().mockResolvedValue(true)
+      }
     };
     const worker = createMemoryWorkerApplication(dependencies);
     const claim = await worker.claimNext({ workerId: "worker-1", leaseSeconds: 30 });
@@ -120,7 +158,22 @@ describe("MemoryWorkerApplication", () => {
     if (!claim) throw new Error("test fixture did not claim a job");
     await worker.heartbeatClaim(claim);
     await worker.requeueClaim(claim, { reason: "work_version_changed" });
+    await worker.loadForClaim(claim, { batchLimit: 25, cursor: "memory-cursor-1" });
     await worker.runClaimed(claim);
+    await expect(worker.runNextChronicle({
+      workerId: "worker-1",
+      leaseSeconds: 30,
+      retrieval: { batchLimit: 25, cursor: "memory-cursor-1" }
+    })).resolves.toBe(true);
     expect(dependencies.executor.runClaimed).toHaveBeenCalledWith(claim);
+    expect(dependencies.retrieval.loadForClaim).toHaveBeenCalledWith(claim, {
+      batchLimit: 25,
+      cursor: "memory-cursor-1"
+    });
+    expect(dependencies.executor.runNextChronicle).toHaveBeenCalledWith({
+      workerId: "worker-1",
+      leaseSeconds: 30,
+      retrieval: { batchLimit: 25, cursor: "memory-cursor-1" }
+    });
   });
 });

@@ -102,9 +102,38 @@ export type AcceptedTurnFictionScope = DerivedTurnMemoryScope & Readonly<{
   narration: string;
 }>;
 
+/**
+ * Generation context retrieval stays inside the caller-owned generation
+ * context. Provider credentials remain a runtime binding rather than an
+ * application command field.
+ */
+export type MemoryGenerationContextPreviewScope = CampaignWorldVersionMemoryScope & Readonly<{
+  request: MemoryContextPreviewRequest;
+  stateOverride?: Readonly<Record<string, unknown>>;
+  scratchpadSafeForPrompt?: boolean;
+  costAttribution?: Readonly<{
+    generationJobId?: string;
+    operation?: "retrieval_embedding" | "context_preview_embedding";
+  }>;
+}>;
+
 export type MemoryWorkerClaimRequest = Readonly<{
   workerId: string;
   leaseSeconds: number;
+}>;
+
+/**
+ * Every worker retrieval is explicitly bounded. Adapters must reject invalid
+ * limits and return a cursor only for the claim's owner/campaign/world version.
+ */
+export type ChronicleWorkerRetrievalRequest = Readonly<{
+  batchLimit: number;
+  cursor?: string | null;
+}>;
+
+/** One worker lane invocation includes both lease authority and its read window. */
+export type ChronicleWorkerRunRequest = MemoryWorkerClaimRequest & Readonly<{
+  retrieval: ChronicleWorkerRetrievalRequest;
 }>;
 
 export type ClaimedChronicleJob = CampaignWorldVersionMemoryScope & Readonly<{
@@ -136,6 +165,8 @@ export type ChronicleWorkerRetrieval = Readonly<{
   config: EmbeddingConfigView;
   /** Bounded, owner/campaign/world-version-scoped rows only. */
   memories: readonly Readonly<Record<string, unknown>>[];
+  batchLimit: number;
+  nextCursor: string | null;
 }>;
 
 export type MemoryContextPreviewRequest = MemoryContextQuery & Readonly<{

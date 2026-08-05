@@ -17,28 +17,46 @@ cutover and deletion of `memory-service.ts` callable paths.
 - Public preview, metrics, and job reads project only the fixed
   `memory_unavailable` / `Chronicle memory is unavailable.` failure. Raw
   provider endpoint, credential, and diagnostics remain adapter-only logs.
-- The accepted-turn transaction is caller owned. 14b2 must bind the five
-  Task10d callbacks and the direct accepted-turn fiction write to the supplied
-  transaction context without beginning another transaction or falling back to
-  a pool.
+- The accepted-turn transaction is caller owned. 14b2 must bind all five
+  Task10d callbacks — including `buildContextPreview` — and the direct
+  accepted-turn fiction write to the supplied transaction context without
+  beginning another transaction or falling back to a pool. The generation
+  context-preview scope carries the resolved owner/campaign/world-version,
+  request, replacement snapshot fields, and cost attribution; provider
+  credentials remain a runtime binding.
 
 ## Task 10d callback inventory
 
 | Current callback | Current binding | 14b1 port | 14b3 disposition |
 | --- | --- | --- | --- |
 | `autoEnableCampaignEmbeddingIfAvailable` | `generation-worker-composition.ts` | `MemoryGenerationTransactionPort.autoEnableCampaignEmbedding` | Injected memory application replaces temporary callback. |
-| `buildContextPreview` | `generation-worker-composition.ts` | `MemoryQueryRepository.previewContext` | Injected worker memory application replaces temporary callback. |
+| `buildContextPreview` | `generation-worker-composition.ts` | `MemoryGenerationTransactionPort.buildContextPreview` | Injected worker memory application replaces temporary callback while preserving the caller-owned context. |
 | `enqueueEmbeddingReindex` | `generation-worker-composition.ts` | `MemoryGenerationTransactionPort.enqueueEmbeddingReindex` | Injected memory application replaces temporary callback. |
 | `rebuildCampaignMemories` | `generation-worker-composition.ts` and accepted-turn collaborators | `MemoryGenerationTransactionPort.rebuildCampaignMemories` | Injected memory application replaces temporary callback. |
 | `storeDerivedTurnMemories` | `generation-worker-composition.ts` and accepted-turn collaborators | `MemoryGenerationTransactionPort.storeDerivedTurnMemories` | Injected memory application replaces temporary callback. |
-| accepted-turn fiction write | `generation-execution-repository.ts` direct `chronicle_memories` insert | `MemoryGenerationTransactionPort.writeAcceptedTurnFiction` | Move into the 14b2 PostgreSQL transaction adapter; remove direct execution-repository write in 14b3. |
+| `accepted-turn fiction write` | `generation-execution-repository.ts` direct `chronicle_memories` insert | `MemoryGenerationTransactionPort.writeAcceptedTurnFiction` | Move into the 14b2 PostgreSQL transaction adapter; remove direct execution-repository write in 14b3. |
+
+## Exact memory transport inventory
+
+The six `/memory` handlers are exactly:
+
+1. `GET /api/v1/campaigns/:campaignId/memory/metrics`
+2. `GET /api/v1/campaigns/:campaignId/memory/context-preview`
+3. `POST /api/v1/campaigns/:campaignId/memory/reindex`
+4. `GET /api/v1/campaigns/:campaignId/memory/embedding-config`
+5. `PUT /api/v1/campaigns/:campaignId/memory/embedding-config`
+6. `POST /api/v1/campaigns/:campaignId/memory/embeddings/reindex`
+
+The separate generic Chronicle-job transport handler is exactly
+`GET /api/v1/jobs/:jobId`; it is not a seventh `/memory` route. Task 14b3
+retains only transport parsing and safe response mapping for all seven handlers.
 
 ## Direct Chronicle/config/job/embedding inventory
 
 | Source | Current responsibility | Disposition | Owner |
 | --- | --- | --- | --- |
 | `services/api/src/memory-service.ts` | configuration, metrics, preview/retrieval, reindex jobs, derived writes, state correction, rebuild, embeddings, worker job loop | Split into 14b2 Chronicle repository/runtime adapters; delete callable service in 14b3 | 14b2/14b3 |
-| `services/api/src/server.ts` | six memory/job transport routes | Retain transport parsing only; inject memory application in 14b3 | 14b3 |
+| `services/api/src/server.ts` | six `/memory` transport routes plus generic `GET /api/v1/jobs/:jobId` | Retain transport parsing only; inject memory application in 14b3 | 14b3 |
 | `services/worker/src/worker.ts` | `runChronicleJob` cross-role import | Inject `MemoryWorkerApplication`; remove memory allowlist entry | 14b3 |
 | `services/runtime/src/generation-worker-composition.ts` | five temporary memory callbacks | Replace in place with runtime composition of memory application | 14b3 |
 | `services/runtime/src/generation-executor-adapter.ts` | consumes the five callbacks for prompt retrieval and accepted-turn commit | Replace temporary collaborator fields with injected memory application ports | 14b3 |

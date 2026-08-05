@@ -34,4 +34,30 @@ describe("Task 14b Chronicle inventory", () => {
     expect(inventory).toContain("14b3");
     expect(inventory).not.toContain("TBD");
   });
+
+  it("enumerates the exact six memory handlers, generic Chronicle job read, and six generation callbacks", async () => {
+    const inventory = await readFile(fileURLToPath(inventoryUrl), "utf8");
+    const memoryRoutes = [
+      "GET /api/v1/campaigns/:campaignId/memory/metrics",
+      "GET /api/v1/campaigns/:campaignId/memory/context-preview",
+      "POST /api/v1/campaigns/:campaignId/memory/reindex",
+      "GET /api/v1/campaigns/:campaignId/memory/embedding-config",
+      "PUT /api/v1/campaigns/:campaignId/memory/embedding-config",
+      "POST /api/v1/campaigns/:campaignId/memory/embeddings/reindex"
+    ];
+    const callbacks = [
+      "autoEnableCampaignEmbeddingIfAvailable",
+      "buildContextPreview",
+      "enqueueEmbeddingReindex",
+      "rebuildCampaignMemories",
+      "storeDerivedTurnMemories",
+      "accepted-turn fiction write"
+    ];
+
+    expect(memoryRoutes).toHaveLength(6);
+    expect(callbacks).toHaveLength(6);
+    for (const route of memoryRoutes) expect(inventory).toContain("`" + route + "`");
+    for (const callback of callbacks) expect(inventory).toContain("`" + callback + "`");
+    expect(inventory).toContain("`GET /api/v1/jobs/:jobId`");
+  });
 });

@@ -20,6 +20,8 @@ export function createMemoryApplication(
     generation: {
       autoEnableCampaignEmbedding: (database, scope) =>
         dependencies.transaction.autoEnableCampaignEmbedding(database, scope),
+      buildContextPreview: (database, scope) =>
+        dependencies.transaction.buildContextPreview(database, scope),
       enqueueEmbeddingReindex: (database, scope) =>
         dependencies.transaction.enqueueEmbeddingReindex(database, scope),
       rebuildCampaignMemories: (database, scope) =>
@@ -36,13 +38,14 @@ export function createMemoryWorkerApplication(
   dependencies: MemoryWorkerApplicationDependencies,
 ): MemoryWorkerApplication {
   return {
+    runNextChronicle: (request) => dependencies.executor.runNextChronicle(request),
     claimNext: (request) => dependencies.state.claimNext(request),
     loadClaimedJob: (scope) => dependencies.state.loadClaimedJob(scope),
     heartbeatClaim: (scope) => dependencies.state.heartbeatClaim(scope),
     completeClaim: (scope, completion) => dependencies.state.completeClaim(scope, completion),
     failClaim: (scope, failure) => dependencies.state.failClaim(scope, failure),
     requeueClaim: (scope, retry) => dependencies.state.requeueClaim(scope, retry),
-    loadForClaim: (scope) => dependencies.retrieval.loadForClaim(scope),
+    loadForClaim: (scope, request) => dependencies.retrieval.loadForClaim(scope, request),
     runClaimed: (claim) => dependencies.executor.runClaimed(claim)
   };
 }
