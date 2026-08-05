@@ -1,5 +1,10 @@
 import type { ImportApplication, ImportApplicationDependencies } from "./ports.js";
-import type { ImportOwnerScope, PortableImportCommitCommand, PortableImportPreviewCommand } from "./types.js";
+import type {
+  ImportOwnerScope,
+  PortableImportCommitCommand,
+  PortableImportPreviewCommand,
+  PortablePreviewDestination
+} from "./types.js";
 
 export class ImportApplicationError extends Error {
   constructor(readonly code: "owner_scope_required" | "import_scope_required" | "idempotency_key_required") {
@@ -16,9 +21,10 @@ function requireOwner(scope: ImportOwnerScope): void {
   if (!nonBlank(scope.ownerUserId)) throw new ImportApplicationError("owner_scope_required");
 }
 
-function requirePreview(command: PortableImportPreviewCommand): void {
-  requireOwner(command);
-  if (!nonBlank(command.stagedInput)) throw new ImportApplicationError("import_scope_required");
+function requirePreviewDestination(command: Readonly<{
+  kind: PortableImportPreviewCommand["kind"];
+  destination: PortablePreviewDestination;
+}>): void {
   if (command.kind === "campaign_zip") {
     if (command.destination.kind === "embedded" && command.destination.operation === "create_world") return;
     if (command.destination.kind === "existing_world_version"
@@ -37,21 +43,36 @@ function requirePreview(command: PortableImportPreviewCommand): void {
   }
 }
 
+function requirePreview(command: PortableImportPreviewCommand): void {
+  requireOwner(command);
+  if (!nonBlank(command.stagedInput)) throw new ImportApplicationError("import_scope_required");
+  requirePreviewDestination(command);
+}
+
+function destinationsMatch(
+  previewDestination: PortablePreviewDestination,
+  commitDestination: PortablePreviewDestination,
+): boolean {
+  if (previewDestination.kind === "embedded") {
+    return commitDestination.kind === "embedded"
+      && previewDestination.operation === commitDestination.operation;
+  }
+  if (previewDestination.kind === "existing_world_version") {
+    return commitDestination.kind === "existing_world_version"
+      && previewDestination.worldId === commitDestination.worldId
+      && previewDestination.worldVersionId === commitDestination.worldVersionId;
+  }
+  return commitDestination.kind === "create_world";
+}
+
 function requireCommit(command: PortableImportCommitCommand): void {
   requireOwner(command);
-  if (!nonBlank(command.previewHandle)) {
+  if (!nonBlank(command.previewHandle.token)) {
     throw new ImportApplicationError("import_scope_required");
   }
   if (!nonBlank(command.idempotencyKey)) throw new ImportApplicationError("idempotency_key_required");
-  if (command.destination.kind === "campaign" && !nonBlank(command.destination.campaignId)) {
-    throw new ImportApplicationError("import_scope_required");
-  }
-  if (command.destination.kind === "world" && !nonBlank(command.destination.worldId)) {
-    throw new ImportApplicationError("import_scope_required");
-  }
-  if (command.destination.kind === "world_version" && (
-    !nonBlank(command.destination.worldId) || !nonBlank(command.destination.worldVersionId)
-  )) {
+  requirePreviewDestination(command);
+  if (!destinationsMatch(command.previewHandle.destination, command.destination)) {
     throw new ImportApplicationError("import_scope_required");
   }
 }

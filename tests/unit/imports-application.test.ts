@@ -13,7 +13,7 @@ import {
   toPortableStagedInput,
   type ImportApplicationDependencies,
   type ImportTransactionContext,
-  type PortableImportCommitCommand,
+  type PortableImportCommitCommandFor,
   type PortableImportPreviewCommand
 } from "../../packages/application/src/imports/index.js";
 
@@ -52,17 +52,6 @@ function preview(
     sourceInstallationId: toPortableSourceInstallationId("foreign-installation"),
     importedRecordId: toPortableImportedRecordId("foreign-record")
   } as PortableImportPreviewCommand;
-}
-
-function commit(kind: PortableImportCommitCommand["kind"]): PortableImportCommitCommand {
-  const previewHandle = toPortablePreviewHandle(`preview-${kind}`);
-  if (kind === "legacy_story" || kind === "campaign_zip") {
-    return { ownerUserId, kind, destination: { kind: "campaign", campaignId }, previewHandle, idempotencyKey: `${kind}-1` };
-  }
-  if (kind === "infinite_worlds") {
-    return { ownerUserId, kind, destination: { kind: "world", worldId }, previewHandle, idempotencyKey: `${kind}-1` };
-  }
-  return { ownerUserId, kind, destination: { kind: "world_version", worldId, worldVersionId }, previewHandle, idempotencyKey: `${kind}-1` };
 }
 
 function dependencies(worlds = portableWorld()): ImportApplicationDependencies {
@@ -105,6 +94,89 @@ describe("portable import application contracts", () => {
     expect(archives.previewPortableImport).toHaveBeenCalledWith(previewCommand);
     expect(result.destination).toEqual(destination);
     expect(result.previewHandle).toEqual(toPortablePreviewHandle(`preview-${kind}`, destination));
+  });
+
+  it("statically prevents redeeming a preview handle for another destination", () => {
+    const embeddedDestination = { kind: "embedded", operation: "create_world" } as const;
+    const existingDestination = { kind: "existing_world_version", worldId, worldVersionId } as const;
+    const embeddedPreview = {
+      ownerUserId,
+      kind: "campaign_zip",
+      stagedInput,
+      destination: embeddedDestination
+    } as const satisfies PortableImportPreviewCommand;
+    const matchingCommit: PortableImportCommitCommandFor<typeof embeddedPreview> = {
+      ownerUserId,
+      kind: "campaign_zip",
+      destination: embeddedDestination,
+      previewHandle: toPortablePreviewHandle("embedded-preview", embeddedDestination),
+      idempotencyKey: "embedded-preview-1"
+    };
+
+    const mismatchedCommit: PortableImportCommitCommandFor<typeof embeddedPreview> = {
+      ownerUserId,
+      kind: "campaign_zip",
+      destination: embeddedDestination,
+      // @ts-expect-error An embedded create-world preview cannot redeem an existing-world-version handle.
+      previewHandle: toPortablePreviewHandle("existing-preview", existingDestination),
+      idempotencyKey: "embedded-preview-2"
+    };
+
+    expect(matchingCommit.destination).toEqual(embeddedDestination);
+    expect(mismatchedCommit.previewHandle.destination).toEqual(existingDestination);
+  });
+
+  it.each([
+    ["campaign_zip", { kind: "embedded", operation: "create_world" }, { kind: "existing_world_version", worldId, worldVersionId }],
+    ["campaign_zip", { kind: "existing_world_version", worldId, worldVersionId }, { kind: "embedded", operation: "create_world" }],
+    ["legacy_story", { kind: "existing_world_version", worldId, worldVersionId }, { kind: "existing_world_version", worldId: "other-world", worldVersionId }],
+    ["story_text", { kind: "existing_world_version", worldId, worldVersionId }, { kind: "existing_world_version", worldId: "other-world", worldVersionId }],
+    ["infinite_worlds", { kind: "create_world" }, { kind: "existing_world_version", worldId, worldVersionId }],
+    ["cyoa", { kind: "create_world" }, { kind: "existing_world_version", worldId, worldVersionId }],
+    ["world_json", { kind: "create_world" }, { kind: "existing_world_version", worldId, worldVersionId }],
+    ["world_text", { kind: "create_world" }, { kind: "existing_world_version", worldId, worldVersionId }]
+  ] as const)("rejects a %s commit whose destination does not match its preview handle", async (kind, previewDestination, commitDestination) => {
+    const archives = dependencies().archives;
+    const application = createImportApplication({ worlds: portableWorld(), archives });
+    const previewed = await application.previewPortableImport(preview(kind, previewDestination));
+
+    await expect(application.commitPortableImport({} as ImportTransactionContext, {
+      ownerUserId,
+      kind,
+      destination: commitDestination,
+      previewHandle: previewed.previewHandle,
+      idempotencyKey: `mismatched-${kind}`
+    } as never)).rejects.toMatchObject({ code: "import_scope_required" });
+    expect(archives.commitPortableImport).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["campaign_zip", { kind: "embedded", operation: "create_world" }],
+    ["campaign_zip", { kind: "existing_world_version", worldId, worldVersionId }],
+    ["legacy_story", { kind: "existing_world_version", worldId, worldVersionId }],
+    ["story_text", { kind: "existing_world_version", worldId, worldVersionId }],
+    ["infinite_worlds", { kind: "create_world" }],
+    ["cyoa", { kind: "create_world" }],
+    ["world_json", { kind: "create_world" }],
+    ["world_text", { kind: "create_world" }]
+  ] as const)("redeems a %s preview only with its matching destination", async (kind, destination) => {
+    const archives = dependencies().archives;
+    const application = createImportApplication({ worlds: portableWorld(), archives });
+    const previewed = await application.previewPortableImport(preview(kind, destination));
+
+    await application.commitPortableImport({} as ImportTransactionContext, {
+      ownerUserId,
+      kind,
+      destination,
+      previewHandle: previewed.previewHandle,
+      idempotencyKey: `matching-${kind}`
+    } as never);
+
+    expect(archives.commitPortableImport).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      kind,
+      destination,
+      previewHandle: previewed.previewHandle
+    }));
   });
 
   it("rejects invalid preview destinations before issuing a preview token", async () => {
@@ -168,18 +240,19 @@ describe("portable import application contracts", () => {
     const application = createImportApplication(dependencies());
     const transaction = {} as ImportTransactionContext;
     const request = {} as never;
+    const invalidExistingDestination = { kind: "existing_world_version", worldId: "", worldVersionId: "" } as const;
 
     await expect(application.previewPortableImport({ ...preview("legacy_story", { kind: "existing_world_version", worldId, worldVersionId }), ownerUserId: "" })).rejects.toMatchObject({ code: "owner_scope_required" });
     await expect(application.commitPortableImport(transaction, {
       ownerUserId,
       kind: "campaign_zip",
-      destination: { kind: "campaign", campaignId: "" },
-      previewHandle: toPortablePreviewHandle("invalid-campaign"),
+      destination: invalidExistingDestination,
+      previewHandle: toPortablePreviewHandle("invalid-campaign", invalidExistingDestination),
       idempotencyKey: "invalid-campaign"
-    })).rejects.toMatchObject({ code: "import_scope_required" });
+    } as never)).rejects.toMatchObject({ code: "import_scope_required" });
     await expect(application.exportCampaignArchive({ ownerUserId, campaignId: "", worldId, worldVersionId })).rejects.toMatchObject({ code: "import_scope_required" });
     await expect(application.downloadPortableExport({ ownerUserId, campaignId: "", worldId, worldVersionId }, toPortableArchiveExportRetrieval("download"))).rejects.toMatchObject({ code: "import_scope_required" });
-    await expect(application.cleanupPreview({ ownerUserId: "", previewHandle: toPortablePreviewHandle("cleanup") })).rejects.toMatchObject({ code: "owner_scope_required" });
+    await expect(application.cleanupPreview({ ownerUserId: "", previewHandle: toPortablePreviewHandle("cleanup", { kind: "create_world" }) })).rejects.toMatchObject({ code: "owner_scope_required" });
     await expect(application.exportWorldJson({ ownerUserId, worldId: "" })).rejects.toMatchObject({ code: "import_scope_required" });
     await expect(application.previewWorldJson({
       ownerUserId: "",
@@ -190,7 +263,7 @@ describe("portable import application contracts", () => {
   });
 
   it("rejects blank opaque handles before they reach an adapter", () => {
-    expect(() => toPortablePreviewHandle("  ")).toThrow("portable_preview_handle_invalid");
+    expect(() => toPortablePreviewHandle("  ", { kind: "create_world" })).toThrow("portable_preview_handle_invalid");
     expect(() => toPortableSourceInstallationId("  ")).toThrow("portable_source_installation_id_invalid");
   });
 });

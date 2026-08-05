@@ -23,6 +23,7 @@ export type PortableImportedRecordId = string & Readonly<{
 
 /** A validated handle never contains a staging path or archive filename. */
 declare const portablePreviewHandleBrand: unique symbol;
+declare const portablePreviewTokenBrand: unique symbol;
 
 /** Opaque repository-issued staged input handle. It cannot be typed as a filesystem path. */
 declare const portableStagedInputBrand: unique symbol;
@@ -78,9 +79,16 @@ export type PortablePreviewDestination =
   | ExistingWorldVersionPreviewDestination
   | CreateWorldPreviewDestination;
 
-/** The generic destination is compile-time bound to the opaque token that was issued for its preview. */
-export type PortablePreviewHandle<Destination extends PortablePreviewDestination = PortablePreviewDestination> =
-  string & Readonly<{ [portablePreviewHandleBrand]: Destination }>;
+/**
+ * The opaque token and its safe destination binding are inseparable. The
+ * destination parameter prevents a preview handle from being redeemed for a
+ * different family or target, while the token itself remains opaque.
+ */
+export type PortablePreviewHandle<Destination extends PortablePreviewDestination> = Readonly<{
+  token: string & Readonly<{ [portablePreviewTokenBrand]: true }>;
+  destination: Destination;
+  [portablePreviewHandleBrand]: (destination: Destination) => Destination;
+}>;
 
 type PortableImportPreviewBase<Destination extends PortablePreviewDestination> = ImportOwnerScope & Readonly<{
   stagedInput: PortableStagedInput;
@@ -90,9 +98,14 @@ type PortableImportPreviewBase<Destination extends PortablePreviewDestination> =
 }>;
 
 export type PortableImportPreviewCommand =
-  | (PortableImportPreviewBase<CampaignZipPreviewDestination> & Readonly<{ kind: "campaign_zip" }>)
-  | (PortableImportPreviewBase<ExistingWorldVersionPreviewDestination> & Readonly<{ kind: "legacy_story" | "story_text" }>)
-  | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "infinite_worlds" | "cyoa" | "world_json" | "world_text" }>);
+  | (PortableImportPreviewBase<Extract<CampaignZipPreviewDestination, { kind: "embedded" }>> & Readonly<{ kind: "campaign_zip" }>)
+  | (PortableImportPreviewBase<ExistingWorldVersionPreviewDestination> & Readonly<{ kind: "campaign_zip" }>)
+  | (PortableImportPreviewBase<ExistingWorldVersionPreviewDestination> & Readonly<{ kind: "legacy_story" }>)
+  | (PortableImportPreviewBase<ExistingWorldVersionPreviewDestination> & Readonly<{ kind: "story_text" }>)
+  | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "infinite_worlds" }>)
+  | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "cyoa" }>)
+  | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "world_json" }>)
+  | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "world_text" }>);
 
 export type PortableImportPreviewView<Command extends PortableImportPreviewCommand = PortableImportPreviewCommand> = Readonly<{
   previewHandle: PortablePreviewHandle<Command["destination"]>;
@@ -104,33 +117,19 @@ export type PortableImportPreviewView<Command extends PortableImportPreviewComma
   diagnostics: readonly PortableArchiveDiagnosticCode[];
 }>;
 
-export type CampaignImportDestination = Readonly<{
-  kind: "campaign";
-  campaignId: string;
-}>;
-
-export type WorldImportDestination = Readonly<{
-  kind: "world";
-  worldId: string;
-}>;
-
-export type WorldVersionImportDestination = Readonly<{
-  kind: "world_version";
-  worldId: string;
-  worldVersionId: string;
-}>;
-
-type PortableImportCommitBase = ImportOwnerScope & Readonly<{
-  previewHandle: PortablePreviewHandle;
+type PortableImportCommitBase<Preview extends PortableImportPreviewCommand> = ImportOwnerScope & Readonly<{
+  kind: Preview["kind"];
+  destination: Preview["destination"];
+  previewHandle: PortablePreviewHandle<Preview["destination"]>;
   idempotencyKey: string;
 }>;
 
-/** Each family names a local, owner-scoped destination; portable provenance never selects local records. */
-export type PortableImportCommitCommand =
-  | (PortableImportCommitBase & Readonly<{ kind: "legacy_story"; destination: CampaignImportDestination }>)
-  | (PortableImportCommitBase & Readonly<{ kind: "campaign_zip"; destination: CampaignImportDestination }>)
-  | (PortableImportCommitBase & Readonly<{ kind: "infinite_worlds"; destination: WorldImportDestination }>)
-  | (PortableImportCommitBase & Readonly<{ kind: "cyoa"; destination: WorldVersionImportDestination }>);
+/** A commit can redeem only the exact destination-bearing handle issued by its preview. */
+export type PortableImportCommitCommandFor<Preview extends PortableImportPreviewCommand> =
+  Preview extends PortableImportPreviewCommand ? PortableImportCommitBase<Preview> : never;
+
+export type PortableImportCommitCommand<Preview extends PortableImportPreviewCommand = PortableImportPreviewCommand> =
+  PortableImportCommitCommandFor<Preview>;
 
 export type PortableImportCommitView = Readonly<{
   importedRecordId: PortableImportedRecordId;
@@ -138,8 +137,8 @@ export type PortableImportCommitView = Readonly<{
   diagnostics: readonly PortableArchiveDiagnosticCode[];
 }>;
 
-export type PortablePreviewCleanupCommand = ImportOwnerScope & Readonly<{
-  previewHandle: PortablePreviewHandle;
+export type PortablePreviewCleanupCommand<Destination extends PortablePreviewDestination> = ImportOwnerScope & Readonly<{
+  previewHandle: PortablePreviewHandle<Destination>;
 }>;
 
 /** Opaque caller-owned database context; preview/commit adapters must use it rather than open another transaction. */
@@ -185,11 +184,14 @@ export function toPortableImportedRecordId(value: string): PortableImportedRecor
   return opaque(value, "portable_imported_record_id_invalid") as PortableImportedRecordId;
 }
 
-export function toPortablePreviewHandle<Destination extends PortablePreviewDestination = PortablePreviewDestination>(
+export function toPortablePreviewHandle<Destination extends PortablePreviewDestination>(
   value: string,
-  _destination?: Destination,
+  destination: Destination,
 ): PortablePreviewHandle<Destination> {
-  return opaque(value, "portable_preview_handle_invalid") as PortablePreviewHandle<Destination>;
+  return {
+    token: opaque(value, "portable_preview_handle_invalid") as PortablePreviewHandle<Destination>["token"],
+    destination
+  } as PortablePreviewHandle<Destination>;
 }
 
 export function toPortableStagedInput(value: string): PortableStagedInput {

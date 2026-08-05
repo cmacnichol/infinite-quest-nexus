@@ -9,6 +9,7 @@ import type {
   PortableImportCommitView,
   PortableImportPreviewCommand,
   PortableImportPreviewView,
+  PortablePreviewDestination,
   PortablePreviewCleanupCommand
 } from "./types.js";
 
@@ -17,16 +18,18 @@ export interface PortableArchivePort {
   previewPortableImport<Command extends PortableImportPreviewCommand>(
     command: Command,
   ): Promise<PortableImportPreviewView<Command>>;
-  commitPortableImport(
+  commitPortableImport<Preview extends PortableImportPreviewCommand>(
     database: ImportTransactionContext,
-    command: PortableImportCommitCommand,
+    command: PortableImportCommitCommand<Preview>,
   ): Promise<PortableImportCommitView>;
   exportCampaignArchive(scope: CampaignArchiveScope): Promise<PortableArchiveExportView>;
   downloadPortableExport(
     scope: CampaignArchiveScope,
     retrieval: PortableArchiveExportRetrieval,
   ): Promise<PortableArchiveDownloadView>;
-  cleanupPreview(command: PortablePreviewCleanupCommand): Promise<void>;
+  cleanupPreview<Destination extends PortablePreviewDestination>(
+    command: PortablePreviewCleanupCommand<Destination>,
+  ): Promise<void>;
 }
 
 /** Existing owner-bound world authority: 14e must consume it instead of recreating world/version SQL. */
