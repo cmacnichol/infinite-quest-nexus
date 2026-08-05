@@ -29,6 +29,11 @@ of this commit and Task 14c2b is not yet complete.
 - Expected-turn and recovery numeric fields use explicit null checks. Invalid
   zero expected-turn values now reach contract validation instead of being
   silently treated as absent; zero recovery attempts remain valid.
+- Added real-PostgreSQL regression coverage proving an out-of-window completed
+  recovery with `attempts = 0` remains in the safe projection and a deliberately
+  persisted `expected_turn_number = 0` is rejected through the typed-safe
+  application error. The corruption fixture restores and validates the database
+  check constraint before the test completes.
 - Added the database barrel export.
 - No route, runtime, worker, legacy-service, state, rewind, or branch file was
   changed.
@@ -52,9 +57,15 @@ Review correction RED:
   `world.playableCharacters`, and a raw nested-state `ZodError` escaping the
   database boundary.
 
+Numeric-field coverage RED:
+
+- With the old truthiness branches temporarily restored, the focused suite was
+  5/7: the zero-attempt recovery became `null`, and the persisted zero expected
+  turn resolved successfully instead of rejecting safely.
+
 Final GREEN:
 
-- Focused real-PostgreSQL adapter suite: 1 file, 5/5 tests passed.
+- Focused real-PostgreSQL adapter suite: 1 file, 7/7 tests passed.
 - `pnpm check`: passed, including repository/data boundary checks and all
   TypeScript workspace checks.
 - `git diff --check`: passed.

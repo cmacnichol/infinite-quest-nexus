@@ -46,6 +46,17 @@ integration("PostgreSQL campaign sync adapters", () => {
     }));
   }
 
+  async function createProviderFixture() {
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id, name, provider_type, provider_role, base_url, default_model
+       ) VALUES ($1,$2,'openai_compatible','text','http://provider.invalid','fixture-model')
+       RETURNING id`,
+      [ownerUserId, `Campaign sync provider ${crypto.randomUUID()}`]
+    );
+    return provider.rows[0]!.id;
+  }
+
   it("returns typed campaign_not_found outside the explicit owner scope", async () => {
     const imported = await createCampaignFixture();
     const foreign = await pool.query<{ id: string }>(
@@ -142,5 +153,100 @@ integration("PostgreSQL campaign sync adapters", () => {
       transaction,
       { ownerUserId, campaignId: imported.campaignId }
     ))).rejects.toMatchObject({ kind: "unavailable", reason: "invalid_transition" });
+  });
+
+  it("retains zero recovery attempts when the result turn is outside the bounded recovery window", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    await pool.query("DELETE FROM turns WHERE campaign_id = $1 AND owner_user_id = $2", [imported.campaignId, ownerUserId]);
+    await pool.query(
+      `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration)
+       SELECT $1, $2, turn_number, 'Action ' || turn_number, 'Narration ' || turn_number
+         FROM generate_series(1, 55) AS turn_number`,
+      [ownerUserId, imported.campaignId]
+    );
+    await pool.query(
+      "UPDATE campaigns SET active_turn_number = 55 WHERE id = $1 AND owner_user_id = $2",
+      [imported.campaignId, ownerUserId]
+    );
+    const providerId = await createProviderFixture();
+    const resultTurn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = 1",
+      [ownerUserId, imported.campaignId]
+    );
+    const resultTurnId = resultTurn.rows[0]?.id;
+    if (!resultTurnId) throw new Error("Expected an out-of-window result-turn fixture.");
+    const recovery = await pool.query<{ id: string }>(
+      `INSERT INTO generation_jobs (
+         owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
+         action, operation_kind, status, attempts, result_turn_id, completed_at
+       ) VALUES ($1,$2,$3,$4,56,'Recovered with no retry','append','completed',0,$5,now())
+       RETURNING id`,
+      [ownerUserId, imported.campaignId, providerId, crypto.randomUUID(), resultTurnId]
+    );
+
+    const snapshot = await adapters.transaction.read((transaction) => adapters.sync.readCampaignSyncSnapshot(
+      transaction,
+      { ownerUserId, campaignId: imported.campaignId }
+    ));
+    expect(snapshot.projection.generationRecovery).toEqual({
+      id: recovery.rows[0]!.id,
+      status: "completed",
+      expectedTurnNumber: 56,
+      attempts: 0,
+      errorCode: null,
+      errorMessage: null,
+      resultTurnId,
+      operationKind: "append",
+      replacementTurnId: null
+    });
+  });
+
+  it("rejects a persisted zero expected turn through the typed-safe application error", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const providerId = await createProviderFixture();
+    const jobId = crypto.randomUUID();
+    const client = await pool.connect();
+    let corruptedJobCommitted = false;
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "ALTER TABLE generation_jobs DROP CONSTRAINT generation_jobs_expected_turn_number_check"
+      );
+      await client.query(
+        `INSERT INTO generation_jobs (
+           id, owner_user_id, campaign_id, provider_profile_id, idempotency_key,
+           expected_turn_number, action, operation_kind, status
+         ) VALUES ($1,$2,$3,$4,$5,0,'Invalid persisted turn','append','queued')`,
+        [jobId, ownerUserId, imported.campaignId, providerId, crypto.randomUUID()]
+      );
+      await client.query(
+        `ALTER TABLE generation_jobs
+           ADD CONSTRAINT generation_jobs_expected_turn_number_check
+           CHECK (expected_turn_number > 0) NOT VALID`
+      );
+      await client.query("COMMIT");
+      corruptedJobCommitted = true;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    try {
+      await expect(adapters.transaction.read((transaction) => adapters.sync.readCampaignSyncSnapshot(
+        transaction,
+        { ownerUserId, campaignId: imported.campaignId }
+      ))).rejects.toMatchObject({ kind: "unavailable", reason: "invalid_transition" });
+    } finally {
+      if (corruptedJobCommitted) {
+        await pool.query("DELETE FROM generation_jobs WHERE id = $1", [jobId]);
+        await pool.query(
+          "ALTER TABLE generation_jobs VALIDATE CONSTRAINT generation_jobs_expected_turn_number_check"
+        );
+      }
+    }
   });
 });
