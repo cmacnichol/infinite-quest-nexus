@@ -137,4 +137,39 @@ describe("createChronicleClaimExecution", () => {
     expect(database.query.mock.calls.map(([sql]) => sql)).toEqual(["BEGIN", "COMMIT"]);
     expect(database.release).toHaveBeenCalledOnce();
   });
+
+  it("rolls back a caller-owned rebuild transaction when heartbeat ownership is lost", async () => {
+    const database = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      release: vi.fn()
+    };
+    const pool = { connect: vi.fn().mockResolvedValue(database) };
+    let heartbeatLoss: Error | null = null;
+    const lifecycle = {
+      get leaseLost() {
+        return heartbeatLoss !== null;
+      },
+      throwIfLeaseLost() {
+        if (heartbeatLoss) throw heartbeatLoss;
+      },
+      waitForLeaseLoss: () => new Promise<Error>(() => undefined)
+    };
+    const rebuildCampaignMemories = vi.fn().mockImplementation(async () => {
+      heartbeatLoss = new Error("Chronicle job lease heartbeat was lost.");
+      return 4;
+    });
+    const enqueueEmbeddingReindex = vi.fn();
+    const execution = createChronicleClaimExecution(pool as never, dependencies({
+      generation: { rebuildCampaignMemories, enqueueEmbeddingReindex }
+    }));
+    const rebuildClaim = { ...claim, jobType: "reindex_campaign" as const };
+
+    await expect(execution.execute(rebuildClaim, {
+      config: { enabled: false }, memories: [], totalMemories: 0, batchLimit: 1, nextCursor: null
+    }, lifecycle)).rejects.toThrow("Chronicle job lease heartbeat was lost.");
+
+    expect(enqueueEmbeddingReindex).not.toHaveBeenCalled();
+    expect(database.query.mock.calls.map(([sql]) => sql)).toEqual(["BEGIN", "ROLLBACK"]);
+    expect(database.release).toHaveBeenCalledOnce();
+  });
 });

@@ -16,11 +16,19 @@ import {
 import type { DatabaseClient, DatabasePool } from "../../packages/database/src/pool.js";
 
 describe("Chronicle runtime adapters", () => {
-  it("heartbeats a claimed Chronicle lease while execution remains in flight", async () => {
+  it("serializes heartbeats and joins the in-flight heartbeat before completion", async () => {
     vi.useFakeTimers();
     let finishExecution!: (progress: Readonly<Record<string, unknown>>) => void;
+    let finishFirstHeartbeat!: (renewed: boolean) => void;
+    let finishSecondHeartbeat!: (renewed: boolean) => void;
     const execution = new Promise<Readonly<Record<string, unknown>>>((resolve) => {
       finishExecution = resolve;
+    });
+    const firstHeartbeat = new Promise<boolean>((resolve) => {
+      finishFirstHeartbeat = resolve;
+    });
+    const secondHeartbeat = new Promise<boolean>((resolve) => {
+      finishSecondHeartbeat = resolve;
     });
     const claim = {
       jobId: "job-heartbeat-1",
@@ -35,7 +43,10 @@ describe("Chronicle runtime adapters", () => {
     const state = {
       claimNext: vi.fn().mockResolvedValue(claim),
       loadClaimedJob: vi.fn().mockResolvedValue(claim),
-      heartbeatClaim: vi.fn().mockResolvedValue(true),
+      heartbeatClaim: vi.fn()
+        .mockResolvedValue(true)
+        .mockReturnValueOnce(firstHeartbeat)
+        .mockReturnValueOnce(secondHeartbeat),
       completeClaim: vi.fn().mockResolvedValue(true),
       requeueClaim: vi.fn(),
       failClaim: vi.fn()
@@ -57,12 +68,143 @@ describe("Chronicle runtime adapters", () => {
 
       expect(state.heartbeatClaim).toHaveBeenCalledWith(claim);
       expect(state.completeClaim).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(state.heartbeatClaim).toHaveBeenCalledTimes(1);
+
+      finishFirstHeartbeat(true);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(state.heartbeatClaim).toHaveBeenCalledTimes(2);
 
       finishExecution({ embedded: 1, total: 1 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(state.completeClaim).not.toHaveBeenCalled();
+      finishSecondHeartbeat(true);
       await expect(running).resolves.toBe(true);
       expect(state.completeClaim).toHaveBeenCalledWith(claim, {
         progress: { embedded: 1, total: 1 }
       });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["false", "rejection"] as const)(
+    "surfaces heartbeat %s as lease loss through the execution lifecycle",
+    async (heartbeatFailure) => {
+      vi.useFakeTimers();
+      const claim = {
+        jobId: `job-heartbeat-${heartbeatFailure}`,
+        ownerUserId: "owner-1",
+        campaignId: "campaign-1",
+        worldVersionId: "world-version-1",
+        jobType: "embed_campaign" as const,
+        workVersion: 1,
+        workerId: "worker-1",
+        leaseSeconds: 3
+      };
+      let executionLifecycle: Readonly<{
+        leaseLost: boolean;
+        throwIfLeaseLost(): void;
+        waitForLeaseLoss(): Promise<Error>;
+      }> | undefined;
+      const state = {
+        claimNext: vi.fn().mockResolvedValue(claim),
+        loadClaimedJob: vi.fn().mockResolvedValue(claim),
+        heartbeatClaim: vi.fn().mockImplementation(() => heartbeatFailure === "false"
+          ? Promise.resolve(false)
+          : Promise.reject(new Error("heartbeat transport failed"))),
+        completeClaim: vi.fn().mockResolvedValue(true),
+        requeueClaim: vi.fn(),
+        failClaim: vi.fn().mockResolvedValue(true)
+      };
+      const logProviderTransportError = vi.fn();
+      const executor = createChronicleWorkerExecutor({
+        state,
+        retrieval: { loadForClaim: vi.fn().mockResolvedValue({
+          config: { enabled: true }, memories: [], totalMemories: 0, batchLimit: 8, nextCursor: null
+        }) },
+        execution: { execute: vi.fn((_claim, _retrieval, lifecycle) => {
+          executionLifecycle = lifecycle;
+          return lifecycle!.waitForLeaseLoss().then((error: Error) => Promise.reject(error));
+        }) },
+        logProviderTransportError
+      });
+
+      try {
+        const running = executor.runNextChronicle({
+          workerId: "worker-1", leaseSeconds: 3, retrieval: { batchLimit: 8 }
+        });
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(executionLifecycle?.leaseLost).toBe(true);
+        expect(() => executionLifecycle?.throwIfLeaseLost()).toThrow("Chronicle job lease heartbeat was lost.");
+        await expect(running).resolves.toBe(true);
+        expect(state.completeClaim).not.toHaveBeenCalled();
+        expect(state.failClaim).toHaveBeenCalledWith(claim, {
+          diagnosticCode: "chronicle_execution_failed"
+        });
+        expect(logProviderTransportError).toHaveBeenCalledWith(
+          expect.objectContaining({ message: "Chronicle job lease heartbeat was lost." }),
+          expect.objectContaining({ chronicleJobId: claim.jobId })
+        );
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it("joins an in-flight heartbeat before failing an execution", async () => {
+    vi.useFakeTimers();
+    let finishHeartbeat!: (renewed: boolean) => void;
+    let failExecution!: (error: Error) => void;
+    const claim = {
+      jobId: "job-heartbeat-failed-execution",
+      ownerUserId: "owner-1",
+      campaignId: "campaign-1",
+      worldVersionId: "world-version-1",
+      jobType: "embed_campaign" as const,
+      workVersion: 1,
+      workerId: "worker-1",
+      leaseSeconds: 3
+    };
+    const heartbeat = new Promise<boolean>((resolve) => {
+      finishHeartbeat = resolve;
+    });
+    const execution = new Promise<Readonly<Record<string, unknown>>>((_resolve, reject) => {
+      failExecution = reject;
+    });
+    const state = {
+      claimNext: vi.fn().mockResolvedValue(claim),
+      loadClaimedJob: vi.fn().mockResolvedValue(claim),
+      heartbeatClaim: vi.fn().mockReturnValue(heartbeat),
+      completeClaim: vi.fn(),
+      requeueClaim: vi.fn(),
+      failClaim: vi.fn().mockResolvedValue(true)
+    };
+    const executor = createChronicleWorkerExecutor({
+      state,
+      retrieval: { loadForClaim: vi.fn().mockResolvedValue({
+        config: { enabled: true }, memories: [], totalMemories: 0, batchLimit: 8, nextCursor: null
+      }) },
+      execution: { execute: vi.fn().mockReturnValue(execution) },
+      logProviderTransportError: vi.fn()
+    });
+
+    try {
+      const running = executor.runNextChronicle({
+        workerId: "worker-1", leaseSeconds: 3, retrieval: { batchLimit: 8 }
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      failExecution(new Error("provider failed"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(state.failClaim).not.toHaveBeenCalled();
+
+      finishHeartbeat(true);
+      await expect(running).resolves.toBe(true);
+      expect(state.failClaim).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }

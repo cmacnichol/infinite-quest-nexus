@@ -121,6 +121,81 @@ function privateFailure(): ChronicleClaimFailure {
   return { diagnosticCode: "chronicle_execution_failed" };
 }
 
+function leaseHeartbeatLost(cause?: unknown): Error {
+  return new Error("Chronicle job lease heartbeat was lost.", cause === undefined ? undefined : { cause });
+}
+
+function startClaimHeartbeat(
+  state: ChronicleWorkerStatePort,
+  claim: ChronicleLeaseScope,
+): Readonly<{
+  lifecycle: Readonly<{
+    readonly leaseLost: boolean;
+    throwIfLeaseLost(): void;
+    waitForLeaseLoss(): Promise<Error>;
+  }>;
+  stop(): Promise<Error | null>;
+}> {
+  const intervalMs = Math.max(1, Math.floor(claim.leaseSeconds * 1_000 / 3));
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let wake: (() => void) | null = null;
+  let loss: Error | null = null;
+  let resolveLoss!: (error: Error) => void;
+  const lossEvent = new Promise<Error>((resolve) => {
+    resolveLoss = resolve;
+  });
+
+  const lose = (cause?: unknown): void => {
+    if (loss) return;
+    loss = leaseHeartbeatLost(cause);
+    resolveLoss(loss);
+  };
+  const waitForInterval = (): Promise<void> => new Promise((resolve) => {
+    wake = resolve;
+    timer = setTimeout(resolve, intervalMs);
+    timer.unref();
+  });
+  const loop = (async () => {
+    while (!stopped) {
+      await waitForInterval();
+      timer = null;
+      wake = null;
+      if (stopped) break;
+      try {
+        if (!await state.heartbeatClaim(claim)) {
+          lose();
+          break;
+        }
+      } catch (error) {
+        lose(error);
+        break;
+      }
+    }
+  })();
+
+  return {
+    lifecycle: {
+      get leaseLost() {
+        return loss !== null;
+      },
+      throwIfLeaseLost() {
+        if (loss) throw loss;
+      },
+      waitForLeaseLoss() {
+        return lossEvent;
+      }
+    },
+    async stop() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      wake?.();
+      await loop;
+      return loss;
+    }
+  };
+}
+
 /**
  * Owns the typed lifecycle seam around the runtime-owned Chronicle work body.
  */
@@ -134,48 +209,60 @@ export function createChronicleWorkerExecutor(
       memories: [], totalMemories: 0, batchLimit: 1, nextCursor: null
     }),
   ): Promise<boolean> => {
-    const heartbeatInterval = setInterval(() => {
-      void dependencies.state.heartbeatClaim(claim).catch(() => undefined);
-    }, Math.max(1, Math.floor(claim.leaseSeconds * 1_000 / 3)));
-    heartbeatInterval.unref();
+    const heartbeat = startClaimHeartbeat(dependencies.state, claim);
+    let progress: Readonly<Record<string, unknown>> | null = null;
+    let executionError: unknown = null;
     try {
+      heartbeat.lifecycle.throwIfLeaseLost();
       const retrieval = await prepare();
-      const progress = await dependencies.execution.execute(claim, retrieval);
-      if (!await dependencies.state.completeClaim(claim, { progress })) {
-        throw new Error("Chronicle job lease was lost before completion could be recorded.");
-      }
-      return true;
+      heartbeat.lifecycle.throwIfLeaseLost();
+      progress = await dependencies.execution.execute(claim, retrieval, heartbeat.lifecycle);
+      heartbeat.lifecycle.throwIfLeaseLost();
     } catch (error) {
-      let claimIsStale = false;
-      try {
-        claimIsStale = await dependencies.state.loadClaimedJob(claim) === null;
-      } catch {
-        // Preserve the original execution failure when the stale-claim probe
-        // cannot prove that newer work superseded this lease.
-      }
-      if (claimIsStale) {
-        try {
-          if (await dependencies.state.completeClaim(claim, {
-            progress: { retryReason: "work_version_changed" }
-          })) {
-            return true;
-          }
-        } catch {
-          // The guarded transition is best-effort here. If it cannot prove the
-          // newer work was requeued, use the ordinary private failure path.
-        }
-      }
-      dependencies.logProviderTransportError(error, {
-        chronicleJobId: claim.jobId,
-        campaignId: claim.campaignId,
-        jobType: claim.jobType,
-        workerId: claim.workerId
-      });
-      await dependencies.state.failClaim(claim, privateFailure());
-      return true;
-    } finally {
-      clearInterval(heartbeatInterval);
+      executionError = error;
     }
+    const heartbeatLoss = await heartbeat.stop();
+    if (heartbeatLoss) executionError = heartbeatLoss;
+
+    if (executionError === null && progress !== null) {
+      try {
+        if (!await dependencies.state.completeClaim(claim, { progress })) {
+          throw new Error("Chronicle job lease was lost before completion could be recorded.");
+        }
+        return true;
+      } catch (error) {
+        executionError = error;
+      }
+    }
+
+    const error = executionError ?? new Error("Chronicle claim execution ended without progress.");
+    let claimIsStale = false;
+    try {
+      claimIsStale = await dependencies.state.loadClaimedJob(claim) === null;
+    } catch {
+      // Preserve the original execution failure when the stale-claim probe
+      // cannot prove that newer work superseded this lease.
+    }
+    if (claimIsStale) {
+      try {
+        if (await dependencies.state.completeClaim(claim, {
+          progress: { retryReason: "work_version_changed" }
+        })) {
+          return true;
+        }
+      } catch {
+        // The guarded transition is best-effort here. If it cannot prove the
+        // newer work was requeued, use the ordinary private failure path.
+      }
+    }
+    dependencies.logProviderTransportError(error, {
+      chronicleJobId: claim.jobId,
+      campaignId: claim.campaignId,
+      jobType: claim.jobType,
+      workerId: claim.workerId
+    });
+    await dependencies.state.failClaim(claim, privateFailure());
+    return true;
   };
   const runClaimed = (claim: ChronicleLeaseScope): Promise<boolean> => executeClaim(
     claim,

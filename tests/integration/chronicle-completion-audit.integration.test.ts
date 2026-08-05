@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -10,6 +10,7 @@ import { buildServer } from "../../services/api/src/server.js";
 import { createWorkerMemoryApplication } from "../../services/runtime/src/memory-composition.js";
 import { serverOptions } from "../helpers/build-server-options.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
+import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -75,12 +76,18 @@ integration("Task 14b4 Chronicle HTTP completion audit", () => {
   let app: Awaited<ReturnType<typeof buildServer>>;
   let ownerUserId = "";
   let foreignOwnerUserId = "";
+  let foreignWorldId = "";
   let foreignCampaignId = "";
   let foreignJobId = "";
   let assetRoot = "";
+  let providerTransport: ReturnType<typeof installIntegrationProviderTransport>;
+  const testCampaignIds = new Set<string>();
+  const testWorldIds = new Set<string>();
+  const testProviderIds = new Set<string>();
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
+    providerTransport = installIntegrationProviderTransport(["127.0.0.0/8", "embedding.test"]);
     await migrateDatabase(pool, resolve("database/migrations"));
     ownerUserId = await initialOwnerId(pool);
     assetRoot = await mkdtemp(join(tmpdir(), "infinitequest-chronicle-routes-"));
@@ -95,6 +102,7 @@ integration("Task 14b4 Chronicle HTTP completion audit", () => {
       "INSERT INTO worlds (owner_user_id, title) VALUES ($1,$2) RETURNING id",
       [foreignOwnerUserId, `Foreign Chronicle world ${crypto.randomUUID()}`]
     );
+    foreignWorldId = world.rows[0]!.id;
     const version = await pool.query<{ id: string }>(
       "INSERT INTO world_versions (world_id, owner_user_id, version_number, content) VALUES ($1,$2,1,'{}'::jsonb) RETURNING id",
       [world.rows[0]!.id, foreignOwnerUserId]
@@ -113,17 +121,45 @@ integration("Task 14b4 Chronicle HTTP completion audit", () => {
 
   afterAll(async () => {
     await app.close();
+    await pool.query("DELETE FROM campaigns WHERE id = $1", [foreignCampaignId]);
+    await pool.query("DELETE FROM world_versions WHERE world_id = $1", [foreignWorldId]);
+    await pool.query("DELETE FROM worlds WHERE id = $1", [foreignWorldId]);
+    await pool.query("DELETE FROM users WHERE id = $1", [foreignOwnerUserId]);
+    await providerTransport.close();
     await pool.end();
     await rm(assetRoot, { recursive: true, force: true });
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    const campaignIds = [...testCampaignIds];
+    const worldIds = [...testWorldIds];
+    const providerIds = [...testProviderIds];
+    testCampaignIds.clear();
+    testWorldIds.clear();
+    testProviderIds.clear();
+    if (campaignIds.length) {
+      await pool.query("DELETE FROM campaigns WHERE id = ANY($1::uuid[])", [campaignIds]);
+    }
+    if (worldIds.length) {
+      await pool.query("DELETE FROM world_versions WHERE world_id = ANY($1::uuid[])", [worldIds]);
+      await pool.query("DELETE FROM worlds WHERE id = ANY($1::uuid[])", [worldIds]);
+    }
+    if (providerIds.length) {
+      await pool.query("DELETE FROM provider_profiles WHERE id = ANY($1::uuid[])", [providerIds]);
+    }
   });
 
   async function campaign(): Promise<string> {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `Chronicle route campaign ${crypto.randomUUID()}`;
-    return (await importLegacyStory(pool, storyImportRequestSchema.parse({
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
       sourceName: `chronicle-route-${crypto.randomUUID()}.story`,
       story: fixture
-    }))).campaignId;
+    }));
+    testCampaignIds.add(imported.campaignId);
+    testWorldIds.add(imported.worldId);
+    return imported.campaignId;
   }
 
   it("applies invalid, missing, and foreign scope handling to all six memory routes and generic job read", async () => {
@@ -260,6 +296,7 @@ integration("Task 14b4 Chronicle HTTP completion audit", () => {
        RETURNING id`,
       [ownerUserId, `Chronicle route provider ${crypto.randomUUID()}`]
     );
+    testProviderIds.add(provider.rows[0]!.id);
     const input = {
       enabled: true,
       providerProfileId: provider.rows[0]!.id,
@@ -305,6 +342,189 @@ integration("Task 14b4 Chronicle HTTP completion audit", () => {
     expect(conflict.statusCode).toBe(409);
   });
 
+  it("atomically persists composed embedding vectors, reported costs, progress, and completion", async () => {
+    const campaignId = await campaign();
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id, name, provider_type, provider_role, base_url, default_model, enabled, is_default
+       ) VALUES ($1,$2,'openai_compatible','embedding','http://embedding.test','audit-embedding-model',true,true)
+       RETURNING id`,
+      [ownerUserId, `Chronicle composed success ${crypto.randomUUID()}`]
+    );
+    const providerId = provider.rows[0]!.id;
+    testProviderIds.add(providerId);
+    const configured = await app.inject({
+      method: "PUT",
+      url: `/api/v1/campaigns/${campaignId}/memory/embedding-config`,
+      payload: {
+        enabled: true,
+        providerProfileId: providerId,
+        model: "audit-embedding-model",
+        batchSize: 2,
+        documentPrefix: "document: ",
+        queryPrefix: "query: "
+      }
+    });
+    expect(configured.statusCode).toBe(200);
+    const jobId = configured.json().jobId as string;
+    const before = await pool.query<{ indexed: number; costs: number; status: string; progress: Record<string, unknown> }>(
+      `SELECT
+         count(memory.id) FILTER (WHERE memory.embedding IS NOT NULL)::int AS indexed,
+         (SELECT count(*)::int FROM provider_cost_events WHERE chronicle_job_id = job.id) AS costs,
+         job.status, job.progress
+       FROM chronicle_jobs job
+       LEFT JOIN chronicle_memories memory ON memory.campaign_id = job.campaign_id
+       WHERE job.id = $1
+       GROUP BY job.id`,
+      [jobId]
+    );
+    expect(before.rows[0]).toEqual({ indexed: 0, costs: 0, status: "queued", progress: {} });
+
+    let responseNumber = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { input: string[] };
+      responseNumber += 1;
+      return new Response(JSON.stringify({
+        id: `audit-embedding-response-${responseNumber}`,
+        model: "audit-embedding-model",
+        data: body.input.map((_content, index) => ({ index, embedding: [1, 0, 0] })),
+        usage: {
+          prompt_tokens: body.input.length,
+          total_tokens: body.input.length,
+          cost: "0.001",
+          currency: "USD"
+        }
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const worker = createWorkerMemoryApplication(pool, credentialSecret);
+    await expect(worker.runNextChronicle({
+      workerId: "chronicle-audit-embedding-success",
+      leaseSeconds: 30,
+      retrieval: { batchLimit: 2 }
+    })).resolves.toBe(true);
+
+    const durable = await pool.query<{
+      status: string;
+      progress: { embedded: number; total: number; skipped: number };
+      total_memories: number;
+      indexed_memories: number;
+      correct_provider: number;
+      cost_events: number;
+      cost_amount: string;
+    }>(
+      `SELECT job.status, job.progress,
+              count(memory.id)::int AS total_memories,
+              count(memory.id) FILTER (WHERE memory.embedding IS NOT NULL)::int AS indexed_memories,
+              count(memory.id) FILTER (
+                WHERE memory.embedding_provider_profile_id = $2
+                  AND memory.embedding_dimensions = 3
+                  AND memory.embedding_content_hash IS NOT NULL
+                  AND memory.embedding_provider_fingerprint IS NOT NULL
+              )::int AS correct_provider,
+              (SELECT count(*)::int FROM provider_cost_events cost
+                WHERE cost.chronicle_job_id = job.id AND cost.category = 'memory'
+                  AND cost.operation = 'memory_embedding') AS cost_events,
+              (SELECT coalesce(sum(cost.amount), 0)::text FROM provider_cost_events cost
+                WHERE cost.chronicle_job_id = job.id) AS cost_amount
+         FROM chronicle_jobs job
+         JOIN chronicle_memories memory ON memory.campaign_id = job.campaign_id
+        WHERE job.id = $1
+        GROUP BY job.id`,
+      [jobId, providerId]
+    );
+    expect(durable.rows[0]).toMatchObject({
+      status: "completed",
+      total_memories: expect.any(Number),
+      indexed_memories: expect.any(Number),
+      correct_provider: expect.any(Number),
+      cost_events: responseNumber
+    });
+    expect(durable.rows[0]!.total_memories).toBeGreaterThan(0);
+    expect(durable.rows[0]!.indexed_memories).toBe(durable.rows[0]!.total_memories);
+    expect(durable.rows[0]!.correct_provider).toBe(durable.rows[0]!.total_memories);
+    expect(durable.rows[0]!.progress).toEqual({
+      embedded: durable.rows[0]!.total_memories,
+      skipped: 0,
+      total: durable.rows[0]!.total_memories
+    });
+    expect(Number(durable.rows[0]!.cost_amount)).toBeCloseTo(responseNumber * 0.001, 6);
+  });
+
+  it("terminalizes composed provider failure with safe projection and no partial embedding writes", async () => {
+    const campaignId = await campaign();
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id, name, provider_type, provider_role, base_url, default_model, enabled, is_default
+       ) VALUES ($1,$2,'openai_compatible','embedding','http://embedding.test','audit-failing-model',true,true)
+       RETURNING id`,
+      [ownerUserId, `Chronicle composed failure ${crypto.randomUUID()}`]
+    );
+    const providerId = provider.rows[0]!.id;
+    testProviderIds.add(providerId);
+    const configured = await app.inject({
+      method: "PUT",
+      url: `/api/v1/campaigns/${campaignId}/memory/embedding-config`,
+      payload: {
+        enabled: true,
+        providerProfileId: providerId,
+        model: "audit-failing-model",
+        batchSize: 2,
+        documentPrefix: null,
+        queryPrefix: null
+      }
+    });
+    const jobId = configured.json().jobId as string;
+    const privateDiagnostic = "https://private.embedding.invalid/v1?token=never-public";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      error: { message: privateDiagnostic }
+    }), { status: 503, headers: { "content-type": "application/json" } })));
+
+    const worker = createWorkerMemoryApplication(pool, credentialSecret);
+    await expect(worker.runNextChronicle({
+      workerId: "chronicle-audit-embedding-failure",
+      leaseSeconds: 30,
+      retrieval: { batchLimit: 2 }
+    })).resolves.toBe(true);
+
+    const internal = await pool.query<{
+      status: string;
+      error_message: string;
+      progress: Record<string, unknown>;
+      indexed: number;
+      costs: number;
+      provider_error: string | null;
+    }>(
+      `SELECT job.status, job.error_message, job.progress,
+              count(memory.id) FILTER (WHERE memory.embedding IS NOT NULL)::int AS indexed,
+              (SELECT count(*)::int FROM provider_cost_events WHERE chronicle_job_id = job.id) AS costs,
+              provider.last_health_error AS provider_error
+         FROM chronicle_jobs job
+         JOIN provider_profiles provider ON provider.id = $2
+         LEFT JOIN chronicle_memories memory ON memory.campaign_id = job.campaign_id
+        WHERE job.id = $1
+        GROUP BY job.id, provider.id`,
+      [jobId, providerId]
+    );
+    expect(internal.rows[0]).toEqual({
+      status: "failed",
+      error_message: "chronicle_execution_failed",
+      progress: {},
+      indexed: 0,
+      costs: 0,
+      provider_error: "chronicle_embedding_failed"
+    });
+    expect(JSON.stringify(internal.rows[0])).not.toContain(privateDiagnostic);
+
+    const publicJob = await app.inject({ method: "GET", url: `/api/v1/jobs/${jobId}` });
+    expect(publicJob.statusCode).toBe(200);
+    expect(publicJob.json()).toMatchObject({
+      id: jobId,
+      status: "failed",
+      failure: { code: "memory_unavailable", message: "Chronicle memory is unavailable." }
+    });
+    expect(JSON.stringify(publicJob.json())).not.toContain(privateDiagnostic);
+  });
+
   it("keeps a slow composed worker claim alive with heartbeats and reclaims an expired claim safely", async () => {
     const campaignId = await campaign();
     const queued = await app.inject({
@@ -312,7 +532,6 @@ integration("Task 14b4 Chronicle HTTP completion audit", () => {
       url: `/api/v1/campaigns/${campaignId}/memory/reindex`
     });
     const jobId = queued.json().jobId as string;
-    await pool.query("UPDATE chronicle_jobs SET created_at = timestamp '2000-01-01' WHERE id = $1", [jobId]);
     await pool.query(`
       CREATE OR REPLACE FUNCTION chronicle_audit_slow_rebuild() RETURNS trigger AS $$
       BEGIN
@@ -376,7 +595,6 @@ integration("Task 14b4 Chronicle HTTP completion audit", () => {
       url: `/api/v1/campaigns/${reclaimCampaignId}/memory/reindex`
     });
     const reclaimJobId = reclaimQueued.json().jobId as string;
-    await pool.query("UPDATE chronicle_jobs SET created_at = timestamp '1999-01-01' WHERE id = $1", [reclaimJobId]);
     const staleClaim = await firstWorker.claimNext({
       workerId: "chronicle-audit-stale-worker",
       leaseSeconds: 30

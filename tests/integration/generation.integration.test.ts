@@ -43,6 +43,47 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "integration-test-credential-secret";
 
+async function generationAuthoritySnapshot(pool: DatabasePool, campaignId: string) {
+  const [campaign, state, turns, memories, canonicalFacts, checkpoints] = await Promise.all([
+    pool.query<{ value: Record<string, unknown> }>(
+      "SELECT to_jsonb(campaign_row) AS value FROM campaigns campaign_row WHERE id = $1",
+      [campaignId]
+    ),
+    pool.query<{ value: Record<string, unknown> }>(
+      "SELECT to_jsonb(state_row) AS value FROM campaign_state state_row WHERE campaign_id = $1",
+      [campaignId]
+    ),
+    pool.query<{ value: Record<string, unknown> }>(
+      `SELECT to_jsonb(turn_row) AS value FROM turns turn_row
+        WHERE campaign_id = $1 ORDER BY turn_number, id`,
+      [campaignId]
+    ),
+    pool.query<{ value: Record<string, unknown> }>(
+      `SELECT to_jsonb(memory_row) AS value FROM chronicle_memories memory_row
+        WHERE campaign_id = $1 ORDER BY ordinal, memory_kind, id`,
+      [campaignId]
+    ),
+    pool.query<{ value: Record<string, unknown> }>(
+      `SELECT to_jsonb(fact_row) AS value FROM campaign_canonical_facts fact_row
+        WHERE campaign_id = $1 ORDER BY source_turn_number, source_fact_index, id`,
+      [campaignId]
+    ),
+    pool.query<{ value: Record<string, unknown> }>(
+      `SELECT to_jsonb(checkpoint_row) AS value FROM summary_checkpoints checkpoint_row
+        WHERE campaign_id = $1 ORDER BY through_turn, id`,
+      [campaignId]
+    )
+  ]);
+  return {
+    campaign: campaign.rows.map((row) => row.value),
+    state: state.rows.map((row) => row.value),
+    turns: turns.rows.map((row) => row.value),
+    memories: memories.rows.map((row) => row.value),
+    canonicalFacts: canonicalFacts.rows.map((row) => row.value),
+    checkpoints: checkpoints.rows.map((row) => row.value)
+  };
+}
+
 async function generationCommands(pool: DatabasePool) {
   const ownerUserId = await initialOwnerId(pool);
   const application = createApiGenerationApplication(pool);
@@ -682,6 +723,7 @@ integration("durable Story Engine integration", () => {
         WHERE t.campaign_id = $1 AND t.turn_number = 2`,
       [imported.campaignId]
     );
+    const authorityBefore = await generationAuthoritySnapshot(pool, imported.campaignId);
     const job = await enqueueLatestReplacement(
       pool,
       imported.campaignId,
@@ -718,6 +760,7 @@ integration("durable Story Engine integration", () => {
           WHERE t.campaign_id = $1 AND t.turn_number = 2`,
         [imported.campaignId]
       )).toMatchObject({ rows: [before.rows[0]] });
+      expect(await generationAuthoritySnapshot(pool, imported.campaignId)).toEqual(authorityBefore);
     } finally {
       warnSpy.mockRestore();
       errorSpy.mockRestore();
@@ -2025,6 +2068,7 @@ integration("durable Story Engine integration", () => {
 
   it("leaves the accepted ledger unchanged when compact recovery is also truncated", async () => {
     const imported = await campaign();
+    const authorityBefore = await generationAuthoritySnapshot(pool, imported.campaignId);
     replies.push(
       { content: '{"narration":"First partial', finishReason: "length" },
       { content: '{"narration":"Second partial', finishReason: "length" }
@@ -2034,6 +2078,7 @@ integration("durable Story Engine integration", () => {
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "recoverable", errorCode: "output_limit" });
     const campaignRow = await pool.query<{ active_turn_number: number }>("SELECT active_turn_number FROM campaigns WHERE id = $1", [imported.campaignId]);
     expect(campaignRow.rows[0]?.active_turn_number).toBe(2);
+    expect(await generationAuthoritySnapshot(pool, imported.campaignId)).toEqual(authorityBefore);
   });
 
   it("retains the first streamed preview and buffers later durable attempts", async () => {

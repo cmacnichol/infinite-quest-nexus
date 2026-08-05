@@ -94,11 +94,18 @@ export interface ChronicleWorkerRetrievalPort {
   ): Promise<ChronicleWorkerRetrieval>;
 }
 
+export interface ChronicleClaimExecutionLifecycle {
+  readonly leaseLost: boolean;
+  throwIfLeaseLost(): void;
+  waitForLeaseLoss(): Promise<Error>;
+}
+
 /** Runtime-composed work body. Lifecycle ownership remains in the application executor. */
 export interface ChronicleClaimExecutionPort {
   execute(
     scope: ChronicleLeaseScope,
     firstPage: ChronicleWorkerRetrieval,
+    lifecycle?: ChronicleClaimExecutionLifecycle,
   ): Promise<Readonly<Record<string, unknown>>>;
 }
 

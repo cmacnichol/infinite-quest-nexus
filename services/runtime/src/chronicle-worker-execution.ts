@@ -1,4 +1,5 @@
 import type {
+  ChronicleClaimExecutionLifecycle,
   ChronicleClaimExecutionPort,
   ChronicleLeaseScope,
   ChronicleWorkerRetrieval,
@@ -34,6 +35,10 @@ function batchMemories(retrieval: ChronicleWorkerRetrieval) {
   });
 }
 
+function throwIfLeaseLost(lifecycle?: ChronicleClaimExecutionLifecycle): void {
+  lifecycle?.throwIfLeaseLost();
+}
+
 /** Executes only typed runtime dependencies. The state-machine adapter owns
  * claim, retrieval failure handling, and the terminal lease transition. */
 async function executeChronicleClaim(
@@ -41,11 +46,16 @@ async function executeChronicleClaim(
   claim: ChronicleLeaseScope,
   first: ChronicleWorkerRetrieval,
   dependencies: ChronicleWorkerExecutionDependencies,
+  lifecycle?: ChronicleClaimExecutionLifecycle,
 ): Promise<Readonly<Record<string, unknown>>> {
+  throwIfLeaseLost(lifecycle);
   if (claim.jobType === "reindex_campaign") {
     const rebuilt = await withTransaction(pool, async (database) => {
+      throwIfLeaseLost(lifecycle);
       const count = await dependencies.generation.rebuildCampaignMemories(database, claim);
+      throwIfLeaseLost(lifecycle);
       await dependencies.generation.enqueueEmbeddingReindex(database, claim);
+      throwIfLeaseLost(lifecycle);
       return count;
     });
     return { rebuilt };
@@ -61,14 +71,18 @@ async function executeChronicleClaim(
     providerProfileId: config.providerProfileId,
     model: config.model
   }, dependencies.credentialSecret);
+  throwIfLeaseLost(lifecycle);
   const prefixes = modelAwareEmbeddingPrefixes(config.model, config.documentPrefix ?? null, config.queryPrefix ?? null);
   const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
+  throwIfLeaseLost(lifecycle);
   let processed = 0;
   try {
     while (true) {
+      throwIfLeaseLost(lifecycle);
       const memories = batchMemories(retrieval);
       if (memories.length) {
         const result = await dependencies.embeddings.embed(provider, memories.map((memory) => `${prefixes.documentPrefix}${memory.content}`));
+        throwIfLeaseLost(lifecycle);
         if (result.embeddings.length !== memories.length) throw new Error("Embedding provider returned an incomplete Chronicle batch.");
         const nextProcessed = processed + memories.length;
         const committed = await dependencies.batches.commitClaimBatch(claim, {
@@ -84,6 +98,7 @@ async function executeChronicleClaim(
         processed = nextProcessed;
       }
       if (!retrieval.nextCursor) break;
+      throwIfLeaseLost(lifecycle);
       retrieval = await dependencies.retrieval.loadForClaim(claim, {
         batchLimit: retrieval.batchLimit,
         cursor: retrieval.nextCursor
@@ -95,6 +110,7 @@ async function executeChronicleClaim(
       providerProfileId: config.providerProfileId,
       model: config.model
     }, true);
+    throwIfLeaseLost(lifecycle);
   } catch (error) {
     await dependencies.embeddings.recordHealth(pool, {
       ownerUserId: claim.ownerUserId,
@@ -111,6 +127,12 @@ export function createChronicleClaimExecution(
   dependencies: ChronicleWorkerExecutionDependencies,
 ): ChronicleClaimExecutionPort {
   return {
-    execute: (scope, firstPage) => executeChronicleClaim(pool, scope, firstPage, dependencies)
+    execute: (scope, firstPage, lifecycle) => executeChronicleClaim(
+      pool,
+      scope,
+      firstPage,
+      dependencies,
+      lifecycle
+    )
   };
 }
