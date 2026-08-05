@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 contract and ownership inventory is next; readiness corrections recorded below |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 contracts/inventory complete; 14e2 PostgreSQL and filesystem/archive adapters are next |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -7693,6 +7693,23 @@ Assign each to API transport, worker scheduling, a named application
 composition, or a deletion in 14e3. Add pure contract/use-case tests and
 compile-time no-cross-role import coverage; no route, worker, or legacy-service
 cutover occurs in 14e1.
+
+**14e1 completion (2026-08-05):** `9f73f66`, `45d5ed1`, `113a14a`, and
+`13ff22f` add the public, platform-free asset and portable-import application
+contracts, pure validating use cases, and a machine-checked disposition
+inventory of every frozen production caller. Asset and import commands require
+explicit owner plus campaign/world/version/asset scope; staged inputs, preview
+handles, source provenance, export retrieval, and safe diagnostics are opaque.
+Portable previews and commits preserve the exact family-specific destination
+through an invariant capability, so mismatched redemption fails before adapter
+delegation. World JSON continues to use the owner-bound portable-world port;
+its idempotency key is forwarded through the new owner-bound idempotent
+extension rather than recreating world SQL. Three correction reviews closed
+Promise-rejection, usable source/destination/retrieval, and preview-to-commit
+binding gaps. Verification passed 1,256 unit tests (2 expected skips),
+`pnpm check`, build, diff, and final independent re-review; no adapter,
+composition, route, worker, migration, or legacy-service behavior changed.
+**14e2 is next.**
 
 **14e2 — PostgreSQL and filesystem/archive adapters (additive only).** Implement
 the owner-scoped database repositories and an archive/filesystem capability
