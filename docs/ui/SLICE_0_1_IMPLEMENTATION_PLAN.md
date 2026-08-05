@@ -7599,6 +7599,22 @@ import, or browser-supplied owner may remain. Preserve Task 14a illustration
 and Task 14b Chronicle behavior without moving their domain state back into
 provider code.
 
+**14d3 completion (2026-08-05):** `f5125c8` and correction `9a70d9e` perform
+the atomic API and worker provider/prompt/intent/cost cutover. All frozen
+consumers now receive distinct, named API or worker provider graphs; execution
+capabilities decrypt internally and make the lifecycle-pinned transport call
+without returning plaintext profiles, keys, or raw transport to application
+code. The six legacy service/temporary bridge files, database/runtime shims,
+and compatibility barrels are gone. Semantic ownership tests prohibit their
+return, assert feature-specific collaborator use and graph injection, and prove
+safe runtime descriptors. The correction also restores staged CYOA generation,
+explicit selected-text embedding fallback only, benchmark graph wiring, safe
+Chronicle projections, transaction-client cost injection, and configured image
+model propagation. Verification passed 1,248 unit tests, 344 integration
+tests, `pnpm check`, build, benchmark budgets, diff, and precheck. The original
+review's two Critical and one Important findings and the correction re-review
+are all approved. **14d4 is next.**
+
 **14d4 — parity, security, and completion audit.** Prove independently for
 text, image, embedding, and intent profiles that base URL, credential,
 inventory, selected model, enabled/default state, health, timeout, and retry
