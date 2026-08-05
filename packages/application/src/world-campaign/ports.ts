@@ -187,11 +187,17 @@ export type WorldCampaignApplicationDependencies = Readonly<{
   progress: WorldGenerationProgressRepositoryPort;
 }>;
 
+export type PortableWorldExportScope = Readonly<{
+  worldId: string;
+  worldVersionId?: string;
+}>;
+
 /**
- * Owner-bound portable-world seam consumed by Task 14e import transports.
- * The composition root binds authority; archive/import callers cannot supply it.
+ * Owner-bound portable-world seam consumed by Task 14e import/export transports.
+ * The composition root binds authority; archive callers cannot supply it.
  */
 export interface PortableWorldApplicationPort {
+  exportWorld(scope: PortableWorldExportScope): Promise<PortableWorldPayload>;
   previewWorldImport(request: WorldImportRequest): Promise<WorldImportPreviewView>;
   importWorld(request: WorldImportRequest): Promise<WorldImportResultView>;
 }

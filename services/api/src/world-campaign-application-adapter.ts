@@ -1,6 +1,7 @@
 import {
   WorldCampaignApplicationError,
   type CampaignScope,
+  type PortableWorldExportScope,
   type PortableWorldApplicationPort,
   type WorldCampaignApplication,
   type WorldImportRequest,
@@ -94,6 +95,13 @@ export function createOwnerBoundPortableWorldApplicationPort(
   resolveOwnerScope: () => Promise<OwnerScope>,
 ): PortableWorldApplicationPort {
   return Object.freeze({
+    exportWorld: async (scope: PortableWorldExportScope) => adapter.run(async () => {
+      const ownerScope = await resolveOwnerScope();
+      const applicationScope = scope.worldVersionId === undefined
+        ? adapter.worldScope(ownerScope.ownerUserId, scope.worldId)
+        : adapter.worldVersionScope(ownerScope.ownerUserId, scope.worldId, scope.worldVersionId);
+      return adapter.application.exportWorld(applicationScope);
+    }),
     previewWorldImport: async (request: WorldImportRequest) => adapter.run(async () => (
       adapter.application.previewWorldImport(await resolveOwnerScope(), request)
     )),

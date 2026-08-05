@@ -9,6 +9,9 @@ import { WORLD_CONTENT_SCHEMA_VERSION } from "../../packages/contracts/src/world
 import { previewInfiniteWorldsImport } from "../../services/api/src/infinite-worlds-import-service.js";
 
 const unusedPortableWorld = {
+  async exportWorld(): Promise<never> {
+    throw new Error("Portable-world export should not be called during import preview.");
+  },
   async previewWorldImport(): Promise<never> {
     throw new Error("Portable-world preview should not be called for this invalid source.");
   },

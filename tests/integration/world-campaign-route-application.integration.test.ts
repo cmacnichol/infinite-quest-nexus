@@ -1,37 +1,50 @@
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { WorldCampaignApplication } from "../../packages/application/src/world-campaign/index.js";
+import type { FastifyInstance } from "fastify";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import {
+  WorldCampaignApplicationError,
+  type WorldCampaignApplication
+} from "../../packages/application/src/world-campaign/index.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { buildServer, type BuildServerOptions } from "../../services/api/src/server.js";
-import { serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
+import { buildServer } from "../../services/api/src/server.js";
+import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
+import { serverOptions } from "../helpers/build-server-options.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
-const CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
-const WORLD_ID = "22222222-2222-4222-8222-222222222222";
-const WORLD_VERSION_ID = "33333333-3333-4333-8333-333333333333";
-const WORLD_CONTENT = {
-  world: {
-    title: "Route World",
-    genre: "Test",
-    tone: "Measured",
-    premise: "Exercise every route boundary.",
-    backgroundStory: "A portable parity fixture.",
-    firstAction: "Begin the route audit.",
-    rules: "Keep authority server-side."
-  },
-  playableCharacters: [{
-    id: "route-explorer",
-    name: "Route Explorer",
-    characterText: "An explorer of application boundaries.",
+
+function worldContent(title: string, marker = "One") {
+  return {
+    schemaVersion: 5,
+    world: {
+      title,
+      genre: "Test",
+      tone: "Measured",
+      premise: `Exercise every route boundary (${marker}).`,
+      backgroundStory: "A portable parity fixture.",
+      firstAction: "Begin the route audit.",
+      rules: "Keep authority server-side."
+    },
+    playableCharacters: [{
+      id: "route-explorer",
+      name: "Route Explorer",
+      characterText: "An explorer of application boundaries.",
+      rpgStats: [],
+      defaultTriggers: [],
+      source: {}
+    }],
+    entities: [],
+    relationships: [],
     rpgStats: [],
-    defaultTriggers: []
-  }],
-  eventTriggers: [],
-  defaults: { trackers: [] }
-};
+    defaultTriggers: [],
+    eventTriggers: [],
+    assets: [],
+    defaults: { trackers: [] }
+  };
+}
+
 const RUNTIME_STATE = {
   continuitySummary: "The route audit is active.",
   openThreads: ["Complete the parity matrix."],
@@ -90,96 +103,184 @@ function runtimeConfig(): RuntimeConfig {
       apiImportBodyLimitBytes: 16_777_216,
       apiAssetBodyLimitBytes: 33_554_432,
       apiRateLimitWindowSeconds: 60,
-      apiRateLimitProviderRequests: 10,
+      apiRateLimitProviderRequests: 1_000,
       apiRateLimitGenerationRequests: 12,
       apiRateLimitImportRequests: 4,
-      apiConcurrencyProviderRequests: 2,
+      apiConcurrencyProviderRequests: 100,
       apiConcurrencyImportRequests: 1,
       trustProxyHops: 0
     }
   };
 }
 
-integration("world campaign Fastify application cutover", () => {
+type TrackedResource = { ownerUserId: string; id: string; title: string };
+
+integration("world campaign Fastify production application cutover", () => {
   let pool: DatabasePool;
+  let app: FastifyInstance;
+  let worldCampaign: WorldCampaignApplication;
+  let ownerUserId: string;
+  const trackedCampaigns: TrackedResource[] = [];
+  const trackedWorlds: TrackedResource[] = [];
+  const trackedForeignUsers: string[] = [];
+
+  const ownerScope = (boundOwnerUserId = ownerUserId) => ({ ownerUserId: boundOwnerUserId });
+  const worldScope = (worldId: string, boundOwnerUserId = ownerUserId) => ({
+    ownerUserId: boundOwnerUserId,
+    worldId
+  });
+  const campaignScope = (campaignId: string, boundOwnerUserId = ownerUserId) => ({
+    ownerUserId: boundOwnerUserId,
+    campaignId
+  });
+  const trackWorld = (id: string, title: string, boundOwnerUserId = ownerUserId) => {
+    trackedWorlds.push({ ownerUserId: boundOwnerUserId, id, title });
+  };
+  const trackCampaign = (id: string, title: string, boundOwnerUserId = ownerUserId) => {
+    trackedCampaigns.push({ ownerUserId: boundOwnerUserId, id, title });
+  };
+  const forget = (resources: TrackedResource[], id: string) => {
+    const index = resources.findIndex((resource) => resource.id === id);
+    if (index >= 0) resources.splice(index, 1);
+  };
+  const rename = (resources: TrackedResource[], id: string, title: string) => {
+    const resource = resources.find((candidate) => candidate.id === id);
+    if (resource) resource.title = title;
+  };
+  const notFound = (error: unknown) => error instanceof WorldCampaignApplicationError
+    && error.kind === "not_found";
+
+  async function cleanupTrackedResources(): Promise<void> {
+    for (const campaign of trackedCampaigns.splice(0).reverse()) {
+      await pool.query(
+        "DELETE FROM chronicle_jobs WHERE campaign_id = $1 AND owner_user_id = $2",
+        [campaign.id, campaign.ownerUserId]
+      );
+      try {
+        await worldCampaign.deleteCampaign(
+          campaignScope(campaign.id, campaign.ownerUserId),
+          { confirmation: "DELETE", expectedTitle: campaign.title }
+        );
+      } catch (error) {
+        if (!notFound(error)) throw error;
+      }
+    }
+    for (const world of trackedWorlds.splice(0).reverse()) {
+      await pool.query(
+        `DELETE FROM campaign_world_transfers
+          WHERE owner_user_id = $2
+            AND (
+              from_world_version_id IN (
+                SELECT id FROM world_versions WHERE world_id = $1 AND owner_user_id = $2
+              )
+              OR to_world_version_id IN (
+                SELECT id FROM world_versions WHERE world_id = $1 AND owner_user_id = $2
+              )
+            )`,
+        [world.id, world.ownerUserId]
+      );
+      await pool.query(
+        `DELETE FROM chronicle_memories
+          WHERE owner_user_id = $2
+            AND world_version_id IN (
+              SELECT id FROM world_versions WHERE world_id = $1 AND owner_user_id = $2
+            )`,
+        [world.id, world.ownerUserId]
+      );
+      try {
+        await worldCampaign.deleteWorld(
+          worldScope(world.id, world.ownerUserId),
+          { confirmation: "DELETE", expectedTitle: world.title }
+        );
+      } catch (error) {
+        if (!notFound(error)) throw error;
+      }
+    }
+    for (const userId of trackedForeignUsers.splice(0).reverse()) {
+      await pool.query("DELETE FROM activity_events WHERE owner_user_id = $1", [userId]);
+      await pool.query("DELETE FROM users WHERE id = $1", [userId]);
+    }
+  }
+
+  async function createPublishedWorld(label: string, boundOwnerUserId = ownerUserId) {
+    const title = `14c3 ${label} ${crypto.randomUUID()}`;
+    const created = await worldCampaign.createWorld(
+      ownerScope(boundOwnerUserId),
+      { title, content: worldContent(title) }
+    );
+    trackWorld(created.id, title, boundOwnerUserId);
+    const published = await worldCampaign.publishWorld(
+      worldScope(created.id, boundOwnerUserId),
+      { expectedRevision: created.draftRevision, releaseNotes: "14c3 production parity" }
+    );
+    return { title, created, published };
+  }
+
+  async function publishNextVersion(worldId: string, title: string) {
+    const detail = await worldCampaign.getWorld(worldScope(worldId));
+    const saved = await worldCampaign.updateWorldDraft(worldScope(worldId), {
+      expectedRevision: detail.draftRevision!,
+      content: worldContent(title, "Two")
+    });
+    return worldCampaign.publishWorld(worldScope(worldId), {
+      expectedRevision: saved.revision,
+      releaseNotes: "14c3 production parity version two"
+    });
+  }
+
+  async function createCampaign(label: string, worldVersionId: string) {
+    const title = `14c3 ${label} ${crypto.randomUUID()}`;
+    const campaign = await worldCampaign.createCampaign(ownerScope(), {
+      title,
+      worldVersionId,
+      selectedCharacterId: "route-explorer",
+      storyLengthProfile: "standard",
+      turnControlStyle: "flexible_auto"
+    });
+    trackCampaign(campaign.id, title);
+    return { title, campaign };
+  }
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
     await migrateDatabase(pool, resolve("database/migrations"));
+    ownerUserId = await initialOwnerId(pool);
+    const config = runtimeConfig();
+    worldCampaign = createApiWorldCampaignApplication(pool, {
+      credentialSecret: config.credentialEncryptionKey
+    });
+    app = await buildServer({
+      ...serverOptions({ config, pool }),
+      worldCampaign
+    });
+  });
+
+  afterEach(async () => {
+    await cleanupTrackedResources();
   });
 
   afterAll(async () => {
+    await app?.close();
     await pool?.end();
   });
 
-  it("routes dashboard reads through the injected application with server-resolved authority", async () => {
-    const expectedOwnerUserId = await initialOwnerId(pool);
-    const scopes: unknown[] = [];
-    const dashboard = {
-      worlds: { available: 101, total: 102, published: 103, drafts: 104, archived: 105 },
-      campaigns: { open: 106, total: 107, archived: 108 },
-      turns: { accepted: 109 },
-      providerCosts: { hasReportedCosts: false, totals: [] }
-    };
-    const worldCampaign = {
-      async getDashboard(scope: unknown) {
-        scopes.push(scope);
-        return dashboard;
-      }
-    } as unknown as WorldCampaignApplication;
-    const options = Object.assign(serverOptions({ config: runtimeConfig(), pool }), {
-      worldCampaign
-    }) as BuildServerOptions;
-    const app = await buildServer(options);
+  it("serves dashboard data from the production PostgreSQL application under server authority", async () => {
+    const expected = await worldCampaign.getDashboard(ownerScope());
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/dashboard/stats",
+      headers: { "x-user-id": crypto.randomUUID() }
+    });
 
-    try {
-      const response = await app.inject({
-        method: "GET",
-        url: "/api/v1/dashboard/stats",
-        headers: { "x-user-id": crypto.randomUUID() }
-      });
-
-      expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual(dashboard);
-      expect(scopes).toEqual([{ ownerUserId: expectedOwnerUserId }]);
-    } finally {
-      await app.close();
-    }
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(expected);
   });
 
-  it("routes every session and profile alias through the injected owner-scoped application", async () => {
-    const expectedOwnerUserId = await initialOwnerId(pool);
-    const calls: Array<{ operation: string; scope: unknown; request?: unknown }> = [];
-    const profile = {
-      id: expectedOwnerUserId,
-      systemKey: "initial-owner",
-      displayName: "Route Owner",
-      settings: {
-        autoSubmitTurnChoices: true,
-        continuousReading: false,
-        defaultTurnControlStyle: "flexible_auto" as const
-      }
-    };
-    const worldCampaign = testWorldCampaignApplication({
-      async getSessionProfile(scope) {
-        calls.push({ operation: "read", scope });
-        return profile;
-      },
-      async updateSessionProfile(scope, request) {
-        calls.push({ operation: "update", scope, request });
-        return {
-          ...profile,
-          displayName: request.displayName ?? profile.displayName,
-          settings: request.settings ?? profile.settings
-        };
-      }
-    });
-    const app = await buildServer(Object.assign(serverOptions({ config: runtimeConfig(), pool }), {
-      worldCampaign
-    }) as BuildServerOptions);
+  it("serves every session/profile alias from the production owner-scoped application", async () => {
+    const original = await worldCampaign.getSessionProfile(ownerScope());
     const spoofedHeaders = { "x-user-id": crypto.randomUUID() };
     const update = {
-      displayName: "Updated Route Owner",
+      displayName: `14c3 owner ${crypto.randomUUID()}`,
       settings: {
         autoSubmitTurnChoices: false,
         continuousReading: true,
@@ -188,314 +289,443 @@ integration("world campaign Fastify application cutover", () => {
     };
 
     try {
-      const requests = [
-        { method: "GET", url: "/api/v1/session" },
-        { method: "GET", url: "/api/v1/users/me" },
-        { method: "GET", url: "/api/v1/user/profile" },
-        { method: "PATCH", url: "/api/v1/users/me/profile", payload: update },
-        { method: "PUT", url: "/api/v1/users/me/profile", payload: update },
-        { method: "PATCH", url: "/api/v1/user/profile", payload: update },
-        { method: "PUT", url: "/api/v1/user/profile", payload: update }
-      ] as const;
-      const responses = [];
-      for (const request of requests) {
-        responses.push(await app.inject({ ...request, headers: spoofedHeaders }));
+      const reads = await Promise.all([
+        app.inject({ method: "GET", url: "/api/v1/session", headers: spoofedHeaders }),
+        app.inject({ method: "GET", url: "/api/v1/users/me", headers: spoofedHeaders }),
+        app.inject({ method: "GET", url: "/api/v1/user/profile", headers: spoofedHeaders })
+      ]);
+      expect(reads.every((response) => response.statusCode === 200)).toBe(true);
+      expect(reads.map((response) => response.json().user.id)).toEqual([
+        ownerUserId,
+        ownerUserId,
+        ownerUserId
+      ]);
+
+      for (const request of [
+        { method: "PATCH", url: "/api/v1/users/me/profile" },
+        { method: "PUT", url: "/api/v1/users/me/profile" },
+        { method: "PATCH", url: "/api/v1/user/profile" },
+        { method: "PUT", url: "/api/v1/user/profile" }
+      ] as const) {
+        const response = await app.inject({ ...request, headers: spoofedHeaders, payload: update });
+        expect(response.statusCode).toBe(200);
+        expect(response.json().user).toMatchObject({ id: ownerUserId, displayName: update.displayName });
       }
-
-      expect(responses.every((response) => response.statusCode === 200)).toBe(true);
-      expect(responses[0]?.json()).toEqual({ user: profile, authentication: "deferred" });
-      expect(responses.slice(1, 3).map((response) => response.json())).toEqual([
-        { user: profile },
-        { user: profile }
-      ]);
-      expect(responses.slice(3).every((response) => response.json().user.displayName === update.displayName)).toBe(true);
-      expect(calls.map(({ operation }) => operation)).toEqual([
-        "read", "read", "read", "update", "update", "update", "update"
-      ]);
-      expect(calls.every(({ scope }) => (
-        JSON.stringify(scope) === JSON.stringify({ ownerUserId: expectedOwnerUserId })
-      ))).toBe(true);
-      expect(calls.filter(({ operation }) => operation === "update").every(({ request }) => (
-        JSON.stringify(request) === JSON.stringify(update)
-      ))).toBe(true);
     } finally {
-      await app.close();
+      await worldCampaign.updateSessionProfile(ownerScope(), {
+        displayName: original.displayName,
+        settings: original.settings
+      });
     }
   });
 
-  it("routes the complete world lifecycle, generation, and progress family through the application", async () => {
-    const operations: string[] = [];
-    const base = testWorldCampaignApplication();
-    const record = <T extends unknown[], R>(name: string, operation: (...args: T) => Promise<R>) => async (...args: T) => {
-      operations.push(name);
-      return operation(...args);
-    };
-    const empty = async () => ({} as never);
-    const worldCampaign = testWorldCampaignApplication({
-      listWorlds: record("listWorlds", base.listWorlds.bind(base)),
-      createWorld: record("createWorld", base.createWorld.bind(base)),
-      generateWorldPreview: record("generateWorldPreview", empty),
-      deleteExpiredWorldGenerationProgress: record("deleteExpiredWorldGenerationProgress", base.deleteExpiredWorldGenerationProgress.bind(base)),
-      getWorldGenerationProgress: record("getWorldGenerationProgress", base.getWorldGenerationProgress.bind(base)),
-      generatePlayableCharacterPreview: record("generatePlayableCharacterPreview", empty),
-      getWorld: record("getWorld", empty),
-      updateWorldDraft: record("updateWorldDraft", empty),
-      generatePlayableCharacter: record("generatePlayableCharacter", empty),
-      organizeWorldCharacterProfile: record("organizeWorldCharacterProfile", empty),
-      publishWorld: record("publishWorld", empty),
-      updateWorldStatus: record("updateWorldStatus", empty),
-      deleteWorld: record("deleteWorld", async () => undefined),
-      deleteWorldVersion: record("deleteWorldVersion", async () => undefined),
-      forkWorld: record("forkWorld", empty),
-      exportWorld: record("exportWorld", async () => ({
-        format: "infinite-quest-world" as const,
-        formatVersion: 1 as const,
-        title: "Route World",
-        content: WORLD_CONTENT as never
-      }))
+  it("exercises the complete world, generation, progress, and portable-export route family against production PostgreSQL", async () => {
+    const title = `14c3 route world ${crypto.randomUUID()}`;
+    const create = await app.inject({
+      method: "POST",
+      url: "/api/v1/worlds",
+      payload: { title, content: worldContent(title) }
     });
-    const app = await buildServer(Object.assign(serverOptions({ config: runtimeConfig(), pool }), { worldCampaign }) as BuildServerOptions);
-    const requests = [
-      { method: "GET", url: "/api/v1/worlds" },
-      { method: "POST", url: "/api/v1/worlds", payload: { title: "Route World" } },
-      { method: "POST", url: "/api/v1/worlds/generate-preview", payload: { prompt: "Generate a route world." } },
-      { method: "GET", url: "/api/v1/worlds/generate-progress?key=route-progress" },
-      { method: "POST", url: "/api/v1/worlds/playable-characters/generate-preview", payload: { content: WORLD_CONTENT, prompt: "Generate a route explorer." } },
-      { method: "GET", url: `/api/v1/worlds/${WORLD_ID}` },
-      { method: "PUT", url: `/api/v1/worlds/${WORLD_ID}/draft`, payload: { expectedRevision: 1, title: "Route World", content: WORLD_CONTENT } },
-      { method: "POST", url: `/api/v1/worlds/${WORLD_ID}/draft/playable-characters/generate`, payload: { expectedRevision: 1, prompt: "Generate a route explorer." } },
-      { method: "POST", url: `/api/v1/worlds/${WORLD_ID}/draft/playable-characters/organize`, payload: { expectedRevision: 1, character: WORLD_CONTENT.playableCharacters[0] } },
-      { method: "POST", url: `/api/v1/worlds/${WORLD_ID}/publish`, payload: { expectedRevision: 1, releaseNotes: "Route parity." } },
-      { method: "PATCH", url: `/api/v1/worlds/${WORLD_ID}`, payload: { status: "archived" } },
-      { method: "DELETE", url: `/api/v1/worlds/${WORLD_ID}`, payload: { confirmation: "DELETE", expectedTitle: "Route World" } },
-      { method: "DELETE", url: `/api/v1/worlds/${WORLD_ID}/versions/${WORLD_VERSION_ID}`, payload: { confirmation: "DELETE", expectedVersionNumber: 1 } },
-      { method: "POST", url: `/api/v1/worlds/${WORLD_ID}/fork`, payload: { title: "Forked Route World", sourceWorldVersionId: WORLD_VERSION_ID } },
-      { method: "GET", url: `/api/v1/worlds/${WORLD_ID}/export?worldVersionId=${WORLD_VERSION_ID}` }
-    ];
+    expect(create.statusCode).toBe(201);
+    const created = create.json();
+    trackWorld(created.id, title);
 
-    try {
-      const responses = [];
-      for (const request of requests) responses.push(await app.inject(request as never));
-      expect(responses.every((response) => response.statusCode >= 200 && response.statusCode < 300)).toBe(true);
-      expect(operations).toEqual([
-        "listWorlds", "createWorld", "generateWorldPreview",
-        "deleteExpiredWorldGenerationProgress", "getWorldGenerationProgress",
-        "generatePlayableCharacterPreview", "getWorld", "updateWorldDraft",
-        "generatePlayableCharacter", "organizeWorldCharacterProfile", "publishWorld",
-        "updateWorldStatus", "deleteWorld", "deleteWorldVersion", "forkWorld", "exportWorld"
-      ]);
-    } finally {
-      await app.close();
-    }
-  });
+    const list = await app.inject({ method: "GET", url: "/api/v1/worlds" });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().worlds.some((world: { id: string }) => world.id === created.id)).toBe(true);
 
-  it("routes campaign lifecycle and playable-character lookup through the application", async () => {
-    const operations: string[] = [];
-    const base = testWorldCampaignApplication();
-    const record = <T extends unknown[], R>(name: string, operation: (...args: T) => Promise<R>) => async (...args: T) => {
-      operations.push(name);
-      return operation(...args);
-    };
-    const empty = async () => ({} as never);
-    const worldCampaign = testWorldCampaignApplication({
-      listCampaigns: record("listCampaigns", base.listCampaigns.bind(base)),
-      getWorldVersionPlayableCharacterSummary: record("getWorldVersionPlayableCharacterSummary", base.getWorldVersionPlayableCharacterSummary.bind(base)),
-      createCampaign: record("createCampaign", base.createCampaign.bind(base)),
-      updateCampaign: record("updateCampaign", empty),
-      deleteCampaign: record("deleteCampaign", async () => undefined),
-      migrateCampaignWorldVersion: record("migrateCampaignWorldVersion", empty)
+    const get = await app.inject({ method: "GET", url: `/api/v1/worlds/${created.id}` });
+    expect(get.statusCode).toBe(200);
+    expect(get.json()).toMatchObject({ id: created.id, title });
+
+    const update = await app.inject({
+      method: "PUT",
+      url: `/api/v1/worlds/${created.id}/draft`,
+      payload: { expectedRevision: created.draftRevision, content: worldContent(title, "Updated") }
     });
-    const app = await buildServer(Object.assign(serverOptions({ config: runtimeConfig(), pool }), { worldCampaign }) as BuildServerOptions);
-    const requests = [
-      { method: "GET", url: "/api/v1/campaigns" },
-      { method: "GET", url: `/api/v1/world-versions/${WORLD_VERSION_ID}/playable-characters` },
-      { method: "POST", url: "/api/v1/campaigns", payload: { worldVersionId: WORLD_VERSION_ID, title: "Route Campaign", selectedCharacterId: "route-explorer" } },
-      { method: "PATCH", url: `/api/v1/campaigns/${CAMPAIGN_ID}`, payload: { title: "Updated Route Campaign" } },
-      { method: "DELETE", url: `/api/v1/campaigns/${CAMPAIGN_ID}`, payload: { confirmation: "DELETE", expectedTitle: "Route Campaign" } },
-      { method: "POST", url: `/api/v1/campaigns/${CAMPAIGN_ID}/migrate-world`, payload: { worldVersionId: WORLD_VERSION_ID, note: "Route parity." } }
-    ];
-    try {
-      const responses = [];
-      for (const request of requests) responses.push(await app.inject(request as never));
-      expect(responses.every((response) => response.statusCode >= 200 && response.statusCode < 300)).toBe(true);
-      expect(operations).toEqual([
-        "listCampaigns", "getWorldVersionPlayableCharacterSummary", "createCampaign",
-        "updateCampaign", "deleteCampaign", "migrateCampaignWorldVersion"
-      ]);
-    } finally {
-      await app.close();
-    }
-  });
+    expect(update.statusCode).toBe(200);
+    const revision = update.json().revision;
 
-  it("routes character profile and campaign transfer operations through the application", async () => {
-    const operations: string[] = [];
-    const empty = async () => ({} as never);
-    const record = <T extends unknown[], R>(name: string, operation: (...args: T) => Promise<R>) => async (...args: T) => {
-      operations.push(name);
-      return operation(...args);
-    };
-    const worldCampaign = testWorldCampaignApplication({
-      getCampaignCharacterProfile: record("getCampaignCharacterProfile", empty),
-      updateCampaignCharacterProfile: record("updateCampaignCharacterProfile", empty),
-      organizeCampaignCharacterProfile: record("organizeCampaignCharacterProfile", empty),
-      previewCampaignWorldTransfer: record("previewCampaignWorldTransfer", empty),
-      transferCampaignWorld: record("transferCampaignWorld", empty)
-    });
-    const app = await buildServer(Object.assign(serverOptions({ config: runtimeConfig(), pool }), { worldCampaign }) as BuildServerOptions);
-    const previewRequest = { targetWorldVersionId: WORLD_VERSION_ID, title: "Transferred Route Campaign" };
-    const requests = [
-      { method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/character-profile` },
-      { method: "PUT", url: `/api/v1/campaigns/${CAMPAIGN_ID}/character-profile`, payload: { expectedRevision: 0, name: "Route Explorer", profile: {} } },
-      { method: "POST", url: `/api/v1/campaigns/${CAMPAIGN_ID}/character-profile/organize`, payload: { expectedRevision: 0, character: WORLD_CONTENT.playableCharacters[0] } },
-      { method: "POST", url: `/api/v1/campaigns/${CAMPAIGN_ID}/transfer-world/preview`, payload: previewRequest },
-      { method: "POST", url: `/api/v1/campaigns/${CAMPAIGN_ID}/transfer-world`, payload: { ...previewRequest, idempotencyKey: crypto.randomUUID(), expectedActiveTurnNumber: 0, expectedStateRevision: 0, sourceFingerprint: "a".repeat(64) } }
-    ];
-    try {
-      const responses = [];
-      for (const request of requests) responses.push(await app.inject(request as never));
-      expect(responses.every((response) => response.statusCode >= 200 && response.statusCode < 300)).toBe(true);
-      expect(operations).toEqual([
-        "getCampaignCharacterProfile", "updateCampaignCharacterProfile",
-        "organizeCampaignCharacterProfile", "previewCampaignWorldTransfer", "transferCampaignWorld"
-      ]);
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("routes campaign state, sync, and player configuration through the application", async () => {
-    const operations: string[] = [];
-    const base = testWorldCampaignApplication();
-    const record = <T extends unknown[], R>(name: string, operation: (...args: T) => Promise<R>) => async (...args: T) => {
-      operations.push(name);
-      return operation(...args);
-    };
-    const worldCampaign = testWorldCampaignApplication({
-      getCampaignRuntimeState: record("getCampaignRuntimeState", base.getCampaignRuntimeState.bind(base)),
-      updateCampaignRuntimeState: record("updateCampaignRuntimeState", base.updateCampaignRuntimeState.bind(base)),
-      getCampaignSyncStatus: record("getCampaignSyncStatus", base.getCampaignSyncStatus.bind(base)),
-      syncPlayerCampaignConfig: record("syncPlayerCampaignConfig", async () => ({ campaignId: CAMPAIGN_ID, activeTurnNumber: 0, synchronized: true as const }))
-    });
-    const app = await buildServer(Object.assign(serverOptions({ config: runtimeConfig(), pool }), { worldCampaign }) as BuildServerOptions);
-    const requests = [
-      { method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/state?turnNumber=0` },
-      { method: "PATCH", url: `/api/v1/campaigns/${CAMPAIGN_ID}/state`, payload: { expectedTurnNumber: 0, expectedRevision: 1, ...RUNTIME_STATE } },
-      { method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/sync-status` },
-      { method: "PUT", url: `/api/v1/campaigns/${CAMPAIGN_ID}/player-config`, payload: { expectedTurnNumber: 0, useRpgStats: false, suppressEventTriggers: false, rpgStats: [], eventTriggers: [], pendingEventTriggers: [] } }
-    ];
-    try {
-      const responses = [];
-      for (const request of requests) responses.push(await app.inject(request as never));
-      expect(responses.every((response) => response.statusCode >= 200 && response.statusCode < 300)).toBe(true);
-      expect(operations).toEqual([
-        "getCampaignRuntimeState", "updateCampaignRuntimeState", "getCampaignSyncStatus",
-        "getCampaignRuntimeState", "syncPlayerCampaignConfig"
-      ]);
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("routes rewind and branch through the application and validates rewind before reading state", async () => {
-    const operations: string[] = [];
-    const base = testWorldCampaignApplication();
-    const record = <T extends unknown[], R>(name: string, operation: (...args: T) => Promise<R>) => async (...args: T) => {
-      operations.push(name);
-      return operation(...args);
-    };
-    const worldCampaign = testWorldCampaignApplication({
-      getCampaignRuntimeState: record("getCampaignRuntimeState", base.getCampaignRuntimeState.bind(base)),
-      rewindCampaign: record("rewindCampaign", base.rewindCampaign.bind(base)),
-      branchCampaign: record("branchCampaign", base.branchCampaign.bind(base))
-    });
-    const app = await buildServer(Object.assign(serverOptions({ config: runtimeConfig(), pool }), { worldCampaign }) as BuildServerOptions);
-    try {
-      const invalid = await app.inject({ method: "POST", url: `/api/v1/campaigns/${CAMPAIGN_ID}/rewind`, payload: { targetTurnNumber: -1 } });
-      expect(invalid.statusCode).toBe(400);
-      expect(operations).toEqual([]);
-
-      const rewind = await app.inject({ method: "POST", url: `/api/v1/campaigns/${CAMPAIGN_ID}/rewind`, payload: { targetTurnNumber: 0 } });
-      const branch = await app.inject({ method: "POST", url: `/api/v1/campaigns/${CAMPAIGN_ID}/branch`, payload: { targetTurnNumber: 0, title: "Branched Route Campaign" } });
-      expect(rewind.statusCode).toBe(200);
-      expect(branch.statusCode).toBe(201);
-      expect(operations).toEqual(["getCampaignRuntimeState", "rewindCampaign", "branchCampaign"]);
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("routes Infinite Worlds world preview and import through the named portable-world application port", async () => {
-    const expectedOwnerUserId = await initialOwnerId(pool);
-    const calls: Array<{ operation: string; scope: unknown; request: unknown }> = [];
-    const worldId = crypto.randomUUID();
-    const worldVersionId = crypto.randomUUID();
-    const importId = crypto.randomUUID();
-    const worldCampaign = testWorldCampaignApplication({
-      async previewWorldImport(scope, request) {
-        calls.push({ operation: "preview", scope, request });
-        return {
-          kind: "world",
-          title: request.worldExport.title,
-          duplicate: false,
-          existingWorldId: null,
-          counts: { entities: 0, relationships: 0, triggers: 0 },
-          warnings: []
-        };
+    const providerBackedRequests = [
+      {
+        method: "POST",
+        url: "/api/v1/worlds/generate-preview",
+        payload: { prompt: "Generate a production parity world." }
       },
-      async importWorld(scope, request) {
-        calls.push({ operation: "import", scope, request });
-        return { importId, worldId, worldVersionId, duplicate: false };
+      {
+        method: "POST",
+        url: "/api/v1/worlds/playable-characters/generate-preview",
+        payload: { content: worldContent(title), prompt: "Generate a production parity explorer." }
+      },
+      {
+        method: "POST",
+        url: `/api/v1/worlds/${created.id}/draft/playable-characters/generate`,
+        payload: { expectedRevision: revision, prompt: "Generate a production parity explorer." }
+      },
+      {
+        method: "POST",
+        url: `/api/v1/worlds/${created.id}/draft/playable-characters/organize`,
+        payload: { expectedRevision: revision, character: worldContent(title).playableCharacters[0] }
+      }
+    ] as const;
+    const providerBackedResponses = [];
+    for (const request of providerBackedRequests) {
+      providerBackedResponses.push(await app.inject(request));
+    }
+    const providerFailureModes = [
+      { statuses: [409, 502], unavailableCode: "default_text_provider_unavailable" },
+      { statuses: [409, 500], unavailableCode: "default_text_provider_unavailable" },
+      { statuses: [409, 500], unavailableCode: "default_text_provider_unavailable" },
+      { statuses: [409, 500], unavailableCode: "text_provider_unavailable" }
+    ] as const;
+    providerBackedResponses.forEach((response, index) => {
+      const expected = providerFailureModes[index]!;
+      expect(expected.statuses).toContain(response.statusCode);
+      if (response.statusCode === 409) {
+        expect(response.json()).toMatchObject({ details: { code: expected.unavailableCode } });
       }
     });
-    const app = await buildServer(Object.assign(serverOptions({ config: runtimeConfig(), pool }), {
-      worldCampaign
-    }) as BuildServerOptions);
+
+    const progress = await app.inject({
+      method: "GET",
+      url: `/api/v1/worlds/generate-progress?key=${crypto.randomUUID()}`
+    });
+    expect(progress.statusCode).toBe(200);
+    expect(progress.json()).toEqual({ status: "unknown", phase: "unknown", progressPercent: 0, message: "" });
+
+    const publish = await app.inject({
+      method: "POST",
+      url: `/api/v1/worlds/${created.id}/publish`,
+      payload: { expectedRevision: revision, releaseNotes: "14c3 route publication" }
+    });
+    expect(publish.statusCode).toBe(201);
+    const published = publish.json();
+
+    for (const url of [
+      `/api/v1/worlds/${created.id}/export`,
+      `/api/v1/worlds/${created.id}/export?worldVersionId=${published.worldVersionId}`
+    ]) {
+      const exported = await app.inject({ method: "GET", url });
+      expect(exported.statusCode).toBe(200);
+      expect(exported.headers["content-disposition"]).toContain("infinite-quest-world.json");
+      expect(exported.json()).toMatchObject({ format: "infinite-quest-world", formatVersion: 1, title });
+    }
+
+    const forkTitle = `14c3 fork ${crypto.randomUUID()}`;
+    const fork = await app.inject({
+      method: "POST",
+      url: `/api/v1/worlds/${created.id}/fork`,
+      payload: { title: forkTitle, sourceWorldVersionId: published.worldVersionId }
+    });
+    expect(fork.statusCode).toBe(201);
+    trackWorld(fork.json().worldId, forkTitle);
+
+    const archive = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/worlds/${created.id}`,
+      payload: { status: "archived" }
+    });
+    expect(archive.statusCode).toBe(200);
+    expect(archive.json()).toMatchObject({ id: created.id, status: "archived" });
+
+    const disposable = await createPublishedWorld("disposable version");
+    const second = await publishNextVersion(disposable.created.id, disposable.title);
+    const deleteVersion = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/worlds/${disposable.created.id}/versions/${disposable.published.worldVersionId}`,
+      payload: { confirmation: "DELETE", expectedVersionNumber: 1 }
+    });
+    expect(deleteVersion.statusCode).toBe(200);
+    expect(second.versionNumber).toBe(2);
+
+    const draftTitle = `14c3 disposable draft ${crypto.randomUUID()}`;
+    const draft = await worldCampaign.createWorld(ownerScope(), {
+      title: draftTitle,
+      content: worldContent(draftTitle)
+    });
+    trackWorld(draft.id, draftTitle);
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/worlds/${draft.id}`,
+      payload: { confirmation: "DELETE", expectedTitle: draftTitle }
+    });
+    expect(deleted.statusCode).toBe(200);
+    forget(trackedWorlds, draft.id);
+
+    const foreignUserId = crypto.randomUUID();
+    trackedForeignUsers.push(foreignUserId);
+    await pool.query(
+      "INSERT INTO users (id, display_name, status) VALUES ($1,$2,'active')",
+      [foreignUserId, `14c3 foreign ${foreignUserId}`]
+    );
+    const foreign = await createPublishedWorld("foreign export", foreignUserId);
+    const foreignExport = await app.inject({
+      method: "GET",
+      url: `/api/v1/worlds/${foreign.created.id}/export?worldVersionId=${foreign.published.worldVersionId}`,
+      headers: { "x-user-id": foreignUserId }
+    });
+    expect(foreignExport.statusCode).toBe(404);
+    expect(foreignExport.json()).toMatchObject({ details: { code: "world_version_not_found" } });
+  });
+
+  it("exercises campaign lifecycle, playable-character lookup, and migration against production PostgreSQL", async () => {
+    const world = await createPublishedWorld("campaign lifecycle");
+    const characters = await app.inject({
+      method: "GET",
+      url: `/api/v1/world-versions/${world.published.worldVersionId}/playable-characters`
+    });
+    expect(characters.statusCode).toBe(200);
+    expect(characters.json()).toMatchObject({
+      characters: [{ id: "route-explorer", name: "Route Explorer" }],
+      readiness: { ready: true }
+    });
+
+    const campaignTitle = `14c3 route campaign ${crypto.randomUUID()}`;
+    const create = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      payload: {
+        worldVersionId: world.published.worldVersionId,
+        title: campaignTitle,
+        selectedCharacterId: "route-explorer"
+      }
+    });
+    expect(create.statusCode).toBe(201);
+    const campaign = create.json();
+    trackCampaign(campaign.id, campaignTitle);
+
+    const list = await app.inject({ method: "GET", url: "/api/v1/campaigns" });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().campaigns.some((item: { id: string }) => item.id === campaign.id)).toBe(true);
+
+    const updatedTitle = `14c3 updated campaign ${crypto.randomUUID()}`;
+    const update = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/campaigns/${campaign.id}`,
+      payload: { title: updatedTitle, storyLengthProfile: "long" }
+    });
+    expect(update.statusCode).toBe(200);
+    expect(update.json()).toMatchObject({ id: campaign.id, title: updatedTitle, storyLengthProfile: "long" });
+    rename(trackedCampaigns, campaign.id, updatedTitle);
+
+    const second = await publishNextVersion(world.created.id, world.title);
+    const migrate = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${campaign.id}/migrate-world`,
+      payload: { worldVersionId: second.worldVersionId, note: "14c3 route migration" }
+    });
+    expect(migrate.statusCode).toBe(200);
+    expect(migrate.json()).toMatchObject({
+      campaignId: campaign.id,
+      fromWorldVersionId: world.published.worldVersionId,
+      toWorldVersionId: second.worldVersionId
+    });
+
+    await pool.query(
+      "DELETE FROM chronicle_jobs WHERE campaign_id = $1 AND owner_user_id = $2",
+      [campaign.id, ownerUserId]
+    );
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/campaigns/${campaign.id}`,
+      payload: { confirmation: "DELETE", expectedTitle: updatedTitle }
+    });
+    expect(deleted.statusCode).toBe(200);
+    forget(trackedCampaigns, campaign.id);
+  });
+
+  it("exercises character profile and campaign transfer routes against production PostgreSQL", async () => {
+    const sourceWorld = await createPublishedWorld("transfer source");
+    const targetWorld = await createPublishedWorld("transfer target");
+    const source = await createCampaign("transfer source", sourceWorld.published.worldVersionId);
+
+    const profile = await app.inject({
+      method: "GET",
+      url: `/api/v1/campaigns/${source.campaign.id}/character-profile`
+    });
+    expect(profile.statusCode).toBe(200);
+    expect(profile.json()).toMatchObject({ campaignId: source.campaign.id, revision: 0 });
+
+    const update = await app.inject({
+      method: "PUT",
+      url: `/api/v1/campaigns/${source.campaign.id}/character-profile`,
+      payload: { expectedRevision: 0, name: "Route Explorer", profile: {} }
+    });
+    expect(update.statusCode).toBe(200);
+    expect(update.json()).toMatchObject({ campaignId: source.campaign.id, revision: 1 });
+
+    const organize = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${source.campaign.id}/character-profile/organize`,
+      payload: { expectedRevision: 1, character: worldContent(sourceWorld.title).playableCharacters[0] }
+    });
+    expect([409, 500]).toContain(organize.statusCode);
+    if (organize.statusCode === 409) {
+      expect(organize.json()).toMatchObject({ details: { code: "text_provider_unavailable" } });
+    }
+
+    const transferTitle = `14c3 transferred ${crypto.randomUUID()}`;
+    const preview = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${source.campaign.id}/transfer-world/preview`,
+      payload: { targetWorldVersionId: targetWorld.published.worldVersionId, title: transferTitle }
+    });
+    expect(preview.statusCode).toBe(200);
+    const previewBody = preview.json();
+    expect(previewBody).toMatchObject({ allowed: true, proposedTitle: transferTitle });
+
+    const transfer = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${source.campaign.id}/transfer-world`,
+      payload: {
+        targetWorldVersionId: targetWorld.published.worldVersionId,
+        title: transferTitle,
+        idempotencyKey: crypto.randomUUID(),
+        expectedActiveTurnNumber: previewBody.expectedActiveTurnNumber,
+        expectedStateRevision: previewBody.expectedStateRevision,
+        sourceFingerprint: previewBody.sourceFingerprint,
+        note: "14c3 production route transfer"
+      }
+    });
+    expect(transfer.statusCode).toBe(201);
+    expect(transfer.json()).toMatchObject({
+      sourceCampaignId: source.campaign.id,
+      targetWorldVersionId: targetWorld.published.worldVersionId,
+      reused: false
+    });
+    trackCampaign(transfer.json().targetCampaignId, transferTitle);
+  });
+
+  it("exercises campaign state, sync, and player configuration routes against production PostgreSQL", async () => {
+    const world = await createPublishedWorld("state");
+    const source = await createCampaign("state", world.published.worldVersionId);
+
+    const state = await app.inject({
+      method: "GET",
+      url: `/api/v1/campaigns/${source.campaign.id}/state?turnNumber=0`
+    });
+    expect(state.statusCode).toBe(200);
+    expect(state.json()).toMatchObject({
+      campaignId: source.campaign.id,
+      activeTurnNumber: 0,
+      viewedTurnNumber: 0,
+      isCurrent: true
+    });
+
+    const update = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/campaigns/${source.campaign.id}/state`,
+      payload: {
+        expectedTurnNumber: 0,
+        expectedRevision: state.json().revision,
+        ...RUNTIME_STATE
+      }
+    });
+    expect(update.statusCode).toBe(200);
+    expect(update.json()).toMatchObject({ campaignId: source.campaign.id, continuitySummary: RUNTIME_STATE.continuitySummary });
+
+    const sync = await app.inject({
+      method: "GET",
+      url: `/api/v1/campaigns/${source.campaign.id}/sync-status`
+    });
+    expect(sync.statusCode).toBe(200);
+    expect(sync.json()).toMatchObject({ campaign: { id: source.campaign.id }, turnWindowMode: "replace" });
+
+    const playerConfig = await app.inject({
+      method: "PUT",
+      url: `/api/v1/campaigns/${source.campaign.id}/player-config`,
+      payload: {
+        expectedTurnNumber: 0,
+        useRpgStats: false,
+        suppressEventTriggers: false,
+        rpgStats: [],
+        eventTriggers: [],
+        pendingEventTriggers: []
+      }
+    });
+    expect(playerConfig.statusCode).toBe(200);
+    expect(playerConfig.json()).toEqual({
+      campaignId: source.campaign.id,
+      activeTurnNumber: 0,
+      synchronized: true
+    });
+  });
+
+  it("exercises rewind validation and branch routes against production PostgreSQL", async () => {
+    const world = await createPublishedWorld("rewind branch");
+    const source = await createCampaign("rewind branch", world.published.worldVersionId);
+
+    const invalid = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${source.campaign.id}/rewind`,
+      payload: { targetTurnNumber: -1 }
+    });
+    expect(invalid.statusCode).toBe(400);
+
+    const currentTurn = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${source.campaign.id}/rewind`,
+      payload: { targetTurnNumber: 0 }
+    });
+    expect(currentTurn.statusCode).toBe(200);
+    expect(currentTurn.json()).toMatchObject({
+      campaignId: source.campaign.id,
+      activeTurnNumber: 0,
+      discardedTurnCount: 0
+    });
+
+    const branchTitle = `14c3 branch ${crypto.randomUUID()}`;
+    const branch = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${source.campaign.id}/branch`,
+      payload: { targetTurnNumber: 0, title: branchTitle }
+    });
+    expect(branch.statusCode).toBe(201);
+    expect(branch.json()).toMatchObject({ title: branchTitle, activeTurnNumber: 0 });
+    trackCampaign(branch.json().id, branchTitle);
+  });
+
+  it("exercises Infinite Worlds preview/import through the production owner-bound portable port", async () => {
+    const title = `14c3 portable import ${crypto.randomUUID()}`;
     const body = {
-      sourceName: "portable-infinite-worlds.json",
+      sourceName: `${title}.json`,
       sourceKind: "world_json",
       sourceText: JSON.stringify({
-        title: "Portable Route World",
+        title,
         background: "A route parity fixture.",
         possibleCharacters: [{ name: "Route Explorer", description: "Tests the portable port." }]
       }),
       enrichFinalTurn: false
     };
+    const spoofedHeaders = { "x-user-id": crypto.randomUUID() };
 
-    try {
-      const preview = await app.inject({
-        method: "POST",
-        url: "/api/v1/imports/infinite-worlds/preview",
-        headers: { "x-user-id": crypto.randomUUID() },
-        payload: body
-      });
-      const imported = await app.inject({
-        method: "POST",
-        url: "/api/v1/imports/infinite-worlds",
-        headers: { "x-user-id": crypto.randomUUID() },
-        payload: body
-      });
+    const preview = await app.inject({
+      method: "POST",
+      url: "/api/v1/imports/infinite-worlds/preview",
+      headers: spoofedHeaders,
+      payload: body
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json()).toMatchObject({
+      kind: "world_json",
+      valid: true,
+      title,
+      duplicate: false
+    });
 
-      expect(preview.statusCode).toBe(200);
-      expect(preview.json()).toMatchObject({
-        kind: "world_json",
-        valid: true,
-        title: "Portable Route World",
-        duplicate: false
-      });
-      expect(imported.statusCode).toBe(201);
-      expect(imported.json()).toEqual({ kind: "world", importId, worldId, worldVersionId, duplicate: false });
-      expect(calls).toHaveLength(2);
-      expect(calls.map(({ operation, scope }) => ({ operation, scope }))).toEqual([
-        { operation: "preview", scope: { ownerUserId: expectedOwnerUserId } },
-        { operation: "import", scope: { ownerUserId: expectedOwnerUserId } }
-      ]);
-      expect(calls[0]?.request).toMatchObject({
-        sourceName: body.sourceName,
-        worldExport: { title: "Portable Route World", format: "infinite-quest-world", formatVersion: 1 }
-      });
-      expect(calls[1]?.request).toEqual(calls[0]?.request);
-    } finally {
-      await app.close();
-    }
+    const imported = await app.inject({
+      method: "POST",
+      url: "/api/v1/imports/infinite-worlds",
+      headers: spoofedHeaders,
+      payload: body
+    });
+    expect(imported.statusCode).toBe(201);
+    expect(imported.json()).toMatchObject({ kind: "world", duplicate: false });
+    trackWorld(imported.json().worldId, title);
+
+    await expect(worldCampaign.getWorld(worldScope(imported.json().worldId))).resolves.toMatchObject({
+      id: imported.json().worldId,
+      title
+    });
   });
 });

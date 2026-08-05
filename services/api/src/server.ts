@@ -686,13 +686,9 @@ export async function buildServer({ config, pool, generation, illustration, memo
     const versionId = request.query.worldVersionId ? uuidSchema.parse(request.query.worldVersionId) : undefined;
     return reply
       .header("content-disposition", 'attachment; filename="infinite-quest-world.json"')
-      .send(await worldCampaignAdapter.run(async () => {
-        const ownerScope = await resolveWorldCampaignOwnerScope();
-        const worldId = uuidSchema.parse(request.params.worldId);
-        const scope = versionId
-          ? worldCampaignAdapter.worldVersionScope(ownerScope.ownerUserId, worldId, versionId)
-          : worldCampaignAdapter.worldScope(ownerScope.ownerUserId, worldId);
-        return worldCampaignAdapter.application.exportWorld(scope);
+      .send(await portableWorldApplication.exportWorld({
+        worldId: uuidSchema.parse(request.params.worldId),
+        ...(versionId === undefined ? {} : { worldVersionId: versionId })
       }));
   });
 
