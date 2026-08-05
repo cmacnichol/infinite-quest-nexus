@@ -180,6 +180,14 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
     },
 
     async updateProfile(command) {
+      if (command.changes.isDefault === true) {
+        const role = await client.query<Pick<ProviderRow, "provider_role">>(
+          "SELECT provider_role FROM provider_profiles WHERE id=$1 AND owner_user_id=$2",
+          [command.providerProfileId, command.ownerUserId]
+        );
+        if (!role.rows[0]) throw httpError("Provider profile not found.", 404);
+        await lockRole(client, command.ownerUserId, role.rows[0].provider_role);
+      }
       const current = await client.query<ProviderRow>(
         `SELECT ${SELECT_COLUMNS} FROM provider_profiles
           WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
@@ -206,7 +214,6 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
         isDefault: changes.isDefault ?? row.is_default
       });
       if (changes.isDefault === true) {
-        await lockRole(client, command.ownerUserId, row.provider_role);
         await client.query(
           "UPDATE provider_profiles SET is_default = false, updated_at = now() WHERE owner_user_id = $1 AND provider_role = $2 AND id <> $3 AND is_default",
           [command.ownerUserId, row.provider_role, row.id]

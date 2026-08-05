@@ -25,6 +25,7 @@ import {
   type TextProviderProfile
 } from "../../packages/story-engine/src/providers.js";
 import { logger } from "../../packages/logger/src/index.js";
+import { setSogniSdkClientFactoryForTests } from "../../packages/story-engine/src/providers/illustration/sogni-sdk/index.js";
 
 const profile: TextProviderProfile = {
   providerType: "lmstudio",
@@ -978,5 +979,74 @@ describe("text provider adapters", () => {
       instanceId: "z_image_turbo_bf16",
       contextLength: 0
     }]);
+  });
+
+  it("discovers Sogni SDK models only through the injected pinned transport", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni_sdk",
+      baseUrl: "https://api.sogni.ai/v1",
+      model: "flux2",
+      apiKey: "sogni-secret"
+    };
+    const fetch = vi.fn(async (_profile, _operation, url) => {
+      const responses: Record<string, unknown> = {
+        "https://socket.sogni.ai/api/v1/models/list": [
+          { id: "qwen-chat", name: "Qwen chat", SID: 1, media: "text", tier: "text-tier" },
+          { id: "flux2", name: "Flux 2", SID: 2, media: "image", tier: "image-tier" }
+        ],
+        "https://socket.sogni.ai/api/v1/status/network/fast/models": { "2": 7 },
+        "https://socket.sogni.ai/api/v1/status/network/relaxed/models": { "2": 3 },
+        "https://socket.sogni.ai/api/v2/models/tiers": {
+          "image-tier": {
+            steps: { min: 1, max: 20, step: 1, default: 8 },
+            guidance: { min: 0, max: 10, decimals: 1, default: 3.5 },
+            sampler: { allowed: ["Euler a"], default: "Euler a" },
+            scheduler: { allowed: ["Normal"], default: "Normal" }
+          }
+        },
+        "https://socket.sogni.ai/api/v1/size-presets/network/fast/model/flux2": [
+          { id: "small", label: "Small", width: 512, height: 512, ratio: "1:1" }
+        ]
+      };
+      expect(responses).toHaveProperty(url);
+      return new Response(JSON.stringify(responses[url]), { status: 200 });
+    });
+    const transport: ProviderTransport = {
+      fetch,
+      validateSdkEndpoint: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    };
+    const secondClient = vi.fn(async () => {
+      throw new Error("Sogni inventory created a second network client");
+    });
+    setSogniSdkClientFactoryForTests(secondClient as never);
+    try {
+      await expect(discoverImageModels(sogniProfile, transport)).resolves.toEqual([{
+        id: "flux2",
+        displayName: "Flux 2",
+      loaded: true,
+      instanceId: "flux2",
+      contextLength: 0,
+      workerCount: 7,
+      workerAvailability: [
+        expect.objectContaining({ type: "fast", workerCount: 7 }),
+        expect.objectContaining({ type: "relaxed", workerCount: 3 })
+      ],
+      media: "image",
+      imageOptions: expect.objectContaining({
+        samplers: ["euler_a"],
+        defaultSampler: "euler_a",
+        schedulers: ["normal"],
+        defaultScheduler: "normal",
+        sizePresets: [expect.objectContaining({ id: "small" })]
+      })
+    }]);
+    expect(transport.validateSdkEndpoint).toHaveBeenCalledOnce();
+      expect(fetch).toHaveBeenCalledTimes(5);
+      expect(secondClient).not.toHaveBeenCalled();
+    } finally {
+      setSogniSdkClientFactoryForTests();
+    }
   });
 });

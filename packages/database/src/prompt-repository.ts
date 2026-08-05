@@ -12,6 +12,14 @@ import type {
   PromptScope,
   PromptSnapshotVersion
 } from "../../application/src/providers/index.js";
+import {
+  buildEventExtensionPrompt,
+  buildEventTriggerPrompt,
+  buildRpgAssessmentPrompt,
+  buildSceneCoveragePrompt,
+  buildStoryUserPrompt,
+  buildTurnIntentPrompt
+} from "../../story-engine/src/index.js";
 import type { DatabaseClient } from "./pool.js";
 
 const CATALOG_VERSION = "prompt-library-v1";
@@ -62,6 +70,27 @@ function protocolVersion(snapshot: PromptSnapshot): string {
   return `${CATALOG_VERSION}-${hash(identity).slice(0, 16)}`;
 }
 
+function establishedPromptPreview(key: PromptTemplateKey, content: string) {
+  const preview = buildPromptPreview(key, content);
+  const context = {
+    authoritativeRules: ["Moonlit gates open only for a spoken promise."],
+    campaignState: { location: "Rainbridge", openThreads: ["Who sealed the eastern gate?"] }
+  };
+  let structuredInput = "";
+  if (key.startsWith("story_")) structuredInput = buildStoryUserPrompt(context, "Mira raises the lantern and promises to return.");
+  else if (key === "rpg_assessment") structuredInput = buildRpgAssessmentPrompt(context, "Mira attempts to open the sealed gate.", [{ id: "resolve", name: "Resolve", value: 63, note: "Courage under pressure." }]);
+  else if (key === "event_trigger") structuredInput = buildEventTriggerPrompt("after", context, "Mira opens the gate.", 7, [{ id: "gate-opened", label: "The eastern gate opens", timing: "after", condition: "The eastern gate is opened.", effect: "Blue light floods the bridge.", addTextAfter: true, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }]);
+  else if (key === "event_extension") structuredInput = buildEventExtensionPrompt("The gate opens beneath Mira's lantern.", ["Blue light floods the rain-swept bridge."]);
+  else if (key === "turn_intent") structuredInput = buildTurnIntentPrompt("Mira opens the gate and calls for the ferryman.");
+  else if (key === "scene_coverage" || key === "scene_coverage_rewrite") structuredInput = buildSceneCoveragePrompt("Mira opens the gate.", "Mira presses her palm to the blue glass, and the gate opens.");
+  if (structuredInput) {
+    const inputSection = preview.sections.find((section) => section.role === "input");
+    if (inputSection) inputSection.content = structuredInput;
+    preview.estimatedTokens = Math.max(1, Math.ceil(preview.sections.reduce((total, section) => total + section.content.length, 0) / 4));
+  }
+  return preview;
+}
+
 export function createPromptRepository(database: DatabaseClient): PromptLibraryPort {
   async function loadPromptSnapshot(scope: PromptScope): Promise<PromptSnapshotVersion> {
     const snapshot = await resolveSnapshot(database, scope);
@@ -98,7 +127,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
         content: request.content,
         scope: "application"
       });
-      return buildPromptPreview(value.key, value.content);
+      return establishedPromptPreview(value.key, value.content);
     },
     async savePromptOverride(command) {
       const campaignId = command.scope === "campaign" ? command.campaignId : null;

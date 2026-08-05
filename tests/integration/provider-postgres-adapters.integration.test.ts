@@ -19,6 +19,7 @@ integration("provider PostgreSQL adapters", () => {
   let pool: DatabasePool;
   let first: Fixture;
   let second: Fixture;
+  const fixtureOwnerUserIds: string[] = [];
 
   async function fixture(label: string): Promise<Fixture> {
     const owner = await pool.query<{ id: string }>(
@@ -26,6 +27,7 @@ integration("provider PostgreSQL adapters", () => {
       [`Provider adapter ${label} ${crypto.randomUUID()}`]
     );
     const ownerUserId = owner.rows[0]!.id;
+    fixtureOwnerUserIds.push(ownerUserId);
     const world = await pool.query<{ id: string }>(
       "INSERT INTO worlds(owner_user_id,title) VALUES($1,$2) RETURNING id",
       [ownerUserId, `World ${label}`]
@@ -45,7 +47,7 @@ integration("provider PostgreSQL adapters", () => {
     return { ownerUserId, campaignId: campaign.rows[0]!.id, turnId: turn.rows[0]!.id };
   }
 
-  function profileCommand(ownerUserId: string, name: string, role: "text" | "image" | "embedding" = "text") {
+  function profileCommand(ownerUserId: string, name: string, role: "text" | "image" | "embedding" | "intent" = "text") {
     return {
       ownerUserId,
       name,
@@ -86,7 +88,30 @@ integration("provider PostgreSQL adapters", () => {
   });
 
   afterAll(async () => {
-    await pool.end();
+    if (!pool) return;
+    try {
+      if (fixtureOwnerUserIds.length) {
+        const parameters = [fixtureOwnerUserIds];
+        await pool.query("DELETE FROM provider_cost_events WHERE owner_user_id=ANY($1::uuid[])", parameters);
+        await pool.query("DELETE FROM prompt_template_overrides WHERE owner_user_id=ANY($1::uuid[])", parameters);
+        await pool.query("DELETE FROM chronicle_jobs WHERE owner_user_id=ANY($1::uuid[])", parameters);
+        await pool.query("DELETE FROM chronicle_memories WHERE owner_user_id=ANY($1::uuid[])", parameters);
+        await pool.query("DELETE FROM campaign_memory_configs WHERE owner_user_id=ANY($1::uuid[])", parameters);
+        await pool.query("DELETE FROM turns WHERE owner_user_id=ANY($1::uuid[])", parameters);
+        await pool.query("DELETE FROM campaigns WHERE owner_user_id=ANY($1::uuid[])", parameters);
+        await pool.query("DELETE FROM provider_profiles WHERE owner_user_id=ANY($1::uuid[])", parameters);
+        await pool.query("DELETE FROM world_versions WHERE owner_user_id=ANY($1::uuid[])", parameters);
+        await pool.query("DELETE FROM worlds WHERE owner_user_id=ANY($1::uuid[])", parameters);
+        await pool.query("DELETE FROM users WHERE id=ANY($1::uuid[])", parameters);
+        const residue = await pool.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM users WHERE id=ANY($1::uuid[])",
+          parameters
+        );
+        expect(residue.rows[0]?.count).toBe("0");
+      }
+    } finally {
+      await pool.end();
+    }
   });
 
   it("keeps profiles owner-scoped, normalized, redacted, and role/model resolution explicit", async () => {
@@ -154,10 +179,10 @@ integration("provider PostgreSQL adapters", () => {
     try {
       await firstClient.query("BEGIN");
       await secondClient.query("BEGIN");
-      await createPostgresProviderRepositories(firstClient).profiles.setDefaultProfile({
+      await createPostgresProviderRepositories(firstClient).profiles.updateProfile({
         ownerUserId: first.ownerUserId,
         providerProfileId: one.id,
-        providerRole: "text"
+        changes: { isDefault: true }
       });
       const secondDefault = createPostgresProviderRepositories(secondClient).profiles.setDefaultProfile({
         ownerUserId: first.ownerUserId,
@@ -178,6 +203,64 @@ integration("provider PostgreSQL adapters", () => {
       [first.ownerUserId]
     );
     expect(defaults.rows).toEqual([{ id: two.id }]);
+  });
+
+  it("resolves image and intent roles without text fallback and rejects wrong-role or disabled selections", async () => {
+    const scoped = await fixture("direct-role-resolution");
+    const text = await inTransaction((client) =>
+      createPostgresProviderRepositories(client).profiles.createProfile(
+        profileCommand(scoped.ownerUserId, `Text only ${crypto.randomUUID()}`)
+      )
+    );
+
+    await inTransaction(async (client) => {
+      const resolution = createPostgresProviderRepositories(client).resolution;
+      expect(await resolution.resolveDirect({ ownerUserId: scoped.ownerUserId, providerRole: "image" })).toEqual({
+        status: "unconfigured",
+        requestedRole: "image",
+        resolvedRole: null
+      });
+      expect(await resolution.resolveDirect({ ownerUserId: scoped.ownerUserId, providerRole: "intent" })).toEqual({
+        status: "unconfigured",
+        requestedRole: "intent",
+        resolvedRole: null
+      });
+    });
+
+    const { image, intent, disabledImage } = await inTransaction(async (client) => {
+      const profiles = createPostgresProviderRepositories(client).profiles;
+      const image = await profiles.createProfile(profileCommand(scoped.ownerUserId, `Image ${crypto.randomUUID()}`, "image"));
+      const intent = await profiles.createProfile(profileCommand(scoped.ownerUserId, `Intent ${crypto.randomUUID()}`, "intent"));
+      const disabledImage = await profiles.createProfile({
+        ...profileCommand(scoped.ownerUserId, `Disabled image ${crypto.randomUUID()}`, "image"),
+        enabled: false
+      });
+      return { image, intent, disabledImage };
+    });
+
+    await inTransaction(async (client) => {
+      const resolution = createPostgresProviderRepositories(client).resolution;
+      expect(await resolution.resolveDirect({ ownerUserId: scoped.ownerUserId, providerRole: "image" })).toMatchObject({
+        status: "resolved",
+        resolvedRole: "image",
+        providerProfileId: image.id
+      });
+      expect(await resolution.resolveDirect({ ownerUserId: scoped.ownerUserId, providerRole: "intent" })).toMatchObject({
+        status: "resolved",
+        resolvedRole: "intent",
+        providerProfileId: intent.id
+      });
+      await expect(resolution.resolveDirect({
+        ownerUserId: scoped.ownerUserId,
+        providerRole: "intent",
+        selectedProviderProfileId: text.id
+      })).rejects.toMatchObject({ statusCode: 400 });
+      await expect(resolution.resolveDirect({
+        ownerUserId: scoped.ownerUserId,
+        providerRole: "image",
+        selectedProviderProfileId: disabledImage.id
+      })).rejects.toMatchObject({ statusCode: 400 });
+    });
   });
 
   it("records stable health transitions without exposing a raw provider error", async () => {

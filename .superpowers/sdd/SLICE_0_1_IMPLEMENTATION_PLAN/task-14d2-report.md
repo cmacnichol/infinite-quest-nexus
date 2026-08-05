@@ -48,3 +48,22 @@
 - Mutating repositories require the surrounding 14d3 composition to supply and own the transaction lifecycle. Passing a client outside an active command transaction would violate the intended use even though PostgreSQL cannot expose transaction state through the `PoolClient` type.
 - Prompt protocol compatibility intentionally follows the established runtime prompt-key set; changing non-runtime authoring/import/illustration prompts changes their snapshot hashes but not the story model-chain protocol fingerprint.
 - Candidate inventory has no credential field in the frozen application contract. The adapter provides a separate runtime-private candidate-discovery method for a transient credential; 14d3 must call that boundary rather than adding the value to application types.
+
+## Independent-review correction (Projectmem issue #0430)
+
+- Sogni SDK inventory no longer creates a second SDK client. After official-origin validation, catalog, worker availability, tier controls, and size presets all use the caller-injected pinned `ProviderTransport`; optional metadata failure leaves the catalog usable. A regression replaces the SDK client factory with a throwing sentinel and proves it is never called while preserving worker/control metadata.
+- Both credential-free and runtime-private credential candidate discovery now replace transport/provider failures with the stable `Provider model inventory is unavailable.` 502 response. Provider messages, endpoints, and credential text are not attached as a cause or returned.
+- Default mutations now share advisory-lock-before-row-lock ordering. `updateProfile({ isDefault: true })` performs a non-locking owner-scoped role lookup, acquires the owner/role advisory transaction lock, and only then obtains the profile row lock. The real PostgreSQL concurrency case now mixes update-to-default with set-default.
+- PostgreSQL prompt preview restores the established story/mechanics/event/intent/scene structured-input builders and recalculates the token estimate after replacing the sample input.
+- The PostgreSQL suite tracks every fixture owner, deletes rows in foreign-key order, verifies no fixture user remains, and then closes the pool. It also now covers image and intent non-fallback resolution, wrong-role selection, and disabled-profile selection.
+- Scope remains additive: no route, runtime-composition, live-consumer, legacy-service, UI, migration, or contract cutover was added.
+
+### Correction verification
+
+- Focused unit: 2 files, 45 tests passed.
+- Focused real PostgreSQL: 1 file, 7 tests passed, including fixture cleanup.
+- `pnpm check`: passed, including repository-boundary, data-safety, and TypeScript checks.
+- `pnpm build`: passed, including legacy and next web builds.
+- Full unit: 110 files, 1,253 tests passed.
+- Full integration: 32 files, 344 tests passed.
+- Remaining concern: none within Task 14d2 scope; production cutover remains deferred to Task 14d3.

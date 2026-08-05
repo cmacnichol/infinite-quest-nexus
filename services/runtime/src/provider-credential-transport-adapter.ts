@@ -169,20 +169,24 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       configuration,
       ...(credential?.trim() ? { apiKey: credential.trim() } : {})
     };
-    const models = await (candidate.providerRole === "image"
-      ? discoverImageModels(profile, options.transport)
-      : candidate.providerRole === "embedding"
-        ? discoverEmbeddingModels(profile, options.transport)
-        : discoverModels(profile, options.transport));
-    return {
-      providerProfileId: null,
-      providerRole: candidate.providerRole,
-      models: models.map((value) => ({
-        id: value.id,
-        name: value.displayName,
-        ...(value.contextLength > 0 ? { contextWindowTokens: value.contextLength } : {})
-      }))
-    };
+    try {
+      const models = await (candidate.providerRole === "image"
+        ? discoverImageModels(profile, options.transport)
+        : candidate.providerRole === "embedding"
+          ? discoverEmbeddingModels(profile, options.transport)
+          : discoverModels(profile, options.transport));
+      return {
+        providerProfileId: null,
+        providerRole: candidate.providerRole,
+        models: models.map((value) => ({
+          id: value.id,
+          name: value.displayName,
+          ...(value.contextLength > 0 ? { contextWindowTokens: value.contextLength } : {})
+        }))
+      };
+    } catch {
+      throw Object.assign(new Error("Provider model inventory is unavailable."), { statusCode: 502 });
+    }
   }
 
   return {

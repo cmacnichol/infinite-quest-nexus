@@ -22,7 +22,6 @@ import {
 } from "./providers/illustration/sogni/index.js";
 import {
   cancelSogniSdkGeneration,
-  discoverSogniSdkModels,
   pollSogniSdkGeneration,
   submitSogniSdkGeneration
 } from "./providers/illustration/sogni-sdk/index.js";
@@ -895,6 +894,145 @@ function inventoryItems(models: any[]): ModelInventoryItem[] {
   }).filter((model: ModelInventoryItem) => model.id);
 }
 
+const SOGNI_SAMPLER_ALIASES: Readonly<Record<string, string>> = {
+  Euler: "euler",
+  "Euler a": "euler_a",
+  "Euler Ancestral": "euler_ancestral",
+  Heun: "heun",
+  "DPM++ 2M": "dpmpp_2m",
+  "DPM++ 2M SDE": "dpmpp_2m_sde",
+  "DPM++ SDE": "dpmpp_sde",
+  "DPM++ 3M SDE": "dpmpp_3m_sde",
+  UniPC: "uni_pc",
+  "LCM (Latent Consistency Model)": "lcm",
+  LMS: "lms",
+  "DPM 2": "dpm_2",
+  "DPM 2 Ancestral": "dpm_2_ancestral",
+  "DPM Fast": "dpm_fast",
+  "DPM Adaptive": "dpm_adaptive",
+  "DPM++ 2S Ancestral": "dpmpp_2s_ancestral",
+  DDPM: "ddpm",
+  "Discrete Flow Sampler (SD3)": "dfs_sd3",
+  "Discrete Flow Scheduler (SD3)": "dfs_sd3",
+  "DPM Solver Multistep (DPM-Solver++)": "dpm_pp",
+  "PNDM (Pseudo-linear multi-step)": "pndm_plms"
+};
+const SOGNI_SCHEDULER_ALIASES: Readonly<Record<string, string>> = {
+  Simple: "simple",
+  Normal: "normal",
+  Karras: "karras",
+  Exponential: "exponential",
+  "SGM Uniform": "sgm_uniform",
+  "DDIM Uniform": "ddim_uniform",
+  Beta: "beta",
+  "Linear Quadratic": "linear_quadratic",
+  "KL Optimal": "kl_optimal",
+  DDIM: "ddim",
+  Leading: "leading",
+  Linear: "linear"
+};
+
+function sogniRange(value: any): { min: number; max: number; step: number; default: number } | undefined {
+  const min = Number(value?.min);
+  const max = Number(value?.max);
+  const fallback = Number(value?.default);
+  if (![min, max, fallback].every(Number.isFinite)) return undefined;
+  const decimals = Number(value?.decimals);
+  const step = Number.isFinite(decimals) && decimals > 0
+    ? 10 ** -decimals
+    : Number.isFinite(Number(value?.step)) ? Number(value.step) : 1;
+  return { min, max, step, default: fallback };
+}
+
+function sogniOptions(value: any, aliases: Readonly<Record<string, string>>) {
+  const allowed = Array.isArray(value?.allowed)
+    ? value.allowed.map((item: unknown) => aliases[String(item)] || String(item))
+    : [];
+  const defaultValue = value?.default === null || value?.default === undefined
+    ? undefined
+    : aliases[String(value.default)] || String(value.default);
+  return { allowed, defaultValue };
+}
+
+function sogniImageOptions(tier: any, presets: any[]): ModelInventoryItem["imageOptions"] | undefined {
+  if (!tier || typeof tier !== "object" || ("type" in tier && tier.type !== "image")) return undefined;
+  const sampler = sogniOptions(tier.sampler || tier.comfySampler, SOGNI_SAMPLER_ALIASES);
+  const scheduler = sogniOptions(tier.scheduler || tier.comfyScheduler, SOGNI_SCHEDULER_ALIASES);
+  return {
+    sizePresets: presets.map((preset) => ({
+      id: String(preset?.id || ""),
+      label: String(preset?.label || preset?.id || ""),
+      width: Number(preset?.width || 0),
+      height: Number(preset?.height || 0),
+      ratio: String(preset?.ratio || "")
+    })).filter((preset) => preset.id),
+    ...(sogniRange(tier.steps) ? { steps: sogniRange(tier.steps)! } : {}),
+    ...(sogniRange(tier.guidance) ? { guidance: sogniRange(tier.guidance)! } : {}),
+    samplers: sampler.allowed,
+    ...(sampler.defaultValue ? { defaultSampler: sampler.defaultValue } : {}),
+    schedulers: scheduler.allowed,
+    ...(scheduler.defaultValue ? { defaultScheduler: scheduler.defaultValue } : {}),
+    outputFormats: ["png", "jpeg", "webp"],
+    maximumPreviews: 10
+  };
+}
+
+async function optionalSogniInventory(
+  profile: TextProviderProfile,
+  transport: ProviderTransport,
+  operation: string,
+  url: string,
+): Promise<Record<string, any> | any[] | null> {
+  try {
+    return await checkedJson(await providerFetch(profile, operation, url, { headers: headers(profile, url) }, transport), profile, operation, url);
+  } catch {
+    return null;
+  }
+}
+
+async function discoverPinnedSogniSdkModels(
+  profile: TextProviderProfile,
+  transport: ProviderTransport,
+): Promise<ModelInventoryItem[]> {
+  const catalogUrl = "https://socket.sogni.ai/api/v1/models/list";
+  const catalog = await checkedJson(await providerFetch(profile, "image model discovery", catalogUrl, { headers: headers(profile, catalogUrl) }, transport), profile, "image model discovery", catalogUrl);
+  const models = inventoryRows(catalog).filter((model: any) => String(model?.media || "").toLowerCase() === "image");
+  const [fastStatus, relaxedStatus, tiers] = await Promise.all([
+    optionalSogniInventory(profile, transport, "image model availability discovery", "https://socket.sogni.ai/api/v1/status/network/fast/models"),
+    optionalSogniInventory(profile, transport, "image model availability discovery", "https://socket.sogni.ai/api/v1/status/network/relaxed/models"),
+    optionalSogniInventory(profile, transport, "image model options discovery", "https://socket.sogni.ai/api/v2/models/tiers")
+  ]);
+  const workerCounts = {
+    fast: fastStatus && !Array.isArray(fastStatus) ? fastStatus : {},
+    relaxed: relaxedStatus && !Array.isArray(relaxedStatus) ? relaxedStatus : {}
+  };
+  const selectedNetwork = profile.configuration?.network === "relaxed" ? "relaxed" : "fast";
+  return Promise.all(models.map(async (model: any): Promise<ModelInventoryItem> => {
+    const fastWorkers = Number(workerCounts.fast[String(model.SID)] || 0);
+    const relaxedWorkers = Number(workerCounts.relaxed[String(model.SID)] || 0);
+    const selectedWorkers = selectedNetwork === "relaxed" ? relaxedWorkers : fastWorkers;
+    const presetsUrl = `https://socket.sogni.ai/api/v1/size-presets/network/${selectedNetwork}/model/${encodeURIComponent(String(model.id || ""))}`;
+    const presetsResponse = await optionalSogniInventory(profile, transport, "image model preset discovery", presetsUrl);
+    const presets = Array.isArray(presetsResponse) ? presetsResponse : [];
+    const tier = tiers && !Array.isArray(tiers) ? tiers[String(model.tier || "")] : undefined;
+    const imageOptions = sogniImageOptions(tier, presets);
+    return {
+      id: String(model.id || ""),
+      displayName: String(model.name || model.id || ""),
+      loaded: selectedWorkers > 0,
+      instanceId: String(model.id || ""),
+      contextLength: 0,
+      workerCount: selectedWorkers,
+      workerAvailability: [
+        { type: "fast", displayName: "Fast GPU workers", workerCount: fastWorkers, description: "High-end GPU workers that generate images faster at a higher cost." },
+        { type: "relaxed", displayName: "Relaxed Mac workers", workerCount: relaxedWorkers, description: "Mac workers that generate images more slowly at a lower cost." }
+      ],
+      media: "image",
+      ...(imageOptions ? { imageOptions } : {})
+    };
+  })).then((items) => items.filter((item) => item.id));
+}
+
 function pricingEntries(value: unknown, provider?: string): Array<{ billable: string; unit: string; costUsd: number; provider?: string }> {
   const rows = Array.isArray(value) ? value : [];
   return rows.flatMap((row: any) => {
@@ -1022,7 +1160,7 @@ export async function discoverImageModels(
   if (profile.providerType === "sogni_sdk") {
     if (profile.configuration?.modelDiscoveryEnabled === false) return [];
     await transport.validateSdkEndpoint(profile);
-    return discoverSogniSdkModels(profile);
+    return discoverPinnedSogniSdkModels(profile, transport);
   }
   if (profile.providerType === "sogni") {
     if (profile.configuration?.modelDiscoveryEnabled === false) return [];
