@@ -250,6 +250,14 @@ function controlledTransportCode(codes: string[], timedOut: boolean): string {
   return recognized || (timedOut ? "REQUEST_TIMEOUT" : "TRANSPORT_FAILURE");
 }
 
+function safeTransportDiagnostic(details: ProviderTransportDetails) {
+  return {
+    diagnosticCode: details.timedOut ? "provider_request_timeout" : "provider_transport_error",
+    providerCategory: details.causeCategory,
+    durationMs: details.durationMs
+  } as const;
+}
+
 function transportFailure(
   profile: TextProviderProfile,
   operation: string,
@@ -298,7 +306,7 @@ function transportFailure(
     ? `${providerName} ${operation} timed out after ${Math.round(timeoutMs / 60_000 * 10) / 10} minutes before a complete response was received. Nexus closed the provider request; increase Request timeout in the provider's Advanced settings or reduce the request workload.`
     : `${providerName} ${operation} could not complete because the provider connection failed (${transportCode}). Check the endpoint and Docker host logs for transport diagnostics.`;
   const error = new ProviderTransportError(message, details);
-  logger.error({ event: "provider_transport_error", ...details });
+  logger.error({ event: "provider_transport_error", ...safeTransportDiagnostic(details) });
   return error;
 }
 
@@ -309,7 +317,11 @@ export function providerTransportErrorDetails(error: unknown): ProviderTransport
 export function logProviderTransportError(error: unknown, context: Record<string, unknown>): void {
   const transport = providerTransportErrorDetails(error);
   if (!transport) return;
-  logger.error({ event: "provider_transport_error_correlated", ...context, ...transport });
+  logger.error({
+    event: "provider_transport_error_correlated",
+    ...context,
+    ...safeTransportDiagnostic(transport)
+  });
 }
 
 async function providerFetch(

@@ -46,6 +46,17 @@ async function assertCampaignOwner(database: DatabaseClient, ownerUserId: string
   if (!result.rows[0]) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
 }
 
+async function invalidateModelChains(database: DatabaseClient, scope: PromptScope, key: PromptTemplateKey) {
+  if (!RUNTIME_KEYS.includes(key)) return;
+  await database.query(
+    `UPDATE model_chains
+        SET active=false,updated_at=now()
+      WHERE owner_user_id=$1 AND active
+        AND ($2::uuid IS NULL OR campaign_id=$2)`,
+    [scope.ownerUserId, scope.scope === "campaign" ? scope.campaignId : null]
+  );
+}
+
 async function resolveSnapshot(database: DatabaseClient, scope: PromptScope): Promise<PromptSnapshot> {
   const campaignId = scope.scope === "campaign" ? scope.campaignId : null;
   if (campaignId) await assertCampaignOwner(database, scope.ownerUserId, campaignId);
@@ -145,6 +156,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
          DO UPDATE SET content=excluded.content,updated_at=now()`,
         [command.ownerUserId, campaignId, value.key, value.content]
       );
+      await invalidateModelChains(database, command, value.key);
       return listPromptLibrary(command);
     },
     async resetPromptOverride(command) {
@@ -161,6 +173,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
           WHERE owner_user_id=$1 AND campaign_id IS NOT DISTINCT FROM $2 AND prompt_key=$3`,
         [command.ownerUserId, campaignId, command.key]
       );
+      await invalidateModelChains(database, command, command.key);
       return listPromptLibrary(command);
     },
     loadPromptSnapshot

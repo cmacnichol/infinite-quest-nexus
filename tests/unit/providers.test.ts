@@ -17,6 +17,7 @@ import {
   discoverEmbeddingModels,
   discoverImageModels,
   discoverModels,
+  logProviderTransportError,
   pollImageProvider,
   providerTransportErrorDetails,
   reportedProviderCost,
@@ -76,7 +77,13 @@ describe("text provider adapters", () => {
 
   it("normalizes header timeouts into explicit safe transport diagnostics", async () => {
     const loggerError = vi.spyOn(logger, "error").mockImplementation(() => undefined);
-    const timeoutProfile = { ...profile, requestTimeoutMs: 420_000, apiKey: "synthetic-secret-token" };
+    const timeoutProfile = {
+      ...profile,
+      baseUrl: "http://provider-internal-host.test/private/v1",
+      model: "provider-internal-model",
+      requestTimeoutMs: 420_000,
+      apiKey: "synthetic-secret-token"
+    };
     const fetcher = vi.fn(async () => {
       throw new TypeError("fetch failed", { cause: Object.assign(new Error("Headers Timeout Error Bearer synthetic-secret-token"), { code: "UND_ERR_HEADERS_TIMEOUT" }) });
     });
@@ -94,14 +101,36 @@ describe("text provider adapters", () => {
       transportCode: "UND_ERR_HEADERS_TIMEOUT",
       causeCategory: "timeout",
       causeMessage: "The provider request timed out.",
-      endpoint: "http://lmstudio.test/api/v1/chat"
+      endpoint: "http://provider-internal-host.test/private/api/v1/chat"
     });
     const logged = JSON.stringify(loggerError.mock.calls);
     expect(logged).toContain('"event":"provider_transport_error"');
+    expect(logged).toContain('"diagnosticCode":"provider_request_timeout"');
     expect(logged).not.toContain("Headers Timeout Error");
     expect(logged).not.toContain("secret prompt");
     expect(logged).not.toContain("private action");
     expect(logged).not.toContain("synthetic-secret-token");
+    expect(logged).not.toContain("provider-internal-host");
+    expect(logged).not.toContain("provider-internal-model");
+    expect(logged).not.toContain("UND_ERR_HEADERS_TIMEOUT");
+    expect(logged).not.toContain("420000");
+
+    loggerError.mockClear();
+    logProviderTransportError(thrown, {
+      generationJobId: "job-correlation-id",
+      campaignId: "campaign-correlation-id"
+    });
+    expect(loggerError).toHaveBeenCalledWith(expect.objectContaining({
+      event: "provider_transport_error_correlated",
+      diagnosticCode: "provider_request_timeout",
+      generationJobId: "job-correlation-id",
+      campaignId: "campaign-correlation-id"
+    }));
+    const correlatedLog = JSON.stringify(loggerError.mock.calls);
+    expect(correlatedLog).not.toContain("provider-internal-host");
+    expect(correlatedLog).not.toContain("provider-internal-model");
+    expect(correlatedLog).not.toContain("UND_ERR_HEADERS_TIMEOUT");
+    expect(correlatedLog).not.toContain("420000");
     loggerError.mockRestore();
   });
 

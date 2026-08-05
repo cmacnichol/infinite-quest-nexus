@@ -11,6 +11,7 @@ import { logger } from "../../packages/logger/src/index.js";
 import { parseCompleteGeneratedWorld } from "../../packages/domain/src/generated-world.js";
 import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
 import { ProviderResponseTooLargeError } from "../../packages/story-engine/src/provider-response.js";
+import { ProviderTransportError } from "../../packages/story-engine/src/providers.js";
 import { generationStreamSnapshotSchema } from "../../packages/contracts/src/generation.js";
 import {
   generatedWorldProviderError,
@@ -643,6 +644,72 @@ describe("API server security and CORS headers", () => {
     });
     expect(response.payload).not.toContain(marker);
     expect(JSON.stringify(errorLogs)).not.toContain(marker);
+
+    await app.close();
+  });
+
+  it("exposes and logs only safe provider transport diagnostics with correlation", async () => {
+    const internalMarkers = [
+      "private-provider-host.test",
+      "private-provider-model",
+      "UND_ERR_HEADERS_TIMEOUT",
+      "420000",
+      "OpenAI-compatible provider",
+      "7 minutes"
+    ];
+    const providerError = new ProviderTransportError(
+      "OpenAI-compatible provider timed out after 7 minutes at private-provider-host.test.",
+      {
+        providerType: "openai_compatible",
+        operation: "private provider operation",
+        endpoint: "https://private-provider-host.test/v1/models",
+        model: "private-provider-model",
+        timeoutMs: 420_000,
+        durationMs: 19,
+        timedOut: true,
+        transportCode: "UND_ERR_HEADERS_TIMEOUT",
+        causeCategory: "timeout",
+        causeMessage: "The provider request timed out."
+      }
+    );
+    const errorLogs: unknown[] = [];
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
+    app.get("/test/provider-transport-error", async (request) => {
+      (request.log as unknown as { error: (...args: unknown[]) => void }).error = (...args) => {
+        errorLogs.push(args);
+      };
+      throw providerError;
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/test/provider-transport-error",
+      headers: { "x-correlation-id": "provider-transport-test" }
+    });
+
+    expect(response.statusCode).toBe(504);
+    expect(response.json()).toMatchObject({
+      error: "ProviderTimeoutError",
+      correlationId: "provider-transport-test",
+      code: "provider_request_timeout",
+      details: {
+        code: "provider_request_timeout",
+        category: "timeout",
+        retryable: true
+      }
+    });
+    expect(errorLogs).toEqual([[
+      expect.objectContaining({
+        correlationId: "provider-transport-test",
+        errorName: "ProviderTimeoutError",
+        errorCode: "provider_request_timeout",
+        providerCategory: "timeout",
+        durationMs: 19
+      }),
+      "request_failed"
+    ]]);
+    const exposed = `${response.payload}\n${JSON.stringify(errorLogs)}`;
+    for (const marker of internalMarkers) expect(exposed).not.toContain(marker);
 
     await app.close();
   });

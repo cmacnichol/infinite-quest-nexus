@@ -1,6 +1,10 @@
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { toSafeProviderConfiguration } from "../../packages/application/src/providers/index.js";
+import {
+  toSafeProviderConfiguration,
+  type ProviderProfileView,
+  type ProviderRole
+} from "../../packages/application/src/providers/index.js";
 import {
   createProviderCostRepository,
   createProviderCostTransactionContext
@@ -9,6 +13,8 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
 import { createPostgresProviderRepositories, writeEncryptedProviderCredential } from "../../packages/database/src/provider-repository.js";
 import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
+import { encryptCredential } from "../../packages/story-engine/src/credentials.js";
+import { createRuntimeProviderAdapter } from "../../services/runtime/src/provider-credential-transport-adapter.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -181,6 +187,202 @@ integration("provider PostgreSQL adapters", () => {
     });
   });
 
+  it("keeps endpoint, credential, inventory, model, state, health, timeout, and retry policy independent across every role", async () => {
+    const roles = ["text", "image", "embedding", "intent"] as const satisfies readonly ProviderRole[];
+    const credentialSecret = "provider-role-parity-encryption-secret";
+    const expectedByRole = Object.fromEntries(roles.map((role, index) => [role, {
+      baseUrl: `https://${role}.provider-parity.test/v1`,
+      credential: `${role}-credential-never-public`,
+      defaultModel: `${role}-default-model`,
+      selectedModel: `${role}-selected-model`,
+      inventoryModel: `${role}-inventory-model`,
+      requestTimeoutMs: 61_000 + index * 1_000,
+      maximumAttempts: index + 2
+    }])) as Record<(typeof roles)[number], {
+      baseUrl: string;
+      credential: string;
+      defaultModel: string;
+      selectedModel: string;
+      inventoryModel: string;
+      requestTimeoutMs: number;
+      maximumAttempts: number;
+    }>;
+    const profiles = await inTransaction(async (client) => {
+      const repository = createPostgresProviderRepositories(client).profiles;
+      const entries = [];
+      for (const role of roles) {
+        const expected = expectedByRole[role];
+        const profile = await repository.createProfile({
+          ...profileCommand(first.ownerUserId, `Parity ${role} ${crypto.randomUUID()}`, role),
+          baseUrl: expected.baseUrl,
+          defaultModel: expected.defaultModel,
+          requestTimeoutMs: expected.requestTimeoutMs,
+          configuration: toSafeProviderConfiguration({ maximumAttempts: expected.maximumAttempts }),
+          isDefault: true
+        });
+        await writeEncryptedProviderCredential(
+          client,
+          first.ownerUserId,
+          profile.id,
+          encryptCredential(expected.credential, credentialSecret)
+        );
+        entries.push([role, profile] as const);
+      }
+      return Object.fromEntries(entries);
+    }) as Record<(typeof roles)[number], ProviderProfileView>;
+
+    const transportCalls: Array<{ role: ProviderRole; credential: string | undefined; url: string }> = [];
+    const transport = {
+      async fetch(profile: { baseUrl: string; apiKey?: string }, _operation: string, url: string) {
+        const role = roles.find((candidate) => profile.baseUrl === expectedByRole[candidate].baseUrl)!;
+        transportCalls.push({ role, credential: profile.apiKey, url });
+        const model = {
+          id: expectedByRole[role].inventoryModel,
+          name: `${role} inventory model`,
+          context_length: 8_192,
+          ...(role === "image" ? { output_modalities: ["image"] } : {})
+        };
+        return new Response(JSON.stringify({ data: [model] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      },
+      async validateSdkEndpoint() {},
+      async close() {}
+    };
+
+    await inTransaction(async (client) => {
+      const repositories = createPostgresProviderRepositories(client);
+      const runtime = createRuntimeProviderAdapter({
+        database: client,
+        credentialSecret,
+        transport,
+        health: repositories.health
+      });
+      for (const role of roles) {
+        const profile = profiles[role];
+        const expected = expectedByRole[role];
+        const resolution = role === "embedding"
+          ? await repositories.resolution.resolveEmbedding({
+              ownerUserId: first.ownerUserId,
+              selectedProviderProfileId: profile.id,
+              model: expected.selectedModel,
+              allowTextFallback: false
+            })
+          : await repositories.resolution.resolveDirect({
+              ownerUserId: first.ownerUserId,
+              providerRole: role,
+              selectedProviderProfileId: profile.id,
+              model: expected.selectedModel
+            });
+        expect(resolution).toMatchObject({
+          status: "resolved",
+          resolvedRole: role,
+          providerProfileId: profile.id,
+          model: expected.selectedModel
+        });
+        const lease = await runtime.leases.leaseResolved(
+          { ownerUserId: first.ownerUserId },
+          profile.id,
+          role,
+          expected.selectedModel
+        );
+        expect(lease).toMatchObject({
+          providerProfileId: profile.id,
+          providerRole: role,
+          baseUrl: expected.baseUrl,
+          model: expected.selectedModel,
+          requestTimeoutMs: expected.requestTimeoutMs,
+          configuration: { maximumAttempts: expected.maximumAttempts }
+        });
+        const inventory = await runtime.inventory.listModels({
+          ownerUserId: first.ownerUserId,
+          providerProfileId: profile.id,
+          providerRole: role
+        });
+        expect(inventory).toMatchObject({
+          providerProfileId: profile.id,
+          providerRole: role,
+          models: [{ id: expected.inventoryModel }]
+        });
+      }
+
+      const visible = await repositories.profiles.listProfiles({ ownerUserId: first.ownerUserId });
+      for (const role of roles) {
+        expect(visible.find((profile) => profile.id === profiles[role].id)).toMatchObject({
+          providerRole: role,
+          baseUrl: expectedByRole[role].baseUrl,
+          defaultModel: expectedByRole[role].defaultModel,
+          requestTimeoutMs: expectedByRole[role].requestTimeoutMs,
+          configuration: { maximumAttempts: expectedByRole[role].maximumAttempts },
+          enabled: true,
+          isDefault: true,
+          hasCredential: true,
+          health: { status: "healthy", consecutiveFailures: 0 }
+        });
+      }
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await repositories.health.recordHealth({
+          ownerUserId: first.ownerUserId,
+          providerProfileId: profiles.image.id,
+          outcome: "failed",
+          diagnosticCode: "provider_unavailable"
+        });
+      }
+      await repositories.profiles.updateProfile({
+        ownerUserId: first.ownerUserId,
+        providerProfileId: profiles.text.id,
+        changes: {
+          baseUrl: "https://changed-text.provider-parity.test/v1",
+          enabled: false,
+          isDefault: false,
+          requestTimeoutMs: 99_000,
+          configuration: toSafeProviderConfiguration({ maximumAttempts: 9 })
+        }
+      });
+      const imageAfterTextChange = (await repositories.profiles.listProfiles({ ownerUserId: first.ownerUserId }))
+        .find((profile) => profile.id === profiles.image.id);
+      expect(imageAfterTextChange).toMatchObject({
+        providerRole: "image",
+        baseUrl: expectedByRole.image.baseUrl,
+        defaultModel: expectedByRole.image.defaultModel,
+        requestTimeoutMs: expectedByRole.image.requestTimeoutMs,
+        configuration: { maximumAttempts: expectedByRole.image.maximumAttempts },
+        enabled: true,
+        isDefault: true,
+        health: { status: "unavailable", consecutiveFailures: 3 }
+      });
+      await repositories.profiles.deleteProfile({
+        ownerUserId: first.ownerUserId,
+        providerProfileId: profiles.text.id
+      });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: first.ownerUserId,
+        providerRole: "text",
+        selectedProviderProfileId: profiles.text.id
+      })).rejects.toMatchObject({ statusCode: 400 });
+      expect(await repositories.profiles.listProfiles({ ownerUserId: first.ownerUserId }))
+        .not.toContainEqual(expect.objectContaining({ id: profiles.text.id }));
+      expect(await repositories.resolution.resolveDirect({
+        ownerUserId: first.ownerUserId,
+        providerRole: "image"
+      })).toMatchObject({
+        status: "resolved",
+        resolvedRole: "image",
+        providerProfileId: profiles.image.id
+      });
+    });
+
+    expect(transportCalls).toEqual(roles.map((role) => ({
+      role,
+      credential: expectedByRole[role].credential,
+      url: `${expectedByRole[role].baseUrl}/models`
+    })));
+    const publicState = JSON.stringify({ profiles, transportCalls: transportCalls.map(({ role, url }) => ({ role, url })) });
+    for (const role of roles) expect(publicState).not.toContain(expectedByRole[role].credential);
+  });
+
   it("serializes concurrent default changes and leaves exactly one enabled role default", async () => {
     const [one, two] = await inTransaction(async (client) => {
       const profiles = createPostgresProviderRepositories(client).profiles;
@@ -344,6 +546,44 @@ integration("provider PostgreSQL adapters", () => {
   });
 
   it("changes prompt protocol versions deterministically while preserving owner and campaign scope", async () => {
+    const [ownedProfile, foreignProfile] = await inTransaction(async (client) => {
+      const profiles = createPostgresProviderRepositories(client).profiles;
+      return Promise.all([
+        profiles.createProfile(profileCommand(first.ownerUserId, `Owned prompt chain ${crypto.randomUUID()}`)),
+        profiles.createProfile(profileCommand(second.ownerUserId, `Foreign prompt chain ${crypto.randomUUID()}`))
+      ]);
+    });
+    const ownedCampaign = await pool.query<{ world_version_id: string }>(
+      "SELECT world_version_id FROM campaigns WHERE id=$1 AND owner_user_id=$2",
+      [first.campaignId, first.ownerUserId]
+    );
+    const foreignCampaign = await pool.query<{ world_version_id: string }>(
+      "SELECT world_version_id FROM campaigns WHERE id=$1 AND owner_user_id=$2",
+      [second.campaignId, second.ownerUserId]
+    );
+    const [ownedChain, foreignChain] = await Promise.all([
+      pool.query<{ id: string }>(
+        `INSERT INTO model_chains (
+           owner_user_id,campaign_id,world_version_id,provider_profile_id,model,
+           endpoint_identity,prompt_protocol_version,context_fingerprint,previous_response_id
+         ) VALUES ($1,$2,$3,$4,'owned-model','owned-endpoint','owned-protocol','owned-context','owned-response')
+         RETURNING id`,
+        [first.ownerUserId, first.campaignId, ownedCampaign.rows[0]!.world_version_id, ownedProfile.id]
+      ),
+      pool.query<{ id: string }>(
+        `INSERT INTO model_chains (
+           owner_user_id,campaign_id,world_version_id,provider_profile_id,model,
+           endpoint_identity,prompt_protocol_version,context_fingerprint,previous_response_id
+         ) VALUES ($1,$2,$3,$4,'foreign-model','foreign-endpoint','foreign-protocol','foreign-context','foreign-response')
+         RETURNING id`,
+        [second.ownerUserId, second.campaignId, foreignCampaign.rows[0]!.world_version_id, foreignProfile.id]
+      )
+    ]);
+    const chainActivity = async () => (await pool.query<{ id: string; active: boolean }>(
+      "SELECT id,active FROM model_chains WHERE id=ANY($1::uuid[]) ORDER BY id",
+      [[ownedChain.rows[0]!.id, foreignChain.rows[0]!.id]]
+    )).rows;
+
     const before = await inTransaction((client) => createPromptRepository(client).loadPromptSnapshot({
       ownerUserId: first.ownerUserId,
       scope: "campaign",
@@ -365,6 +605,23 @@ integration("provider PostgreSQL adapters", () => {
     }));
     expect(changed.protocolVersion).not.toBe(before.protocolVersion);
     expect(repeated).toEqual(changed);
+    expect(await chainActivity()).toEqual([
+      { id: ownedChain.rows[0]!.id, active: false },
+      { id: foreignChain.rows[0]!.id, active: true }
+    ].sort((left, right) => left.id.localeCompare(right.id)));
+
+    await pool.query("UPDATE model_chains SET active=true WHERE id=$1", [ownedChain.rows[0]!.id]);
+    await inTransaction((client) => createPromptRepository(client).resetPromptOverride({
+      ownerUserId: first.ownerUserId,
+      scope: "campaign",
+      campaignId: first.campaignId,
+      key: "story_system"
+    }));
+    expect(await chainActivity()).toEqual([
+      { id: ownedChain.rows[0]!.id, active: false },
+      { id: foreignChain.rows[0]!.id, active: true }
+    ].sort((left, right) => left.id.localeCompare(right.id)));
+
     await inTransaction(async (client) => {
       await expect(createPromptRepository(client).loadPromptSnapshot({
         ownerUserId: second.ownerUserId, scope: "campaign", campaignId: first.campaignId

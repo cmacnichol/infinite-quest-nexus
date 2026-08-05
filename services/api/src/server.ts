@@ -349,14 +349,28 @@ export async function buildServer({
     const exposedError = (details.name === "ArchiveError" || details.name === "OriginNotAllowedError") && details.code
       ? details.code
       : details.name;
-    request.log.error({ err: error, code }, "request_failed");
+    const providerErrorCode = transport?.timedOut ? "provider_request_timeout" : "provider_transport_error";
+    if (transport) {
+      request.log.error({
+        correlationId: request.id,
+        code,
+        errorName: details.name,
+        errorCode: providerErrorCode,
+        providerCategory: transport.causeCategory,
+        durationMs: transport.durationMs
+      }, "request_failed");
+    } else {
+      request.log.error({ err: error, code }, "request_failed");
+    }
     const payload = apiErrorEnvelopeSchema.parse({
       error: exposed ? (exposedError || "Provider request failed") : "Internal server error",
-      message: exposed ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
+      message: transport
+        ? `${transport.timedOut ? "The provider request timed out." : "The provider connection failed."} Correlation ID: ${request.id}.`
+        : exposed ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
       correlationId: request.id,
       ...(!exposed || details.code === undefined ? {} : { code: details.code }),
       details: transport
-        ? { code: transport.timedOut ? "provider_request_timeout" : "provider_transport_error", transport }
+        ? { code: providerErrorCode, category: transport.causeCategory, retryable: true }
         : exposed ? safeErrorDetails(details.details) : {},
       ...(details.issues === undefined ? {} : { issues: details.issues })
     });
