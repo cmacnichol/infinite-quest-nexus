@@ -12,7 +12,8 @@ import type {
   GenerationChanged,
   GenerationEventSource,
   GenerationEventSubscription,
-  IllustrationApplication
+  IllustrationApplication,
+  MemoryApplication
 } from "../../../packages/application/src/index.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import { createLoggerOptions, logger } from "../../../packages/logger/src/index.js";
@@ -98,14 +99,7 @@ import { previewLegacyStoryImport } from "./import-service.js";
 import { getImportProgress, importInfiniteWorlds, previewInfiniteWorldsImport } from "./infinite-worlds-import-service.js";
 import { getSessionUserProfile, updateSessionUserProfile } from "./user-service.js";
 import { listPromptLibrary, previewPromptTemplate, resetPromptOverride, savePromptOverride } from "./prompt-library-service.js";
-import {
-  buildContextPreview,
-  enqueueChronicleReindex,
-  enqueueEmbeddingReindex,
-  getCampaignEmbeddingConfig,
-  getChronicleMetrics,
-  setCampaignEmbeddingConfig
-} from "./memory-service.js";
+import { createMemoryApplicationAdapter } from "./memory-application-adapter.js";
 import { queryAssets, readAsset, readAssetDerivative, selectTurnIllustration, selectWorldCover, updateAssetMetadata, type FilesystemAssetStore } from "./asset-service.js";
 import { createProvider, deleteProvider, discoverUnsavedProviderModels, generateProviderText, listProviders, providerModels, setDefaultProvider, updateProvider } from "./provider-service.js";
 import { branchCampaign, rewindCampaign, syncPlayerCampaignConfig } from "./generation-service.js";
@@ -154,6 +148,7 @@ export type BuildServerOptions = {
   pool: DatabasePool;
   generation: GenerationApplication;
   illustration: IllustrationApplication;
+  memory?: MemoryApplication;
   generationEvents: GenerationEventSource;
 };
 
@@ -308,7 +303,7 @@ async function generationLifecycleLogContext(
   return result.rows[0] || null;
 }
 
-export async function buildServer({ config, pool, generation, illustration, generationEvents }: BuildServerOptions): Promise<FastifyInstance> {
+export async function buildServer({ config, pool, generation, illustration, memory, generationEvents }: BuildServerOptions): Promise<FastifyInstance> {
   const illustrationTurnScope = async (turnId: string) => {
     const ownerUserId = await initialOwnerId(pool);
     const result = await pool.query<{ campaign_id: string }>(
@@ -337,6 +332,11 @@ export async function buildServer({ config, pool, generation, illustration, gene
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
+  const memoryAdapter = memory ? createMemoryApplicationAdapter(pool, memory) : null;
+  const requireMemoryAdapter = () => {
+    if (!memoryAdapter) throw new Error("The API role requires a Chronicle memory application.");
+    return memoryAdapter;
+  };
   const generationAdapter = createGenerationApplicationAdapter(generation);
   const generationLifecycle = createGenerationRouteLifecycle({
     readContext: (ownerUserId, generationJobId) => generationLifecycleLogContext(pool, ownerUserId, generationJobId),
@@ -1272,50 +1272,49 @@ export async function buildServer({ config, pool, generation, illustration, gene
   });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/metrics", async (request) => {
-    return getChronicleMetrics(pool, uuidSchema.parse(request.params.campaignId));
+    const ownerUserId = await initialOwnerId(pool);
+    return requireMemoryAdapter().metrics(ownerUserId, uuidSchema.parse(request.params.campaignId));
   });
 
   app.get<{ Params: { campaignId: string }; Querystring: Record<string, unknown> }>(
     "/api/v1/campaigns/:campaignId/memory/context-preview",
     async (request) => {
       const query = memoryContextQuerySchema.parse(request.query);
-      return buildContextPreview(pool, uuidSchema.parse(request.params.campaignId), query, config.credentialEncryptionKey);
+      const ownerUserId = await initialOwnerId(pool);
+      return requireMemoryAdapter().contextPreview(ownerUserId, uuidSchema.parse(request.params.campaignId), query);
     }
   );
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/reindex", async (request, reply) => {
-    const jobId = await enqueueChronicleReindex(pool, uuidSchema.parse(request.params.campaignId));
-    return reply.code(202).send({ jobId, status: "queued" });
+    const ownerUserId = await initialOwnerId(pool);
+    return reply.code(202).send(await requireMemoryAdapter().reindex(ownerUserId, uuidSchema.parse(request.params.campaignId)));
   });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/embedding-config", async (request) => (
-    getCampaignEmbeddingConfig(pool, uuidSchema.parse(request.params.campaignId))
+    requireMemoryAdapter().embeddingConfig(await initialOwnerId(pool), uuidSchema.parse(request.params.campaignId))
   ));
 
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/embedding-config", async (request) => {
     const campaignId = uuidSchema.parse(request.params.campaignId);
-    const saved = await setCampaignEmbeddingConfig(pool, campaignId, campaignEmbeddingConfigSchema.parse(request.body));
-    const jobId = saved.enabled ? await enqueueEmbeddingReindex(pool, campaignId) : null;
+    const ownerUserId = await initialOwnerId(pool);
+    const saved = await requireMemoryAdapter().setEmbeddingConfig(ownerUserId, campaignId, campaignEmbeddingConfigSchema.parse(request.body));
+    const jobId = saved.enabled === true ? await requireMemoryAdapter().reindexEmbeddings(ownerUserId, campaignId) : null;
     return { ...saved, jobId };
   });
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/embeddings/reindex", async (request, reply) => {
-    const jobId = await enqueueEmbeddingReindex(pool, uuidSchema.parse(request.params.campaignId));
+    const jobId = await requireMemoryAdapter().reindexEmbeddings(await initialOwnerId(pool), uuidSchema.parse(request.params.campaignId));
     if (!jobId) return reply.code(409).send({ error: "Not configured", message: "Enable semantic memory and select an embedding provider first." });
     return reply.code(202).send({ jobId, status: "queued" });
   });
 
   app.get<{ Params: { jobId: string } }>("/api/v1/jobs/:jobId", async (request, reply) => {
-    const ownerUserId = await initialOwnerId(pool);
-    const result = await pool.query(
-      `SELECT id, campaign_id AS "campaignId", job_type AS "jobType", status, attempts,
-              progress, error_message AS "errorMessage", created_at AS "createdAt", updated_at AS "updatedAt",
-              completed_at AS "completedAt"
-         FROM chronicle_jobs WHERE id = $1 AND owner_user_id = $2`,
-      [uuidSchema.parse(request.params.jobId), ownerUserId]
-    );
-    const job = result.rows[0];
-    return job ? job : reply.code(404).send({ error: "Not found", message: "Job not found." });
+    try {
+      return await requireMemoryAdapter().job(await initialOwnerId(pool), uuidSchema.parse(request.params.jobId));
+    } catch (error) {
+      if (statusCode(error) === 404) return reply.code(404).send({ error: "Not found", message: "Job not found." });
+      throw error;
+    }
   });
 
   return app;

@@ -29,11 +29,14 @@ function rejectedCollaborators(): GenerationExecutionCollaborators {
     throw new Error("A collaborator ran before the execution payload guard passed.");
   });
   return {
-    autoEnableCampaignEmbeddingIfAvailable: unexpected,
-    buildContextPreview: unexpected,
-    enqueueEmbeddingReindex: unexpected,
-    rebuildCampaignMemories: unexpected,
-    storeDerivedTurnMemories: unexpected,
+    memory: {
+      autoEnableCampaignEmbedding: unexpected,
+      buildContextPreview: unexpected,
+      enqueueEmbeddingReindex: unexpected,
+      rebuildCampaignMemories: unexpected,
+      storeDerivedTurnMemories: unexpected,
+      writeAcceptedTurnFiction: unexpected
+    } as never,
     illustration: {
       loadStreamingIllustrationConfig: unexpected,
       createProvisionalSet: unexpected,

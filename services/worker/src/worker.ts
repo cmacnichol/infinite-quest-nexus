@@ -1,17 +1,18 @@
 import { hostname } from "node:os";
 import type {
   GenerationWorkerApplication,
-  IllustrationWorkerApplication
+  IllustrationWorkerApplication,
+  MemoryWorkerApplication
 } from "../../../packages/application/src/index.js";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import { runChronicleJob } from "../../api/src/memory-service.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { runAssetMetadataBackfill } from "../../api/src/asset-service.js";
 
 export type WorkerDependencies = Readonly<{
   generation: GenerationWorkerApplication;
   illustration?: IllustrationWorkerApplication;
+  memory?: MemoryWorkerApplication;
   optionalLanes?: WorkerOptionalLanes;
 }>;
 
@@ -91,22 +92,25 @@ function defaultOptionalLanes(
   pool: DatabasePool,
   config: RuntimeConfig,
   workerId: string,
-  illustration: IllustrationWorkerApplication | undefined
+  illustration: IllustrationWorkerApplication | undefined,
+  memory: MemoryWorkerApplication | undefined
 ): WorkerOptionalLanes {
   if (!illustration) {
     throw new Error("The worker role requires an illustration application when default optional lanes are enabled.");
+  }
+  if (!memory) {
+    throw new Error("The worker role requires a Chronicle memory application when default optional lanes are enabled.");
   }
   return {
     illustration: () => illustration.runNextIllustration({
       workerId,
       leaseSeconds: config.workerLeaseSeconds
     }),
-    chronicle: () => runChronicleJob(
-      pool,
+    chronicle: () => memory.runNextChronicle({
       workerId,
-      config.workerLeaseSeconds,
-      config.credentialEncryptionKey
-    ),
+      leaseSeconds: config.workerLeaseSeconds,
+      retrieval: { batchLimit: 100 }
+    }),
     asset: () => runAssetMetadataBackfill(pool, { root: config.assetStorageRoot })
   };
 }
@@ -137,14 +141,14 @@ export async function runWorker(
   pool: DatabasePool,
   config: RuntimeConfig,
   signal: AbortSignal,
-  { generation, illustration, optionalLanes: injectedOptionalLanes }: WorkerDependencies
+  { generation, illustration, memory, optionalLanes: injectedOptionalLanes }: WorkerDependencies
 ): Promise<void> {
   const workerId = `${hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
   logger.info({ event: "worker_started", workerId });
 
   const activeGeneration = new Set<Promise<boolean>>();
   let generationNextEligibleAt = 0;
-  const optionalLanes = injectedOptionalLanes ?? defaultOptionalLanes(pool, config, workerId, illustration);
+  const optionalLanes = injectedOptionalLanes ?? defaultOptionalLanes(pool, config, workerId, illustration, memory);
   const lanes: ActiveLane[] = [
     { name: "illustration", active: new Set(), nextEligibleAt: 0, run: optionalLanes.illustration },
     { name: "chronicle", active: new Set(), nextEligibleAt: 0, run: optionalLanes.chronicle },

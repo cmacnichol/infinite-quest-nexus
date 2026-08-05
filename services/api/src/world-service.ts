@@ -28,7 +28,7 @@ import {
   resolvePlayableCharacters
 } from "../../../packages/domain/src/world-characters.js";
 import { resolveEffectiveProviderId } from "./provider-service.js";
-import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
+import { memoryApplicationForPool } from "./memory-application-adapter.js";
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? null);
@@ -599,7 +599,11 @@ export async function createCampaign(pool: DatabasePool, request: CampaignCreate
         json({ scratchpad: "", trackers: initialTrackers, eventTriggers: content.eventTriggers, pendingEventTriggers: [], rpgStats: seed.rpgStats })
       ]
     );
-    await autoEnableCampaignEmbeddingIfAvailable(client, ownerUserId, campaignId);
+    await memoryApplicationForPool(pool).generation.autoEnableCampaignEmbedding(client, {
+      ownerUserId,
+      campaignId,
+      worldVersionId: request.worldVersionId
+    });
     return { id: campaignId, title: request.title, status: "active", activeTurnNumber: 0, storyLengthProfile: request.storyLengthProfile, turnControlStyle: request.turnControlStyle, worldId: source.world_id, worldVersionId: request.worldVersionId, worldVersionNumber: source.version_number, selectedCharacterId: seed.character.id, selectedCharacterName: seed.character.name, textProviderProfileId: null, imageProviderProfileId: null };
   });
 }

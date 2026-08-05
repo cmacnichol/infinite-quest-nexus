@@ -1,6 +1,7 @@
 import type {
   GenerationExecutor,
   IllustrationGenerationTransactionPort,
+  MemoryGenerationTransactionPort,
   StreamingIllustrationConfig
 } from "../../../packages/application/src/index.js";
 import {
@@ -101,39 +102,7 @@ type GenerationCostAttribution = Readonly<{
 }>;
 
 export type GenerationExecutionCollaborators = Readonly<{
-  autoEnableCampaignEmbeddingIfAvailable(
-    database: DatabaseClient | DatabasePool,
-    ownerUserId: string,
-    campaignId: string
-  ): Promise<unknown>;
-  buildContextPreview(
-    pool: DatabasePool,
-    ownerUserId: string,
-    campaignId: string,
-    options: MemoryContextQuery,
-    credentialSecret: string,
-    costAttribution: { generationJobId?: string; operation?: "retrieval_embedding" | "context_preview_embedding" },
-    scope: { throughTurnNumber?: number; stateOverride?: Record<string, unknown>; scratchpadSafeForPrompt?: boolean }
-  ): Promise<GenerationContextPreview>;
-  enqueueEmbeddingReindex(
-    database: DatabaseClient | DatabasePool,
-    ownerUserId: string,
-    campaignId: string
-  ): Promise<string | null>;
-  rebuildCampaignMemories(
-    client: DatabaseClient,
-    ownerUserId: string,
-    campaignId: string
-  ): Promise<number>;
-  storeDerivedTurnMemories(
-    client: DatabaseClient,
-    ownerUserId: string,
-    campaignId: string,
-    worldVersionId: string,
-    turnId: string,
-    ordinal: number,
-    derived: unknown
-  ): Promise<void>;
+  memory: MemoryGenerationTransactionPort;
   illustration: IllustrationGenerationTransactionPort;
   loadTextProvider(
     pool: DatabasePool,
@@ -667,21 +636,23 @@ async function executeLoadedGeneration(
       safeContextBudget
     } = preparedInput;
 
-    const context = await phase("context_retrieval", () => collaborators.buildContextPreview(
+    const context = (await phase("context_retrieval", () => collaborators.memory.buildContextPreview(
       pool,
-      job.owner_user_id,
-      job.campaign_id,
-      { ...job.context_options, budgetTokens: safeContextBudget, query: safeAction },
-      credentialSecret,
-      { generationJobId: job.id, operation: "retrieval_embedding" },
-      job.operation_kind === "replace_latest"
-        ? {
-            throughTurnNumber: job.base_turn_number ?? 0,
-            stateOverride: job.base_state_private,
-            scratchpadSafeForPrompt: job.base_scratchpad_safe_for_prompt
-          }
-        : {}
-    ));
+      {
+        ownerUserId: job.owner_user_id,
+        campaignId: job.campaign_id,
+        worldVersionId: job.world_version_id ?? "",
+        request: { ...job.context_options, budgetTokens: safeContextBudget, query: safeAction },
+        costAttribution: { generationJobId: job.id, operation: "retrieval_embedding" },
+        ...(job.operation_kind === "replace_latest"
+          ? {
+              throughTurnNumber: job.base_turn_number ?? 0,
+              stateOverride: job.base_state_private,
+              scratchpadSafeForPrompt: job.base_scratchpad_safe_for_prompt
+            }
+          : {})
+      }
+    ))) as GenerationContextPreview;
     const promptContext = context.scopes;
     const inputs = await phase("orchestration_loading", async () => job.orchestration_inputs);
     let orchestration = job.orchestration_private || {};
@@ -1335,9 +1306,7 @@ async function executeLoadedGeneration(
     }
     assertActiveGenerationUpdate(await repository.markCommitting(scope), "entering commit");
     const acceptedCommitCollaborators: AcceptedGenerationCommitCollaborators = {
-      rebuildCampaignMemories: collaborators.rebuildCampaignMemories,
-      storeDerivedTurnMemories: collaborators.storeDerivedTurnMemories,
-      enqueueEmbeddingReindex: collaborators.enqueueEmbeddingReindex,
+      memory: collaborators.memory,
       illustration: collaborators.illustration,
       attributeGenerationCostsToTurn: collaborators.attributeGenerationCostsToTurn
     };

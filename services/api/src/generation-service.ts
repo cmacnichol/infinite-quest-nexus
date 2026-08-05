@@ -9,11 +9,7 @@ import {
   normalizeCampaignStateSnapshot,
   normalizeCampaignTrackers
 } from "../../../packages/domain/src/index.js";
-import {
-  autoEnableCampaignEmbeddingIfAvailable,
-  enqueueEmbeddingReindex,
-  rebuildCampaignMemories
-} from "./memory-service.js";
+import { memoryApplicationForPool } from "./memory-application-adapter.js";
 import { loadOrNotFound } from "./service-helpers.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
@@ -77,8 +73,8 @@ export async function syncPlayerCampaignConfig(pool: DatabasePool, campaignId: s
 export async function rewindCampaign(pool: DatabasePool, campaignId: string, request: CampaignRewindRequest) {
   const ownerUserId = await initialOwnerId(pool);
   return withTransaction(pool, async (client) => {
-    const campaignResult = await client.query<{ active_turn_number: number }>(
-      `SELECT active_turn_number FROM campaigns
+    const campaignResult = await client.query<{ active_turn_number: number; world_version_id: string }>(
+      `SELECT active_turn_number, world_version_id FROM campaigns
         WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
@@ -216,8 +212,10 @@ export async function rewindCampaign(pool: DatabasePool, campaignId: string, req
         WHERE campaign_id = $1 AND owner_user_id = $2 AND status <> 'running'`,
       [campaignId, ownerUserId]
     );
-    await rebuildCampaignMemories(client, ownerUserId, campaignId);
-    await enqueueEmbeddingReindex(client, campaignId);
+    const memory = memoryApplicationForPool(pool).generation;
+    const memoryScope = { ownerUserId, campaignId, worldVersionId: campaign.world_version_id };
+    await memory.rebuildCampaignMemories(client, memoryScope);
+    await memory.enqueueEmbeddingReindex(client, memoryScope);
     await client.query(
       `DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2`,
       [campaignId, ownerUserId]
@@ -415,7 +413,11 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
            FROM campaign_memory_configs WHERE campaign_id = $2 AND owner_user_id = $3 ON CONFLICT DO NOTHING`,
       [newCampaignId, campaignId, ownerUserId]
     );
-    await autoEnableCampaignEmbeddingIfAvailable(client, ownerUserId, newCampaignId);
+    await memoryApplicationForPool(pool).generation.autoEnableCampaignEmbedding(client, {
+      ownerUserId,
+      campaignId: newCampaignId,
+      worldVersionId: campaign.world_version_id
+    });
 
     if (request.targetTurnNumber > 0) {
       await client.query(
@@ -472,8 +474,10 @@ export async function branchCampaign(pool: DatabasePool, campaignId: string, req
       [newCampaignId, campaignId, ownerUserId]
     );
 
-    await rebuildCampaignMemories(client, ownerUserId, newCampaignId);
-    await enqueueEmbeddingReindex(client, newCampaignId);
+    const memory = memoryApplicationForPool(pool).generation;
+    const memoryScope = { ownerUserId, campaignId: newCampaignId, worldVersionId: campaign.world_version_id };
+    await memory.rebuildCampaignMemories(client, memoryScope);
+    await memory.enqueueEmbeddingReindex(client, memoryScope);
 
     await client.query(
       `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, details)

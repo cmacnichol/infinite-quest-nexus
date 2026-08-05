@@ -2,7 +2,8 @@ import type {
   ClaimedGeneration,
   GenerationClaimRepository,
   GenerationExecutionRequest,
-  IllustrationGenerationTransactionPort
+  IllustrationGenerationTransactionPort,
+  MemoryGenerationTransactionPort
 } from "../../application/src/index.js";
 import {
   pendingEventTriggerSchema,
@@ -81,6 +82,7 @@ export type GenerationExecutionPayload = {
   id: string;
   owner_user_id: string;
   campaign_id: string;
+  world_version_id?: string;
   provider_profile_id: string;
   expected_turn_number: number;
   operation_kind: "append" | "replace_latest";
@@ -139,25 +141,7 @@ type GenerationTextProvider = TextProviderProfile & {
 };
 
 export type AcceptedGenerationCommitCollaborators = Readonly<{
-  rebuildCampaignMemories(
-    client: DatabaseClient,
-    ownerUserId: string,
-    campaignId: string
-  ): Promise<number>;
-  storeDerivedTurnMemories(
-    client: DatabaseClient,
-    ownerUserId: string,
-    campaignId: string,
-    worldVersionId: string,
-    turnId: string,
-    ordinal: number,
-    derived: unknown
-  ): Promise<void>;
-  enqueueEmbeddingReindex(
-    client: DatabaseClient,
-    ownerUserId: string,
-    campaignId: string
-  ): Promise<string | null>;
+  memory: MemoryGenerationTransactionPort;
   illustration: IllustrationGenerationTransactionPort;
   attributeGenerationCostsToTurn(
     client: DatabaseClient,
@@ -464,7 +448,11 @@ async function commitAcceptedTurn(
     [job.campaign_id, job.owner_user_id, job.expected_turn_number]
   );
   if (isReplacement) {
-    await collaborators.rebuildCampaignMemories(client, job.owner_user_id, job.campaign_id);
+    await collaborators.memory.rebuildCampaignMemories(client, {
+      ownerUserId: job.owner_user_id,
+      campaignId: job.campaign_id,
+      worldVersionId: campaign.world_version_id
+    });
     await client.query(
       `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, correlation_id, details)
        VALUES ($1,$2,'campaign_turn_replaced',$3,$4)`,
@@ -472,14 +460,13 @@ async function commitAcceptedTurn(
         json({ turnNumber: job.expected_turn_number, replacementTurnId: turnId })]
     );
   } else {
-    await collaborators.storeDerivedTurnMemories(
-      client,
-      job.owner_user_id,
-      job.campaign_id,
-      campaign.world_version_id,
+    await collaborators.memory.storeDerivedTurnMemories(client, {
+      ownerUserId: job.owner_user_id,
+      campaignId: job.campaign_id,
+      worldVersionId: campaign.world_version_id,
       turnId,
-      job.expected_turn_number,
-      {
+      ordinal: job.expected_turn_number,
+      derived: {
         continuitySummary: story.continuity_summary,
         canonicalFacts: story.canonical_facts,
         supersededFacts: story.superseded_facts,
@@ -490,27 +477,21 @@ async function commitAcceptedTurn(
         openThreads: story.open_threads,
         entityCatalog
       }
-    );
+    });
     const memory = buildTurnFictionMemory(
       { action: input.fictionAction, narration: story.narration },
       job.expected_turn_number
     );
     const entityMetadata = resolveEntityMetadata(memory.content, entityCatalog);
-    await client.query(
-      `INSERT INTO chronicle_memories (
-         owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal,
-         content, token_estimate, importance, entities, entity_ids, metadata
-       ) VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,$7,$8,$9,$10,$11)`,
-      [job.owner_user_id, job.campaign_id, campaign.world_version_id, turnId,
-        job.expected_turn_number, memory.content, memory.tokenEstimate,
-        Math.min(1, 0.5 + job.expected_turn_number / 100), entityMetadata.entities,
-        entityMetadata.entityIds,
-        json({
-          sanitized: memory.sanitized,
-          removedMechanicsSegments: memory.removedMechanicsSegments,
-          generated: true
-        })]
-    );
+    await collaborators.memory.writeAcceptedTurnFiction(client, {
+      ownerUserId: job.owner_user_id,
+      campaignId: job.campaign_id,
+      worldVersionId: campaign.world_version_id,
+      turnId,
+      ordinal: job.expected_turn_number,
+      action: input.fictionAction,
+      narration: story.narration
+    });
   }
   await client.query("SAVEPOINT accepted_turn_illustration_enqueue");
   try {
@@ -543,11 +524,11 @@ async function commitAcceptedTurn(
     await client.query("RELEASE SAVEPOINT accepted_turn_illustration_enqueue");
     input.onIllustrationEnqueueError(error, turnId);
   }
-  await collaborators.enqueueEmbeddingReindex(
-    client,
-    job.owner_user_id,
-    job.campaign_id
-  );
+  await collaborators.memory.enqueueEmbeddingReindex(client, {
+    ownerUserId: job.owner_user_id,
+    campaignId: job.campaign_id,
+    worldVersionId: campaign.world_version_id
+  });
   const completed = await client.query<{ id: string }>(
     `UPDATE generation_jobs SET status = 'completed', result_turn_id = $3, provider_response_id = $4,
        provider_finish_reason = $5, completed_at = now(), updated_at = now(), lease_owner = NULL, lease_expires_at = NULL,
@@ -610,7 +591,7 @@ export function createPostgresGenerationExecutionRepository(
                 j.action, j.requested_input_mode, j.resolved_input_mode, j.input_mode_source,
                 j.requested_model, j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
                 j.attempts, j.orchestration_private, j.streaming_segments_state,
-                c.legacy_settings, c.character_profile, c.character_snapshot,
+                c.world_version_id, c.legacy_settings, c.character_profile, c.character_snapshot,
                 cs.rpg_stats, cs.event_triggers, cs.pending_event_triggers,
                 latest.state_snapshot_private
            FROM generation_jobs j

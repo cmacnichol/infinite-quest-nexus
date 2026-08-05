@@ -13,6 +13,7 @@ import {
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { createChronicleWorkerExecutor } from "./chronicle-platform-adapter.js";
 import { createChroniclePlatformBindings } from "./chronicle-platform-bindings.js";
+import { runChronicleJob } from "../../api/src/memory-service.js";
 
 export type ApiMemoryCompositionDependencies = Readonly<{
   credentialSecret: string;
@@ -67,4 +68,18 @@ export function createRepositoryBackedChronicleExecutor(
 ): ChronicleWorkerExecutor {
   const adapters = createPostgresChronicleWorkerAdapters(pool);
   return createChronicleWorkerExecutor({ ...adapters, ...compatibility });
+}
+
+/**
+ * The worker consumes only the typed application. The legacy job body remains
+ * temporarily encapsulated in runtime composition while its final execution
+ * algorithm is moved behind the direct Chronicle worker ports.
+ */
+export function createLiveWorkerMemoryApplication(
+  pool: DatabasePool,
+  credentialSecret: string,
+): MemoryWorkerApplication {
+  return {
+    runNextChronicle: ({ workerId, leaseSeconds }) => runChronicleJob(pool, workerId, leaseSeconds, credentialSecret)
+  } as MemoryWorkerApplication;
 }

@@ -3,7 +3,9 @@ import type {
   GenerationEventSource,
   GenerationWorkerApplication,
   IllustrationApplication,
-  IllustrationWorkerApplication
+  IllustrationWorkerApplication,
+  MemoryApplication,
+  MemoryWorkerApplication
 } from "../../../packages/application/src/index.js";
 import type { DatabasePool, RuntimeConfig } from "../../../packages/database/src/index.js";
 import type { BuildServerOptions } from "../../api/src/server.js";
@@ -28,11 +30,13 @@ export type RuntimeRoleDependencies = Readonly<{
   ): Promise<void>;
   createApiGeneration(pool: DatabasePool): GenerationApplication;
   createApiIllustration(pool: DatabasePool): IllustrationApplication;
+  createApiMemory?(pool: DatabasePool, credentialSecret: string): MemoryApplication;
   createWorkerIllustration(
     pool: DatabasePool,
     credentialSecret: string,
     assetStorageRoot: string
   ): IllustrationWorkerApplication;
+  createWorkerMemory?(pool: DatabasePool, credentialSecret: string): MemoryWorkerApplication;
   createWorkerGeneration(
     pool: DatabasePool,
     credentialSecret: string,
@@ -102,7 +106,11 @@ export async function dispatchRuntimeRole(
     if (!generationEvents) throw new Error("The API role requires a generation event source.");
     const generation = dependencies.createApiGeneration(pool);
     const illustration = dependencies.createApiIllustration(pool);
-    const server = await dependencies.buildServer({ config, pool, generation, illustration, generationEvents });
+    const memory = dependencies.createApiMemory?.(pool, config.credentialEncryptionKey);
+    const server = await dependencies.buildServer({
+      config, pool, generation, illustration, generationEvents,
+      ...(memory ? { memory } : {})
+    });
     await server.listen({ host: config.host, port: config.port });
     await waitForAbort(signal);
     await server.close();
@@ -111,18 +119,26 @@ export async function dispatchRuntimeRole(
 
   if (config.role === "worker") {
     const illustration = dependencies.createApiIllustration(pool);
+    const memory = dependencies.createApiMemory?.(pool, config.credentialEncryptionKey);
     const generation = dependencies.createWorkerGeneration(pool, config.credentialEncryptionKey, illustration);
     const workerIllustration = dependencies.createWorkerIllustration(
       pool,
       config.credentialEncryptionKey,
       config.assetStorageRoot
     );
-    await dependencies.runWorker(pool, config, signal, { generation, illustration: workerIllustration });
+    await dependencies.runWorker(pool, config, signal, {
+      generation,
+      illustration: workerIllustration,
+      ...(dependencies.createWorkerMemory
+        ? { memory: dependencies.createWorkerMemory(pool, config.credentialEncryptionKey) }
+        : {})
+    });
     return;
   }
 
   const apiGeneration = dependencies.createApiGeneration(pool);
   const illustration = dependencies.createApiIllustration(pool);
+  const memory = dependencies.createApiMemory?.(pool, config.credentialEncryptionKey);
   if (!generationEvents) throw new Error("The all role requires a generation event source.");
   const workerGeneration = dependencies.createWorkerGeneration(pool, config.credentialEncryptionKey, illustration);
   const workerIllustration = dependencies.createWorkerIllustration(
@@ -135,12 +151,16 @@ export async function dispatchRuntimeRole(
     pool,
     generation: apiGeneration,
     illustration,
-    generationEvents
+    generationEvents,
+    ...(memory ? { memory } : {})
   });
   await server.listen({ host: config.host, port: config.port });
   await dependencies.runWorker(pool, config, signal, {
     generation: workerGeneration,
-    illustration: workerIllustration
+    illustration: workerIllustration,
+    ...(dependencies.createWorkerMemory
+      ? { memory: dependencies.createWorkerMemory(pool, config.credentialEncryptionKey) }
+      : {})
   });
   await server.close();
 }

@@ -19,7 +19,7 @@ import {
 } from "../../../packages/contracts/src/world-library.js";
 import { cleanupUnreferencedCreatedPaths, persistArchiveAssets, restoreAssetBindings, type ArchiveIdMap } from "./asset-archive-service.js";
 import { detectMimeType, lockOriginalImages, parseDataImage, persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
-import { autoEnableCampaignEmbeddingIfAvailable } from "./memory-service.js";
+import { memoryApplicationForPool } from "./memory-application-adapter.js";
 import { ArchiveError, rehydratePersistedStagedArchive } from "./archive-io.js";
 import { campaignArchiveApplicationVersion, cleanupArchivePreviewStaging, cleanupExpiredArchivePreviews, decodeCampaignArchive, portableWorldContentHash, type ArchiveCleanupLogger, type DecodedCampaignArchive } from "./campaign-archive-service.js";
 
@@ -858,7 +858,11 @@ export async function importLegacyStory(
       memoryCount += 1;
     }
 
-    await autoEnableCampaignEmbeddingIfAvailable(client, ownerUserId, campaignId);
+    await memoryApplicationForPool(pool).generation.autoEnableCampaignEmbedding(client, {
+      ownerUserId,
+      campaignId,
+      worldVersionId
+    });
 
     const stats: StoryImportResult["stats"] = {
       turnCount: request.story.turns.length,

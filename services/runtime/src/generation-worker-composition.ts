@@ -3,21 +3,14 @@ import {
   type GenerationClaimRepository,
   type GenerationExecutor,
   type GenerationWorkerApplication,
-  type IllustrationApplication
+  type IllustrationApplication,
+  type MemoryApplication
 } from "../../../packages/application/src/index.js";
 import {
   createPostgresGenerationExecutionRepository,
   type GenerationExecutionRepository
 } from "../../../packages/database/src/generation-execution-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import {
-  autoEnableCampaignEmbeddingIfAvailable,
-  buildContextPreview,
-  enqueueEmbeddingReindex,
-  rebuildCampaignMemories,
-  storeDerivedTurnMemories,
-  type DerivedStoryMemory
-} from "../../api/src/memory-service.js";
 import { loadTextProvider } from "../../api/src/provider-service.js";
 import {
   attributeGenerationCostsToTurn,
@@ -39,7 +32,7 @@ type WorkerGenerationRepository = GenerationClaimRepository & GenerationExecutio
 
 export type WorkerGenerationCompositionFactories = Readonly<{
   createRepository(pool: DatabasePool): WorkerGenerationRepository;
-  createCollaborators(illustration: IllustrationApplication): GenerationExecutionCollaborators;
+  createCollaborators(illustration: IllustrationApplication, memory?: MemoryApplication): GenerationExecutionCollaborators;
   createExecutor(dependencies: GenerationExecutorDependencies): GenerationExecutor;
   createApplication(dependencies: Readonly<{
     claims: GenerationClaimRepository;
@@ -49,46 +42,10 @@ export type WorkerGenerationCompositionFactories = Readonly<{
 
 export function createGenerationExecutionCollaborators(
   illustration: IllustrationApplication,
+  memory?: MemoryApplication,
 ): GenerationExecutionCollaborators {
   return {
-    autoEnableCampaignEmbeddingIfAvailable,
-    buildContextPreview: (
-      pool,
-      ownerUserId,
-      campaignId,
-      options,
-      credentialSecret,
-      costAttribution,
-      scope
-    ) => buildContextPreview(
-      pool,
-      campaignId,
-      options,
-      credentialSecret,
-      costAttribution,
-      scope,
-      ownerUserId
-    ),
-    enqueueEmbeddingReindex: (database, ownerUserId, campaignId) =>
-      enqueueEmbeddingReindex(database, campaignId, ownerUserId),
-    rebuildCampaignMemories,
-    storeDerivedTurnMemories: (
-      client,
-      ownerUserId,
-      campaignId,
-      worldVersionId,
-      turnId,
-      ordinal,
-      derived
-    ) => storeDerivedTurnMemories(
-      client,
-      ownerUserId,
-      campaignId,
-      worldVersionId,
-      turnId,
-      ordinal,
-      derived as DerivedStoryMemory
-    ),
+    memory: memory?.generation ?? unavailableMemoryGenerationPort(),
     illustration: illustration.generation,
     loadTextProvider,
     resolvePromptSnapshot,
@@ -99,6 +56,20 @@ export function createGenerationExecutionCollaborators(
       await turnReportedCosts(database, ownerUserId, turnIds) as Map<string, unknown>,
     attributeGenerationCostsToTurn
   };
+}
+
+function unavailableMemoryGenerationPort(): MemoryApplication["generation"] {
+  const unavailable = async (): Promise<never> => {
+    throw new Error("The worker role requires a Chronicle memory application.");
+  };
+  return {
+    autoEnableCampaignEmbedding: unavailable,
+    buildContextPreview: unavailable,
+    enqueueEmbeddingReindex: unavailable,
+    rebuildCampaignMemories: unavailable,
+    storeDerivedTurnMemories: unavailable,
+    writeAcceptedTurnFiction: unavailable
+  } as MemoryApplication["generation"];
 }
 
 const productionFactories: WorkerGenerationCompositionFactories = {
@@ -112,10 +83,11 @@ export function createWorkerGenerationApplication(
   pool: DatabasePool,
   credentialSecret: string,
   illustration: IllustrationApplication,
-  factories: WorkerGenerationCompositionFactories = productionFactories
+  factories: WorkerGenerationCompositionFactories = productionFactories,
+  memory?: MemoryApplication,
 ): GenerationWorkerApplication {
   const repository = factories.createRepository(pool);
-  const collaborators = factories.createCollaborators(illustration);
+  const collaborators = factories.createCollaborators(illustration, memory);
   const executor = factories.createExecutor({
     pool,
     repository,

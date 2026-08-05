@@ -7,7 +7,7 @@ import {
 import { initialOwnerId, withTransaction, type DatabaseClient, type DatabasePool } from "../../../packages/database/src/pool.js";
 import { normalizeCampaignTrackers } from "../../../packages/domain/src/campaign-trackers.js";
 import { containsMechanicsLanguage } from "../../../packages/domain/src/text.js";
-import { rebuildCampaignMemories } from "./memory-service.js";
+import { memoryApplicationForPool } from "./memory-application-adapter.js";
 
 type EffectiveCampaignStateEdit = {
   id: string;
@@ -188,8 +188,8 @@ export async function updateCampaignRuntimeState(pool: DatabasePool, campaignId:
   }
   const ownerUserId = await initialOwnerId(pool);
   await withTransaction(pool, async (client) => {
-    const campaignResult = await client.query<{ active_turn_number: number }>(
-      `SELECT active_turn_number FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
+    const campaignResult = await client.query<{ active_turn_number: number; world_version_id: string }>(
+      `SELECT active_turn_number, world_version_id FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
       [campaignId, ownerUserId]
     );
     const campaign = loadOrNotFound(campaignResult, "Campaign");
@@ -275,7 +275,11 @@ export async function updateCampaignRuntimeState(pool: DatabasePool, campaignId:
        ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
       [editId, ownerUserId, campaignId, campaign.active_turn_number, nextRevision, json(snapshot), json(changedFields)]
     );
-    await rebuildCampaignMemories(client, ownerUserId, campaignId);
+    await memoryApplicationForPool(pool).generation.rebuildCampaignMemories(client, {
+      ownerUserId,
+      campaignId,
+      worldVersionId: campaign.world_version_id
+    });
     await client.query(`DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2`, [campaignId, ownerUserId]);
     await client.query(
       `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, details)

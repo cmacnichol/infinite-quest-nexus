@@ -73,7 +73,7 @@ describe("createWorkerGenerationApplication", () => {
 
     expect(result).toBe(application);
     expect(factories.createCollaborators).toHaveBeenCalledOnce();
-    expect(factories.createCollaborators).toHaveBeenCalledWith(illustration);
+    expect(factories.createCollaborators).toHaveBeenCalledWith(illustration, undefined);
     expect(factories.createRepository).toHaveBeenCalledOnce();
     expect(factories.createRepository).toHaveBeenCalledWith(pool);
     expect(factories.createExecutor).toHaveBeenCalledOnce();

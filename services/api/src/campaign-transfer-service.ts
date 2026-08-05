@@ -9,7 +9,7 @@ import { worldContentSchema, type WorldContent } from "../../../packages/contrac
 import { assessCampaignTransferCompatibility } from "../../../packages/domain/src/campaign-transfer.js";
 import { normalizeCampaignStateSnapshot, normalizeCampaignTrackers } from "../../../packages/domain/src/campaign-trackers.js";
 import { removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
-import { enqueueEmbeddingReindex, rebuildCampaignMemories } from "./memory-service.js";
+import { memoryApplicationForPool } from "./memory-application-adapter.js";
 
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
 function httpError(statusCode: number, message: string, details?: unknown): Error {
@@ -224,6 +224,7 @@ export async function previewCampaignWorldTransfer(pool: DatabasePool, campaignI
 }
 
 async function insertCampaignClone(
+  pool: DatabasePool,
   client: DatabaseClient,
   ownerUserId: string,
   source: SourceRow,
@@ -339,8 +340,10 @@ async function insertCampaignClone(
       [ownerUserId, reference.asset_id, campaignId, mappedTurnId, reference.asset_role, reference.created_at]
     );
   }
-  const memoryCount = await rebuildCampaignMemories(client, ownerUserId, campaignId);
-  const embeddingJobId = await enqueueEmbeddingReindex(client, campaignId);
+  const memory = memoryApplicationForPool(pool).generation;
+  const memoryScope = { ownerUserId, campaignId, worldVersionId: target.id };
+  const memoryCount = await memory.rebuildCampaignMemories(client, memoryScope);
+  const embeddingJobId = await memory.enqueueEmbeddingReindex(client, memoryScope);
   return { campaignId, memoryCount, embeddingJobId };
 }
 
@@ -424,7 +427,7 @@ export async function transferCampaignWorld(pool: DatabasePool, campaignId: stri
     }
     const transferId = crypto.randomUUID();
     const title = request.title || `${source.title} (${target.world_title})`;
-    const clone = await insertCampaignClone(client, ownerUserId, source, target, title, transferId);
+    const clone = await insertCampaignClone(pool, client, ownerUserId, source, target, title, transferId);
     const warnings = findings.filter((finding) => finding.severity !== "blocking");
     await client.query(
       `INSERT INTO campaign_world_transfers (
