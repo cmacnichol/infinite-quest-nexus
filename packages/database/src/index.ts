@@ -6,3 +6,4 @@ export * from "./illustration-repository.js";
 export * from "./migrate.js";
 export * from "./pool.js";
 export * from "./postgres-generation-events.js";
+export * from "./world-repository.js";
