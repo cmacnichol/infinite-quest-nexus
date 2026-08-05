@@ -87,7 +87,7 @@ contain this plan.
 | Task 12 | B3 — worker concurrency and fair lanes | **Complete** | Implementation `312ebaa`, correction `57147c7`, docs `8593e3e`; scoped implementation review plus clean correction re-review; full unit 1,150/1,150, implementation full PostgreSQL 232/232, correction-relevant PostgreSQL 68/68; C0 concurrency 1/2/4 benchmark and duplicate-turn guard passed |
 | Task 13b | B4b — play-loop read profiling/optimization | **Complete** | Implementation `1d6b766`, correction `ff7f56e`; scoped review and correction re-review approved; full unit 1,156/1,156, full PostgreSQL 234/234, C0 read benchmark passed |
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | **Complete** | `e2a15e6` through `c7c8353`; contracts, cutover, durability, privacy, ownership, and all 18 Fastify route-parity gates independently approved |
-| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | In progress — 14b1 complete | `3e0dc8b`, remediation `6f77f74`; independent re-review approved; 14b2 adapters are next |
+| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | In progress — 14b1 complete; 14b2 split before implementation | `3e0dc8b`, remediation `6f77f74`; independent re-review approved; 14b2a helper extraction is next |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | Not started | — |
 | Task 14d | B5d — providers and prompt configuration (removes none) | Not started | — |
 | Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
@@ -6985,14 +6985,24 @@ integration, plus new application/repository/adapter suites.
 
 14b1 freezes applications for embedding configuration, context preview,
 metrics, Chronicle/embedding reindex, derived-turn writes, state correction,
-and `runNextChronicle`. 14b2 moves owner/campaign-scoped authoritative reads,
-derived writes, claim/lease/retry, embedding provider calls, and rebuilds behind
-ports. 14b3 switches API, worker, generation executor, campaign-transfer, world,
-and import consumers; removes the memory allowlist entry and all five Task 10d
-memory callbacks; and leaves no worker import from API. 14b4 proves accepted
-turns/state remain authoritative, summaries/embeddings are rebuildable,
-rejected generations write no memory, and retrieval/reindex cannot cross owner,
-campaign, world, or world-version scope.
+and `runNextChronicle`. 14b2 is a three-checkpoint adapter series: **14b2a**
+extracts the private Chronicle helper behavior currently embedded in
+`memory-service.ts` into testable platform-neutral/shared helper modules, with
+behavioral parity for campaign scope, canonical facts, entity catalogues,
+sanitization, embedding/provider fingerprinting, and safe error projection;
+it does not move live consumers. **14b2b** binds every Chronicle repository and
+runtime operation directly, including all five Task 10d transaction callbacks
+and accepted-turn fiction writes, against the caller-owned client. It may not
+inject a legacy service callback, open a nested transaction, or fall back to a
+pool. **14b2c** proves the concrete PostgreSQL/runtime bindings with the full
+Chronicle race, ownership, lease, work-version, rebuild, provider-selection,
+and bounded-retrieval matrix. Only after all three checkpoints may **14b3**
+switch API, worker, generation executor, campaign-transfer, world, import,
+state-correction, rewind, and branch consumers; remove the memory allowlist
+entry and all five Task 10d memory callbacks; and leave no worker import from
+API. 14b4 proves accepted turns/state remain authoritative, summaries/embeddings
+are rebuildable, rejected generations write no memory, and retrieval/reindex
+cannot cross owner, campaign, world, or world-version scope.
 
 **Task 14b readiness corrections (2026-08-05, required before implementation):**
 
@@ -7031,9 +7041,50 @@ campaign, world, or world-version scope.
    tests; generation authority snapshots; import/transfer/rewind/branch
    rehome tests; and no-old-import/no-runtime-to-API static audits.
 
+**Task 14b2 split (2026-08-05, required after implementation review):** The
+initial staged adapter scaffold correctly demonstrates direct job
+claim/lease/retrieval and runtime provider bindings, but it is not a valid
+cutover foundation: rebuild, derived-memory, preview, embedding-reindex, and
+accepted-fiction operations still delegate through injected compatibility
+callbacks, and its PostgreSQL suite does not prove the complete ownership/race
+contract. Do not commit that scaffold as a completed 14b2 checkpoint. Preserve
+only its valid direct repository/binding work while completing these three
+separately reviewed checkpoints:
+
+1. **14b2a — extract behavioral helpers before adapter binding.** Identify the
+   private helper logic used by `memory-service.ts` for campaign and world-version
+   scope validation, accepted-fiction filtering, canonical facts/entity
+   construction, memory sanitization, embedding eligibility, provider/model
+   fingerprinting, and safe public errors. Extract only the reusable behavior
+   into named testable modules under the application/domain boundary; retain API
+   transport and live service ownership until 14b3. Write parity tests first,
+   including private/mechanic/rejected-content exclusion and a future direct-port
+   caller contract. No new compatibility delegate is allowed.
+2. **14b2b — complete direct database and runtime bindings.** Implement each
+   `MemoryGenerationTransactionPort` operation directly using the outer
+   PostgreSQL client: `autoEnableCampaignEmbeddingIfAvailable`,
+   `buildContextPreview`, `enqueueEmbeddingReindex`,
+   `rebuildCampaignMemories`, `storeDerivedTurnMemories`, and the
+   accepted-fiction write. Bind provider selection/load/transport/fingerprint,
+   health, cost attribution, and safe diagnostics in runtime composition with
+   the dedicated-enabled-embedding-then-text-only fallback rule. A direct port
+   has no `MemoryService`/legacy callback parameter, no nested transaction, and
+   no pool fallback. Fix `completeClaim` so a newer work version fences an old
+   claim unconditionally, not only when a caller opts into requeue behavior.
+3. **14b2c — prove the real PostgreSQL contract.** Add sequential, isolated
+   integration coverage for oldest-first `SKIP LOCKED` claim exclusivity, one
+   live job per campaign, owner/world-version/campaign isolation, lease
+   heartbeat/reclaim/lost-lease fencing, unconditional work-version requeue,
+   stale completion rejection, atomic batch progress/cost, hash/dimension/
+   protocol guards, rebuild idempotence, bounded retrieval cursor/limit, safe
+   provider failure projection, and image-profile exclusion. Exercise every
+   direct transaction operation in a rollback/no-partial-write scenario so the
+   later accepted-turn cutover can rely on atomicity.
+
 **Corrected order:** **14b1** inventory, platform-free contracts/scopes,
-transaction/worker ports, and safe errors; **14b2** PostgreSQL/runtime adapter
-contracts; **14b3** atomic cutover/removal; **14b4** route, worker/race,
+transaction/worker ports, and safe errors; **14b2a** helper extraction and
+parity; **14b2b** direct PostgreSQL/runtime bindings; **14b2c** real-PostgreSQL
+contract matrix; **14b3** atomic cutover/removal; **14b4** route, worker/race,
 authority/rebuild, safety, and static completion audit.
 
 ### Task 14c — B5c: identity, worlds, versions, and campaigns
