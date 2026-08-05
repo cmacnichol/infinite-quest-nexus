@@ -87,7 +87,7 @@ contain this plan.
 | Task 12 | B3 — worker concurrency and fair lanes | **Complete** | Implementation `312ebaa`, correction `57147c7`, docs `8593e3e`; scoped implementation review plus clean correction re-review; full unit 1,150/1,150, implementation full PostgreSQL 232/232, correction-relevant PostgreSQL 68/68; C0 concurrency 1/2/4 benchmark and duplicate-turn guard passed |
 | Task 13b | B4b — play-loop read profiling/optimization | **Complete** | Implementation `1d6b766`, correction `ff7f56e`; scoped review and correction re-review approved; full unit 1,156/1,156, full PostgreSQL 234/234, C0 read benchmark passed |
 | Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | **Complete** | `e2a15e6` through `c7c8353`; contracts, cutover, durability, privacy, ownership, and all 18 Fastify route-parity gates independently approved |
-| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | In progress — 14b1/14b2a/14b2b/14b2c/14b3 complete | `3e0dc8b`, `6f77f74`, `5d0c3c2`, `dae333d`, `261e224`, `aeeba49`, `92f03a7`, `21f0722`, `ad9dbc1`, `2e5daa7`; independent reviews approved; 14b4 completion audit is next |
+| Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; controller 1,228 unit/270 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | Not started | — |
 | Task 14d | B5d — providers and prompt configuration (removes none) | Not started | — |
 | Task 14e | B5e — imports, exports, archives, assets (removes 1) | Not started | — |
@@ -7163,23 +7163,42 @@ findings. Fresh controller verification passed **1,220/1,220 unit tests**,
 legacy-file/symbol deletion scans, boundary scans, range diff checks, and
 project-memory prechecks.
 
-**Task 14b4 — Chronicle completion audit (next):** Treat this as a separately
-briefed and reviewed audit checkpoint, not as inferred coverage from 14b3.
-Add executable real-Fastify/PostgreSQL parity for all six memory routes plus the
+**Task 14b4 — Chronicle completion audit:** This separately briefed and
+reviewed checkpoint verifies the final Chronicle cutover rather than inferring
+coverage from 14b3. It required executable real-Fastify/PostgreSQL parity for
+all six memory routes plus the
 generic job read, covering success, invalid input, missing/foreign scope,
 disabled conflicts, duplicate/retry behavior, resumable progress, and fixed
-safe public failures. Exercise the composed production worker through claim,
+safe public failures. It exercised the composed production worker through claim,
 bounded retrieval, heartbeat/reclaim, stale-work requeue, atomic vector/cost/
-progress commit, rebuild, failure, and completion races. Prove accepted turns
+progress commit, rebuild, failure, and completion races. It proved accepted turns
 and campaign state remain authoritative; rejected/incomplete generations write
 no Chronicle state; summaries and embeddings rebuild from authoritative rows;
 and retrieval/reindex cannot cross owner, campaign, world, or world-version
-scope. Re-run import, transfer, correction, rewind, branch, replacement, and
-accepted-fiction rehome coverage using caller-owned transactions. Finish with
+scope. It re-ran import, transfer, correction, rewind, branch, replacement,
+and accepted-fiction rehome coverage using caller-owned transactions. It finished with
 static audits proving no legacy memory symbol/file, cross-role memory allowlist
 entry, API-to-runtime import, anonymous replacement callback, or optional
-memory fallback remains. Record exact commands, pass/skip counts, base/head
-SHAs, and independent review before marking Task 14b complete or starting 14c.
+memory fallback remains. It recorded exact commands, pass/skip counts, base/head
+SHAs, and independent review before Task 14b completion and the 14c handoff.
+
+**Task 14b4 verification (2026-08-05, complete):** `56b35d2` adds the real
+Fastify/PostgreSQL route, composed-worker, authority, rehome, and static
+completion audit; `7003116` corrects the first review's heartbeat lifecycle,
+composed durability/failure, authority-snapshot, and fixture-isolation
+findings; and `ae92416` prevents late heartbeat lease loss from degrading a
+healthy embedding provider. Reports were finalized in `c0437f4`, `680eb37`,
+and `d32cefb`. The final audit exercises all six memory routes plus generic job
+read; serialized/joined heartbeat, reclaim, lost-lease fencing, atomic vector/
+provider/cost/progress completion, rebuild, and failure; owner/campaign/world/
+world-version isolation; complete rejected/incomplete generation authority
+snapshots; import, transfer, correction, rewind, branch, and replacement
+rehome; and whole-tree legacy/import/fallback/callback removal. Both scoped
+re-review rounds approved all findings with no residual blocker. Fresh
+controller verification passed **1,228/1,228 unit tests**, **270/270
+real-PostgreSQL integration tests**, `pnpm check`, `pnpm build`, range diff
+checks, and project-memory prechecks. Task **14b is complete**; the Task 14c
+identity/world/campaign extraction is next after the correction-gate cleanup.
 
 ### Task 14c — B5c: identity, worlds, versions, and campaigns
 
@@ -7279,10 +7298,10 @@ round trips, and no private campaign/export fixture enters source control.
   separately briefed/reviewed commit series. Re-measure route/function/import
   counts at checkpoint start and record drift, but do not defer architecture or
   file ownership to a future planning task.
-- [ ] Illustration extraction preserves the independent image provider profile,
+- [x] Illustration extraction preserves the independent image provider profile,
   credential/model/health/retry lane and the rule that image failure cannot
   affect accepted narration.
-- [ ] Chronicle extraction keeps accepted turns/campaign state authoritative,
+- [x] Chronicle extraction keeps accepted turns/campaign state authoritative,
   keeps summaries/embeddings rebuildable and campaign-scoped, and prevents any
   prompt/retrieval cross-campaign access.
 - [ ] World/campaign extraction preserves immutable world-version pins, explicit
