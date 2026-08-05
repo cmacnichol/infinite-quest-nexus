@@ -7534,6 +7534,20 @@ embedding may retain its documented existing text-profile fallback only through
 an explicit embedding resolution result, while image and intent must never fall
 back to text implicitly.
 
+**14d1 completion (2026-08-05):** `9ecc654f` and correction `c4fdb4a`
+add the platform-free provider application types, ports, use cases, barrels,
+consumer collaborator contracts, and a machine-checked inventory of all twelve
+current production provider/prompt/cost importers. The boundary distinguishes
+client-safe profile data, opaque runtime credential references, and
+transport-ready leases; it models independent text/image/intent resolution and
+only an explicit embedding-to-text fallback. The correction replaces arbitrary
+configuration and diagnostic strings with allowlisted safe contracts, adds
+campaign scope to cost operations, and types the two temporary 14c bridge
+payloads. No route, database, runtime, worker, credential, transport, or
+legacy-service behavior changed. Focused tests, 1,246 unit tests, 337
+integration tests, `pnpm check`, build, diff, and precheck passed; independent
+review and correction re-review approved. **14d2 is next.**
+
 **14d2 — PostgreSQL, credential, and transport adapters (additive only).**
 Implement owner-scoped provider, prompt, and cost repositories with one
 caller-owned command transaction for default selection, profile mutation,
