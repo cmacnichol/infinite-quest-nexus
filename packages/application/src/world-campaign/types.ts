@@ -202,6 +202,7 @@ export type ReplaceCampaignFactInput = Readonly<Omit<CampaignFact, "replacesFact
 }>;
 
 export type ApiTimestamp = string;
+export type AdapterTimestamp = string | Date;
 
 /** Adapter input; application views canonicalize its Date branch to an ISO string. */
 export type WorldListSource = WorldListResponse;
@@ -225,6 +226,12 @@ export type PublishedWorldSummaryView = Readonly<{
   }>;
   detachments: Readonly<{ drafts: number; forks: number; imports: number }>;
 }>;
+export type PublishedWorldSummarySource = Readonly<
+  Omit<PublishedWorldSummaryView, "publishedAt" | "createdAt"> & {
+    publishedAt: AdapterTimestamp;
+    createdAt: AdapterTimestamp;
+  }
+>;
 
 export type WorldCampaignReferenceView = Readonly<{
   id: string;
@@ -238,6 +245,9 @@ export type WorldCampaignReferenceView = Readonly<{
   turnControlStyle: CampaignUpdateRequest["turnControlStyle"];
   updatedAt: ApiTimestamp;
 }>;
+export type WorldCampaignReferenceSource = Readonly<
+  Omit<WorldCampaignReferenceView, "updatedAt"> & { updatedAt: AdapterTimestamp }
+>;
 
 export type WorldAggregateView = Readonly<{
   id: string;
@@ -255,7 +265,17 @@ export type WorldAggregateView = Readonly<{
   versions: readonly PublishedWorldSummaryView[];
   campaigns: readonly WorldCampaignReferenceView[];
 }>;
+export type WorldAggregateSource = Readonly<
+  Omit<WorldAggregateView, "createdAt" | "updatedAt" | "draftUpdatedAt" | "versions" | "campaigns"> & {
+    createdAt: AdapterTimestamp;
+    updatedAt: AdapterTimestamp;
+    draftUpdatedAt: AdapterTimestamp | null;
+    versions: readonly PublishedWorldSummarySource[];
+    campaigns: readonly WorldCampaignReferenceSource[];
+  }
+>;
 
+export type WorldCreateSource = WorldCreateResponse;
 export type WorldCreateView = DeepReadonly<WorldCreateResponse>;
 export type WorldDraftUpdateView = Readonly<{
   worldId: string;
@@ -264,6 +284,9 @@ export type WorldDraftUpdateView = Readonly<{
   content: DeepReadonly<WorldContent>;
   updatedAt: ApiTimestamp;
 }>;
+export type WorldDraftUpdateSource = Readonly<
+  Omit<WorldDraftUpdateView, "updatedAt"> & { updatedAt: AdapterTimestamp }
+>;
 export type WorldPublicationView = Readonly<{
   worldId: string;
   worldVersionId: string;
@@ -271,12 +294,18 @@ export type WorldPublicationView = Readonly<{
   draftRevision: number;
   publishedAt: ApiTimestamp;
 }>;
+export type WorldPublicationSource = Readonly<
+  Omit<WorldPublicationView, "publishedAt"> & { publishedAt: AdapterTimestamp }
+>;
 export type WorldStatusView = Readonly<{
   id: string;
   title: string;
   status: "draft" | "active" | "archived";
   updatedAt: ApiTimestamp;
 }>;
+export type WorldStatusSource = Readonly<
+  Omit<WorldStatusView, "updatedAt"> & { updatedAt: AdapterTimestamp }
+>;
 export type WorldForkView = Readonly<{
   worldId: string;
   sourceWorldId: string;
@@ -304,7 +333,8 @@ export type WorldPromotionView = Readonly<{
   promotedFactCount: number;
 }>;
 
-export type CampaignListView = DeepReadonly<CampaignListResponse>;
+export type CampaignListSource = CampaignListResponse;
+export type CampaignListView = DeepReadonly<CampaignListSource>;
 export type CampaignCreateView = DeepReadonly<CampaignCreateResponse>;
 export type CampaignUpdateView = Readonly<{
   id: string;
@@ -317,6 +347,9 @@ export type CampaignUpdateView = Readonly<{
   turnControlStyle: NonNullable<CampaignUpdateRequest["turnControlStyle"]>;
   updatedAt: ApiTimestamp;
 }>;
+export type CampaignUpdateSource = Readonly<
+  Omit<CampaignUpdateView, "updatedAt"> & { updatedAt: AdapterTimestamp }
+>;
 export type CampaignMigrationView = Readonly<{
   migrationId: string;
   campaignId: string;
@@ -325,6 +358,9 @@ export type CampaignMigrationView = Readonly<{
   worldVersionNumber: number;
   migratedAt: ApiTimestamp;
 }>;
+export type CampaignMigrationSource = Readonly<
+  Omit<CampaignMigrationView, "migratedAt"> & { migratedAt: AdapterTimestamp }
+>;
 export type CampaignPlayerConfigSyncView = Readonly<{
   campaignId: string;
   activeTurnNumber: number;
@@ -337,8 +373,13 @@ export type CampaignStateEditView = Readonly<{
   revision: number;
   effectiveTurnNumber: number;
   snapshot: DeepReadonly<CampaignRuntimeStateContent>;
+  updatedAt: ApiTimestamp;
 }>;
-export type CampaignStateCorrectionView = DeepReadonly<CampaignRuntimeState>;
+export type CampaignStateEditSource = Readonly<
+  Omit<CampaignStateEditView, "updatedAt"> & { updatedAt: AdapterTimestamp }
+>;
+export type CampaignStateCorrectionSource = CampaignRuntimeState;
+export type CampaignStateCorrectionView = DeepReadonly<CampaignStateCorrectionSource>;
 
 export type CharacterProfileView = Readonly<{
   campaignId: string;
@@ -360,24 +401,30 @@ export type CharacterProfileUpdateView = Readonly<{
 }>;
 export type CharacterProfileOrganizationView = DeepReadonly<CharacterProfileOrganizationResult>;
 
-export type DashboardView = Readonly<{
+export type DashboardProviderCostTotalView = Readonly<{
+  providerProfileId: string | null;
+  providerName: string | null;
+  providerType: string;
+  category: "story" | "image" | "memory";
+  currency: string;
+  amount: string;
+  eventCount: number;
+  lastReportedAt: ApiTimestamp;
+}>;
+export type DashboardProviderCostTotalSource = Readonly<
+  Omit<DashboardProviderCostTotalView, "lastReportedAt"> & { lastReportedAt: AdapterTimestamp }
+>;
+type DashboardProjection<ProviderCostTotal> = Readonly<{
   worlds: Readonly<{ available: number; total: number; published: number; drafts: number; archived: number }>;
   campaigns: Readonly<{ open: number; total: number; archived: number }>;
   turns: Readonly<{ accepted: number }>;
   providerCosts: Readonly<{
     hasReportedCosts: boolean;
-    totals: readonly Readonly<{
-      providerProfileId: string | null;
-      providerName: string | null;
-      providerType: string;
-      category: "story" | "image" | "memory";
-      currency: string;
-      amount: string;
-      eventCount: number;
-      lastReportedAt: ApiTimestamp;
-    }>[];
+    totals: readonly ProviderCostTotal[];
   }>;
 }>;
+export type DashboardSource = DashboardProjection<DashboardProviderCostTotalSource>;
+export type DashboardView = DashboardProjection<DashboardProviderCostTotalView>;
 export type SessionProfileView = DeepReadonly<UserProfile>;
 export type GeneratedWorldPreviewView = Readonly<{ title: string; content: DeepReadonly<WorldContent> }>;
 export type GeneratedPlayableCharacterView = Readonly<{ character: DeepReadonly<PlayableCharacter> }>;
@@ -393,9 +440,14 @@ export type WorldGenerationProgressView = Readonly<{
 }>;
 
 export type BoundedCampaignTurn = DeepReadonly<TurnSummary>;
+export type BoundedCampaignTurnSource = TurnSummary;
 
 export type BoundedCampaignTurnPage = Readonly<{
   turns: readonly BoundedCampaignTurn[];
+  nextCursor: string | null;
+}>;
+export type BoundedCampaignTurnPageSource = Readonly<{
+  turns: readonly BoundedCampaignTurnSource[];
   nextCursor: string | null;
 }>;
 
@@ -404,15 +456,14 @@ export type BoundedCampaignTurnPageRequest = Readonly<{
   limit: number;
 }>;
 
-export type CampaignSyncSnapshot = Readonly<{
+export type CampaignSyncSnapshotSource = Readonly<{
   syncToken: string;
-  projection: CampaignSyncProjection;
+  projection: CampaignSyncSourceProjection;
 }>;
 
 type UnchangedCampaignSyncStatus = Extract<CampaignSyncStatus, { turnWindowMode: "unchanged" }>;
-export type CampaignSyncProjection = DeepReadonly<
-  Omit<UnchangedCampaignSyncStatus, "syncToken" | "turnWindowMode" | "turns">
->;
+export type CampaignSyncSourceProjection = Omit<UnchangedCampaignSyncStatus, "syncToken" | "turnWindowMode" | "turns">;
+export type CampaignSyncProjection = DeepReadonly<CampaignSyncSourceProjection>;
 export type CampaignSyncStatusView = DeepReadonly<CampaignSyncStatus>;
 
 export type PortableWorldPayload = DeepReadonly<WorldImportRequest["worldExport"]>;

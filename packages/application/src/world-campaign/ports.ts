@@ -1,33 +1,39 @@
 import type {
-  BoundedCampaignTurnPage,
+  BoundedCampaignTurnPageSource,
   BoundedCampaignTurnPageRequest,
   CampaignBranchRequest,
   CampaignBranchView,
   CampaignCharacterProfileUpdate,
   CampaignCreateView,
   CampaignCreateRequest,
+  CampaignListSource,
   CampaignListView,
+  CampaignMigrationSource,
   CampaignMigrationView,
   CampaignPlayerConfigSyncView,
   CampaignRewindRequest,
   CampaignRewindView,
   CampaignRuntimeStateUpdate,
   CampaignScope,
+  CampaignStateCorrectionSource,
   CampaignStateCorrectionView,
+  CampaignStateEditSource,
   CampaignStateEditView,
-  CampaignSyncSnapshot,
+  CampaignSyncSnapshotSource,
   CampaignSyncStatusView,
   CampaignTransferCommitRequest,
   CampaignTransferPreviewRequest,
   CampaignTransferResultView,
   CampaignTransferView,
   CampaignUpdateRequest,
+  CampaignUpdateSource,
   CampaignUpdateView,
   CampaignWorldMigrationRequest,
   CharacterProfileOrganizationRequest,
   CharacterProfileOrganizationView,
   CharacterProfileUpdateView,
   CharacterProfileView,
+  DashboardSource,
   DashboardView,
   GeneratedPlayableCharacterView,
   GeneratedWorldPreviewView,
@@ -45,7 +51,9 @@ import type {
   WorldCampaignReadContext,
   WorldCampaignRepositoryResult,
   WorldCreateRequest,
+  WorldCreateSource,
   WorldCreateView,
+  WorldDraftUpdateSource,
   WorldDraftUpdateView,
   WorldDraftUpdateRequest,
   WorldForkRequest,
@@ -60,10 +68,13 @@ import type {
   WorldListSource,
   WorldListView,
   WorldPublishRequest,
+  WorldPublicationSource,
   WorldPublicationView,
   WorldPromotionView,
   WorldScope,
+  WorldAggregateSource,
   WorldAggregateView,
+  WorldStatusSource,
   WorldStatusUpdateRequest,
   WorldStatusView,
   WorldVersionDeleteRequest,
@@ -78,11 +89,11 @@ export interface WorldCampaignTransactionPort {
 
 export interface WorldRepositoryPort {
   listWorlds(transaction: WorldCampaignReadContext, scope: OwnerScope): Promise<WorldListSource>;
-  getWorld(transaction: WorldCampaignReadContext, scope: WorldScope): Promise<WorldAggregateView>;
-  createWorld(transaction: WorldCampaignCommandContext, scope: OwnerScope, request: WorldCreateRequest): Promise<WorldCampaignRepositoryResult<WorldCreateView>>;
-  updateWorldDraft(transaction: WorldCampaignCommandContext, scope: WorldScope, request: WorldDraftUpdateRequest): Promise<WorldCampaignRepositoryResult<WorldDraftUpdateView>>;
-  publishWorld(transaction: WorldCampaignCommandContext, scope: WorldScope, request: WorldPublishRequest): Promise<WorldCampaignRepositoryResult<WorldPublicationView>>;
-  updateWorldStatus(transaction: WorldCampaignCommandContext, scope: WorldScope, request: WorldStatusUpdateRequest): Promise<WorldCampaignRepositoryResult<WorldStatusView>>;
+  getWorld(transaction: WorldCampaignReadContext, scope: WorldScope): Promise<WorldAggregateSource>;
+  createWorld(transaction: WorldCampaignCommandContext, scope: OwnerScope, request: WorldCreateRequest): Promise<WorldCampaignRepositoryResult<WorldCreateSource>>;
+  updateWorldDraft(transaction: WorldCampaignCommandContext, scope: WorldScope, request: WorldDraftUpdateRequest): Promise<WorldCampaignRepositoryResult<WorldDraftUpdateSource>>;
+  publishWorld(transaction: WorldCampaignCommandContext, scope: WorldScope, request: WorldPublishRequest): Promise<WorldCampaignRepositoryResult<WorldPublicationSource>>;
+  updateWorldStatus(transaction: WorldCampaignCommandContext, scope: WorldScope, request: WorldStatusUpdateRequest): Promise<WorldCampaignRepositoryResult<WorldStatusSource>>;
   forkWorld(transaction: WorldCampaignCommandContext, scope: WorldScope, request: WorldForkRequest): Promise<WorldCampaignRepositoryResult<WorldForkView>>;
   exportWorld(transaction: WorldCampaignReadContext, scope: WorldScope | WorldVersionScope): Promise<PortableWorldPayload>;
   previewWorldImport(transaction: WorldCampaignReadContext, scope: OwnerScope, request: WorldImportRequest): Promise<WorldImportPreviewView>;
@@ -93,31 +104,31 @@ export interface WorldRepositoryPort {
 }
 
 export interface CampaignRepositoryPort {
-  listCampaigns(transaction: WorldCampaignReadContext, scope: OwnerScope): Promise<CampaignListView>;
+  listCampaigns(transaction: WorldCampaignReadContext, scope: OwnerScope): Promise<CampaignListSource>;
   createCampaign(transaction: WorldCampaignCommandContext, scope: OwnerScope, request: CampaignCreateRequest): Promise<WorldCampaignRepositoryResult<CampaignCreateView>>;
-  updateCampaign(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignUpdateRequest): Promise<WorldCampaignRepositoryResult<CampaignUpdateView>>;
+  updateCampaign(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignUpdateRequest): Promise<WorldCampaignRepositoryResult<CampaignUpdateSource>>;
   deleteCampaign(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: ResourceDeleteRequest): Promise<WorldCampaignRepositoryResult<void>>;
   listWorldVersionPlayableCharacters(transaction: WorldCampaignReadContext, scope: WorldVersionScope): Promise<readonly PlayableCharacterSummaryItemView[]>;
   getWorldVersionPlayableCharacterSummary(transaction: WorldCampaignReadContext, scope: WorldVersionScope): Promise<PlayableCharacterSummaryView>;
-  migrateCampaignWorldVersion(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignWorldMigrationRequest): Promise<WorldCampaignRepositoryResult<CampaignMigrationView>>;
+  migrateCampaignWorldVersion(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignWorldMigrationRequest): Promise<WorldCampaignRepositoryResult<CampaignMigrationSource>>;
   syncPlayerCampaignConfig(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: PlayerCampaignConfig): Promise<WorldCampaignRepositoryResult<CampaignPlayerConfigSyncView>>;
   rewindCampaign(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignRewindRequest): Promise<WorldCampaignRepositoryResult<CampaignRewindView>>;
   branchCampaign(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignBranchRequest): Promise<WorldCampaignRepositoryResult<CampaignBranchView>>;
 }
 
 export interface CampaignStateRepositoryPort {
-  loadEffectiveCampaignStateEdit(transaction: WorldCampaignReadContext, scope: CampaignScope): Promise<CampaignStateEditView>;
-  getCampaignRuntimeState(transaction: WorldCampaignReadContext, scope: CampaignScope, requestedTurnNumber?: number): Promise<CampaignStateCorrectionView>;
-  updateCampaignRuntimeState(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignRuntimeStateUpdate): Promise<WorldCampaignRepositoryResult<CampaignStateCorrectionView>>;
+  loadEffectiveCampaignStateEdit(transaction: WorldCampaignReadContext, scope: CampaignScope): Promise<CampaignStateEditSource>;
+  getCampaignRuntimeState(transaction: WorldCampaignReadContext, scope: CampaignScope, requestedTurnNumber?: number): Promise<CampaignStateCorrectionSource>;
+  updateCampaignRuntimeState(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignRuntimeStateUpdate): Promise<WorldCampaignRepositoryResult<CampaignStateCorrectionSource>>;
 }
 
 export interface CampaignSyncRepositoryPort {
-  readCampaignSyncSnapshot(transaction: WorldCampaignReadContext, scope: CampaignScope): Promise<CampaignSyncSnapshot>;
+  readCampaignSyncSnapshot(transaction: WorldCampaignReadContext, scope: CampaignScope): Promise<CampaignSyncSnapshotSource>;
 }
 
 /** Adapter contract for the existing B4 bounded cursor/snapshot reader. */
 export interface BoundedCampaignTurnPagePort {
-  readTurnPage(scope: CampaignScope, request: BoundedCampaignTurnPageRequest): Promise<BoundedCampaignTurnPage>;
+  readTurnPage(scope: CampaignScope, request: BoundedCampaignTurnPageRequest): Promise<BoundedCampaignTurnPageSource>;
 }
 
 export interface CharacterProfileRepositoryPort {
@@ -137,7 +148,7 @@ export interface CampaignTransferRepositoryPort {
 }
 
 export interface DashboardRepositoryPort {
-  getDashboard(transaction: WorldCampaignReadContext, scope: OwnerScope): Promise<DashboardView>;
+  getDashboard(transaction: WorldCampaignReadContext, scope: OwnerScope): Promise<DashboardSource>;
 }
 
 export interface SessionProfileRepositoryPort {

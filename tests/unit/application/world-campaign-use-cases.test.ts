@@ -9,25 +9,38 @@ import {
   publishWorldDraft,
   replaceCampaignFact,
   type BoundedCampaignTurnPagePort,
+  type BoundedCampaignTurnPageSource,
   type BoundedCampaignTurn,
   type CampaignScope,
   type CampaignListView,
+  type CampaignListSource,
+  type CampaignMigrationSource,
+  type CampaignStateCorrectionSource,
   type CampaignStateEditView,
+  type CampaignStateEditSource,
+  type CampaignSyncSnapshotSource,
   type CampaignSyncStatusView,
   type CampaignTransferResultView,
   type CampaignTransferView,
   type CampaignUpdateView,
+  type CampaignUpdateSource,
   type CharacterProfileView,
   type DashboardView,
+  type DashboardSource,
   type GeneratedPlayableCharacterView,
   type GeneratedWorldPreviewView,
   type OwnerScope,
   type PlayableCharacterSummaryView,
   type WorldAggregateView,
+  type WorldAggregateSource,
   type WorldCampaignApplication,
   type WorldCampaignApplicationDependencies,
   type WorldCampaignTransactionPort,
-  type WorldListView
+  type WorldListView,
+  type WorldCreateSource,
+  type WorldDraftUpdateSource,
+  type WorldPublicationSource,
+  type WorldStatusSource
 } from "../../../packages/application/src/index.js";
 
 const ownerUserId = "11111111-1111-4111-8111-111111111111";
@@ -308,6 +321,8 @@ describe("world and campaign application use cases", () => {
 
   test("delegates changed sync windows to one bounded turn-page port", async () => {
     const pageRequests: unknown[] = [];
+    const repositoryCampaignUpdatedAt = new Date("2026-08-05T10:00:00.000Z");
+    const repositoryTurnAcceptedAt = new Date("2026-08-05T10:05:00.000Z");
     const transaction: WorldCampaignTransactionPort = {
       command: async (work) => work({}),
       read: async (work) => work({})
@@ -328,7 +343,7 @@ describe("world and campaign application use cases", () => {
             customActionSuggestion: "",
             imagePrompt: "",
             imageUrl: null,
-            acceptedAt: "2026-08-05T10:00:00.000Z",
+            acceptedAt: repositoryTurnAcceptedAt,
             reportedCost: null
           }],
           nextCursor: "older-page"
@@ -342,7 +357,7 @@ describe("world and campaign application use cases", () => {
       activeTurnNumber: 1,
       worldVersionId: currentVersionId,
       storyLengthProfile: "standard" as const,
-      updatedAt: "2026-08-05T10:00:00.000Z",
+      updatedAt: repositoryCampaignUpdatedAt,
       selectedCharacterId: null,
       selectedCharacterName: "",
       characterSnapshot: null,
@@ -387,23 +402,44 @@ describe("world and campaign application use cases", () => {
     });
     const application = createWorldCampaignApplication(dependencies);
     const scope = { ownerUserId, campaignId };
-
-    await expect(application.getCampaignSyncStatus(scope, { since: "sync-1" })).resolves.toEqual({
+    const expectedSyncProjection = {
       ...syncProjection,
+      updatedAt: "2026-08-05T10:00:00.000Z",
+      campaign: {
+        ...campaign,
+        updatedAt: "2026-08-05T10:00:00.000Z"
+      }
+    };
+
+    const changed = await application.getCampaignSyncStatus(scope, { since: "sync-1" });
+    expect(changed).toEqual({
+      ...expectedSyncProjection,
       syncToken: "sync-2",
       turnWindowMode: "replace",
       turns: {
         campaignId,
-        turns: expect.arrayContaining([expect.objectContaining({ id: "turn-1" })]),
+        turns: expect.arrayContaining([expect.objectContaining({
+          id: "turn-1",
+          acceptedAt: "2026-08-05T10:05:00.000Z"
+        })]),
         nextCursor: "older-page"
       }
     });
-    await expect(application.getCampaignSyncStatus(scope, { since: "sync-2" })).resolves.toEqual({
-      ...syncProjection,
+    const unchanged = await application.getCampaignSyncStatus(scope, { since: "sync-2" });
+    expect(unchanged).toEqual({
+      ...expectedSyncProjection,
       syncToken: "sync-2",
       turnWindowMode: "unchanged",
       turns: null
     });
+    const changedAcceptedAt = changed.turnWindowMode === "replace" ? changed.turns.turns[0]?.acceptedAt : null;
+    expect(() => (changed.campaign.updatedAt as unknown as Date).setTime(0)).toThrow(TypeError);
+    expect(() => (changedAcceptedAt as unknown as Date).setTime(0)).toThrow(TypeError);
+    repositoryCampaignUpdatedAt.setTime(0);
+    repositoryTurnAcceptedAt.setTime(0);
+    expect(changed.campaign.updatedAt).toBe("2026-08-05T10:00:00.000Z");
+    expect(changedAcceptedAt).toBe("2026-08-05T10:05:00.000Z");
+    expect(unchanged.campaign.updatedAt).toBe("2026-08-05T10:00:00.000Z");
     expect(pageRequests).toEqual([{ scope, request: { before: undefined, limit: 50 } }]);
   });
 
@@ -427,6 +463,22 @@ describe("world and campaign application use cases", () => {
     expectTypeOf<CampaignSyncStatusView["world"]["playableCharacters"]>().toMatchTypeOf<readonly unknown[]>();
     expectTypeOf<CampaignSyncStatusView["playerConfig"]["trackers"]>().toMatchTypeOf<readonly unknown[]>();
     expectTypeOf<BoundedCampaignTurn["acceptedAt"]>().toEqualTypeOf<string>();
+  });
+
+  test("accepts raw Date values on every timestamp-bearing adapter source", () => {
+    expectTypeOf<WorldAggregateSource["createdAt"]>().toEqualTypeOf<string | Date>();
+    expectTypeOf<WorldCreateSource["updatedAt"]>().toEqualTypeOf<string | Date>();
+    expectTypeOf<WorldDraftUpdateSource["updatedAt"]>().toEqualTypeOf<string | Date>();
+    expectTypeOf<WorldPublicationSource["publishedAt"]>().toEqualTypeOf<string | Date>();
+    expectTypeOf<WorldStatusSource["updatedAt"]>().toEqualTypeOf<string | Date>();
+    expectTypeOf<CampaignListSource["campaigns"][number]["createdAt"]>().toEqualTypeOf<string | Date>();
+    expectTypeOf<CampaignUpdateSource["updatedAt"]>().toEqualTypeOf<string | Date>();
+    expectTypeOf<CampaignMigrationSource["migratedAt"]>().toEqualTypeOf<string | Date>();
+    expectTypeOf<CampaignStateEditSource["updatedAt"]>().toEqualTypeOf<string | Date>();
+    expectTypeOf<CampaignStateCorrectionSource["updatedAt"]>().toEqualTypeOf<string | Date>();
+    expectTypeOf<CampaignSyncSnapshotSource["projection"]["updatedAt"]>().toEqualTypeOf<string | Date>();
+    expectTypeOf<BoundedCampaignTurnPageSource["turns"][number]["acceptedAt"]>().toEqualTypeOf<string | Date>();
+    expectTypeOf<DashboardSource["providerCosts"]["totals"][number]["lastReportedAt"]>().toEqualTypeOf<string | Date>();
   });
 
   test("exposes the complete platform-free responsibility boundary", () => {
