@@ -7333,6 +7333,19 @@ Split this domain internally:
    campaign-transfer, state-correction, dashboard, user-profile, client-route,
    pure-use-case, adapter-contract, and real-PostgreSQL suites.
 
+**14c1 completion (2026-08-05):** Commits `dc1de51`, `80a0941`, `2a7748f`,
+and `99ef161` establish the additive `packages/application/src/world-campaign`
+boundary. It has explicit owner-scoped ports/use cases, transaction ownership,
+closed transition errors, concrete immutable views, raw Date-bearing source
+contracts, and application-owned ISO timestamp canonicalization. Campaign sync
+delegates its changed 50-turn window to the existing bounded reader and does not
+implement cursor or snapshot logic. Three independent correction reviews closed
+the projection, Date-immutability, and raw-source/view consistency findings;
+the final review approved with zero findings. Verification: focused 10/10,
+1,238 unit tests, 271 integration tests, `pnpm check`, build, boundary, diff,
+and project-memory prechecks passed. 14c2 is now next; no route, repository,
+runtime composition, worker, or legacy-service cutover occurred in 14c1.
+
 The initial-user resolver is injected at the Fastify boundary; no request field,
 header, email, display name, or provider identity is accepted as authority.
 Initial-user bootstrap remains idempotent and credential-free. Preserve non-null
