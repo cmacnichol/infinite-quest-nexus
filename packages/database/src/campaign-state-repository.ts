@@ -148,7 +148,9 @@ function runtimeStateContent(
   const candidate = {
     continuitySummary: source.continuitySummary ?? "",
     openThreads: source.openThreads ?? [],
-    canonicalFacts: canonicalFacts ?? persistedCanonicalFacts(source.canonicalFacts ?? []),
+    canonicalFacts: canonicalFacts?.length
+      ? canonicalFacts
+      : persistedCanonicalFacts(source.canonicalFacts ?? []),
     scratchpad: source.scratchpad ?? "",
     trackers: persistedTrackers(source.trackers ?? []),
     rpgStats: source.rpgStats ?? [],

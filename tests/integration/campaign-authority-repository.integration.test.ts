@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import {
   createPostgresBoundedCampaignTurnPageAdapter,
@@ -22,6 +22,14 @@ const integration = databaseUrl ? describe.sequential : describe.skip;
 integration("PostgreSQL campaign sync adapters", () => {
   let pool: DatabasePool;
   let ownerUserId = "";
+  const importedFixtures: Array<Readonly<{
+    importId: string;
+    campaignId: string;
+    worldVersionId: string;
+    worldId: string;
+  }>> = [];
+  const providerIds: string[] = [];
+  const foreignUserIds: string[] = [];
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
@@ -31,6 +39,38 @@ integration("PostgreSQL campaign sync adapters", () => {
 
   afterAll(async () => {
     await pool?.end();
+  });
+
+  afterEach(async () => {
+    const fixtures = [...importedFixtures];
+    const createdProviderIds = [...providerIds];
+    const createdForeignUserIds = [...foreignUserIds];
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (fixtures.length) {
+        await client.query("DELETE FROM imports WHERE id = ANY($1::uuid[])", [fixtures.map(({ importId }) => importId)]);
+        await client.query("DELETE FROM campaigns WHERE id = ANY($1::uuid[])", [fixtures.map(({ campaignId }) => campaignId)]);
+        await client.query("DELETE FROM world_drafts WHERE world_id = ANY($1::uuid[])", [fixtures.map(({ worldId }) => worldId)]);
+        await client.query("DELETE FROM world_versions WHERE id = ANY($1::uuid[])", [fixtures.map(({ worldVersionId }) => worldVersionId)]);
+        await client.query("DELETE FROM worlds WHERE id = ANY($1::uuid[])", [fixtures.map(({ worldId }) => worldId)]);
+      }
+      if (createdProviderIds.length) {
+        await client.query("DELETE FROM provider_profiles WHERE id = ANY($1::uuid[])", [createdProviderIds]);
+      }
+      if (createdForeignUserIds.length) {
+        await client.query("DELETE FROM users WHERE id = ANY($1::uuid[])", [createdForeignUserIds]);
+      }
+      await client.query("COMMIT");
+      importedFixtures.splice(0, fixtures.length);
+      providerIds.splice(0, createdProviderIds.length);
+      foreignUserIds.splice(0, createdForeignUserIds.length);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 
   function createAdapters() {
@@ -44,10 +84,12 @@ integration("PostgreSQL campaign sync adapters", () => {
   async function createCampaignFixture() {
     const story = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     story.world.title = `Campaign sync ${crypto.randomUUID()}`;
-    return importLegacyStory(pool, storyImportRequestSchema.parse({
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
       sourceName: `campaign-sync-${crypto.randomUUID()}.story`,
       story
     }));
+    importedFixtures.push(imported);
+    return imported;
   }
 
   async function createProviderFixture() {
@@ -58,32 +100,38 @@ integration("PostgreSQL campaign sync adapters", () => {
        RETURNING id`,
       [ownerUserId, `Campaign sync provider ${crypto.randomUUID()}`]
     );
-    return provider.rows[0]!.id;
+    const providerId = provider.rows[0]!.id;
+    providerIds.push(providerId);
+    return providerId;
+  }
+
+  async function createForeignUserFixture(label: string) {
+    const foreign = await pool.query<{ id: string }>(
+      "INSERT INTO users (display_name, status) VALUES ($1, 'active') RETURNING id",
+      [`${label} ${crypto.randomUUID()}`]
+    );
+    const foreignUserId = foreign.rows[0]!.id;
+    foreignUserIds.push(foreignUserId);
+    return foreignUserId;
   }
 
   it("returns typed campaign_not_found outside the explicit owner scope", async () => {
     const imported = await createCampaignFixture();
-    const foreign = await pool.query<{ id: string }>(
-      "INSERT INTO users (display_name, status) VALUES ($1, 'active') RETURNING id",
-      [`Foreign sync owner ${crypto.randomUUID()}`]
-    );
+    const foreignUserId = await createForeignUserFixture("Foreign sync owner");
     const adapters = createAdapters();
 
     await expect(adapters.transaction.read((transaction) => adapters.sync.readCampaignSyncSnapshot(
       transaction,
-      { ownerUserId: foreign.rows[0]!.id, campaignId: imported.campaignId }
+      { ownerUserId: foreignUserId, campaignId: imported.campaignId }
     ))).rejects.toMatchObject({ reason: "campaign_not_found" });
   });
 
   it("keeps campaign runtime state invisible outside the explicit owner scope", async () => {
     const imported = await createCampaignFixture();
-    const foreign = await pool.query<{ id: string }>(
-      "INSERT INTO users (display_name, status) VALUES ($1, 'active') RETURNING id",
-      [`Foreign state owner ${crypto.randomUUID()}`]
-    );
+    const foreignUserId = await createForeignUserFixture("Foreign state owner");
     const adapters = createAdapters();
 
-    const foreignScope = { ownerUserId: foreign.rows[0]!.id, campaignId: imported.campaignId };
+    const foreignScope = { ownerUserId: foreignUserId, campaignId: imported.campaignId };
     await expect(adapters.transaction.read((transaction) => adapters.state.getCampaignRuntimeState(
       transaction,
       foreignScope
@@ -171,6 +219,62 @@ integration("PostgreSQL campaign sync adapters", () => {
       }
     });
     expect(edit.updatedAt).toBeInstanceOf(Date);
+  });
+
+  it("retains snapshot-only canonical facts across current and historical reads and later corrections", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const historicalFact = "The old bell rang only at moonrise.";
+    const currentFact = "The restored beacon burns with a steady blue flame.";
+    await pool.query(
+      `UPDATE turns
+          SET state_snapshot_private = jsonb_set(
+            state_snapshot_private,
+            '{canonicalFacts}',
+            CASE turn_number WHEN 1 THEN $3::jsonb ELSE $4::jsonb END
+          )
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number IN (1, 2)`,
+      [ownerUserId, imported.campaignId, JSON.stringify([historicalFact]), JSON.stringify([currentFact])]
+    );
+    await pool.query(
+      "DELETE FROM campaign_canonical_facts WHERE owner_user_id = $1 AND campaign_id = $2",
+      [ownerUserId, imported.campaignId]
+    );
+
+    const current = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope));
+    const historical = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope, 1));
+    expect(current.canonicalFacts).toEqual([{ id: null, content: currentFact }]);
+    expect(historical.canonicalFacts).toEqual([{ id: null, content: historicalFact }]);
+
+    const corrected = await adapters.transaction.command((transaction) =>
+      adapters.state.updateCampaignRuntimeState(transaction, scope, {
+        expectedTurnNumber: current.activeTurnNumber,
+        expectedRevision: current.revision,
+        continuitySummary: "The beacon keeper has returned to the tower.",
+        openThreads: current.openThreads,
+        canonicalFacts: current.canonicalFacts,
+        scratchpad: current.scratchpad,
+        trackers: current.trackers,
+        rpgStats: current.rpgStats,
+        eventTriggers: current.eventTriggers,
+        pendingEventTriggers: current.pendingEventTriggers
+      }));
+    expect(corrected).toMatchObject({
+      ok: true,
+      value: { canonicalFacts: [{ id: expect.any(String), content: currentFact }] }
+    });
+    await expect(pool.query<{ canonicalFacts: unknown }>(
+      `SELECT state_snapshot_private->'canonicalFacts' AS "canonicalFacts"
+         FROM campaign_state_edits
+        WHERE owner_user_id = $1 AND campaign_id = $2
+        ORDER BY revision DESC LIMIT 1`,
+      [ownerUserId, imported.campaignId]
+    )).resolves.toMatchObject({
+      rows: [{ canonicalFacts: [{ id: expect.any(String), content: currentFact }] }]
+    });
   });
 
   it("updates campaign state only when both turn and state-revision fences match", async () => {
