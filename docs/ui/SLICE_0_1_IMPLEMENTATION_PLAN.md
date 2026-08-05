@@ -7396,9 +7396,18 @@ Split this domain internally:
    keeps source campaign state/history immutable, and deliberately does not
    clone operational jobs, costs, or recovery records. The final independent
    review approved with zero findings; real-PostgreSQL coverage passed 26/26
-   twice with `pnpm check` and diff checks. **14c2 is complete; 14c2c
+   twice with `pnpm check` and diff checks. **14c2b is complete; 14c2c
    (transfer and characters) is next.** No route/runtime/worker/legacy-service
    cutover occurred.
+
+   **14c2c completion (2026-08-05):** `908760c` adds additive PostgreSQL
+   campaign-transfer and character-profile adapters; correction `10f66dc`
+   preserves AI organizer protocol provenance and blocks transfers while every
+   live/recoverable image-job state is active. The final re-review approved with
+   zero findings. Focused real-PostgreSQL coverage passed 11/11 with `pnpm
+   check` and diff checks. **14c2d (dashboard, session, progress, and
+   world-generation collaborator seam) is next.** No route/runtime/worker/
+   legacy-service/provider cutover occurred.
 
 3. **14c3 — atomic composition and transport cutover.** Create named API
    adapters plus `services/runtime/src/world-campaign-composition.ts`, bind every
