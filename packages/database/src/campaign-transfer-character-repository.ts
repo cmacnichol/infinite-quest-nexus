@@ -133,6 +133,11 @@ export function createPostgresCharacterProfileRepository(): CharacterProfileRepo
     async updateCampaignCharacterProfile(transaction, scope, input) {
       const client = worldCampaignDatabaseClient(transaction);
       const request = parseRequest(campaignCharacterProfileUpdateSchema, input, scope);
+      if (request.editSource === "ai_organized" && !request.organizerProtocolVersion) {
+        throw new WorldCampaignApplicationError("invalid_request", "invalid_transition", {
+          campaignId: scope.campaignId
+        });
+      }
       const current = await client.query(
         `SELECT character_profile AS "characterProfile",
                 character_profile_revision AS "characterProfileRevision"
@@ -204,7 +209,9 @@ export function createPostgresCharacterProfileRepository(): CharacterProfileRepo
         [scope.ownerUserId, scope.campaignId, json({
           characterProfileRevision: revision,
           editSource: request.editSource,
-          organizerProtocolVersion: null
+          organizerProtocolVersion: request.editSource === "ai_organized"
+            ? request.organizerProtocolVersion
+            : null
         }), scope.campaignId],
       );
       return success({
@@ -318,7 +325,7 @@ async function transferCounts(client: DatabaseClient, scope: CampaignScope): Pro
        (SELECT count(*)::int FROM generation_jobs WHERE owner_user_id = $1 AND campaign_id = $2
           AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')) AS active_generation_count,
        (SELECT count(*)::int FROM image_jobs WHERE owner_user_id = $1 AND campaign_id = $2
-          AND status IN ('queued','generating','recoverable')) AS active_image_count`,
+          AND status IN ('queued','generating','provider_pending','downloading','recoverable')) AS active_image_count`,
     [scope.ownerUserId, scope.campaignId],
   );
   const parsed = countRowSchema.safeParse(result.rows[0]);

@@ -156,7 +156,8 @@ export const campaignCharacterProfileSchema = z.object({
 
 export const campaignCharacterProfileUpdateSchema = campaignCharacterProfileSchema.extend({
   expectedRevision: z.coerce.number().int().min(0),
-  editSource: characterProfileEditSourceSchema.default("manual")
+  editSource: characterProfileEditSourceSchema.default("manual"),
+  organizerProtocolVersion: z.string().trim().min(1).max(100).optional()
 }).strict();
 
 export const characterProfileOrganizationRequestSchema = z.object({

@@ -225,6 +225,7 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
       activeChain: boolean;
       edits: unknown;
       activities: number;
+      activityDetails: unknown;
     }>(
       `SELECT c.character_profile AS "characterProfile",
               c.character_profile_revision AS "characterProfileRevision",
@@ -232,7 +233,10 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
               (SELECT jsonb_agg(jsonb_build_array(revision, edit_source) ORDER BY revision)
                  FROM campaign_character_profile_edits WHERE campaign_id = c.id) AS edits,
               (SELECT count(*)::int FROM activity_events
-                WHERE campaign_id = c.id AND event_type = 'campaign_character_profile_updated') AS activities
+                WHERE campaign_id = c.id AND event_type = 'campaign_character_profile_updated') AS activities,
+              (SELECT details FROM activity_events
+                WHERE campaign_id = c.id AND event_type = 'campaign_character_profile_updated'
+                ORDER BY created_at DESC LIMIT 1) AS "activityDetails"
          FROM campaigns c WHERE c.id = $1`,
       [campaign.id],
     );
@@ -241,7 +245,12 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
       characterProfileRevision: 2,
       activeChain: false,
       edits: [[1, "world_version_seed"], [2, "manual"]],
-      activities: 1
+      activities: 1,
+      activityDetails: {
+        characterProfileRevision: 2,
+        editSource: "manual",
+        organizerProtocolVersion: null
+      }
     });
 
     const stale = await transactions.command((transaction) => repository.updateCampaignCharacterProfile(
@@ -314,6 +323,47 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
       transaction,
       { ownerUserId, campaignId: campaign.id },
     ))).rejects.toMatchObject({ kind: "unavailable", reason: "invalid_transition" });
+  });
+
+  it("persists AI organizer protocol provenance and refuses an unversioned organized edit", async () => {
+    const { campaign } = await campaignFixture("Profile organizer audit");
+    const transactions = createPostgresWorldCampaignTransactionPort(pool);
+    const repository = repositoryModule.createPostgresCharacterProfileRepository();
+    const profile = characterProfileSchema.parse({ story: { role: "Organized authority witness" } });
+
+    const saved = unwrap(await transactions.command((transaction) => repository.updateCampaignCharacterProfile(
+      transaction,
+      { ownerUserId, campaignId: campaign.id },
+      campaignCharacterProfileUpdateSchema.parse({
+        expectedRevision: 1,
+        name: "Organized Hero",
+        profile,
+        editSource: "ai_organized",
+        organizerProtocolVersion: "character-profile-organizer-v2"
+      }),
+    )));
+    expect(saved).toMatchObject({ revision: 2, name: "Organized Hero" });
+    expect((await pool.query<{ details: unknown }>(
+      `SELECT details FROM activity_events
+        WHERE campaign_id = $1 AND event_type = 'campaign_character_profile_updated'
+        ORDER BY created_at DESC LIMIT 1`,
+      [campaign.id],
+    )).rows[0]?.details).toMatchObject({
+      characterProfileRevision: 2,
+      editSource: "ai_organized",
+      organizerProtocolVersion: "character-profile-organizer-v2"
+    });
+
+    await expect(transactions.command((transaction) => repository.updateCampaignCharacterProfile(
+      transaction,
+      { ownerUserId, campaignId: campaign.id },
+      campaignCharacterProfileUpdateSchema.parse({
+        expectedRevision: 2,
+        name: "Unversioned organized hero",
+        profile,
+        editSource: "ai_organized"
+      }),
+    ))).rejects.toMatchObject({ kind: "invalid_request", reason: "invalid_transition" });
   });
 
   it("previews transfer compatibility and counts without mutating either aggregate", async () => {
@@ -416,6 +466,70 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
       campaignTransferPreviewRequestSchema.parse({ targetWorldVersionId: target.worldVersionId }),
     ))).rejects.toMatchObject({ kind: "unavailable", reason: "invalid_transition" });
   });
+
+  it.each(["provider_pending", "downloading"] as const)(
+    "blocks transfer preview and commit while an image job is %s",
+    async (status) => {
+      const source = await campaignFixture(`Transfer image ${status}`);
+      const target = await publishedWorld(`Transfer image ${status} target`, `${status}-target`);
+      const provider = await pool.query<{ id: string }>(
+        `INSERT INTO provider_profiles (
+           owner_user_id, name, provider_type, provider_role, base_url, default_model
+         ) VALUES ($1, $2, 'openai_compatible', 'image', 'http://provider.invalid', 'synthetic-image-model')
+         RETURNING id`,
+        [ownerUserId, `Transfer image provider ${status} ${crypto.randomUUID()}`],
+      );
+      const providerId = provider.rows[0]!.id;
+      providerIds.push(providerId);
+      const turn = await pool.query<{ id: string }>(
+        `INSERT INTO turns (
+           owner_user_id, campaign_id, turn_number, action, narration, choices,
+           state_snapshot_private, model_metadata
+         ) VALUES ($1, $2, 1, 'Wait.', 'Waiting.', '[]', '{}', '{}') RETURNING id`,
+        [ownerUserId, source.campaign.id],
+      );
+      await pool.query(
+        `INSERT INTO image_jobs (
+           owner_user_id, campaign_id, turn_id, provider_profile_id, requested_model,
+           prompt, prompt_hash, status, provider_type, target_type
+         ) VALUES ($1,$2,$3,$4,'synthetic-image-model','A safe fictional scene.',$5,$6,
+                   'openai_compatible','turn_illustration')`,
+        [ownerUserId, source.campaign.id, turn.rows[0]!.id, providerId, crypto.randomUUID(), status],
+      );
+      const transactions = createPostgresWorldCampaignTransactionPort(pool);
+      const repository = transferRepository();
+      const previewRequest = campaignTransferPreviewRequestSchema.parse({ targetWorldVersionId: target.worldVersionId });
+      const preview = await transactions.read((transaction) => repository.previewCampaignWorldTransfer(
+        transaction,
+        { ownerUserId, campaignId: source.campaign.id },
+        previewRequest,
+      ));
+      expect(preview).toMatchObject({ allowed: false });
+      expect(preview.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "active_image_job", severity: "blocking" })
+      ]));
+      const before = await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM campaigns WHERE owner_user_id = $1",
+        [ownerUserId],
+      );
+      const committed = await transactions.command((transaction) => repository.transferCampaignWorld(
+        transaction,
+        { ownerUserId, campaignId: source.campaign.id },
+        campaignTransferCommitRequestSchema.parse({
+          ...previewRequest,
+          idempotencyKey: crypto.randomUUID(),
+          expectedActiveTurnNumber: preview.expectedActiveTurnNumber,
+          expectedStateRevision: preview.expectedStateRevision,
+          sourceFingerprint: preview.sourceFingerprint
+        }),
+      ));
+      expect(committed).toMatchObject({ ok: false, failure: { reason: "invalid_transition" } });
+      expect((await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM campaigns WHERE owner_user_id = $1",
+        [ownerUserId],
+      )).rows[0]?.count).toBe(before.rows[0]?.count);
+    },
+  );
 
   it("commits a transfer once with migration, state, asset, and replacement provenance", async () => {
     const source = await campaignFixture("Transfer commit");
