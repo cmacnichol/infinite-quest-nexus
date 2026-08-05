@@ -9,7 +9,7 @@ import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { buildServer } from "../../services/api/src/server.js";
-import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
+import { createApiWorldCampaignApplication } from "../helpers/runtime-application-fixtures.js";
 import { serverOptions } from "../helpers/build-server-options.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;

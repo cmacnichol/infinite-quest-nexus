@@ -4,6 +4,7 @@ import { logger } from "../../../packages/logger/src/index.js";
 import { containsMechanicsLanguage } from "../../../packages/story-engine/src/index.js";
 import { enqueueIllustration } from "./illustration-image-job-adapter.js";
 import { enqueueSegmentProviderImage } from "./illustration-segment-job-adapter.js";
+import type { IllustrationProviderCollaborators } from "./provider-application-composition.js";
 
 const MATCH_ALGORITHM_VERSION = "library-match-v1";
 const THRESHOLDS = { strict: 0.68, balanced: 0.52, broad: 0.38 } as const;
@@ -327,7 +328,12 @@ async function markResolutionFailure(pool: DatabasePool, job: ResolutionRow, wor
   });
 }
 
-export async function runIllustrationResolutionJob(pool: DatabasePool, workerId: string, leaseSeconds: number): Promise<boolean> {
+export async function runIllustrationResolutionJob(
+  pool: DatabasePool,
+  workerId: string,
+  leaseSeconds: number,
+  providers: IllustrationProviderCollaborators,
+): Promise<boolean> {
   const job = await claimResolutionJob(pool, workerId, leaseSeconds);
   if (!job) return false;
   const startedAt = Date.now();
@@ -416,8 +422,8 @@ export async function runIllustrationResolutionJob(pool: DatabasePool, workerId:
     });
     if (outcome.kind === "generate") {
       const imageJob = job.segment_id
-        ? await enqueueSegmentProviderImage(pool, job.segment_id)
-        : await enqueueIllustration(pool, job.turn_id!, { replace: false });
+        ? await enqueueSegmentProviderImage(pool, job.segment_id, providers)
+        : await enqueueIllustration(pool, job.turn_id!, { replace: false }, providers);
       if (!imageJob) return true;
       await pool.query(
         `UPDATE illustration_resolution_jobs

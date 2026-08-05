@@ -98,7 +98,12 @@ import {
   campaignTransferPreviewRequestSchema
 } from "../../../packages/contracts/src/campaign-transfer.js";
 import { previewLegacyStoryImport } from "./import-service.js";
-import { getImportProgress, importInfiniteWorlds, previewInfiniteWorldsImport } from "./infinite-worlds-import-service.js";
+import {
+  getImportProgress,
+  importInfiniteWorlds,
+  previewInfiniteWorldsImport,
+  type InfiniteWorldsApiProviders
+} from "./infinite-worlds-import-service.js";
 import { createMemoryApplicationAdapter } from "./memory-application-adapter.js";
 import {
   createOwnerBoundPortableWorldApplicationPort,
@@ -122,6 +127,7 @@ export type BuildServerOptions = {
   generationEvents: GenerationEventSource;
   worldCampaign: import("../../../packages/application/src/world-campaign/index.js").WorldCampaignApplication;
   providers: ProviderApiTransportAdapter;
+  infiniteWorldsProviders: InfiniteWorldsApiProviders;
 };
 
 const uuidSchema = z.uuid();
@@ -275,7 +281,17 @@ async function generationLifecycleLogContext(
   return result.rows[0] || null;
 }
 
-export async function buildServer({ config, pool, generation, illustration, memory, generationEvents, worldCampaign, providers }: BuildServerOptions): Promise<FastifyInstance> {
+export async function buildServer({
+  config,
+  pool,
+  generation,
+  illustration,
+  memory,
+  generationEvents,
+  worldCampaign,
+  providers,
+  infiniteWorldsProviders,
+}: BuildServerOptions): Promise<FastifyInstance> {
   const illustrationTurnScope = async (turnId: string) => {
     const ownerUserId = await initialOwnerId(pool);
     const result = await pool.query<{ campaign_id: string }>(
@@ -586,7 +602,7 @@ export async function buildServer({ config, pool, generation, illustration, memo
     const result = await importInfiniteWorlds(
       pool,
       infiniteWorldsImportRequestSchema.parse(request.body),
-      config.credentialEncryptionKey,
+      infiniteWorldsProviders,
       memory.generation,
       portableWorldApplication,
       assetStore

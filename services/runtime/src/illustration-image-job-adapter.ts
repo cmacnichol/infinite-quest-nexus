@@ -27,18 +27,12 @@ import {
   containsMechanicsLanguage,
   logProviderTransportError,
   MAX_IMAGE_ARTIFACT_BYTES,
-  pollImageProvider,
-  submitImageProvider,
-  type ImageProviderArtifact,
-  type ImageProviderResult,
-  type TextProviderProfile
+  type ImageProviderArtifact
 } from "../../../packages/story-engine/src/index.js";
 import { pinnedConnectOptions } from "../../../packages/story-engine/src/provider-transport.js";
 import { lockOriginalImages, persistTurnImage, persistWorldCover, type FilesystemAssetStore } from "../../api/src/asset-service.js";
-import { loadImageProvider, recordProviderHealth, resolveEffectiveProviderId } from "./provider-runtime-adapter.js";
-import { recordProfileCost } from "./provider-cost-adapter.js";
-import { promptFromSnapshot, resolvePromptSnapshot } from "./provider-prompt-adapter.js";
 import { loadOrNotFound } from "../../api/src/service-helpers.js";
+import type { IllustrationProviderCollaborators } from "./provider-application-composition.js";
 
 type IllustrationConfigRow = {
   enabled: boolean;
@@ -277,7 +271,12 @@ export async function insertImageJob(
   return result.rows[0] || null;
 }
 
-export async function enqueueWorldCover(pool: DatabasePool, worldId: string, request: WorldCoverRequest) {
+export async function enqueueWorldCover(
+  pool: DatabasePool,
+  worldId: string,
+  request: WorldCoverRequest,
+  providers: IllustrationProviderCollaborators,
+) {
   const ownerUserId = await initialOwnerId(pool);
   return withTransaction(pool, async (client) => {
     const worldResult = await client.query<{ title: string; status: string; content: Record<string, any> }>(
@@ -298,15 +297,10 @@ export async function enqueueWorldCover(pool: DatabasePool, worldId: string, req
       || (existing.rows[0].status === "completed" && !request.replace))) {
       return { ...publicJob(existing.rows[0]), duplicate: true };
     }
-    const providerProfileId = await resolveEffectiveProviderId(client, ownerUserId, "image", null);
-    if (!providerProfileId) throw Object.assign(new Error("Configure a default image provider before generating a world cover."), { statusCode: 409 });
-    const provider = await client.query<{ default_model: string }>(
-      `SELECT default_model FROM provider_profiles
-        WHERE id = $1 AND owner_user_id = $2 AND provider_role = 'image' AND enabled = true`,
-      [providerProfileId, ownerUserId]
-    );
-    const model = provider.rows[0]?.default_model.trim();
-    if (!model) throw Object.assign(new Error("Select a default model on the default image provider before generating a world cover."), { statusCode: 409 });
+    const resolution = await providers.resolution.resolveDirect({ ownerUserId, providerRole: "image" });
+    if (resolution.status !== "resolved") throw Object.assign(new Error("Configure a default image provider before generating a world cover."), { statusCode: 409 });
+    const providerProfileId = resolution.providerProfileId;
+    const model = resolution.model;
     const overview = world.content?.world || {};
     const prompt = request.prompt || [
       `Create a polished vertical fantasy book cover for the story world “${world.title}”.`,
@@ -341,7 +335,8 @@ export async function enqueueAcceptedTurnIllustration(
   ownerUserId: string,
   campaignId: string,
   turnId: string,
-  imagePrompt: string
+  imagePrompt: string,
+  providers: IllustrationProviderCollaborators,
 ): Promise<string | null> {
   const configResult = await client.query<IllustrationConfigRow & { campaign_provider_profile_id: string | null }>(
     `SELECT c.enabled, c.source_policy, c.matching_scope, c.confidence_profile, c.repetition_window,
@@ -367,18 +362,24 @@ export async function enqueueAcceptedTurnIllustration(
     );
     return resolution.rows[0]?.id || null;
   }
-  const configuredProviderId = row.provider_profile_id;
-  row.provider_profile_id = await resolveEffectiveProviderId(client, ownerUserId, "image", row.campaign_provider_profile_id);
-  if (!row.provider_profile_id) return null;
-  if (row.provider_profile_id !== configuredProviderId) {
-    const provider = await client.query<{ default_model: string }>("SELECT default_model FROM provider_profiles WHERE id = $1 AND owner_user_id = $2", [row.provider_profile_id, ownerUserId]);
-    if (provider.rows[0]?.default_model) row.model = provider.rows[0].default_model;
-  }
+  const resolution = await providers.resolution.resolveDirect({
+    ownerUserId,
+    providerRole: "image",
+    ...(row.campaign_provider_profile_id ? { selectedProviderProfileId: row.campaign_provider_profile_id } : {})
+  });
+  if (resolution.status !== "resolved") return null;
+  row.provider_profile_id = resolution.providerProfileId;
+  row.model = resolution.model;
   const job = await insertImageJob(client, { ownerUserId, campaignId, turnId, prompt: imagePrompt, config: publicConfig(row) });
   return job?.id || null;
 }
 
-export async function enqueueIllustration(pool: DatabasePool, turnId: string, request: IllustrationRequest) {
+export async function enqueueIllustration(
+  pool: DatabasePool,
+  turnId: string,
+  request: IllustrationRequest,
+  providers: IllustrationProviderCollaborators,
+) {
   const ownerUserId = await initialOwnerId(pool);
   return withTransaction(pool, async (client) => {
     const turnResult = await client.query<{
@@ -410,29 +411,29 @@ export async function enqueueIllustration(pool: DatabasePool, turnId: string, re
       [turn.campaign_id, ownerUserId]
     );
     const config = publicConfig(configResult.rows[0]);
-    const configuredProviderId = config.providerProfileId;
-    config.providerProfileId = await resolveEffectiveProviderId(
-      client,
+    const selectedProviderProfileId = request.providerProfileId || configResult.rows[0]?.campaign_provider_profile_id;
+    const resolution = await providers.resolution.resolveDirect({
       ownerUserId,
-      "image",
-      request.providerProfileId || configResult.rows[0]?.campaign_provider_profile_id
-    );
-    if (config.providerProfileId && config.providerProfileId !== configuredProviderId && !request.model) {
-      const providerModel = await client.query<{ default_model: string }>("SELECT default_model FROM provider_profiles WHERE id = $1 AND owner_user_id = $2", [config.providerProfileId, ownerUserId]);
-      if (providerModel.rows[0]?.default_model) config.model = providerModel.rows[0].default_model;
-    }
-    if (request.model) config.model = request.model;
+      providerRole: "image",
+      ...(selectedProviderProfileId ? { selectedProviderProfileId } : {}),
+      ...(request.model ? { model: request.model } : {})
+    });
+    config.providerProfileId = resolution.status === "resolved" ? resolution.providerProfileId : "";
+    config.model = resolution.status === "resolved" ? resolution.model : "";
     if (!config.providerProfileId || !config.model) throw Object.assign(new Error("Configure an image provider and model before requesting an illustration."), { statusCode: 409 });
     const provider = await client.query(
       `SELECT id FROM provider_profiles WHERE id = $1 AND owner_user_id = $2 AND provider_role = 'image' AND enabled = true`,
       [config.providerProfileId, ownerUserId]
     );
     if (!provider.rows[0]) throw Object.assign(new Error("Enabled image provider profile not found."), { statusCode: 400 });
-    const promptSnapshot = await resolvePromptSnapshot(client, ownerUserId, turn.campaign_id);
+    const promptSnapshot = await providers.prompts.loadIllustrationPromptSnapshot({
+      ownerUserId,
+      campaignId: turn.campaign_id
+    });
     const prompt = composeIllustrationProviderPrompt(
       request.prompt || turn.image_prompt,
       characterVisualReference(turn.character_profile, turn.character_snapshot),
-      promptFromSnapshot(promptSnapshot, "illustration_character_reference")
+      providers.promptTools.content(promptSnapshot.snapshot, "illustration_character_reference")
     );
     const job = await insertImageJob(client, { ownerUserId, campaignId: turn.campaign_id, turnId, prompt, config });
     if (!job) throw Object.assign(new Error("The accepted turn does not contain a safe fiction-only image prompt."), { statusCode: 409 });
@@ -542,11 +543,6 @@ export type ArtifactDownloadDependencies = {
   resolve?: ProviderNetworkResolver;
 };
 
-function numberSetting(profile: TextProviderProfile, key: string, fallback: number, minimum: number, maximum: number): number {
-  const value = Number(profile.configuration?.[key]);
-  return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, Math.round(value))) : fallback;
-}
-
 function pendingProviderStatus(metadata: Record<string, unknown>): string {
   const status = String(metadata.status || "pending").trim().toLowerCase();
   return status.slice(0, 100) || "pending";
@@ -655,148 +651,6 @@ export async function downloadArtifact(
   }
 }
 
-async function completeImageJob(
-  pool: DatabasePool,
-  job: ImageJobRow,
-  workerId: string,
-  store: FilesystemAssetStore,
-  provider: TextProviderProfile & { id: string; name: string },
-  result: { artifacts: ImageProviderArtifact[]; usage: Record<string, unknown>; reportedCost: ImageProviderResult["reportedCost"]; providerMetadata: Record<string, unknown> }
-): Promise<void> {
-  if (result.artifacts.length !== job.image_count) throw Object.assign(new Error("Image provider returned an unsupported artifact count."), { code: "invalid_artifact_count", permanent: true });
-  const downloading = await pool.query<{ id: string }>(
-    `UPDATE image_jobs SET status = 'downloading', provider_status = 'completed', updated_at = now()
-      WHERE id = $1 AND lease_owner = $2 AND status IN ('generating','provider_pending','downloading')
-      RETURNING id`,
-    [job.id, workerId]
-  );
-  if (!downloading.rows[0]) return;
-  const timeoutMs = numberSetting(provider, "artifactDownloadTimeoutMs", 30_000, 5_000, 120_000);
-  const allowPrivateHosts = provider.configuration?.allowPrivateArtifactHosts === true;
-  const downloaded = await Promise.all(result.artifacts.map((artifact) => downloadArtifact(artifact, timeoutMs, allowPrivateHosts)));
-  await withTransaction(pool, async (client) => {
-    if (job.generation_job_id) {
-      const parent = await client.query<{ status: string }>(
-        "SELECT status FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE",
-        [job.generation_job_id, job.owner_user_id]
-      );
-      if (!parent.rows[0] || !["assessing", "generating", "validating", "committing"].includes(parent.rows[0].status)) return;
-    }
-    const lease = await client.query<{ lease_owner: string | null; status: ImageJobRow["status"] }>(
-      "SELECT lease_owner, status FROM image_jobs WHERE id = $1 FOR UPDATE",
-      [job.id]
-    );
-    if (lease.rows[0]?.lease_owner !== workerId || lease.rows[0]?.status !== "downloading") return;
-    await lockOriginalImages(client, job.owner_user_id, downloaded);
-    const assets = [];
-    const rawRequestedVariantIndex = job.provider_request_metadata.targetVariantIndex;
-    const requestedVariantIndex = Number(rawRequestedVariantIndex);
-    const hasRequestedVariant = rawRequestedVariantIndex !== null
-      && rawRequestedVariantIndex !== undefined
-      && Boolean(job.segment_id)
-      && Number.isInteger(requestedVariantIndex)
-      && requestedVariantIndex >= 0
-      && requestedVariantIndex <= 1;
-    for (const [artifactIndex, image] of downloaded.entries()) {
-      const variantIndex = hasRequestedVariant ? requestedVariantIndex : artifactIndex;
-      const generationContext = {
-        imageJobId: job.id,
-        targetType: job.target_type,
-        variantIndex,
-        prompt: job.prompt,
-        providerProfileId: job.provider_profile_id,
-        providerType: job.provider_type || provider.providerType,
-        model: job.requested_model,
-        generationParameters: {
-          size: job.size,
-          aspectRatio: job.aspect_ratio,
-          quality: job.quality,
-          outputFormat: job.output_format,
-          ...(provider.providerType === "sogni_sdk"
-            ? { contentFilterEnabled: provider.configuration?.contentFilter !== false }
-            : {})
-        }
-      };
-      assets.push(job.target_type === "world_cover"
-        ? await persistWorldCover(client, store, job.owner_user_id, image.bytes, image.mimeType, { generationContext })
-        : await persistTurnImage(client, store, job.owner_user_id, job.campaign_id!, job.turn_id!, image.bytes, image.mimeType,
-          { generationContext, attachReference: !job.segment_id && variantIndex === 0 }));
-    }
-    const primary = assets[0]!;
-    const usageQuantity = Number(result.usage.quantity ?? result.usage.images ?? result.usage.image_count);
-    const persistedUsageQuantity = Number.isFinite(usageQuantity) && usageQuantity >= 0 ? usageQuantity : assets.length;
-    const usageUnit = String(result.usage.unit || "image").slice(0, 100);
-    const providerResponseId = String(result.providerMetadata.responseId || job.remote_job_id || "");
-    if (job.target_type === "world_cover") {
-      await client.query("UPDATE worlds SET cover_asset_id = $3, updated_at = now() WHERE id = $1 AND owner_user_id = $2", [job.world_id, job.owner_user_id, primary.id]);
-    } else if (!job.segment_id) {
-      await client.query("UPDATE turns SET image_url = $3 WHERE id = $1 AND owner_user_id = $2", [job.turn_id, job.owner_user_id, primary.publicUrl]);
-    }
-    const completed = await client.query<{ id: string }>(
-      `UPDATE image_jobs SET status = 'completed', asset_id = $3,
-         provider_response_id = COALESCE(NULLIF($10, ''), remote_job_id, provider_response_id),
-         response_metadata = $4, provider_result_metadata = $5, provider_progress = 100,
-         usage_quantity = $6, usage_unit = $7, reported_cost = $8, reported_currency = $9,
-         completed_at = now(), updated_at = now(), lease_owner = NULL, lease_expires_at = NULL,
-         next_poll_at = NULL, error_code = NULL, error_message = NULL
-       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $11 AND status = 'downloading'
-       RETURNING id`,
-      [job.id, job.owner_user_id, primary.id,
-        JSON.stringify({ usage: result.usage, provider: result.providerMetadata, mimeType: downloaded[0]!.mimeType, byteLength: downloaded[0]!.bytes.length, assetIds: assets.map((asset) => asset.id) }),
-        JSON.stringify({ ...result.providerMetadata, artifactCount: assets.length, assetIds: assets.map((asset) => asset.id) }),
-        persistedUsageQuantity, usageUnit, result.reportedCost?.amount ?? null, result.reportedCost?.currency ?? null,
-        providerResponseId, workerId]
-    );
-    if (!completed.rows[0]) return;
-    if (job.segment_id) {
-      for (const [artifactIndex, asset] of assets.entries()) {
-        const variantIndex = hasRequestedVariant ? requestedVariantIndex : artifactIndex;
-        await client.query(
-          `INSERT INTO turn_illustration_segment_assets (
-             segment_id, owner_user_id, asset_id, image_job_id, variant_index
-           ) VALUES ($1,$2,$3,$4,$5)
-           ON CONFLICT (segment_id, variant_index)
-           DO UPDATE SET asset_id = EXCLUDED.asset_id, image_job_id = EXCLUDED.image_job_id, created_at = now()`,
-          [job.segment_id, job.owner_user_id, asset.id, job.id, variantIndex]
-        );
-      }
-      await client.query(
-        `UPDATE turn_illustration_segments SET status = 'completed', updated_at = now()
-          WHERE id = $1 AND owner_user_id = $2`,
-        [job.segment_id, job.owner_user_id]
-      );
-      await client.query(
-        `UPDATE turn_illustration_sets sets
-            SET status = CASE
-              WHEN NOT EXISTS (SELECT 1 FROM turn_illustration_segments segments WHERE segments.illustration_set_id = sets.id AND segments.status <> 'completed') THEN 'completed'
-              WHEN EXISTS (SELECT 1 FROM turn_illustration_segments segments WHERE segments.illustration_set_id = sets.id AND segments.status = 'completed') THEN 'partial'
-              ELSE 'generating'
-            END,
-            completed_at = CASE WHEN NOT EXISTS (SELECT 1 FROM turn_illustration_segments segments WHERE segments.illustration_set_id = sets.id AND segments.status <> 'completed') THEN now() ELSE NULL END
-          WHERE sets.id = (SELECT illustration_set_id FROM turn_illustration_segments WHERE id = $1)
-            AND sets.owner_user_id = $2`,
-        [job.segment_id, job.owner_user_id]
-      );
-    }
-    await client.query(
-      `UPDATE illustration_resolution_jobs
-          SET status = 'completed', reason_code = 'generated', completed_at = now(), updated_at = now()
-        WHERE image_job_id = $1 AND owner_user_id = $2 AND status = 'generation_queued'`,
-      [job.id, job.owner_user_id]
-    );
-    if (job.campaign_id) {
-      await recordProfileCost(client, provider, {
-        ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId: job.turn_id,
-        imageJobId: job.id, category: "image", operation: "illustration"
-      }, { usage: result.usage, reportedCost: result.reportedCost, responseId: providerResponseId });
-    }
-  });
-  logger.info({
-    event: "image_provider_completed", imageJobId: job.id, providerType: provider.providerType,
-    remoteJobId: job.remote_job_id, stage: "completed", progress: 100, artifactCount: downloaded.length
-  });
-}
-
 async function requeueRemoteImageJob(
   pool: DatabasePool,
   job: ImageJobRow,
@@ -850,182 +704,12 @@ export async function runImageJob(
   pool: DatabasePool,
   workerId: string,
   leaseSeconds: number,
-  credentialSecret: string,
-  store: FilesystemAssetStore,
-  ports?: IllustrationWorkerPorts
+  ports: IllustrationWorkerPorts
 ): Promise<boolean> {
-  if (ports) {
-    return runImageJobThroughPorts(pool, workerId, leaseSeconds, ports);
-  }
-  const job = await claimImageJob(pool, workerId, leaseSeconds);
-  if (!job) return false;
-  try {
-    if (containsMechanicsLanguage(job.prompt)) throw Object.assign(new Error("Illustration prompt failed the fiction-only boundary."), { code: "unsafe_prompt", permanent: true });
-    const provider = await loadImageProvider(pool, job.owner_user_id, job.provider_profile_id, credentialSecret, job.requested_model);
-    const request = {
-      prompt: job.prompt,
-      size: job.size,
-      aspectRatio: job.aspect_ratio,
-      quality: job.quality,
-      outputFormat: job.output_format,
-      idempotencyKey: `${job.id}:${job.generation_revision}`,
-      imageCount: job.image_count
-    } as const;
-    if (job.remote_job_id) {
-      const persistedSogniTerminalError = job.provider_type === "sogni_sdk"
-        && ["5001", "5002", "5003", "5005"].includes(job.error_code || "");
-      if (persistedSogniTerminalError && job.attempts < job.max_attempts) {
-        await requeueRemoteImageJob(pool, job, workerId, job.error_code!, job.error_message || "Sogni remote generation failed.");
-        return true;
-      }
-      if (job.generation_deadline && job.generation_deadline.getTime() <= Date.now()) {
-        throw Object.assign(new Error("The provider generation deadline expired before completion."), { code: "image_generation_expired", expired: true, permanent: true });
-      }
-      const response = await pollImageProvider(provider, { remoteJobId: job.remote_job_id });
-      if (response.status === "pending") {
-        const pollAfterMs = Math.min(
-          numberSetting(provider, "maximumPollIntervalMs", 10_000, 1_000, 30_000),
-          Math.max(numberSetting(provider, "pollIntervalMs", 2_000, 1_000, 30_000), Number(response.pollAfterMs || 0))
-        );
-        await pool.query(
-          `UPDATE image_jobs SET status = 'provider_pending', provider_status = $3,
-             provider_progress = COALESCE($4, provider_progress), provider_queue_position = $5,
-             provider_eta_at = CASE WHEN $6::double precision IS NULL THEN NULL ELSE now() + ($6::text || ' seconds')::interval END,
-             last_polled_at = now(), next_poll_at = now() + ($7::text || ' milliseconds')::interval,
-             provider_result_metadata = $8, error_code = NULL, error_message = NULL,
-             lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-           WHERE id = $1 AND lease_owner = $2
-             AND status IN ('generating','provider_pending','downloading')`,
-          [job.id, workerId, pendingProviderStatus(response.providerMetadata), response.progress ?? null, response.queuePosition ?? null, response.etaSeconds ?? null,
-            pollAfterMs, JSON.stringify(withoutTemporaryUrls(response.providerMetadata))]
-        );
-        logger.info({
-          event: "image_provider_status", imageJobId: job.id, providerType: provider.providerType,
-          remoteJobId: job.remote_job_id, stage: pendingProviderStatus(response.providerMetadata),
-          progress: response.progress ?? null, queuePosition: response.queuePosition ?? null, etaSeconds: response.etaSeconds ?? null,
-          reconciliation: response.providerMetadata.recoveredAfterRestart === true
-        });
-        await recordProviderHealth(pool, job.owner_user_id, job.provider_profile_id, true);
-        return true;
-      }
-      if (response.status === "failed") {
-        throw Object.assign(new Error(response.error.message), {
-          code: response.error.code || "provider_generation_failed",
-          permanent: !response.error.retryable,
-          remoteTerminal: true
-        });
-      }
-      await recordProviderHealth(pool, job.owner_user_id, job.provider_profile_id, true);
-      await completeImageJob(pool, job, workerId, store, provider, {
-        artifacts: response.artifacts,
-        usage: response.usage || {},
-        reportedCost: response.reportedCost || null,
-        providerMetadata: withoutTemporaryUrls(response.providerMetadata)
-      });
-    } else {
-      const response = await submitImageProvider(provider, request);
-      await recordProviderHealth(pool, job.owner_user_id, job.provider_profile_id, true);
-      if (response.mode === "pending") {
-        const pollAfterMs = Math.min(
-          numberSetting(provider, "maximumPollIntervalMs", 10_000, 1_000, 30_000),
-          Math.max(numberSetting(provider, "pollIntervalMs", 2_000, 1_000, 30_000), Number(response.pollAfterMs || 0))
-        );
-        const generationTimeoutMs = numberSetting(provider, "generationTimeoutMs", provider.providerType === "sogni_sdk" ? 600_000 : 180_000,
-          30_000, provider.providerType === "sogni_sdk" ? 3_600_000 : 600_000);
-        const persisted = await pool.query(
-          `UPDATE image_jobs SET status = 'provider_pending', remote_job_id = $3, provider_status = $4,
-             provider_progress = $5, provider_queue_position = $6,
-             provider_eta_at = CASE WHEN $7::double precision IS NULL THEN NULL ELSE now() + ($7::text || ' seconds')::interval END,
-             submitted_at = COALESCE(submitted_at, now()), next_poll_at = now() + ($8::text || ' milliseconds')::interval,
-             generation_deadline = COALESCE(generation_deadline, now() + ($9::text || ' milliseconds')::interval),
-             provider_result_metadata = $10, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-           WHERE id = $1 AND lease_owner = $2 AND remote_job_id IS NULL
-             AND status IN ('generating','provider_pending','downloading') RETURNING id`,
-          [job.id, workerId, response.remoteJobId, pendingProviderStatus(response.providerMetadata), response.progress ?? null, response.queuePosition ?? null, response.etaSeconds ?? null,
-            pollAfterMs, generationTimeoutMs, JSON.stringify(withoutTemporaryUrls(response.providerMetadata))]
-        );
-        if (!persisted.rows[0]) throw Object.assign(new Error("Image job lease was lost before the remote job identifier was persisted."), { code: "lease_lost" });
-        logger.info({
-          event: "image_provider_submitted", imageJobId: job.id, providerType: provider.providerType,
-          remoteJobId: response.remoteJobId, stage: pendingProviderStatus(response.providerMetadata),
-          progress: response.progress ?? null, queuePosition: response.queuePosition ?? null, etaSeconds: response.etaSeconds ?? null,
-          submitPersistBoundary: "remote_id_persisted"
-        });
-        return true;
-      }
-      await completeImageJob(pool, job, workerId, store, provider, {
-        artifacts: response.artifacts,
-        usage: response.usage || {},
-        reportedCost: response.reportedCost || null,
-        providerMetadata: withoutTemporaryUrls(response.providerMetadata)
-      });
-    }
-  } catch (error) {
-    logProviderTransportError(error, {
-      imageJobId: job.id,
-      campaignId: job.campaign_id,
-      turnId: job.turn_id,
-      providerProfileId: job.provider_profile_id,
-      workerId
-    });
-    await recordProviderHealth(pool, job.owner_user_id, job.provider_profile_id, false, error instanceof Error ? error.message : String(error)).catch(() => undefined);
-    const { permanent, code, expired, remoteTerminal } = imageProviderFailureMetadata(error);
-    const retryableSubmission = !job.remote_job_id && !permanent && job.attempts < job.max_attempts;
-    const retryableRemoteFailure = Boolean(job.remote_job_id) && remoteTerminal && !permanent && job.attempts < job.max_attempts;
-    const retryablePoll = Boolean(job.remote_job_id) && !remoteTerminal && !permanent && (!job.generation_deadline || job.generation_deadline.getTime() > Date.now());
-    if (retryableRemoteFailure) {
-      await requeueRemoteImageJob(pool, job, workerId, code, error instanceof Error ? error.message : String(error));
-      return true;
-    }
-    const nextStatus = expired ? "expired" : retryablePoll ? "provider_pending" : retryableSubmission ? "queued" : permanent ? "failed" : "recoverable";
-    const requestedRetryDelay = typeof error === "object" && error !== null && "retryAfterMs" in error
-      ? Number((error as { retryAfterMs: unknown }).retryAfterMs)
-      : Number.NaN;
-    const fallbackRetryDelay = retryablePoll
-      ? Math.min(Math.max(job.attempts, 1), 5) * 2_000
-      : Math.min(Math.max(job.attempts, 1), 5) * 15_000;
-    const retryDelayMs = Number.isFinite(requestedRetryDelay)
-      ? Math.min(300_000, Math.max(1_000, Math.round(requestedRetryDelay)))
-      : fallbackRetryDelay;
-    const persistedFailure = await pool.query<{ id: string }>(
-      `UPDATE image_jobs SET status = $3, next_attempt_at = CASE WHEN $3 = 'queued'
-           THEN now() + ($7::text || ' milliseconds')::interval ELSE next_attempt_at END,
-         next_poll_at = CASE WHEN $3 = 'provider_pending'
-           THEN now() + ($7::text || ' milliseconds')::interval ELSE next_poll_at END,
-         error_code = $4, error_message = $5, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $6
-         AND status IN ('generating','provider_pending','downloading')
-       RETURNING id`,
-      [job.id, job.owner_user_id, nextStatus, code,
-        (error instanceof Error ? error.message : String(error)).slice(0, 4000), workerId, retryDelayMs]
-    );
-    if (!persistedFailure.rows[0]) return true;
-    if (job.segment_id && ["recoverable", "failed", "expired"].includes(nextStatus)) {
-      await pool.query(
-        `UPDATE turn_illustration_segments
-            SET status = $3, updated_at = now()
-          WHERE id = $1 AND owner_user_id = $2`,
-        [job.segment_id, job.owner_user_id, nextStatus === "recoverable" ? "recoverable" : "failed"]
-      );
-    }
-    if (["failed", "expired"].includes(nextStatus)) {
-      await pool.query(
-        `UPDATE illustration_resolution_jobs
-            SET status = 'failed', reason_code = $3, completed_at = now(), updated_at = now()
-          WHERE image_job_id = $1 AND owner_user_id = $2 AND status = 'generation_queued'`,
-        [job.id, job.owner_user_id, `generation_${code}`.slice(0, 200)]
-      );
-    }
-  }
-  return true;
+  return runImageJobThroughPorts(pool, workerId, leaseSeconds, ports);
 }
 
-/**
- * The runtime default lane uses the extracted application ports for all
- * provider transport, artifact retrieval, and asset writes.  The legacy
- * overload above remains only for directly invoked compatibility tests while
- * the 14a extraction is being audited; composition always supplies ports.
- */
+/** Executes the image lane only through the injected illustration/provider ports. */
 async function runImageJobThroughPorts(
   pool: DatabasePool,
   workerId: string,

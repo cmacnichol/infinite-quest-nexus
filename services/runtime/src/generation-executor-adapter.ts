@@ -37,7 +37,6 @@ import {
   buildRpgAssessmentPrompt,
   buildSceneCoveragePrompt,
   buildStoryUserPrompt,
-  callTextProvider,
   compactStoryLengthWordRange,
   containsMechanicsLanguage,
   extractPartialNarration,
@@ -57,9 +56,9 @@ import {
   providerTransportErrorDetails,
   type ActivatedEvent,
   type ProviderRequest,
-  type ProviderResult,
-  type TextProviderProfile
+  type ProviderResult
 } from "../../../packages/story-engine/src/index.js";
+import type { RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
 import {
   StreamingSegmentTracker,
   characterVisualReference,
@@ -70,10 +69,7 @@ import {
 } from "../../../packages/domain/src/index.js";
 import { logger } from "../../../packages/logger/src/index.js";
 
-type GenerationTextProvider = TextProviderProfile & {
-  id: string;
-  name: string;
-};
+type GenerationTextProvider = RuntimeTextExecution;
 
 type GenerationContextPreview = {
   campaign: {
@@ -104,34 +100,21 @@ type GenerationCostAttribution = Readonly<{
 export type GenerationExecutionCollaborators = Readonly<{
   memory: MemoryGenerationTransactionPort;
   illustration: IllustrationGenerationTransactionPort;
-  loadTextProvider(
-    pool: DatabasePool,
+  loadTextExecution(
     ownerUserId: string,
     providerProfileId: string,
-    credentialSecret: string,
     model?: string
   ): Promise<GenerationTextProvider>;
-  resolvePromptSnapshot(
-    database: DatabaseClient | DatabasePool,
-    ownerUserId: string,
-    campaignId?: string
-  ): Promise<PromptSnapshot>;
   promptFromSnapshot(
     snapshot: PromptSnapshot | Record<string, unknown> | undefined,
     key: PromptTemplateKey
   ): string;
-  promptProtocolVersion(snapshot: PromptSnapshot | Record<string, unknown> | undefined): string;
   recordProfileCost(
     database: DatabaseClient | DatabasePool,
     profile: GenerationTextProvider,
     attribution: GenerationCostAttribution,
     result: ProviderResult
   ): Promise<string | null>;
-  turnReportedCosts(
-    database: DatabaseClient | DatabasePool,
-    ownerUserId: string,
-    turnIds: string[]
-  ): Promise<Map<string, unknown>>;
   attributeGenerationCostsToTurn(
     client: DatabaseClient,
     ownerUserId: string,
@@ -145,7 +128,6 @@ export type GenerationExecutorDependencies = Readonly<{
   pool: DatabasePool;
   repository: GenerationExecutionRepository;
   collaborators: GenerationExecutionCollaborators;
-  credentialSecret: string;
 }>;
 
 type StoryCostOperation = "rpg_assessment" | "event_trigger_before" | "story_generation"
@@ -451,7 +433,7 @@ async function callCampaignTextProvider(
     recovery: Boolean(request.recoveryInput)
   });
   try {
-    const result = await callTextProvider(provider, request);
+    const result = await provider.execute(request);
     await dependencies.collaborators.recordProfileCost(
       dependencies.pool,
       provider,
@@ -558,7 +540,7 @@ async function executeLoadedGeneration(
   leaseSeconds: number,
   job: GenerationExecutionPayload
 ): Promise<boolean> {
-  const { repository, collaborators, pool, credentialSecret } = dependencies;
+  const { repository, collaborators, pool } = dependencies;
   const scope = { jobId: job.id, ownerUserId: job.owner_user_id, workerId };
   const generationStartedAt = Date.now();
   const diagnosticContext: TurnGenerationDiagnosticContext = {
@@ -581,11 +563,9 @@ async function executeLoadedGeneration(
   }, Math.max(5000, Math.floor(leaseSeconds * 1000 / 3)));
 
   try {
-    const provider = await phase("provider_loading", () => collaborators.loadTextProvider(
-      pool,
+    const provider = await phase("provider_loading", () => collaborators.loadTextExecution(
       job.owner_user_id,
       job.provider_profile_id,
-      credentialSecret,
       job.requested_model
     ));
 

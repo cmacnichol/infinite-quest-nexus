@@ -332,13 +332,11 @@ async function seedCampaign({ pool, importLegacyStory, memory, storyTemplate, ow
   return { campaignId, worldId, worldVersionId, generationJobId };
 }
 
-async function seedFixtures(pool, dependencies) {
+async function seedFixtures(pool, dependencies, providers) {
   const ownerUserId = await dependencies.initialOwnerId(pool);
   const providerProfileId = await insertProvider(pool, ownerUserId);
   const storyTemplate = JSON.parse(readFileSync(resolve("tests/fixtures/legacy-story.json"), "utf8"));
-  const memory = dependencies.createApiMemoryApplication(pool, {
-    credentialSecret: "play-loop-benchmark-only"
-  });
+  const memory = dependencies.createApiMemoryApplication(pool, providers.chronicle);
   const campaigns = {};
   for (const [label, shape] of Object.entries(FIXTURE_SHAPES)) {
     campaigns[label] = await seedCampaign({
@@ -441,29 +439,28 @@ function findStatement(statements, predicate, name) {
 }
 
 async function benchmarkDatabase(pool, databaseUrl, settings, dependencies) {
-  const seeded = await seedFixtures(pool, dependencies);
-  const tracker = createQueryTracker();
-  const measuredPool = trackedPool(pool, tracker);
   const providerTransport = dependencies.createProviderTransport({
     policy: dependencies.createProviderNetworkPolicy({ allowlist: [] })
   });
-  const memory = dependencies.createApiMemoryApplication(measuredPool, {
-    credentialSecret: "play-loop-benchmark-only"
+  const seedProviders = dependencies.createApiProviderApplicationComposition(pool, {
+    credentialSecret: "play-loop-benchmark-only",
+    transport: providerTransport,
   });
-  const providers = dependencies.createProviderApplicationAdapter(
-    dependencies.createApiProviderApplicationComposition(measuredPool, {
-      credentialSecret: "play-loop-benchmark-only",
-      transport: providerTransport
-    })
-  );
+  const seeded = await seedFixtures(pool, dependencies, seedProviders);
+  const tracker = createQueryTracker();
+  const measuredPool = trackedPool(pool, tracker);
+  const providerGraph = dependencies.createApiProviderApplicationComposition(measuredPool, {
+    credentialSecret: "play-loop-benchmark-only",
+    transport: providerTransport,
+  });
+  const memory = dependencies.createApiMemoryApplication(measuredPool, providerGraph.chronicle);
+  const providers = dependencies.createProviderApplicationAdapter(providerGraph);
   const app = await dependencies.buildServer({
     config: runtimeConfig(databaseUrl),
     pool: measuredPool,
-    generation: dependencies.createApiGenerationApplication(measuredPool),
+    generation: dependencies.createApiGenerationApplication(measuredPool, providerGraph.generation),
     memory,
-    worldCampaign: dependencies.createApiWorldCampaignApplication(measuredPool, {
-      credentialSecret: "play-loop-benchmark-only"
-    }),
+    worldCampaign: dependencies.createApiWorldCampaignApplication(measuredPool, providerGraph),
     generationEvents: inertGenerationEvents(),
     providers
   });

@@ -7,7 +7,7 @@ import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { buildServer } from "../../services/api/src/server.js";
-import { createWorkerMemoryApplication } from "../../services/runtime/src/memory-composition.js";
+import { createWorkerMemoryApplication } from "../helpers/runtime-application-fixtures.js";
 import { serverOptions } from "../helpers/build-server-options.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
@@ -511,7 +511,7 @@ integration("Task 14b4 Chronicle HTTP completion audit", () => {
       progress: {},
       indexed: 0,
       costs: 0,
-      provider_error: "chronicle_embedding_failed"
+      provider_error: "provider_unavailable"
     });
     expect(JSON.stringify(internal.rows[0])).not.toContain(privateDiagnostic);
 

@@ -15,13 +15,23 @@ import {
   createWorkerGenerationApplication,
   type WorkerGenerationCompositionFactories
 } from "../../services/runtime/src/generation-worker-composition.js";
+import type {
+  ApiGenerationProviderCollaborators,
+  WorkerGenerationProviderCollaborators
+} from "../../services/runtime/src/provider-application-composition.js";
+
+const apiProviders = {
+  prompts: { loadGenerationPromptSnapshot: vi.fn() },
+  promptTools: { protocolVersion: vi.fn(), content: vi.fn() },
+  reads: { getTurnCosts: vi.fn() },
+} as unknown as ApiGenerationProviderCollaborators;
 
 describe("createApiGenerationApplication", () => {
   it("provides every command without querying during construction", () => {
     const query = vi.fn();
     const pool = { query } as unknown as DatabasePool;
 
-    const application = createApiGenerationApplication(pool);
+    const application = createApiGenerationApplication(pool, apiProviders);
 
     expect(application).toMatchObject({
       enqueueAppend: expect.any(Function),
@@ -42,7 +52,7 @@ describe("createApiGenerationApplication", () => {
     const createCommandRepository = vi.fn(() => repository);
     const createApplication = vi.fn(() => application);
 
-    const result = createApiGenerationApplication(pool, {
+    const result = createApiGenerationApplication(pool, apiProviders, {
       createApplication,
       createCommandRepository
     });
@@ -64,6 +74,7 @@ describe("createWorkerGenerationApplication", () => {
     const illustration = {} as IllustrationApplication;
     const memory = { generation: {} } as MemoryApplication;
     const collaborators = {} as never;
+    const providers = {} as WorkerGenerationProviderCollaborators;
     const factories = {
       createApplication: vi.fn(() => application),
       createCollaborators: vi.fn(() => collaborators),
@@ -71,19 +82,18 @@ describe("createWorkerGenerationApplication", () => {
       createRepository: vi.fn(() => repository)
     } satisfies WorkerGenerationCompositionFactories;
 
-    const result = createWorkerGenerationApplication(pool, "credential-secret", illustration, memory, factories);
+    const result = createWorkerGenerationApplication(pool, illustration, memory, providers, factories);
 
     expect(result).toBe(application);
     expect(factories.createCollaborators).toHaveBeenCalledOnce();
-    expect(factories.createCollaborators).toHaveBeenCalledWith(illustration, memory);
+    expect(factories.createCollaborators).toHaveBeenCalledWith(pool, illustration, memory, providers);
     expect(factories.createRepository).toHaveBeenCalledOnce();
     expect(factories.createRepository).toHaveBeenCalledWith(pool);
     expect(factories.createExecutor).toHaveBeenCalledOnce();
     expect(factories.createExecutor).toHaveBeenCalledWith({
       pool,
       repository,
-      collaborators,
-      credentialSecret: "credential-secret"
+      collaborators
     });
     expect(factories.createApplication).toHaveBeenCalledOnce();
     expect(factories.createApplication).toHaveBeenCalledWith({

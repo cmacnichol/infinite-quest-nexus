@@ -43,6 +43,7 @@ import {
   removeSegmentIllustrationVariant,
   type SegmentConfigRow
 } from "./illustration-segment-job-adapter.js";
+import type { IllustrationProviderCollaborators } from "./provider-application-composition.js";
 
 function notFound(resource: string): Error & { statusCode: number } {
   return Object.assign(new Error(`${resource} not found.`), { statusCode: 404 });
@@ -149,7 +150,9 @@ function segmentConfig(config: StreamingIllustrationConfig): SegmentConfigRow {
   };
 }
 
-export function createIllustrationGenerationTransactionPort(): IllustrationGenerationTransactionPort {
+export function createIllustrationGenerationTransactionPort(
+  providers: IllustrationProviderCollaborators,
+): IllustrationGenerationTransactionPort {
   return {
     loadStreamingIllustrationConfig: async (database, scope) => streamingConfig(await loadConfig(
       database as DatabaseClient,
@@ -171,6 +174,7 @@ export function createIllustrationGenerationTransactionPort(): IllustrationGener
       scope.setId,
       request.segment,
       segmentConfig(request.config),
+      providers,
       request.visualReference,
     ),
     promoteProvisionalSet: (database, scope, request) => promoteProvisionalSet(
@@ -181,6 +185,7 @@ export function createIllustrationGenerationTransactionPort(): IllustrationGener
       scope.campaignId,
       request.finalNarration,
       segmentConfig(request.config),
+      providers,
       request.visualReference,
     ),
     orphanProvisionalSet: (database, scope) => orphanProvisionalSet(
@@ -193,12 +198,15 @@ export function createIllustrationGenerationTransactionPort(): IllustrationGener
       scope.ownerUserId,
       scope.campaignId,
       scope.turnId,
+      providers,
     )
   };
 }
 
 /** Runtime-only binding for the concrete illustration job state machines. */
-export function createIllustrationRepositoryFactories(): IllustrationRepositoryFactories {
+export function createIllustrationRepositoryFactories(
+  providers: IllustrationProviderCollaborators,
+): IllustrationRepositoryFactories {
   return {
     createConfigRepository: (pool) => ({
       async getIllustrationConfig(scope) {
@@ -213,7 +221,7 @@ export function createIllustrationRepositoryFactories(): IllustrationRepositoryF
     createJobRepository: (pool) => ({
       async enqueueWorldCover(scope, request) {
         await assertInitialOwner(pool, scope.ownerUserId);
-        const result = await enqueueWorldCover(pool, scope.worldId, request);
+        const result = await enqueueWorldCover(pool, scope.worldId, request, providers);
         return { ...imageJob(result), duplicate: result.duplicate };
       },
       async getLatestWorldCoverJob(scope) {
@@ -229,11 +237,12 @@ export function createIllustrationRepositoryFactories(): IllustrationRepositoryF
           scope.campaignId,
           scope.turnId,
           request.imagePrompt,
+          providers,
         ),
       ),
       async enqueueIllustration(scope, request) {
         await assertInitialOwner(pool, scope.ownerUserId);
-        const result = await enqueueIllustration(pool, scope.turnId, request);
+        const result = await enqueueIllustration(pool, scope.turnId, request, providers);
         return { ...imageJob(result), duplicate: result.duplicate };
       },
       async getImageJob(scope) {
@@ -252,7 +261,7 @@ export function createIllustrationRepositoryFactories(): IllustrationRepositoryF
     createSegmentRepository: (pool) => ({
       async generateTurnIllustrationSegments(scope, request) {
         await assertInitialOwner(pool, scope.ownerUserId);
-        return generateTurnIllustrationSegments(pool, scope.turnId, request);
+        return generateTurnIllustrationSegments(pool, scope.turnId, request, providers);
       },
       enqueueAcceptedTurnIllustrationSegments: (scope) => withTransaction(
         pool,
@@ -261,6 +270,7 @@ export function createIllustrationRepositoryFactories(): IllustrationRepositoryF
           scope.ownerUserId,
           scope.campaignId,
           scope.turnId,
+          providers,
         ),
       ),
       async previewIllustrationBackfill(scope, request) {
@@ -269,7 +279,7 @@ export function createIllustrationRepositoryFactories(): IllustrationRepositoryF
       },
       async enqueueIllustrationBackfill(scope, request) {
         await assertInitialOwner(pool, scope.ownerUserId);
-        return enqueueIllustrationBackfill(pool, scope.campaignId, request);
+        return enqueueIllustrationBackfill(pool, scope.campaignId, request, providers);
       },
       async listCampaignIllustrationSegments(scope) {
         await assertInitialOwner(pool, scope.ownerUserId);
@@ -277,7 +287,7 @@ export function createIllustrationRepositoryFactories(): IllustrationRepositoryF
       },
       async regenerateSegmentIllustration(scope, request) {
         await assertInitialOwner(pool, scope.ownerUserId);
-        const result = await regenerateSegmentIllustration(pool, scope.segmentId, request);
+        const result = await regenerateSegmentIllustration(pool, scope.segmentId, request, providers);
         return result.status
           ? { id: result.id, duplicate: result.duplicate, segmentId: result.segmentId, variantIndex: result.variantIndex, status: "queued" as const }
           : { id: result.id, duplicate: result.duplicate, segmentId: result.segmentId, variantIndex: result.variantIndex };
@@ -306,14 +316,14 @@ export function createIllustrationRepositoryFactories(): IllustrationRepositoryF
       ),
       createProvisionalSegment: (scope, request) => createProvisionalSegment(
         pool, scope.ownerUserId, scope.campaignId, scope.generationJobId, scope.setId,
-        request.segment, segmentConfig(request.config), request.visualReference,
+        request.segment, segmentConfig(request.config), providers, request.visualReference,
       ),
       promoteProvisionalSet: (scope, request) => promoteProvisionalSet(
         pool, scope.ownerUserId, scope.generationJobId, scope.turnId, scope.campaignId,
-        request.finalNarration, segmentConfig(request.config), request.visualReference,
+        request.finalNarration, segmentConfig(request.config), providers, request.visualReference,
       ),
       orphanProvisionalSet: (scope) => orphanProvisionalSet(pool, scope.ownerUserId, scope.generationJobId)
     }),
-    createGenerationTransactionPort: () => createIllustrationGenerationTransactionPort()
+    createGenerationTransactionPort: () => createIllustrationGenerationTransactionPort(providers)
   };
 }

@@ -27,6 +27,7 @@ import { runIllustrationPromptJob } from "./illustration-segment-job-adapter.js"
 import { createIllustrationPlatformBindings } from "./illustration-platform-bindings.js";
 import { createIllustrationRepositoryFactories } from "./illustration-repository-bindings.js";
 import { createIllustrationWorkerStateMachine } from "./illustration-worker-state-adapter.js";
+import type { IllustrationProviderCollaborators } from "./provider-application-composition.js";
 
 export type ApiIllustrationCompositionFactories = Readonly<{
   createRepositories(pool: DatabasePool): IllustrationApplicationDependencies;
@@ -34,18 +35,21 @@ export type ApiIllustrationCompositionFactories = Readonly<{
 }>;
 
 const apiFactories: ApiIllustrationCompositionFactories = {
-  createRepositories: (pool) => createPostgresIllustrationRepositories(
-    pool,
-    createIllustrationRepositoryFactories(),
-  ),
+  createRepositories: () => {
+    throw new Error("Provider collaborators are required.");
+  },
   createApplication: createIllustrationApplication
 };
 
 export function createApiIllustrationApplication(
   pool: DatabasePool,
+  providers: IllustrationProviderCollaborators,
   factories: ApiIllustrationCompositionFactories = apiFactories,
 ): IllustrationApplication {
-  return factories.createApplication(factories.createRepositories(pool));
+  const repositories = factories === apiFactories
+    ? createPostgresIllustrationRepositories(pool, createIllustrationRepositoryFactories(providers))
+    : factories.createRepositories(pool);
+  return factories.createApplication(repositories);
 }
 
 export type IllustrationWorkerLanes = Readonly<{
@@ -69,14 +73,13 @@ export function createIllustrationWorkerExecutor(
 export type WorkerIllustrationCompositionFactories = Readonly<{
   createPorts(
     pool: DatabasePool,
-    credentialSecret: string,
     store: FilesystemAssetStore,
+    providers: IllustrationProviderCollaborators,
   ): IllustrationWorkerPorts;
   createLanes(
     pool: DatabasePool,
-    credentialSecret: string,
-    store: FilesystemAssetStore,
     ports: IllustrationWorkerPorts,
+    providers: IllustrationProviderCollaborators,
   ): IllustrationWorkerLanes;
   createState(pool: DatabasePool, lanes: IllustrationWorkerLanes): IllustrationWorkerStateMachinePort;
   createExecutor(state: IllustrationWorkerStateMachinePort): IllustrationWorkerExecutor;
@@ -85,19 +88,17 @@ export type WorkerIllustrationCompositionFactories = Readonly<{
 
 export function createIllustrationWorkerPorts(
   pool: DatabasePool,
-  credentialSecret: string,
   store: FilesystemAssetStore,
+  providers: IllustrationProviderCollaborators,
 ): IllustrationWorkerPorts {
-  const bindings = createIllustrationPlatformBindings(pool, credentialSecret, store);
+  const bindings = createIllustrationPlatformBindings(pool, store, providers);
   return {
     imageProvider: createIllustrationImageProviderAdapter(
       pool,
-      credentialSecret,
       bindings.imageProvider,
     ),
     promptRefinement: createIllustrationPromptRefinementAdapter(
       pool,
-      credentialSecret,
       bindings.promptRefinement,
     ),
     artifactDownload: createIllustrationArtifactDownloadAdapter(bindings.artifactDownload),
@@ -108,26 +109,25 @@ export function createIllustrationWorkerPorts(
 
 const workerFactories: WorkerIllustrationCompositionFactories = {
   createPorts: createIllustrationWorkerPorts,
-  createLanes: (pool, credentialSecret, store, ports) => ({
+  createLanes: (pool, ports, providers) => ({
     prompt: (request) => runIllustrationPromptJob(
       pool,
       request.workerId,
       request.leaseSeconds,
-      credentialSecret,
       ports.promptRefinement,
       ports.costs,
+      providers,
     ),
     resolution: (request) => runIllustrationResolutionJob(
       pool,
       request.workerId,
       request.leaseSeconds,
+      providers,
     ),
     image: (request) => runImageJob(
       pool,
       request.workerId,
       request.leaseSeconds,
-      credentialSecret,
-      store,
       ports,
     )
   }),
@@ -138,12 +138,14 @@ const workerFactories: WorkerIllustrationCompositionFactories = {
 
 export function createWorkerIllustrationApplication(
   pool: DatabasePool,
-  credentialSecret: string,
   store: FilesystemAssetStore,
+  providers: IllustrationProviderCollaborators,
   factories: WorkerIllustrationCompositionFactories = workerFactories,
 ): IllustrationWorkerApplication {
-  const ports = factories.createPorts(pool, credentialSecret, store);
-  const lanes = factories.createLanes(pool, credentialSecret, store, ports);
+  const ports = factories === workerFactories
+    ? createIllustrationWorkerPorts(pool, store, providers)
+    : factories.createPorts(pool, store, providers);
+  const lanes = factories.createLanes(pool, ports, providers);
   const state = factories.createState(pool, lanes);
   const executor = factories.createExecutor(state);
   return factories.createApplication({ executor, ports, state });

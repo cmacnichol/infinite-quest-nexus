@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { createProvider } from "../../services/runtime/src/provider-runtime-adapter.js";
+import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { getImportProgress, previewInfiniteWorldsImport } from "../../services/api/src/infinite-worlds-import-service.js";
 import { importInfiniteWorlds, portableWorldApplicationForTest } from "../helpers/memory-aware-services.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";

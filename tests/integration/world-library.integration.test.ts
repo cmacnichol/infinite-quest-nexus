@@ -984,7 +984,7 @@ integration("World Library and campaign version integration", () => {
         providerType: "lmstudio",
         model: "synthetic-model",
         responseId: "private-response-id",
-        promptProtocolVersion: "synthetic-protocol"
+        providerPromptProtocolVersion: "synthetic-protocol"
       })]
     );
     await pool.query(

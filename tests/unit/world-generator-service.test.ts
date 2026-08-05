@@ -14,10 +14,11 @@ import {
   generateWorldPreviewForOwner,
   incompleteGeneratedCharacterError,
   incompleteGeneratedWorldError,
-  type TemplateWorldGenerationDependencies,
   type WorldGenerationProviderDependencies,
   worldGenerationFailureDiagnostic
 } from "../../services/runtime/src/provider-world-generation-adapter.js";
+import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
+import type { WorldGenerationProviderCollaborators } from "../../services/runtime/src/provider-application-composition.js";
 
 function profile() {
   return {
@@ -117,26 +118,28 @@ function providerResult(
 function generationHarness(outcomes: Array<ProviderResult | Error>) {
   const requests: ProviderRequest[] = [];
   const progressUpdates: Array<{ phase: string; percent: number; message: string }> = [];
-  const dependencies = {
-    loadTextProvider: async () => ({
-      id: "provider-id",
-      name: "Test Provider",
-      providerType: "lmstudio" as const,
-      baseUrl: "http://lmstudio.test/v1",
+  const providers = {
+    resolution: { resolveDirect: async () => ({
+      status: "resolved",
+      requestedRole: "text",
+      resolvedRole: "text",
+      providerProfileId: "provider-id",
+      providerType: "lmstudio",
       model: "test-model",
-      contextWindowTokens: 32_000,
-      maxOutputTokens: 8_000,
-      temperature: 0
-    }),
-    resolvePromptSnapshot: async () => ({} as never),
-    callTextProvider: async (_profile: unknown, request: ProviderRequest) => {
+    }) },
+    execution: { text: async () => ({ execute: async (request: ProviderRequest) => {
       requests.push(request);
       const outcome = outcomes.shift();
       if (!outcome) throw new Error("Unexpected provider call.");
       if (outcome instanceof Error) throw outcome;
       return outcome;
-    }
-  } as unknown as TemplateWorldGenerationDependencies;
+    } }) },
+    prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: {} }) },
+    promptTools: {
+      content: (_snapshot: unknown, key: keyof typeof PROMPT_TEMPLATE_CATALOG) =>
+        PROMPT_TEMPLATE_CATALOG[key].defaultContent,
+    },
+  } as unknown as WorldGenerationProviderCollaborators;
 
   return {
     requests,
@@ -145,7 +148,6 @@ function generationHarness(outcomes: Array<ProviderResult | Error>) {
       {} as never,
       "owner-id",
       "provider-id",
-      "credential-secret",
       {
         sourceName: "test-prompt",
         sourceKind: "prompt",
@@ -154,13 +156,28 @@ function generationHarness(outcomes: Array<ProviderResult | Error>) {
         keywords: [],
         excerpts: []
       },
+      providers,
+      "world-preview",
       undefined,
       async (phase, percent, message) => {
         progressUpdates.push({ phase, percent, message });
-      },
-      dependencies
+      }
     )
   };
+}
+
+function worldProvidersWithError(error: unknown): WorldGenerationProviderCollaborators {
+  return {
+    resolution: { resolveDirect: async () => ({
+      status: "resolved",
+      requestedRole: "text",
+      resolvedRole: "text",
+      providerProfileId: "provider-id",
+      providerType: "lmstudio",
+      model: "test-model",
+    }) },
+    execution: { text: async () => { throw error; } },
+  } as unknown as WorldGenerationProviderCollaborators;
 }
 
 describe("generateTemplateWorld orchestration", () => {
@@ -585,7 +602,7 @@ describe("generateWorldPreview provider failures", () => {
         {} as never,
         "owner-id",
         { title: "The Moving Roads", prompt: "Moving roads.", progressKey: "world-gen:test" },
-        "credential-secret",
+        worldProvidersWithError(generatedError),
         dependencies
       );
     } catch {
@@ -672,7 +689,7 @@ describe("generateWorldPreview provider failures", () => {
           prompt: "PRIVATE_WORLD_PROMPT",
           progressKey: "world-gen:test"
         },
-        "credential-secret",
+        worldProvidersWithError(safeProviderError),
         dependencies
       );
     } catch (error) {
@@ -751,7 +768,7 @@ describe("generateWorldPreview provider failures", () => {
           prompt: `${marker}: PRIVATE_WORLD_PROMPT`,
           progressKey: "world-gen:typed-provider-failure"
         },
-        `${marker}: credential-secret`,
+        worldProvidersWithError(safeProviderError),
         dependencies
       );
     } catch (error) {

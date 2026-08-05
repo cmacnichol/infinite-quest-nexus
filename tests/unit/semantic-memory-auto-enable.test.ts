@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChronicleEmbeddingProviderPort } from "../../services/runtime/src/chronicle-platform-adapter.js";
-import { resolveChronicleEmbeddingProviderId } from "../../services/runtime/src/chronicle-platform-bindings.js";
 import { createPostgresChronicleGenerationTransactionPort } from "../../packages/database/src/chronicle-repository.js";
 import type { DatabaseClient } from "../../packages/database/src/pool.js";
 import { DEFAULT_EMBEDDING_MODEL } from "../../packages/contracts/src/memory.js";
@@ -8,52 +7,6 @@ import { DEFAULT_EMBEDDING_MODEL } from "../../packages/contracts/src/memory.js"
 const scope = { ownerUserId: "owner-id", campaignId: "campaign-id", worldVersionId: "wv-1" };
 
 describe("Semantic memory auto-enabling on campaign creation", () => {
-  it("resolves the dedicated embedding provider when one is enabled", async () => {
-    const database = {
-      query: vi.fn(async (sql: string) => sql.includes("provider_role = 'embedding'")
-        ? { rows: [{ id: "embed-provider-id", is_default: true }] }
-        : { rows: [] })
-    } as unknown as DatabaseClient;
-
-    await expect(resolveChronicleEmbeddingProviderId(database, {
-      ownerUserId: scope.ownerUserId,
-      campaignId: scope.campaignId
-    })).resolves.toBe("embed-provider-id");
-  });
-
-  it("falls back to the campaign's enabled text provider when no dedicated provider exists", async () => {
-    const database = {
-      query: vi.fn(async (sql: string) => {
-        if (sql.includes("provider_role = 'embedding'")) return { rows: [] };
-        if (sql.includes("SELECT text_provider_profile_id FROM campaigns")) {
-          return { rows: [{ text_provider_profile_id: "text-provider-id" }] };
-        }
-        if (sql.includes("provider_role = 'text' AND enabled = true") && sql.includes("id = $1")) {
-          return { rows: [{ id: "text-provider-id" }] };
-        }
-        return { rows: [] };
-      })
-    } as unknown as DatabaseClient;
-
-    await expect(resolveChronicleEmbeddingProviderId(database, {
-      ownerUserId: scope.ownerUserId,
-      campaignId: scope.campaignId
-    })).resolves.toBe("text-provider-id");
-  });
-
-  it("returns null when no embedding or fallback provider is available", async () => {
-    const database = {
-      query: vi.fn(async (sql: string) => sql.includes("SELECT text_provider_profile_id FROM campaigns")
-        ? { rows: [{ text_provider_profile_id: null }] }
-        : { rows: [] })
-    } as unknown as DatabaseClient;
-
-    await expect(resolveChronicleEmbeddingProviderId(database, {
-      ownerUserId: scope.ownerUserId,
-      campaignId: scope.campaignId
-    })).resolves.toBeNull();
-  });
-
   it("auto-enables semantic memory and queues embed_campaign through the transaction port", async () => {
     const queries: string[] = [];
     const database = {
@@ -77,7 +30,7 @@ describe("Semantic memory auto-enabling on campaign creation", () => {
     const embeddings = {
       resolve: vi.fn().mockResolvedValue("embed-provider-1")
     } as unknown as ChronicleEmbeddingProviderPort;
-    const memory = createPostgresChronicleGenerationTransactionPort({ credentialSecret: "secret", embeddings });
+    const memory = createPostgresChronicleGenerationTransactionPort({ embeddings });
 
     await expect(memory.autoEnableCampaignEmbedding(database, scope)).resolves.toMatchObject({
       enabled: true,
@@ -98,7 +51,7 @@ describe("Semantic memory auto-enabling on campaign creation", () => {
       })
     } as unknown as DatabaseClient;
     const embeddings = { resolve: vi.fn().mockResolvedValue(null) } as unknown as ChronicleEmbeddingProviderPort;
-    const memory = createPostgresChronicleGenerationTransactionPort({ credentialSecret: "secret", embeddings });
+    const memory = createPostgresChronicleGenerationTransactionPort({ embeddings });
 
     await expect(memory.autoEnableCampaignEmbedding(database, scope)).resolves.toMatchObject({
       enabled: false,

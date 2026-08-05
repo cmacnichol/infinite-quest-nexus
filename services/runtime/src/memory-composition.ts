@@ -16,32 +16,31 @@ import { logProviderTransportError } from "../../../packages/story-engine/src/pr
 import { createChronicleWorkerExecutor } from "./chronicle-platform-adapter.js";
 import { createChroniclePlatformBindings } from "./chronicle-platform-bindings.js";
 import { createChronicleClaimExecution } from "./chronicle-worker-execution.js";
+import type { ChronicleProviderCollaborators } from "./provider-application-composition.js";
 
 export type ApiMemoryCompositionDependencies = Readonly<{
-  credentialSecret: string;
   embeddings?: ChronicleGenerationTransactionDependencies["embeddings"];
 }>;
 
 /** Composes the API's sole Chronicle application over PostgreSQL ports. */
 export function createApiMemoryApplication(
   pool: DatabasePool,
-  dependencies: ApiMemoryCompositionDependencies,
+  providers: ChronicleProviderCollaborators,
+  dependencies: ApiMemoryCompositionDependencies = {},
 ): MemoryApplication {
   const transactionDependencies: ChronicleGenerationTransactionDependencies = {
-    credentialSecret: dependencies.credentialSecret,
-    embeddings: dependencies.embeddings ?? createChroniclePlatformBindings().embeddings
+    embeddings: dependencies.embeddings ?? createChroniclePlatformBindings(providers).embeddings
   };
   return createMemoryApplication(createPostgresChronicleRepositories(pool, transactionDependencies));
 }
 
 export function createWorkerMemoryApplication(
   pool: DatabasePool,
-  credentialSecret: string,
+  providers: ChronicleProviderCollaborators,
 ): MemoryWorkerApplication {
   const adapters = createPostgresChronicleWorkerAdapters(pool);
-  const bindings = createChroniclePlatformBindings();
+  const bindings = createChroniclePlatformBindings(providers);
   const generation = createPostgresChronicleGenerationTransactionPort({
-    credentialSecret,
     embeddings: bindings.embeddings
   });
   const batches = createPostgresChronicleEmbeddingBatchPort(pool, {
@@ -53,8 +52,7 @@ export function createWorkerMemoryApplication(
       retrieval: adapters.retrieval,
       embeddings: bindings.embeddings,
       batches,
-      generation,
-      credentialSecret
+      generation
     }),
     logProviderTransportError
   });

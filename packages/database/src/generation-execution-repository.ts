@@ -22,8 +22,7 @@ import {
   buildTurnFictionMemory,
   type ActivatedEvent,
   type PrivateRollResolution,
-  type ProviderResult,
-  type TextProviderProfile
+  type ProviderResult
 } from "../../story-engine/src/index.js";
 import {
   buildScopedEntityCatalog,
@@ -135,10 +134,12 @@ export type GenerationFailedUpdate = GenerationLeaseScope & Readonly<{
   recoveryMetadata: Record<string, unknown>;
 }>;
 
-type GenerationTextProvider = TextProviderProfile & {
+type GenerationTextProvider = Readonly<{
   id: string;
   name: string;
-};
+  providerType: string;
+  model: string;
+}>;
 
 export type AcceptedGenerationCommitCollaborators = Readonly<{
   memory: MemoryGenerationTransactionPort;

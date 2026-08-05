@@ -9,9 +9,8 @@ import {
   type CharacterProfileOrganizationResult,
   type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
-import { callTextProvider, extractJsonObject } from "../../../packages/story-engine/src/index.js";
-import { loadTextProvider, resolveEffectiveProviderId } from "./provider-runtime-adapter.js";
-import { promptFromSnapshot, resolvePromptSnapshot } from "./provider-prompt-adapter.js";
+import { extractJsonObject } from "../../../packages/story-engine/src/index.js";
+import type { CharacterOrganizationProviderCollaborators } from "./provider-application-composition.js";
 
 export const CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION = "character-profile-organizer-v2";
 
@@ -245,26 +244,44 @@ export function characterProfileOrganizerRepairInput(
 }
 
 async function organize(
-  pool: DatabasePool,
+  _pool: DatabasePool,
   ownerUserId: string,
   content: WorldContent,
   character: CharacterProfileOrganizationRequest["character"],
-  credentialSecret: string,
+  providers: CharacterOrganizationProviderCollaborators,
+  worldId: string,
   campaignTextProviderId: string | null = null
 ) {
-  const providerId = await resolveEffectiveProviderId(pool, ownerUserId, "text", campaignTextProviderId);
-  if (!providerId) throw httpError(409, "No enabled text provider is available to organize this profile.", "text_provider_unavailable");
-  const provider = await loadTextProvider(pool, ownerUserId, providerId, credentialSecret);
-  const promptSnapshot = await resolvePromptSnapshot(pool, ownerUserId);
+  const resolution = await providers.resolution.resolveDirect({
+    ownerUserId,
+    providerRole: "text",
+    ...(campaignTextProviderId === null ? {} : { selectedProviderProfileId: campaignTextProviderId }),
+  });
+  if (resolution.status !== "resolved") {
+    throw httpError(409, "No enabled text provider is available to organize this profile.", "text_provider_unavailable");
+  }
+  const provider = await providers.execution.text(
+    { ownerUserId }, resolution.providerProfileId, "text", resolution.model,
+  );
+  const promptSnapshot = (await providers.prompts.loadCharacterOrganizationPromptSnapshot({
+    ownerUserId,
+    worldId,
+    characterId: character.id,
+  })).snapshot;
   const sources = characterProfileOrganizerSources(character, content);
-  const result = await callTextProvider(provider, {
-    systemPrompt: characterProfileOrganizerPrompt(promptFromSnapshot(promptSnapshot, "character_profile_organizer")),
+  const result = await provider.execute({
+    systemPrompt: characterProfileOrganizerPrompt(
+      providers.promptTools.content(promptSnapshot, "character_profile_organizer"),
+    ),
     input: JSON.stringify(characterProfileOrganizerInput(character.name, sources))
   });
   const initialResponse = extractJsonObject(result.content);
   return validateOrganizerResultWithRepair(initialResponse, sources, async (failure) => {
-    const repaired = await callTextProvider(provider, {
-      systemPrompt: characterProfileOrganizerRepairPrompt(promptFromSnapshot(promptSnapshot, "character_profile_organizer"), promptFromSnapshot(promptSnapshot, "character_profile_repair")),
+    const repaired = await provider.execute({
+      systemPrompt: characterProfileOrganizerRepairPrompt(
+        providers.promptTools.content(promptSnapshot, "character_profile_organizer"),
+        providers.promptTools.content(promptSnapshot, "character_profile_repair"),
+      ),
       input: JSON.stringify(characterProfileOrganizerRepairInput(character.name, sources, initialResponse, failure))
     });
     return extractJsonObject(repaired.content);
@@ -276,7 +293,7 @@ export async function organizeWorldCharacterProfileForOwner(
   ownerUserId: string,
   worldId: string,
   request: CharacterProfileOrganizationRequest,
-  credentialSecret: string
+  providers: CharacterOrganizationProviderCollaborators,
 ) {
   const result = await pool.query<{ status: string; revision: number; content: unknown }>(
     `SELECT worlds.status, world_drafts.revision, world_drafts.content
@@ -292,7 +309,7 @@ export async function organizeWorldCharacterProfileForOwner(
     throw httpError(409, "The world draft changed. Reload it before organizing the character.", "world_draft_revision_conflict");
   }
   const content = worldContentSchema.parse(draft.content);
-  return organize(pool, ownerUserId, content, playableCharacterSchema.parse(request.character), credentialSecret);
+  return organize(pool, ownerUserId, content, playableCharacterSchema.parse(request.character), providers, worldId);
 }
 
 export async function organizeCampaignCharacterProfileForOwner(
@@ -300,7 +317,7 @@ export async function organizeCampaignCharacterProfileForOwner(
   ownerUserId: string,
   campaignId: string,
   request: CharacterProfileOrganizationRequest,
-  credentialSecret: string
+  providers: CharacterOrganizationProviderCollaborators,
 ) {
   const result = await pool.query<{
     character_profile_revision: number;
@@ -309,8 +326,10 @@ export async function organizeCampaignCharacterProfileForOwner(
     rpg_stats: unknown[];
     default_triggers: unknown[];
     trackers: unknown[];
+    world_id: string;
   }>(
     `SELECT campaigns.character_profile_revision, campaigns.text_provider_profile_id,
+            world_versions.world_id,
             world_versions.content AS world_content, campaign_state.rpg_stats,
             campaign_state.default_triggers, campaign_state.trackers
        FROM campaigns JOIN world_versions
@@ -336,7 +355,8 @@ export async function organizeCampaignCharacterProfileForOwner(
       rpgStats: row.rpg_stats || [],
       defaultTriggers: [...(row.default_triggers || []), ...(row.trackers || [])]
     }),
-    credentialSecret,
+    providers,
+    row.world_id,
     row.text_provider_profile_id
   );
 }

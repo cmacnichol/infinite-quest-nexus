@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import type { WorldCampaignApplication } from "../../packages/application/src/world-campaign/index.js";
-import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
+import { createApiWorldCampaignApplication } from "../helpers/runtime-application-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;

@@ -3,14 +3,7 @@ import {
   createChronicleEmbeddingProviderPort,
   createChronicleWorkerExecutor
 } from "../../services/runtime/src/chronicle-platform-adapter.js";
-import {
-  createChroniclePlatformBindings,
-  resolveChronicleEmbeddingProviderId
-} from "../../services/runtime/src/chronicle-platform-bindings.js";
 import { createChronicleClaimExecution } from "../../services/runtime/src/chronicle-worker-execution.js";
-import {
-  createApiMemoryApplication
-} from "../../services/runtime/src/memory-composition.js";
 import {
   type ChronicleWorkerStatePort
 } from "../../packages/application/src/memory/index.js";
@@ -286,7 +279,7 @@ describe("Chronicle runtime adapters", () => {
           rebuildCampaignMemories: vi.fn(),
           enqueueEmbeddingReindex: vi.fn()
         },
-        credentialSecret: "secret"
+
       });
       const logProviderTransportError = vi.fn();
       const executor = createChronicleWorkerExecutor({
@@ -333,158 +326,18 @@ describe("Chronicle runtime adapters", () => {
     }
   );
 
-  it("selects a dedicated enabled embedding profile before text and never queries image roles", async () => {
-    const roles: string[] = [];
-    const database = {
-      query: vi.fn(async (sql: string, values: readonly unknown[]) => {
-        roles.push(sql);
-        if (sql.includes("provider_role = 'embedding'")) {
-          return { rows: [{ id: "embedding-profile", is_default: true }] };
-        }
-        throw new Error(`Unexpected fallback query: ${sql} ${JSON.stringify(values)}`);
-      })
-    } as unknown as DatabaseClient;
-
-    await expect(resolveChronicleEmbeddingProviderId(database, {
-      ownerUserId: "owner-1",
-      campaignId: "campaign-1",
-      selectedProviderProfileId: "text-profile"
-    })).resolves.toBe("embedding-profile");
-    expect(roles.join("\n")).not.toMatch(/provider_role = 'image'|provider_role IN \([^)]*image/i);
-    expect(roles).toHaveLength(1);
-  });
-
-  it("uses an enabled text profile only when no dedicated embedding profile is enabled", async () => {
-    const sqlStatements: string[] = [];
-    const database = {
-      query: vi.fn(async (sql: string) => {
-        sqlStatements.push(sql);
-        if (sql.includes("provider_role = 'embedding'")) return { rows: [] };
-        if (sql.includes("provider_role = 'text'") && sql.includes("id = $1")) {
-          return { rows: [{ id: "text-profile" }] };
-        }
-        throw new Error(`Unexpected query: ${sql}`);
-      })
-    } as unknown as DatabaseClient;
-
-    await expect(resolveChronicleEmbeddingProviderId(database, {
-      ownerUserId: "owner-1",
-      campaignId: "campaign-1",
-      selectedProviderProfileId: "text-profile"
-    })).resolves.toBe("text-profile");
-    expect(sqlStatements.join("\n")).not.toMatch(/provider_role = 'image'|provider_role IN \([^)]*image/i);
-  });
-
-  it("binds profile selection to the caller database without a captured pool fallback", async () => {
-    const database = {
-      query: vi.fn(async (sql: string) => {
-        if (sql.includes("provider_role = 'embedding'")) {
-          return { rows: [{ id: "embedding-profile", is_default: true }] };
-        }
-        throw new Error(`Unexpected query: ${sql}`);
-      })
-    } as unknown as DatabaseClient;
-    const bindings = createChroniclePlatformBindings();
-
-    await expect(bindings.embeddings.resolve(database, {
-      ownerUserId: "owner-1",
-      campaignId: "campaign-1"
-    })).resolves.toBe("embedding-profile");
-    expect(database.query).toHaveBeenCalledOnce();
-  });
-
-  it("composes a direct generation transaction port that never falls back to the repository pool", async () => {
-    const poolQuery = vi.fn(() => {
-      throw new Error("repository pool fallback was used");
-    });
-    const pool = { query: poolQuery } as unknown as DatabasePool;
-    const caller = {
-      query: vi.fn(async (sql: string) => {
-        if (sql.includes("FROM campaigns")) return { rows: [{ world_version_id: "world-version-1" }] };
-        if (sql.includes("SELECT default_model FROM provider_profiles")) return { rows: [{ default_model: "embed-v1" }] };
-        if (sql.includes("INSERT INTO campaign_memory_configs")) return { rows: [{
-          embedding_enabled: true,
-          embedding_provider_profile_id: "embedding-profile",
-          embedding_model: "embed-v1",
-          embedding_batch_size: 16,
-          embedding_document_prefix: null,
-          embedding_query_prefix: null
-        }] };
-        if (sql.includes("INSERT INTO chronicle_jobs")) return { rows: [{ id: "embedding-job-1" }] };
-        throw new Error(`Unexpected caller SQL: ${sql}`);
-      })
-    } as unknown as DatabaseClient;
-    const application = createApiMemoryApplication(pool, {
-      credentialSecret: "credential-secret",
-      embeddings: {
-        resolve: async (database: DatabaseClient) => {
-          expect(database).toBe(caller);
-          return "embedding-profile";
-        }
-      } as never
-    });
-
-    await expect(application.generation.autoEnableCampaignEmbedding(caller, {
-      ownerUserId: "owner-1",
-      campaignId: "campaign-1",
-      worldVersionId: "world-version-1"
-    })).resolves.toMatchObject({ enabled: true, providerProfileId: "embedding-profile" });
-    expect(poolQuery).not.toHaveBeenCalled();
-  });
-
-  it("binds the runtime embedding platform by default in API composition", async () => {
-    const poolQuery = vi.fn(async () => {
-      throw new Error("repository pool fallback was used");
-    });
-    const pool = { query: poolQuery } as unknown as DatabasePool;
-    const caller = {
-      query: vi.fn(async (sql: string) => {
-        if (sql.includes("FROM campaigns") && !sql.includes("provider_profiles")) {
-          return { rows: [{ world_version_id: "world-version-1" }] };
-        }
-        if (sql.includes("provider_role = 'embedding'")) {
-          return { rows: [{ id: "embedding-profile", is_default: true }] };
-        }
-        if (sql.includes("SELECT default_model FROM provider_profiles")) {
-          return { rows: [{ default_model: "embed-v1" }] };
-        }
-        if (sql.includes("INSERT INTO campaign_memory_configs")) return { rows: [{
-          embedding_enabled: true,
-          embedding_provider_profile_id: "embedding-profile",
-          embedding_model: "embed-v1",
-          embedding_batch_size: 16,
-          embedding_document_prefix: null,
-          embedding_query_prefix: null
-        }] };
-        if (sql.includes("INSERT INTO chronicle_jobs")) return { rows: [{ id: "embedding-job-1" }] };
-        throw new Error(`Unexpected caller SQL: ${sql}`);
-      })
-    } as unknown as DatabaseClient;
-    const application = createApiMemoryApplication(pool, {
-      credentialSecret: "credential-secret"
-    });
-
-    await expect(application.generation.autoEnableCampaignEmbedding(caller, {
-      ownerUserId: "owner-1",
-      campaignId: "campaign-1",
-      worldVersionId: "world-version-1"
-    })).resolves.toMatchObject({ enabled: true, providerProfileId: "embedding-profile" });
-    expect(poolQuery).not.toHaveBeenCalled();
-  });
-
   it("loads and fingerprints an embedding provider through the exact caller database context", async () => {
     const load = vi.fn().mockResolvedValue({
       id: "embedding-profile",
       model: "embed-v1",
       providerType: "openai-compatible",
-      baseUrl: "https://embedding.example/v1///",
-      configuration: { dimensions: 768 }
+      configuration: { dimensions: 768 },
+      embed: vi.fn(),
     });
     const resolveEmbeddingProviderId = vi.fn().mockResolvedValue("embedding-profile");
     const database = { transaction: "accepted-turn" } as never;
     const port = createChronicleEmbeddingProviderPort({
-      loadEmbeddingProvider: load,
-      callEmbeddingProvider: vi.fn(),
+      loadEmbeddingExecution: load,
       recordProviderHealth: vi.fn(),
       recordProfileCost: vi.fn(),
       logProviderTransportError: vi.fn(),
@@ -495,19 +348,16 @@ describe("Chronicle runtime adapters", () => {
       ownerUserId: "owner-1",
       providerProfileId: "embedding-profile",
       model: "embed-v1"
-    }, "credential-secret");
+    });
 
     expect(provider).toMatchObject({
       id: "embedding-profile",
       model: "embed-v1",
-      providerType: "openai-compatible",
-      baseUrl: "https://embedding.example/v1///"
+      providerType: "openai-compatible"
     });
     expect(load).toHaveBeenCalledWith(
-      database,
       "owner-1",
       "embedding-profile",
-      "credential-secret",
       "embed-v1"
     );
     expect(load.mock.calls[0]).not.toContain("image");
@@ -640,9 +490,8 @@ describe("Chronicle runtime adapters", () => {
     const recordProviderHealth = vi.fn().mockResolvedValue(undefined);
     const recordProfileCost = vi.fn().mockResolvedValue("cost-1");
     const port = createChronicleEmbeddingProviderPort({
-      loadEmbeddingProvider: vi.fn(),
+      loadEmbeddingExecution: vi.fn(),
       resolveEmbeddingProviderId: vi.fn(),
-      callEmbeddingProvider: vi.fn(),
       recordProviderHealth,
       recordProfileCost,
       logProviderTransportError: vi.fn()
@@ -650,8 +499,7 @@ describe("Chronicle runtime adapters", () => {
     const provider = {
       id: "embedding-profile",
       model: "embed-v1",
-      providerType: "openai-compatible",
-      baseUrl: "https://embedding.example/v1"
+      providerType: "openai-compatible"
     };
     const result = { embeddings: [[0.1, 0.2]], responseId: "response-1", usage: { inputTokens: 4 }, reportedCost: null };
 

@@ -8,10 +8,10 @@ import { createPostgresGenerationCommandRepository } from "../../packages/databa
 import { sha256 } from "../../packages/domain/src/index.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
-import { turnReportedCosts } from "../../services/runtime/src/provider-cost-adapter.js";
+import { readTurnReportedCostsForTest } from "../helpers/provider-application-fixtures.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
-import { promptProtocolVersion, resolvePromptSnapshot } from "../../services/runtime/src/provider-prompt-adapter.js";
-import { createProvider } from "../../services/runtime/src/provider-runtime-adapter.js";
+import { providerPromptProtocolVersion, loadPromptSnapshotForTest } from "../helpers/provider-application-fixtures.js";
+import { createProvider } from "../helpers/provider-application-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -46,9 +46,11 @@ integration("PostgreSQL generation command repository", () => {
 
   function repository() {
     return createPostgresGenerationCommandRepository(pool, {
-      resolvePromptSnapshot,
-      promptProtocolVersion,
-      readTurnReportedCosts: (scopeOwnerUserId, turnIds) => turnReportedCosts(pool, scopeOwnerUserId, [...turnIds])
+      resolvePromptSnapshot: (client, scopeOwnerUserId, campaignId) =>
+        loadPromptSnapshotForTest(client, scopeOwnerUserId, campaignId),
+      promptProtocolVersion: providerPromptProtocolVersion,
+      readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) =>
+        readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds])
     });
   }
 
@@ -81,9 +83,11 @@ integration("PostgreSQL generation command repository", () => {
     }) as DatabasePool;
     return {
       commands: createPostgresGenerationCommandRepository(instrumentedPool, {
-        resolvePromptSnapshot,
-        promptProtocolVersion,
-        readTurnReportedCosts: (scopeOwnerUserId, turnIds) => turnReportedCosts(pool, scopeOwnerUserId, [...turnIds])
+        resolvePromptSnapshot: (client, scopeOwnerUserId, campaignId) =>
+          loadPromptSnapshotForTest(client, scopeOwnerUserId, campaignId),
+        promptProtocolVersion: providerPromptProtocolVersion,
+        readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) =>
+          readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds])
       }),
       statements
     };

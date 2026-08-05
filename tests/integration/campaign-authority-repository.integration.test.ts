@@ -14,7 +14,7 @@ import {
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
-import { turnReportedCosts } from "../../services/runtime/src/provider-cost-adapter.js";
+import { readTurnReportedCostsForTest } from "../helpers/provider-application-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -122,7 +122,10 @@ integration("PostgreSQL campaign sync adapters", () => {
   });
 
   function createAdapters(memory = memoryGeneration(pool)) {
-    const turnPages = createPostgresBoundedCampaignTurnPageAdapter(pool, { turnReportedCosts });
+    const turnPages = createPostgresBoundedCampaignTurnPageAdapter(pool, {
+      turnReportedCosts: (client, ownerUserId, _campaignId, turnIds) =>
+        readTurnReportedCostsForTest(client, ownerUserId, turnIds),
+    });
     return createPostgresCampaignAuthorityAdapters(pool, {
       turnPages,
       memory
@@ -1462,7 +1465,7 @@ integration("PostgreSQL campaign sync adapters", () => {
       byCategory: { story: "0.125000000000", image: "0", memory: "0" }
     };
 
-    expect((await turnReportedCosts(pool, ownerUserId, [turnId])).get(turnId)).toEqual(expectedCost);
+    expect((await readTurnReportedCostsForTest(pool, ownerUserId, [turnId])).get(turnId)).toEqual(expectedCost);
     const syncPage = await adapters.turnPages.readTurnPage(scope, { before: undefined, limit: 1 });
     expect(syncPage.turns[0]?.reportedCost).toEqual(expectedCost);
   });

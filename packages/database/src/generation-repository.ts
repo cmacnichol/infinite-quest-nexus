@@ -102,6 +102,7 @@ export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
   promptProtocolVersion: (snapshot: PromptSnapshot) => string;
   readTurnReportedCosts: (
     ownerUserId: string,
+    campaignId: string,
     turnIds: readonly string[],
   ) => Promise<ReadonlyMap<string, GenerationResult["reportedCost"]>>;
 }>;
@@ -549,7 +550,7 @@ export function createPostgresGenerationCommandRepository(
           generationStatus: row.status
         });
       }
-      const costs = await dependencies.readTurnReportedCosts(scope.ownerUserId, [row.resultTurnId]);
+      const costs = await dependencies.readTurnReportedCosts(scope.ownerUserId, row.campaignId, [row.resultTurnId]);
       return {
         id: row.id,
         status: "completed",

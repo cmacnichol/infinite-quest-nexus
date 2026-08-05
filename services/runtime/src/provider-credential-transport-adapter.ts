@@ -15,25 +15,78 @@ import {
   writeEncryptedProviderCredential
 } from "../../../packages/database/src/provider-repository.js";
 import {
+  callEmbeddingProvider,
+  callTextProvider,
   decryptCredential,
   discoverEmbeddingModels,
   discoverImageModels,
   discoverModels,
   encryptCredential,
+  pollImageProvider,
+  submitImageProvider,
+  type EmbeddingResult,
+  type ImageProviderPollResult,
+  type ImageProviderRequest,
+  type ImageProviderSubmissionResult,
+  type ProviderRequest,
+  type ProviderResult,
   type ProviderTransport,
   type TextProviderProfile
 } from "../../../packages/story-engine/src/index.js";
 
-export type RuntimeProviderAdapter = Readonly<{
-  transport: ProviderTransport;
-  leases: ProviderRuntimeLeasePort;
-  inventory: ProviderModelInventoryPort;
-  loadProvider(
+export type RuntimeProviderDescriptor<R extends ProviderRole = ProviderRole> = Readonly<{
+  id: string;
+  name: string;
+  providerRole: R;
+  providerType: TextProviderProfile["providerType"];
+  model: string;
+  contextWindowTokens: number;
+  maxOutputTokens: number;
+  temperature: number;
+  requestTimeoutMs: number;
+  configuration: Readonly<Record<string, unknown>>;
+}>;
+
+export type RuntimeTextExecution = RuntimeProviderDescriptor<"text" | "intent"> & Readonly<{
+  execute(
+    request: ProviderRequest,
+    policy?: Readonly<{ maxOutputTokens?: number; temperature?: number }>,
+  ): Promise<ProviderResult>;
+}>;
+
+export type RuntimeEmbeddingExecution = RuntimeProviderDescriptor<"embedding" | "text"> & Readonly<{
+  embed(documents: readonly string[]): Promise<EmbeddingResult>;
+}>;
+
+export type RuntimeImageExecution = RuntimeProviderDescriptor<"image"> & Readonly<{
+  submit(request: ImageProviderRequest): Promise<ImageProviderSubmissionResult>;
+  poll(remoteJobId: string): Promise<ImageProviderPollResult>;
+}>;
+
+export type RuntimeProviderExecutionPort = Readonly<{
+  text(
     scope: Readonly<{ ownerUserId: string }>,
     providerProfileId: string,
-    providerRole: ProviderRole,
+    providerRole: "text" | "intent",
     model?: string,
-  ): Promise<TextProviderProfile & Readonly<{ id: string; name: string }>>;
+  ): Promise<RuntimeTextExecution>;
+  embedding(
+    scope: Readonly<{ ownerUserId: string }>,
+    providerProfileId: string,
+    providerRole: "embedding" | "text",
+    model?: string,
+  ): Promise<RuntimeEmbeddingExecution>;
+  image(
+    scope: Readonly<{ ownerUserId: string }>,
+    providerProfileId: string,
+    model?: string,
+  ): Promise<RuntimeImageExecution>;
+}>;
+
+export type RuntimeProviderAdapter = Readonly<{
+  leases: ProviderRuntimeLeasePort;
+  inventory: ProviderModelInventoryPort;
+  execution: RuntimeProviderExecutionPort;
   storeCredential(ownerUserId: string, providerProfileId: string, credential: string | null): Promise<void>;
   discoverCandidateModelsWithCredential(
     candidate: ProviderCandidate,
@@ -90,6 +143,25 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       configuration: row.configuration,
       ...(apiKey ? { apiKey } : {})
     };
+  }
+
+  function descriptor<R extends ProviderRole>(
+    row: Awaited<ReturnType<typeof load>>,
+    providerRole: R,
+    model = row.defaultModel,
+  ): RuntimeProviderDescriptor<R> {
+    return Object.freeze({
+      id: row.providerProfileId,
+      name: row.name,
+      providerRole,
+      providerType: row.providerType,
+      model,
+      contextWindowTokens: row.contextWindowTokens,
+      maxOutputTokens: row.maxOutputTokens,
+      temperature: row.temperature,
+      requestTimeoutMs: row.requestTimeoutMs,
+      configuration: Object.freeze({ ...row.configuration })
+    });
   }
 
   const leases: ProviderRuntimeLeasePort = {
@@ -196,21 +268,66 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     }
   }
 
-  return {
-    transport: options.transport,
-    leases,
-    inventory,
-    async loadProvider(scope, providerProfileId, providerRole, model) {
+  const execution: RuntimeProviderExecutionPort = {
+    async text(scope, providerProfileId, providerRole, model) {
       const row = await load(scope.ownerUserId, providerProfileId);
       if (row.providerRole !== providerRole) {
         throw Object.assign(new Error(`Enabled ${providerRole} provider profile not found.`), { statusCode: 404 });
       }
-      return {
-        ...transportProfile(row, model?.trim() || row.defaultModel),
-        id: row.providerProfileId,
-        name: row.name
-      };
+      const selectedModel = model?.trim() || row.defaultModel;
+      return Object.freeze({
+        ...descriptor(row, providerRole, selectedModel),
+        execute: (
+          request: ProviderRequest,
+          policy?: Readonly<{ maxOutputTokens?: number; temperature?: number }>,
+        ) => callTextProvider(
+          { ...transportProfile(row, selectedModel), ...policy },
+          request,
+          options.transport
+        )
+      });
     },
+    async embedding(scope, providerProfileId, providerRole, model) {
+      const row = await load(scope.ownerUserId, providerProfileId);
+      if (row.providerRole !== providerRole) {
+        throw Object.assign(new Error(`Enabled ${providerRole} provider profile not found.`), { statusCode: 404 });
+      }
+      const selectedModel = model?.trim() || row.defaultModel;
+      return Object.freeze({
+        ...descriptor(row, providerRole, selectedModel),
+        embed: (documents: readonly string[]) => callEmbeddingProvider(
+          transportProfile(row, selectedModel),
+          [...documents],
+          options.transport
+        )
+      });
+    },
+    async image(scope, providerProfileId, model) {
+      const row = await load(scope.ownerUserId, providerProfileId);
+      if (row.providerRole !== "image") {
+        throw Object.assign(new Error("Enabled image provider profile not found."), { statusCode: 404 });
+      }
+      const selectedModel = model?.trim() || row.defaultModel;
+      return Object.freeze({
+        ...descriptor(row, "image", selectedModel),
+        submit: (request: ImageProviderRequest) => submitImageProvider(
+          transportProfile(row, selectedModel),
+          request,
+          options.transport
+        ),
+        poll: (remoteJobId: string) => pollImageProvider(
+          transportProfile(row, selectedModel),
+          { remoteJobId },
+          options.transport
+        )
+      });
+    }
+  };
+
+  return {
+    leases,
+    inventory,
+    execution,
     discoverCandidateModelsWithCredential: discoverCandidateModels,
     async storeCredential(ownerUserId, providerProfileId, credential) {
       const encrypted = credential?.trim()

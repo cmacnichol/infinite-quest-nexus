@@ -73,7 +73,6 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     });
     callerClient = client;
     const transaction = createPostgresChronicleGenerationTransactionPort({
-      credentialSecret: "credential-secret",
       embeddings: embeddingPort({
         resolve: async (database, requestedScope) => {
           expect(database).toBe(callerClient);
@@ -121,7 +120,6 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     });
     callerClient = client;
     const transaction = createPostgresChronicleGenerationTransactionPort({
-      credentialSecret: "credential-secret",
       embeddings: embeddingPort({
         resolve: async (database, requestedScope) => {
           expect(database).toBe(callerClient);
@@ -153,7 +151,6 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       throw new Error(`Unexpected SQL: ${sql}`);
     });
     const transaction = createPostgresChronicleGenerationTransactionPort({
-      credentialSecret: "credential-secret",
       embeddings: embeddingPort()
     });
 
@@ -216,7 +213,6 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       throw new Error(`Unexpected SQL: ${sql}`);
     });
     const transaction = createPostgresChronicleGenerationTransactionPort({
-      credentialSecret: "credential-secret",
       embeddings: embeddingPort()
     });
 
@@ -272,7 +268,6 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       throw new Error(`Unexpected SQL: ${sql}`);
     });
     const transaction = createPostgresChronicleGenerationTransactionPort({
-      credentialSecret: "credential-secret",
       embeddings: embeddingPort()
     });
 
@@ -332,7 +327,6 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       throw new Error(`Unexpected SQL: ${sql}`);
     });
     const transaction = createPostgresChronicleGenerationTransactionPort({
-      credentialSecret: "credential-secret",
       embeddings: embeddingPort()
     });
 
@@ -424,7 +418,6 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     });
     callerClient = client;
     const transaction = createPostgresChronicleGenerationTransactionPort({
-      credentialSecret: "credential-secret",
       embeddings: embeddingPort({
         resolve: async (database) => {
           expect(database).toBe(callerClient);
@@ -436,7 +429,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
             id: "embedding-profile",
             model: "embed-v1",
             providerType: "openai-compatible",
-            baseUrl: "https://embedding.example/v1"
+            embed: async () => ({ embeddings: [], responseId: "unused", usage: {}, reportedCost: null }),
           };
         },
         embed: async (_provider, documents) => {

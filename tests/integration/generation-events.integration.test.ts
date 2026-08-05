@@ -16,11 +16,12 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { generationStreamSnapshotSchema, type GenerationStreamSnapshot } from "../../packages/contracts/src/generation.js";
 import { logger } from "../../packages/logger/src/index.js";
 import { buildServer } from "../../services/api/src/server.js";
-import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
-import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
-import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
+import { createApiGenerationApplication } from "../helpers/runtime-application-fixtures.js";
+import { createApiWorldCampaignApplication } from "../helpers/runtime-application-fixtures.js";
+import { createApiIllustrationApplication } from "../helpers/runtime-application-fixtures.js";
 import { apiMemoryApplication } from "../helpers/memory-applications.js";
 import { inertProviders } from "../helpers/build-server-options.js";
+import { apiProviderGraph } from "../helpers/provider-application-fixtures.js";
 
 const { Client } = pg;
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -308,6 +309,7 @@ integration("generation job notification delivery", () => {
       illustration: createApiIllustrationApplication(countedPool),
       memory: apiMemoryApplication(countedPool),
       providers: inertProviders,
+      infiniteWorldsProviders: apiProviderGraph(countedPool, runtimeConfig(3).credentialEncryptionKey).infiniteWorlds,
       worldCampaign: createApiWorldCampaignApplication(countedPool, { credentialSecret: runtimeConfig(3).credentialEncryptionKey }),
       generationEvents: source
     });
@@ -373,6 +375,7 @@ integration("generation job notification delivery", () => {
       illustration: createApiIllustrationApplication(routePool),
       memory: apiMemoryApplication(routePool),
       providers: inertProviders,
+      infiniteWorldsProviders: apiProviderGraph(routePool, runtimeConfig(3).credentialEncryptionKey).infiniteWorlds,
       worldCampaign: createApiWorldCampaignApplication(routePool, { credentialSecret: runtimeConfig(3).credentialEncryptionKey }),
       generationEvents: source
     });

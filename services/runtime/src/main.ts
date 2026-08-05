@@ -59,20 +59,11 @@ await runRuntimeLifecycle(config, abortController, {
     createProviderApiAdapter: createProviderApplicationAdapter,
     createApiGeneration: createApiGenerationApplication,
     createApiIllustration: createApiIllustrationApplication,
-    createApiMemory: (pool, credentialSecret) => createApiMemoryApplication(pool, { credentialSecret }),
-    createApiWorldCampaign: (pool, credentialSecret) => createApiWorldCampaignApplication(pool, { credentialSecret }),
+    createApiMemory: createApiMemoryApplication,
+    createApiWorldCampaign: createApiWorldCampaignApplication,
     createWorkerMemory: createWorkerMemoryApplication,
-    createWorkerIllustration: (pool, credentialSecret, assetStorageRoot) => createWorkerIllustrationApplication(
-      pool,
-      credentialSecret,
-      { root: assetStorageRoot }
-    ),
-    createWorkerGeneration: (pool, credentialSecret, illustration, memory) => createWorkerGenerationApplication(
-      pool,
-      credentialSecret,
-      illustration,
-      memory
-    ),
+    createWorkerIllustration: createWorkerIllustrationApplication,
+    createWorkerGeneration: createWorkerGenerationApplication,
     buildServer,
     runWorker
   }, providerTransport, generationEvents)

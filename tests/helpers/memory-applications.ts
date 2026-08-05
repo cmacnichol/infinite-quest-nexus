@@ -6,12 +6,13 @@ import type {
 } from "../../packages/application/src/index.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { createApiMemoryApplication, createWorkerMemoryApplication } from "../../services/runtime/src/memory-composition.js";
+import { apiProviderGraph, workerProviderGraph } from "./provider-application-fixtures.js";
 
 export function apiMemoryApplication(
   pool: DatabasePool,
   credentialSecret = "test-credential-secret",
 ): MemoryApplication {
-  return createApiMemoryApplication(pool, { credentialSecret });
+  return createApiMemoryApplication(pool, apiProviderGraph(pool, credentialSecret).chronicle);
 }
 
 export function memoryGeneration(
@@ -25,7 +26,7 @@ export function workerMemoryApplication(
   pool: DatabasePool,
   credentialSecret = "test-credential-secret",
 ): MemoryWorkerApplication {
-  return createWorkerMemoryApplication(pool, credentialSecret);
+  return createWorkerMemoryApplication(pool, workerProviderGraph(pool, credentialSecret).chronicle);
 }
 
 export const inertWorkerMemory: MemoryWorkerApplication = {

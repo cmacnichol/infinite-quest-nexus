@@ -27,24 +27,30 @@ import {
   organizeCampaignCharacterProfileForOwner,
   organizeWorldCharacterProfileForOwner
 } from "./provider-character-organization-adapter.js";
-import { turnReportedCosts } from "./provider-cost-adapter.js";
-import { resolveEffectiveProviderId } from "./provider-runtime-adapter.js";
 import {
   generatePlayableCharacterForOwner,
   generatePlayableCharacterPreviewForOwner,
-  generateTemplateWorld,
   generateWorldPreviewForOwner
 } from "./provider-world-generation-adapter.js";
 import { createChroniclePlatformBindings } from "./chronicle-platform-bindings.js";
+import type {
+  ApiGenerationProviderCollaborators,
+  CharacterOrganizationProviderCollaborators,
+  ChronicleProviderCollaborators,
+  WorldGenerationProviderCollaborators
+} from "./provider-application-composition.js";
 
 export type WorldCampaignCompositionDependencies = Readonly<{
-  credentialSecret: string;
+  worldGeneration: WorldGenerationProviderCollaborators;
+  characterOrganization: CharacterOrganizationProviderCollaborators;
+  chronicle: ChronicleProviderCollaborators;
+  generation: Pick<ApiGenerationProviderCollaborators, "reads">;
 }>;
 
 /** Binds owner-scoped provider and prompt collaborators to character organization. */
 export function createProviderCharacterProfileOrganizer(
   pool: DatabasePool,
-  credentialSecret: string,
+  providers: CharacterOrganizationProviderCollaborators,
 ): CharacterProfileOrganizerPort {
   const organizer: CharacterProfileOrganizerPort = {
     organizeCampaignCharacterProfile: (scope, request) => organizeCampaignCharacterProfileForOwner(
@@ -52,14 +58,14 @@ export function createProviderCharacterProfileOrganizer(
       scope.ownerUserId,
       scope.campaignId,
       request,
-      credentialSecret
+      providers,
     ),
     organizeWorldCharacterProfile: (scope, request) => organizeWorldCharacterProfileForOwner(
       pool,
       scope.ownerUserId,
       scope.worldId,
       request,
-      credentialSecret
+      providers,
     )
   };
   return Object.freeze(organizer);
@@ -73,7 +79,7 @@ async function unwrapTransition<T>(result: WorldCampaignRepositoryResult<T>): Pr
 /** Binds owner-scoped provider and prompt collaborators to world generation. */
 export function createProviderWorldGenerationCollaborator(
   pool: DatabasePool,
-  credentialSecret: string,
+  providers: WorldGenerationProviderCollaborators,
   transaction: ReturnType<typeof createPostgresWorldRepositoryAdapters>["transaction"],
   progress: WorldGenerationProgressRepositoryPort,
 ): WorldGenerationCollaboratorPort {
@@ -93,31 +99,29 @@ export function createProviderWorldGenerationCollaborator(
     progress.updateWorldGenerationProgress(database, { ownerUserId, progressKey }, update)
   )));
   const providerDependencies = {
-    resolveEffectiveProviderId,
     createWorldGenerationProgress: createProgress,
     updateWorldGenerationProgress: updateProgress,
-    generateTemplateWorld
   };
   const collaborator: WorldGenerationCollaboratorPort = {
     generateWorldPreview: (scope, request) => generateWorldPreviewForOwner(
       pool,
       scope.ownerUserId,
       request,
-      credentialSecret,
+      providers,
       providerDependencies
     ),
     generatePlayableCharacterPreview: (scope, request) => generatePlayableCharacterPreviewForOwner(
       pool,
       scope.ownerUserId,
       request,
-      credentialSecret
+      providers,
     ),
     generatePlayableCharacter: (scope, request) => generatePlayableCharacterForOwner(
       pool,
       scope.ownerUserId,
       scope.worldId,
       request,
-      credentialSecret
+      providers,
     )
   };
   return Object.freeze(collaborator);
@@ -129,10 +133,12 @@ export function createApiWorldCampaignApplication(
   dependencies: WorldCampaignCompositionDependencies,
 ): WorldCampaignApplication {
   const memory = createPostgresChronicleGenerationTransactionPort({
-    credentialSecret: dependencies.credentialSecret,
-    embeddings: createChroniclePlatformBindings().embeddings
+    embeddings: createChroniclePlatformBindings(dependencies.chronicle).embeddings
   });
-  const turnPages = createPostgresBoundedCampaignTurnPageAdapter(pool, { turnReportedCosts });
+  const turnPages = createPostgresBoundedCampaignTurnPageAdapter(pool, {
+    turnReportedCosts: async (_database, ownerUserId, campaignId, turnIds) =>
+      new Map(await dependencies.generation.reads.getTurnCosts({ ownerUserId, campaignId, turnIds }))
+  });
   const worldAdapters = createPostgresWorldRepositoryAdapters(pool, { memory });
   const authorityAdapters = createPostgresCampaignAuthorityAdapters(pool, { memory, turnPages });
   const progress = createPostgresWorldGenerationProgressRepository();
@@ -147,13 +153,13 @@ export function createApiWorldCampaignApplication(
     sync: authorityAdapters.sync,
     turnPages,
     characters: createPostgresCharacterProfileRepository(),
-    characterOrganizer: createProviderCharacterProfileOrganizer(pool, dependencies.credentialSecret),
+    characterOrganizer: createProviderCharacterProfileOrganizer(pool, dependencies.characterOrganization),
     transfers: createPostgresCampaignTransferRepository({ memory }),
     dashboard: createPostgresDashboardRepository(),
     sessionProfile: createPostgresSessionProfileRepository(),
     worldGeneration: createProviderWorldGenerationCollaborator(
       pool,
-      dependencies.credentialSecret,
+      dependencies.worldGeneration,
       worldAdapters.transaction,
       progress
     ),

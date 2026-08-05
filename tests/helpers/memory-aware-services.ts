@@ -12,6 +12,7 @@ import { memoryGeneration } from "./memory-applications.js";
 import { apiMemoryApplication, workerMemoryApplication } from "./memory-applications.js";
 import type { WorldCampaignApplication } from "../../packages/application/src/world-campaign/index.js";
 import type { CampaignBranchRequest, CampaignRewindRequest, PlayerCampaignConfig } from "../../packages/contracts/src/generation.js";
+import { apiProviderGraph } from "./provider-application-fixtures.js";
 
 type Mutable<T> = T extends readonly (infer Item)[]
   ? Mutable<Item>[]
@@ -39,8 +40,9 @@ async function withWorldCampaign<T>(
   credentialSecret = "test-credential-secret",
 ): Promise<Mutable<T>> {
   const ownerUserId = await initialOwnerId(pool);
+  const providers = apiProviderGraph(pool, credentialSecret);
   const adapter = createWorldCampaignApplicationAdapter(
-    createApiWorldCampaignApplication(pool, { credentialSecret })
+    createApiWorldCampaignApplication(pool, providers)
   );
   return structuredClone(await adapter.run(() => operation({ adapter, ownerUserId }))) as Mutable<T>;
 }
@@ -195,8 +197,9 @@ export function generateWorldPreview(
 }
 
 export function getWorldGenerationProgress(pool: DatabasePool, ownerUserId: string, progressKey: string) {
+  const providers = apiProviderGraph(pool, "test-credential-secret");
   const adapter = createWorldCampaignApplicationAdapter(
-    createApiWorldCampaignApplication(pool, { credentialSecret: "test-credential-secret" })
+    createApiWorldCampaignApplication(pool, providers)
   );
   return adapter.run(() => adapter.application.getWorldGenerationProgress({ ownerUserId, progressKey }));
 }
@@ -281,7 +284,7 @@ export function importInfiniteWorlds(
   return importInfiniteWorldsApplication(
     pool,
     request,
-    credentialSecret,
+    apiProviderGraph(pool, credentialSecret).infiniteWorlds,
     memoryGeneration(pool),
     portableWorldApplicationForTest(pool, credentialSecret),
     assetStore
@@ -289,7 +292,9 @@ export function importInfiniteWorlds(
 }
 
 export function portableWorldApplicationForTest(pool: DatabasePool, credentialSecret: string) {
-  const adapter = createWorldCampaignApplicationAdapter(createApiWorldCampaignApplication(pool, { credentialSecret }));
+  const adapter = createWorldCampaignApplicationAdapter(
+    createApiWorldCampaignApplication(pool, apiProviderGraph(pool, credentialSecret)),
+  );
   return createOwnerBoundPortableWorldApplicationPort(
     adapter,
     async () => adapter.ownerScope(await initialOwnerId(pool))

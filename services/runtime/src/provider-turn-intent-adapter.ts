@@ -13,7 +13,6 @@ import { withTransaction } from "../../../packages/database/src/pool.js";
 import { sha256 } from "../../../packages/domain/src/text.js";
 import {
   buildTurnIntentPrompt,
-  callTextProvider,
   parseTurnIntentOutput
 } from "../../../packages/story-engine/src/index.js";
 import type { RuntimeProviderAdapter } from "./provider-credential-transport-adapter.js";
@@ -112,7 +111,7 @@ export function createTurnIntentClassificationAdapter(options: Readonly<{
       });
       if (resolution.status === "resolved") {
         try {
-          const profile = await options.runtime.loadProvider(
+          const provider = await options.runtime.execution.text(
             { ownerUserId: command.ownerUserId },
             resolution.providerProfileId,
             "intent",
@@ -123,14 +122,10 @@ export function createTurnIntentClassificationAdapter(options: Readonly<{
             scope: "campaign",
             campaignId: command.campaignId
           });
-          const result = await callTextProvider({
-            ...profile,
-            maxOutputTokens: Math.min(profile.maxOutputTokens, 256),
-            temperature: 0
-          }, {
+          const result = await provider.execute({
             systemPrompt: promptContent(prompts, "turn_intent"),
             input: buildTurnIntentPrompt(command.text)
-          }, options.runtime.transport);
+          }, { maxOutputTokens: Math.min(provider.maxOutputTokens, 256), temperature: 0 });
           if (result.outputLimited) throw new Error("Turn intent classification reached its output limit.");
           const parsed = parseTurnIntentOutput(result.content);
           await withTransaction(options.pool, async (client) => options.costs.recordCost(
@@ -138,9 +133,9 @@ export function createTurnIntentClassificationAdapter(options: Readonly<{
             {
               ownerUserId: command.ownerUserId,
               campaignId: command.campaignId,
-              providerProfileId: profile.id,
-              providerType: profile.providerType,
-              requestedModel: profile.model,
+              providerProfileId: provider.id,
+              providerType: provider.providerType,
+              requestedModel: provider.model,
               ...(result.modelInstanceId === undefined ? {} : { resolvedModel: result.modelInstanceId }),
               providerResponseId: result.responseId,
               category: "story",
@@ -151,7 +146,7 @@ export function createTurnIntentClassificationAdapter(options: Readonly<{
           ));
           await options.health.recordHealth({
             ownerUserId: command.ownerUserId,
-            providerProfileId: profile.id,
+            providerProfileId: provider.id,
             outcome: "healthy"
           });
           const parsedMode = resolvedMode(parsed.classification, fallback);
@@ -162,7 +157,7 @@ export function createTurnIntentClassificationAdapter(options: Readonly<{
             classification: parsed.classification,
             resolvedMode: parsedMode,
             confidenceBand: parsed.confidenceBand,
-            providerProfileId: profile.id,
+            providerProfileId: provider.id,
             providerSource: "intent_default",
             diagnostics: { confidence: parsed.confidence }
           });

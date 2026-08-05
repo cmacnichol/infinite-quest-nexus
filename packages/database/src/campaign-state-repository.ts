@@ -1186,6 +1186,7 @@ type CampaignTurnReportedCost = Readonly<{
 export type CampaignTurnReportedCostReader = (
   client: DatabasePool,
   ownerUserId: string,
+  campaignId: string,
   turnIds: string[]
 ) => Promise<Map<string, CampaignTurnReportedCost>>;
 
@@ -1454,6 +1455,7 @@ export function createPostgresBoundedCampaignTurnPageAdapter(
       const reportedCosts = await collaborators.turnReportedCosts(
         pool,
         scope.ownerUserId,
+        scope.campaignId,
         page.turns.map((turn) => turn.id)
       );
       return {

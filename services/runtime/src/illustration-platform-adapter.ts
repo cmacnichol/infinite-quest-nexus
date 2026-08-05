@@ -15,22 +15,19 @@ import {
   type DatabasePool
 } from "../../../packages/database/src/pool.js";
 import {
-  type callTextProvider,
-  type pollImageProvider,
-  type submitImageProvider,
   type ImageProviderArtifact
 } from "../../../packages/story-engine/src/index.js";
+import type {
+  RuntimeImageExecution,
+  RuntimeTextExecution
+} from "./provider-credential-transport-adapter.js";
 
 export type ImageProviderAdapterDependencies = Readonly<{
-  loadImageProvider(
-    pool: DatabasePool,
+  loadImageExecution(
     ownerUserId: string,
     providerProfileId: string,
-    credentialSecret: string,
     model: string,
-  ): Promise<Parameters<typeof submitImageProvider>[0]>;
-  submitImageProvider: typeof submitImageProvider;
-  pollImageProvider: typeof pollImageProvider;
+  ): Promise<RuntimeImageExecution>;
   recordProviderHealth(
     pool: DatabasePool,
     ownerUserId: string,
@@ -41,14 +38,11 @@ export type ImageProviderAdapterDependencies = Readonly<{
 }>;
 
 export type PromptRefinementAdapterDependencies = Readonly<{
-  loadTextProvider(
-    pool: DatabasePool,
+  loadTextExecution(
     ownerUserId: string,
     providerProfileId: string,
-    credentialSecret: string,
     model: string,
-  ): Promise<Parameters<typeof callTextProvider>[0]>;
-  callTextProvider: typeof callTextProvider;
+  ): Promise<RuntimeTextExecution>;
   recordProviderHealth: ImageProviderAdapterDependencies["recordProviderHealth"];
   buildRefinementInput(fictionText: string, storyContext: string): string;
   parseRefinedPrompt(content: string): string;
@@ -121,7 +115,7 @@ function imageArtifact(artifact: ImageProviderArtifact): IllustrationImageArtifa
 }
 
 function boundedProviderSetting(
-  provider: Parameters<typeof submitImageProvider>[0],
+  provider: RuntimeImageExecution,
   key: string,
   fallback: number,
   minimum: number,
@@ -133,7 +127,7 @@ function boundedProviderSetting(
     : fallback;
 }
 
-function imageExecutionPolicy(provider: Parameters<typeof submitImageProvider>[0]) {
+function imageExecutionPolicy(provider: RuntimeImageExecution) {
   return {
     artifactDownloadTimeoutMs: boundedProviderSetting(provider, "artifactDownloadTimeoutMs", 30_000, 5_000, 120_000),
     allowPrivateArtifactHosts: provider.configuration?.allowPrivateArtifactHosts === true,
@@ -173,23 +167,18 @@ function completedImageResult(
 
 export function createIllustrationImageProviderAdapter(
   pool: DatabasePool,
-  credentialSecret: string,
   dependencies: ImageProviderAdapterDependencies,
 ): IllustrationImageProviderPort {
   return {
     async executeImage(request) {
       try {
-        const provider = await dependencies.loadImageProvider(
-          pool,
+        const provider = await dependencies.loadImageExecution(
           request.ownerUserId,
           request.providerProfileId,
-          credentialSecret,
           request.model,
         );
         if (request.remoteJobId) {
-          const result = await dependencies.pollImageProvider(provider, {
-            remoteJobId: request.remoteJobId
-          });
+          const result = await provider.poll(request.remoteJobId);
           if (result.status === "failed") {
             throw Object.assign(new Error(result.error.message), {
               code: result.error.code || "provider_generation_failed",
@@ -222,7 +211,7 @@ export function createIllustrationImageProviderAdapter(
           return completedImageResult(request.providerProfileId, request.model, result, policy);
         }
 
-        const result = await dependencies.submitImageProvider(provider, {
+        const result = await provider.submit({
           prompt: request.prompt,
           size: request.size,
           aspectRatio: request.aspectRatio,
@@ -270,20 +259,17 @@ export function createIllustrationImageProviderAdapter(
 
 export function createIllustrationPromptRefinementAdapter(
   pool: DatabasePool,
-  credentialSecret: string,
   dependencies: PromptRefinementAdapterDependencies,
 ): IllustrationPromptRefinementPort {
   return {
     async refinePrompt(request) {
       try {
-        const provider = await dependencies.loadTextProvider(
-          pool,
+        const provider = await dependencies.loadTextExecution(
           request.ownerUserId,
           request.providerProfileId,
-          credentialSecret,
           request.model,
         );
-        const result = await dependencies.callTextProvider(provider, {
+        const result = await provider.execute({
           systemPrompt: request.systemPrompt,
           input: dependencies.buildRefinementInput(request.fictionText, request.storyContext)
         });

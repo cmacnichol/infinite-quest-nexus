@@ -129,7 +129,7 @@ describe("provider PostgreSQL adapter boundaries", () => {
       providerProfileId: row.id,
       providerRole: "text"
     });
-    const privateProfile = await adapter.loadProvider(
+    const execution = await adapter.execution.text(
       { ownerUserId: "00000000-0000-4000-8000-000000000012" },
       row.id,
       "text",
@@ -138,15 +138,14 @@ describe("provider PostgreSQL adapter boundaries", () => {
     await adapter.storeCredential("00000000-0000-4000-8000-000000000012", row.id, plaintext);
 
     expect(inventory.models).toEqual([{ id: "story-model", name: "Story Model", contextWindowTokens: 16_384 }]);
-    expect(privateProfile).toMatchObject({
+    expect(execution).toMatchObject({
       id: row.id,
       name: row.name,
-      model: "alternate-model",
-      apiKey: plaintext
+      model: "alternate-model"
     });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(health.recordHealth).toHaveBeenCalledWith(expect.objectContaining({ outcome: "healthy" }));
-    const publicValues = JSON.stringify({ lease, inventory });
+    const publicValues = JSON.stringify({ lease, inventory, execution });
     expect(publicValues).not.toContain(plaintext);
     expect(publicValues).not.toContain(encrypted.ciphertext);
     expect(publicValues).not.toContain("stored-config-secret");

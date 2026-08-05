@@ -79,7 +79,6 @@ integration("PostgreSQL world campaign repository adapters", () => {
 
   function createAdapters() {
     const memory = createPostgresChronicleGenerationTransactionPort({
-      credentialSecret: "",
       embeddings: {
         async resolve(database, scope) {
           const selected = await (database as DatabaseClient).query<{ id: string }>(

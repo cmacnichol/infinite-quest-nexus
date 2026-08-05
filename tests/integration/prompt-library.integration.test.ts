@@ -6,9 +6,9 @@ import { worldContentSchema } from "../../packages/contracts/src/world-library.j
 import { createCampaign, createWorld, publishWorld } from "../helpers/memory-aware-services.js";
 import {
   resetPromptOverride,
-  resolvePromptSnapshot,
+  loadPromptSnapshotForTest,
   savePromptOverride
-} from "../../services/runtime/src/provider-prompt-adapter.js";
+} from "../helpers/provider-application-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -47,7 +47,7 @@ integration("Prompt Library persistence", () => {
 
   it("resolves campaign override, application override, and shipped default in order", async () => {
     await savePromptOverride(pool, { key: "story_system", scope: "application", content: "Application story prompt." });
-    expect((await resolvePromptSnapshot(pool, ownerUserId, campaignId)).story_system)
+    expect((await loadPromptSnapshotForTest(pool, ownerUserId, campaignId)).story_system)
       .toMatchObject({ content: "Application story prompt.", source: "application" });
 
     await savePromptOverride(pool, {
@@ -56,13 +56,13 @@ integration("Prompt Library persistence", () => {
       campaignId,
       content: "Campaign story prompt."
     });
-    expect((await resolvePromptSnapshot(pool, ownerUserId, campaignId)).story_system)
+    expect((await loadPromptSnapshotForTest(pool, ownerUserId, campaignId)).story_system)
       .toMatchObject({ content: "Campaign story prompt.", source: "campaign" });
 
     await resetPromptOverride(pool, { key: "story_system", scope: "campaign", campaignId });
-    expect((await resolvePromptSnapshot(pool, ownerUserId, campaignId)).story_system.source).toBe("application");
+    expect((await loadPromptSnapshotForTest(pool, ownerUserId, campaignId)).story_system.source).toBe("application");
     await resetPromptOverride(pool, { key: "story_system", scope: "application" });
-    expect((await resolvePromptSnapshot(pool, ownerUserId, campaignId)).story_system.source).toBe("shipped");
+    expect((await loadPromptSnapshotForTest(pool, ownerUserId, campaignId)).story_system.source).toBe("shipped");
   });
 
   it("rejects a campaign override whose owner does not own the campaign", async () => {

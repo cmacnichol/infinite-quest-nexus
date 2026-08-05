@@ -163,6 +163,21 @@ integration("provider PostgreSQL adapters", () => {
         resolvedRole: "text",
         providerProfileId: fallbackText.id
       });
+      expect(await resolution.resolveEmbedding({
+        ownerUserId: fallbackOwner.ownerUserId,
+        selectedProviderProfileId: fallbackText.id,
+        allowTextFallback: true,
+      })).toMatchObject({
+        status: "resolved",
+        source: "text_fallback",
+        resolvedRole: "text",
+        providerProfileId: fallbackText.id,
+      });
+      await expect(resolution.resolveEmbedding({
+        ownerUserId: fallbackOwner.ownerUserId,
+        selectedProviderProfileId: fallbackText.id,
+        allowTextFallback: false,
+      })).rejects.toMatchObject({ statusCode: 400 });
     });
   });
 

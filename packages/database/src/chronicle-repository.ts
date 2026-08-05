@@ -84,8 +84,11 @@ export type ChronicleTransactionEmbeddingProvider = Readonly<{
   id: string;
   model: string;
   providerType: string;
-  baseUrl: string;
   configuration?: unknown;
+}>;
+
+export type ChronicleTransactionEmbeddingExecution = ChronicleTransactionEmbeddingProvider & Readonly<{
+  embed(documents: readonly string[]): Promise<ChronicleTransactionEmbeddingResult>;
 }>;
 
 export type ChronicleTransactionEmbeddingResult = Readonly<{
@@ -107,10 +110,9 @@ export type ChronicleTransactionEmbeddingPort = Readonly<{
   load(
     database: MemoryTransactionContext,
     scope: Readonly<{ ownerUserId: string; providerProfileId: string; model: string }>,
-    credentialSecret: string,
-  ): Promise<ChronicleTransactionEmbeddingProvider>;
+  ): Promise<ChronicleTransactionEmbeddingExecution>;
   embed(
-    provider: ChronicleTransactionEmbeddingProvider,
+    provider: ChronicleTransactionEmbeddingExecution,
     documents: readonly string[],
   ): Promise<ChronicleTransactionEmbeddingResult>;
   fingerprint(
@@ -139,7 +141,6 @@ export type ChronicleTransactionEmbeddingPort = Readonly<{
 }>;
 
 export type ChronicleGenerationTransactionDependencies = Readonly<{
-  credentialSecret: string;
   embeddings: ChronicleTransactionEmbeddingPort;
 }>;
 
@@ -1090,7 +1091,7 @@ async function applyContextSemanticRelevance(
   if (!providerProfileId) return { mode: "lexical", semanticAvailable: false, fallbackReason: "provider_unavailable" };
   const providerScope = { ownerUserId: scope.ownerUserId, providerProfileId, model: config.embedding_model };
   try {
-    const provider = await dependencies.embeddings.load(client, providerScope, dependencies.credentialSecret);
+    const provider = await dependencies.embeddings.load(client, providerScope);
     const prefixes = modelAwareEmbeddingPrefixes(
       config.embedding_model,
       config.embedding_document_prefix,
@@ -1890,9 +1891,6 @@ type ChronicleEmbeddingConfigurationRow = Readonly<{
   embedding_model: string;
   embedding_document_prefix: string | null;
   embedding_query_prefix: string | null;
-  provider_type: string;
-  base_url: string;
-  configuration: unknown;
 }>;
 
 function requiredProgressString(
@@ -1951,16 +1949,11 @@ export function createPostgresChronicleEmbeddingBatchPort(
 
         const configuration = await client.query<ChronicleEmbeddingConfigurationRow>(
           `SELECT memory_config.embedding_provider_profile_id, memory_config.embedding_model,
-                  memory_config.embedding_document_prefix, memory_config.embedding_query_prefix,
-                  provider.provider_type, provider.base_url, provider.configuration
+                  memory_config.embedding_document_prefix, memory_config.embedding_query_prefix
              FROM campaign_memory_configs memory_config
-             JOIN provider_profiles provider
-               ON provider.id = memory_config.embedding_provider_profile_id
-              AND provider.owner_user_id = memory_config.owner_user_id
             WHERE memory_config.campaign_id = $1 AND memory_config.owner_user_id = $2
-              AND memory_config.embedding_enabled = true AND provider.enabled = true
-              AND provider.provider_role IN ('embedding','text')
-            FOR SHARE OF memory_config, provider`,
+              AND memory_config.embedding_enabled = true
+            FOR SHARE OF memory_config`,
           [scope.campaignId, scope.ownerUserId]
         );
         const selected = configuration.rows[0];
@@ -1974,29 +1967,18 @@ export function createPostgresChronicleEmbeddingBatchPort(
           selected.embedding_document_prefix,
           selected.embedding_query_prefix
         );
-        const configuredProvider: ChronicleTransactionEmbeddingProvider = {
-          id: selected.embedding_provider_profile_id,
-          model: selected.embedding_model,
-          providerType: selected.provider_type,
-          baseUrl: selected.base_url,
-          configuration: selected.configuration
-        };
-        const configuredFingerprint = providerModelFingerprint({
-          ...configuredProvider,
-          protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION
-        }, prefixes);
         const inputFingerprint = providerModelFingerprint({
           ...input.provider,
+          baseUrl: input.provider.id,
           protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION
         }, prefixes);
-        if (input.providerFingerprint !== configuredFingerprint
-          || inputFingerprint !== configuredFingerprint) {
+        if (input.providerFingerprint !== inputFingerprint) {
           throw invalid("Chronicle embedding provider fingerprint changed during the claimed job.");
         }
 
-        requiredProgressString(job.progress, "embeddingProviderProfileId", configuredProvider.id);
-        requiredProgressString(job.progress, "embeddingModel", configuredProvider.model);
-        requiredProgressString(job.progress, "embeddingProviderFingerprint", configuredFingerprint);
+        requiredProgressString(job.progress, "embeddingProviderProfileId", input.provider.id);
+        requiredProgressString(job.progress, "embeddingModel", input.provider.model);
+        requiredProgressString(job.progress, "embeddingProviderFingerprint", inputFingerprint);
         requiredProgressString(job.progress, "embeddingProtocolVersion", input.protocolVersion);
         const previousDimensions = job.progress.embeddingDimensions;
         if (previousDimensions !== undefined && previousDimensions !== dimensions) {
@@ -2054,14 +2036,14 @@ export function createPostgresChronicleEmbeddingBatchPort(
               AND memory.campaign_id = $10
               AND memory.world_version_id = $11
               AND memory.content = batch.content`,
-          [ids, configuredProvider.id, configuredProvider.model, dimensions, configuredFingerprint,
+          [ids, input.provider.id, input.provider.model, dimensions, inputFingerprint,
             vectors, hashes, contents, scope.ownerUserId, scope.campaignId, scope.worldVersionId]
         );
         if (updated.rowCount !== input.memories.length) {
           throw invalid("Chronicle embedding batch did not update its complete claimed scope.");
         }
 
-        await dependencies.recordCost(client, configuredProvider, {
+        await dependencies.recordCost(client, input.provider, {
           ownerUserId: scope.ownerUserId,
           campaignId: scope.campaignId,
           chronicleJobId: scope.jobId,
@@ -2071,9 +2053,9 @@ export function createPostgresChronicleEmbeddingBatchPort(
           embedded: input.processed,
           total: input.total,
           embeddingDimensions: dimensions,
-          embeddingProviderProfileId: configuredProvider.id,
-          embeddingModel: configuredProvider.model,
-          embeddingProviderFingerprint: configuredFingerprint,
+          embeddingProviderProfileId: input.provider.id,
+          embeddingModel: input.provider.model,
+          embeddingProviderFingerprint: inputFingerprint,
           embeddingProtocolVersion: input.protocolVersion
         };
         const heartbeat = await client.query(

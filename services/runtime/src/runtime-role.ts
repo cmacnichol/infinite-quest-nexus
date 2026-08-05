@@ -13,7 +13,11 @@ import type { BuildServerOptions } from "../../api/src/server.js";
 import type { ProviderApiTransportAdapter } from "../../api/src/provider-application-adapter.js";
 import type { WorkerDependencies } from "../../worker/src/worker.js";
 import type { ProviderTransport } from "../../../packages/story-engine/src/provider-transport.js";
-import type { ProviderApplicationComposition } from "./provider-application-composition.js";
+import type {
+  ApiProviderApplicationComposition,
+  WorkerProviderApplicationComposition
+} from "./provider-application-composition.js";
+import type { FilesystemAssetStore } from "../../api/src/asset-service.js";
 import { logger } from "../../../packages/logger/src/index.js";
 
 type RuntimeServer = {
@@ -36,28 +40,45 @@ export type RuntimeRoleDependencies = Readonly<{
     pool: DatabasePool,
     credentialSecret: string,
     transport: ProviderTransport
-  ): ProviderApplicationComposition;
+  ): ApiProviderApplicationComposition;
   createWorkerProviders(
     pool: DatabasePool,
     credentialSecret: string,
     transport: ProviderTransport
-  ): ProviderApplicationComposition;
-  createProviderApiAdapter(composition: ProviderApplicationComposition): ProviderApiTransportAdapter;
-  createApiGeneration(pool: DatabasePool): GenerationApplication;
-  createApiIllustration(pool: DatabasePool): IllustrationApplication;
-  createApiMemory(pool: DatabasePool, credentialSecret: string): MemoryApplication;
-  createApiWorldCampaign(pool: DatabasePool, credentialSecret: string): WorldCampaignApplication;
+  ): WorkerProviderApplicationComposition;
+  createProviderApiAdapter(composition: ApiProviderApplicationComposition): ProviderApiTransportAdapter;
+  createApiGeneration(pool: DatabasePool, providers: ApiProviderApplicationComposition["generation"]): GenerationApplication;
+  createApiIllustration(
+    pool: DatabasePool,
+    providers: ApiProviderApplicationComposition["illustration"] | WorkerProviderApplicationComposition["illustration"],
+  ): IllustrationApplication;
+  createApiMemory(
+    pool: DatabasePool,
+    providers: ApiProviderApplicationComposition["chronicle"] | WorkerProviderApplicationComposition["chronicle"],
+  ): MemoryApplication;
+  createApiWorldCampaign(
+    pool: DatabasePool,
+    dependencies: Readonly<{
+      worldGeneration: ApiProviderApplicationComposition["worldGeneration"];
+      characterOrganization: ApiProviderApplicationComposition["characterOrganization"];
+      chronicle: ApiProviderApplicationComposition["chronicle"];
+      generation: Pick<ApiProviderApplicationComposition["generation"], "reads">;
+    }>,
+  ): WorldCampaignApplication;
   createWorkerIllustration(
     pool: DatabasePool,
-    credentialSecret: string,
-    assetStorageRoot: string
+    store: FilesystemAssetStore,
+    providers: WorkerProviderApplicationComposition["illustration"],
   ): IllustrationWorkerApplication;
-  createWorkerMemory(pool: DatabasePool, credentialSecret: string): MemoryWorkerApplication;
+  createWorkerMemory(
+    pool: DatabasePool,
+    providers: WorkerProviderApplicationComposition["chronicle"],
+  ): MemoryWorkerApplication;
   createWorkerGeneration(
     pool: DatabasePool,
-    credentialSecret: string,
     illustration: IllustrationApplication,
-    memory: MemoryApplication
+    memory: MemoryApplication,
+    providers: WorkerProviderApplicationComposition["generation"],
   ): GenerationWorkerApplication;
   buildServer(options: BuildServerOptions): Promise<RuntimeServer>;
   runWorker(
@@ -122,17 +143,19 @@ export async function dispatchRuntimeRole(
 
   if (config.role === "api") {
     if (!generationEvents) throw new Error("The API role requires a generation event source.");
-    const generation = dependencies.createApiGeneration(pool);
-    const illustration = dependencies.createApiIllustration(pool);
-    const memory = dependencies.createApiMemory(pool, config.credentialEncryptionKey);
-    const worldCampaign = dependencies.createApiWorldCampaign(pool, config.credentialEncryptionKey);
-    const providers = dependencies.createProviderApiAdapter(dependencies.createApiProviders(
+    const providerGraph = dependencies.createApiProviders(
       pool,
       config.credentialEncryptionKey,
       providerTransport
-    ));
+    );
+    const generation = dependencies.createApiGeneration(pool, providerGraph.generation);
+    const illustration = dependencies.createApiIllustration(pool, providerGraph.illustration);
+    const memory = dependencies.createApiMemory(pool, providerGraph.chronicle);
+    const worldCampaign = dependencies.createApiWorldCampaign(pool, providerGraph);
+    const providers = dependencies.createProviderApiAdapter(providerGraph);
     const server = await dependencies.buildServer({
-      config, pool, generation, illustration, memory, providers, generationEvents, worldCampaign
+      config, pool, generation, illustration, memory, providers, generationEvents, worldCampaign,
+      infiniteWorldsProviders: providerGraph.infiniteWorlds,
     });
     await server.listen({ host: config.host, port: config.port });
     await waitForAbort(signal);
@@ -141,48 +164,54 @@ export async function dispatchRuntimeRole(
   }
 
   if (config.role === "worker") {
-    dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport);
-    const illustration = dependencies.createApiIllustration(pool);
-    const memory = dependencies.createApiMemory(pool, config.credentialEncryptionKey);
-    const generation = dependencies.createWorkerGeneration(pool, config.credentialEncryptionKey, illustration, memory);
+    const providerGraph = dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport);
+    const illustration = dependencies.createApiIllustration(pool, providerGraph.illustration);
+    const memory = dependencies.createApiMemory(pool, providerGraph.chronicle);
+    const generation = dependencies.createWorkerGeneration(pool, illustration, memory, providerGraph.generation);
     const workerIllustration = dependencies.createWorkerIllustration(
       pool,
-      config.credentialEncryptionKey,
-      config.assetStorageRoot
+      { root: config.assetStorageRoot },
+      providerGraph.illustration,
     );
     await dependencies.runWorker(pool, config, signal, {
       generation,
       illustration: workerIllustration,
-      memory: dependencies.createWorkerMemory(pool, config.credentialEncryptionKey)
+      memory: dependencies.createWorkerMemory(pool, providerGraph.chronicle)
     });
     return;
   }
 
-  const apiGeneration = dependencies.createApiGeneration(pool);
-  const illustration = dependencies.createApiIllustration(pool);
-  const memory = dependencies.createApiMemory(pool, config.credentialEncryptionKey);
-  const worldCampaign = dependencies.createApiWorldCampaign(pool, config.credentialEncryptionKey);
-  const providers = dependencies.createProviderApiAdapter(dependencies.createApiProviders(
+  const apiProviderGraph = dependencies.createApiProviders(
     pool,
     config.credentialEncryptionKey,
     providerTransport
-  ));
-  dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport);
+  );
+  const workerProviderGraph = dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport);
+  const apiGeneration = dependencies.createApiGeneration(pool, apiProviderGraph.generation);
+  const illustration = dependencies.createApiIllustration(pool, apiProviderGraph.illustration);
+  const memory = dependencies.createApiMemory(pool, apiProviderGraph.chronicle);
+  const workerIllustrationTransactions = dependencies.createApiIllustration(pool, workerProviderGraph.illustration);
+  const workerMemoryTransactions = dependencies.createApiMemory(pool, workerProviderGraph.chronicle);
+  const worldCampaign = dependencies.createApiWorldCampaign(pool, apiProviderGraph);
+  const providers = dependencies.createProviderApiAdapter(apiProviderGraph);
   if (!generationEvents) throw new Error("The all role requires a generation event source.");
-  const workerGeneration = dependencies.createWorkerGeneration(pool, config.credentialEncryptionKey, illustration, memory);
+  const workerGeneration = dependencies.createWorkerGeneration(
+    pool, workerIllustrationTransactions, workerMemoryTransactions, workerProviderGraph.generation,
+  );
   const workerIllustration = dependencies.createWorkerIllustration(
     pool,
-    config.credentialEncryptionKey,
-    config.assetStorageRoot
+    { root: config.assetStorageRoot },
+    workerProviderGraph.illustration,
   );
   const server = await dependencies.buildServer({
-    config, pool, generation: apiGeneration, illustration, memory, providers, generationEvents, worldCampaign
+    config, pool, generation: apiGeneration, illustration, memory, providers, generationEvents, worldCampaign,
+    infiniteWorldsProviders: apiProviderGraph.infiniteWorlds,
   });
   await server.listen({ host: config.host, port: config.port });
   await dependencies.runWorker(pool, config, signal, {
     generation: workerGeneration,
     illustration: workerIllustration,
-    memory: dependencies.createWorkerMemory(pool, config.credentialEncryptionKey)
+    memory: dependencies.createWorkerMemory(pool, workerProviderGraph.chronicle)
   });
   await server.close();
 }

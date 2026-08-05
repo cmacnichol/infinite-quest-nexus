@@ -11,13 +11,13 @@ import { storyImportRequestSchema } from "../../packages/contracts/src/imports.j
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
-import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
-import { createWorkerIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
-import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, retryImageJob, runImageJob, setIllustrationConfig } from "../../services/runtime/src/illustration-image-job-adapter.js";
+import { createApiGenerationApplication } from "../helpers/runtime-application-fixtures.js";
+import { createWorkerIllustrationApplication } from "../helpers/runtime-application-fixtures.js";
+import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, retryImageJob, runImageJob, setIllustrationConfig } from "../helpers/illustration-job-fixtures.js";
 import { createWorld, getWorld, importLegacyStory } from "../helpers/memory-aware-services.js";
-import { createProvider } from "../../services/runtime/src/provider-runtime-adapter.js";
+import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { listAssets, persistOriginalImage, queryAssets, readAssetDerivative, runAssetMetadataBackfill, selectTurnIllustration, selectWorldCover, updateAssetMetadata } from "../../services/api/src/asset-service.js";
-import { getTurnIllustrationResolution, runIllustrationResolutionJob } from "../../services/runtime/src/illustration-resolution-job-adapter.js";
+import { getTurnIllustrationResolution, runIllustrationResolutionJob } from "../helpers/illustration-job-fixtures.js";
 import {
   createProvisionalSegment,
   createProvisionalSet,
@@ -27,8 +27,8 @@ import {
   previewIllustrationBackfill,
   regenerateSegmentIllustration,
   runIllustrationPromptJob
-} from "../../services/runtime/src/illustration-segment-job-adapter.js";
-import { getCampaignCostSummary } from "../../services/runtime/src/provider-cost-adapter.js";
+} from "../helpers/illustration-job-fixtures.js";
+import { getCampaignCostSummary } from "../helpers/provider-application-fixtures.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;

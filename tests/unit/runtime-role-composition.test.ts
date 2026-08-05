@@ -12,7 +12,10 @@ import type {
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import type { ProviderTransport } from "../../packages/story-engine/src/provider-transport.js";
-import type { ProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
+import type {
+  ApiProviderApplicationComposition,
+  WorkerProviderApplicationComposition
+} from "../../services/runtime/src/provider-application-composition.js";
 import type { ProviderApiTransportAdapter } from "../../services/api/src/provider-application-adapter.js";
 import {
   dispatchRuntimeRole,
@@ -29,8 +32,28 @@ const workerMemory = { kind: "worker-memory" } as unknown as MemoryWorkerApplica
 const worldCampaign = { kind: "world-campaign" } as unknown as WorldCampaignApplication;
 const generationEvents = { kind: "generation-events" } as unknown as GenerationEventSource;
 const providerTransport = { kind: "provider-transport" } as unknown as ProviderTransport;
-const apiProviders = { kind: "api-providers" } as unknown as ProviderApplicationComposition;
-const workerProviders = { kind: "worker-providers" } as unknown as ProviderApplicationComposition;
+const apiGenerationProviders = { kind: "api-generation-providers" };
+const apiIllustrationProviders = { kind: "api-illustration-providers" };
+const apiChronicleProviders = { kind: "api-chronicle-providers" };
+const apiInfiniteWorldsProviders = { kind: "api-infinite-worlds-providers" };
+const apiProviders = {
+  kind: "api-providers",
+  generation: apiGenerationProviders,
+  illustration: apiIllustrationProviders,
+  chronicle: apiChronicleProviders,
+  worldGeneration: { kind: "api-world-generation-providers" },
+  characterOrganization: { kind: "api-character-organization-providers" },
+  infiniteWorlds: apiInfiniteWorldsProviders,
+} as unknown as ApiProviderApplicationComposition;
+const workerGenerationProviders = { kind: "worker-generation-providers" };
+const workerIllustrationProviders = { kind: "worker-illustration-providers" };
+const workerChronicleProviders = { kind: "worker-chronicle-providers" };
+const workerProviders = {
+  kind: "worker-providers",
+  generation: workerGenerationProviders,
+  illustration: workerIllustrationProviders,
+  chronicle: workerChronicleProviders,
+} as unknown as WorkerProviderApplicationComposition;
 const providerApiAdapter = { kind: "provider-api-adapter" } as unknown as ProviderApiTransportAdapter;
 
 function config(role: RuntimeConfig["role"]): RuntimeConfig {
@@ -81,9 +104,13 @@ describe("runtime role generation composition", () => {
     await dispatchRuntimeRole(config("api"), pool, controller.signal, values, providerTransport, generationEvents);
 
     expect(values.createApiGeneration).toHaveBeenCalledOnce();
-    expect(values.createApiGeneration).toHaveBeenCalledWith(pool);
+    expect(values.createApiProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport);
+    expect(values.createWorkerProviders).not.toHaveBeenCalled();
+    expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders);
+    expect(values.createApiIllustration).toHaveBeenCalledWith(pool, apiIllustrationProviders);
+    expect(values.createApiMemory).toHaveBeenCalledWith(pool, apiChronicleProviders);
     expect(values.createApiWorldCampaign).toHaveBeenCalledOnce();
-    expect(values.createApiWorldCampaign).toHaveBeenCalledWith(pool, "role-secret");
+    expect(values.createApiWorldCampaign).toHaveBeenCalledWith(pool, apiProviders);
     expect(values.createWorkerGeneration).not.toHaveBeenCalled();
     expect(values.buildServer).toHaveBeenCalledOnce();
     expect(values.buildServer).toHaveBeenCalledWith({
@@ -94,7 +121,8 @@ describe("runtime role generation composition", () => {
       memory,
       providers: providerApiAdapter,
       generationEvents,
-      worldCampaign
+      worldCampaign,
+      infiniteWorldsProviders: apiInfiniteWorldsProviders,
     });
     expect(values.runWorker).not.toHaveBeenCalled();
     expect(server.close).toHaveBeenCalledOnce();
@@ -112,7 +140,13 @@ describe("runtime role generation composition", () => {
       17_000
     );
     expect(values.createWorkerGeneration).toHaveBeenCalledOnce();
-    expect(values.createWorkerGeneration).toHaveBeenCalledWith(pool, "role-secret", illustration, memory);
+    expect(values.createWorkerProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport);
+    expect(values.createApiProviders).not.toHaveBeenCalled();
+    expect(values.createApiIllustration).toHaveBeenCalledWith(pool, workerIllustrationProviders);
+    expect(values.createApiMemory).toHaveBeenCalledWith(pool, workerChronicleProviders);
+    expect(values.createWorkerGeneration).toHaveBeenCalledWith(
+      pool, illustration, memory, workerGenerationProviders,
+    );
     expect(values.runWorker).toHaveBeenCalledOnce();
     expect(values.runWorker).toHaveBeenCalledWith(
       pool,
@@ -133,11 +167,15 @@ describe("runtime role generation composition", () => {
     await dispatchRuntimeRole(config("all"), pool, controller.signal, values, providerTransport, generationEvents);
 
     expect(values.createApiGeneration).toHaveBeenCalledOnce();
-    expect(values.createApiGeneration).toHaveBeenCalledWith(pool);
+    expect(values.createApiProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport);
+    expect(values.createWorkerProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport);
+    expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders);
     expect(values.createApiWorldCampaign).toHaveBeenCalledOnce();
-    expect(values.createApiWorldCampaign).toHaveBeenCalledWith(pool, "role-secret");
+    expect(values.createApiWorldCampaign).toHaveBeenCalledWith(pool, apiProviders);
     expect(values.createWorkerGeneration).toHaveBeenCalledOnce();
-    expect(values.createWorkerGeneration).toHaveBeenCalledWith(pool, "role-secret", illustration, memory);
+    expect(values.createWorkerGeneration).toHaveBeenCalledWith(
+      pool, illustration, memory, workerGenerationProviders,
+    );
     expect(values.buildServer).toHaveBeenCalledWith({
       config: expect.objectContaining({ role: "all" }),
       pool,
@@ -146,7 +184,8 @@ describe("runtime role generation composition", () => {
       memory,
       providers: providerApiAdapter,
       generationEvents,
-      worldCampaign
+      worldCampaign,
+      infiniteWorldsProviders: apiInfiniteWorldsProviders,
     });
     expect(values.runWorker).toHaveBeenCalledWith(
       pool,

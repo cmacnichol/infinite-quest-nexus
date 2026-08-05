@@ -1,10 +1,6 @@
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import type { IllustrationCostPort } from "../../../packages/application/src/index.js";
-import {
-  callTextProvider,
-  pollImageProvider,
-  submitImageProvider
-} from "../../../packages/story-engine/src/index.js";
+import type { ProviderCostRecordCommand } from "../../../packages/application/src/providers/index.js";
 import {
   persistTurnImage,
   persistWorldCover,
@@ -15,12 +11,7 @@ import {
   buildIllustrationRefinementInput,
   parseRefinedPrompt
 } from "./illustration-segment-job-adapter.js";
-import {
-  loadImageProvider,
-  loadTextProvider,
-  recordProviderHealth
-} from "./provider-runtime-adapter.js";
-import { recordProviderCost, type CostAttribution } from "./provider-cost-adapter.js";
+import type { IllustrationProviderCollaborators } from "./provider-application-composition.js";
 import type {
   ArtifactDownloadAdapterDependencies,
   AssetAdapterDependencies,
@@ -43,44 +34,59 @@ export type IllustrationPlatformBindings = Readonly<{
  */
 export function createIllustrationPlatformBindings(
   _pool: DatabasePool,
-  _credentialSecret: string,
   _store: FilesystemAssetStore,
+  providers: IllustrationProviderCollaborators,
 ): IllustrationPlatformBindings {
   return {
     imageProvider: {
-      loadImageProvider,
-      submitImageProvider,
-      pollImageProvider,
-      recordProviderHealth
+      loadImageExecution: (ownerUserId, providerProfileId, model) => providers.execution.image(
+        { ownerUserId },
+        providerProfileId,
+        model
+      ),
+      recordProviderHealth: (_pool, ownerUserId, providerProfileId, healthy) => providers.health.recordHealth({
+        ownerUserId,
+        providerProfileId,
+        outcome: healthy ? "healthy" : "failed",
+        ...(healthy ? {} : { diagnosticCode: "provider_unavailable" })
+      })
     },
     promptRefinement: {
-      loadTextProvider,
-      callTextProvider,
-      recordProviderHealth,
+      loadTextExecution: (ownerUserId, providerProfileId, model) => providers.execution.text(
+        { ownerUserId },
+        providerProfileId,
+        "text",
+        model
+      ),
+      recordProviderHealth: (_pool, ownerUserId, providerProfileId, healthy) => providers.health.recordHealth({
+        ownerUserId,
+        providerProfileId,
+        outcome: healthy ? "healthy" : "failed",
+        ...(healthy ? {} : { diagnosticCode: "provider_unavailable" })
+      }),
       buildRefinementInput: buildIllustrationRefinementInput,
       parseRefinedPrompt
     },
     artifactDownload: { downloadArtifact },
     costs: {
       recordIllustrationCost: (database, input) => {
-        const attribution: CostAttribution = {
+        return providers.costs.recordIllustrationCost(providers.costContext(database as never), {
           ownerUserId: input.ownerUserId,
           campaignId: input.campaignId,
           providerProfileId: input.providerProfileId,
-          providerType: input.providerType,
+          providerType: input.providerType as ProviderCostRecordCommand["providerType"],
           requestedModel: input.requestedModel,
-          category: "image",
           operation: input.operation,
-          usage: input.usage
-        };
-        if (input.turnId !== undefined) attribution.turnId = input.turnId;
-        if (input.imageJobId) attribution.imageJobId = input.imageJobId;
-        const localCallId = input.promptJobId ?? input.imageJobId;
-        if (localCallId !== undefined) attribution.localCallId = localCallId;
-        return recordProviderCost(database as never, attribution, {
+          usage: input.usage,
           reportedCost: input.reportedCost,
-          responseId: input.responseId,
-          usage: input.usage
+          providerResponseId: input.responseId,
+          category: "image",
+          resolvedModel: input.requestedModel,
+          ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
+          ...(input.imageJobId ? { imageJobId: input.imageJobId } : {}),
+          ...((input.promptJobId ?? input.imageJobId) ? {
+            localCallId: input.promptJobId ?? input.imageJobId
+          } : {})
         });
       }
     },

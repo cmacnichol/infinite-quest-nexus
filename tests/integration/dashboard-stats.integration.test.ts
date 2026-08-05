@@ -4,7 +4,7 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { getDashboardStats } from "../helpers/memory-aware-services.js";
 import { buildServer } from "../../services/api/src/server.js";
-import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
+import { createApiWorldCampaignApplication } from "../helpers/runtime-application-fixtures.js";
 import { serverOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 

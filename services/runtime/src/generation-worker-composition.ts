@@ -11,17 +11,8 @@ import {
   type GenerationExecutionRepository
 } from "../../../packages/database/src/generation-execution-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import { loadTextProvider } from "./provider-runtime-adapter.js";
-import {
-  attributeGenerationCostsToTurn,
-  recordProfileCost,
-  turnReportedCosts
-} from "./provider-cost-adapter.js";
-import {
-  promptFromSnapshot,
-  promptProtocolVersion,
-  resolvePromptSnapshot
-} from "./provider-prompt-adapter.js";
+import { withTransaction } from "../../../packages/database/src/pool.js";
+import type { WorkerGenerationProviderCollaborators } from "./provider-application-composition.js";
 import {
   createGenerationExecutor,
   type GenerationExecutionCollaborators,
@@ -32,7 +23,12 @@ type WorkerGenerationRepository = GenerationClaimRepository & GenerationExecutio
 
 export type WorkerGenerationCompositionFactories = Readonly<{
   createRepository(pool: DatabasePool): WorkerGenerationRepository;
-  createCollaborators(illustration: IllustrationApplication, memory: MemoryApplication): GenerationExecutionCollaborators;
+  createCollaborators(
+    pool: DatabasePool,
+    illustration: IllustrationApplication,
+    memory: MemoryApplication,
+    providers: WorkerGenerationProviderCollaborators,
+  ): GenerationExecutionCollaborators;
   createExecutor(dependencies: GenerationExecutorDependencies): GenerationExecutor;
   createApplication(dependencies: Readonly<{
     claims: GenerationClaimRepository;
@@ -41,20 +37,40 @@ export type WorkerGenerationCompositionFactories = Readonly<{
 }>;
 
 export function createGenerationExecutionCollaborators(
+  pool: DatabasePool,
   illustration: IllustrationApplication,
   memory: MemoryApplication,
+  providers: WorkerGenerationProviderCollaborators,
 ): GenerationExecutionCollaborators {
   return {
     memory: memory.generation,
     illustration: illustration.generation,
-    loadTextProvider,
-    resolvePromptSnapshot,
-    promptFromSnapshot,
-    promptProtocolVersion,
-    recordProfileCost,
-    turnReportedCosts: async (database, ownerUserId, turnIds) =>
-      await turnReportedCosts(database, ownerUserId, turnIds) as Map<string, unknown>,
-    attributeGenerationCostsToTurn
+    loadTextExecution: (ownerUserId, providerProfileId, model) => providers.execution.text(
+      { ownerUserId },
+      providerProfileId,
+      "text",
+      model
+    ),
+    promptFromSnapshot: providers.promptTools.content,
+    recordProfileCost: (_database, profile, attribution, result) => withTransaction(pool, (client) =>
+      providers.costs.recordGenerationCost(providers.costContext(client), {
+        ...attribution,
+        providerProfileId: profile.id,
+        providerType: profile.providerType,
+        requestedModel: profile.model,
+        resolvedModel: result.modelInstanceId || profile.model,
+        providerResponseId: result.responseId,
+        usage: result.usage,
+        reportedCost: result.reportedCost
+      })
+    ),
+    attributeGenerationCostsToTurn: (client, ownerUserId, campaignId, generationJobId, turnId) =>
+      providers.attributeCosts.attributeGenerationCostsToTurn(providers.costContext(client), {
+        ownerUserId,
+        campaignId,
+        generationJobId,
+        turnId
+      })
   };
 }
 
@@ -67,18 +83,17 @@ const productionFactories: WorkerGenerationCompositionFactories = {
 
 export function createWorkerGenerationApplication(
   pool: DatabasePool,
-  credentialSecret: string,
   illustration: IllustrationApplication,
   memory: MemoryApplication,
+  providers: WorkerGenerationProviderCollaborators,
   factories: WorkerGenerationCompositionFactories = productionFactories,
 ): GenerationWorkerApplication {
   const repository = factories.createRepository(pool);
-  const collaborators = factories.createCollaborators(illustration, memory);
+  const collaborators = factories.createCollaborators(pool, illustration, memory, providers);
   const executor = factories.createExecutor({
     pool,
     repository,
-    collaborators,
-    credentialSecret
+    collaborators
   });
   return factories.createApplication({ claims: repository, executor });
 }

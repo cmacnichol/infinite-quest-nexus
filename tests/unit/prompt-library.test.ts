@@ -9,7 +9,7 @@ import {
 } from "../../packages/contracts/src/prompt-library.js";
 import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../../packages/domain/src/illustrations.js";
 import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
-import { promptProtocolVersion } from "../../services/runtime/src/provider-prompt-adapter.js";
+import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
 import type { PromptSnapshot } from "../../packages/contracts/src/index.js";
 import { infiniteWorldsPromptSet } from "../../services/api/src/infinite-worlds-import-service.js";
 
@@ -126,9 +126,9 @@ describe("Prompt Library catalog", () => {
       template.key,
       { content: template.defaultContent, hash: "ignored", source: "shipped" }
     ])) as PromptSnapshot;
-    const original = promptProtocolVersion(snapshot);
+    const original = providerPromptProtocolVersion(snapshot);
     snapshot.event_trigger = { ...snapshot.event_trigger, content: `${snapshot.event_trigger.content}\nChanged.` };
-    expect(promptProtocolVersion(snapshot)).not.toBe(original);
+    expect(providerPromptProtocolVersion(snapshot)).not.toBe(original);
   });
 
   it("renders editable illustration wrappers after sanitizing structured values", () => {

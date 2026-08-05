@@ -319,14 +319,24 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
       let row = request.selectedProviderProfileId
         ? dedicated.rows.find((value) => value.id === request.selectedProviderProfileId)
         : dedicated.rows.length === 1 || dedicated.rows[0]?.is_default ? dedicated.rows[0] : undefined;
-      if (request.selectedProviderProfileId && !row) throw httpError("Enabled embedding provider profile not found.", 400);
       if (row) {
         const model = request.model?.trim() || row.default_model.trim();
         if (!model) throw httpError("Select an embedding model for this provider profile.", 400);
         return { status: "resolved", requestedRole: "embedding", resolvedRole: "embedding", source: "dedicated_embedding", providerProfileId: row.id, providerType: row.provider_type, model };
       }
+      const selectedTextFallbackAllowed = Boolean(
+        request.selectedProviderProfileId && request.allowTextFallback && dedicated.rows.length === 0
+      );
+      if (request.selectedProviderProfileId && !selectedTextFallbackAllowed) {
+        throw httpError("Enabled embedding provider profile not found.", 400);
+      }
       if (request.allowTextFallback) {
-        const fallback = await resolve(request.ownerUserId, "text", undefined, request.model);
+        const fallback = await resolve(
+          request.ownerUserId,
+          "text",
+          selectedTextFallbackAllowed ? request.selectedProviderProfileId : undefined,
+          request.model,
+        );
         if (fallback.status === "resolved") return { ...fallback, requestedRole: "embedding", source: "text_fallback" };
       }
       return { status: "unconfigured", requestedRole: "embedding", resolvedRole: null, source: "none" };

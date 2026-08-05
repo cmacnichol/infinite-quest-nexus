@@ -45,12 +45,9 @@ function rejectedCollaborators(): GenerationExecutionCollaborators {
       orphanProvisionalSet: unexpected,
       enqueueAcceptedTurnIllustrationSegments: unexpected
     } as IllustrationGenerationTransactionPort,
-    loadTextProvider: unexpected,
-    resolvePromptSnapshot: unexpected,
+    loadTextExecution: unexpected,
     promptFromSnapshot: unexpectedSync,
-    promptProtocolVersion: unexpectedSync,
     recordProfileCost: unexpected,
-    turnReportedCosts: unexpected,
     attributeGenerationCostsToTurn: unexpected
   };
 }
@@ -86,8 +83,7 @@ describe("generation executor adapter", () => {
     const executor = createGenerationExecutor({
       pool: {} as DatabasePool,
       repository,
-      collaborators,
-      credentialSecret: "runtime-only-secret"
+      collaborators
     });
 
     await expect(executor.execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(false);

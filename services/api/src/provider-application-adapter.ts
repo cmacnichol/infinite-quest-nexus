@@ -14,17 +14,23 @@ import {
   type ProviderRole,
   type PromptScope
 } from "../../../packages/application/src/providers/index.js";
-import { callTextProvider } from "../../../packages/story-engine/src/providers.js";
-import type { ProviderTransport, TextProviderProfile } from "../../../packages/story-engine/src/index.js";
+import type { ProviderRequest, ProviderResult } from "../../../packages/story-engine/src/index.js";
 
 type ApiRuntimeProviderAdapter = Readonly<{
-  transport: ProviderTransport;
-  loadProvider(
-    scope: Readonly<{ ownerUserId: string }>,
-    providerProfileId: string,
-    providerRole: ProviderRole,
-    model?: string,
-  ): Promise<TextProviderProfile & Readonly<{ id: string; name: string }>>;
+  execution: Readonly<{
+    text(
+      scope: Readonly<{ ownerUserId: string }>,
+      providerProfileId: string,
+      providerRole: "text" | "intent",
+      model?: string,
+    ): Promise<Readonly<{
+      model: string;
+      execute(
+        request: ProviderRequest,
+        policy?: Readonly<{ maxOutputTokens?: number; temperature?: number }>,
+      ): Promise<ProviderResult>;
+    }>>;
+  }>;
   storeCredential(ownerUserId: string, providerProfileId: string, credential: string | null): Promise<void>;
   discoverCandidateModelsWithCredential(
     candidate: ProviderCandidate,
@@ -209,7 +215,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       if (resolution.status === "unconfigured") {
         throw Object.assign(new Error("Add a text provider or mark one as default in Provider Management."), { statusCode: 409 });
       }
-      const profile = await composition.runtime.loadProvider(
+      const provider = await composition.runtime.execution.text(
         { ownerUserId },
         resolution.providerProfileId,
         "text",
@@ -219,11 +225,11 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
         .map((message) => message.content).join("\n\n") || "Return only the requested result.";
       const input = request.messages.filter((message) => message.role !== "system")
         .map((message) => `${message.role}: ${message.content}`).join("\n\n");
-      const result = await callTextProvider(profile, { systemPrompt, input }, composition.runtime.transport);
+      const result = await provider.execute({ systemPrompt, input });
       return {
         content: result.content,
         finishReason: result.finishReason,
-        model: result.modelInstanceId || profile.model,
+        model: result.modelInstanceId || provider.model,
         usage: result.usage
       };
     },

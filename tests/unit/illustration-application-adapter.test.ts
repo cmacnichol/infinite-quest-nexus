@@ -27,8 +27,21 @@ describe("illustration provider adapters", () => {
   });
 
   it("keeps image submission and remote polling on the image-provider path", async () => {
-    const provider = { id: providerProfileId, providerRole: "image", providerType: "openai_compatible" };
-    const loadImageProvider = vi.fn(async () => provider);
+    const provider = {
+      id: providerProfileId,
+      name: "Image provider",
+      providerRole: "image" as const,
+      providerType: "openai_compatible" as const,
+      model: "image-model",
+      contextWindowTokens: 0,
+      maxOutputTokens: 0,
+      temperature: 0,
+      requestTimeoutMs: 30_000,
+      configuration: {},
+      submit: vi.fn(),
+      poll: vi.fn(),
+    };
+    const loadImageExecution = vi.fn(async () => provider);
     const submitImageProvider = vi.fn(async () => ({
       mode: "pending" as const,
       remoteJobId: "remote-1",
@@ -48,14 +61,13 @@ describe("illustration provider adapters", () => {
     const recordProviderHealth = vi.fn(async () => undefined);
     const adapter = createIllustrationImageProviderAdapter(
       {} as DatabasePool,
-      "credential-secret",
       {
-        loadImageProvider: loadImageProvider as never,
-        submitImageProvider: submitImageProvider as never,
-        pollImageProvider: pollImageProvider as never,
+        loadImageExecution: loadImageExecution as never,
         recordProviderHealth: recordProviderHealth as never
       }
     );
+    provider.submit.mockImplementation(submitImageProvider);
+    provider.poll.mockImplementation(pollImageProvider as never);
     const baseRequest = {
       ownerUserId,
       jobId,
@@ -86,10 +98,8 @@ describe("illustration provider adapters", () => {
       allowPrivateArtifactHosts: false,
       generationTimeoutMs: 180_000
     });
-    expect(loadImageProvider).toHaveBeenCalledWith(
-      expect.anything(), ownerUserId, providerProfileId, "credential-secret", "image-model"
-    );
-    expect(submitImageProvider).toHaveBeenCalledWith(provider, {
+    expect(loadImageExecution).toHaveBeenCalledWith(ownerUserId, providerProfileId, "image-model");
+    expect(submitImageProvider).toHaveBeenCalledWith({
       prompt: "A moonlit observatory.",
       size: "1024x1024",
       aspectRatio: "1:1",
@@ -113,7 +123,7 @@ describe("illustration provider adapters", () => {
       allowPrivateArtifactHosts: false,
       generationTimeoutMs: 180_000
     });
-    expect(pollImageProvider).toHaveBeenCalledWith(provider, { remoteJobId: "remote-1" });
+    expect(pollImageProvider).toHaveBeenCalledWith("remote-1");
     expect(recordProviderHealth).toHaveBeenCalledTimes(2);
     expect(recordProviderHealth).toHaveBeenLastCalledWith(
       expect.anything(), ownerUserId, providerProfileId, true
@@ -121,8 +131,8 @@ describe("illustration provider adapters", () => {
   });
 
   it("keeps fiction refinement on the text-provider path with the configured system prompt", async () => {
-    const provider = { id: providerProfileId, providerRole: "text", providerType: "openai_compatible" };
-    const loadTextProvider = vi.fn(async () => provider);
+    const provider = { execute: vi.fn() };
+    const loadTextExecution = vi.fn(async () => provider);
     const callTextProvider = vi.fn(async () => ({
       content: "Moonlit observatory, silver lens, cinematic fantasy illustration",
       responseId: "text-response-1",
@@ -137,15 +147,14 @@ describe("illustration provider adapters", () => {
     const parseRefinedPrompt = vi.fn((content: string) => content);
     const adapter = createIllustrationPromptRefinementAdapter(
       {} as DatabasePool,
-      "credential-secret",
       {
-        loadTextProvider: loadTextProvider as never,
-        callTextProvider: callTextProvider as never,
+        loadTextExecution: loadTextExecution as never,
         recordProviderHealth: recordProviderHealth as never,
         buildRefinementInput,
         parseRefinedPrompt
       }
     );
+    provider.execute.mockImplementation(callTextProvider);
 
     await expect(adapter.refinePrompt({
       ownerUserId,
@@ -163,15 +172,13 @@ describe("illustration provider adapters", () => {
       model: "text-model",
       prompt: "Moonlit observatory, silver lens, cinematic fantasy illustration"
     });
-    expect(loadTextProvider).toHaveBeenCalledWith(
-      expect.anything(), ownerUserId, providerProfileId, "credential-secret", "text-model"
-    );
-    expect(callTextProvider).toHaveBeenCalledWith(provider, {
+    expect(loadTextExecution).toHaveBeenCalledWith(ownerUserId, providerProfileId, "text-model");
+    expect(callTextProvider).toHaveBeenCalledWith({
       systemPrompt: "Return only a fiction-only visual prompt.",
       input: expect.stringContaining("Moonlight fills the observatory.")
     });
-    const refinementCall = callTextProvider.mock.calls[0] as unknown as [unknown, { input: string }];
-    expect(refinementCall[1].input).toContain("A quiet night beneath a violet sky.");
+    const refinementCall = callTextProvider.mock.calls[0] as unknown as [{ input: string }];
+    expect(refinementCall[0].input).toContain("A quiet night beneath a violet sky.");
     expect(buildRefinementInput).toHaveBeenCalledWith(
       "Moonlight fills the observatory.",
       "A quiet night beneath a violet sky.",
@@ -246,7 +253,7 @@ describe("illustration generation transaction adapter", () => {
         }]
       });
     const database = { query } as unknown as DatabaseClient;
-    const adapter = createIllustrationGenerationTransactionPort();
+    const adapter = createIllustrationGenerationTransactionPort({} as never);
 
     await expect(adapter.loadStreamingIllustrationConfig(database, { ownerUserId, campaignId }))
       .resolves.toMatchObject({

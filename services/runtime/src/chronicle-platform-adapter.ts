@@ -11,12 +11,13 @@ import type {
 } from "../../../packages/application/src/memory/index.js";
 import type {
   ChronicleTransactionEmbeddingPort,
+  ChronicleTransactionEmbeddingExecution,
   ChronicleTransactionEmbeddingProvider,
   ChronicleTransactionEmbeddingResult
 } from "../../../packages/database/src/chronicle-repository.js";
 import { providerModelFingerprint } from "../../../packages/domain/src/chronicle-memory-helpers.js";
 
-export type ChronicleEmbeddingProvider = ChronicleTransactionEmbeddingProvider;
+export type ChronicleEmbeddingProvider = ChronicleTransactionEmbeddingExecution;
 export type ChronicleEmbeddingResult = ChronicleTransactionEmbeddingResult;
 
 export type ChronicleEmbeddingProviderScope = Readonly<{
@@ -36,11 +37,9 @@ export type ChronicleEmbeddingProviderSelectionScope = Readonly<{
  * rest of provider configuration; application commands never see credentials.
  */
 export type ChronicleEmbeddingProviderDependencies = Readonly<{
-  loadEmbeddingProvider(
-    database: MemoryTransactionContext,
+  loadEmbeddingExecution(
     ownerUserId: string,
     providerProfileId: string,
-    credentialSecret: string,
     model: string,
   ): Promise<ChronicleEmbeddingProvider>;
   resolveEmbeddingProviderId(
@@ -49,7 +48,6 @@ export type ChronicleEmbeddingProviderDependencies = Readonly<{
     campaignId: string,
     selectedProviderProfileId?: string | null,
   ): Promise<string | null>;
-  callEmbeddingProvider(provider: ChronicleEmbeddingProvider, documents: readonly string[]): Promise<ChronicleEmbeddingResult>;
   recordProviderHealth(
     database: MemoryTransactionContext,
     ownerUserId: string,
@@ -59,7 +57,7 @@ export type ChronicleEmbeddingProviderDependencies = Readonly<{
   ): Promise<void>;
   recordProfileCost(
     database: MemoryTransactionContext,
-    provider: ChronicleEmbeddingProvider,
+    provider: ChronicleTransactionEmbeddingProvider,
     attribution: Readonly<{
       ownerUserId: string;
       campaignId: string;
@@ -84,15 +82,17 @@ export function createChronicleEmbeddingProviderPort(
       scope.campaignId,
       scope.selectedProviderProfileId ?? null,
     ),
-    load: (database, scope, credentialSecret) => dependencies.loadEmbeddingProvider(
-      database,
+    load: (_database, scope) => dependencies.loadEmbeddingExecution(
       scope.ownerUserId,
       scope.providerProfileId,
-      credentialSecret,
       scope.model,
     ),
-    embed: (provider, documents) => dependencies.callEmbeddingProvider(provider, documents),
-    fingerprint: async (provider, prefixes) => providerModelFingerprint(provider, prefixes),
+    embed: (provider, documents) => provider.embed(documents),
+    fingerprint: async (provider, prefixes) => providerModelFingerprint({
+      ...provider,
+      // The provider id is the opaque endpoint identity at this boundary.
+      baseUrl: provider.id,
+    }, prefixes),
     recordHealth: (database, scope, healthy, diagnostic = "") => dependencies.recordProviderHealth(
       database,
       scope.ownerUserId,

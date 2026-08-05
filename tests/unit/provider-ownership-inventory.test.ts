@@ -18,7 +18,14 @@ const removedLegacyFiles = [
   "services/api/src/turn-intent-service.ts",
   "services/api/src/cost-service.ts",
   "services/api/src/task-14d-character-profile-organizer-bridge.ts",
-  "services/api/src/task-14d-world-generation-bridge.ts"
+  "services/api/src/task-14d-world-generation-bridge.ts",
+  "packages/database/src/provider-runtime-adapter.ts",
+  "packages/database/src/provider-prompt-adapter.ts",
+  "packages/database/src/provider-cost-adapter.ts",
+  "packages/database/src/provider-world-generation-adapter.ts",
+  "services/runtime/src/provider-runtime-adapter.ts",
+  "services/runtime/src/provider-prompt-adapter.ts",
+  "services/runtime/src/provider-cost-adapter.ts",
 ] as const;
 
 const namedCutoverFiles = [
@@ -26,6 +33,26 @@ const namedCutoverFiles = [
   "services/runtime/src/provider-application-composition.ts",
   "services/runtime/src/provider-character-organization-adapter.ts",
   "services/runtime/src/provider-world-generation-adapter.ts"
+] as const;
+
+const frozenConsumerFiles = [
+  "services/runtime/src/generation-api-composition.ts",
+  "services/runtime/src/generation-worker-composition.ts",
+  "services/runtime/src/illustration-composition.ts",
+  "services/runtime/src/memory-composition.ts",
+  "services/runtime/src/world-campaign-composition.ts",
+  "services/runtime/src/provider-character-organization-adapter.ts",
+  "services/runtime/src/provider-world-generation-adapter.ts",
+  "services/api/src/infinite-worlds-import-service.ts",
+] as const;
+
+const forbiddenRawAuthority = [
+  /\bloadProviderProfile\b/,
+  /\bresolveProviderForGeneration\b/,
+  /\bcallTextProvider\b/,
+  /\bcallEmbeddingProvider\b/,
+  /\bsubmitImageGeneration\b/,
+  /\bpollImageGeneration\b/,
 ] as const;
 
 function sourceFiles(directory: string): string[] {
@@ -60,5 +87,30 @@ describe("Task 14d provider/prompt/intent/cost ownership inventory", () => {
     for (const path of namedCutoverFiles) {
       expect(readFileSync(join(repositoryRoot, path), "utf8")).not.toBe("");
     }
+  });
+
+  it("makes every frozen consumer accept named application collaborators instead of raw provider authority", () => {
+    for (const path of frozenConsumerFiles) {
+      const source = readFileSync(join(repositoryRoot, path), "utf8");
+      expect(source, path).toMatch(/ProviderCollaborators|ApiProviders/);
+      expect(source, path).not.toMatch(/provider-(?:runtime|prompt|cost)-adapter/);
+      for (const forbidden of forbiddenRawAuthority) {
+        expect(source, `${path} contains ${forbidden}`).not.toMatch(forbidden);
+      }
+    }
+  });
+
+  it("keeps decrypted profiles and pinned transport inside the runtime-private execution adapter", () => {
+    const source = readFileSync(
+      join(repositoryRoot, "services/runtime/src/provider-credential-transport-adapter.ts"),
+      "utf8",
+    );
+    const publicAdapterContract = source.match(
+      /export type RuntimeProviderAdapter = Readonly<\{([\s\S]*?)\}>;/,
+    )?.[1] ?? "";
+    expect(source).toContain("execution:");
+    expect(source).toContain("execute:");
+    expect(publicAdapterContract).not.toMatch(/\bloadProvider\b/);
+    expect(publicAdapterContract).not.toMatch(/\btransport\b/);
   });
 });

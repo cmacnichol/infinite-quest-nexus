@@ -7,11 +7,13 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { generationRequestSchema, generationRetryLatestRequestSchema, illustrationConfigSchema } from "../../packages/contracts/src/generation.js";
 import { setIllustrationConfig } from "../../services/runtime/src/illustration-image-job-adapter.js";
-import { createProvider } from "../../services/runtime/src/provider-runtime-adapter.js";
-import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
-import { createWorkerGenerationApplication } from "../../services/runtime/src/generation-worker-composition.js";
-import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
+import { createProvider } from "../helpers/provider-application-fixtures.js";
+import { createApiGenerationApplication } from "../helpers/runtime-application-fixtures.js";
+import { createWorkerGenerationApplication } from "../helpers/runtime-application-fixtures.js";
+import { createWorkerGenerationApplication as composeWorkerGenerationApplication } from "../../services/runtime/src/generation-worker-composition.js";
+import { createApiIllustrationApplication } from "../helpers/runtime-application-fixtures.js";
 import { runWorker } from "../../services/worker/src/worker.js";
+import { startNextGeneration } from "../../services/worker/src/worker.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import {
   branchCampaign,
@@ -23,7 +25,8 @@ import {
   getCampaignRuntimeState,
   updateCampaignRuntimeState
 } from "../helpers/memory-aware-services.js";
-import { getCampaignCostSummary } from "../../services/runtime/src/provider-cost-adapter.js";
+import { getCampaignCostSummary } from "../helpers/provider-application-fixtures.js";
+import { workerProviderGraph } from "../helpers/provider-application-fixtures.js";
 import { logger } from "../../packages/logger/src/index.js";
 import {
   apiMemoryApplication,
@@ -1857,9 +1860,6 @@ integration("durable Story Engine integration", () => {
     const querySpy = vi.spyOn(pool, "query");
     querySpy.mockImplementation((async (...args: any[]) => {
       const statement = String(args[0]);
-      if (statement.includes("INSERT INTO provider_cost_events")) {
-        throw Object.assign(new Error("Synthetic provider cost failure."), { code: unsafeCode });
-      }
       if (statement.includes("UPDATE generation_jobs SET status = 'failed'")) {
         return { rows: [], rowCount: 0 };
       }
@@ -1868,7 +1868,24 @@ integration("durable Story Engine integration", () => {
     try {
       replies.push({ content: validStory("The provider cost write fails after a valid response.") });
       const job = await queue(imported.campaignId);
-      await runGenerationJob(pool, "story-worker-safe-error-codes", 30, credentialSecret);
+      const providerGraph = workerProviderGraph(pool, credentialSecret);
+      const failingProviders = {
+        ...providerGraph.generation,
+        costs: {
+          async recordGenerationCost() {
+            throw Object.assign(new Error("Synthetic provider cost failure."), { code: unsafeCode });
+          }
+        }
+      };
+      const generation = composeWorkerGenerationApplication(
+        pool,
+        createApiIllustrationApplication(pool),
+        apiMemoryApplication(pool, credentialSecret),
+        failingProviders,
+      );
+      const started = await startNextGeneration(generation, "story-worker-safe-error-codes", 30);
+      expect(started?.jobId).toBe(job.id);
+      await started?.execution;
 
       const events = [...infoSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls]
         .map(([event]) => event)

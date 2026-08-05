@@ -7,10 +7,11 @@ import { createApiGenerationApplication } from "../../services/runtime/src/gener
 import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { createApiMemoryApplication } from "../../services/runtime/src/memory-composition.js";
 import type { ProviderApiTransportAdapter } from "../../services/api/src/provider-application-adapter.js";
+import { apiProviderGraph } from "./provider-application-fixtures.js";
 
 export type ServerOptionsOverrides = Readonly<
   Pick<BuildServerOptions, "config" | "pool"> &
-  Partial<Pick<BuildServerOptions, "generation" | "illustration" | "memory" | "generationEvents" | "worldCampaign" | "providers">>
+  Partial<Pick<BuildServerOptions, "generation" | "illustration" | "memory" | "generationEvents" | "worldCampaign" | "providers" | "infiniteWorldsProviders">>
 >;
 
 export const inertProviders = {
@@ -364,15 +365,15 @@ export function testWorldCampaignApplication(
 }
 
 export function serverOptions(overrides: ServerOptionsOverrides): BuildServerOptions {
+  const providerGraph = apiProviderGraph(overrides.pool, overrides.config.credentialEncryptionKey);
   return {
     ...overrides,
-    generation: overrides.generation ?? createApiGenerationApplication(overrides.pool),
-    illustration: overrides.illustration ?? createApiIllustrationApplication(overrides.pool),
-    memory: overrides.memory ?? createApiMemoryApplication(overrides.pool, {
-      credentialSecret: overrides.config.credentialEncryptionKey
-    }),
+    generation: overrides.generation ?? createApiGenerationApplication(overrides.pool, providerGraph.generation),
+    illustration: overrides.illustration ?? createApiIllustrationApplication(overrides.pool, providerGraph.illustration),
+    memory: overrides.memory ?? createApiMemoryApplication(overrides.pool, providerGraph.chronicle),
     worldCampaign: overrides.worldCampaign ?? testWorldCampaignApplication(),
     providers: overrides.providers ?? inertProviders,
+    infiniteWorldsProviders: overrides.infiniteWorldsProviders ?? providerGraph.infiniteWorlds,
     generationEvents: overrides.generationEvents ?? inertGenerationEvents
   };
 }

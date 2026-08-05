@@ -18,25 +18,62 @@ import {
   isInfiniteWorldsWorld,
   parseInfiniteWorldsStory
 } from "../../../packages/domain/src/infinite-worlds.js";
-import { callTextProvider, containsMechanicsLanguage, extractJsonObject } from "../../../packages/story-engine/src/index.js";
+import {
+  containsMechanicsLanguage,
+  extractJsonObject,
+  type ProviderRequest,
+  type ProviderResult
+} from "../../../packages/story-engine/src/index.js";
 import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js";
-import { loadTextProvider } from "../../../packages/database/src/provider-runtime-adapter.js";
 import type { FilesystemAssetStore } from "./asset-service.js";
 import { resolvePlayableCharacters } from "../../../packages/domain/src/world-characters.js";
-import { extractCyoaLayers, parseCyoaExport } from "../../../packages/domain/src/world-template.js";
 import {
-  generateTemplateWorld,
-  worldGenerationFailureDiagnostic
-} from "../../../packages/database/src/provider-world-generation-adapter.js";
+  extractCyoaLayers,
+  parseCyoaExport,
+  type TemplateWorldInput,
+} from "../../../packages/domain/src/world-template.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import type { PromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
 import type { MemoryGenerationTransactionPort } from "../../../packages/application/src/memory/index.js";
 import type { PortableWorldApplicationPort } from "../../../packages/application/src/world-campaign/index.js";
-import {
-  promptFromSnapshot,
-  resolvePromptSnapshot
-} from "../../../packages/database/src/provider-prompt-adapter.js";
+import type {
+  InfiniteWorldsPromptPort,
+  ProviderResolutionPort,
+  PromptSnapshotVersion
+} from "../../../packages/application/src/providers/index.js";
+
+export type InfiniteWorldsApiProviders = Readonly<{
+  resolution: ProviderResolutionPort;
+  prompts: InfiniteWorldsPromptPort;
+  promptTools: Readonly<{
+    content(snapshot: PromptSnapshotVersion["snapshot"], key: keyof PromptSnapshotVersion["snapshot"]): string;
+  }>;
+  execution: Readonly<{
+    text(
+      scope: Readonly<{ ownerUserId: string }>,
+      providerProfileId: string,
+      providerRole: "text",
+      model?: string,
+    ): Promise<Readonly<{
+      execute(request: ProviderRequest): Promise<ProviderResult>;
+    }>>;
+  }>;
+  generateCyoaWorld(command: Readonly<{
+    ownerUserId: string;
+    providerProfileId: string;
+    input: TemplateWorldInput;
+    worldId: string;
+    model?: string;
+    onProgress?: (phase: string, percent: number, message: string) => Promise<void> | void;
+  }>): Promise<Readonly<{ title: string; content: WorldContent }>>;
+  diagnoseWorldGenerationFailure(error: unknown): Readonly<{
+    message: string;
+    statusCode?: number;
+    code?: string;
+    issues?: readonly unknown[];
+  }>;
+}>;
 
 
 export type ImportProgressReport = {
@@ -142,12 +179,34 @@ function matchedStoryCharacterId(content: WorldContent, characterText: string, r
 }
 
 export function infiniteWorldsPromptSet(snapshot: PromptSnapshot, batch: number, total: number) {
-  const conversion = promptFromSnapshot(snapshot, "infinite_worlds_conversion");
+  const content = (key: keyof PromptSnapshot) => {
+    const entry = snapshot[key];
+    return entry && typeof entry === "object" && typeof entry.content === "string" ? entry.content : "";
+  };
+  const conversion = content("infinite_worlds_conversion");
   return {
     conversion,
-    recovery: promptFromSnapshot(snapshot, "infinite_worlds_recovery"),
-    batch: renderPromptTemplate(promptFromSnapshot(snapshot, "infinite_worlds_batch"), { base: conversion, batch, total }),
-    finalTurn: promptFromSnapshot(snapshot, "infinite_worlds_final_turn")
+    recovery: content("infinite_worlds_recovery"),
+    batch: renderPromptTemplate(content("infinite_worlds_batch"), { base: conversion, batch, total }),
+    finalTurn: content("infinite_worlds_final_turn")
+  };
+}
+
+function applicationPromptSet(
+  providers: InfiniteWorldsApiProviders,
+  snapshot: PromptSnapshotVersion["snapshot"],
+  batch: number,
+  total: number,
+) {
+  const conversion = providers.promptTools.content(snapshot, "infinite_worlds_conversion");
+  return {
+    conversion,
+    recovery: providers.promptTools.content(snapshot, "infinite_worlds_recovery"),
+    batch: renderPromptTemplate(
+      providers.promptTools.content(snapshot, "infinite_worlds_batch"),
+      { base: conversion, batch, total },
+    ),
+    finalTurn: providers.promptTools.content(snapshot, "infinite_worlds_final_turn"),
   };
 }
 
@@ -281,16 +340,16 @@ function convertedPlayableCharacters(converted: z.infer<typeof convertedWorldSch
 }
 
 async function requestConvertedWorld(
-  profile: Awaited<ReturnType<typeof loadTextProvider>>,
+  provider: Readonly<{ execute(request: ProviderRequest): Promise<ProviderResult> }>,
   prompt: { systemPrompt: string; input: string },
   recoveryInput: string
 ) {
-  let result = await callTextProvider(profile, prompt);
+  let result = await provider.execute(prompt);
   try {
     return convertedWorldSchema.parse(extractJsonObject(result.content));
   } catch (error) {
     if (!result.outputLimited) throw error;
-    result = await callTextProvider(profile, {
+    result = await provider.execute({
       ...prompt,
       ...(result.responseId ? { previousResponseId: result.responseId } : {}),
       recoveryInput
@@ -299,18 +358,34 @@ async function requestConvertedWorld(
   }
 }
 
-async function convertWorldText(pool: DatabasePool, request: InfiniteWorldsImportRequest, credentialSecret: string) {
+async function convertWorldText(
+  pool: DatabasePool,
+  request: InfiniteWorldsImportRequest,
+  providers: InfiniteWorldsApiProviders,
+  importId: string,
+) {
   if (!request.providerProfileId) throw Object.assign(new Error("Select a text provider to convert an Infinite Worlds world TXT export."), { statusCode: 400 });
   const ownerUserId = await initialOwnerId(pool);
-  const profile = await loadTextProvider(pool, ownerUserId, request.providerProfileId, credentialSecret, request.model);
-  const snapshot = await resolvePromptSnapshot(pool, ownerUserId);
+  const resolution = await providers.resolution.resolveDirect({
+    ownerUserId,
+    providerRole: "text",
+    selectedProviderProfileId: request.providerProfileId,
+    ...(request.model ? { model: request.model } : {}),
+  });
+  if (resolution.status !== "resolved") {
+    throw Object.assign(new Error("The selected text provider is unavailable."), { statusCode: 409 });
+  }
+  const provider = await providers.execution.text(
+    { ownerUserId }, resolution.providerProfileId, "text", resolution.model,
+  );
+  const snapshot = (await providers.prompts.loadInfiniteWorldsPromptSnapshot({ ownerUserId, importId })).snapshot;
   const chunks = sourceChunks(request.sourceText);
   if (!chunks.length) throw Object.assign(new Error("The selected world TXT export was empty."), { statusCode: 400 });
   let converted: z.infer<typeof convertedWorldSchema> | null = null;
   for (const [index, chunk] of chunks.entries()) {
-    const prompts = infiniteWorldsPromptSet(snapshot, index + 1, chunks.length);
+    const prompts = applicationPromptSet(providers, snapshot, index + 1, chunks.length);
     const basePrompt = worldConversionPrompt(request.sourceName, chunk, prompts.conversion);
-    const partial = await requestConvertedWorld(profile, {
+    const partial = await requestConvertedWorld(provider, {
       systemPrompt: prompts.batch,
       input: JSON.stringify({
         task: "Accumulate this batch into an Infinite Quest world import.",
@@ -350,15 +425,32 @@ async function convertWorldText(pool: DatabasePool, request: InfiniteWorldsImpor
   return portableWorldSchema.parse({ format: "infinite-quest-world", formatVersion: 1, title: converted.title, content });
 }
 
-async function enrichFinalTurn(pool: DatabasePool, request: InfiniteWorldsImportRequest, story: LegacyStory, credentialSecret: string): Promise<void> {
+async function enrichFinalTurn(
+  pool: DatabasePool,
+  request: InfiniteWorldsImportRequest,
+  story: LegacyStory,
+  providers: InfiniteWorldsApiProviders,
+  importId: string,
+): Promise<void> {
   const finalTurn = story.turns.at(-1);
   if (!request.enrichFinalTurn || !finalTurn || (Array.isArray(finalTurn.choices) && finalTurn.choices.length)) return;
   if (!request.providerProfileId) throw Object.assign(new Error("Select a text provider to generate missing final-turn choices."), { statusCode: 400 });
   const ownerUserId = await initialOwnerId(pool);
-  const profile = await loadTextProvider(pool, ownerUserId, request.providerProfileId, credentialSecret, request.model);
-  const snapshot = await resolvePromptSnapshot(pool, ownerUserId);
-  const result = await callTextProvider(profile, {
-    systemPrompt: infiniteWorldsPromptSet(snapshot, 1, 1).finalTurn,
+  const resolution = await providers.resolution.resolveDirect({
+    ownerUserId,
+    providerRole: "text",
+    selectedProviderProfileId: request.providerProfileId,
+    ...(request.model ? { model: request.model } : {}),
+  });
+  if (resolution.status !== "resolved") {
+    throw Object.assign(new Error("The selected text provider is unavailable."), { statusCode: 409 });
+  }
+  const provider = await providers.execution.text(
+    { ownerUserId }, resolution.providerProfileId, "text", resolution.model,
+  );
+  const snapshot = (await providers.prompts.loadInfiniteWorldsPromptSnapshot({ ownerUserId, importId })).snapshot;
+  const result = await provider.execute({
+    systemPrompt: applicationPromptSet(providers, snapshot, 1, 1).finalTurn,
     input: JSON.stringify({ world: story.world, recentTurns: story.turns.slice(-6).map((turn) => ({ action: turn.action, narration: turn.narration ?? turn.story ?? turn.text })) })
   });
   if (result.outputLimited) throw new Error("Final-turn enrichment reached the provider output limit. Import again without enrichment or increase that provider's output allowance.");
@@ -465,7 +557,7 @@ export async function previewInfiniteWorldsImport(
 export async function importInfiniteWorlds(
   pool: DatabasePool,
   request: InfiniteWorldsImportRequest,
-  credentialSecret: string,
+  providers: InfiniteWorldsApiProviders,
   memory: MemoryGenerationTransactionPort,
   portableWorld: PortableWorldApplicationPort,
   assetStore?: FilesystemAssetStore
@@ -487,27 +579,26 @@ export async function importInfiniteWorlds(
         throw invalidCyoaJsonError();
       }
       const extracted = extractCyoaLayers(parsed, request.sourceName);
-      const generated = await generateTemplateWorld(
-        pool,
-        await initialOwnerId(pool),
-        request.providerProfileId || "",
-        credentialSecret,
-        extracted,
-        request.model,
-        async (phase, progressPercent, message) => {
+      const generated = await providers.generateCyoaWorld({
+        ownerUserId: await initialOwnerId(pool),
+        providerProfileId: request.providerProfileId || "",
+        input: extracted,
+        worldId: progressKey,
+        ...(request.model ? { model: request.model } : {}),
+        onProgress: async (phase, progressPercent, message) => {
           activeProgressMap.set(progressKey, {
             status: "processing",
             phase,
             progressPercent,
-            message
+            message,
           });
-        }
-      );
+        },
+      });
       const worldExport = portableWorldSchema.parse({
         format: "infinite-quest-world",
         formatVersion: 1,
         title: generated.title,
-        content: generated.content
+        content: generated.content,
       });
       activeProgressMap.set(progressKey, {
         status: "processing",
@@ -527,7 +618,7 @@ export async function importInfiniteWorlds(
       });
       return { kind: "world" as const, ...result };
     } catch (error) {
-      const failure = worldGenerationFailureDiagnostic(error);
+      const failure = providers.diagnoseWorldGenerationFailure(error);
       logger.error({
         progressKey,
         statusCode: failure.statusCode,
@@ -547,7 +638,7 @@ export async function importInfiniteWorlds(
   if (kind === "world_json" || kind === "world_text") {
     const worldExport = kind === "world_json"
       ? convertInfiniteWorldsWorld(parseJsonText(request.sourceText))
-      : await convertWorldText(pool, request, credentialSecret);
+      : await convertWorldText(pool, request, providers, progressKey);
     const result = await portableWorld.importWorld({ sourceName: request.sourceName, worldExport });
     return { kind: "world" as const, ...result };
   }
@@ -556,7 +647,7 @@ export async function importInfiniteWorlds(
   const parsed = parseInfiniteWorldsStory(request.sourceText);
   const selectedCharacterId = matchedStoryCharacterId(target.content, parsed.characterText, request.selectedCharacterId);
   const story = infiniteWorldsStoryToLegacyStory(parsed, target.content, request.sourceName, selectedCharacterId);
-  await enrichFinalTurn(pool, request, story, credentialSecret);
+  await enrichFinalTurn(pool, request, story, providers, progressKey);
   const result = await importLegacyStory(
     pool,
     { sourceName: request.sourceName, story, targetWorldVersionId: request.targetWorldVersionId, selectedCharacterId },

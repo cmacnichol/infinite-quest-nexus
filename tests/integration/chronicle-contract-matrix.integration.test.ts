@@ -116,13 +116,14 @@ integration("PostgreSQL Chronicle contract matrix", () => {
   }
 
   function embeddingFingerprint(
+    providerId: string,
     model: string,
     documentPrefix: string | null = null,
     queryPrefix: string | null = null,
   ) {
     return providerModelFingerprint({
       providerType: "openai_compatible",
-      baseUrl: "http://provider.invalid/v1",
+      baseUrl: providerId,
       model,
       configuration: {},
       protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION
@@ -377,9 +378,8 @@ integration("PostgreSQL Chronicle contract matrix", () => {
         id: providerId,
         model: "first-batch-gap-model",
         providerType: "openai_compatible",
-        baseUrl: "http://provider.invalid/v1"
       },
-      providerFingerprint: embeddingFingerprint("first-batch-gap-model"),
+      providerFingerprint: embeddingFingerprint(providerId, "first-batch-gap-model"),
       protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
       memories: [{
         ...memory.rows[0]!,
@@ -443,7 +443,6 @@ integration("PostgreSQL Chronicle contract matrix", () => {
         id: providerId,
         model,
         providerType: "openai_compatible",
-        baseUrl: "http://provider.invalid/v1"
       };
       const input = {
         provider: drift === "provider"
@@ -453,7 +452,7 @@ integration("PostgreSQL Chronicle contract matrix", () => {
             : configuredProvider,
         providerFingerprint: drift === "fingerprint"
           ? "changed-provider-model-hash"
-          : embeddingFingerprint(model, documentPrefix, queryPrefix),
+          : embeddingFingerprint(providerId, model, documentPrefix, queryPrefix),
         protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
         memories: [{
           ...memory.rows[0]!,
@@ -525,9 +524,8 @@ integration("PostgreSQL Chronicle contract matrix", () => {
       id: providerId,
       model: "atomic-batch-model",
       providerType: "openai_compatible",
-      baseUrl: "http://provider.invalid/v1"
     };
-    const providerFingerprint = embeddingFingerprint(provider.model);
+    const providerFingerprint = embeddingFingerprint(provider.id, provider.model);
 
     await expect(batches.commitClaimBatch(claim, {
       provider,
@@ -676,9 +674,8 @@ integration("PostgreSQL Chronicle contract matrix", () => {
         id: providerId,
         model: "batch-rollback-model",
         providerType: "openai_compatible",
-        baseUrl: "http://provider.invalid/v1"
       },
-      providerFingerprint: embeddingFingerprint("batch-rollback-model"),
+      providerFingerprint: embeddingFingerprint(providerId, "batch-rollback-model"),
       protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
       memories: [{
         ...memory.rows[0]!,
@@ -798,10 +795,9 @@ integration("PostgreSQL Chronicle contract matrix", () => {
       id: providerId,
       model: "direct-rollback-model",
       providerType: "openai_compatible",
-      baseUrl: "http://provider.invalid/v1"
+      embed: async () => ({ embeddings: [], responseId: "unused", usage: {}, reportedCost: null }),
     };
     const transaction = createPostgresChronicleGenerationTransactionPort({
-      credentialSecret: "",
       embeddings: {
         async resolve(_database, scope) {
           return scope.selectedProviderProfileId ?? providerId;
@@ -980,7 +976,6 @@ integration("PostgreSQL Chronicle contract matrix", () => {
       })]
     );
     const transaction = createPostgresChronicleGenerationTransactionPort({
-      credentialSecret: "",
       embeddings: {
         async resolve() { return null; },
         async load() { throw new Error("not used by rebuild"); },

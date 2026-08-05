@@ -74,7 +74,7 @@ integration("cross-world campaign transfer", () => {
          state_snapshot_private, model_metadata
        ) VALUES ($1,$2,1,'Enter the gate.','The traveler enters the gate.','[]',$3,$4) RETURNING id`,
       [ownerUserId, source.id, JSON.stringify({ scratchpad: "private", trackers: [], eventTriggers: [], pendingEventTriggers: [], rpgStats: [] }),
-        JSON.stringify({ model: "synthetic-model", promptProtocolVersion: "test" })]
+        JSON.stringify({ model: "synthetic-model", providerPromptProtocolVersion: "test" })]
     );
     await pool.query("UPDATE campaigns SET active_turn_number = 1 WHERE id = $1 AND owner_user_id = $2", [source.id, ownerUserId]);
     await pool.query(

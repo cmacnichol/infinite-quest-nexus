@@ -18,6 +18,7 @@ import {
   type WorkerIllustrationCompositionFactories
 } from "../../services/runtime/src/illustration-composition.js";
 import { createIllustrationWorkerStateMachine } from "../../services/runtime/src/illustration-worker-state-adapter.js";
+import type { IllustrationProviderCollaborators } from "../../services/runtime/src/provider-application-composition.js";
 
 async function productionTypeScriptFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -250,8 +251,9 @@ describe("createApiIllustrationApplication", () => {
       createRepositories: vi.fn(() => repositories),
       createApplication: vi.fn(() => application)
     } satisfies ApiIllustrationCompositionFactories;
+    const providers = {} as IllustrationProviderCollaborators;
 
-    expect(createApiIllustrationApplication(pool, factories)).toBe(application);
+    expect(createApiIllustrationApplication(pool, providers, factories)).toBe(application);
     expect(factories.createRepositories).toHaveBeenCalledOnce();
     expect(factories.createRepositories).toHaveBeenCalledWith(pool);
     expect(factories.createApplication).toHaveBeenCalledOnce();
@@ -336,6 +338,7 @@ describe("createWorkerIllustrationApplication", () => {
     };
     const state = {} as IllustrationWorkerStateMachinePort;
     const application = {} as IllustrationWorkerApplication;
+    const providers = {} as IllustrationProviderCollaborators;
     const factories = {
       createLanes: vi.fn(() => lanes),
       createState: vi.fn(() => state),
@@ -346,16 +349,16 @@ describe("createWorkerIllustrationApplication", () => {
 
     expect(createWorkerIllustrationApplication(
       pool,
-      "credential-secret",
       store,
+      providers,
       factories
     )).toBe(application);
     expect((factories as unknown as { createPorts: ReturnType<typeof vi.fn> }).createPorts)
-      .toHaveBeenCalledWith(pool, "credential-secret", store);
+      .toHaveBeenCalledWith(pool, store, providers);
     // The default execution lanes must receive the same typed ports exposed
     // by the worker application; otherwise those adapters are test-only
     // delegation while legacy handlers bypass them in production.
-    expect(factories.createLanes).toHaveBeenCalledWith(pool, "credential-secret", store, ports);
+    expect(factories.createLanes).toHaveBeenCalledWith(pool, ports, providers);
     expect(factories.createState).toHaveBeenCalledWith(pool, lanes);
     expect(factories.createExecutor).toHaveBeenCalledWith(state);
     expect(factories.createApplication).toHaveBeenCalledWith({ executor, ports, state });

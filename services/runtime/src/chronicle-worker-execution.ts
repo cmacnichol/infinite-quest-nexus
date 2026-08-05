@@ -23,7 +23,6 @@ export type ChronicleWorkerExecutionDependencies = Readonly<{
   embeddings: ChronicleEmbeddingProviderPort;
   batches: ChronicleEmbeddingBatchPort;
   generation: MemoryGenerationTransactionPort;
-  credentialSecret: string;
 }>;
 
 function batchMemories(retrieval: ChronicleWorkerRetrieval) {
@@ -70,7 +69,7 @@ async function executeChronicleClaim(
     ownerUserId: claim.ownerUserId,
     providerProfileId: config.providerProfileId,
     model: config.model
-  }, dependencies.credentialSecret);
+  });
   throwIfLeaseLost(lifecycle);
   const prefixes = modelAwareEmbeddingPrefixes(config.model, config.documentPrefix ?? null, config.queryPrefix ?? null);
   const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);

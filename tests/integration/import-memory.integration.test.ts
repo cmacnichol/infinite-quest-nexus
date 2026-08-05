@@ -24,7 +24,7 @@ import {
 } from "../helpers/memory-aware-services.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { buildServer } from "../../services/api/src/server.js";
-import { createApiMemoryApplication } from "../../services/runtime/src/memory-composition.js";
+import { createApiMemoryApplication } from "../helpers/runtime-application-fixtures.js";
 import { serverOptions } from "../helpers/build-server-options.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;

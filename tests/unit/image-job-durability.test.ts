@@ -20,10 +20,10 @@ describe("durable asynchronous image jobs", () => {
 
     expect(source).toContain("idempotencyKey: `${job.id}:${job.generation_revision}`");
     expect(source).toContain("generation_revision = generation_revision + 1");
-    expect(source).toContain("if (job.remote_job_id)");
-    expect(source).toContain("pollImageProvider(provider, { remoteJobId: job.remote_job_id })");
-    expect(source).toContain("remote_job_id = $3");
-    expect(source).toContain("response.error.retryable");
+    expect(source).toContain("ports.imageProvider.executeImage");
+    expect(source).toContain("remoteJobId: job.remote_job_id");
+    expect(source).not.toContain("pollImageProvider(");
+    expect(source).toContain("remote_job_id = COALESCE(remote_job_id, $3)");
     expect(source).toContain("retryableRemoteFailure");
     expect(source).toContain("persistedSogniTerminalError");
     expect(source).toContain('["5001", "5002", "5003", "5005"]');
