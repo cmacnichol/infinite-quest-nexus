@@ -7354,6 +7354,20 @@ Split this domain internally:
    diff checks. **14c2b remains active** for runtime-state, player-config,
    rewind, and branch adapters; no route/runtime/worker/legacy-service cutover
    occurred.
+
+   **Remaining 14c2b delivery order (frozen):** 14c2b-state adds effective
+   state-edit/runtime-state reads and state correction plus player-config sync,
+   all owner-scoped and protected by the required expected-turn and
+   state-revision fences. Its PostgreSQL matrix must prove foreign-owner
+   invisibility, unchanged versus stale fences, rollback on invalid nested state,
+   and that configuration writes cannot bypass the campaign-state revision.
+   14c2b-history then adds rewind and branch operations, preserving append-only
+   and replacement provenance, deleting only the permitted post-target derived
+   state, and atomically rebuilding the authoritative state/history boundary.
+   Its matrix must prove target/fence conflicts, branch lineage, rejected
+   deletion, rollback, and cross-owner isolation. Each remains additive and
+   independently committed/reviewed; 14c3 may consume them only after both are
+   green.
 3. **14c3 — atomic composition and transport cutover.** Create named API
    adapters plus `services/runtime/src/world-campaign-composition.ts`, bind every
    `OwnerScope` at Fastify composition, and cut over all listed routes and any
