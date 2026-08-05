@@ -9,6 +9,7 @@ import {
   publishWorldDraft,
   replaceCampaignFact,
   type BoundedCampaignTurnPagePort,
+  type BoundedCampaignTurn,
   type CampaignScope,
   type CampaignListView,
   type CampaignStateEditView,
@@ -264,6 +265,47 @@ describe("world and campaign application use cases", () => {
     expect(events).toEqual(["read", "read", "command"]);
   });
 
+  test("canonicalizes repository Date timestamps so callers cannot mutate returned time values", async () => {
+    const repositoryCreatedAt = new Date("2026-08-05T10:00:00.000Z");
+    const transaction: WorldCampaignTransactionPort = {
+      command: async (work) => work({}),
+      read: async (work) => work({})
+    };
+    const dependencies = minimalDependencies(transaction, {
+      readTurnPage: async () => ({ turns: [], nextCursor: null })
+    });
+    dependencies.worlds.listWorlds = async () => ({
+      worlds: [{
+        id: worldId,
+        title: "Glass Stars",
+        status: "draft",
+        imageUrl: "",
+        forkedFromWorldId: null,
+        forkedFromWorldVersionId: null,
+        createdAt: repositoryCreatedAt,
+        updatedAt: new Date("2026-08-05T11:00:00.000Z"),
+        draftRevision: 1,
+        draftUpdatedAt: new Date("2026-08-05T11:00:00.000Z"),
+        draftPreview: null,
+        latestVersionId: null,
+        latestVersionNumber: null,
+        latestPublishedAt: null,
+        latestPreview: null,
+        campaignCount: 0
+      }]
+    });
+    const application = createWorldCampaignApplication(dependencies);
+
+    const worlds = await application.listWorlds({ ownerUserId });
+    const returnedCreatedAt = worlds.worlds[0]?.createdAt;
+
+    expect(returnedCreatedAt).toBe("2026-08-05T10:00:00.000Z");
+    expect(returnedCreatedAt).not.toBeInstanceOf(Date);
+    expect(() => (returnedCreatedAt as unknown as Date).setTime(0)).toThrow(TypeError);
+    repositoryCreatedAt.setTime(0);
+    expect(worlds.worlds[0]?.createdAt).toBe("2026-08-05T10:00:00.000Z");
+  });
+
   test("delegates changed sync windows to one bounded turn-page port", async () => {
     const pageRequests: unknown[] = [];
     const transaction: WorldCampaignTransactionPort = {
@@ -367,8 +409,10 @@ describe("world and campaign application use cases", () => {
 
   test("requires explicit readonly fields on every public domain projection", () => {
     expectTypeOf<WorldListView["worlds"][number]["latestVersionId"]>().toEqualTypeOf<string | null>();
+    expectTypeOf<WorldListView["worlds"][number]["createdAt"]>().toEqualTypeOf<string>();
     expectTypeOf<WorldAggregateView["versions"][number]["deletionBlockers"]["campaignTransfers"]>().toEqualTypeOf<number>();
     expectTypeOf<CampaignListView["campaigns"][number]["worldVersionId"]>().toEqualTypeOf<string>();
+    expectTypeOf<CampaignListView["campaigns"][number]["updatedAt"]>().toEqualTypeOf<string>();
     expectTypeOf<CampaignUpdateView["turnControlStyle"]>().toEqualTypeOf<"action_only" | "flexible_auto" | "flexible_action" | "flexible_scene">();
     expectTypeOf<CampaignStateEditView["snapshot"]["canonicalFacts"]>().toMatchTypeOf<readonly unknown[]>();
     expectTypeOf<CharacterProfileView["revision"]>().toEqualTypeOf<number>();
@@ -379,8 +423,10 @@ describe("world and campaign application use cases", () => {
     expectTypeOf<GeneratedWorldPreviewView["content"]["playableCharacters"]>().toMatchTypeOf<readonly unknown[]>();
     expectTypeOf<GeneratedPlayableCharacterView["character"]["name"]>().toEqualTypeOf<string>();
     expectTypeOf<CampaignSyncStatusView["campaign"]["activeTurnNumber"]>().toEqualTypeOf<number>();
+    expectTypeOf<CampaignSyncStatusView["campaign"]["updatedAt"]>().toEqualTypeOf<string>();
     expectTypeOf<CampaignSyncStatusView["world"]["playableCharacters"]>().toMatchTypeOf<readonly unknown[]>();
     expectTypeOf<CampaignSyncStatusView["playerConfig"]["trackers"]>().toMatchTypeOf<readonly unknown[]>();
+    expectTypeOf<BoundedCampaignTurn["acceptedAt"]>().toEqualTypeOf<string>();
   });
 
   test("exposes the complete platform-free responsibility boundary", () => {

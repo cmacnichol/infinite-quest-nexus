@@ -118,7 +118,8 @@ export type WorldCampaignRepositoryResult<T> =
   | Readonly<{ ok: false; failure: WorldCampaignTransitionFailure }>;
 
 export type DeepReadonly<T> =
-  T extends (...args: never[]) => unknown ? T
+  T extends Date ? string
+    : T extends (...args: never[]) => unknown ? T
     : T extends readonly (infer Item)[] ? readonly DeepReadonly<Item>[]
       : T extends object ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
         : T;
@@ -200,8 +201,10 @@ export type ReplaceCampaignFactInput = Readonly<Omit<CampaignFact, "replacesFact
   replacesFactId: string;
 }>;
 
-export type ApiTimestamp = string | Date;
+export type ApiTimestamp = string;
 
+/** Adapter input; application views canonicalize its Date branch to an ISO string. */
+export type WorldListSource = WorldListResponse;
 export type WorldListView = DeepReadonly<WorldListResponse>;
 
 export type PublishedWorldSummaryView = Readonly<{

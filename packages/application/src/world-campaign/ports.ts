@@ -57,6 +57,7 @@ import type {
   WorldImportRequest,
   WorldImportPreviewView,
   WorldImportResultView,
+  WorldListSource,
   WorldListView,
   WorldPublishRequest,
   WorldPublicationView,
@@ -76,7 +77,7 @@ export interface WorldCampaignTransactionPort {
 }
 
 export interface WorldRepositoryPort {
-  listWorlds(transaction: WorldCampaignReadContext, scope: OwnerScope): Promise<WorldListView>;
+  listWorlds(transaction: WorldCampaignReadContext, scope: OwnerScope): Promise<WorldListSource>;
   getWorld(transaction: WorldCampaignReadContext, scope: WorldScope): Promise<WorldAggregateView>;
   createWorld(transaction: WorldCampaignCommandContext, scope: OwnerScope, request: WorldCreateRequest): Promise<WorldCampaignRepositoryResult<WorldCreateView>>;
   updateWorldDraft(transaction: WorldCampaignCommandContext, scope: WorldScope, request: WorldDraftUpdateRequest): Promise<WorldCampaignRepositoryResult<WorldDraftUpdateView>>;

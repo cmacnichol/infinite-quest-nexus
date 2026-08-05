@@ -39,7 +39,7 @@ function cloneAndFreeze<T>(value: T): DeepReadonly<T> {
     return Object.freeze(value.map((item) => cloneAndFreeze(item))) as DeepReadonly<T>;
   }
   if (value instanceof Date) {
-    return Object.freeze(new Date(value.getTime())) as DeepReadonly<T>;
+    return value.toISOString() as DeepReadonly<T>;
   }
   if (value !== null && typeof value === "object") {
     const clone: Record<string, unknown> = {};
