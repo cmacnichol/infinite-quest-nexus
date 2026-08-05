@@ -86,7 +86,7 @@ contain this plan.
 | Task 11 | B2 — notification-backed SSE delivery | **Complete** | `d76beb8`; scoped implementation review approved; focused 65/65, full unit 1,127/1,127, relevant real-PostgreSQL 56/56; notification-to-frame p95 7.812 ms |
 | Task 12 | B3 — worker concurrency and fair lanes | **Complete** | Implementation `312ebaa`, correction `57147c7`, docs `8593e3e`; scoped implementation review plus clean correction re-review; full unit 1,150/1,150, implementation full PostgreSQL 232/232, correction-relevant PostgreSQL 68/68; C0 concurrency 1/2/4 benchmark and duplicate-turn guard passed |
 | Task 13b | B4b — play-loop read profiling/optimization | **Complete** | Implementation `1d6b766`, correction `ff7f56e`; scoped review and correction re-review approved; full unit 1,156/1,156, full PostgreSQL 234/234, C0 read benchmark passed |
-| Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | Not started | — |
+| Task 14a | B5a — illustration and image jobs (removes 3 cross-role entries) | **Complete** | `e2a15e6` through `c7c8353`; contracts, cutover, durability, privacy, ownership, and all 18 Fastify route-parity gates independently approved |
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | Not started | — |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | Not started | — |
 | Task 14d | B5d — providers and prompt configuration (removes none) | Not started | — |
@@ -6848,12 +6848,124 @@ library matching/rematch, and `runNextIllustration`. Every command/query carries
 owner plus campaign/world/turn/job scope as applicable. 14a2 moves claim/lease,
 prompt/refinement, resolution, image execution, retry, artifact download, and
 asset binding behind concrete adapters while keeping text and image provider
-profiles distinct. 14a3 switches routes and the worker, replaces the six Task
+profiles distinct. **14a2R is a mandatory corrective gate before cutover:** it
+extends the worker application and ports with typed owner-scoped claim/load,
+lease heartbeat, state transition, retry, prompt-resolution, and handler
+operations for every illustration job family. It also adds an explicit
+transaction-scoped generation collaborator that accepts the caller's database
+client for accepted-turn segment enqueue and all five streaming callbacks. The
+concrete PostgreSQL/runtime bindings must preserve one transaction for accepted
+turn, state, Chronicle, and illustration enqueue. This additive checkpoint may
+use a named, injected compatibility binding to the legacy state-machine bodies;
+it must not import them directly from application code, and its tests must prove
+the typed ports and transaction context—not an implicit service lookup—control
+the call. The binding names, owners, and exact removal disposition are frozen
+for 14a3, which owns moving the state-machine bodies and deleting the callable
+legacy paths. The correction must not move live routes/worker lanes, remove
+allowlist entries, or delete legacy code; it makes the later atomic cutover
+possible. 14a3 follows
+14a2R and switches routes and the worker, replaces the six Task
 10d illustration callbacks, removes exactly the three 14a allowlist entries,
 and deletes or reduces the three old services so no callable shadow remains.
 14a4 proves images disabled/unavailable/incompatible/failed/retried never change
 narration acceptance, fiction-only prompts exclude mechanics/private output,
 artifact SSRF controls remain pinned, and owner/campaign isolation holds.
+
+**Current Task 14a verification (2026-08-04, 14a1/14a2 complete):**
+`e2a15e6` introduced the platform-neutral illustration applications and frozen
+owner-scoped contracts. `ad039ccd` added the concrete PostgreSQL, provider,
+artifact, asset, and runtime adapters; its initial review identified two
+important architecture defects. Remediation `98a0b0f` moves the temporary
+provider/asset bindings into `services/runtime/illustration-platform-bindings.ts`
+and injects them into the adapter, then creates and delegates the typed image,
+refinement, artifact-download, and asset ports through
+`IllustrationWorkerApplication`. The re-review approved the cumulative range
+`e2a15e6..98a0b0f`: no adapter imports `provider-service.ts` or
+`asset-service.ts`, and no `server.ts`, `worker.ts`, runtime `main.ts`, route,
+or boundary-allowlist change occurred. Focused illustration checks passed 13/13;
+`pnpm check`, `pnpm build`, diff checks, and precheck passed. The real-PostgreSQL
+repository tests are part of the checkpoint and passed when the test database
+was available; a re-review environment without `TEST_DATABASE_URL` skipped
+those two tests rather than treating them as evidence. **The initial 14a3
+inventory found that 14a2's worker contract did not expose the legacy job state
+machines and its application did not expose the transaction-scoped generation
+callbacks. 14a2R therefore precedes cutover. Only after its scoped review may
+14a3 perform the atomic live route/worker cutover and only then may the three illustration
+allowlist entries, six temporary generation callbacks, and legacy callable
+paths be removed.**
+
+**Task 14a2R verification (2026-08-04, complete):** `6e8fe73` introduces the
+owner/job/family/worker/lease-scoped worker-state port, three injected handler
+bindings, and all six caller-owned transaction callbacks under
+`IllustrationApplication.generation`. The exact corrective range
+`98a0b0f..6e8fe73` was independently approved: the adapter uses the supplied
+transaction client without opening a nested transaction; legacy job bodies are
+runtime-only named compatibility bindings; and routes, worker loop, runtime
+main, allowlist, and legacy deletions remain untouched. Targeted tests passed
+15 with one intentional 14a3 skip, and `pnpm check` plus diff checks passed.
+
+**Task 14a3 verification (2026-08-04, complete):** `71c7852` performs the
+atomic live route, worker, and generation-callback cutover. It removes all
+three 14a worker-to-API allowlist entries, moves the three retired API job
+implementations to runtime-owned adapters with no forwarding paths, and routes
+the six generation collaborators through the explicit transaction-scoped
+illustration application port. The runtime state adapter is owner/job/family/
+lease fenced and preserves each image, prompt, and resolution family’s claim,
+recoverable, retry, and reclaim semantics. An independently reviewed production
+API-wide import guard rejects real relative runtime imports without false
+positives. Final verification passed: full unit **99 files / 1,179 tests**,
+`pnpm check`, `pnpm build`, focused illustration boundary tests, the client
+boundary scan, static retired-service search, diff checks, and precheck. The
+next checkpoint, **14a4**, must prove behavioral parity under real PostgreSQL
+and the defined image-independence/security/ownership cases before Task 14a can
+be marked complete.
+
+**Task 14a4 audit corrections (2026-08-04, required before completion):**
+
+1. **Critical fiction-only correction.** Remove `scratchpad_private` and every
+   mechanics/tracker/private-reasoning field from all illustration-context
+   queries and refinement inputs. `scratchpad_safe_for_prompt` never authorizes
+   private material for the illustration text or image paths. Add an adversarial
+   real-PostgreSQL refined-segment test that captures both provider requests and
+   proves those values are absent.
+2. **Make ports live.** The default worker path created by runtime composition
+   must use the typed image, refinement, artifact-download, and asset ports;
+   their current test-only delegation is insufficient. Add a real-PostgreSQL
+   worker-composition/default-lane test proving the port path handles prompt,
+   resolution, image, artifact, and asset work without direct legacy-handler
+   bypass.
+3. **Route parity.** Add real Fastify + PostgreSQL coverage for config, jobs,
+   segments, backfill, world-cover, turn/segment, resolution, and retry routes,
+   including owner/campaign/world/turn/segment scope-derived `404`s and frozen
+   response/status parity.
+4. **Complete independence matrix.** Every disabled, unavailable,
+   incompatible, failed, and retried image case must assert accepted narration,
+   campaign state, and Chronicle snapshots are unchanged. The endpoint-
+   unavailable and terminal-failure cases must no longer use turn count alone.
+5. **Record runtime-to-API disposition.** Task 14a has no unowned coupling:
+   move the illustration application adapter to runtime/platform code now, or
+   name its exact 14d/14e replacement/removal owner and require Task 14f to
+   verify it. Provider/asset service imports already belong to 14d/14e, but the
+   illustration adapter itself cannot remain untracked.
+
+**Task 14a completion audit (2026-08-05, complete):** the independently
+reviewed cumulative range `e2a15e6..c7c8353` establishes platform-neutral
+contracts, runtime-only adapters, atomic route/worker/six-callback cutover, and
+deletion of all three former API job services and their three boundary
+exceptions. The default worker lanes use typed provider, refinement, artifact,
+asset, and cost ports; private scratchpads, mechanics, trackers, and private
+reasoning are excluded from illustration prompt paths. Image artifact download
+controls, owner/campaign/world/turn/lease fences, transactionally atomic asset
+and cost writes, artifact variants, segment references, retries, and durable
+ledger operation labels preserve the legacy behavior. Real PostgreSQL tests
+prove disabled, unavailable, incompatible, failed, exhausted, and retried image
+work never changes accepted narration, campaign state, or Chronicle memory.
+The real Fastify/PostgreSQL matrix covers all 18 illustration routes, duplicate
+branches, and missing/foreign/owned retry outcomes. Final evidence: full unit
+**99 files / 1,180 tests**, full PostgreSQL integration **23 files / 241 tests**,
+route/image matrix **28 tests** under the isolated sequential harness,
+`pnpm check`, `pnpm build`, client-boundary scan, and diff/precheck all pass.
+Task **14b** is now the next backend domain; UI remains blocked until Task 14f.
 
 ### Task 14b — B5b: Chronicle memory and embeddings
 
