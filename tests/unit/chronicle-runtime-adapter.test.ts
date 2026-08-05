@@ -16,6 +16,58 @@ import {
 import type { DatabaseClient, DatabasePool } from "../../packages/database/src/pool.js";
 
 describe("Chronicle runtime adapters", () => {
+  it("heartbeats a claimed Chronicle lease while execution remains in flight", async () => {
+    vi.useFakeTimers();
+    let finishExecution!: (progress: Readonly<Record<string, unknown>>) => void;
+    const execution = new Promise<Readonly<Record<string, unknown>>>((resolve) => {
+      finishExecution = resolve;
+    });
+    const claim = {
+      jobId: "job-heartbeat-1",
+      ownerUserId: "owner-1",
+      campaignId: "campaign-1",
+      worldVersionId: "world-version-1",
+      jobType: "embed_campaign" as const,
+      workVersion: 1,
+      workerId: "worker-1",
+      leaseSeconds: 3
+    };
+    const state = {
+      claimNext: vi.fn().mockResolvedValue(claim),
+      loadClaimedJob: vi.fn().mockResolvedValue(claim),
+      heartbeatClaim: vi.fn().mockResolvedValue(true),
+      completeClaim: vi.fn().mockResolvedValue(true),
+      requeueClaim: vi.fn(),
+      failClaim: vi.fn()
+    };
+    const executor = createChronicleWorkerExecutor({
+      state,
+      retrieval: { loadForClaim: vi.fn().mockResolvedValue({
+        config: { enabled: true }, memories: [], totalMemories: 0, batchLimit: 8, nextCursor: null
+      }) },
+      execution: { execute: vi.fn().mockReturnValue(execution) },
+      logProviderTransportError: vi.fn()
+    });
+
+    try {
+      const running = executor.runNextChronicle({
+        workerId: "worker-1", leaseSeconds: 3, retrieval: { batchLimit: 8 }
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(state.heartbeatClaim).toHaveBeenCalledWith(claim);
+      expect(state.completeClaim).not.toHaveBeenCalled();
+
+      finishExecution({ embedded: 1, total: 1 });
+      await expect(running).resolves.toBe(true);
+      expect(state.completeClaim).toHaveBeenCalledWith(claim, {
+        progress: { embedded: 1, total: 1 }
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("selects a dedicated enabled embedding profile before text and never queries image roles", async () => {
     const roles: string[] = [];
     const database = {

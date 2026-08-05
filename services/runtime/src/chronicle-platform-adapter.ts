@@ -134,6 +134,10 @@ export function createChronicleWorkerExecutor(
       memories: [], totalMemories: 0, batchLimit: 1, nextCursor: null
     }),
   ): Promise<boolean> => {
+    const heartbeatInterval = setInterval(() => {
+      void dependencies.state.heartbeatClaim(claim).catch(() => undefined);
+    }, Math.max(1, Math.floor(claim.leaseSeconds * 1_000 / 3)));
+    heartbeatInterval.unref();
     try {
       const retrieval = await prepare();
       const progress = await dependencies.execution.execute(claim, retrieval);
@@ -169,6 +173,8 @@ export function createChronicleWorkerExecutor(
       });
       await dependencies.state.failClaim(claim, privateFailure());
       return true;
+    } finally {
+      clearInterval(heartbeatInterval);
     }
   };
   const runClaimed = (claim: ChronicleLeaseScope): Promise<boolean> => executeClaim(

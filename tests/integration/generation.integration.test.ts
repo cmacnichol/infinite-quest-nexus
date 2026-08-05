@@ -641,6 +641,18 @@ integration("durable Story Engine integration", () => {
     expect(after.rows[0]?.id).not.toBe(before.rows[0]?.id);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", operationKind: "replace_latest" });
 
+    const replacementMemory = await pool.query<{ turn_id: string; content: string }>(
+      `SELECT turn_id, content
+         FROM chronicle_memories
+        WHERE campaign_id = $1 AND ordinal = 2 AND memory_kind = 'turn_fiction'`,
+      [imported.campaignId]
+    );
+    expect(replacementMemory.rows).toEqual([{
+      turn_id: after.rows[0]?.id,
+      content: expect.stringContaining("newly validated replacement scene")
+    }]);
+    expect(replacementMemory.rows[0]?.content).not.toContain(before.rows[0]?.narration ?? "");
+
     const replacementRequests = requests.slice(requestCount).map((entry) => JSON.stringify(entry)).join("\n");
     expect(replacementRequests).toContain("Marker One");
     expect(replacementRequests).not.toContain("Marker Two becomes visible");
@@ -1002,6 +1014,34 @@ integration("durable Story Engine integration", () => {
       [branched.id]
     );
     expect(branchTurns.rows.map((row) => row.turn_number)).toEqual([1, 2]);
+    const branchMemories = await pool.query<{
+      campaign_id: string;
+      world_version_id: string;
+      turn_campaign_id: string;
+      ordinal: number;
+    }>(
+      `SELECT memory.campaign_id, memory.world_version_id,
+              turn_row.campaign_id AS turn_campaign_id, memory.ordinal
+         FROM chronicle_memories memory
+         JOIN turns turn_row ON turn_row.id = memory.turn_id
+        WHERE memory.campaign_id = $1 AND memory.memory_kind = 'turn_fiction'
+        ORDER BY memory.ordinal`,
+      [branched.id]
+    );
+    expect(branchMemories.rows).toEqual([
+      {
+        campaign_id: branched.id,
+        world_version_id: imported.worldVersionId,
+        turn_campaign_id: branched.id,
+        ordinal: 1
+      },
+      {
+        campaign_id: branched.id,
+        world_version_id: imported.worldVersionId,
+        turn_campaign_id: branched.id,
+        ordinal: 2
+      }
+    ]);
   });
 
   it("canonicalizes branch materialized tracker state without rewriting accepted turns", async () => {

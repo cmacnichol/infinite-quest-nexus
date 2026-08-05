@@ -68,4 +68,30 @@ describe("Task 14b3 Chronicle consumer cutover", () => {
 
     expect(boundaries).not.toContain("memory-service.js");
   });
+
+  it("has no API-to-runtime Chronicle edge or anonymous replacement transaction callback", async () => {
+    const api = await productionTypeScript("services/api/src");
+    const production = (await Promise.all([
+      Promise.resolve(api),
+      productionTypeScript("services/runtime/src"),
+      productionTypeScript("services/worker/src")
+    ])).flat();
+    const apiRuntimeMemoryImport = /\bfrom\s+["'][^"']*runtime\/src\/[^"']*(?:memory|chronicle)[^"']*["']/u;
+    const callbackNames = [
+      "autoEnableCampaignEmbedding",
+      "buildContextPreview",
+      "enqueueEmbeddingReindex",
+      "rebuildCampaignMemories",
+      "storeDerivedTurnMemories",
+      "writeAcceptedTurnFiction"
+    ].join("|");
+    const anonymousReplacement = new RegExp(`\\b(?:${callbackNames})\\s*:\\s*(?:async\\s*)?\\([^)]*\\)\\s*=>`, "u");
+
+    expect(api.flatMap((file) => apiRuntimeMemoryImport.test(file.source)
+      ? [`${file.path}: API imports runtime Chronicle implementation`]
+      : [])).toEqual([]);
+    expect(production.flatMap((file) => anonymousReplacement.test(file.source)
+      ? [`${file.path}: anonymous Chronicle transaction callback`]
+      : [])).toEqual([]);
+  });
 });
