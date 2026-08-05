@@ -2,13 +2,16 @@
 
 ## Status and range
 
-- Status: review round 1 fixes are implemented and locally verified; independent re-review is still required before Task 14b is marked complete.
+- Status: review round 2 fix is implemented and locally verified; independent re-review is still required before Task 14b is marked complete.
 - Audit base: `e6771025be3bb5ac6f99924626590fd45f183776`.
 - Audited implementation head: `56b35d28a4bca831c702ed6c4e700070748c4966`.
 - Implementation commit: `56b35d2 test(memory): complete Chronicle audit`.
 - Initial report commit: `c0437f4cd3324746172fbb10ee9d946eefb3739a`.
 - Review round 1 correction head: `7003116627771c1741e06a058a01b38993c706df`.
 - Correction commit: `7003116 fix(memory): harden Chronicle completion audit`.
+- Review round 1 report commit: `680eb3744837b31d9d28af45ccc4f5880e2af458`.
+- Review round 2 correction head: `ae92416e6225650ab3ea172af115ae03efdaaf69`.
+- Review round 2 correction commit: `ae92416 fix(memory): preserve health on Chronicle lease loss`.
 - Task 14b3 dependency: `2e5daa7 refactor(memory): complete Chronicle cutover`.
 
 ## Scoped files
@@ -29,7 +32,7 @@ The pre-existing unrelated worktree modifications and untracked files were not s
 | Requirement | Executable evidence |
 | --- | --- |
 | All six memory routes plus generic job read | `chronicle-completion-audit.integration.test.ts` drives the real Fastify server and PostgreSQL adapters for metrics, context preview, Chronicle reindex, embedding-config get/set, embedding reindex, and `/api/v1/jobs/:id`. It covers owned success, invalid `400`, missing/foreign `404`, disabled `409`, duplicate identity, terminal retry identity, resumable progress, and fixed safe failures that redact endpoint/credential-like diagnostics. |
-| Production worker claim, heartbeat/reclaim, stale fencing, bounded batches, rebuild, failure, and races | The completion audit runs the composed production worker through slow rebuild, lease renewal, competing claim, expired-claim reclaim, and stale completion rejection. It now also drives real PostgreSQL/provider-composed embedding success and failure: the success assertion reads vectors, provider metadata, cost rows, guarded progress, and terminal completion together; the failure assertion proves fixed private/public projection with zero vectors, cost rows, or progress writes. Heartbeats use a serialized awaited loop, surface `false` and rejection as lease loss to production execution, and join the in-flight heartbeat before any terminal transition. Reindex checks that lifecycle inside its caller-owned transaction, so lease loss rolls back before enqueue. `chronicle-contract-matrix.integration.test.ts` continues to cover oldest-first `SKIP LOCKED`, one-live-job, sibling races, unconditional work-version requeue, bounded cursor retrieval, repository atomicity, rebuild idempotence, and direct-operation rollback. |
+| Production worker claim, heartbeat/reclaim, stale fencing, bounded batches, rebuild, failure, and races | The completion audit runs the composed production worker through slow rebuild, lease renewal, competing claim, expired-claim reclaim, and stale completion rejection. It also drives real PostgreSQL/provider-composed embedding success and failure: the success assertion reads vectors, provider metadata, cost rows, guarded progress, and terminal completion together; the failure assertion proves fixed private/public projection with zero vectors, cost rows, or progress writes. Heartbeats use a serialized awaited loop, surface `false` and rejection as lease loss to production execution, and join the in-flight heartbeat before any terminal transition. Provider unhealthy recording is now scoped strictly to the embedding call and response validation, so late lease loss after successful embedding/health recording preserves healthy state while still entering guarded stale-work requeue; genuine embedding failures retain the fixed unhealthy diagnostic. Reindex checks that lifecycle inside its caller-owned transaction, so lease loss rolls back before enqueue. `chronicle-contract-matrix.integration.test.ts` continues to cover oldest-first `SKIP LOCKED`, one-live-job, sibling races, unconditional work-version requeue, bounded cursor retrieval, repository atomicity, rebuild idempotence, and direct-operation rollback. |
 | Accepted ledger/state authority and rejected/incomplete exclusion | `generation.integration.test.ts` proves accepted fiction-only output commits the turn, campaign state, entity-attributed Chronicle rows, and canonical facts. Failed/rejected replacement and incomplete/recoverable generation now compare complete deterministic before/after snapshots of campaign rows, campaign state, turns, `chronicle_memories`, `campaign_canonical_facts`, and `summary_checkpoints`. `import-memory.integration.test.ts` proves deterministic rebuild from authoritative rows and stable corrected fact provenance. |
 | Owner/campaign/world/world-version isolation | `chronicle-contract-matrix.integration.test.ts` exercises foreign owners, wrong campaigns, wrong world versions, database foreign keys, and bounded retrieval rows from another campaign and another version. The completion audit repeats foreign campaign/job projection through every public route. |
 | Import, transfer, correction, rewind, branch, replacement, accepted-fiction rehome | Existing real-PostgreSQL suites cover import, campaign transfer, state correction, rewind, and accepted-fiction writes. The generation suite now directly proves replacement memories reference only the replacement turn/content and branch memories reference only branch turns while retaining the immutable world version. All operations use the cut-over caller-owned transaction port. |
@@ -46,6 +49,7 @@ The pre-existing unrelated worktree modifications and untracked files were not s
 - Review round 1 composed-worker RED: temporarily omitting cost persistence failed the real PostgreSQL success assertion (`0` rather than two batch cost rows); temporarily exposing the provider diagnostic failed the fixed-safe-failure assertion. Both mutations were restored, and the production-composed success/failure cases passed.
 - Review round 1 authority RED: a temporary state-revision mutation produced a complete before/after authority diff for the rejected path. Restoring the source made failed/rejected and incomplete/recoverable snapshots identical across all authoritative and derived Chronicle tables in scope.
 - Review round 1 isolation RED: removing the magic timestamps exposed a wrong globally claimed job. Per-test campaign/world/provider cleanup fixed claim isolation; the first cleanup order exposed a world-version foreign-key failure, and deleting versions before worlds fixed it. The completion audit then passed twice consecutively without global timestamps and passed combined with the contract matrix.
+- Review round 2 late-heartbeat RED: a production-composed unit regression held the successful healthy write open, then drove the real heartbeat loop to `false` and rejection. Both cases changed provider state from healthy/zero failures to degraded/one failure before the fix. Narrowing the provider-error boundary made both cases preserve healthy/zero, avoid private failure/logging, clear the heartbeat timer, and use the existing guarded `{ retryReason: "work_version_changed" }` completion path. The pre-existing provider rejection test remained green and continued to record `chronicle_embedding_failed`.
 
 All temporary mutations were restored; none appear in the implementation or correction commits.
 
@@ -115,8 +119,43 @@ pjm precheck
   passed
 ```
 
+## Review round 2 correction verification
+
+```text
+pnpm exec vitest run tests/unit/chronicle-runtime-adapter.test.ts -t "preserves healthy provider state" --reporter=dot
+  RED before production correction: 2 tests failed; provider state was degraded with one consecutive failure
+  GREEN after correction: 2 tests passed; 14 filtered
+
+pnpm exec vitest run tests/unit/chronicle-runtime-adapter.test.ts tests/unit/chronicle-worker-execution.test.ts --reporter=dot
+  2 files passed; 21 tests passed; 0 skipped
+
+pnpm exec vitest run tests/unit/chronicle-helpers.test.ts tests/unit/chronicle-runtime-adapter.test.ts tests/unit/chronicle-transaction-repository.test.ts tests/unit/chronicle-worker-execution.test.ts tests/unit/chronicle.test.ts tests/unit/memory-application.test.ts tests/unit/memory-cutover.test.ts tests/unit/memory-inventory.test.ts tests/unit/semantic-memory-auto-enable.test.ts --reporter=dot
+  9 files passed; 59 tests passed; 0 skipped
+
+pnpm exec vitest run --config vitest.integration.config.ts tests/integration/chronicle-completion-audit.integration.test.ts tests/integration/chronicle-contract-matrix.integration.test.ts --reporter=dot
+  2 files passed; 25 tests passed; 0 skipped
+
+pnpm check
+  passed; repository boundary and data-safety checks covered 630 candidate files
+
+pnpm build
+  passed; TypeScript and both web production builds succeeded
+
+pnpm test:unit
+  106 files passed; 1,228 tests passed; 0 skipped
+
+pnpm test:integration
+  26 files passed; 270 tests passed; 0 skipped
+
+git diff --check
+  passed
+
+pjm precheck
+  passed
+```
+
 ## Diff review and concerns
 
 - The complete correction diff was reviewed before commit. Production changes are limited to the application-owned execution lifecycle contract and the runtime Chronicle executor/worker checks; the remaining correction files are executable audit coverage.
 - No secrets, credentials, private story data, migration, schema, public contract, provider protocol, or deployment behavior changed.
-- Initial independent review recorded `NEEDS_FIXES` for the range through `c0437f4cd3324746172fbb10ee9d946eefb3739a`; the findings are addressed by `7003116627771c1741e06a058a01b38993c706df`. Re-review the full exact `e6771025be3bb5ac6f99924626590fd45f183776..7003116627771c1741e06a058a01b38993c706df` implementation range before marking Task 14b complete or beginning Task 14c.
+- Initial independent review recorded four findings for the range through `c0437f4cd3324746172fbb10ee9d946eefb3739a`; `7003116627771c1741e06a058a01b38993c706df` addressed all four. The subsequent re-review recorded the late lease-loss/provider-health regression, addressed by `ae92416e6225650ab3ea172af115ae03efdaaf69`. Re-review the full exact `e6771025be3bb5ac6f99924626590fd45f183776..ae92416e6225650ab3ea172af115ae03efdaaf69` implementation range before marking Task 14b complete or beginning Task 14c.
