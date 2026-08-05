@@ -7566,6 +7566,22 @@ owner invisibility, concurrent default changes, redaction/write behavior,
 role/model resolution, prompt-version changes, health updates, and cost
 isolation; do not switch routes or consumers yet.
 
+**14d2 completion (2026-08-05):** `b83812e` and correction `f3ad9ab` add
+owner-scoped provider, prompt, and cost repositories plus a runtime-private
+encrypted credential and injected pinned-transport adapter. Default updates use
+consistent advisory-before-row locking; provider writes preserve normalized
+URLs, role/enabled/default validation, text reserve, Sogni validation, health
+transitions, and Chronicle embedding invalidation/requeue. Prompt snapshots and
+previews preserve the established structured examples, token recalculation, and
+runtime-key protocol fingerprint; cost reads retain owner/campaign/turn/category
+and currency isolation. Sogni SDK inventory validates the official origin but
+makes all actual catalog and metadata requests through the injected pinned
+transport; candidate failures are safe generic errors. The correction adds
+fixture cleanup and full role-negative coverage. No route, composition, worker,
+legacy service, UI, migration, or consumer changed. Focused 45-unit/7-real-PG,
+full 1,253-unit/344-integration, `pnpm check`, build, diff, and precheck passed;
+independent review and correction re-review approved. **14d3 is next.**
+
 **14d3 — atomic API/worker cutover and legacy removal.** Create named API and
 worker provider-application composition plus a thin API transport adapter.
 Migrate provider and prompt routes, generation API/worker composition,
