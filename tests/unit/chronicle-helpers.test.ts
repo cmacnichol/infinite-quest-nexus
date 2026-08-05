@@ -120,4 +120,16 @@ describe("Chronicle helper parity", () => {
       message: "Chronicle memory is unavailable."
     });
   });
+
+  it("invalidates embedding fingerprints when the embedding protocol changes", () => {
+    const prefixes = modelAwareEmbeddingPrefixes("nomic-embed-text", null, null);
+    const provider = {
+      providerType: "openai-compatible",
+      baseUrl: "http://embeddings.example/v1",
+      model: "nomic-embed-text",
+      configuration: { dimensions: 768 }
+    };
+    expect(providerModelFingerprint({ ...provider, protocolVersion: "chronicle-embedding-v1" }, prefixes))
+      .not.toBe(providerModelFingerprint({ ...provider, protocolVersion: "chronicle-embedding-v2" }, prefixes));
+  });
 });

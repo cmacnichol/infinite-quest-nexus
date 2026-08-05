@@ -13,7 +13,10 @@ export type EmbeddingProviderFingerprintInput = Readonly<{
   baseUrl: string;
   model: string;
   configuration?: unknown;
+  protocolVersion?: string;
 }>;
+
+export const CHRONICLE_EMBEDDING_PROTOCOL_VERSION = "chronicle-embedding-v1";
 
 export type EmbeddingPrefixes = Readonly<{
   documentPrefix: string;
@@ -69,6 +72,7 @@ export function providerModelFingerprint(
     baseUrl: provider.baseUrl.replace(/\/+$/, ""),
     model: provider.model,
     configuration: provider.configuration ?? {},
+    protocolVersion: provider.protocolVersion ?? CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
     documentPrefix: prefixes.documentPrefix,
     queryPrefix: prefixes.queryPrefix
   }));

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type {
   CampaignMemoryScope,
   CampaignWorldVersionMemoryScope,
@@ -22,6 +21,7 @@ import {
   type CompressionLevel
 } from "../../contracts/src/memory.js";
 import {
+  CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
   buildAcceptedTurnFictionMemory,
   buildCanonicalChronicleFacts,
   buildChronicleEntityCatalog,
@@ -138,6 +138,28 @@ export type ChronicleTransactionEmbeddingPort = Readonly<{
 export type ChronicleGenerationTransactionDependencies = Readonly<{
   credentialSecret: string;
   embeddings: ChronicleTransactionEmbeddingPort;
+}>;
+
+export type ChronicleEmbeddingBatchInput = Readonly<{
+  provider: ChronicleTransactionEmbeddingProvider;
+  providerFingerprint: string;
+  protocolVersion: string;
+  memories: readonly Readonly<{
+    id: string;
+    content: string;
+    contentHash: string;
+  }>[];
+  result: ChronicleTransactionEmbeddingResult;
+  processed: number;
+  total: number;
+}>;
+
+export type ChronicleEmbeddingBatchPort = Readonly<{
+  commitClaimBatch(scope: ChronicleLeaseScope, input: ChronicleEmbeddingBatchInput): Promise<boolean>;
+}>;
+
+export type ChronicleEmbeddingBatchDependencies = Readonly<{
+  recordCost: ChronicleTransactionEmbeddingPort["recordCost"];
 }>;
 
 function notFound(resource: string): Error & { statusCode: number } {
@@ -471,6 +493,11 @@ function stateCorrectionSnapshot(snapshot: Record<string, unknown>): StateCorrec
   };
 }
 
+function correctionFactId(campaignId: string, stateEditId: string, factIndex: number): string {
+  const hash = chronicleContentHash(`${campaignId}:${stateEditId}:${factIndex}`);
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+}
+
 async function projectStateCorrection(
   client: DatabaseClient,
   scope: CampaignWorldVersionMemoryScope,
@@ -518,7 +545,7 @@ async function projectStateCorrection(
     }
   }
   for (const [index, desired] of canonicalFacts.entries()) {
-    const id = desired.id ?? randomUUID();
+    const id = desired.id ?? correctionFactId(scope.campaignId, edit.id, index);
     const existing = activeById.get(id);
     const entityMetadata = resolveEntityMetadata(desired.content, entityCatalog);
     if (existing?.source_turn_number === edit.effectiveTurnNumber) {
@@ -1608,7 +1635,7 @@ export function createPostgresChronicleWorkerStatePort(pool: DatabasePool): Chro
                    WHERE active.campaign_id = j.campaign_id AND active.status = 'running'
                      AND active.lease_expires_at >= now() AND active.id <> j.id
                 )
-              ORDER BY CASE WHEN j.status = 'running' THEN 0 ELSE 1 END, j.created_at, j.id
+              ORDER BY j.created_at, j.id
               FOR UPDATE SKIP LOCKED
               LIMIT 1
            )
@@ -1635,7 +1662,8 @@ export function createPostgresChronicleWorkerStatePort(pool: DatabasePool): Chro
                 j.work_version, j.progress, j.created_at, j.updated_at, j.completed_at
            FROM chronicle_jobs j JOIN campaigns c ON c.id = j.campaign_id AND c.owner_user_id = j.owner_user_id
           WHERE j.id = $1 AND j.owner_user_id = $2 AND j.campaign_id = $3 AND c.world_version_id = $4
-            AND j.lease_owner = $5 AND j.status = 'running' AND j.work_version = $6`,
+            AND j.lease_owner = $5 AND j.status = 'running' AND j.work_version = $6
+            AND j.lease_expires_at >= now()`,
         [scope.jobId, scope.ownerUserId, scope.campaignId, scope.worldVersionId, scope.workerId, scope.workVersion]
       );
       const row = result.rows[0];
@@ -1646,6 +1674,7 @@ export function createPostgresChronicleWorkerStatePort(pool: DatabasePool): Chro
         `UPDATE chronicle_jobs SET lease_expires_at = now() + ($7::text || ' seconds')::interval, updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3 AND lease_owner = $4
             AND status = 'running' AND work_version = $5
+            AND lease_expires_at >= now()
             AND EXISTS (SELECT 1 FROM campaigns WHERE id = $3 AND owner_user_id = $2 AND world_version_id = $6)`,
         [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion, scope.worldVersionId, scope.leaseSeconds]
       );
@@ -1659,6 +1688,7 @@ export function createPostgresChronicleWorkerStatePort(pool: DatabasePool): Chro
              progress = $6::jsonb, updated_at = now(), lease_owner = NULL, lease_expires_at = NULL, error_message = NULL
           WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3 AND lease_owner = $4
             AND status = 'running' AND work_version >= $5
+            AND lease_expires_at >= now()
             AND EXISTS (SELECT 1 FROM campaigns WHERE id = $3 AND owner_user_id = $2 AND world_version_id = $7)
           RETURNING status`,
         [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion,
@@ -1672,6 +1702,7 @@ export function createPostgresChronicleWorkerStatePort(pool: DatabasePool): Chro
              lease_owner = NULL, lease_expires_at = NULL
           WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3 AND lease_owner = $4
             AND status = 'running' AND work_version = $5
+            AND lease_expires_at >= now()
             AND EXISTS (SELECT 1 FROM campaigns WHERE id = $3 AND owner_user_id = $2 AND world_version_id = $7)`,
         [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion,
           failure.diagnosticCode.slice(0, 128), scope.worldVersionId]
@@ -1684,10 +1715,188 @@ export function createPostgresChronicleWorkerStatePort(pool: DatabasePool): Chro
              progress = progress || jsonb_build_object('retryReason', $6::text), updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3 AND lease_owner = $4
             AND status = 'running' AND work_version = $5
+            AND lease_expires_at >= now()
             AND EXISTS (SELECT 1 FROM campaigns WHERE id = $3 AND owner_user_id = $2 AND world_version_id = $7)`,
         [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion, retry.reason, scope.worldVersionId]
       );
       return result.rowCount === 1;
+    }
+  };
+}
+
+type ChronicleEmbeddingBatchJobRow = Readonly<{
+  progress: Record<string, unknown>;
+}>;
+
+type ChronicleEmbeddingBatchMemoryRow = Readonly<{
+  id: string;
+  content: string;
+}>;
+
+function requiredProgressString(
+  progress: Record<string, unknown>,
+  key: string,
+  expected: string,
+): void {
+  const existing = progress[key];
+  if (existing !== undefined && existing !== expected) {
+    throw invalid(`Chronicle embedding ${key} changed during the claimed job.`);
+  }
+}
+
+export function createPostgresChronicleEmbeddingBatchPort(
+  pool: DatabasePool,
+  dependencies: ChronicleEmbeddingBatchDependencies,
+): ChronicleEmbeddingBatchPort {
+  return {
+    async commitClaimBatch(scope, input) {
+      if (scope.jobType !== "embed_campaign") throw invalid("Only embedding jobs may commit Chronicle vectors.");
+      if (input.protocolVersion !== CHRONICLE_EMBEDDING_PROTOCOL_VERSION) {
+        throw invalid("Chronicle embedding protocol version is incompatible.");
+      }
+      if (!input.providerFingerprint.trim()) throw invalid("Chronicle embedding provider fingerprint is required.");
+      if (!Number.isSafeInteger(input.processed)
+        || !Number.isSafeInteger(input.total)
+        || input.processed < 1
+        || input.total < input.processed
+        || input.memories.length < 1
+        || input.memories.length > 128
+        || input.result.embeddings.length !== input.memories.length) {
+        throw invalid("Chronicle embedding batch progress is invalid.");
+      }
+      const dimensions = input.result.embeddings[0]?.length ?? 0;
+      if (!dimensions || input.result.embeddings.some((vector) => (
+        vector.length !== dimensions || vector.some((coordinate) => !Number.isFinite(coordinate))
+      ))) {
+        throw invalid("Chronicle embedding batch dimensions are invalid.");
+      }
+
+      return withTransaction(pool, async (client) => {
+        const active = await client.query<ChronicleEmbeddingBatchJobRow>(
+          `SELECT j.progress
+             FROM chronicle_jobs j
+             JOIN campaigns c ON c.id = j.campaign_id AND c.owner_user_id = j.owner_user_id
+            WHERE j.id = $1 AND j.owner_user_id = $2 AND j.campaign_id = $3
+              AND c.world_version_id = $4 AND j.lease_owner = $5
+              AND j.status = 'running' AND j.work_version = $6
+              AND j.lease_expires_at >= clock_timestamp()
+            FOR UPDATE OF j`,
+          [scope.jobId, scope.ownerUserId, scope.campaignId, scope.worldVersionId,
+            scope.workerId, scope.workVersion]
+        );
+        const job = active.rows[0];
+        if (!job) return false;
+
+        const provider = await client.query<{ id: string }>(
+          `SELECT id FROM provider_profiles
+            WHERE id = $1 AND owner_user_id = $2 AND enabled = true
+              AND provider_role IN ('embedding','text')`,
+          [input.provider.id, scope.ownerUserId]
+        );
+        if (!provider.rows[0]) throw invalid("Chronicle embedding provider is unavailable for this owner.");
+
+        requiredProgressString(job.progress, "embeddingProviderProfileId", input.provider.id);
+        requiredProgressString(job.progress, "embeddingModel", input.provider.model);
+        requiredProgressString(job.progress, "embeddingProviderFingerprint", input.providerFingerprint);
+        requiredProgressString(job.progress, "embeddingProtocolVersion", input.protocolVersion);
+        const previousDimensions = job.progress.embeddingDimensions;
+        if (previousDimensions !== undefined && previousDimensions !== dimensions) {
+          throw invalid("Chronicle embedding dimensions changed during the claimed job.");
+        }
+        const previousProcessed = job.progress.embedded;
+        if (previousProcessed !== undefined
+          && (!Number.isSafeInteger(previousProcessed) || previousProcessed !== input.processed - input.memories.length)) {
+          throw invalid("Chronicle embedding batch progress is stale.");
+        }
+        const previousTotal = job.progress.total;
+        if (previousTotal !== undefined && previousTotal !== input.total) {
+          throw invalid("Chronicle embedding batch total changed during the claimed job.");
+        }
+
+        const ids = input.memories.map((memory) => memory.id);
+        if (new Set(ids).size !== ids.length) throw invalid("Chronicle embedding batch contains duplicate memories.");
+        const stored = await client.query<ChronicleEmbeddingBatchMemoryRow>(
+          `SELECT id, content FROM chronicle_memories
+            WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
+              AND id = ANY($4::uuid[])
+            ORDER BY id
+            FOR UPDATE`,
+          [scope.ownerUserId, scope.campaignId, scope.worldVersionId, ids]
+        );
+        const storedById = new Map(stored.rows.map((memory) => [memory.id, memory]));
+        for (const memory of input.memories) {
+          const current = storedById.get(memory.id);
+          if (!current
+            || current.content !== memory.content
+            || chronicleContentHash(current.content) !== memory.contentHash) {
+            throw invalid("Chronicle embedding memory content changed before batch commit.");
+          }
+        }
+
+        const vectors = input.result.embeddings.map(vectorLiteral);
+        const hashes = input.memories.map((memory) => memory.contentHash);
+        const contents = input.memories.map((memory) => memory.content);
+        const updated = await client.query(
+          `UPDATE chronicle_memories AS memory
+              SET embedding = batch.embedding::vector,
+                  embedding_provider_profile_id = $2,
+                  embedding_model = $3,
+                  embedding_dimensions = $4,
+                  embedding_content_hash = batch.content_hash,
+                  embedding_updated_at = clock_timestamp(),
+                  embedding_provider_fingerprint = $5,
+                  updated_at = clock_timestamp()
+             FROM (SELECT unnest($1::uuid[]) AS id,
+                          unnest($6::text[]) AS embedding,
+                          unnest($7::text[]) AS content_hash,
+                          unnest($8::text[]) AS content) AS batch
+            WHERE memory.id = batch.id
+              AND memory.owner_user_id = $9
+              AND memory.campaign_id = $10
+              AND memory.world_version_id = $11
+              AND memory.content = batch.content`,
+          [ids, input.provider.id, input.provider.model, dimensions, input.providerFingerprint,
+            vectors, hashes, contents, scope.ownerUserId, scope.campaignId, scope.worldVersionId]
+        );
+        if (updated.rowCount !== input.memories.length) {
+          throw invalid("Chronicle embedding batch did not update its complete claimed scope.");
+        }
+
+        await dependencies.recordCost(client, input.provider, {
+          ownerUserId: scope.ownerUserId,
+          campaignId: scope.campaignId,
+          chronicleJobId: scope.jobId,
+          operation: "memory_embedding"
+        }, input.result);
+        const progress = {
+          embedded: input.processed,
+          total: input.total,
+          embeddingDimensions: dimensions,
+          embeddingProviderProfileId: input.provider.id,
+          embeddingModel: input.provider.model,
+          embeddingProviderFingerprint: input.providerFingerprint,
+          embeddingProtocolVersion: input.protocolVersion
+        };
+        const heartbeat = await client.query(
+          `UPDATE chronicle_jobs
+              SET progress = $7::jsonb,
+                  lease_expires_at = clock_timestamp() + ($8::text || ' seconds')::interval,
+                  updated_at = clock_timestamp()
+            WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3
+              AND lease_owner = $4 AND status = 'running' AND work_version = $5
+              AND lease_expires_at >= clock_timestamp()
+              AND EXISTS (
+                SELECT 1 FROM campaigns
+                 WHERE id = $3 AND owner_user_id = $2 AND world_version_id = $6
+              )`,
+          [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion,
+            scope.worldVersionId, JSON.stringify(progress), scope.leaseSeconds]
+        );
+        if (heartbeat.rowCount !== 1) {
+          throw new Error("Chronicle embedding lease was lost before the batch could be committed.");
+        }
+        return true;
+      });
     }
   };
 }
@@ -1704,7 +1913,11 @@ function parseCursor(cursor: string | null | undefined): { ordinal: number; id: 
   if (!cursor) return null;
   const [ordinalText, id] = cursor.split(":", 2);
   const ordinal = Number(ordinalText);
-  if (!Number.isSafeInteger(ordinal) || !id) throw invalid("Invalid Chronicle memory cursor.");
+  if (!Number.isSafeInteger(ordinal)
+    || !id
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    throw invalid("Invalid Chronicle memory cursor.");
+  }
   return { ordinal, id };
 }
 
@@ -1724,16 +1937,17 @@ export function createPostgresChronicleWorkerRetrievalPort(pool: DatabasePool): 
             AND ($4::integer IS NULL OR ordinal > $4 OR (ordinal = $4 AND id > $5::uuid))
           ORDER BY ordinal, id
           LIMIT $6`,
-        [scope.ownerUserId, scope.campaignId, scope.worldVersionId, cursor?.ordinal ?? null, cursor?.id ?? null, request.batchLimit]
+        [scope.ownerUserId, scope.campaignId, scope.worldVersionId, cursor?.ordinal ?? null, cursor?.id ?? null, request.batchLimit + 1]
       );
-      const tail = result.rows.at(-1);
+      const rows = result.rows.slice(0, request.batchLimit);
+      const tail = rows.at(-1);
       return {
         config: await loadConfig(pool, scope),
-        memories: result.rows.map((row) => ({
+        memories: rows.map((row) => ({
           id: row.id, ordinal: row.ordinal, content: row.content, tokenEstimate: row.token_estimate, kind: row.memory_kind
         })),
         batchLimit: request.batchLimit,
-        nextCursor: tail && result.rows.length === request.batchLimit ? `${tail.ordinal}:${tail.id}` : null
+        nextCursor: tail && result.rows.length > request.batchLimit ? `${tail.ordinal}:${tail.id}` : null
       };
     }
   };

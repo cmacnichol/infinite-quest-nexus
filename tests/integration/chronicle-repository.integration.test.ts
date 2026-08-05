@@ -88,6 +88,34 @@ integration("PostgreSQL Chronicle repository", () => {
     await pool.query("UPDATE chronicle_jobs SET status = 'completed' WHERE id = $1", [secondJob.rows[0]!.id]);
   });
 
+  it("rejects heartbeat and completion after the lease expires before reclaim", async () => {
+    const fixture = await campaignFixture("expired lease fencing");
+    const job = await pool.query<{ id: string }>(
+      "INSERT INTO chronicle_jobs (owner_user_id, campaign_id, job_type, status) VALUES ($1,$2,'reindex_campaign','queued') RETURNING id",
+      [ownerUserId, fixture.campaignId]
+    );
+    const { state } = createPostgresChronicleWorkerAdapters(pool);
+    const claim = await state.claimNext({ workerId: "chronicle-expired-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(job.rows[0]!.id);
+    if (!claim) throw new Error("fixture job was not claimed");
+
+    await pool.query(
+      "UPDATE chronicle_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+      [claim.jobId]
+    );
+    await expect(state.loadClaimedJob(claim)).resolves.toBeNull();
+    await expect(state.heartbeatClaim(claim)).resolves.toBe(false);
+    await expect(state.failClaim(claim, { diagnosticCode: "expired" })).resolves.toBe(false);
+    await expect(state.requeueClaim(claim, { reason: "lease_reclaimed" })).resolves.toBe(false);
+    await expect(state.completeClaim(claim, { progress: { processed: 1 } })).resolves.toBe(false);
+    await expect(pool.query<{ status: string; progress: Record<string, unknown> }>(
+      "SELECT status, progress FROM chronicle_jobs WHERE id = $1",
+      [claim.jobId]
+    )).resolves.toMatchObject({ rows: [{ status: "running", progress: {} }] });
+
+    await pool.query("UPDATE chronicle_jobs SET status = 'completed' WHERE id = $1", [claim.jobId]);
+  });
+
   it("keeps worker retrieval bounded to the claimed owner, campaign, and world version", async () => {
     const fixture = await campaignFixture("retrieval");
     const job = await pool.query<{ id: string }>(
