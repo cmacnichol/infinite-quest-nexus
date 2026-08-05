@@ -15,7 +15,7 @@ import { generationStreamSnapshotSchema } from "../../packages/contracts/src/gen
 import {
   generatedWorldProviderError,
   incompleteGeneratedWorldError
-} from "../../services/api/src/world-generator-service.js";
+} from "../../services/api/src/task-14d-world-generation-bridge.js";
 
 function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
   return {

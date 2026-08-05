@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { exportCampaign } from "../../services/api/src/campaign-archive-service.js";
 import {
   campaignCreateSchema,
   campaignCharacterProfileUpdateSchema,
@@ -25,7 +26,6 @@ import {
   deleteCampaign,
   deleteWorld,
   deleteWorldVersion,
-  exportCampaign,
   exportWorld,
   forkWorld,
   getWorldVersionPlayableCharacterSummary,
@@ -39,18 +39,16 @@ import {
   publishWorld,
   updateCampaign,
   updateWorldDraft
-} from "../../services/api/src/world-service.js";
+} from "../helpers/memory-aware-services.js";
 import {
   buildContextPreview,
   createCampaign,
-  importLegacyStory,
-  transferCampaignWorld
-} from "../helpers/memory-aware-services.js";
-import { previewCampaignWorldTransfer } from "../../services/api/src/campaign-transfer-service.js";
-import {
   getCampaignCharacterProfile,
+  importLegacyStory,
+  previewCampaignWorldTransfer,
+  transferCampaignWorld,
   updateCampaignCharacterProfile
-} from "../../services/api/src/character-profile-service.js";
+} from "../helpers/memory-aware-services.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -97,7 +95,7 @@ integration("World Library and campaign version integration", () => {
   async function publishNextVersion(worldId: string, title: string, marker: string) {
     const detail = await getWorld(pool, worldId);
     const saved = await updateWorldDraft(pool, worldId, worldDraftUpdateSchema.parse({
-      expectedRevision: detail.draftRevision,
+      expectedRevision: detail.draftRevision!,
       content: content(title, marker)
     }));
     return publishWorld(pool, worldId, worldPublishSchema.parse({
@@ -210,11 +208,11 @@ integration("World Library and campaign version integration", () => {
 
     const beforeAdd = await getWorld(pool, created.id);
     const added = await updateWorldDraft(pool, created.id, worldDraftUpdateSchema.parse({
-      expectedRevision: beforeAdd.draftRevision,
+      expectedRevision: beforeAdd.draftRevision!,
       content: {
-        ...beforeAdd.draftContent,
+        ...beforeAdd.draftContent!,
         playableCharacters: [
-          ...beforeAdd.draftContent.playableCharacters,
+          ...beforeAdd.draftContent!.playableCharacters,
           {
             id: "new-character",
             name: "New Character",
@@ -225,31 +223,31 @@ integration("World Library and campaign version integration", () => {
         ]
       }
     }));
-    expect(added.revision).toBe(beforeAdd.draftRevision + 1);
+    expect(added.revision).toBe(beforeAdd.draftRevision! + 1);
 
     const beforeEdit = await getWorld(pool, created.id);
-    const editedCharacters = beforeEdit.draftContent.playableCharacters.map((character: any) => character.id === "imported-character"
+    const editedCharacters = beforeEdit.draftContent!.playableCharacters.map((character: any) => character.id === "imported-character"
       ? { ...character, name: "Renamed Character", characterText: "Edited character guidance." }
       : character);
     const edited = await updateWorldDraft(pool, created.id, worldDraftUpdateSchema.parse({
-      expectedRevision: beforeEdit.draftRevision,
-      content: { ...beforeEdit.draftContent, playableCharacters: editedCharacters }
+      expectedRevision: beforeEdit.draftRevision!,
+      content: { ...beforeEdit.draftContent!, playableCharacters: editedCharacters }
     }));
-    expect(edited.revision).toBe(beforeEdit.draftRevision + 1);
+    expect(edited.revision).toBe(beforeEdit.draftRevision! + 1);
 
     const beforeDelete = await getWorld(pool, created.id);
     const deleted = await updateWorldDraft(pool, created.id, worldDraftUpdateSchema.parse({
-      expectedRevision: beforeDelete.draftRevision,
+      expectedRevision: beforeDelete.draftRevision!,
       content: {
-        ...beforeDelete.draftContent,
-        playableCharacters: beforeDelete.draftContent.playableCharacters.filter((character: any) => character.id !== "new-character")
+        ...beforeDelete.draftContent!,
+        playableCharacters: beforeDelete.draftContent!.playableCharacters.filter((character: any) => character.id !== "new-character")
       }
     }));
-    expect(deleted.revision).toBe(beforeDelete.draftRevision + 1);
+    expect(deleted.revision).toBe(beforeDelete.draftRevision! + 1);
 
     const draft = (await getWorld(pool, created.id)).draftContent;
-    expect(draft.playableCharacters).toHaveLength(1);
-    expect(draft.playableCharacters[0]).toMatchObject({
+    expect(draft!.playableCharacters).toHaveLength(1);
+    expect(draft!.playableCharacters[0]).toMatchObject({
       id: "imported-character",
       name: "Renamed Character",
       characterText: "Edited character guidance.",
@@ -423,7 +421,7 @@ integration("World Library and campaign version integration", () => {
       worldVersionDeleteSchema.parse({ confirmation: "DELETE", expectedVersionNumber: 1 })
     )).rejects.toMatchObject({
       statusCode: 409,
-      details: { blockers: { campaignTransfers: 1, currentCampaigns: 0, campaignMigrations: 0, chronicleMemories: 0, modelChains: 0 } }
+      details: { code: "deletion_blocked", blockers: ["campaign_transfers:1"] }
     });
   });
 
@@ -456,7 +454,7 @@ integration("World Library and campaign version integration", () => {
       worldVersionDeleteSchema.parse({ confirmation: "DELETE", expectedVersionNumber: 1 })
     )).rejects.toMatchObject({
       statusCode: 409,
-      details: { blockers: { chronicleMemories: 1, currentCampaigns: 0, campaignMigrations: 0, campaignTransfers: 0, modelChains: 0 } }
+      details: { code: "deletion_blocked", blockers: ["chronicle_memories:1"] }
     });
   });
 
@@ -490,7 +488,7 @@ integration("World Library and campaign version integration", () => {
       worldVersionDeleteSchema.parse({ confirmation: "DELETE", expectedVersionNumber: 1 })
     )).rejects.toMatchObject({
       statusCode: 409,
-      details: { blockers: { modelChains: 1, currentCampaigns: 0, campaignMigrations: 0, campaignTransfers: 0, chronicleMemories: 0 } }
+      details: { code: "deletion_blocked", blockers: ["model_chains:1"] }
     });
   });
 
@@ -540,7 +538,7 @@ integration("World Library and campaign version integration", () => {
       expectedVersionNumber: 2
     }))).rejects.toMatchObject({ statusCode: 409 });
     await expect(deleteWorldVersion(pool, second.created.id, first.version.worldVersionId, request))
-      .rejects.toMatchObject({ statusCode: 409 });
+      .rejects.toMatchObject({ statusCode: 400, details: { code: "invalid_transition" } });
 
     const otherUser = await pool.query<{ id: string }>(
       "INSERT INTO users (display_name, status) VALUES ($1, 'active') RETURNING id",
@@ -732,7 +730,7 @@ integration("World Library and campaign version integration", () => {
       name: "Blocked edit",
       profile: editedProfile,
       editSource: "manual"
-    }))).rejects.toMatchObject({ statusCode: 409, details: { code: "generation_active" } });
+    }))).rejects.toMatchObject({ statusCode: 400, details: { code: "invalid_transition" } });
     await pool.query("UPDATE generation_jobs SET status = 'failed' WHERE id = $1", [activeJob.rows[0]!.id]);
 
     const audit = await pool.query<any>(
@@ -902,7 +900,7 @@ integration("World Library and campaign version integration", () => {
       worldVersionId: published.worldVersionId
     }))).rejects.toMatchObject({
       statusCode: 400,
-      message: "This world version has no playable characters."
+      details: { code: "invalid_transition" }
     });
   });
 
@@ -921,7 +919,7 @@ integration("World Library and campaign version integration", () => {
       forkedFromWorldVersionId: source.version.worldVersionId,
       draftRevision: 1
     });
-    expect(detail.draftContent.world.title).toBe(forkTitle);
+    expect(detail.draftContent!.world.title).toBe(forkTitle);
     expect(detail.versions).toHaveLength(0);
   });
 
@@ -1021,7 +1019,7 @@ integration("World Library and campaign version integration", () => {
       worldVersionId: first.version.worldVersionId
     }));
     await expect(migrateCampaignWorld(pool, campaign.id, campaignWorldMigrationSchema.parse({ worldVersionId: second.version.worldVersionId })))
-      .rejects.toMatchObject({ statusCode: 409 });
+      .rejects.toMatchObject({ statusCode: 400, details: { code: "world_transfer_required" } });
   });
 
   it("deletes campaigns before safely deleting their world", async () => {
@@ -1040,7 +1038,7 @@ integration("World Library and campaign version integration", () => {
     await expect(deleteCampaign(pool, campaign.id, resourceDeleteSchema.parse({
       confirmation: "DELETE",
       expectedTitle: "Wrong title"
-    }))).rejects.toMatchObject({ statusCode: 409 });
+    }))).rejects.toMatchObject({ statusCode: 400, details: { code: "invalid_transition" } });
 
     await deleteCampaign(pool, campaign.id, resourceDeleteSchema.parse({
       confirmation: "DELETE",

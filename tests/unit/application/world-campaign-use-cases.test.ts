@@ -320,6 +320,73 @@ describe("world and campaign application use cases", () => {
     expect(worlds.worlds[0]?.createdAt).toBe("2026-08-05T10:00:00.000Z");
   });
 
+  test("reads owner-scoped dashboard counts and canonicalizes reported-cost timestamps", async () => {
+    const observedScopes: OwnerScope[] = [];
+    const transaction: WorldCampaignTransactionPort = {
+      command: async (work) => work({}),
+      read: async (work) => work({})
+    };
+    const dependencies = minimalDependencies(transaction, {
+      readTurnPage: async () => ({ turns: [], nextCursor: null })
+    });
+    dependencies.dashboard.getDashboard = async (_transaction, scope) => {
+      observedScopes.push(scope);
+      return {
+        worlds: { available: 3, total: 5, published: 4, drafts: 1, archived: 1 },
+        campaigns: { open: 2, total: 3, archived: 1 },
+        turns: { accepted: 27 },
+        providerCosts: {
+          hasReportedCosts: true,
+          totals: [{
+            providerProfileId: "66666666-6666-4666-8666-666666666666",
+            providerName: "OpenRouter Primary",
+            providerType: "openrouter",
+            category: "image",
+            currency: "USD",
+            amount: "1.375000000000",
+            eventCount: 4,
+            lastReportedAt: new Date("2026-07-22T12:00:00.000Z")
+          }]
+        }
+      };
+    };
+
+    const dashboard = await createWorldCampaignApplication(dependencies).getDashboard({ ownerUserId });
+
+    expect(observedScopes).toEqual([{ ownerUserId }]);
+    expect(dashboard).toMatchObject({
+      worlds: { available: 3, total: 5, published: 4, drafts: 1, archived: 1 },
+      campaigns: { open: 2, total: 3, archived: 1 },
+      turns: { accepted: 27 },
+      providerCosts: {
+        hasReportedCosts: true,
+        totals: [{ lastReportedAt: "2026-07-22T12:00:00.000Z" }]
+      }
+    });
+    expect(Object.isFrozen(dashboard.providerCosts.totals)).toBe(true);
+  });
+
+  test("does not represent absent provider cost reports as zero", async () => {
+    const transaction: WorldCampaignTransactionPort = {
+      command: async (work) => work({}),
+      read: async (work) => work({})
+    };
+    const dependencies = minimalDependencies(transaction, {
+      readTurnPage: async () => ({ turns: [], nextCursor: null })
+    });
+    dependencies.dashboard.getDashboard = async () => ({
+      worlds: { available: 0, total: 0, published: 0, drafts: 0, archived: 0 },
+      campaigns: { open: 0, total: 0, archived: 0 },
+      turns: { accepted: 0 },
+      providerCosts: { hasReportedCosts: false, totals: [] }
+    });
+
+    const dashboard = await createWorldCampaignApplication(dependencies).getDashboard({ ownerUserId });
+
+    expect(dashboard.providerCosts).toEqual({ hasReportedCosts: false, totals: [] });
+    expect(JSON.stringify(dashboard.providerCosts)).not.toContain('"amount":"0"');
+  });
+
   test("delegates changed sync windows to one bounded turn-page port", async () => {
     const pageRequests: unknown[] = [];
     const repositoryCampaignUpdatedAt = new Date("2026-08-05T10:00:00.000Z");

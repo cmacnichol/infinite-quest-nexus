@@ -614,6 +614,10 @@ function createPostgresCampaignAuthorityRepository(
         "unavailable",
         scope
       ));
+      const normalizedStateEdits = sourceEdits.map((edit) => ({
+        revision: edit.revision,
+        stateSnapshotPrivate: normalizeCampaignStateSnapshot(edit.stateSnapshotPrivate)
+      }));
       const targetTurn = sourceTurns.at(-1);
       const targetEdit = [...sourceEdits]
         .reverse()
@@ -709,12 +713,24 @@ function createPostgresCampaignAuthorityRepository(
              owner_user_id, campaign_id, effective_turn_number, revision,
              state_snapshot_private, changed_fields, created_at
            )
-           SELECT owner_user_id, $1, effective_turn_number, revision,
-                  state_snapshot_private, changed_fields, created_at
-             FROM campaign_state_edits
-            WHERE campaign_id = $2 AND owner_user_id = $3 AND effective_turn_number <= $4
-            ORDER BY revision`,
-          [branchCampaignId, scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+           SELECT source.owner_user_id, $1, source.effective_turn_number, source.revision,
+                  normalized."stateSnapshotPrivate", source.changed_fields, source.created_at
+             FROM campaign_state_edits source
+             JOIN jsonb_to_recordset($5::jsonb) AS normalized(
+               revision integer,
+               "stateSnapshotPrivate" jsonb
+             ) ON normalized.revision = source.revision
+            WHERE source.campaign_id = $2
+              AND source.owner_user_id = $3
+              AND source.effective_turn_number <= $4
+            ORDER BY source.revision`,
+          [
+            branchCampaignId,
+            scope.campaignId,
+            scope.ownerUserId,
+            parsed.targetTurnNumber,
+            json(normalizedStateEdits)
+          ]
         );
       }
       await client.query(

@@ -3,8 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { worldContentSchema } from "../../packages/contracts/src/world-library.js";
-import { createWorld, publishWorld } from "../../services/api/src/world-service.js";
-import { createCampaign } from "../helpers/memory-aware-services.js";
+import { createCampaign, createWorld, publishWorld } from "../helpers/memory-aware-services.js";
 import {
   resetPromptOverride,
   resolvePromptSnapshot,

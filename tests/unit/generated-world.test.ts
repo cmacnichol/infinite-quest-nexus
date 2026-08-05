@@ -13,7 +13,7 @@ import {
   incompleteGeneratedWorldError,
   selectCompleteGeneratedCharacters,
   worldGenerationFailureDiagnostic
-} from "../../services/api/src/world-generator-service.js";
+} from "../../services/api/src/task-14d-world-generation-bridge.js";
 
 function profile() {
   return {

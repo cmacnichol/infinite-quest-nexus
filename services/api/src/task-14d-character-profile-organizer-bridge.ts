@@ -1,18 +1,14 @@
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import {
-  campaignCharacterProfileSchema,
   characterProfileOrganizationResultSchema,
   characterProfileSchema,
   playableCharacterSchema,
   worldContentSchema,
-  type CampaignCharacterProfileUpdate,
   type CharacterProfile,
   type CharacterProfileOrganizationRequest,
   type CharacterProfileOrganizationResult,
   type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
-import { effectiveCampaignCharacter } from "../../../packages/domain/src/world-characters.js";
 import { callTextProvider, extractJsonObject } from "../../../packages/story-engine/src/index.js";
 import { loadTextProvider, resolveEffectiveProviderId } from "./provider-service.js";
 import { promptFromSnapshot, resolvePromptSnapshot } from "./prompt-library-service.js";
@@ -27,10 +23,6 @@ const CHARACTER_PROFILE_ORGANIZER_OUTPUT_TEMPLATE = {
   warnings: [],
   protocolVersion: CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION
 };
-
-function json(value: unknown): string {
-  return JSON.stringify(value ?? null);
-}
 
 function httpError(statusCode: number, message: string, code: string, additionalDetails: Record<string, unknown> = {}): Error {
   return Object.assign(new Error(message), { statusCode, details: { code, ...additionalDetails } });
@@ -303,118 +295,6 @@ export async function organizeWorldCharacterProfileForOwner(
   return organize(pool, ownerUserId, content, playableCharacterSchema.parse(request.character), credentialSecret);
 }
 
-export async function organizeWorldCharacterProfile(
-  pool: DatabasePool,
-  worldId: string,
-  request: CharacterProfileOrganizationRequest,
-  credentialSecret: string
-) {
-  return organizeWorldCharacterProfileForOwner(
-    pool,
-    await initialOwnerId(pool),
-    worldId,
-    request,
-    credentialSecret
-  );
-}
-
-export async function getCampaignCharacterProfile(pool: DatabasePool, campaignId: string) {
-  const ownerUserId = await initialOwnerId(pool);
-  const result = await pool.query<{
-    selected_character_id: string | null;
-    character_snapshot: Record<string, unknown> | null;
-    character_profile: Record<string, unknown> | null;
-    character_profile_revision: number;
-    rpg_stats: unknown[];
-    default_triggers: unknown[];
-    trackers: unknown[];
-  }>(
-    `SELECT campaigns.selected_character_id, campaigns.character_snapshot,
-            campaigns.character_profile, campaigns.character_profile_revision,
-            campaign_state.rpg_stats, campaign_state.default_triggers, campaign_state.trackers
-       FROM campaigns
-       JOIN campaign_state
-         ON campaign_state.campaign_id = campaigns.id
-        AND campaign_state.owner_user_id = campaigns.owner_user_id
-      WHERE campaigns.id = $1 AND campaigns.owner_user_id = $2`,
-    [campaignId, ownerUserId]
-  );
-  const row = result.rows[0];
-  if (!row) throw httpError(404, "Campaign not found.", "campaign_not_found");
-  const effective = effectiveCampaignCharacter(row.character_profile, row.character_snapshot);
-  return {
-    campaignId,
-    characterId: row.selected_character_id,
-    revision: row.character_profile_revision,
-    name: effective.name,
-    profile: effective.profile,
-    storedProfile: row.character_profile,
-    inheritedFromSnapshot: !row.character_profile && Boolean(effective.profile),
-    legacyCharacterText: effective.legacyGuidance,
-    rpgStats: row.rpg_stats || [],
-    defaultTriggers: [...(row.default_triggers || []), ...(row.trackers || [])]
-  };
-}
-
-export async function updateCampaignCharacterProfile(
-  pool: DatabasePool,
-  campaignId: string,
-  request: CampaignCharacterProfileUpdate
-) {
-  const ownerUserId = await initialOwnerId(pool);
-  return withTransaction(pool, async (client) => {
-    const current = await client.query<{
-      character_profile: Record<string, unknown> | null;
-      character_profile_revision: number;
-    }>(
-      `SELECT character_profile, character_profile_revision FROM campaigns
-        WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
-      [campaignId, ownerUserId]
-    );
-    const row = current.rows[0];
-    if (!row) throw httpError(404, "Campaign not found.", "campaign_not_found");
-    if (row.character_profile_revision !== request.expectedRevision) {
-      throw httpError(409, "The campaign character profile changed. Reload it before saving.", "character_profile_revision_conflict");
-    }
-    const active = await client.query(
-      `SELECT 1 FROM generation_jobs
-        WHERE campaign_id = $1 AND owner_user_id = $2
-          AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
-        LIMIT 1`,
-      [campaignId, ownerUserId]
-    );
-    if (active.rowCount) throw httpError(409, "Wait for the active story generation job before editing the character profile.", "generation_active");
-    const nextProfile = campaignCharacterProfileSchema.parse({ name: request.name, profile: request.profile });
-    const revision = row.character_profile_revision + 1;
-    await client.query(
-      `UPDATE campaigns SET character_profile = $3, character_profile_revision = $4, updated_at = now()
-        WHERE id = $1 AND owner_user_id = $2`,
-      [campaignId, ownerUserId, json(nextProfile), revision]
-    );
-    await client.query(
-      `INSERT INTO campaign_character_profile_edits (
-         owner_user_id, campaign_id, revision, previous_profile, next_profile, edit_source
-       ) VALUES ($1,$2,$3,$4,$5,$6)`,
-      [ownerUserId, campaignId, revision, row.character_profile ? json(row.character_profile) : null,
-        json(nextProfile), request.editSource]
-    );
-    await client.query(
-      "UPDATE model_chains SET active = false, updated_at = now() WHERE campaign_id = $1 AND owner_user_id = $2",
-      [campaignId, ownerUserId]
-    );
-    await client.query(
-      `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, correlation_id, details)
-       VALUES ($1,$2,'campaign_character_profile_updated',$4,$3)`,
-      [ownerUserId, campaignId, json({
-        characterProfileRevision: revision,
-        editSource: request.editSource,
-        organizerProtocolVersion: request.editSource === "ai_organized" ? CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION : null
-      }), campaignId]
-    );
-    return { campaignId, revision, ...nextProfile };
-  });
-}
-
 export async function organizeCampaignCharacterProfileForOwner(
   pool: DatabasePool,
   ownerUserId: string,
@@ -458,20 +338,5 @@ export async function organizeCampaignCharacterProfileForOwner(
     }),
     credentialSecret,
     row.text_provider_profile_id
-  );
-}
-
-export async function organizeCampaignCharacterProfile(
-  pool: DatabasePool,
-  campaignId: string,
-  request: CharacterProfileOrganizationRequest,
-  credentialSecret: string
-) {
-  return organizeCampaignCharacterProfileForOwner(
-    pool,
-    await initialOwnerId(pool),
-    campaignId,
-    request,
-    credentialSecret
   );
 }

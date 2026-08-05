@@ -23,7 +23,7 @@ import {
 } from "../../packages/database/src/pool.js";
 import * as repositoryModule from "../../packages/database/src/world-generation-repository.js";
 import { createPostgresWorldCampaignTransactionPort } from "../../packages/database/src/world-campaign-transaction.js";
-import { getDashboardStats } from "../../services/api/src/dashboard-service.js";
+import { getDashboardStats } from "../helpers/memory-aware-services.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;

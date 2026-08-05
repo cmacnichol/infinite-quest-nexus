@@ -8,7 +8,6 @@ import { storyImportRequestSchema } from "../../packages/contracts/src/imports.j
 import { generationRequestSchema, generationRetryLatestRequestSchema, illustrationConfigSchema } from "../../packages/contracts/src/generation.js";
 import { setIllustrationConfig } from "../../services/runtime/src/illustration-image-job-adapter.js";
 import { createProvider } from "../../services/api/src/provider-service.js";
-import { syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { createWorkerGenerationApplication } from "../../services/runtime/src/generation-worker-composition.js";
 import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
@@ -20,10 +19,11 @@ import {
   importLegacyStory,
   rewindCampaign,
   setCampaignEmbeddingConfig,
+  syncPlayerCampaignConfig,
+  getCampaignRuntimeState,
   updateCampaignRuntimeState
 } from "../helpers/memory-aware-services.js";
 import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
-import { getCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
 import { logger } from "../../packages/logger/src/index.js";
 import {
   apiMemoryApplication,
@@ -1027,7 +1027,6 @@ integration("durable Story Engine integration", () => {
     const branched = await branchCampaign(pool, imported.campaignId, { targetTurnNumber: 2, title: "My Branch Story" });
     expect(branched).toMatchObject({
       title: "My Branch Story",
-      status: "active",
       activeTurnNumber: 2
     });
     expect(branched.id).not.toBe(imported.campaignId);

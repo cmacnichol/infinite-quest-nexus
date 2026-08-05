@@ -24,6 +24,32 @@ const LEGACY_MIGRATION_ALLOWLIST = [
   "services/api/src/server.ts"
 ];
 
+const RETIRED_WORLD_CAMPAIGN_AUTHORITY = [
+  "services/api/src/campaign-state-service.ts",
+  "services/api/src/campaign-transfer-service.ts",
+  "services/api/src/character-profile-service.ts",
+  "services/api/src/dashboard-service.ts",
+  "services/api/src/generation-service.ts",
+  "services/api/src/user-service.ts",
+  "services/api/src/world-generation-progress-service.ts",
+  "services/api/src/world-generator-service.ts",
+  "services/api/src/world-service.ts"
+];
+const TASK_14D_PROVIDER_BRIDGE_IMPORTERS = new Map([
+  ["task-14d-character-profile-organizer-bridge", new Set([
+    "services/runtime/src/world-campaign-composition.ts"
+  ])],
+  ["task-14d-world-generation-bridge", new Set([
+    "services/api/src/infinite-worlds-import-service.ts",
+    "services/runtime/src/world-campaign-composition.ts"
+  ])]
+]);
+const REQUIRED_WORLD_CAMPAIGN_BOUNDARIES = [
+  "packages/database/src/play-loop-read-repository.ts",
+  "services/api/src/task-14d-character-profile-organizer-bridge.ts",
+  "services/api/src/task-14d-world-generation-bridge.ts"
+];
+
 const codeExtension = /\.(?:cjs|html|js|mjs|ts)$/u;
 const activeCode = /^(?:apps|packages|services)\//u;
 const runtimeConfiguration = /^(?:Dockerfile|compose(?:\.[^/]+)?\.ya?ml|\.env\.example|deploy\/.*\.ya?ml|apps\/|packages\/|services\/)/u;
@@ -94,6 +120,28 @@ for (const file of files) {
 for (const migrationFile of LEGACY_MIGRATION_ALLOWLIST) {
   if (!files.includes(migrationFile)) {
     violations.push(`${migrationFile}: stale legacy-migration allowlist entry`);
+  }
+}
+
+for (const retiredFile of RETIRED_WORLD_CAMPAIGN_AUTHORITY) {
+  if (normalizedText(retiredFile) !== null) {
+    violations.push(`${retiredFile}: retired Task 14c authority must not remain callable`);
+  }
+}
+
+for (const requiredFile of REQUIRED_WORLD_CAMPAIGN_BOUNDARIES) {
+  if (normalizedText(requiredFile) === null) {
+    violations.push(`${requiredFile}: required Task 14c/14d boundary is missing`);
+  }
+}
+
+for (const file of files.filter((candidate) => /^(?:packages|services)\/.*\.(?:js|mjs|ts)$/u.test(candidate))) {
+  const text = normalizedText(file);
+  if (text === null) continue;
+  for (const [bridgeName, allowedImporters] of TASK_14D_PROVIDER_BRIDGE_IMPORTERS) {
+    if (text.includes(bridgeName) && !allowedImporters.has(file)) {
+      violations.push(`${file}: ${bridgeName} may only be imported by its explicit runtime/platform consumers`);
+    }
   }
 }
 

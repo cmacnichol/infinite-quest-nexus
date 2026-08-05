@@ -22,13 +22,9 @@ import {
   activeProgressMap,
   getImportProgress
 } from "../../services/api/src/infinite-worlds-import-service.js";
-import { importInfiniteWorlds } from "../helpers/memory-aware-services.js";
-import { generateWorldPreview } from "../../services/api/src/world-generator-service.js";
+import { generateWorldPreview, getWorldGenerationProgress, importInfiniteWorlds } from "../helpers/memory-aware-services.js";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
-import {
-  getWorldGenerationProgress,
-  type WorldGenerationProgress
-} from "../../services/api/src/world-generation-progress-service.js";
+import type { WorldGenerationProgressView as WorldGenerationProgress } from "../../packages/application/src/world-campaign/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;

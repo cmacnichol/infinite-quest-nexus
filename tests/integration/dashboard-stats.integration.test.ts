@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resolve } from "node:path";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { getDashboardStats } from "../../services/api/src/dashboard-service.js";
+import { getDashboardStats } from "../helpers/memory-aware-services.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
 import { serverOptions } from "../helpers/build-server-options.js";
@@ -96,56 +96,63 @@ integration("dashboard statistics integration", () => {
   });
 
   it("aggregates only the initial owner's records and reported costs", async () => {
-    const client = await pool.connect();
-    await client.query("BEGIN");
+    const baseline = await getDashboardStats(pool);
+    const ownerWorldIds: string[] = [];
+    const ownerCampaignIds: string[] = [];
+    let foreignUserId: string | undefined;
+    let foreignWorldId: string | undefined;
+    let foreignCampaignId: string | undefined;
+    let providerProfileId: string | undefined;
     try {
-      const scopedPool = client as unknown as DatabasePool;
-      const baseline = await getDashboardStats(scopedPool);
-      const ownerUserId = await initialOwnerId(client);
-      const foreignUser = await client.query<{ id: string }>(
+      const ownerUserId = await initialOwnerId(pool);
+      const foreignUser = await pool.query<{ id: string }>(
         "INSERT INTO users (display_name) VALUES ('Dashboard Foreign Owner') RETURNING id"
       );
-      const foreignUserId = foreignUser.rows[0]!.id;
+      foreignUserId = foreignUser.rows[0]!.id;
 
-      const activeWorld = await client.query<{ id: string }>(
+      const activeWorld = await pool.query<{ id: string }>(
         "INSERT INTO worlds (owner_user_id, title, status) VALUES ($1, $2, 'active') RETURNING id",
         [ownerUserId, `Dashboard active ${crypto.randomUUID()}`]
       );
       const activeWorldId = activeWorld.rows[0]!.id;
-      const version = await client.query<{ id: string }>(
+      ownerWorldIds.push(activeWorldId);
+      const version = await pool.query<{ id: string }>(
         `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
          VALUES ($1, $2, 1, '{}'::jsonb) RETURNING id`,
         [activeWorldId, ownerUserId]
       );
       const worldVersionId = version.rows[0]!.id;
-      await client.query(
+      const additionalWorlds = await pool.query<{ id: string }>(
         `INSERT INTO worlds (owner_user_id, title, status) VALUES
-         ($1, $2, 'draft'), ($1, $3, 'archived')`,
+         ($1, $2, 'draft'), ($1, $3, 'archived') RETURNING id`,
         [ownerUserId, `Dashboard draft ${crypto.randomUUID()}`, `Dashboard archived ${crypto.randomUUID()}`]
       );
-      const openCampaign = await client.query<{ id: string }>(
+      ownerWorldIds.push(...additionalWorlds.rows.map((row) => row.id));
+      const openCampaign = await pool.query<{ id: string }>(
         `INSERT INTO campaigns (owner_user_id, world_version_id, title, status)
          VALUES ($1, $2, $3, 'active') RETURNING id`,
         [ownerUserId, worldVersionId, `Dashboard open ${crypto.randomUUID()}`]
       );
       const openCampaignId = openCampaign.rows[0]!.id;
-      await client.query(
+      ownerCampaignIds.push(openCampaignId);
+      const archivedCampaign = await pool.query<{ id: string }>(
         `INSERT INTO campaigns (owner_user_id, world_version_id, title, status)
-         VALUES ($1, $2, $3, 'archived')`,
+         VALUES ($1, $2, $3, 'archived') RETURNING id`,
         [ownerUserId, worldVersionId, `Dashboard archived campaign ${crypto.randomUUID()}`]
       );
-      await client.query(
+      ownerCampaignIds.push(archivedCampaign.rows[0]!.id);
+      await pool.query(
         `INSERT INTO turns (owner_user_id, campaign_id, turn_number, narration)
          VALUES ($1, $2, 1, 'An accepted dashboard integration turn.')`,
         [ownerUserId, openCampaignId]
       );
-      const provider = await client.query<{ id: string }>(
+      const provider = await pool.query<{ id: string }>(
         `INSERT INTO provider_profiles (owner_user_id, name, provider_type, provider_role, base_url)
          VALUES ($1, $2, 'openrouter', 'text', 'https://dashboard.test') RETURNING id`,
         [ownerUserId, `Dashboard Provider ${crypto.randomUUID()}`]
       );
-      const providerProfileId = provider.rows[0]!.id;
-      await client.query(
+      providerProfileId = provider.rows[0]!.id;
+      await pool.query(
         `INSERT INTO provider_cost_events (
            owner_user_id, campaign_id, provider_profile_id, provider_type, category, operation,
            requested_model, resolved_model, amount, currency
@@ -155,27 +162,29 @@ integration("dashboard statistics integration", () => {
         [ownerUserId, openCampaignId, providerProfileId]
       );
 
-      const foreignWorld = await client.query<{ id: string }>(
+      const foreignWorld = await pool.query<{ id: string }>(
         "INSERT INTO worlds (owner_user_id, title, status) VALUES ($1, $2, 'active') RETURNING id",
         [foreignUserId, `Foreign dashboard world ${crypto.randomUUID()}`]
       );
-      const foreignVersion = await client.query<{ id: string }>(
+      foreignWorldId = foreignWorld.rows[0]!.id;
+      const foreignVersion = await pool.query<{ id: string }>(
         `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
          VALUES ($1, $2, 1, '{}'::jsonb) RETURNING id`,
-        [foreignWorld.rows[0]!.id, foreignUserId]
+        [foreignWorldId, foreignUserId]
       );
-      const foreignCampaign = await client.query<{ id: string }>(
+      const foreignCampaign = await pool.query<{ id: string }>(
         `INSERT INTO campaigns (owner_user_id, world_version_id, title)
          VALUES ($1, $2, $3) RETURNING id`,
         [foreignUserId, foreignVersion.rows[0]!.id, `Foreign dashboard campaign ${crypto.randomUUID()}`]
       );
-      await client.query(
+      foreignCampaignId = foreignCampaign.rows[0]!.id;
+      await pool.query(
         `INSERT INTO turns (owner_user_id, campaign_id, turn_number, narration)
          VALUES ($1, $2, 1, 'This foreign turn must not be counted.')`,
-        [foreignUserId, foreignCampaign.rows[0]!.id]
+        [foreignUserId, foreignCampaignId]
       );
 
-      const stats = await getDashboardStats(scopedPool);
+      const stats = await getDashboardStats(pool);
 
       expect(stats.worlds).toEqual({
         available: baseline.worlds.available + 1,
@@ -198,8 +207,23 @@ integration("dashboard statistics integration", () => {
         eventCount: 2
       }));
     } finally {
-      await client.query("ROLLBACK");
-      client.release();
+      const campaignIds = [...ownerCampaignIds, ...(foreignCampaignId ? [foreignCampaignId] : [])];
+      if (campaignIds.length) {
+        await pool.query("DELETE FROM provider_cost_events WHERE campaign_id = ANY($1::uuid[])", [campaignIds]);
+        await pool.query("DELETE FROM turns WHERE campaign_id = ANY($1::uuid[])", [campaignIds]);
+        await pool.query("DELETE FROM campaigns WHERE id = ANY($1::uuid[])", [campaignIds]);
+      }
+      if (providerProfileId) {
+        await pool.query("DELETE FROM provider_profiles WHERE id = $1", [providerProfileId]);
+      }
+      const worldIds = [...ownerWorldIds, ...(foreignWorldId ? [foreignWorldId] : [])];
+      if (worldIds.length) {
+        await pool.query("DELETE FROM world_versions WHERE world_id = ANY($1::uuid[])", [worldIds]);
+        await pool.query("DELETE FROM worlds WHERE id = ANY($1::uuid[])", [worldIds]);
+      }
+      if (foreignUserId) {
+        await pool.query("DELETE FROM users WHERE id = $1", [foreignUserId]);
+      }
     }
   });
 });

@@ -26,7 +26,7 @@ import { createPostgresWorldRepositoryAdapters } from "../../../packages/databas
 import {
   organizeCampaignCharacterProfileForOwner,
   organizeWorldCharacterProfileForOwner
-} from "../../api/src/character-profile-service.js";
+} from "../../api/src/task-14d-character-profile-organizer-bridge.js";
 import { turnReportedCosts } from "../../api/src/cost-service.js";
 import { resolveEffectiveProviderId } from "../../api/src/provider-service.js";
 import {
@@ -34,7 +34,7 @@ import {
   generatePlayableCharacterPreviewForOwner,
   generateTemplateWorld,
   generateWorldPreviewForOwner
-} from "../../api/src/world-generator-service.js";
+} from "../../api/src/task-14d-world-generation-bridge.js";
 import { createChroniclePlatformBindings } from "./chronicle-platform-bindings.js";
 
 export type WorldCampaignCompositionDependencies = Readonly<{

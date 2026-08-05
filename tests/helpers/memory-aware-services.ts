@@ -1,10 +1,6 @@
 import type { MemoryContextQuery } from "../../packages/contracts/src/memory.js";
 import type { ChronicleMetricsView, MemoryPublicResult } from "../../packages/application/src/memory/index.js";
 import { initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
-import { createCampaign as createCampaignApplication } from "../../services/api/src/world-service.js";
-import { updateCampaignRuntimeState as updateCampaignRuntimeStateApplication } from "../../services/api/src/campaign-state-service.js";
-import { transferCampaignWorld as transferCampaignWorldApplication } from "../../services/api/src/campaign-transfer-service.js";
-import { branchCampaign as branchCampaignApplication, rewindCampaign as rewindCampaignApplication } from "../../services/api/src/generation-service.js";
 import { importLegacyStory as importLegacyStoryApplication } from "../../services/api/src/import-service.js";
 import { importInfiniteWorlds as importInfiniteWorldsApplication } from "../../services/api/src/infinite-worlds-import-service.js";
 import {
@@ -14,6 +10,14 @@ import {
 import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
 import { memoryGeneration } from "./memory-applications.js";
 import { apiMemoryApplication, workerMemoryApplication } from "./memory-applications.js";
+import type { WorldCampaignApplication } from "../../packages/application/src/world-campaign/index.js";
+import type { CampaignBranchRequest, CampaignRewindRequest, PlayerCampaignConfig } from "../../packages/contracts/src/generation.js";
+
+type Mutable<T> = T extends readonly (infer Item)[]
+  ? Mutable<Item>[]
+  : T extends object
+    ? { -readonly [Key in keyof T]: Mutable<T[Key]> }
+    : T;
 
 async function campaignScope(pool: DatabasePool, campaignId: string, ownerUserId?: string) {
   const resolvedOwnerUserId = ownerUserId ?? await initialOwnerId(pool);
@@ -26,6 +30,177 @@ async function campaignScope(pool: DatabasePool, campaignId: string, ownerUserId
   return { ownerUserId: resolvedOwnerUserId, campaignId, worldVersionId };
 }
 
+async function withWorldCampaign<T>(
+  pool: DatabasePool,
+  operation: (context: Readonly<{
+    adapter: ReturnType<typeof createWorldCampaignApplicationAdapter>;
+    ownerUserId: string;
+  }>) => Promise<T>,
+  credentialSecret = "test-credential-secret",
+): Promise<Mutable<T>> {
+  const ownerUserId = await initialOwnerId(pool);
+  const adapter = createWorldCampaignApplicationAdapter(
+    createApiWorldCampaignApplication(pool, { credentialSecret })
+  );
+  return structuredClone(await adapter.run(() => operation({ adapter, ownerUserId }))) as Mutable<T>;
+}
+
+async function worldVersionScope(
+  pool: DatabasePool,
+  ownerUserId: string,
+  worldVersionId: string,
+) {
+  const result = await pool.query<{ world_id: string }>(
+    "SELECT world_id FROM world_versions WHERE id = $1 AND owner_user_id = $2",
+    [worldVersionId, ownerUserId]
+  );
+  const worldId = result.rows[0]?.world_id;
+  if (!worldId) throw Object.assign(new Error("World version not found."), { statusCode: 404 });
+  return { ownerUserId, worldId, worldVersionId };
+}
+
+export function listWorlds(pool: DatabasePool) {
+  return withWorldCampaign(pool, async ({ adapter, ownerUserId }) => (
+    await adapter.application.listWorlds(adapter.ownerScope(ownerUserId))
+  ).worlds);
+}
+
+export function getWorld(pool: DatabasePool, worldId: string) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.getWorld(adapter.worldScope(ownerUserId, worldId)));
+}
+
+export function createWorld(pool: DatabasePool, request: Parameters<WorldCampaignApplication["createWorld"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.createWorld(adapter.ownerScope(ownerUserId), request));
+}
+
+export function updateWorldDraft(pool: DatabasePool, worldId: string, request: Parameters<WorldCampaignApplication["updateWorldDraft"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.updateWorldDraft(adapter.worldScope(ownerUserId, worldId), request));
+}
+
+export function publishWorld(pool: DatabasePool, worldId: string, request: Parameters<WorldCampaignApplication["publishWorld"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.publishWorld(adapter.worldScope(ownerUserId, worldId), request));
+}
+
+export function updateWorld(pool: DatabasePool, worldId: string, request: Parameters<WorldCampaignApplication["updateWorldStatus"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.updateWorldStatus(adapter.worldScope(ownerUserId, worldId), request));
+}
+
+export function forkWorld(pool: DatabasePool, worldId: string, request: Parameters<WorldCampaignApplication["forkWorld"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.forkWorld(adapter.worldScope(ownerUserId, worldId), request));
+}
+
+export function exportWorld(pool: DatabasePool, worldId: string, worldVersionId?: string) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.exportWorld(
+    worldVersionId === undefined
+      ? adapter.worldScope(ownerUserId, worldId)
+      : adapter.worldVersionScope(ownerUserId, worldId, worldVersionId)
+  ));
+}
+
+export function previewWorldImport(pool: DatabasePool, request: Parameters<WorldCampaignApplication["previewWorldImport"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.previewWorldImport(adapter.ownerScope(ownerUserId), request));
+}
+
+export function importWorld(pool: DatabasePool, request: Parameters<WorldCampaignApplication["importWorld"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.importWorld(adapter.ownerScope(ownerUserId), request));
+}
+
+export function listCampaigns(pool: DatabasePool) {
+  return withWorldCampaign(pool, async ({ adapter, ownerUserId }) => (
+    await adapter.application.listCampaigns(adapter.ownerScope(ownerUserId))
+  ).campaigns);
+}
+
+export function updateCampaign(pool: DatabasePool, campaignId: string, request: Parameters<WorldCampaignApplication["updateCampaign"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.updateCampaign(adapter.campaignScope(ownerUserId, campaignId), request));
+}
+
+export function deleteCampaign(pool: DatabasePool, campaignId: string, request: Parameters<WorldCampaignApplication["deleteCampaign"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.deleteCampaign(adapter.campaignScope(ownerUserId, campaignId), request));
+}
+
+export function deleteWorld(pool: DatabasePool, worldId: string, request: Parameters<WorldCampaignApplication["deleteWorld"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.deleteWorld(adapter.worldScope(ownerUserId, worldId), request));
+}
+
+export function deleteWorldVersion(pool: DatabasePool, worldId: string, worldVersionId: string, request: Parameters<WorldCampaignApplication["deleteWorldVersion"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.deleteWorldVersion(adapter.worldVersionScope(ownerUserId, worldId, worldVersionId), request));
+}
+
+export function migrateCampaignWorld(pool: DatabasePool, campaignId: string, request: Parameters<WorldCampaignApplication["migrateCampaignWorldVersion"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.migrateCampaignWorldVersion(adapter.campaignScope(ownerUserId, campaignId), request));
+}
+
+export function getWorldVersionPlayableCharacterSummary(pool: DatabasePool, worldVersionId: string) {
+  return withWorldCampaign(pool, async ({ adapter, ownerUserId }) => adapter.application.getWorldVersionPlayableCharacterSummary(
+    await worldVersionScope(pool, ownerUserId, worldVersionId)
+  ));
+}
+
+export async function listWorldVersionPlayableCharacters(pool: DatabasePool, worldVersionId: string) {
+  return withWorldCampaign(pool, async ({ adapter, ownerUserId }) => adapter.application.listWorldVersionPlayableCharacters(
+    await worldVersionScope(pool, ownerUserId, worldVersionId)
+  ));
+}
+
+export function getCampaignRuntimeState(pool: DatabasePool, campaignId: string, requestedTurnNumber?: number) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.getCampaignRuntimeState(
+    adapter.campaignScope(ownerUserId, campaignId),
+    requestedTurnNumber
+  ));
+}
+
+export function getCampaignCharacterProfile(pool: DatabasePool, campaignId: string) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.getCampaignCharacterProfile(adapter.campaignScope(ownerUserId, campaignId)));
+}
+
+export function updateCampaignCharacterProfile(pool: DatabasePool, campaignId: string, request: Parameters<WorldCampaignApplication["updateCampaignCharacterProfile"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.updateCampaignCharacterProfile(adapter.campaignScope(ownerUserId, campaignId), request));
+}
+
+export function previewCampaignWorldTransfer(pool: DatabasePool, campaignId: string, request: Parameters<WorldCampaignApplication["previewCampaignWorldTransfer"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.previewCampaignWorldTransfer(adapter.campaignScope(ownerUserId, campaignId), request));
+}
+
+export function getDashboardStats(pool: DatabasePool) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.getDashboard(adapter.ownerScope(ownerUserId)));
+}
+
+export function getSessionUserProfile(pool: DatabasePool) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.getSessionProfile(adapter.ownerScope(ownerUserId)));
+}
+
+export function updateSessionUserProfile(pool: DatabasePool, request: Parameters<WorldCampaignApplication["updateSessionProfile"]>[1]) {
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => adapter.application.updateSessionProfile(adapter.ownerScope(ownerUserId), request));
+}
+
+export async function syncPlayerCampaignConfig(pool: DatabasePool, campaignId: string, request: PlayerCampaignConfig) {
+  return withWorldCampaign(pool, async ({ adapter, ownerUserId }) => {
+    const scope = adapter.campaignScope(ownerUserId, campaignId);
+    const state = await adapter.application.getCampaignRuntimeState(scope);
+    return adapter.application.syncPlayerCampaignConfig(scope, { ...request, expectedStateRevision: state.revision });
+  });
+}
+
+export function generateWorldPreview(
+  pool: DatabasePool,
+  request: Parameters<WorldCampaignApplication["generateWorldPreview"]>[1],
+  credentialSecret: string,
+) {
+  return withWorldCampaign(
+    pool,
+    ({ adapter, ownerUserId }) => adapter.application.generateWorldPreview(adapter.ownerScope(ownerUserId), request),
+    credentialSecret
+  );
+}
+
+export function getWorldGenerationProgress(pool: DatabasePool, ownerUserId: string, progressKey: string) {
+  const adapter = createWorldCampaignApplicationAdapter(
+    createApiWorldCampaignApplication(pool, { credentialSecret: "test-credential-secret" })
+  );
+  return adapter.run(() => adapter.application.getWorldGenerationProgress({ ownerUserId, progressKey }));
+}
+
 function requireMemoryResult<T>(result: MemoryPublicResult<T>): T {
   if (typeof result === "object" && result !== null && "failure" in result) {
     throw new Error(result.failure.message);
@@ -35,41 +210,57 @@ function requireMemoryResult<T>(result: MemoryPublicResult<T>): T {
 
 export function createCampaign(
   pool: DatabasePool,
-  request: Parameters<typeof createCampaignApplication>[1],
+  request: Parameters<WorldCampaignApplication["createCampaign"]>[1],
 ) {
-  return createCampaignApplication(pool, request, memoryGeneration(pool));
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => (
+    adapter.application.createCampaign(adapter.ownerScope(ownerUserId), request)
+  ));
 }
 
 export function updateCampaignRuntimeState(
   pool: DatabasePool,
   campaignId: string,
-  request: Parameters<typeof updateCampaignRuntimeStateApplication>[2],
+  request: Parameters<WorldCampaignApplication["updateCampaignRuntimeState"]>[1],
 ) {
-  return updateCampaignRuntimeStateApplication(pool, campaignId, request, memoryGeneration(pool));
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => (
+    adapter.application.updateCampaignRuntimeState(adapter.campaignScope(ownerUserId, campaignId), request)
+  ));
 }
 
 export function transferCampaignWorld(
   pool: DatabasePool,
   campaignId: string,
-  request: Parameters<typeof transferCampaignWorldApplication>[2],
+  request: Parameters<WorldCampaignApplication["transferCampaignWorld"]>[1],
 ) {
-  return transferCampaignWorldApplication(pool, campaignId, request, memoryGeneration(pool));
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => (
+    adapter.application.transferCampaignWorld(adapter.campaignScope(ownerUserId, campaignId), request)
+  ));
 }
 
-export function rewindCampaign(
+export async function rewindCampaign(
   pool: DatabasePool,
   campaignId: string,
-  request: Parameters<typeof rewindCampaignApplication>[2],
+  request: CampaignRewindRequest,
 ) {
-  return rewindCampaignApplication(pool, campaignId, request, memoryGeneration(pool));
+  return withWorldCampaign(pool, async ({ adapter, ownerUserId }) => {
+    const scope = adapter.campaignScope(ownerUserId, campaignId);
+    const state = await adapter.application.getCampaignRuntimeState(scope);
+    return adapter.application.rewindCampaign(scope, {
+      ...request,
+      expectedCurrentTurnNumber: request.expectedCurrentTurnNumber ?? state.activeTurnNumber,
+      expectedStateRevision: state.revision
+    });
+  });
 }
 
 export function branchCampaign(
   pool: DatabasePool,
   campaignId: string,
-  request: Parameters<typeof branchCampaignApplication>[2],
+  request: CampaignBranchRequest,
 ) {
-  return branchCampaignApplication(pool, campaignId, request, memoryGeneration(pool));
+  return withWorldCampaign(pool, ({ adapter, ownerUserId }) => (
+    adapter.application.branchCampaign(adapter.campaignScope(ownerUserId, campaignId), request)
+  ));
 }
 
 export function importLegacyStory(

@@ -20,7 +20,7 @@ import {
   characterProfileOrganizerSources,
   validateOrganizerResultWithRepair,
   validateOrganizerResult
-} from "../../services/api/src/character-profile-service.js";
+} from "../../services/api/src/task-14d-character-profile-organizer-bridge.js";
 
 const profile = characterProfileSchema.parse({
   identity: { aliases: ["The Fox"], pronouns: "she/her" },

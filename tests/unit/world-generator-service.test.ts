@@ -11,13 +11,13 @@ import {
 import {
   generatedWorldProviderError,
   generateTemplateWorld,
-  generateWorldPreview,
+  generateWorldPreviewForOwner,
   incompleteGeneratedCharacterError,
   incompleteGeneratedWorldError,
   type TemplateWorldGenerationDependencies,
-  type WorldGenerationPreviewDependencies,
+  type WorldGenerationProviderDependencies,
   worldGenerationFailureDiagnostic
-} from "../../services/api/src/world-generator-service.js";
+} from "../../services/api/src/task-14d-world-generation-bridge.js";
 
 function profile() {
   return {
@@ -570,20 +570,20 @@ describe("generateWorldPreview provider failures", () => {
       message: `${"m".repeat(500)}${marker}`
     }]));
     const dependencies = {
-      initialOwnerId: async () => "owner-id",
       resolveEffectiveProviderId: async () => "provider-id",
       createWorldGenerationProgress: async () => undefined,
       updateWorldGenerationProgress: async () => undefined,
       generateTemplateWorld: async () => {
         throw generatedError;
       }
-    } as unknown as WorldGenerationPreviewDependencies;
+    } as unknown as WorldGenerationProviderDependencies;
     const errorLog = vi.spyOn(logger, "error").mockImplementation(() => undefined);
     let errorLogCalls: unknown[][] = [];
 
     try {
-      await generateWorldPreview(
+      await generateWorldPreviewForOwner(
         {} as never,
+        "owner-id",
         { title: "The Moving Roads", prompt: "Moving roads.", progressKey: "world-gen:test" },
         "credential-secret",
         dependencies
@@ -645,7 +645,6 @@ describe("generateWorldPreview provider failures", () => {
     const safeProviderError = generatedWorldProviderError(providerError);
     const progressUpdates: unknown[] = [];
     const dependencies = {
-      initialOwnerId: async () => "owner-id",
       resolveEffectiveProviderId: async () => "provider-id",
       createWorldGenerationProgress: async () => undefined,
       updateWorldGenerationProgress: async (
@@ -659,14 +658,15 @@ describe("generateWorldPreview provider failures", () => {
       generateTemplateWorld: async () => {
         throw safeProviderError;
       }
-    } as unknown as WorldGenerationPreviewDependencies;
+    } as unknown as WorldGenerationProviderDependencies;
     const errorLog = vi.spyOn(logger, "error").mockImplementation(() => undefined);
     let errorLogCalls: unknown[][] = [];
 
     let thrown: unknown;
     try {
-      await generateWorldPreview(
+      await generateWorldPreviewForOwner(
         {} as never,
+        "owner-id",
         {
           title: "The Moving Roads",
           prompt: "PRIVATE_WORLD_PROMPT",
@@ -724,7 +724,6 @@ describe("generateWorldPreview provider failures", () => {
     }));
     const progressUpdates: unknown[] = [];
     const dependencies = {
-      initialOwnerId: async () => "owner-id",
       resolveEffectiveProviderId: async () => "provider-id",
       createWorldGenerationProgress: async () => undefined,
       updateWorldGenerationProgress: async (
@@ -738,14 +737,15 @@ describe("generateWorldPreview provider failures", () => {
       generateTemplateWorld: async () => {
         throw safeProviderError;
       }
-    } as unknown as WorldGenerationPreviewDependencies;
+    } as unknown as WorldGenerationProviderDependencies;
     const errorLog = vi.spyOn(logger, "error").mockImplementation(() => undefined);
     let errorLogCalls: unknown[][] = [];
     let thrown: unknown;
 
     try {
-      await generateWorldPreview(
+      await generateWorldPreviewForOwner(
         {} as never,
+        "owner-id",
         {
           title: "The Moving Roads",
           prompt: `${marker}: PRIVATE_WORLD_PROMPT`,

@@ -27,7 +27,7 @@ import { extractCyoaLayers, parseCyoaExport } from "../../../packages/domain/src
 import {
   generateTemplateWorld,
   worldGenerationFailureDiagnostic
-} from "./world-generator-service.js";
+} from "./task-14d-world-generation-bridge.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import type { PromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
