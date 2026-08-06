@@ -22,6 +22,7 @@ import { createApiIllustrationApplication } from "../helpers/runtime-application
 import { apiMemoryApplication } from "../helpers/memory-applications.js";
 import { inertProviders } from "../helpers/build-server-options.js";
 import { apiProviderGraph } from "../helpers/provider-application-fixtures.js";
+import { dropTestDatabaseWhenIdle } from "./database-test-helpers.js";
 
 const { Client } = pg;
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -403,47 +404,65 @@ integration("generation job notification delivery", () => {
   });
 
   it("removes and restores the notification trigger and function through the migration down/up path", async () => {
-    const client = await pool.connect();
+    const databaseName = `infinitequest_generation_events_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const isolatedUrl = new URL(databaseUrl!);
+    isolatedUrl.pathname = `/${databaseName}`;
+    let migrationPool: DatabasePool | null = null;
     try {
-      const reverted = await runner({
-        dbClient: client,
-        dir: resolve("database/migrations"),
-        direction: "down",
-        count: 1,
-        migrationsTable: "schema_migrations",
-        checkOrder: true,
-        singleTransaction: true,
-        verbose: false,
-        logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      migrationPool = createDatabasePool(isolatedUrl.toString(), 2);
+      await migrateDatabase(migrationPool, resolve("database/migrations"));
+      const client = await migrationPool.connect();
+      try {
+        const reverted = await runner({
+          dbClient: client,
+          dir: resolve("database/migrations"),
+          direction: "down",
+          count: 2,
+          migrationsTable: "schema_migrations",
+          checkOrder: true,
+          singleTransaction: true,
+          verbose: false,
+          logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
+        });
+        expect(reverted.map((migration) => migration.name)).toEqual([
+          "0053_durable_asset_portable_operations",
+          "0052_generation_job_notifications"
+        ]);
+      } finally {
+        client.release();
+      }
+
+      await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
+         `SELECT (
+           SELECT min(trigger_name) FROM information_schema.triggers
+            WHERE event_object_table = 'generation_jobs'
+              AND trigger_name = 'generation_jobs_notify_changed_v1'
+         ) AS trigger_name,
+         to_regprocedure('notify_generation_job_changed_v1()')::text AS function_name`
+      )).resolves.toMatchObject({ rows: [{ trigger_name: null, function_name: null }] });
+
+      await expect(migrateDatabase(migrationPool, resolve("database/migrations")))
+        .resolves.toEqual([
+          "0052_generation_job_notifications",
+          "0053_durable_asset_portable_operations"
+        ]);
+      await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
+         `SELECT (
+           SELECT min(trigger_name) FROM information_schema.triggers
+            WHERE event_object_table = 'generation_jobs'
+              AND trigger_name = 'generation_jobs_notify_changed_v1'
+         ) AS trigger_name,
+         to_regprocedure('notify_generation_job_changed_v1()')::text AS function_name`
+      )).resolves.toMatchObject({
+        rows: [{
+          trigger_name: "generation_jobs_notify_changed_v1",
+          function_name: "notify_generation_job_changed_v1()"
+        }]
       });
-      expect(reverted.map((migration) => migration.name)).toEqual(["0052_generation_job_notifications"]);
     } finally {
-      client.release();
+      if (migrationPool) await migrationPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
     }
-
-    await expect(pool.query<{ trigger_name: string | null; function_name: string | null }>(
-       `SELECT (
-         SELECT min(trigger_name) FROM information_schema.triggers
-          WHERE event_object_table = 'generation_jobs'
-            AND trigger_name = 'generation_jobs_notify_changed_v1'
-       ) AS trigger_name,
-       to_regprocedure('notify_generation_job_changed_v1()')::text AS function_name`
-    )).resolves.toMatchObject({ rows: [{ trigger_name: null, function_name: null }] });
-
-    await expect(migrateDatabase(pool, resolve("database/migrations")))
-      .resolves.toEqual(["0052_generation_job_notifications"]);
-    await expect(pool.query<{ trigger_name: string | null; function_name: string | null }>(
-       `SELECT (
-         SELECT min(trigger_name) FROM information_schema.triggers
-          WHERE event_object_table = 'generation_jobs'
-            AND trigger_name = 'generation_jobs_notify_changed_v1'
-       ) AS trigger_name,
-       to_regprocedure('notify_generation_job_changed_v1()')::text AS function_name`
-    )).resolves.toMatchObject({
-      rows: [{
-        trigger_name: "generation_jobs_notify_changed_v1",
-        function_name: "notify_generation_job_changed_v1()"
-      }]
-    });
   });
 });

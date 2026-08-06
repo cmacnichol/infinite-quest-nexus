@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { PoolClient } from "pg";
@@ -90,7 +90,8 @@ integration("standard database migration runner", () => {
     expect(columns.rows.map((row) => row.column_name)).toEqual([
       "id", "owner_user_id", "archive_type", "token_hash", "content_fingerprint",
       "destination_hash", "application_version", "staged_archive_path", "source_name",
-      "preview", "status", "expires_at", "consumed_at", "result", "created_at", "updated_at"
+      "preview", "status", "expires_at", "consumed_at", "result", "created_at", "updated_at",
+      "storage_security_state", "secure_staged_input_id", "legacy_drain_policy"
     ]);
     expect(columns.rows.find((row) => row.column_name === "id")).toMatchObject({ data_type: "uuid", is_nullable: "NO" });
     expect(columns.rows.find((row) => row.column_name === "owner_user_id")).toMatchObject({ data_type: "uuid", is_nullable: "NO" });
@@ -134,6 +135,89 @@ integration("standard database migration runner", () => {
     });
     expect(inserted.rows[0]!.staged_archive_path).not.toMatch(/^[A-Za-z]:[\\/]|^\\\\|^\//);
     await pool.query("DELETE FROM archive_previews WHERE token_hash = $1", [inserted.rows[0]!.token_hash]);
+  });
+
+  it("creates owner-scoped durable asset and portable-operation schema with hashed-only capabilities", async () => {
+    const tableNames = [
+      "asset_metadata_backfill_jobs",
+      "asset_mutation_idempotency",
+      "durable_filesystem_operations",
+      "durable_filesystem_descriptors",
+      "portable_staged_inputs",
+      "portable_import_operations",
+      "portable_export_artifacts"
+    ];
+    const tables = await pool.query<{ table_name: string }>(
+      `SELECT table_name
+         FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = ANY($1::text[])
+        ORDER BY table_name`,
+      [tableNames]
+    );
+    expect(tables.rows.map((row) => row.table_name)).toEqual([...tableNames].sort());
+
+    const owners = await pool.query<{ table_name: string; is_nullable: string }>(
+      `SELECT table_name, is_nullable
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = ANY($1::text[])
+          AND column_name = 'owner_user_id'
+        ORDER BY table_name`,
+      [tableNames]
+    );
+    expect(owners.rows).toHaveLength(tableNames.length);
+    expect(owners.rows.every((row) => row.is_nullable === "NO")).toBe(true);
+
+    const capabilityColumns = await pool.query<{ table_name: string; column_name: string }>(
+      `SELECT table_name, column_name
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = ANY($1::text[])
+          AND column_name ~ '(token|candidate|locator|retrieval|idempotency)'
+        ORDER BY table_name, column_name`,
+      [tableNames]
+    );
+    expect(capabilityColumns.rows).not.toHaveLength(0);
+    expect(capabilityColumns.rows.filter((row) => (
+      row.column_name !== "change_token" && !row.column_name.endsWith("_hash")
+    ))).toEqual([]);
+
+    const constraints = await pool.query<{ table_name: string; definition: string }>(
+      `SELECT relations.relname AS table_name, pg_get_constraintdef(constraints.oid) AS definition
+         FROM pg_constraint constraints
+         JOIN pg_class relations ON relations.oid = constraints.conrelid
+         JOIN pg_namespace namespaces ON namespaces.oid = relations.relnamespace
+        WHERE namespaces.nspname = 'public' AND relations.relname = ANY($1::text[])
+        ORDER BY relations.relname, constraints.conname`,
+      [tableNames]
+    );
+    const definitions = constraints.rows.map((row) => `${row.table_name}: ${row.definition}`).join("\n");
+    expect(definitions).toMatch(/asset_metadata_backfill_jobs:.*queued.*running.*recoverable.*completed.*failed/i);
+    expect(definitions).toMatch(/durable_filesystem_operations:.*reserved.*attached.*finalized.*cleanup_pending.*cleaned/i);
+    expect(definitions).toMatch(/portable_import_operations:.*campaign_zip.*legacy_story.*infinite_worlds.*cyoa.*world_json.*world_text.*story_text/i);
+    expect(definitions).toMatch(/asset_metadata_unavailable.*filesystem_race_detected/i);
+    expect(definitions).toMatch(/portable_import_operations: FOREIGN KEY \(import_id, owner_user_id\).*imports\(id, owner_user_id\)/i);
+
+    const indexes = await pool.query<{ indexname: string }>(
+      `SELECT indexname
+         FROM pg_indexes
+        WHERE schemaname = 'public' AND indexname = ANY($1::text[])
+        ORDER BY indexname`,
+      [[
+        "asset_metadata_backfill_claim_idx",
+        "durable_filesystem_operations_recovery_idx",
+        "portable_staged_inputs_expiry_idx",
+        "portable_import_operations_expiry_idx",
+        "portable_export_artifacts_expiry_idx"
+      ]]
+    );
+    expect(indexes.rows.map((row) => row.indexname)).toEqual([
+      "asset_metadata_backfill_claim_idx",
+      "durable_filesystem_operations_recovery_idx",
+      "portable_export_artifacts_expiry_idx",
+      "portable_import_operations_expiry_idx",
+      "portable_staged_inputs_expiry_idx"
+    ]);
   });
 
   it("adds scoped entity identity columns and indexes to Chronicle records", async () => {
@@ -239,6 +323,173 @@ integration("standard database migration runner", () => {
       if (isolatedPool) await isolatedPool.end();
       await dropTestDatabaseWhenIdle(pool, databaseName);
       await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("atomically upgrades legacy asset and archive data without changing authoritative imports or asset identities", async () => {
+    const migrationName = "0053_durable_asset_portable_operations";
+    const databaseName = `infinitequest_asset_portable_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-asset-portable-migrations-"));
+    const failingMigrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-asset-portable-rollback-"));
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      for (const file of await readdir(resolve("database/migrations"))) {
+        if (file.endsWith(".sql") && file < `${migrationName}.sql`) {
+          await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
+        }
+      }
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await migrateDatabase(isolatedPool, migrationDirectory);
+
+      const owner = await isolatedPool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'");
+      const ownerUserId = owner.rows[0]!.id;
+      const incompleteAsset = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO assets (
+           owner_user_id, content_hash, storage_driver, storage_path, mime_type, byte_length, technical_metadata
+         ) VALUES ($1, repeat('a',64), 'filesystem', 'legacy/incomplete.png', 'image/png', 12,
+                   jsonb_build_object('format', 'png', 'backfillError', 'secret /srv/private/assets/incomplete.png'))
+         RETURNING id`,
+        [ownerUserId]
+      );
+      const completeAsset = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO assets (
+           owner_user_id, content_hash, storage_driver, storage_path, mime_type, byte_length,
+           pixel_width, pixel_height, technical_metadata
+         ) VALUES ($1, repeat('b',64), 'filesystem', 'legacy/complete.png', 'image/png', 24, 10, 10,
+                   jsonb_build_object('format', 'png'))
+         RETURNING id`,
+        [ownerUserId]
+      );
+      await isolatedPool.query(
+        `INSERT INTO asset_derivatives (
+           owner_user_id, source_asset_id, derivative_kind, transform_version, pixel_width, pixel_height,
+           storage_driver, storage_path, mime_type, byte_length, content_hash
+         ) VALUES ($1,$2,'thumbnail',1,10,10,'filesystem','legacy/complete.webp','image/webp',8,repeat('c',64))`,
+        [ownerUserId, completeAsset.rows[0]!.id]
+      );
+      const importRecord = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO imports (owner_user_id, source_type, source_name, source_hash, status)
+         VALUES ($1,'legacy_story','legacy.json',repeat('d',64),'completed') RETURNING id`,
+        [ownerUserId]
+      );
+      const previewTokenHash = createHash("sha256").update("legacy-preview-token", "utf8").digest("hex");
+      const legacyPreview = await isolatedPool.query<{ id: string; expires_at: Date }>(
+        `INSERT INTO archive_previews (
+           owner_user_id, archive_type, token_hash, content_fingerprint, destination_hash,
+           application_version, staged_archive_path, source_name, preview, status, expires_at
+         ) VALUES ($1,'campaign',$2,repeat('e',64),repeat('f',64),'legacy-v1','staging/legacy.zip',
+                   'legacy.zip','{}'::jsonb,'previewed',date_trunc('second', now()) + interval '30 minutes')
+         RETURNING id, expires_at`,
+        [ownerUserId, previewTokenHash]
+      );
+
+      const migrationSql = await readFile(resolve(`database/migrations/${migrationName}.sql`), "utf8");
+      await writeFile(
+        join(failingMigrationDirectory, `${migrationName}.sql`),
+        migrationSql.replace("\n-- Down Migration\n", "\nSELECT 1 / 0;\n\n-- Down Migration\n")
+      );
+      await expect(migrateDatabase(isolatedPool, failingMigrationDirectory)).rejects.toThrow();
+      await expect(isolatedPool.query("SELECT to_regclass('public.asset_metadata_backfill_jobs') AS table_name"))
+        .resolves.toMatchObject({ rows: [{ table_name: null }] });
+      await expect(isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
+        "SELECT technical_metadata FROM assets WHERE id = $1",
+        [incompleteAsset.rows[0]!.id]
+      )).resolves.toMatchObject({
+        rows: [{ technical_metadata: { format: "png", backfillError: "secret /srv/private/assets/incomplete.png" } }]
+      });
+      await expect(isolatedPool.query("SELECT name FROM schema_migrations WHERE name = $1", [migrationName]))
+        .resolves.toMatchObject({ rows: [] });
+
+      await expect(migrateDatabase(isolatedPool, resolve("database/migrations"))).resolves.toEqual([migrationName]);
+
+      const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
+        "SELECT technical_metadata FROM assets WHERE id = $1",
+        [incompleteAsset.rows[0]!.id]
+      );
+      expect(scrubbed.rows).toEqual([{
+        technical_metadata: { format: "png", backfillError: "asset_metadata_unavailable" }
+      }]);
+      const jobs = await isolatedPool.query<{
+        asset_id: string;
+        owner_user_id: string;
+        status: string;
+        diagnostic_code: string | null;
+      }>(
+        `SELECT asset_id, owner_user_id, status, diagnostic_code
+           FROM asset_metadata_backfill_jobs ORDER BY asset_id`
+      );
+      expect(jobs.rows).toEqual([{
+        asset_id: incompleteAsset.rows[0]!.id,
+        owner_user_id: ownerUserId,
+        status: "recoverable",
+        diagnostic_code: "asset_metadata_unavailable"
+      }]);
+      await expect(isolatedPool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM durable_filesystem_operations"
+      )).resolves.toMatchObject({ rows: [{ count: "0" }] });
+
+      const preserved = await isolatedPool.query<{
+        asset_ids: string[];
+        import_id: string;
+        source_hash: string;
+        import_count: string;
+      }>(
+        `SELECT ARRAY(SELECT id::text FROM assets ORDER BY id)::text[] AS asset_ids,
+                min(id::text) FILTER (WHERE id = $1)::text AS import_id,
+                min(source_hash) FILTER (WHERE id = $1) AS source_hash,
+                count(*) FILTER (WHERE id = $1)::text AS import_count
+           FROM imports`,
+        [importRecord.rows[0]!.id]
+      );
+      expect(preserved.rows[0]).toEqual({
+        asset_ids: [incompleteAsset.rows[0]!.id, completeAsset.rows[0]!.id].sort(),
+        import_id: importRecord.rows[0]!.id,
+        source_hash: "d".repeat(64),
+        import_count: "1"
+      });
+      await expect(isolatedPool.query(
+        `SELECT worlds.cover_asset_id, image_jobs.asset_id, segment_assets.asset_id
+           FROM worlds
+           FULL JOIN image_jobs ON false
+           FULL JOIN turn_illustration_segment_assets segment_assets ON false
+          LIMIT 0`
+      )).resolves.toMatchObject({ rows: [] });
+
+      const preview = await isolatedPool.query<{
+        status: string;
+        storage_security_state: string;
+        secure_staged_input_id: string | null;
+        expires_at: Date;
+        legacy_drain_policy: string;
+        staged_archive_path: string;
+      }>(
+        `SELECT status, storage_security_state, secure_staged_input_id, expires_at,
+                legacy_drain_policy, staged_archive_path
+           FROM archive_previews WHERE id = $1`,
+        [legacyPreview.rows[0]!.id]
+      );
+      expect(preview.rows).toEqual([{
+        status: "previewed",
+        storage_security_state: "legacy_path_v1",
+        secure_staged_input_id: null,
+        expires_at: legacyPreview.rows[0]!.expires_at,
+        legacy_drain_policy: "serve_until_expiry_then_identity_cleanup",
+        staged_archive_path: "staging/legacy.zip"
+      }]);
+
+      await expect(migrateDatabase(isolatedPool, resolve("database/migrations"))).resolves.toEqual([]);
+      await expect(isolatedPool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM asset_metadata_backfill_jobs WHERE asset_id = $1",
+        [incompleteAsset.rows[0]!.id]
+      )).resolves.toMatchObject({ rows: [{ count: "1" }] });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+      await rm(failingMigrationDirectory, { recursive: true, force: true });
     }
   });
 
