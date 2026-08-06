@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e1R2/14e2a complete; 14e2aR persisted capability handoff is next |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e1R2/14e2a/14e2aR complete; 14e2b1 migration and legacy-data safety is next |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -7828,6 +7828,24 @@ descriptor-anchor, bounded I/O, fail-closed platform, and quarantine semantics
 from 14e2a. Add test-only fake persistence/rehydration coverage including stale
 identity, foreign owner, restart, and cleanup retry. Do not add a migration or
 switch a production consumer here.
+
+**14e2aR completion (2026-08-05):** `1136277`, `fc715d4`, and correction
+`14703a1` add the private persisted-capability handoff and identity-safe asset
+publication lifecycle, with review reports in `8507ba0`, `e525e02`, and
+`9fda6e3`. Restarted adapters redeem only hashed owner-bound tokens whose
+lifecycle, relative locator, immutable identity, length, and SHA-256 match the
+private persistence record; fresh and persisted operations retain the
+descriptor-anchor, bounded I/O, fail-closed platform, and quarantine guarantees.
+Original/derivative publication now reserves a durable private plan before final
+adoption and carries both temporary/final identity-bound cleanup descriptors
+through attach, finalization, recovery, and idempotent cleanup. The correction
+round canonicalizes operation scope, fences locator redemption by lifecycle,
+maps all lifecycle failures to frozen safe diagnostics, and recovers after-link
+and unlink faults without an orphan or `EEXIST` retry failure. Verification
+passed 126 focused tests, 1,349 unit tests, check, build, diff, and precheck;
+two independent security reviews approved. No migration/schema, route, worker,
+runtime, legacy cutover, allowlist, or #0446 live wiring changed. **14e2b1 is
+next.**
 
 **14e2b — owner-scoped PostgreSQL repositories.** Deliver the following
 sequential, independently reviewed checkpoints after 14e1R2 and 14e2aR:
