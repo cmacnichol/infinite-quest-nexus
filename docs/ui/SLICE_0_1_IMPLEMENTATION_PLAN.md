@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e1R2/14e2a/14e2aR complete; 14e2b1 migration and legacy-data safety is next |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e1R2/14e2a/14e2aR/14e2b1 complete; 14e2b2 asset repositories are next |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -7862,6 +7862,25 @@ remain authoritative references, never unjournaled reaper candidates; existing
 legacy archive previews require an explicit secure migration or expire/supersede
 and identity-safe drain policy. Preserve current imports/source-hash semantics,
 IDs, and specialized world/segment/generation asset tables.
+
+**14e2b1 completion (2026-08-06):** `7dc7db4`, `ec51faf`, `c9adf8b`, and
+`9726877` add and harden the additive `0053` durable asset/portable-operation
+schema. It has owner-scoped jobs, idempotency records, operation journals,
+append-only descriptors, staged inputs, portable import operations, and export
+artifacts; opaque capabilities persist only as SHA-256 hashes. Real-PostgreSQL
+regressions prove owner and purpose binding, immutable operation authority,
+reserve-to-attach-only capability minting, valid lifecycle/lease updates,
+relationship coherence, and online-safe import ownership without an
+existing-table index build. Historical raw backfill diagnostics are scrubbed,
+incomplete assets are seeded without becoming reaper candidates, and legacy
+path-only previews created before `0053` are retained rather than path-deleted
+until a secure staged-input migration/cutover owns them. Newly created legacy
+previews remain explicitly labeled compatibility records until 14e3 replaces
+their path-based service. Verification passed 12 focused migration tests,
+1,349 unit tests, 349 integration tests, `pnpm check`, build, diff, and
+precheck; the initial review and two scoped correction re-reviews are clean.
+No repository, production route, worker, runtime, allowlist, or #0446 cutover
+occurred. **14e2b2 is next.**
 
 **14e2b2 — asset library, selection, delivery, and backfill repositories.**
 Implement `asset-repository.ts` for full list/facet parity, metadata revision,
