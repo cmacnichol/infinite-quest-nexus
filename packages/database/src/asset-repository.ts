@@ -113,8 +113,8 @@ type AssetCursor = Readonly<{
   usageCount: number;
 }>;
 
-function queryFingerprint(query: AssetLibraryQuery): string {
-  return sha256(stableStringify({ ...query, cursor: undefined }));
+function queryFingerprint(ownerUserId: string, query: AssetLibraryQuery): string {
+  return sha256(stableStringify({ ownerUserId, query: { ...query, cursor: undefined } }));
 }
 
 function decodeCursor(value: string, fingerprint: string): AssetCursor {
@@ -330,7 +330,7 @@ function facetRecord(rows: Array<{ value: string; count: number }>): Readonly<Re
 
 async function listAssets(pool: DatabasePool, ownerUserId: string, query: AssetLibraryQuery): Promise<AssetLibraryView> {
   const { base, params } = buildLibraryQuery(ownerUserId, query);
-  const fingerprint = queryFingerprint(query);
+  const fingerprint = queryFingerprint(ownerUserId, query);
   const cursor = query.cursor ? decodeCursor(query.cursor, fingerprint) : null;
   const pageParams = [...params];
   const add = (value: unknown): string => {
@@ -705,15 +705,35 @@ async function classifyLease(
   client: DatabaseClient | DatabasePool,
   claim: AssetMetadataBackfillClaim,
 ): Promise<"stale" | "lease_lost" | "already_current"> {
-  const current = await client.query<{ status: string; work_version: number }>(
-    `SELECT status, work_version FROM asset_metadata_backfill_jobs
-      WHERE owner_user_id=$1 AND asset_id=$2`,
+  const current = await client.query<{
+    status: string;
+    work_version: number;
+    completion_fence: string | null;
+  }>(
+    `SELECT job.status, job.work_version,
+            asset.technical_metadata ->> 'assetMetadataBackfillCompletionFence' AS completion_fence
+       FROM asset_metadata_backfill_jobs job
+       JOIN assets asset
+         ON asset.id=job.asset_id AND asset.owner_user_id=job.owner_user_id
+      WHERE job.owner_user_id=$1 AND job.asset_id=$2`,
     [claim.ownerUserId, claim.assetId]
   );
   const row = current.rows[0];
   if (!row || row.work_version !== claim.workVersion) return "stale";
-  if (row.status === "completed") return "already_current";
+  if (row.status === "completed" && row.completion_fence === backfillCompletionFence(claim)) {
+    return "already_current";
+  }
   return "lease_lost";
+}
+
+function backfillCompletionFence(claim: AssetMetadataBackfillClaim): string {
+  return sha256(stableStringify({
+    ownerUserId: claim.ownerUserId,
+    assetId: claim.assetId,
+    leaseId: claim.leaseId,
+    leaseOwner: claim.leaseOwner,
+    workVersion: claim.workVersion
+  }));
 }
 
 function assetDatabaseClient(context: AssetTransactionContext): DatabaseClient {
@@ -816,7 +836,20 @@ function metadataRepository(pool: DatabasePool): AssetMetadataBackfillPort {
           RETURNING job.id`,
           [claim.ownerUserId, claim.assetId, claim.leaseId, claim.leaseOwner, claim.workVersion]
         );
-        if (completed.rowCount) return { assetId: claim.assetId, outcome: "updated" as const };
+        if (completed.rowCount) {
+          await client.query(
+            `UPDATE assets
+                SET technical_metadata=jsonb_set(
+                  technical_metadata,
+                  '{assetMetadataBackfillCompletionFence}',
+                  to_jsonb($3::text),
+                  true
+                )
+              WHERE id=$1 AND owner_user_id=$2`,
+            [claim.assetId, claim.ownerUserId, backfillCompletionFence(claim)]
+          );
+          return { assetId: claim.assetId, outcome: "updated" as const };
+        }
         const classification = await classifyLease(client, claim);
         if (classification === "already_current") {
           return { assetId: claim.assetId, outcome: "already_current" as const };

@@ -20,6 +20,7 @@ import {
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
+import { queryAssets as queryLegacyAssets } from "../../services/api/src/asset-service.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -170,7 +171,17 @@ integration("PostgreSQL asset repository", () => {
     return contentHash;
   }
 
-  async function addContext(assetId: string, fixture: CampaignFixture): Promise<void> {
+  async function addContext(
+    assetId: string,
+    fixture: CampaignFixture,
+    input: Partial<{
+      fictionPrompt: string;
+      entities: string[];
+      locations: string[];
+      providerType: string;
+      model: string;
+    }> = {},
+  ): Promise<void> {
     await pool.query(
       `INSERT INTO asset_generation_contexts (
          owner_user_id, asset_id, created_by_user_id, world_id, world_version_id,
@@ -184,11 +195,11 @@ integration("PostgreSQL asset repository", () => {
         fixture.worldVersionId,
         fixture.campaignId,
         fixture.turnId,
-        "A moonlit citadel above the harbor",
-        JSON.stringify(["entity-citadel"]),
-        JSON.stringify(["location-harbor"]),
-        "openai_compatible",
-        "illustrator-v1"
+        input.fictionPrompt ?? "A moonlit citadel above the harbor",
+        JSON.stringify(input.entities ?? ["entity-citadel"]),
+        JSON.stringify(input.locations ?? ["location-harbor"]),
+        input.providerType ?? "openai_compatible",
+        input.model ?? "illustrator-v1"
       ]
     );
   }
@@ -207,6 +218,7 @@ integration("PostgreSQL asset repository", () => {
     relativePath: string,
     byteLength: number,
     contentHash: string,
+    finalized = true,
   ): Promise<string> {
     const locator = `locator-${crypto.randomUUID()}`;
     const candidate = `candidate-${crypto.randomUUID()}`;
@@ -232,10 +244,12 @@ integration("PostgreSQL asset repository", () => {
        ) VALUES ($1,$2,'delivery',0,$3,'dev-1',$4,'change-1',$5,$6)`,
       [operationId, ownerUserId, relativePath, `file-${crypto.randomUUID()}`, contentHash, byteLength]
     );
-    await pool.query(
-      "UPDATE durable_filesystem_operations SET lifecycle='finalized', finalized_at=now() WHERE id=$1",
-      [operationId]
-    );
+    if (finalized) {
+      await pool.query(
+        "UPDATE durable_filesystem_operations SET lifecycle='finalized', finalized_at=now() WHERE id=$1",
+        [operationId]
+      );
+    }
     return locator;
   }
 
@@ -339,6 +353,202 @@ integration("PostgreSQL asset repository", () => {
       .rejects.toMatchObject({ code: "asset_cursor_invalid" });
   });
 
+  it("differentially preserves every validated list filter, sort, cursor, and facet", async () => {
+    const firstCampaign = await campaign();
+    const secondCampaign = await campaign();
+    const marker = `parity${crypto.randomUUID().replaceAll("-", "")}`;
+    const foreignCreator = crypto.randomUUID();
+    await pool.query(
+      "INSERT INTO users (id, display_name, status) VALUES ($1,'Asset parity creator','active')",
+      [foreignCreator]
+    );
+    const alpha = await asset({
+      campaignId: firstCampaign.campaignId,
+      turnId: firstCampaign.turnId,
+      createdAt: "2026-08-01T12:00:00.000Z",
+      title: `Alpha ${marker}`,
+      tags: ["common", "red"],
+      origin: "generated",
+      reuseScope: "campaign",
+      automaticReuseEnabled: true,
+      reviewStatus: "eligible",
+      favorite: true,
+      mimeType: "image/png",
+      width: 640,
+      height: 360
+    });
+    const beta = await asset({
+      campaignId: secondCampaign.campaignId,
+      turnId: secondCampaign.turnId,
+      createdAt: "2026-08-02T12:00:00.000Z",
+      title: `Beta ${marker}`,
+      tags: ["blue", "common"],
+      origin: "imported",
+      reuseScope: "owner_library",
+      automaticReuseEnabled: false,
+      reviewStatus: "restricted",
+      mimeType: "image/jpeg",
+      width: 320,
+      height: 640
+    });
+    const gamma = await asset({
+      createdAt: "2026-08-03T12:00:00.000Z",
+      title: `Gamma ${marker}`,
+      tags: ["archived"],
+      origin: "generated",
+      reuseScope: "world",
+      reviewStatus: "blocked",
+      mimeType: "image/gif",
+      width: 512,
+      height: 512,
+      archived: true
+    });
+    const delta = await asset({
+      createdAt: "2026-08-04T12:00:00.000Z",
+      title: `Delta ${marker}`,
+      tags: ["green"],
+      origin: "uploaded",
+      reuseScope: "private",
+      automaticReuseEnabled: false,
+      reviewStatus: "unreviewed",
+      mimeType: "image/webp",
+      width: null,
+      height: null
+    });
+    await addContext(alpha.assetId, firstCampaign, {
+      fictionPrompt: `Citadel ${marker}`,
+      entities: ["entity-alpha"],
+      locations: ["location-alpha"],
+      providerType: "provider-alpha",
+      model: "model-alpha"
+    });
+    await addContext(beta.assetId, secondCampaign, {
+      fictionPrompt: `Forest ${marker}`,
+      entities: ["entity-beta"],
+      locations: ["location-beta"],
+      providerType: "provider-beta",
+      model: "model-beta"
+    });
+    await addReference(alpha.assetId, firstCampaign, "turn_illustration");
+    await addReference(alpha.assetId, firstCampaign, "import_attachment");
+    await addReference(beta.assetId, secondCampaign, "import_attachment");
+    await pool.query(
+      "UPDATE asset_library_entries SET created_by_user_id=$3 WHERE asset_id=$1 AND owner_user_id=$2",
+      [beta.assetId, ownerUserId, foreignCreator]
+    );
+
+    const defaultOrder = [delta.assetId, beta.assetId, alpha.assetId];
+    const cases: Array<Readonly<{
+      name: string;
+      input: Record<string, unknown>;
+      expected: string[];
+    }>> = [
+      { name: "q", input: {}, expected: defaultOrder },
+      { name: "scope all", input: { scope: "all" }, expected: defaultOrder },
+      { name: "scope campaign", input: { scope: "campaign", campaignId: firstCampaign.campaignId }, expected: [alpha.assetId] },
+      { name: "scope world", input: { scope: "world", worldId: firstCampaign.worldId }, expected: [alpha.assetId] },
+      { name: "scope owner library", input: { scope: "owner_library" }, expected: [beta.assetId] },
+      { name: "scope shared negative", input: { scope: "shared" }, expected: [] },
+      { name: "creator me", input: { creator: "me" }, expected: [delta.assetId, alpha.assetId] },
+      { name: "world id", input: { worldId: firstCampaign.worldId }, expected: [alpha.assetId] },
+      { name: "world version id", input: { worldVersionId: firstCampaign.worldVersionId }, expected: [alpha.assetId] },
+      { name: "campaign id", input: { campaignId: firstCampaign.campaignId }, expected: [alpha.assetId] },
+      { name: "origin", input: { origin: ["generated"] }, expected: [alpha.assetId] },
+      { name: "tags any", input: { tags: ["red", "blue"] }, expected: [beta.assetId, alpha.assetId] },
+      { name: "tags all", input: { tags: ["common", "red"], allTags: true }, expected: [alpha.assetId] },
+      { name: "entity ids", input: { entityIds: ["entity-alpha"] }, expected: [alpha.assetId] },
+      { name: "location ids", input: { locationIds: ["location-alpha"] }, expected: [alpha.assetId] },
+      { name: "provider", input: { provider: ["provider-alpha"] }, expected: [alpha.assetId] },
+      { name: "model", input: { model: ["model-alpha"] }, expected: [alpha.assetId] },
+      { name: "review status", input: { reviewStatus: ["restricted"] }, expected: [beta.assetId] },
+      { name: "reuse scope", input: { reuseScope: ["owner_library"] }, expected: [beta.assetId] },
+      { name: "eligible true", input: { eligible: true }, expected: [alpha.assetId] },
+      { name: "eligible false", input: { eligible: false }, expected: [delta.assetId, beta.assetId] },
+      { name: "favorite true", input: { favorite: true }, expected: [alpha.assetId] },
+      { name: "favorite false", input: { favorite: false }, expected: [delta.assetId, beta.assetId] },
+      { name: "archived", input: { archived: true }, expected: [gamma.assetId] },
+      { name: "mime type", input: { mimeType: ["image/jpeg"] }, expected: [beta.assetId] },
+      { name: "aspect landscape", input: { aspect: ["landscape"] }, expected: [alpha.assetId] },
+      { name: "aspect portrait", input: { aspect: ["portrait"] }, expected: [beta.assetId] },
+      { name: "aspect unknown", input: { aspect: ["unknown"] }, expected: [delta.assetId] },
+      { name: "created from", input: { createdFrom: "2026-08-03T18:00:00.000Z" }, expected: [delta.assetId] },
+      { name: "created to", input: { createdTo: "2026-08-02T18:00:00.000Z" }, expected: [beta.assetId, alpha.assetId] },
+      { name: "q negative", input: { q: `missing${marker}` }, expected: [] },
+      { name: "tag negative", input: { tags: ["missing-tag"] }, expected: [] },
+      { name: "entity negative", input: { entityIds: ["missing-entity"] }, expected: [] },
+      { name: "provider negative", input: { provider: ["missing-provider"] }, expected: [] }
+    ];
+
+    for (const testCase of cases) {
+      const query = assetListQuerySchema.parse({ q: marker, ...testCase.input });
+      const [legacy, current] = await Promise.all([
+        queryLegacyAssets(pool, ownerUserId, query),
+        application().listAssets({ ownerUserId }, query)
+      ]);
+      const comparableCurrent = {
+        ...current,
+        assets: current.assets.map(({ assetId: _assetId, ...item }) => item),
+        nextCursor: current.nextCursor ? "cursor" : null
+      };
+      expect(comparableCurrent, testCase.name).toEqual({
+        ...legacy,
+        nextCursor: legacy.nextCursor ? "cursor" : null
+      });
+      expect(current.assets.map((item) => item.assetId), testCase.name).toEqual(testCase.expected);
+    }
+
+    const base = assetListQuerySchema.parse({ q: marker });
+    const facetResult = await application().listAssets({ ownerUserId }, base);
+    expect(facetResult.facets).toEqual({
+      origin: { generated: 1, imported: 1, uploaded: 1 },
+      reviewStatus: { eligible: 1, restricted: 1, unreviewed: 1 },
+      reuseScope: { campaign: 1, owner_library: 1, private: 1 },
+      tags: { blue: 1, common: 2, green: 1, red: 1 }
+    });
+
+    const sortCases = [
+      { sort: "newest" as const, expected: [delta.assetId, beta.assetId, alpha.assetId] },
+      { sort: "oldest" as const, expected: [alpha.assetId, beta.assetId, delta.assetId] },
+      { sort: "title" as const, expected: [alpha.assetId, beta.assetId, delta.assetId] },
+      { sort: "most_used" as const, expected: [alpha.assetId, beta.assetId, delta.assetId] }
+    ];
+    for (const testCase of sortCases) {
+      const query = assetListQuerySchema.parse({ q: marker, sort: testCase.sort, limit: 1 });
+      const currentIds: string[] = [];
+      const legacyIds: string[] = [];
+      let currentCursor: string | undefined;
+      let legacyCursor: string | undefined;
+      do {
+        const current = await application().listAssets({ ownerUserId }, { ...query, cursor: currentCursor });
+        currentIds.push(...current.assets.map((item) => item.assetId));
+        currentCursor = current.nextCursor ?? undefined;
+        const legacy = await queryLegacyAssets(pool, ownerUserId, { ...query, cursor: legacyCursor });
+        legacyIds.push(...legacy.assets.map((item) => item.id));
+        legacyCursor = legacy.nextCursor ?? undefined;
+      } while (currentCursor || legacyCursor);
+      expect(currentIds, `${testCase.sort} current cursor`).toEqual(testCase.expected);
+      expect(legacyIds, `${testCase.sort} legacy cursor`).toEqual(testCase.expected);
+    }
+  });
+
+  it("rejects a cursor minted for another owner", async () => {
+    const marker = `ownercursor${crypto.randomUUID().replaceAll("-", "")}`;
+    await asset({ title: marker, createdAt: "2026-08-05T12:00:00.000Z" });
+    await asset({ title: marker, createdAt: "2026-08-04T12:00:00.000Z" });
+    const foreignOwner = crypto.randomUUID();
+    await pool.query(
+      "INSERT INTO users (id, display_name, status) VALUES ($1,'Cursor owner','active')",
+      [foreignOwner]
+    );
+    const query = assetListQuerySchema.parse({ q: marker, limit: 1 });
+    const first = await application().listAssets({ ownerUserId }, query);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    await expect(application().listAssets(
+      { ownerUserId: foreignOwner },
+      { ...query, cursor: first.nextCursor! }
+    )).rejects.toMatchObject({ statusCode: 400, code: "asset_cursor_invalid" });
+  });
+
   it("replays an identical metadata key, rejects a mismatch, and fences concurrent revision writers", async () => {
     const target = await asset({ title: "Original" });
     const assets = application();
@@ -395,10 +605,17 @@ integration("PostgreSQL asset repository", () => {
     )).resolves.toMatchObject({ rows: [{ image_url: "" }] });
 
     const worldScope = { ownerUserId, worldId: fixture.worldId };
-    await expect(assets.selectWorldCover(worldScope, {
+    const worldKey = toAssetMutationIdempotencyKey(`world-select-${crypto.randomUUID()}`);
+    const worldCommand = {
       assetId: target.assetId,
-      idempotencyKey: toAssetMutationIdempotencyKey(`world-select-${crypto.randomUUID()}`)
-    })).resolves.toEqual({ assetId: target.assetId, selected: true });
+      idempotencyKey: worldKey
+    };
+    await expect(assets.selectWorldCover(worldScope, worldCommand))
+      .resolves.toEqual({ assetId: target.assetId, selected: true });
+    await expect(assets.selectWorldCover(worldScope, worldCommand))
+      .resolves.toEqual({ assetId: target.assetId, selected: true });
+    await expect(assets.selectWorldCover(worldScope, { assetId: null, idempotencyKey: worldKey }))
+      .rejects.toMatchObject({ code: "asset_idempotency_mismatch" });
     await expect(assets.selectWorldCover(worldScope, {
       assetId: null,
       idempotencyKey: toAssetMutationIdempotencyKey(`world-clear-${crypto.randomUUID()}`)
@@ -417,6 +634,7 @@ integration("PostgreSQL asset repository", () => {
       "INSERT INTO users (id, display_name, status) VALUES ($1,'Foreign asset owner','active')",
       [foreignOwner]
     );
+    const foreignAsset = await asset({ ownerUserId: foreignOwner });
     const assets = application();
 
     await expect(assets.readAsset({ ownerUserId: foreignOwner, assetId: target.assetId }))
@@ -435,8 +653,13 @@ integration("PostgreSQL asset repository", () => {
       { ownerUserId: foreignOwner, campaignId: fixture.campaignId, turnId: fixture.turnId },
       { assetId: target.assetId, idempotencyKey: toAssetMutationIdempotencyKey(`foreign-turn-${crypto.randomUUID()}`) }
     )).rejects.toMatchObject({ statusCode: 404, code: "asset_scope_not_found" });
-    await expect(assets.listAssets({ ownerUserId: foreignOwner }, assetListQuerySchema.parse({})))
-      .resolves.toMatchObject({ assets: [], total: 0 });
+    await expect(assets.selectWorldCover(
+      { ownerUserId, worldId: fixture.worldId },
+      { assetId: foreignAsset.assetId, idempotencyKey: toAssetMutationIdempotencyKey(`foreign-asset-${crypto.randomUUID()}`) }
+    )).rejects.toMatchObject({ statusCode: 404, code: "asset_not_found" });
+    const foreignLibrary = await assets.listAssets({ ownerUserId: foreignOwner }, assetListQuerySchema.parse({}));
+    expect(foreignLibrary.assets.map((item) => item.assetId)).toEqual([foreignAsset.assetId]);
+    expect(foreignLibrary.assets.some((item) => item.assetId === target.assetId)).toBe(false);
   });
 
   it("describes original and thumbnail delivery without exposing paths and falls back when a thumbnail is absent", async () => {
@@ -503,6 +726,14 @@ integration("PostgreSQL asset repository", () => {
       64,
       thumbnailHash
     );
+    const attachedLocator = await durableLocator(
+      target,
+      "asset_derivative",
+      `derivatives/attached-${thumbnailHash}.webp`,
+      64,
+      thumbnailHash,
+      false
+    );
     const redemption = createPostgresAssetStorageLocatorRedemptionRepository(pool);
     const scope: DurableFilesystemScope = { ownerUserId, resourceKind: "asset", assetId: target.assetId };
 
@@ -518,30 +749,48 @@ integration("PostgreSQL asset repository", () => {
       { ownerUserId, resourceKind: "asset", assetId: crypto.randomUUID() },
       originalLocator as DatabaseIssuedStorageLocator
     )).resolves.toBeNull();
+    await expect(redemption.redeemStorageLocator(scope, attachedLocator as DatabaseIssuedStorageLocator))
+      .resolves.toBeNull();
   });
 
-  it("uses SKIP LOCKED so two workers claim distinct rows and derive owner only from each claimed job", async () => {
+  it("uses SKIP LOCKED to bypass a transaction-locked first job and derives owner from each claimed row", async () => {
     const foreignOwner = crypto.randomUUID();
     await pool.query("INSERT INTO users (id, display_name, status) VALUES ($1,'Backfill owner','active')", [foreignOwner]);
     const first = await asset({ width: null, height: null });
     const second = await asset({ ownerUserId: foreignOwner, width: null, height: null });
     await pool.query(
-      `INSERT INTO asset_metadata_backfill_jobs (owner_user_id, asset_id)
-       VALUES ($1,$2),($3,$4)`,
+      `INSERT INTO asset_metadata_backfill_jobs (owner_user_id, asset_id, next_attempt_at, created_at)
+       VALUES ($1,$2,'2000-01-01T00:00:00Z','2000-01-01T00:00:00Z'),
+              ($3,$4,'2000-01-01T00:00:00Z','2000-01-02T00:00:00Z')`,
       [ownerUserId, first.assetId, foreignOwner, second.assetId]
     );
     const metadata = createPostgresAssetRepositories(pool).metadata;
-
-    const [claimA, claimB] = await Promise.all([
-      metadata.claimNextMetadataBackfill({ workerId: "worker-a", leaseSeconds: 30 }),
-      metadata.claimNextMetadataBackfill({ workerId: "worker-b", leaseSeconds: 30 })
-    ]);
-    expect(claimA).not.toBeNull();
-    expect(claimB).not.toBeNull();
-    expect(new Set([claimA!.assetId, claimB!.assetId])).toEqual(new Set([first.assetId, second.assetId]));
-    expect(new Set([claimA!.ownerUserId, claimB!.ownerUserId])).toEqual(new Set([ownerUserId, foreignOwner]));
-    expect(claimA!.leaseOwner).toBe("worker-a");
-    expect(claimB!.leaseOwner).toBe("worker-b");
+    const lockClient = await pool.connect();
+    try {
+      await lockClient.query("BEGIN");
+      await lockClient.query(
+        "SELECT id FROM asset_metadata_backfill_jobs WHERE owner_user_id=$1 AND asset_id=$2 FOR UPDATE",
+        [ownerUserId, first.assetId]
+      );
+      const skipped = await metadata.claimNextMetadataBackfill({ workerId: "worker-b", leaseSeconds: 30 });
+      expect(skipped).toMatchObject({
+        assetId: second.assetId,
+        ownerUserId: foreignOwner,
+        leaseOwner: "worker-b"
+      });
+      await lockClient.query("COMMIT");
+    } catch (error) {
+      await lockClient.query("ROLLBACK");
+      throw error;
+    } finally {
+      lockClient.release();
+    }
+    const firstClaim = await metadata.claimNextMetadataBackfill({ workerId: "worker-a", leaseSeconds: 30 });
+    expect(firstClaim).toMatchObject({
+      assetId: first.assetId,
+      ownerUserId,
+      leaseOwner: "worker-a"
+    });
   });
 
   it("heartbeats live work, reports expiry, requeues diagnostics, reclaims work, and rejects the stale lease", async () => {
@@ -613,6 +862,14 @@ integration("PostgreSQL asset repository", () => {
       await verificationClient.query("BEGIN");
       await expect(metadata.backfillMetadata(verificationClient as AssetTransactionContext, claim))
         .resolves.toEqual({ assetId: target.assetId, outcome: "already_current" });
+      await expect(metadata.backfillMetadata(
+        verificationClient as AssetTransactionContext,
+        { ...claim, leaseId: crypto.randomUUID() }
+      )).resolves.toEqual({ assetId: target.assetId, outcome: "lease_lost" });
+      await expect(metadata.backfillMetadata(
+        verificationClient as AssetTransactionContext,
+        { ...claim, leaseOwner: "wrong-completing-worker" }
+      )).resolves.toEqual({ assetId: target.assetId, outcome: "lease_lost" });
       const stale: AssetMetadataBackfillClaim = { ...claim, workVersion: claim.workVersion - 1 };
       await expect(metadata.backfillMetadata(verificationClient as AssetTransactionContext, stale))
         .resolves.toEqual({ assetId: target.assetId, outcome: "stale" });
@@ -623,5 +880,80 @@ integration("PostgreSQL asset repository", () => {
     } finally {
       verificationClient.release();
     }
+  });
+
+  it("keeps completion in the caller transaction and persists only allowlisted safe failure", async () => {
+    const rollbackTarget = await asset();
+    await addThumbnail(rollbackTarget.assetId);
+    await pool.query(
+      "INSERT INTO asset_metadata_backfill_jobs (owner_user_id, asset_id) VALUES ($1,$2)",
+      [ownerUserId, rollbackTarget.assetId]
+    );
+    const metadata = createPostgresAssetRepositories(pool).metadata;
+    const rollbackClaim = (await metadata.claimNextMetadataBackfill({
+      workerId: "worker-rollback",
+      leaseSeconds: 30
+    }))!;
+    const rollbackClient = await pool.connect();
+    try {
+      await rollbackClient.query("BEGIN");
+      await expect(metadata.backfillMetadata(rollbackClient as AssetTransactionContext, rollbackClaim))
+        .resolves.toEqual({ assetId: rollbackTarget.assetId, outcome: "updated" });
+      await rollbackClient.query("ROLLBACK");
+    } finally {
+      rollbackClient.release();
+    }
+    await expect(pool.query(
+      `SELECT status, lease_id, lease_owner, work_version
+         FROM asset_metadata_backfill_jobs
+        WHERE owner_user_id=$1 AND asset_id=$2`,
+      [ownerUserId, rollbackTarget.assetId]
+    )).resolves.toMatchObject({
+      rows: [{
+        status: "running",
+        lease_id: rollbackClaim.leaseId,
+        lease_owner: rollbackClaim.leaseOwner,
+        work_version: rollbackClaim.workVersion
+      }]
+    });
+
+    const failedTarget = await asset({ width: null, height: null });
+    await pool.query(
+      "INSERT INTO asset_metadata_backfill_jobs (owner_user_id, asset_id) VALUES ($1,$2)",
+      [ownerUserId, failedTarget.assetId]
+    );
+    const failureClaim = (await metadata.claimNextMetadataBackfill({
+      workerId: "worker-safe-failure",
+      leaseSeconds: 30
+    }))!;
+    const failureClient = await pool.connect();
+    try {
+      await failureClient.query("BEGIN");
+      await expect(metadata.backfillMetadata(failureClient as AssetTransactionContext, failureClaim))
+        .resolves.toEqual({
+          assetId: failedTarget.assetId,
+          outcome: "safe_failure",
+          diagnosticCode: "asset_metadata_unavailable"
+        });
+      await failureClient.query("COMMIT");
+    } catch (error) {
+      await failureClient.query("ROLLBACK");
+      throw error;
+    } finally {
+      failureClient.release();
+    }
+    await expect(pool.query(
+      `SELECT status, diagnostic_code, lease_id, lease_owner
+         FROM asset_metadata_backfill_jobs
+        WHERE owner_user_id=$1 AND asset_id=$2`,
+      [ownerUserId, failedTarget.assetId]
+    )).resolves.toMatchObject({
+      rows: [{
+        status: "failed",
+        diagnostic_code: "asset_metadata_unavailable",
+        lease_id: null,
+        lease_owner: null
+      }]
+    });
   });
 });

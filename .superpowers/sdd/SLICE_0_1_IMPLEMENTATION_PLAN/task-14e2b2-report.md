@@ -120,3 +120,61 @@ Full repository verification:
   cutover and legacy-service removal.
 - No route, service, worker, runtime composition, cross-role allowlist,
   migration, or `#0446` state changed in this checkpoint.
+
+## Correction round 1
+
+Independent review findings `#0481` through `#0483` were corrected without
+adding a migration or widening the checkpoint into production composition,
+worker scheduling, or physical-content reaping.
+
+- Asset cursor fingerprints now include the owner UUID as well as the complete
+  cursor-free query. A cursor minted for one owner is rejected before it can
+  reposition another owner's page.
+- Successful backfill completion now stores a SHA-256 hash of the complete
+  owner/asset/lease-ID/lease-owner/work-version fence in the asset's private
+  technical metadata, in the same caller-owned transaction as terminal job
+  completion. No raw lease identity is retained. `already_current` is returned
+  only when the replayed claim reproduces that exact completing fence; a wrong
+  lease ID or lease owner returns `lease_lost`, and a different work version
+  remains `stale`.
+- The asset library proof is now table-driven and differential against the
+  legacy query implementation. It covers search, all five scopes, creator,
+  world/version/campaign, origin, any/all tags, entities, locations,
+  provider/model, review/reuse, eligibility, favorite/archive, MIME, aspect,
+  date bounds, negative filters, all four sorts, full cursor traversal, and all
+  four facet projections using independently expected asset IDs and counts.
+- Selection coverage now explicitly proves world same-key replay and mismatch,
+  plus denial when an otherwise-authorized world command selects another
+  owner's asset.
+- Locator coverage now rejects an attached but non-finalized operation in
+  addition to proving finalized original/derivative redemption.
+- The `SKIP LOCKED` regression holds the first ordered job lock in one
+  transaction and proves a second worker claims the next owner's row before
+  the lock is released.
+- Caller-transaction coverage now proves rollback restores the live job fence,
+  and incomplete metadata completion persists only the allowlisted
+  `asset_metadata_unavailable` safe failure.
+
+Correction TDD evidence:
+
+- Clean focused RED after correcting one fixture expectation: 10 tests passed
+  and 2 failed. The failures were exactly cross-owner cursor acceptance and
+  wrong-lease terminal replay returning `already_current`.
+- `pnpm exec vitest run --config vitest.integration.config.ts tests/integration/asset-repository.integration.test.ts`
+  - 1 file passed, 12 tests passed.
+- `pnpm exec vitest run tests/unit/assets-application.test.ts tests/unit/task-14e1r2-contracts.test.ts`
+  - 2 files passed, 23 tests passed.
+- `pnpm check`
+  - repository boundary/data checks and all TypeScript/web checks passed.
+- `pnpm test`
+  - 116 unit files passed, 1,349 unit tests passed.
+  - 33 integration files passed, 361 integration tests passed.
+- `pnpm build`
+  - TypeScript, legacy web, and Next web builds passed.
+
+Completed rows written before this correction have no completing-fence hash and
+therefore fail closed as `lease_lost` rather than accepting an unattributable
+terminal replay. The repository is still additive and uncomposed, so no live
+worker-produced completed row requires migration. No migration, route, service,
+worker, runtime, cutover, reaper, global physical-retention, or `#0446` state
+changed in this correction.
