@@ -5,9 +5,12 @@
 Task 14e2aR is implemented as an additive private capability checkpoint on base
 `f5ab49bc2d86780ae1cac9c4039925b9f359d512`.
 
-Implementation commit:
-`113627751dc773b054341d5c2bed021ed162cd9d`
-(`feat(api): persist filesystem capability handoff`).
+Implementation commits:
+
+- `113627751dc773b054341d5c2bed021ed162cd9d`
+  (`feat(api): persist filesystem capability handoff`).
+- `fc715d4946b70b6adab5d06e444d957157ad73f8`
+  (`fix(api): stabilize partial archive cleanup`).
 
 The secure filesystem adapter no longer treats its staged-input or export maps
 as authority. It requires an injected private persistence port, redeems an
@@ -40,6 +43,10 @@ descriptor, storage exception, or driver detail.
 - Added owner-scoped locator redemption for published asset delivery.
 - Made staged, export, and publication cleanup retryable and idempotent while
   retaining the existing descriptor-pinned quarantine-and-recheck deletion.
+- Made failed staging/export writes settle their active file operation before
+  cleanup pins device/inode, closes the handle, reacquires the same
+  descriptor-relative filesystem node, and captures its final mutable metadata
+  for quarantine deletion.
 - Kept all existing diagnostics in the allowlisted archive/asset code sets.
 
 No migration, schema, route, worker, production composition, runtime
@@ -86,7 +93,7 @@ independent provider, and path-free storage rules to the 14e2aR handoff.
 | Same-inode growth or truncation | Positional bounded reads with a sentinel/final identity check; persisted archive hashing is capped by the configured compressed limit. |
 | Truncated/header-only image | Validate signature, metadata, pixel/page limits, and complete bounded decode before publication or delivery. |
 | Publication overwrite/replay | Create an exclusive temporary file, then adopt it with an exclusive hard link; an existing final candidate is never replaced. |
-| Cleanup substitution | Rename the expected identity into a descriptor-relative quarantine name, recheck the renamed object, then unlink; restore or preserve on mismatch. |
+| Cleanup substitution | After failed writes settle, pin device/inode through the open handle, reacquire that same descriptor-relative node, capture final full identity, rename it into quarantine, recheck the renamed object, then unlink; restore or preserve on mismatch. |
 | Crash or cleanup failure | Persist the candidate descriptor before attach; lifecycle records retain cleanup intent, retry returns the same descriptor, and completion is idempotent. |
 | Stale recovery worker | Lease id, lease owner, work version, expiry, operation identity, and scope fence every terminal action. |
 | Information disclosure | Capability failures are frozen `{ code }` objects; opaque result views contain no path, descriptor, raw exception, or storage detail. |
@@ -167,13 +174,26 @@ RED was observed before implementation:
   not rehydrated.
 - The projection-only assertion was removed during test review because it did
   not prove a new behavior.
+- Final stress verification exposed projectmem issue `#0471`: a failed stream
+  could complete teardown while an in-flight file write was still settling, so
+  the cleanup identity's mutable timestamps became stale and the owned partial
+  remained. A deterministic regression reproduced that metadata settlement
+  between the final handle stat and path cleanup. The first attempted identity
+  refresh remained RED because it neither exposed an explicit active-write
+  settlement promise nor limited the reacquisition fence to device/inode. A
+  custom delayed stream destroy also remained RED by deadlocking the compressed
+  limit path; it was discarded.
 
 GREEN and regression evidence:
 
 - `pnpm exec vitest run tests/unit/task-14e2ar-persisted-filesystem.test.ts tests/unit/portable-archive-filesystem-adapter.test.ts tests/unit/archive-io.test.ts tests/unit/task-14e1r2-contracts.test.ts`
-  - 4 files passed, 111 tests passed.
+  - 4 files passed, 112 tests passed on each of 3 consecutive runs.
+- `pnpm exec vitest run tests/unit/archive-io.test.ts`
+  - 73 tests passed on each of 5 consecutive stress runs (365 executions),
+    including partial cleanup, substitution denial, and compressed export
+    limits.
 - `pnpm test:unit`
-  - 116 files passed, 1,334 tests passed.
+  - 116 files passed, 1,335 tests passed.
 - `pnpm check`
   - repository boundary/data checks and all TypeScript/web checks passed.
 - `pnpm build`
@@ -190,6 +210,8 @@ Behavior coverage includes:
 - foreign-owner denial;
 - same-length stale identity substitution;
 - cleanup-pending retry after adapter recreation;
+- post-teardown metadata settlement cleanup without weakening substituted-path
+  denial;
 - original and derivative reserve/publish/attach/deliver/finalize;
 - publication cleanup substitution and retry;
 - recovery claim fencing and stale-claim rejection;
