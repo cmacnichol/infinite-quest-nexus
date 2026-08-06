@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e2a complete; 14e1R2 contract/durability correction is next before repositories |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e1R2/14e2a complete; 14e2aR persisted capability handoff is next |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -7799,6 +7799,23 @@ identity-bound candidate in the caller transaction, then finalize after commit
 or mark cleanup after rollback/recovery. Pure/compile-time tests must prove the
 full surface and private-barrel exclusion. No schema, adapter, route, worker,
 or legacy cutover occurs in 14e1R2.
+
+**14e1R2 completion (2026-08-05):** `6072a1c` and correction `2bf6767`
+complete the route-parity and durable-operation contract gate. Asset list,
+view, and facet contracts retain the full live safe projection; metadata and
+selection use an explicit branded idempotency-key ingress; and backfill work
+uses fenced lease, heartbeat, requeue, stale, and lease-lost results. Portable
+preview/commit/retrieval contracts now model exact valid and invalid projections
+for all seven import families and eight destination variants without cast
+bypasses. Private contracts provide database-issued locators, immutable
+publication candidates, and reserve/attach/finalize/cleanup lifecycle types;
+fenced recovery claims are required for terminal transitions and support an
+idempotent already-cleaned acknowledgement. Three correction-review findings
+closed invalid-branch parity and stale reaper completion gaps. Verification
+passed 72 focused tests, 1,327 unit tests, check, build, diff, and precheck;
+the correction re-review approved. No storage/database adapter, migration,
+route, worker, runtime, cutover, legacy service, or #0446 change occurred.
+**14e2aR is next.**
 
 **14e2aR — persisted capability handoff and publication (additive only).**
 Extend the secure filesystem capability with identity-safe original/derivative
