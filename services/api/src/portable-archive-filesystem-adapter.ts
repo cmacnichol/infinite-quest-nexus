@@ -36,12 +36,16 @@ import {
   ArchiveError,
   inspectArchive,
   inspectArchiveContainer,
+  releaseAnchoredStagedArchive,
   readVerifiedContainerEntry,
   readVerifiedEntry,
-  stageArchiveUpload,
+  stageAnchoredArchiveUpload,
+  stagedArchiveIdentity,
   writeArchiveArtifact,
+  type ArchiveFileIdentity,
   type ArchiveArtifactEntry,
   type ArchiveLimits,
+  type CompletedArchiveArtifact,
   type InspectedArchive,
   type InspectedArchiveContainer,
   type StagedArchive
@@ -134,15 +138,11 @@ export type PortableArchiveFilesystemOptions = Readonly<{
   assetRoot: string;
   limits: ArchiveLimits;
   platform?: NodeJS.Platform;
+  maxImagePixels?: number;
+  maxImagePages?: number;
 }>;
 
-type FileIdentity = Readonly<{
-  device: bigint;
-  inode: bigint;
-  size: bigint;
-  modifiedNanoseconds: bigint;
-  changedNanoseconds: bigint;
-}>;
+type FileIdentity = Readonly<ArchiveFileIdentity>;
 
 type UploadRecord = Readonly<{
   ownerUserId: string;
@@ -190,6 +190,8 @@ const IMAGE_FORMATS: Readonly<Record<AssetLibraryItemView["mimeType"], string>> 
   "image/webp": "webp",
   "image/gif": "gif"
 };
+const DEFAULT_MAX_IMAGE_PIXELS = 40_000_000;
+const DEFAULT_MAX_IMAGE_PAGES = 100;
 
 function safeFailure(code: SafeDiagnosticCode): SafeFilesystemCapabilityFailure {
   return Object.freeze({ code });
@@ -377,7 +379,19 @@ async function readStableFile(
       throw new CapabilityFault("filesystem_race_detected");
     }
     if (opened.identity.size > BigInt(maximumBytes)) throw new CapabilityFault("asset_too_large");
-    const bytes = await opened.handle.readFile();
+    const chunks: Buffer[] = [];
+    let position = 0;
+    while (true) {
+      const remainingWithSentinel = maximumBytes + 1 - position;
+      if (remainingWithSentinel <= 0) throw new CapabilityFault("asset_too_large");
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, remainingWithSentinel));
+      const read = await opened.handle.read(buffer, 0, buffer.byteLength, position);
+      if (read.bytesRead === 0) break;
+      position += read.bytesRead;
+      if (position > maximumBytes) throw new CapabilityFault("asset_too_large");
+      chunks.push(buffer.subarray(0, read.bytesRead));
+    }
+    const bytes = Buffer.concat(chunks, position);
     const finalIdentity = identityOf(await opened.handle.stat({ bigint: true }));
     if (!sameIdentity(opened.identity, finalIdentity) || bytes.byteLength !== Number(finalIdentity.size)) {
       throw new CapabilityFault("filesystem_race_detected");
@@ -423,7 +437,7 @@ async function cleanupIdentitySafely(
     if (current.isSymbolicLink() || !current.isFile()) {
       throw new CapabilityFault("filesystem_link_denied");
     }
-    if (!sameIdentity(identityOf(current as never), expectedIdentity)) {
+    if (!sameRenamedIdentity(identityOf(current as never), expectedIdentity)) {
       throw new CapabilityFault("filesystem_race_detected");
     }
 
@@ -504,6 +518,9 @@ function mapArchiveFailure(error: unknown, fallback: PortableArchiveDiagnosticCo
   if (error.code === "archive-entry-missing") return safeFailure("archive_format_invalid");
   if (error.code === "archive-checksum-mismatch") return safeFailure("archive_truncated");
   if (error.code === "archive-entry-unsafe") {
+    if (/changed|identity|storage directory|intended storage path|outside the configured storage root/i.test(error.message)) {
+      return safeFailure("archive_containment_denied");
+    }
     return safeFailure(/link|symbolic|junction|non-regular/i.test(error.message)
       ? "archive_link_denied"
       : "archive_path_invalid");
@@ -562,6 +579,12 @@ export function createPortableArchiveFilesystemAdapter(
   options: PortableArchiveFilesystemOptions
 ): PortableArchiveFilesystemAdapter {
   const platform = options.platform ?? process.platform;
+  const maxImagePixels = options.maxImagePixels ?? DEFAULT_MAX_IMAGE_PIXELS;
+  const maxImagePages = options.maxImagePages ?? DEFAULT_MAX_IMAGE_PAGES;
+  if (!safeInteger(maxImagePixels) || maxImagePixels === 0
+    || !safeInteger(maxImagePages) || maxImagePages === 0) {
+    throw new Error("Portable archive image decode limits must be positive safe integers.");
+  }
   const uploads = new WeakMap<object, UploadRecord>();
   const stagedRecords = new Map<PortableStagedInput, StagedRecord>();
   const artifactRecords = new Map<PortableArchiveExportRetrieval, ArtifactRecord>();
@@ -596,24 +619,22 @@ export function createPortableArchiveFilesystemAdapter(
         if (!issued || upload.byteLength !== issued.byteLength) {
           throw new CapabilityFault("archive_unavailable");
         }
-        const staged = await stageArchiveUpload(issued.source, options.archiveRoot, options.limits);
+        const staged = await stageAnchoredArchiveUpload(issued.source, options.archiveRoot, options.limits);
+        const identity = stagedArchiveIdentity(staged);
         if (staged.compressedBytes !== issued.byteLength) {
           try {
-            const captured = await openAnchoredRegularFile(options.archiveRoot, staged.relativePath);
-            await closeHandle(captured.handle);
-            await cleanupIdentitySafely(options.archiveRoot, staged.relativePath, captured.identity);
+            await cleanupIdentitySafely(options.archiveRoot, staged.relativePath, identity);
+            await releaseAnchoredStagedArchive(staged);
           } catch {
             // The safe diagnostic remains archive_truncated; a later reaper can retry cleanup.
           }
           throw new CapabilityFault("archive_truncated");
         }
-        const captured = await openAnchoredRegularFile(options.archiveRoot, staged.relativePath);
-        await closeHandle(captured.handle);
         const stagedInput = toPortableStagedInput(randomUUID());
         stagedRecords.set(stagedInput, {
           ownerUserId: issued.ownerUserId,
           staged,
-          identity: captured.identity
+          identity
         });
         return stagedInput;
       } catch (error) {
@@ -699,6 +720,7 @@ export function createPortableArchiveFilesystemAdapter(
         assertLinux(platform);
         const record = ownedStagedRecord(stagedRecords, owner, stagedInput);
         await cleanupIdentitySafely(options.archiveRoot, record.staged.relativePath, record.identity);
+        await releaseAnchoredStagedArchive(record.staged);
         stagedRecords.delete(stagedInput);
       } catch {
         throw safeFailure("archive_cleanup_required");
@@ -706,27 +728,27 @@ export function createPortableArchiveFilesystemAdapter(
     },
 
     async publishArchiveArtifact(owner, entries, buildManifest) {
-      let relativePath: string | undefined;
+      let artifact: CompletedArchiveArtifact | undefined;
       try {
         assertLinux(platform);
         const ownerUserId = requireOwner(owner);
-        const artifact = await writeArchiveArtifact(
+        artifact = await writeArchiveArtifact(
           options.archiveRoot,
           entries,
           buildManifest,
           options.limits
         );
-        relativePath = artifact.relativePath;
         const opened = await openAnchoredRegularFile(options.archiveRoot, artifact.relativePath);
-        let identity: FileIdentity;
         let measurement: Awaited<ReturnType<typeof measureHandleContent>>;
         try {
-          await opened.handle.chmod(0o440);
-          await opened.handle.sync();
-          identity = identityOf(await opened.handle.stat({ bigint: true }));
-          measurement = await measureHandleContent(opened.handle, identity.size);
+          if (!sameIdentity(opened.identity, artifact.identity)) {
+            throw new CapabilityFault("filesystem_race_detected");
+          }
+          measurement = await measureHandleContent(opened.handle, opened.identity.size);
           const finalIdentity = identityOf(await opened.handle.stat({ bigint: true }));
-          if (!sameIdentity(identity, finalIdentity) || measurement.byteLength !== artifact.byteLength) {
+          if (!sameIdentity(opened.identity, finalIdentity)
+            || measurement.byteLength !== artifact.byteLength
+            || measurement.sha256 !== artifact.sha256) {
             throw new CapabilityFault("filesystem_race_detected");
           }
         } finally {
@@ -739,9 +761,9 @@ export function createPortableArchiveFilesystemAdapter(
         artifactRecords.set(retrieval, {
           ownerUserId,
           relativePath: artifact.relativePath,
-          identity,
+          identity: artifact.identity,
           byteLength: artifact.byteLength,
-          sha256: measurement.sha256
+          sha256: artifact.sha256
         });
         return {
           retrieval,
@@ -749,11 +771,9 @@ export function createPortableArchiveFilesystemAdapter(
           byteLength: artifact.byteLength
         };
       } catch (error) {
-        if (relativePath) {
+        if (artifact) {
           try {
-            const captured = await openAnchoredRegularFile(options.archiveRoot, relativePath);
-            await closeHandle(captured.handle);
-            await cleanupIdentitySafely(options.archiveRoot, relativePath, captured.identity);
+            await cleanupIdentitySafely(options.archiveRoot, artifact.relativePath, artifact.identity);
           } catch {
             // A later owner-scoped reaper can retry without weakening the safe failure.
           }
@@ -825,7 +845,11 @@ export function createPortableArchiveFilesystemAdapter(
 
         let metadata;
         try {
-          metadata = await sharp(read.bytes, { animated: true }).metadata();
+          metadata = await sharp(read.bytes, {
+            animated: true,
+            failOn: "error",
+            limitInputPixels: maxImagePixels
+          }).metadata();
         } catch {
           throw new CapabilityFault("asset_content_invalid");
         }
@@ -833,6 +857,24 @@ export function createPortableArchiveFilesystemAdapter(
           || !metadata.height
           || !metadata.format
           || metadata.format !== IMAGE_FORMATS[input.mimeType]) {
+          throw new CapabilityFault("asset_content_invalid");
+        }
+        const pages = metadata.pages ?? 1;
+        const pageHeight = metadata.pageHeight ?? metadata.height;
+        const decodedPixels = BigInt(metadata.width) * BigInt(pageHeight) * BigInt(pages);
+        if (!safeInteger(pages)
+          || pages === 0
+          || pages > maxImagePages
+          || decodedPixels > BigInt(maxImagePixels)) {
+          throw new CapabilityFault("asset_content_invalid");
+        }
+        try {
+          await sharp(read.bytes, {
+            animated: true,
+            failOn: "error",
+            limitInputPixels: maxImagePixels
+          }).raw().toBuffer();
+        } catch {
           throw new CapabilityFault("asset_content_invalid");
         }
         const rotated = [5, 6, 7, 8].includes(metadata.orientation ?? 0);
@@ -844,7 +886,7 @@ export function createPortableArchiveFilesystemAdapter(
           width: rotated ? metadata.height : metadata.width,
           height: rotated ? metadata.width : metadata.height,
           format: metadata.format,
-          pages: metadata.pages ?? 1,
+          pages,
           orientation: metadata.orientation ?? null
         };
       } catch (error) {

@@ -11,6 +11,7 @@ import {
   rm,
   stat,
   symlink,
+  unlink,
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -167,6 +168,7 @@ describe("portable archive filesystem adapter", () => {
       adapter.inspectPortableArchive(foreignOwner, stagedInput, "system"),
       "archive_unavailable"
     );
+    await adapter.cleanupStagedInput(owner, stagedInput);
   });
 
   it("enforces claimed and configured upload bounds and removes partial uploads deterministically", async () => {
@@ -241,6 +243,50 @@ describe("portable archive filesystem adapter", () => {
       adapter.extractVerifiedEntry(owner, stagedInput, "records/data.json", 12),
       "archive_entry_limit_exceeded"
     );
+    await adapter.cleanupStagedInput(owner, stagedInput);
+  });
+
+  it("rejects a staging-root alias installed before inspection", async () => {
+    const archiveRoot = await temporaryRoot("iq-portable-root-before-");
+    const sourcePath = await portableZip(archiveRoot);
+    const sourceBytes = await readFile(sourcePath);
+    const adapter = createPortableArchiveFilesystemAdapter({ archiveRoot, assetRoot: archiveRoot, limits });
+    const upload = adapter.issueOwnerBoundUpload(owner, createReadStream(sourcePath), sourceBytes.byteLength);
+    const stagedInput = await adapter.stagingPort.stagePortableArchive(upload);
+    const movedRoot = `${archiveRoot}.moved`;
+    roots.push(movedRoot);
+    await rename(archiveRoot, movedRoot);
+    await symlink(movedRoot, archiveRoot, "junction");
+
+    await expectSafeFailure(
+      adapter.inspectPortableArchive(owner, stagedInput, "system"),
+      "archive_containment_denied"
+    );
+    await unlink(archiveRoot);
+    await rename(movedRoot, archiveRoot);
+    await adapter.cleanupStagedInput(owner, stagedInput);
+  });
+
+  it("rejects a staging-root alias installed between inspection and extraction", async () => {
+    const archiveRoot = await temporaryRoot("iq-portable-root-between-");
+    const sourcePath = await portableZip(archiveRoot);
+    const sourceBytes = await readFile(sourcePath);
+    const adapter = createPortableArchiveFilesystemAdapter({ archiveRoot, assetRoot: archiveRoot, limits });
+    const upload = adapter.issueOwnerBoundUpload(owner, createReadStream(sourcePath), sourceBytes.byteLength);
+    const stagedInput = await adapter.stagingPort.stagePortableArchive(upload);
+    await adapter.inspectPortableArchive(owner, stagedInput, "system");
+    const movedRoot = `${archiveRoot}.moved`;
+    roots.push(movedRoot);
+    await rename(archiveRoot, movedRoot);
+    await symlink(movedRoot, archiveRoot, "junction");
+
+    await expectSafeFailure(
+      adapter.extractVerifiedEntry(owner, stagedInput, "records/data.json", 100),
+      "archive_containment_denied"
+    );
+    await unlink(archiveRoot);
+    await rename(movedRoot, archiveRoot);
+    await adapter.cleanupStagedInput(owner, stagedInput);
   });
 
   it("maps traversal, links, and aggregate expansion failures to allowlisted diagnostics", async () => {
@@ -252,6 +298,7 @@ describe("portable archive filesystem adapter", () => {
     const upload = adapter.issueOwnerBoundUpload(owner, createReadStream(zipPath), zipBytes.byteLength);
     const staged = await adapter.stagingPort.stagePortableArchive(upload);
     await expectSafeFailure(adapter.inspectPortableArchive(owner, staged, "container"), "archive_link_denied");
+    await adapter.cleanupStagedInput(owner, staged);
 
     for (const [index, unsafePath] of ["../bad!", "/bad!!!", "C:/bad!"].entries()) {
       const unsafeZip = await unsafePathZip(archiveRoot, unsafePath, index);
@@ -266,6 +313,7 @@ describe("portable archive filesystem adapter", () => {
         adapter.inspectPortableArchive(owner, unsafeStaged, "container"),
         "archive_path_invalid"
       );
+      await adapter.cleanupStagedInput(owner, unsafeStaged);
     }
 
     const largeZip = join(archiveRoot, "aggregate.zip");
@@ -285,6 +333,7 @@ describe("portable archive filesystem adapter", () => {
       bounded.inspectPortableArchive(owner, largeStaged, "container"),
       "archive_size_limit_exceeded"
     );
+    await bounded.cleanupStagedInput(owner, largeStaged);
   });
 
   it("publishes a read-only verified artifact behind an opaque owner-bound retrieval and cleans it safely", async () => {
@@ -330,6 +379,9 @@ describe("portable archive filesystem adapter", () => {
 
     expect(await readFile(stagedPath, "utf8")).toBe("replacement must survive");
     expect(await readFile(`${stagedPath}.original`)).toEqual(sourceBytes);
+    await unlink(stagedPath);
+    await rename(`${stagedPath}.original`, stagedPath);
+    await adapter.cleanupStagedInput(owner, staged);
   });
 
   it("rejects a staging-parent junction replacement without touching the outside target", async () => {
@@ -348,6 +400,9 @@ describe("portable archive filesystem adapter", () => {
 
     expect(await readFile(join(outside, "sentinel"), "utf8")).toBe("preserve");
     expect(await readdir(join(archiveRoot, "staging.original"))).toHaveLength(1);
+    await unlink(join(archiveRoot, "staging"));
+    await rename(join(archiveRoot, "staging.original"), join(archiveRoot, "staging"));
+    await adapter.cleanupStagedInput(owner, staged);
   });
 
   it("verifies bounded asset MIME, signature, decoder metadata, and legacy content hash through anchored segments", async () => {
@@ -400,6 +455,70 @@ describe("portable archive filesystem adapter", () => {
       expectedContentHash: legacyAssetDigest(png),
       maximumBytes: png.byteLength
     }), "filesystem_path_invalid");
+  });
+
+  it("rejects an image whose header parses but whose pixels cannot be fully decoded", async () => {
+    const archiveRoot = await temporaryRoot("iq-portable-truncated-archive-");
+    const assetRoot = await temporaryRoot("iq-portable-truncated-assets-");
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64"
+    ).subarray(0, 41);
+    await mkdir(join(assetRoot, "aa"));
+    await writeFile(join(assetRoot, "aa", "truncated.png"), png);
+    const adapter = createPortableArchiveFilesystemAdapter({ archiveRoot, assetRoot, limits });
+
+    await expectSafeFailure(adapter.readVerifiedAsset({
+      relativePath: "aa/truncated.png",
+      mimeType: "image/png",
+      expectedByteLength: png.byteLength,
+      expectedContentHash: legacyAssetDigest(png),
+      maximumBytes: png.byteLength
+    }), "asset_content_invalid");
+  });
+
+  it("enforces decoded image pixel and page limits before accepting content", async () => {
+    const archiveRoot = await temporaryRoot("iq-portable-image-limits-archive-");
+    const assetRoot = await temporaryRoot("iq-portable-image-limits-assets-");
+    const twoPixelPng = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADklEQVQImWP4z8DwH4QBEfcD/RSF9bkAAAAASUVORK5CYII=",
+      "base64"
+    );
+    const twoPageGif = Buffer.from(
+      "R0lGODlhAQABAIAAAExpcf8AACH/C05FVFNDQVBFMi4wAwEAAAAh+QQFCgAAACwAAAAAAQABAAACAkwBACH5BAUKAAAALAAAAAABAAEAgExpcQAA/wICTAEAOw==",
+      "base64"
+    );
+    await mkdir(join(assetRoot, "aa"));
+    await writeFile(join(assetRoot, "aa", "two-pixels.png"), twoPixelPng);
+    await writeFile(join(assetRoot, "aa", "two-pages.gif"), twoPageGif);
+
+    const pixelBounded = createPortableArchiveFilesystemAdapter({
+      archiveRoot,
+      assetRoot,
+      limits,
+      maxImagePixels: 1
+    });
+    await expectSafeFailure(pixelBounded.readVerifiedAsset({
+      relativePath: "aa/two-pixels.png",
+      mimeType: "image/png",
+      expectedByteLength: twoPixelPng.byteLength,
+      expectedContentHash: legacyAssetDigest(twoPixelPng),
+      maximumBytes: twoPixelPng.byteLength
+    }), "asset_content_invalid");
+
+    const pageBounded = createPortableArchiveFilesystemAdapter({
+      archiveRoot,
+      assetRoot,
+      limits,
+      maxImagePages: 1
+    });
+    await expectSafeFailure(pageBounded.readVerifiedAsset({
+      relativePath: "aa/two-pages.gif",
+      mimeType: "image/gif",
+      expectedByteLength: twoPageGif.byteLength,
+      expectedContentHash: legacyAssetDigest(twoPageGif),
+      maximumBytes: twoPageGif.byteLength
+    }), "asset_content_invalid");
   });
 
   it("rejects symlink, directory, and post-publication artifact identity changes without leaking storage details", async () => {
