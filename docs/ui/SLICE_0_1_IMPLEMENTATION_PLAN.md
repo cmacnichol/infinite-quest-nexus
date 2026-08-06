@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e1R2/14e2a/14e2aR/14e2b1 complete; 14e2b2 asset repositories are next |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e1R2/14e2a/14e2aR/14e2b1/14e2b2 complete; 14e2b3 portable repositories are next |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -7891,6 +7891,23 @@ from the claimed row. Test metadata/selection same-key replay and mismatch,
 concurrent revision writers, cross-owner denial, descriptor/thumbnail behavior,
 nullable clears, two-worker `SKIP LOCKED` claims, expiry/reclaim/stale lease,
 and enum-only diagnostic persistence.
+
+**14e2b2 completion (2026-08-06):** `f61d6fa` and correction `0f01afa`
+add the owner-scoped PostgreSQL `asset-repository.ts` behind the existing
+application ports. It retains live list/filter/sort/cursor/facet parity,
+optimistic metadata revisions, idempotent set/explicit-null clear selection,
+safe original/derivative descriptors, finalized private locator redemption,
+and fenced backfill claim/heartbeat/requeue/completion. Cursor fingerprints
+include owner scope; terminal completion accepts only the exact stored
+owner/asset/lease/work-version fence and fails closed for un-fenced historical
+terminal rows. Real-PostgreSQL tests prove filter/sort/facet parity, owner and
+scope denial, selection replay/mismatch, locator status denial, forced
+`SKIP LOCKED`, wrong-fence rejection, rollback, and enum-only safe diagnostics.
+Verification passed 23 focused asset-contract tests, 12 focused real-PostgreSQL
+tests, 1,349 unit tests, 361 integration tests, `pnpm check`, build, diff, and
+precheck; independent review and correction re-review approved. No migration,
+route, worker, runtime, reaper, physical-retention, or #0446 cutover occurred.
+**14e2b3 is next.**
 
 **14e2b3 — portable staged/preview/import/export repositories.** Implement
 `import-repository.ts` for hashed opaque staged handles, destination-bound
