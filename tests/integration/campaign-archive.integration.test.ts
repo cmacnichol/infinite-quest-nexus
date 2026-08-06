@@ -1211,6 +1211,37 @@ integration("campaign archive export", () => {
     await expect(stat(staged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  secureGeneratedStagingIt("[secure generated staging] legacy drain never deletes a replacement without persisted identity", async () => {
+    const staged = await stagedExport();
+    const preview = await previewCampaignArchive(pool, runtimeConfig(), staged, "legacy-replacement.zip", { kind: "embedded" });
+    const tokenHash = createHash("sha256").update(preview.previewToken, "utf8").digest("hex");
+    const replacement = Buffer.from("replacement-owned-by-another-writer", "utf8");
+    await pool.query(
+      `UPDATE archive_previews
+          SET legacy_drain_policy='retain_until_secure_cleanup',expires_at=now()-interval '1 second'
+        WHERE token_hash=$1`,
+      [tokenHash]
+    );
+    await unlink(staged.absolutePath);
+    await writeFile(staged.absolutePath, replacement, { flag: "wx" });
+
+    await expect(cleanupExpiredArchivePreviews(pool, runtimeConfig(), new Date())).resolves.toEqual({
+      expiredCount: 1,
+      cleanupFailureCount: 0
+    });
+    await expect(readFile(staged.absolutePath)).resolves.toEqual(replacement);
+    await expect(previewRow(preview.previewToken)).resolves.toMatchObject({
+      status: "expired",
+      result: { stagingCleanupPending: true }
+    });
+
+    await expect(cleanupExpiredArchivePreviews(pool, runtimeConfig(), new Date())).resolves.toEqual({
+      expiredCount: 0,
+      cleanupFailureCount: 0
+    });
+    await expect(readFile(staged.absolutePath)).resolves.toEqual(replacement);
+  });
+
   secureGeneratedStagingIt("[secure generated staging] rejects expired, consumed, and application-stale preview tokens", async () => {
     const expiredPreview = await previewCampaignArchive(pool, runtimeConfig(-1), await stagedExport(), "expired.zip", { kind: "embedded" });
     await expect(importCampaignArchive(pool, runtimeConfig(-1), { root }, {

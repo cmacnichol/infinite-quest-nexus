@@ -3,9 +3,6 @@
 -- Durable asset/archive persistence is additive. Existing assets and legacy
 -- archive previews remain authoritative for the currently composed services.
 
-ALTER TABLE imports
-  ADD CONSTRAINT imports_id_owner_unique UNIQUE (id, owner_user_id);
-
 CREATE TABLE asset_metadata_backfill_jobs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_user_id uuid NOT NULL REFERENCES users(id),
@@ -149,6 +146,9 @@ CREATE TABLE durable_filesystem_operations (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (id, owner_user_id),
+  UNIQUE (id, owner_user_id, purpose),
+  FOREIGN KEY (asset_id, owner_user_id)
+    REFERENCES assets(id, owner_user_id) ON DELETE RESTRICT,
   CONSTRAINT durable_filesystem_scope_check CHECK (
     (resource_kind = 'asset'
       AND purpose IN ('asset_original', 'asset_derivative')
@@ -187,6 +187,31 @@ CREATE INDEX durable_filesystem_operations_recovery_idx
   ON durable_filesystem_operations(lifecycle, lease_expires_at, expires_at, created_at, id)
   WHERE lifecycle IN ('reserved', 'attached', 'cleanup_pending');
 
+CREATE FUNCTION enforce_durable_filesystem_operation_authority() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.owner_user_id IS DISTINCT FROM NEW.owner_user_id
+    OR OLD.operation_token_hash IS DISTINCT FROM NEW.operation_token_hash
+    OR OLD.purpose IS DISTINCT FROM NEW.purpose
+    OR OLD.resource_kind IS DISTINCT FROM NEW.resource_kind
+    OR OLD.asset_id IS DISTINCT FROM NEW.asset_id
+    OR OLD.operation_scope_hash IS DISTINCT FROM NEW.operation_scope_hash
+    OR (OLD.candidate_token_hash IS NOT NULL
+      AND OLD.candidate_token_hash IS DISTINCT FROM NEW.candidate_token_hash)
+    OR (OLD.locator_token_hash IS NOT NULL
+      AND OLD.locator_token_hash IS DISTINCT FROM NEW.locator_token_hash)
+  THEN
+    RAISE EXCEPTION 'durable filesystem operation authority is write-once'
+      USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER durable_filesystem_operations_authority_trigger
+BEFORE UPDATE ON durable_filesystem_operations
+FOR EACH ROW EXECUTE FUNCTION enforce_durable_filesystem_operation_authority();
+
 -- Filesystem identities are append-only evidence. Repositories update the
 -- operation lifecycle but never rewrite a descriptor after attachment.
 CREATE TABLE durable_filesystem_descriptors (
@@ -213,7 +238,7 @@ CREATE TABLE durable_filesystem_descriptors (
 CREATE UNIQUE INDEX durable_filesystem_delivery_descriptor_idx
   ON durable_filesystem_descriptors(operation_id) WHERE descriptor_role = 'delivery';
 
-CREATE FUNCTION reject_durable_filesystem_descriptor_update() RETURNS trigger
+CREATE FUNCTION reject_durable_filesystem_descriptor_mutation() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
   RAISE EXCEPTION 'durable filesystem descriptors are immutable';
@@ -221,14 +246,15 @@ END;
 $$;
 
 CREATE TRIGGER durable_filesystem_descriptors_immutable_trigger
-BEFORE UPDATE ON durable_filesystem_descriptors
-FOR EACH ROW EXECUTE FUNCTION reject_durable_filesystem_descriptor_update();
+BEFORE UPDATE OR DELETE ON durable_filesystem_descriptors
+FOR EACH ROW EXECUTE FUNCTION reject_durable_filesystem_descriptor_mutation();
 
 CREATE TABLE portable_staged_inputs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_user_id uuid NOT NULL REFERENCES users(id),
   handle_token_hash text NOT NULL UNIQUE CHECK (handle_token_hash ~ '^[0-9a-f]{64}$'),
   filesystem_operation_id uuid NOT NULL,
+  filesystem_operation_purpose text GENERATED ALWAYS AS ('portable_staging'::text) STORED,
   status text NOT NULL DEFAULT 'staged'
     CHECK (status IN ('staged', 'consumed', 'expired', 'failed', 'cleanup_pending', 'cleaned')),
   content_hash text NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
@@ -238,8 +264,8 @@ CREATE TABLE portable_staged_inputs (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (id, owner_user_id),
-  FOREIGN KEY (filesystem_operation_id, owner_user_id)
-    REFERENCES durable_filesystem_operations(id, owner_user_id),
+  FOREIGN KEY (filesystem_operation_id, owner_user_id, filesystem_operation_purpose)
+    REFERENCES durable_filesystem_operations(id, owner_user_id, purpose),
   CONSTRAINT portable_staged_consumption_check CHECK (
     (status = 'staged' AND consumed_at IS NULL)
     OR status IN ('expired', 'failed', 'cleanup_pending', 'cleaned')
@@ -311,8 +337,7 @@ CREATE TABLE portable_import_operations (
     REFERENCES worlds(id, owner_user_id),
   FOREIGN KEY (destination_world_version_id, owner_user_id)
     REFERENCES world_versions(id, owner_user_id),
-  FOREIGN KEY (import_id, owner_user_id)
-    REFERENCES imports(id, owner_user_id),
+  FOREIGN KEY (import_id) REFERENCES imports(id),
   CONSTRAINT portable_import_kind_destination_check CHECK (
     (import_kind = 'campaign_zip' AND destination_kind IN ('embedded_create_world', 'existing_world_version'))
     OR (import_kind IN ('legacy_story', 'story_text') AND destination_kind = 'existing_world_version')
@@ -360,11 +385,47 @@ COMMENT ON COLUMN portable_import_operations.source_installation_id IS
 COMMENT ON COLUMN portable_import_operations.source_record_id IS
   'Opaque source-record provenance only. It is never a local foreign key or authorization key.';
 
+CREATE FUNCTION validate_portable_import_operation_scope() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.destination_kind = 'existing_world_version' THEN
+    PERFORM 1
+      FROM world_versions
+     WHERE id = NEW.destination_world_version_id
+       AND world_id = NEW.destination_world_id
+       AND owner_user_id = NEW.owner_user_id
+       FOR NO KEY UPDATE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'portable import destination world/version scope is invalid'
+        USING ERRCODE = '23503';
+    END IF;
+  END IF;
+
+  IF NEW.import_id IS NOT NULL THEN
+    PERFORM 1
+      FROM imports
+     WHERE id = NEW.import_id
+       AND owner_user_id = NEW.owner_user_id
+       FOR NO KEY UPDATE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'portable import result owner scope is invalid'
+        USING ERRCODE = '23503';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER portable_import_operations_scope_trigger
+BEFORE INSERT OR UPDATE ON portable_import_operations
+FOR EACH ROW EXECUTE FUNCTION validate_portable_import_operation_scope();
+
 CREATE TABLE portable_export_artifacts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_user_id uuid NOT NULL REFERENCES users(id),
   retrieval_token_hash text NOT NULL UNIQUE CHECK (retrieval_token_hash ~ '^[0-9a-f]{64}$'),
   filesystem_operation_id uuid NOT NULL,
+  filesystem_operation_purpose text GENERATED ALWAYS AS ('portable_export'::text) STORED,
   export_kind text NOT NULL CHECK (export_kind IN ('campaign_zip', 'world_json')),
   campaign_id uuid,
   world_id uuid NOT NULL,
@@ -379,8 +440,8 @@ CREATE TABLE portable_export_artifacts (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (id, owner_user_id),
-  FOREIGN KEY (filesystem_operation_id, owner_user_id)
-    REFERENCES durable_filesystem_operations(id, owner_user_id),
+  FOREIGN KEY (filesystem_operation_id, owner_user_id, filesystem_operation_purpose)
+    REFERENCES durable_filesystem_operations(id, owner_user_id, purpose),
   FOREIGN KEY (campaign_id, owner_user_id) REFERENCES campaigns(id, owner_user_id),
   FOREIGN KEY (world_id, owner_user_id) REFERENCES worlds(id, owner_user_id),
   FOREIGN KEY (world_version_id, owner_user_id) REFERENCES world_versions(id, owner_user_id),
@@ -394,18 +455,111 @@ CREATE INDEX portable_export_artifacts_expiry_idx
   ON portable_export_artifacts(status, expires_at, created_at, id)
   WHERE status IN ('ready', 'expired', 'cleanup_pending');
 
--- Legacy rows remain redeemable by the current live service until their
--- existing expiry. Secure consumers must either bind them to an identity-safe
--- staged input explicitly or supersede/expire them; path-only rows are never
--- promoted into the new durable tables automatically.
+CREATE FUNCTION validate_portable_export_artifact_scope() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.export_kind = 'campaign_zip' THEN
+    PERFORM 1
+      FROM campaigns campaigns
+      JOIN world_versions versions
+        ON versions.id = campaigns.world_version_id
+       AND versions.owner_user_id = campaigns.owner_user_id
+     WHERE campaigns.id = NEW.campaign_id
+       AND campaigns.owner_user_id = NEW.owner_user_id
+       AND campaigns.world_version_id = NEW.world_version_id
+       AND versions.id = NEW.world_version_id
+       AND versions.world_id = NEW.world_id
+       AND versions.owner_user_id = NEW.owner_user_id
+       FOR NO KEY UPDATE OF campaigns, versions;
+  ELSE
+    PERFORM 1
+      FROM world_versions
+     WHERE id = NEW.world_version_id
+       AND world_id = NEW.world_id
+       AND owner_user_id = NEW.owner_user_id
+       FOR NO KEY UPDATE;
+  END IF;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'portable export campaign/world/version scope is invalid'
+      USING ERRCODE = '23503';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER portable_export_artifacts_scope_trigger
+BEFORE INSERT OR UPDATE ON portable_export_artifacts
+FOR EACH ROW EXECUTE FUNCTION validate_portable_export_artifact_scope();
+
+CREATE FUNCTION protect_portable_scope_parent_update() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_TABLE_NAME = 'imports' THEN
+    IF OLD.owner_user_id IS DISTINCT FROM NEW.owner_user_id
+      AND EXISTS (
+        SELECT 1 FROM portable_import_operations WHERE import_id = OLD.id
+      )
+    THEN
+      RAISE EXCEPTION 'referenced import owner scope is immutable'
+        USING ERRCODE = '55000';
+    END IF;
+  ELSIF TG_TABLE_NAME = 'world_versions' THEN
+    IF (OLD.owner_user_id IS DISTINCT FROM NEW.owner_user_id
+      OR OLD.world_id IS DISTINCT FROM NEW.world_id)
+      AND (
+        EXISTS (
+          SELECT 1 FROM portable_import_operations
+           WHERE destination_world_version_id = OLD.id
+        )
+        OR EXISTS (
+          SELECT 1 FROM portable_export_artifacts WHERE world_version_id = OLD.id
+        )
+      )
+    THEN
+      RAISE EXCEPTION 'referenced world version portable scope is immutable'
+        USING ERRCODE = '55000';
+    END IF;
+  ELSIF TG_TABLE_NAME = 'campaigns' THEN
+    IF (OLD.owner_user_id IS DISTINCT FROM NEW.owner_user_id
+      OR OLD.world_version_id IS DISTINCT FROM NEW.world_version_id)
+      AND EXISTS (
+        SELECT 1 FROM portable_export_artifacts WHERE campaign_id = OLD.id
+      )
+    THEN
+      RAISE EXCEPTION 'referenced campaign portable scope is immutable'
+        USING ERRCODE = '55000';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER imports_portable_scope_parent_trigger
+BEFORE UPDATE ON imports
+FOR EACH ROW EXECUTE FUNCTION protect_portable_scope_parent_update();
+
+CREATE TRIGGER world_versions_portable_scope_parent_trigger
+BEFORE UPDATE ON world_versions
+FOR EACH ROW EXECUTE FUNCTION protect_portable_scope_parent_update();
+
+CREATE TRIGGER campaigns_portable_scope_parent_trigger
+BEFORE UPDATE ON campaigns
+FOR EACH ROW EXECUTE FUNCTION protect_portable_scope_parent_update();
+
+-- Pre-migration path-only rows have no persisted filesystem identity and must
+-- never unlink a path which may now name a replacement. New compatibility rows
+-- keep the live path cleanup contract until the secure staging cutover.
 ALTER TABLE archive_previews
   ADD COLUMN storage_security_state text NOT NULL DEFAULT 'legacy_path_v1',
   ADD COLUMN secure_staged_input_id uuid,
-  ADD COLUMN legacy_drain_policy text NOT NULL DEFAULT 'serve_until_expiry_then_identity_cleanup',
+  ADD COLUMN legacy_drain_policy text NOT NULL DEFAULT 'live_path_cleanup_compatibility',
   ADD CONSTRAINT archive_previews_storage_security_state_check
     CHECK (storage_security_state IN ('legacy_path_v1', 'identity_bound_v2')) NOT VALID,
   ADD CONSTRAINT archive_previews_legacy_drain_policy_check
-    CHECK (legacy_drain_policy = 'serve_until_expiry_then_identity_cleanup') NOT VALID,
+    CHECK (legacy_drain_policy IN (
+      'retain_until_secure_cleanup', 'live_path_cleanup_compatibility'
+    )) NOT VALID,
   ADD CONSTRAINT archive_previews_secure_staged_owner_fk
     FOREIGN KEY (secure_staged_input_id, owner_user_id)
     REFERENCES portable_staged_inputs(id, owner_user_id) NOT VALID,
@@ -414,8 +568,13 @@ ALTER TABLE archive_previews
     OR (storage_security_state = 'identity_bound_v2' AND secure_staged_input_id IS NOT NULL)
   ) NOT VALID;
 
+UPDATE archive_previews
+   SET legacy_drain_policy = 'retain_until_secure_cleanup';
+
 COMMENT ON COLUMN archive_previews.storage_security_state IS
-  'legacy_path_v1 rows are compatibility-only and drain at expires_at; identity_bound_v2 requires an explicit secure staged-input migration.';
+  'legacy_path_v1 rows are path-only compatibility records; identity_bound_v2 requires an explicit secure staged-input migration.';
+COMMENT ON COLUMN archive_previews.legacy_drain_policy IS
+  'Pre-migration path-only rows are retained because unlinking without persisted identity could delete a replacement.';
 
 -- Seed durable jobs without making existing asset rows reaper candidates.
 -- Historical failure text is reduced to one generic allowlisted code while
@@ -461,14 +620,28 @@ ALTER TABLE archive_previews
   DROP COLUMN IF EXISTS secure_staged_input_id,
   DROP COLUMN IF EXISTS storage_security_state;
 
+DROP TRIGGER IF EXISTS imports_portable_scope_parent_trigger ON imports;
+DROP TRIGGER IF EXISTS world_versions_portable_scope_parent_trigger ON world_versions;
+DROP TRIGGER IF EXISTS campaigns_portable_scope_parent_trigger ON campaigns;
+DROP FUNCTION IF EXISTS protect_portable_scope_parent_update();
+
+DROP TRIGGER IF EXISTS portable_export_artifacts_scope_trigger
+  ON portable_export_artifacts;
+DROP FUNCTION IF EXISTS validate_portable_export_artifact_scope();
+DROP TRIGGER IF EXISTS portable_import_operations_scope_trigger
+  ON portable_import_operations;
+DROP FUNCTION IF EXISTS validate_portable_import_operation_scope();
+
 DROP TABLE IF EXISTS portable_export_artifacts;
 DROP TABLE IF EXISTS portable_import_operations;
 DROP TABLE IF EXISTS portable_staged_inputs;
 DROP TRIGGER IF EXISTS durable_filesystem_descriptors_immutable_trigger
   ON durable_filesystem_descriptors;
-DROP FUNCTION IF EXISTS reject_durable_filesystem_descriptor_update();
+DROP FUNCTION IF EXISTS reject_durable_filesystem_descriptor_mutation();
 DROP TABLE IF EXISTS durable_filesystem_descriptors;
+DROP TRIGGER IF EXISTS durable_filesystem_operations_authority_trigger
+  ON durable_filesystem_operations;
+DROP FUNCTION IF EXISTS enforce_durable_filesystem_operation_authority();
 DROP TABLE IF EXISTS durable_filesystem_operations;
 DROP TABLE IF EXISTS asset_mutation_idempotency;
 DROP TABLE IF EXISTS asset_metadata_backfill_jobs;
-ALTER TABLE imports DROP CONSTRAINT IF EXISTS imports_id_owner_unique;

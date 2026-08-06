@@ -196,7 +196,14 @@ integration("standard database migration runner", () => {
     expect(definitions).toMatch(/durable_filesystem_operations:.*reserved.*attached.*finalized.*cleanup_pending.*cleaned/i);
     expect(definitions).toMatch(/portable_import_operations:.*campaign_zip.*legacy_story.*infinite_worlds.*cyoa.*world_json.*world_text.*story_text/i);
     expect(definitions).toMatch(/asset_metadata_unavailable.*filesystem_race_detected/i);
-    expect(definitions).toMatch(/portable_import_operations: FOREIGN KEY \(import_id, owner_user_id\).*imports\(id, owner_user_id\)/i);
+
+    const blockingImportConstraint = await pool.query<{ constraint_name: string }>(
+      `SELECT constraint_name
+         FROM information_schema.table_constraints
+        WHERE table_schema='public' AND table_name='imports'
+          AND constraint_name='imports_id_owner_unique'`
+    );
+    expect(blockingImportConstraint.rows).toEqual([]);
 
     const indexes = await pool.query<{ indexname: string }>(
       `SELECT indexname
@@ -218,6 +225,299 @@ integration("standard database migration runner", () => {
       "portable_import_operations_expiry_idx",
       "portable_staged_inputs_expiry_idx"
     ]);
+  });
+
+  it("enforces durable authority, purpose, owner, retention, and portable scope relationships in PostgreSQL", async () => {
+    const client = await pool.connect();
+    const hash = (label: string) => createHash("sha256").update(`${label}-${crypto.randomUUID()}`, "utf8").digest("hex");
+    let savepointOrdinal = 0;
+    const statementWasRejected = async (sql: string, parameters: unknown[] = []): Promise<boolean> => {
+      const savepoint = `task_14e2b1_rejection_${savepointOrdinal += 1}`;
+      await client.query(`SAVEPOINT ${savepoint}`);
+      let rejected = false;
+      try {
+        await client.query(sql, parameters);
+      } catch {
+        rejected = true;
+      } finally {
+        await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      }
+      return rejected;
+    };
+    try {
+      await client.query("BEGIN");
+      const ownerOne = (await client.query<{ id: string }>(
+        "SELECT id FROM users WHERE system_key='initial-owner'"
+      )).rows[0]!.id;
+      const ownerTwo = (await client.query<{ id: string }>(
+        "INSERT INTO users (display_name) VALUES ('Migration isolation owner') RETURNING id"
+      )).rows[0]!.id;
+      const assetOne = (await client.query<{ id: string }>(
+        `INSERT INTO assets (
+           owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,pixel_width,pixel_height
+         ) VALUES ($1,$2,'filesystem',$3,'image/png',1,1,1) RETURNING id`,
+        [ownerOne, hash("asset-one"), `migration/${crypto.randomUUID()}.png`]
+      )).rows[0]!.id;
+      const assetTwo = (await client.query<{ id: string }>(
+        `INSERT INTO assets (
+           owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,pixel_width,pixel_height
+         ) VALUES ($1,$2,'filesystem',$3,'image/png',1,1,1) RETURNING id`,
+        [ownerOne, hash("asset-two"), `migration/${crypto.randomUUID()}.png`]
+      )).rows[0]!.id;
+
+      const insertOperation = async (
+        ownerUserId: string,
+        purpose: "asset_original" | "asset_derivative" | "portable_staging" | "portable_export",
+        assetId: string | null
+      ): Promise<string> => (await client.query<{ id: string }>(
+        `INSERT INTO durable_filesystem_operations (
+           owner_user_id,operation_token_hash,purpose,resource_kind,asset_id,operation_scope_hash,
+           lease_id,lease_owner,lease_expires_at,expires_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,gen_random_uuid(),'migration-test',now()+interval '5 minutes',now()+interval '1 hour')
+         RETURNING id`,
+        [
+          ownerUserId,
+          hash(`operation-${purpose}`),
+          purpose,
+          assetId === null ? "portable" : "asset",
+          assetId,
+          assetId === null ? hash(`scope-${purpose}`) : null
+        ]
+      )).rows[0]!.id;
+
+      const crossOwnerAssetRejected = await statementWasRejected(
+        `INSERT INTO durable_filesystem_operations (
+           owner_user_id,operation_token_hash,purpose,resource_kind,asset_id,
+           lease_id,lease_owner,lease_expires_at,expires_at
+         ) VALUES ($1,$2,'asset_original','asset',$3,gen_random_uuid(),'migration-test',now()+interval '5 minutes',now()+interval '1 hour')`,
+        [ownerTwo, hash("cross-owner-operation"), assetOne]
+      );
+      const nonexistentAssetRejected = await statementWasRejected(
+        `INSERT INTO durable_filesystem_operations (
+           owner_user_id,operation_token_hash,purpose,resource_kind,asset_id,
+           lease_id,lease_owner,lease_expires_at,expires_at
+         ) VALUES ($1,$2,'asset_original','asset',$3,gen_random_uuid(),'migration-test',now()+interval '5 minutes',now()+interval '1 hour')`,
+        [ownerOne, hash("missing-asset-operation"), crypto.randomUUID()]
+      );
+
+      const assetOperationId = await insertOperation(ownerOne, "asset_original", assetOne);
+      const operationTokenMutationRejected = await statementWasRejected(
+        "UPDATE durable_filesystem_operations SET operation_token_hash=$2 WHERE id=$1",
+        [assetOperationId, hash("mutated-operation-token")]
+      );
+      const purposeMutationRejected = await statementWasRejected(
+        "UPDATE durable_filesystem_operations SET purpose='asset_derivative' WHERE id=$1",
+        [assetOperationId]
+      );
+      const assetMutationRejected = await statementWasRejected(
+        "UPDATE durable_filesystem_operations SET asset_id=$2 WHERE id=$1",
+        [assetOperationId, assetTwo]
+      );
+      const assetDeletionRejected = await statementWasRejected(
+        "DELETE FROM assets WHERE id=$1",
+        [assetOne]
+      );
+
+      const candidateHash = hash("candidate");
+      const locatorHash = hash("locator");
+      await client.query(
+        `UPDATE durable_filesystem_operations
+            SET lifecycle='attached',candidate_token_hash=$2,locator_token_hash=$3,attached_at=now()
+          WHERE id=$1`,
+        [assetOperationId, candidateHash, locatorHash]
+      );
+      await client.query(
+        `UPDATE durable_filesystem_operations
+            SET lease_id=gen_random_uuid(),lease_owner='migration-recovery',work_version=work_version+1,
+                lease_expires_at=now()+interval '10 minutes',updated_at=now()
+          WHERE id=$1`,
+        [assetOperationId]
+      );
+      const legalLifecycle = await client.query<{ lifecycle: string; lease_owner: string; work_version: number }>(
+        "SELECT lifecycle,lease_owner,work_version FROM durable_filesystem_operations WHERE id=$1",
+        [assetOperationId]
+      );
+      expect(legalLifecycle.rows).toEqual([{ lifecycle: "attached", lease_owner: "migration-recovery", work_version: 2 }]);
+      const candidateMutationRejected = await statementWasRejected(
+        "UPDATE durable_filesystem_operations SET candidate_token_hash=$2 WHERE id=$1",
+        [assetOperationId, hash("replacement-candidate")]
+      );
+      const locatorMutationRejected = await statementWasRejected(
+        "UPDATE durable_filesystem_operations SET locator_token_hash=$2 WHERE id=$1",
+        [assetOperationId, hash("replacement-locator")]
+      );
+
+      await client.query(
+        `INSERT INTO durable_filesystem_descriptors (
+           operation_id,owner_user_id,descriptor_role,ordinal,relative_path,device_id,file_id,
+           change_token,content_hash,byte_length
+         ) VALUES ($1,$2,'delivery',0,'assets/original.png','device-1','file-1','change-1',$3,1)`,
+        [assetOperationId, ownerOne, hash("descriptor-content")]
+      );
+      const descriptorUpdateRejected = await statementWasRejected(
+        "UPDATE durable_filesystem_descriptors SET change_token='change-2' WHERE operation_id=$1",
+        [assetOperationId]
+      );
+      const descriptorDeleteRejected = await statementWasRejected(
+        "DELETE FROM durable_filesystem_descriptors WHERE operation_id=$1",
+        [assetOperationId]
+      );
+
+      const stagingOperationId = await insertOperation(ownerOne, "portable_staging", null);
+      const exportOperationId = await insertOperation(ownerOne, "portable_export", null);
+      const portableOwnerMutationRejected = await statementWasRejected(
+        "UPDATE durable_filesystem_operations SET owner_user_id=$2 WHERE id=$1",
+        [stagingOperationId, ownerTwo]
+      );
+      const portableScopeMutationRejected = await statementWasRejected(
+        "UPDATE durable_filesystem_operations SET operation_scope_hash=$2 WHERE id=$1",
+        [stagingOperationId, hash("replacement-scope")]
+      );
+      const stagedWrongPurposeRejected = await statementWasRejected(
+        `INSERT INTO portable_staged_inputs (
+           owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+         ) VALUES ($1,$2,$3,$4,1,now()+interval '1 hour')`,
+        [ownerOne, hash("wrong-staged-handle"), exportOperationId, hash("wrong-staged-content")]
+      );
+      const stagedInputId = (await client.query<{ id: string }>(
+        `INSERT INTO portable_staged_inputs (
+           owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+         ) VALUES ($1,$2,$3,$4,1,now()+interval '1 hour') RETURNING id`,
+        [ownerOne, hash("staged-handle"), stagingOperationId, hash("staged-content")]
+      )).rows[0]!.id;
+
+      const worldOne = (await client.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Portable world one') RETURNING id",
+        [ownerOne]
+      )).rows[0]!.id;
+      const worldTwo = (await client.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Portable world two') RETURNING id",
+        [ownerOne]
+      )).rows[0]!.id;
+      const worldVersionOne = (await client.query<{ id: string }>(
+        `INSERT INTO world_versions (world_id,owner_user_id,version_number,content)
+         VALUES ($1,$2,1,'{}'::jsonb) RETURNING id`,
+        [worldOne, ownerOne]
+      )).rows[0]!.id;
+      const worldVersionTwo = (await client.query<{ id: string }>(
+        `INSERT INTO world_versions (world_id,owner_user_id,version_number,content)
+         VALUES ($1,$2,1,'{}'::jsonb) RETURNING id`,
+        [worldTwo, ownerOne]
+      )).rows[0]!.id;
+      const campaignOne = (await client.query<{ id: string }>(
+        "INSERT INTO campaigns (owner_user_id,world_version_id,title) VALUES ($1,$2,'Portable campaign') RETURNING id",
+        [ownerOne, worldVersionOne]
+      )).rows[0]!.id;
+
+      const mismatchedPreviewRejected = await statementWasRejected(
+        `INSERT INTO portable_import_operations (
+           owner_user_id,staged_input_id,import_kind,preview_token_hash,content_fingerprint,
+           destination_fingerprint,destination_kind,destination_world_id,destination_world_version_id,
+           preview_projection,expires_at
+         ) VALUES ($1,$2,'legacy_story',$3,$4,$5,'existing_world_version',$6,$7,'{}'::jsonb,now()+interval '1 hour')`,
+        [
+          ownerOne, stagedInputId, hash("mismatch-preview-token"), hash("mismatch-preview-content"),
+          hash("mismatch-preview-destination"), worldTwo, worldVersionOne
+        ]
+      );
+
+      const foreignImportId = (await client.query<{ id: string }>(
+        `INSERT INTO imports (owner_user_id,source_type,source_name,source_hash,status)
+         VALUES ($1,'legacy_story','foreign.json',$2,'completed') RETURNING id`,
+        [ownerTwo, hash("foreign-import")]
+      )).rows[0]!.id;
+      const crossOwnerImportRejected = await statementWasRejected(
+        `INSERT INTO portable_import_operations (
+           owner_user_id,staged_input_id,import_kind,preview_token_hash,content_fingerprint,
+           destination_fingerprint,destination_kind,destination_world_id,destination_world_version_id,
+           preview_projection,import_id,expires_at
+         ) VALUES ($1,$2,'legacy_story',$3,$4,$5,'existing_world_version',$6,$7,'{}'::jsonb,$8,now()+interval '1 hour')`,
+        [
+          ownerOne, stagedInputId, hash("foreign-import-token"), hash("foreign-import-content"),
+          hash("foreign-import-destination"), worldOne, worldVersionOne, foreignImportId
+        ]
+      );
+      const localImportId = (await client.query<{ id: string }>(
+        `INSERT INTO imports (owner_user_id,source_type,source_name,source_hash,status)
+         VALUES ($1,'legacy_story','local.json',$2,'completed') RETURNING id`,
+        [ownerOne, hash("local-import")]
+      )).rows[0]!.id;
+      await client.query(
+        `INSERT INTO portable_import_operations (
+           owner_user_id,staged_input_id,import_kind,preview_token_hash,content_fingerprint,
+           destination_fingerprint,destination_kind,destination_world_id,destination_world_version_id,
+           preview_projection,import_id,expires_at
+         ) VALUES ($1,$2,'legacy_story',$3,$4,$5,'existing_world_version',$6,$7,'{}'::jsonb,$8,now()+interval '1 hour')`,
+        [
+          ownerOne, stagedInputId, hash("local-import-token"), hash("local-import-content"),
+          hash("local-import-destination"), worldOne, worldVersionOne, localImportId
+        ]
+      );
+
+      const exportWrongPurposeRejected = await statementWasRejected(
+        `INSERT INTO portable_export_artifacts (
+           owner_user_id,retrieval_token_hash,filesystem_operation_id,export_kind,campaign_id,
+           world_id,world_version_id,content_type,content_hash,byte_length,expires_at
+         ) VALUES ($1,$2,$3,'campaign_zip',$4,$5,$6,'application/zip',$7,1,now()+interval '1 hour')`,
+        [ownerOne, hash("wrong-export-token"), stagingOperationId, campaignOne, worldOne, worldVersionOne, hash("wrong-export-content")]
+      );
+      const mismatchedCampaignExportRejected = await statementWasRejected(
+        `INSERT INTO portable_export_artifacts (
+           owner_user_id,retrieval_token_hash,filesystem_operation_id,export_kind,campaign_id,
+           world_id,world_version_id,content_type,content_hash,byte_length,expires_at
+         ) VALUES ($1,$2,$3,'campaign_zip',$4,$5,$6,'application/zip',$7,1,now()+interval '1 hour')`,
+        [ownerOne, hash("mismatch-export-token"), exportOperationId, campaignOne, worldTwo, worldVersionTwo, hash("mismatch-export-content")]
+      );
+      await client.query(
+        `INSERT INTO portable_export_artifacts (
+           owner_user_id,retrieval_token_hash,filesystem_operation_id,export_kind,campaign_id,
+           world_id,world_version_id,content_type,content_hash,byte_length,expires_at
+         ) VALUES ($1,$2,$3,'campaign_zip',$4,$5,$6,'application/zip',$7,1,now()+interval '1 hour')`,
+        [ownerOne, hash("valid-export-token"), exportOperationId, campaignOne, worldOne, worldVersionOne, hash("valid-export-content")]
+      );
+
+      expect({
+        crossOwnerAssetRejected,
+        nonexistentAssetRejected,
+        operationTokenMutationRejected,
+        purposeMutationRejected,
+        assetMutationRejected,
+        assetDeletionRejected,
+        candidateMutationRejected,
+        locatorMutationRejected,
+        descriptorUpdateRejected,
+        descriptorDeleteRejected,
+        portableOwnerMutationRejected,
+        portableScopeMutationRejected,
+        stagedWrongPurposeRejected,
+        mismatchedPreviewRejected,
+        crossOwnerImportRejected,
+        exportWrongPurposeRejected,
+        mismatchedCampaignExportRejected
+      }).toEqual({
+        crossOwnerAssetRejected: true,
+        nonexistentAssetRejected: true,
+        operationTokenMutationRejected: true,
+        purposeMutationRejected: true,
+        assetMutationRejected: true,
+        assetDeletionRejected: true,
+        candidateMutationRejected: true,
+        locatorMutationRejected: true,
+        descriptorUpdateRejected: true,
+        descriptorDeleteRejected: true,
+        portableOwnerMutationRejected: true,
+        portableScopeMutationRejected: true,
+        stagedWrongPurposeRejected: true,
+        mismatchedPreviewRejected: true,
+        crossOwnerImportRejected: true,
+        exportWrongPurposeRejected: true,
+        mismatchedCampaignExportRejected: true
+      });
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
   });
 
   it("adds scoped entity identity columns and indexes to Chronicle records", async () => {
@@ -476,7 +776,7 @@ integration("standard database migration runner", () => {
         storage_security_state: "legacy_path_v1",
         secure_staged_input_id: null,
         expires_at: legacyPreview.rows[0]!.expires_at,
-        legacy_drain_policy: "serve_until_expiry_then_identity_cleanup",
+        legacy_drain_policy: "retain_until_secure_cleanup",
         staged_archive_path: "staging/legacy.zip"
       }]);
 

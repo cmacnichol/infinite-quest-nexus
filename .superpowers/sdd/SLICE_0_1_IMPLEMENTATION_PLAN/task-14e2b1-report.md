@@ -132,3 +132,66 @@ of import/source-hash and specialized asset-table semantics.
   cutover and legacy removal.
 - Projectmem issue `#0446` remains open because this checkpoint intentionally
   does not wire the live worker or replace its current production code path.
+
+## Correction round 1
+
+Reviewer findings `#0475` through `#0480` were corrected without expanding
+this checkpoint into repository implementation or production cutover work.
+
+- Durable filesystem operations now reference assets through
+  `(asset_id, owner_user_id)` with `ON DELETE RESTRICT`. PostgreSQL regressions
+  reject both cross-owner and nonexistent asset authority and prove that an
+  asset with a live operation cannot be deleted accidentally.
+- Operation authority is write-once for owner, operation token, purpose,
+  resource kind, asset, portable scope, and attached candidate/locator
+  identities. Lifecycle, lease, work-version, diagnostic, and timestamp fields
+  remain mutable. Descriptor evidence is append-only: both update and delete
+  are rejected.
+- Generated constant-purpose columns bind staged inputs to
+  `portable_staging` operations and export artifacts to `portable_export`
+  operations through owner-scoped composite foreign keys.
+- Portable import destinations validate the exact owner/world/world-version
+  tuple. Export artifacts validate either an exact owner/world/world-version
+  tuple or the exact campaign-pinned version and its world. Validation locks
+  referenced parents, and parent-update guards preserve those relationships
+  under concurrent writes.
+- The blocking `UNIQUE (id, owner_user_id)` alteration on the existing
+  `imports` table was removed. Portable operations retain the normal foreign
+  key to `imports(id)` and enforce owner equality with a locked trigger check;
+  a parent-update guard prevents later owner drift. No concurrent index build
+  is attempted inside the migration transaction.
+- Pre-`0053` path-only archive previews are labeled
+  `retain_until_secure_cleanup`. Live cleanup expires them and preserves the
+  pending marker but refuses to unlink their path because it has no persisted
+  filesystem identity. A PostgreSQL/filesystem regression replaces the
+  original staged file before drain and proves repeated cleanup never deletes
+  the replacement.
+
+The compatibility default for archive previews created by the still-composed
+legacy service remains `live_path_cleanup_compatibility`. That narrow bridge is
+not described as identity-safe and remains deferred to the secure staging
+cutover. Issue `#0446` therefore remains open.
+
+Correction TDD evidence:
+
+- Initial focused RED run: 2 files, 38 passed and 4 failed. The failures
+  identified the blocking import constraint, thirteen missing PostgreSQL
+  authority/relationship rejections, the unsafe legacy drain policy, and the
+  absent replacement-file retention contract.
+- `pnpm exec vitest run --config vitest.integration.config.ts tests/integration/migrations.integration.test.ts tests/integration/campaign-archive.integration.test.ts`
+  - 2 files passed, 42 tests passed.
+- `pnpm test`
+  - 116 unit files passed, 1,349 unit tests passed.
+  - 32 integration files passed, 349 integration tests passed.
+- `pnpm check`
+  - repository boundary/data checks and all TypeScript/web checks passed.
+- `pnpm build`
+  - TypeScript, legacy web, and next web builds passed.
+
+Correction files:
+
+- `database/migrations/0053_durable_asset_portable_operations.sql`
+- `services/api/src/campaign-archive-service.ts`
+- `tests/integration/migrations.integration.test.ts`
+- `tests/integration/campaign-archive.integration.test.ts`
+- `.superpowers/sdd/SLICE_0_1_IMPLEMENTATION_PLAN/task-14e2b1-report.md`

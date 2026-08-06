@@ -384,8 +384,13 @@ async function cleanupPendingArchivePreviewPaths(
   logger?: ArchiveCleanupLogger,
   previewId?: string
 ): Promise<number> {
-  const pending = await pool.query<{ id: string; staged_archive_path: string; status: string }>(
-    `SELECT id,staged_archive_path,status
+  const pending = await pool.query<{
+    id: string;
+    staged_archive_path: string;
+    status: string;
+    legacy_drain_policy: string;
+  }>(
+    `SELECT id,staged_archive_path,status,legacy_drain_policy
        FROM archive_previews
       WHERE owner_user_id=$1 AND archive_type='campaign'
         AND status IN ('superseded','consumed','expired','failed')
@@ -396,6 +401,7 @@ async function cleanupPendingArchivePreviewPaths(
   );
   let cleanupFailureCount = 0;
   for (const row of pending.rows) {
+    if (row.legacy_drain_policy === "retain_until_secure_cleanup") continue;
     const activeReference = await pool.query(
       `SELECT 1
          FROM archive_previews
