@@ -5,6 +5,7 @@ declare const databaseIssuedStorageLocatorBrand: unique symbol;
 declare const assetPublicationCandidateBrand: unique symbol;
 declare const reservedFilesystemOperationBrand: unique symbol;
 declare const attachedFilesystemOperationBrand: unique symbol;
+declare const durableFilesystemRecoveryClaimBrand: unique symbol;
 
 export type DurableFilesystemOperationId = string & Readonly<{
   [durableFilesystemOperationIdBrand]: true;
@@ -58,9 +59,25 @@ export type AttachedFilesystemOperation = DurableFilesystemScope & Readonly<{
   [attachedFilesystemOperationBrand]: true;
 }>;
 
+/** Opaque journal-issued authority fenced to one operation work version and lease. */
+export type DurableFilesystemRecoveryClaim = Readonly<{
+  operationId: DurableFilesystemOperationId;
+  leaseId: string;
+  leaseOwner: string;
+  workVersion: number;
+  leaseExpiresAt: string;
+  [durableFilesystemRecoveryClaimBrand]: true;
+}>;
+
 export type DurableFilesystemReserveRequest = Readonly<{
   purpose: DurableFilesystemPurpose;
+  leaseOwner: string;
   expiresAt: string;
+}>;
+
+export type DurableFilesystemReserveResult = Readonly<{
+  operation: ReservedFilesystemOperation;
+  claim: DurableFilesystemRecoveryClaim;
 }>;
 
 export type DurableFilesystemAttachResult =
@@ -68,11 +85,12 @@ export type DurableFilesystemAttachResult =
     outcome: "attached";
     operation: AttachedFilesystemOperation;
     locator: DatabaseIssuedStorageLocator;
+    claim: DurableFilesystemRecoveryClaim;
   }>
   | Readonly<{ outcome: "stale" | "candidate_mismatch" }>;
 
 export type DurableFilesystemFinalizeResult = Readonly<{
-  outcome: "finalized" | "already_finalized" | "stale";
+  outcome: "finalized" | "already_finalized" | "stale" | "lease_lost";
 }>;
 
 export type DurableFilesystemCleanupRequest = Readonly<{
@@ -81,7 +99,11 @@ export type DurableFilesystemCleanupRequest = Readonly<{
 }>;
 
 export type DurableFilesystemCleanupResult = Readonly<{
-  outcome: "cleanup_pending" | "already_cleaned" | "stale";
+  outcome: "cleanup_pending" | "already_cleaned" | "stale" | "lease_lost";
+}>;
+
+export type DurableFilesystemCleanupCompletionResult = Readonly<{
+  outcome: "cleaned" | "already_cleaned" | "stale" | "lease_lost";
 }>;
 
 export type DurableFilesystemRecoveryRequest = Readonly<{
@@ -94,10 +116,12 @@ export type DurableFilesystemRecoveryRecord =
   | Readonly<{
     action: "finalize";
     operation: AttachedFilesystemOperation;
+    claim: DurableFilesystemRecoveryClaim;
   }>
   | Readonly<{
     action: "cleanup";
     operation: ReservedFilesystemOperation | AttachedFilesystemOperation;
+    claim: DurableFilesystemRecoveryClaim;
   }>;
 
 /** Private secure-storage seam for redeeming database authority into immutable file identity. */
@@ -114,17 +138,25 @@ export interface PrivateStorageLocatorRedemptionPort {
  * only after commit. Rollback and restart recovery mark cleanup instead.
  */
 export interface DurableFilesystemJournalPort {
-  reserve(scope: DurableFilesystemScope, request: DurableFilesystemReserveRequest): Promise<ReservedFilesystemOperation>;
+  reserve(scope: DurableFilesystemScope, request: DurableFilesystemReserveRequest): Promise<DurableFilesystemReserveResult>;
   attach(
     database: DurableFilesystemTransactionContext,
     reservation: ReservedFilesystemOperation,
     candidate: AssetPublicationCandidate,
   ): Promise<DurableFilesystemAttachResult>;
-  finalizeAfterCommit(operation: AttachedFilesystemOperation): Promise<DurableFilesystemFinalizeResult>;
+  finalizeAfterCommit(
+    operation: AttachedFilesystemOperation,
+    claim: DurableFilesystemRecoveryClaim,
+  ): Promise<DurableFilesystemFinalizeResult>;
   markCleanup(
     operation: ReservedFilesystemOperation | AttachedFilesystemOperation,
+    claim: DurableFilesystemRecoveryClaim,
     request: DurableFilesystemCleanupRequest,
   ): Promise<DurableFilesystemCleanupResult>;
+  completeCleanup(
+    operation: ReservedFilesystemOperation | AttachedFilesystemOperation,
+    claim: DurableFilesystemRecoveryClaim,
+  ): Promise<DurableFilesystemCleanupCompletionResult>;
   recover(request: DurableFilesystemRecoveryRequest): Promise<readonly DurableFilesystemRecoveryRecord[]>;
 }
 
@@ -145,12 +177,26 @@ function requireOperation(operation: ReservedFilesystemOperation | AttachedFiles
   if (!nonBlank(operation.operationId)) throw new Error("filesystem_operation_invalid");
 }
 
+function requireClaim(claim: DurableFilesystemRecoveryClaim): void {
+  if (!nonBlank(claim.operationId)
+    || !nonBlank(claim.leaseId)
+    || !nonBlank(claim.leaseOwner)
+    || !Number.isInteger(claim.workVersion)
+    || claim.workVersion <= 0
+    || !nonBlank(claim.leaseExpiresAt)
+    || !Number.isFinite(Date.parse(claim.leaseExpiresAt))) {
+    throw new Error("filesystem_recovery_claim_invalid");
+  }
+}
+
 /** Pure validating use case; adapters own transactions, persistence, and filesystem work. */
 export function createDurableFilesystemLifecycle(journal: DurableFilesystemJournalPort): DurableFilesystemLifecycle {
   return {
     reserve: async (scope, request) => {
       requireScope(scope);
-      if (!nonBlank(request.expiresAt) || !Number.isFinite(Date.parse(request.expiresAt))) {
+      if (!nonBlank(request.leaseOwner)
+        || !nonBlank(request.expiresAt)
+        || !Number.isFinite(Date.parse(request.expiresAt))) {
         throw new Error("filesystem_operation_invalid");
       }
       return journal.reserve(scope, request);
@@ -160,13 +206,20 @@ export function createDurableFilesystemLifecycle(journal: DurableFilesystemJourn
       if (!nonBlank(candidate)) throw new Error("filesystem_candidate_invalid");
       return journal.attach(database, reservation, candidate);
     },
-    finalizeAfterCommit: async (operation) => {
+    finalizeAfterCommit: async (operation, claim) => {
       requireOperation(operation);
-      return journal.finalizeAfterCommit(operation);
+      requireClaim(claim);
+      return journal.finalizeAfterCommit(operation, claim);
     },
-    markCleanup: async (operation, request) => {
+    markCleanup: async (operation, claim, request) => {
       requireOperation(operation);
-      return journal.markCleanup(operation, request);
+      requireClaim(claim);
+      return journal.markCleanup(operation, claim, request);
+    },
+    completeCleanup: async (operation, claim) => {
+      requireOperation(operation);
+      requireClaim(claim);
+      return journal.completeCleanup(operation, claim);
     },
     recover: async (request) => {
       if (!nonBlank(request.leaseOwner)

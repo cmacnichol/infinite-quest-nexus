@@ -4,6 +4,7 @@ import type {
   DatabaseIssuedStorageLocator,
   DurableFilesystemJournalPort,
   DurableFilesystemOperationId,
+  DurableFilesystemRecoveryClaim,
   DurableFilesystemRecoveryRecord,
   DurableFilesystemScope,
   PrivateStorageLocatorRedemptionPort,
@@ -23,11 +24,15 @@ export type FakeDurableFilesystemLifecycle = FakePublicationCandidateIssuer & Pr
   events(): readonly string[];
 }>;
 
-type OperationState = "reserved" | "attached" | "finalized" | "cleanup_pending";
+type OperationState = "reserved" | "attached" | "finalized" | "cleanup_pending" | "cleaned";
 
 type OperationRecord = Readonly<{
   reservation: ReservedFilesystemOperation;
-}> & { state: OperationState };
+}> & {
+  state: OperationState;
+  workVersion: number;
+  activeClaim: DurableFilesystemRecoveryClaim;
+};
 
 /** Pure test fake for the private durable publication protocol. */
 export function createFakeDurableFilesystemLifecycle(): FakeDurableFilesystemLifecycle {
@@ -44,6 +49,51 @@ export function createFakeDurableFilesystemLifecycle(): FakeDurableFilesystemLif
   let operationSequence = 0;
   let candidateSequence = 0;
   let locatorSequence = 0;
+  let leaseSequence = 0;
+
+  function issueClaim(
+    operationId: DurableFilesystemOperationId,
+    leaseOwner: string,
+    workVersion: number,
+    leaseExpiresAt: string,
+  ): DurableFilesystemRecoveryClaim {
+    return {
+      operationId,
+      leaseId: `filesystem-lease-${++leaseSequence}`,
+      leaseOwner,
+      workVersion,
+      leaseExpiresAt
+    } as DurableFilesystemRecoveryClaim;
+  }
+
+  function operationMatches(
+    record: OperationRecord,
+    operation: ReservedFilesystemOperation | AttachedFilesystemOperation,
+  ): boolean {
+    const reserved = record.reservation;
+    return reserved.operationId === operation.operationId
+      && reserved.ownerUserId === operation.ownerUserId
+      && reserved.resourceKind === operation.resourceKind
+      && reserved.purpose === operation.purpose
+      && (reserved.resourceKind !== "asset" || operation.resourceKind !== "asset" || reserved.assetId === operation.assetId)
+      && (reserved.resourceKind !== "portable" || operation.resourceKind !== "portable" || reserved.operationScopeId === operation.operationScopeId);
+  }
+
+  function claimOutcome(
+    record: OperationRecord | undefined,
+    operation: ReservedFilesystemOperation | AttachedFilesystemOperation,
+    claim: DurableFilesystemRecoveryClaim,
+  ): "valid" | "stale" | "lease_lost" {
+    if (!record || !operationMatches(record, operation)) return "stale";
+    const active = record.activeClaim;
+    if (active.operationId !== claim.operationId
+      || active.leaseId !== claim.leaseId
+      || active.leaseOwner !== claim.leaseOwner
+      || active.workVersion !== claim.workVersion
+      || active.leaseExpiresAt !== claim.leaseExpiresAt
+      || Date.parse(claim.leaseExpiresAt) <= Date.now()) return "lease_lost";
+    return "valid";
+  }
 
   const journal: DurableFilesystemJournalPort = {
     async reserve(scope, request) {
@@ -53,9 +103,10 @@ export function createFakeDurableFilesystemLifecycle(): FakeDurableFilesystemLif
         purpose: request.purpose,
         expiresAt: request.expiresAt
       } as ReservedFilesystemOperation;
-      operationById.set(reservation.operationId, { reservation, state: "reserved" });
+      const claim = issueClaim(reservation.operationId, request.leaseOwner, 1, request.expiresAt);
+      operationById.set(reservation.operationId, { reservation, state: "reserved", workVersion: 1, activeClaim: claim });
       observedEvents.push("reserved");
-      return reservation;
+      return { operation: reservation, claim };
     },
     async attach(_database, reservation, candidate) {
       const operation = operationById.get(reservation.operationId);
@@ -79,10 +130,12 @@ export function createFakeDurableFilesystemLifecycle(): FakeDurableFilesystemLif
         purpose: reservation.purpose
       } as AttachedFilesystemOperation;
       observedEvents.push("attached");
-      return { outcome: "attached", operation: attached, locator };
+      return { outcome: "attached", operation: attached, locator, claim: operation.activeClaim };
     },
-    async finalizeAfterCommit(operation) {
+    async finalizeAfterCommit(operation, claim) {
       const record = operationById.get(operation.operationId);
+      const claimStatus = claimOutcome(record, operation, claim);
+      if (claimStatus !== "valid") return { outcome: claimStatus };
       if (!record) return { outcome: "stale" };
       if (record.state === "finalized") return { outcome: "already_finalized" };
       if (record.state !== "attached") return { outcome: "stale" };
@@ -90,18 +143,39 @@ export function createFakeDurableFilesystemLifecycle(): FakeDurableFilesystemLif
       observedEvents.push("finalized");
       return { outcome: "finalized" };
     },
-    async markCleanup(operation) {
+    async markCleanup(operation, claim) {
       const record = operationById.get(operation.operationId);
+      const claimStatus = claimOutcome(record, operation, claim);
+      if (claimStatus !== "valid") return { outcome: claimStatus };
       if (!record || record.state === "finalized") return { outcome: "stale" };
+      if (record.state === "cleaned") return { outcome: "already_cleaned" };
       if (record.state === "cleanup_pending") return { outcome: "cleanup_pending" };
       record.state = "cleanup_pending";
       observedEvents.push("cleanup_pending");
       return { outcome: "cleanup_pending" };
     },
+    async completeCleanup(operation, claim) {
+      const record = operationById.get(operation.operationId);
+      const claimStatus = claimOutcome(record, operation, claim);
+      if (claimStatus !== "valid") return { outcome: claimStatus };
+      if (!record) return { outcome: "stale" };
+      if (record.state === "cleaned") return { outcome: "already_cleaned" };
+      if (record.state !== "cleanup_pending") return { outcome: "stale" };
+      record.state = "cleaned";
+      observedEvents.push("cleaned");
+      return { outcome: "cleaned" };
+    },
     async recover(request) {
       const records: DurableFilesystemRecoveryRecord[] = [];
       for (const operation of operationById.values()) {
-        if (operation.state === "finalized" || records.length >= request.limit) continue;
+        if (operation.state === "finalized" || operation.state === "cleaned" || records.length >= request.limit) continue;
+        operation.workVersion += 1;
+        operation.activeClaim = issueClaim(
+          operation.reservation.operationId,
+          request.leaseOwner,
+          operation.workVersion,
+          new Date(Date.now() + request.leaseSeconds * 1_000).toISOString(),
+        );
         if (operation.state === "attached") {
           const attached = {
             ...(operation.reservation.resourceKind === "asset"
@@ -110,9 +184,9 @@ export function createFakeDurableFilesystemLifecycle(): FakeDurableFilesystemLif
             operationId: operation.reservation.operationId,
             purpose: operation.reservation.purpose
           } as AttachedFilesystemOperation;
-          records.push({ action: "finalize", operation: attached });
+          records.push({ action: "finalize", operation: attached, claim: operation.activeClaim });
         } else {
-          records.push({ action: "cleanup", operation: operation.reservation });
+          records.push({ action: "cleanup", operation: operation.reservation, claim: operation.activeClaim });
         }
       }
       observedEvents.push("recovered");

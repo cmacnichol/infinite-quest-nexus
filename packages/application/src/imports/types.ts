@@ -126,12 +126,13 @@ export type CampaignZipPreviewProjection = Readonly<
   Omit<CampaignArchivePreviewResponse, "previewToken" | "expiresAt">
 >;
 
-export type LegacyStoryPreviewProjection = Readonly<{
+type PreviewValidity = Readonly<{ valid: true }> | Readonly<{ valid: false }>;
+
+type LegacyStoryPreviewDetails = Readonly<{
   kind: "campaign";
   title: string;
   duplicate: boolean;
   existingCampaignId: string | null;
-  valid: boolean;
   counts: Readonly<{
     turns: number;
     completeHistoryCharacters: number;
@@ -140,23 +141,42 @@ export type LegacyStoryPreviewProjection = Readonly<{
   warnings: readonly string[];
 }>;
 
-export type InfiniteWorldsJsonPreviewProjection = Readonly<Omit<WorldImportPreviewView, "kind"> & {
+export type LegacyStoryPreviewProjection = LegacyStoryPreviewDetails & PreviewValidity;
+
+type InfiniteWorldsJsonPreviewValidProjection = Readonly<Omit<WorldImportPreviewView, "kind"> & {
   kind: "world_json";
-  valid: boolean;
+  valid: true;
   characters: readonly Readonly<{ index: number; name: string }>[];
 }>;
 
-export type CyoaPreviewProjection = Readonly<CyoaImportPreviewResult>;
+type InfiniteWorldsJsonPreviewInvalidProjection = Readonly<{
+  kind: "world_json";
+  valid: false;
+  duplicate: false;
+  existingWorldId: null;
+  characters: readonly Readonly<{ index: number; name: string }>[];
+  counts: Readonly<{ entities: number; relationships: number; triggers: number }>;
+  warnings: readonly string[];
+}>;
 
-export type WorldTextPreviewProjection = Readonly<{
+/** Live invalid world JSON previews intentionally omit `title`. */
+export type InfiniteWorldsJsonPreviewProjection =
+  | InfiniteWorldsJsonPreviewValidProjection
+  | InfiniteWorldsJsonPreviewInvalidProjection;
+
+type CyoaPreviewDetails = Readonly<Omit<CyoaImportPreviewResult, "valid">>;
+export type CyoaPreviewProjection = CyoaPreviewDetails & PreviewValidity;
+
+type WorldTextPreviewDetails = Readonly<{
   kind: "world_text";
-  valid: boolean;
   requiresProvider: true;
   warnings: readonly string[];
   counts: Readonly<{ sourceCharacters: number; sourceWords: number }>;
 }>;
 
-export type StoryTextPreviewProjection = Readonly<{
+export type WorldTextPreviewProjection = WorldTextPreviewDetails & PreviewValidity;
+
+type StoryTextCompletePreviewDetails = Readonly<{
   kind: "story_text";
   title: string;
   duplicate: boolean;
@@ -165,19 +185,46 @@ export type StoryTextPreviewProjection = Readonly<{
   diagnostics: readonly string[];
   characters: readonly Readonly<{ id: string; name: string }>[];
   selectedCharacterId: string | null;
-  valid: boolean;
   counts: LegacyStoryPreviewProjection["counts"];
   warnings: readonly string[];
 }>;
 
+type StoryTextMissingTargetPreviewProjection = Readonly<{
+  kind: "story_text";
+  valid: false;
+  warnings: readonly string[];
+  counts: Readonly<{ turns: number }>;
+}>;
+
+type StoryTextChoiceRequiredPreviewProjection = Readonly<{
+  kind: "story_text";
+  targetWorldId: string;
+  diagnostics: readonly string[];
+  characters: readonly Readonly<{ id: string; name: string }>[];
+  selectedCharacterId: null;
+  valid: false;
+  warnings: readonly string[];
+  counts: Readonly<{ turns: number }>;
+}>;
+
+/** Live invalid story previews may omit title, target, choice, and full history counts. */
+export type StoryTextPreviewProjection =
+  | (StoryTextCompletePreviewDetails & PreviewValidity)
+  | StoryTextMissingTargetPreviewProjection
+  | StoryTextChoiceRequiredPreviewProjection;
+
+export type PortableImportPreviewProjectionByKind = Readonly<{
+  campaign_zip: CampaignZipPreviewProjection;
+  legacy_story: LegacyStoryPreviewProjection;
+  infinite_worlds: InfiniteWorldsJsonPreviewProjection;
+  cyoa: CyoaPreviewProjection;
+  world_json: InfiniteWorldsJsonPreviewProjection;
+  world_text: WorldTextPreviewProjection;
+  story_text: StoryTextPreviewProjection;
+}>;
+
 export type PortableImportPreviewProjectionFor<Kind extends PortableImportKind> =
-  Kind extends "campaign_zip" ? CampaignZipPreviewProjection
-    : Kind extends "legacy_story" ? LegacyStoryPreviewProjection
-      : Kind extends "infinite_worlds" | "world_json" ? InfiniteWorldsJsonPreviewProjection
-        : Kind extends "cyoa" ? CyoaPreviewProjection
-          : Kind extends "world_text" ? WorldTextPreviewProjection
-            : Kind extends "story_text" ? StoryTextPreviewProjection
-              : never;
+  PortableImportPreviewProjectionByKind[Kind];
 
 export type PortableImportPreviewView<Command extends PortableImportPreviewCommand = PortableImportPreviewCommand> = Readonly<{
   previewHandle: PortablePreviewHandle<Command["destination"]>;
@@ -229,12 +276,18 @@ export type PortableStoryImportResultProjection = LegacyStoryImportResultProject
   kind: "campaign";
 }>;
 
+export type PortableImportResultProjectionByKind = Readonly<{
+  campaign_zip: CampaignArchiveImportResultProjection;
+  legacy_story: LegacyStoryImportResultProjection;
+  infinite_worlds: PortableWorldImportResultProjection;
+  cyoa: PortableWorldImportResultProjection;
+  world_json: PortableWorldImportResultProjection;
+  world_text: PortableWorldImportResultProjection;
+  story_text: PortableStoryImportResultProjection;
+}>;
+
 export type PortableImportResultProjectionFor<Kind extends PortableImportKind> =
-  Kind extends "campaign_zip" ? CampaignArchiveImportResultProjection
-    : Kind extends "legacy_story" ? LegacyStoryImportResultProjection
-      : Kind extends "story_text" ? PortableStoryImportResultProjection
-        : Kind extends "infinite_worlds" | "cyoa" | "world_json" | "world_text" ? PortableWorldImportResultProjection
-          : never;
+  PortableImportResultProjectionByKind[Kind];
 
 export type PortableImportCommitView<Kind extends PortableImportKind = PortableImportKind> = Readonly<{
   importedRecordId: PortableImportedRecordId;

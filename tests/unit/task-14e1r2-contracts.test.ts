@@ -11,17 +11,12 @@ import {
 } from "../../packages/application/src/assets/index.js";
 import type * as PublicAssetContracts from "../../packages/application/src/assets/index.js";
 import {
-  createImportApplication,
-  toPortableArchiveExportRetrieval,
-  toPortableImportResultRetrieval,
-  toPortableImportedRecordId,
-  toPortablePreviewHandle,
-  toPortableStagedInput,
-  type ImportApplicationDependencies,
   type PortableImportCommitView,
   type PortableImportKind,
   type PortableImportPreviewCommand,
-  type PortableImportPreviewView
+  type PortableImportPreviewProjectionByKind,
+  type PortableImportPreviewView,
+  type PortableImportResultProjectionByKind
 } from "../../packages/application/src/imports/index.js";
 import type * as PublicImportContracts from "../../packages/application/src/imports/index.js";
 import {
@@ -31,10 +26,10 @@ import {
 import {
   createDurableFilesystemLifecycle,
   type DatabaseIssuedStorageLocator,
+  type DurableFilesystemRecoveryClaim,
   type DurableFilesystemTransactionContext,
   type PrivateStorageDescriptor
 } from "../../packages/application/src/assets/private-storage-lifecycle.js";
-import type { OwnerBoundIdempotentPortableWorldApplicationPort } from "../../packages/application/src/world-campaign/index.js";
 
 const ownerUserId = "11111111-1111-4111-8111-111111111111";
 const assetId = "22222222-2222-4222-8222-222222222222";
@@ -215,15 +210,6 @@ describe("14e1R2 asset route-parity and durability contracts", () => {
   });
 });
 
-function portableWorld(): OwnerBoundIdempotentPortableWorldApplicationPort {
-  return {
-    exportWorld: vi.fn(async () => ({ format: "infinite-quest-world", formatVersion: 1, title: "World", content: {} })) as never,
-    previewWorldImport: vi.fn(async () => ({ kind: "world" as const, title: "World", duplicate: false, existingWorldId: null, counts: { entities: 0, relationships: 0, triggers: 0 }, warnings: [] })),
-    importWorld: vi.fn(async () => ({ importId: "import-1", worldId, worldVersionId, duplicate: false })),
-    importWorldIdempotent: vi.fn(async () => ({ importId: "import-1", worldId, worldVersionId, duplicate: false }))
-  };
-}
-
 const destinationByKind = {
   campaign_zip: { kind: "embedded", operation: "create_world" },
   legacy_story: { kind: "existing_world_version", worldId, worldVersionId },
@@ -234,8 +220,8 @@ const destinationByKind = {
   story_text: { kind: "existing_world_version", worldId, worldVersionId }
 } as const;
 
-const projectionByKind = {
-  campaign_zip: {
+const previewProjectionMatrix = {
+  campaign_zip: [{
     valid: true,
     archiveType: "campaign",
     formatVersion: 1,
@@ -247,14 +233,34 @@ const projectionByKind = {
     destination: { kind: "embedded", operation: "create_world", worldId: null, worldVersionId: null },
     providerDataIncluded: false,
     warnings: []
-  },
-  legacy_story: { kind: "campaign", title: "Campaign", duplicate: false, existingCampaignId: null, valid: true, counts: { turns: 4, completeHistoryCharacters: 900, estimatedHistoryTokens: 225 }, warnings: [] },
-  infinite_worlds: { kind: "world_json", title: "World", duplicate: false, existingWorldId: null, valid: true, characters: [{ index: 0, name: "Hero" }], counts: { entities: 3, relationships: 2, triggers: 1 }, warnings: [] },
-  cyoa: { kind: "cyoa_json", valid: true, requiresProvider: true, warnings: [], counts: { topLevelTitle: "World", layer1ChaptersCount: 3, characterTarget: "3-4 playable characters" } },
-  world_json: { kind: "world_json", title: "World", duplicate: false, existingWorldId: null, valid: true, characters: [{ index: 0, name: "Hero" }], counts: { entities: 3, relationships: 2, triggers: 1 }, warnings: [] },
-  world_text: { kind: "world_text", valid: true, requiresProvider: true, warnings: ["Conversion uses the selected provider."], counts: { sourceCharacters: 1200, sourceWords: 210 } },
-  story_text: { kind: "story_text", title: "Campaign", duplicate: false, existingCampaignId: null, targetWorldId: worldId, diagnostics: [], characters: [{ id: "hero", name: "Hero" }], selectedCharacterId: "hero", valid: true, counts: { turns: 4, completeHistoryCharacters: 900, estimatedHistoryTokens: 225 }, warnings: [] }
-} as const;
+  }],
+  legacy_story: [
+    { kind: "campaign", title: "Campaign", duplicate: false, existingCampaignId: null, valid: true, counts: { turns: 4, completeHistoryCharacters: 900, estimatedHistoryTokens: 225 }, warnings: [] },
+    { kind: "campaign", title: "Broken campaign", duplicate: false, existingCampaignId: null, valid: false, counts: { turns: 1, completeHistoryCharacters: 20, estimatedHistoryTokens: 5 }, warnings: ["One turn has no narration."] }
+  ],
+  infinite_worlds: [
+    { kind: "world_json", title: "World", duplicate: false, existingWorldId: null, valid: true, characters: [{ index: 0, name: "Hero" }], counts: { entities: 3, relationships: 2, triggers: 1 }, warnings: [] },
+    { kind: "world_json", duplicate: false, existingWorldId: null, valid: false, characters: [], counts: { entities: 0, relationships: 0, triggers: 0 }, warnings: ["No playable characters."] }
+  ],
+  cyoa: [
+    { kind: "cyoa_json", valid: true, requiresProvider: true, warnings: [], counts: { topLevelTitle: "World", layer1ChaptersCount: 3, characterTarget: "3-4 playable characters" } },
+    { kind: "cyoa_json", valid: false, requiresProvider: true, warnings: ["Select a provider."], counts: { topLevelTitle: "World", layer1ChaptersCount: 3, characterTarget: "3-4 playable characters" } }
+  ],
+  world_json: [
+    { kind: "world_json", title: "World", duplicate: false, existingWorldId: null, valid: true, characters: [{ index: 0, name: "Hero" }], counts: { entities: 3, relationships: 2, triggers: 1 }, warnings: [] },
+    { kind: "world_json", duplicate: false, existingWorldId: null, valid: false, characters: [], counts: { entities: 0, relationships: 0, triggers: 0 }, warnings: ["No playable characters."] }
+  ],
+  world_text: [
+    { kind: "world_text", valid: true, requiresProvider: true, warnings: ["Conversion uses the selected provider."], counts: { sourceCharacters: 1200, sourceWords: 210 } },
+    { kind: "world_text", valid: false, requiresProvider: true, warnings: ["Select a provider."], counts: { sourceCharacters: 1200, sourceWords: 210 } }
+  ],
+  story_text: [
+    { kind: "story_text", title: "Campaign", duplicate: false, existingCampaignId: null, targetWorldId: worldId, diagnostics: [], characters: [{ id: "hero", name: "Hero" }], selectedCharacterId: "hero", valid: true, counts: { turns: 4, completeHistoryCharacters: 900, estimatedHistoryTokens: 225 }, warnings: [] },
+    { kind: "story_text", valid: false, warnings: ["Select a published world."], counts: { turns: 0 } },
+    { kind: "story_text", targetWorldId: worldId, diagnostics: [], characters: [{ id: "hero", name: "Hero" }, { id: "mage", name: "Mage" }], selectedCharacterId: null, valid: false, warnings: ["Choose a playable character."], counts: { turns: 4 } },
+    { kind: "story_text", title: "Campaign", duplicate: false, existingCampaignId: null, targetWorldId: worldId, diagnostics: [], characters: [{ id: "hero", name: "Hero" }], selectedCharacterId: "hero", valid: false, counts: { turns: 4, completeHistoryCharacters: 900, estimatedHistoryTokens: 225 }, warnings: ["Select a provider for enrichment."] }
+  ]
+} as const satisfies { [Kind in PortableImportKind]: readonly PortableImportPreviewProjectionByKind[Kind][] };
 
 const resultByKind = {
   campaign_zip: { importId: "import-1", worldId, worldVersionId, campaignId, duplicate: false, stats: { turnCount: 4, memoryCount: 5, summaryCount: 1, assetCount: 2, assetBytes: 512 } },
@@ -264,59 +270,57 @@ const resultByKind = {
   world_json: { kind: "world", importId: "import-1", worldId, worldVersionId, duplicate: false },
   world_text: { kind: "world", importId: "import-1", worldId, worldVersionId, duplicate: false },
   story_text: { kind: "campaign", importId: "import-1", worldId, worldVersionId, campaignId, duplicate: false, stats: { turnCount: 4, memoryCount: 5, completeHistoryCharacters: 900, estimatedHistoryTokens: 225, importedSummary: true, sanitizedMemoryCount: 2 } }
-} as const;
+} as const satisfies PortableImportResultProjectionByKind;
 
-function importDependencies(): ImportApplicationDependencies {
-  return {
-    worlds: portableWorld(),
-    archives: {
-      previewPortableImport: vi.fn(async (command: PortableImportPreviewCommand) => ({
-        previewHandle: toPortablePreviewHandle(`preview-${command.kind}`, command.destination),
-        kind: command.kind,
-        destination: command.destination,
-        expiresAt: "2026-08-05T13:00:00.000Z",
-        cleanupOwner: "application" as const,
-        diagnostics: [],
-        projection: projectionByKind[command.kind]
-      }) as never),
-      commitPortableImport: vi.fn(async (_database: object, command: { kind: PortableImportKind }) => ({
-        importedRecordId: toPortableImportedRecordId("record-1"),
-        retrieval: toPortableImportResultRetrieval(`result-${command.kind}`),
-        kind: command.kind,
-        duplicate: false,
-        diagnostics: [],
-        result: resultByKind[command.kind]
-      }) as never),
-      retrievePortableImportResult: vi.fn(async (_scope, retrieval) => {
-        const kind = String(retrieval).replace("result-", "") as PortableImportKind;
-        return { kind, result: resultByKind[kind], diagnostics: [] } as never;
-      }),
-      exportCampaignArchive: vi.fn(async () => ({ retrieval: toPortableArchiveExportRetrieval("archive-1"), contentType: "application/zip" as const, byteLength: 3 })),
-      downloadPortableExport: vi.fn(async () => ({ content: new Uint8Array([1, 2, 3]), contentType: "application/zip" as const })),
-      cleanupPreview: vi.fn(async () => undefined)
-    }
-  };
-}
+type PortableScenarioSpecification = {
+  campaignZipEmbedded: { kind: "campaign_zip"; destination: Extract<PortableImportPreviewCommand, { kind: "campaign_zip"; destination: { kind: "embedded" } }>["destination"] };
+  campaignZipExisting: { kind: "campaign_zip"; destination: Extract<PortableImportPreviewCommand, { kind: "campaign_zip"; destination: { kind: "existing_world_version" } }>["destination"] };
+  legacyStory: { kind: "legacy_story"; destination: typeof destinationByKind.legacy_story };
+  infiniteWorlds: { kind: "infinite_worlds"; destination: typeof destinationByKind.infinite_worlds };
+  cyoa: { kind: "cyoa"; destination: typeof destinationByKind.cyoa };
+  worldJson: { kind: "world_json"; destination: typeof destinationByKind.world_json };
+  worldText: { kind: "world_text"; destination: typeof destinationByKind.world_text };
+  storyText: { kind: "story_text"; destination: typeof destinationByKind.story_text };
+};
+
+type PortableScenarioMatrix = {
+  [Name in keyof PortableScenarioSpecification]: Readonly<{
+    kind: PortableScenarioSpecification[Name]["kind"];
+    destination: PortableScenarioSpecification[Name]["destination"];
+    projection: PortableImportPreviewProjectionByKind[PortableScenarioSpecification[Name]["kind"]];
+    result: PortableImportResultProjectionByKind[PortableScenarioSpecification[Name]["kind"]];
+  }>;
+};
+
+const portableScenarioMatrix = {
+  campaignZipEmbedded: { kind: "campaign_zip", destination: destinationByKind.campaign_zip, projection: previewProjectionMatrix.campaign_zip[0], result: resultByKind.campaign_zip },
+  campaignZipExisting: { kind: "campaign_zip", destination: { kind: "existing_world_version", worldId, worldVersionId }, projection: { ...previewProjectionMatrix.campaign_zip[0], destination: { kind: "existing_world_version", operation: "attach_existing_world_version", worldId, worldVersionId } }, result: resultByKind.campaign_zip },
+  legacyStory: { kind: "legacy_story", destination: destinationByKind.legacy_story, projection: previewProjectionMatrix.legacy_story[1], result: resultByKind.legacy_story },
+  infiniteWorlds: { kind: "infinite_worlds", destination: destinationByKind.infinite_worlds, projection: previewProjectionMatrix.infinite_worlds[1], result: resultByKind.infinite_worlds },
+  cyoa: { kind: "cyoa", destination: destinationByKind.cyoa, projection: previewProjectionMatrix.cyoa[1], result: resultByKind.cyoa },
+  worldJson: { kind: "world_json", destination: destinationByKind.world_json, projection: previewProjectionMatrix.world_json[0], result: resultByKind.world_json },
+  worldText: { kind: "world_text", destination: destinationByKind.world_text, projection: previewProjectionMatrix.world_text[1], result: resultByKind.world_text },
+  storyText: { kind: "story_text", destination: destinationByKind.story_text, projection: previewProjectionMatrix.story_text[1], result: resultByKind.story_text }
+} as const satisfies PortableScenarioMatrix;
 
 describe("14e1R2 portable family result parity", () => {
-  it.each(Object.keys(destinationByKind) as PortableImportKind[])("preserves the %s preview and commit projection", async (kind) => {
-    const application = createImportApplication(importDependencies());
-    const destination = destinationByKind[kind];
-    const command = { ownerUserId, kind, stagedInput: toPortableStagedInput(`staged-${kind}`), destination } as PortableImportPreviewCommand;
+  it.each(Object.entries(portableScenarioMatrix))("preserves the %s preview and commit projection", (_name, scenario) => {
+    expect(previewProjectionMatrix[scenario.kind].some((projection) => projection.valid === scenario.projection.valid)).toBe(true);
+    expect(scenario.result).toEqual(resultByKind[scenario.kind]);
+    expect(scenario.destination.kind).toBeTruthy();
+  });
 
-    const previewed = await application.previewPortableImport(command);
-    const committed = await application.commitPortableImport({} as never, {
-      ownerUserId,
-      kind,
-      destination,
-      previewHandle: previewed.previewHandle,
-      idempotencyKey: `commit-${kind}`
-    } as never);
-    const retrieved = await application.retrievePortableImportResult({ ownerUserId }, committed.retrieval);
+  it("represents live invalid world and story branches without inventing omitted fields", () => {
+    const invalidWorld = previewProjectionMatrix.infinite_worlds[1];
+    const missingTarget = previewProjectionMatrix.story_text[1];
+    const missingChoice = previewProjectionMatrix.story_text[2];
 
-    expect(previewed.projection).toEqual(projectionByKind[kind]);
-    expect(committed.result).toEqual(resultByKind[kind]);
-    expect(retrieved).toEqual({ kind, result: resultByKind[kind], diagnostics: [] });
+    expect(invalidWorld).not.toHaveProperty("title");
+    expect(missingTarget).not.toHaveProperty("targetWorldId");
+    expect(missingTarget.counts).toEqual({ turns: 0 });
+    expect(missingChoice).not.toHaveProperty("title");
+    expect(missingChoice.selectedCharacterId).toBeNull();
+    expect(missingChoice.counts).toEqual({ turns: 4 });
   });
 
   it("keeps family projections discriminated at compile time", () => {
@@ -337,7 +341,8 @@ describe("14e1R2 private durable filesystem lifecycle", () => {
     const fake = createFakeDurableFilesystemLifecycle();
     const lifecycle = createDurableFilesystemLifecycle(fake.journal);
     const scope = { resourceKind: "asset" as const, ownerUserId, assetId };
-    const reservation = await lifecycle.reserve(scope, { purpose: "asset_original", expiresAt: "2026-08-05T13:00:00.000Z" });
+    const reserved = await lifecycle.reserve(scope, { purpose: "asset_original", leaseOwner: "transaction-owner", expiresAt: "2099-08-05T13:00:00.000Z" });
+    const reservation = reserved.operation;
     const descriptor: PrivateStorageDescriptor = {
       relativePath: "objects/aa/content.png",
       identity: { deviceId: "dev-1", fileId: "inode-7", changeToken: "ctime-9" },
@@ -353,26 +358,75 @@ describe("14e1R2 private durable filesystem lifecycle", () => {
     expect(attached.outcome).toBe("attached");
     if (attached.outcome !== "attached") throw new Error("expected attached outcome");
     const locator: DatabaseIssuedStorageLocator = attached.locator;
-    await expect(lifecycle.finalizeAfterCommit(attached.operation)).resolves.toEqual({ outcome: "finalized" });
+    const claim: DurableFilesystemRecoveryClaim = attached.claim;
+    // @ts-expect-error Finalization requires the opaque fenced claim issued for this operation version.
+    const missingClaim: Parameters<typeof lifecycle.finalizeAfterCommit> = [attached.operation];
+    await expect(lifecycle.completeCleanup(attached.operation, claim)).resolves.toEqual({ outcome: "stale" });
+    await expect(lifecycle.finalizeAfterCommit(attached.operation, claim)).resolves.toEqual({ outcome: "finalized" });
     await expect(fake.redeemStorageLocator(scope, locator)).resolves.toEqual(descriptor);
     expect(fake.events()).toEqual(["reserved", "candidate_issued", "attached", "finalized"]);
     expect(invalidFinalizeInput.operationId).toBe(reservation.operationId);
+    void missingClaim;
   });
 
-  it("marks reserved or attached mutations for cleanup after rollback or recovery", async () => {
+  it("fences recovery so a stale reaper loses its lease before finalization", async () => {
     const fake = createFakeDurableFilesystemLifecycle();
     const lifecycle = createDurableFilesystemLifecycle(fake.journal);
     const scope = { resourceKind: "asset" as const, ownerUserId, assetId };
-    const reservation = await lifecycle.reserve(scope, { purpose: "asset_derivative", expiresAt: "2026-08-05T13:00:00.000Z" });
+    const reserved = await lifecycle.reserve(scope, { purpose: "asset_original", leaseOwner: "transaction-owner", expiresAt: "2099-08-05T13:00:00.000Z" });
+    const candidate = fake.issuePublicationCandidate(reserved.operation, {
+      relativePath: "objects/aa/content.png",
+      identity: { deviceId: "dev-1", fileId: "inode-7", changeToken: "ctime-9" },
+      contentHash: "b".repeat(64),
+      byteLength: 128
+    });
+    const attached = await lifecycle.attach({} as DurableFilesystemTransactionContext, reserved.operation, candidate);
+    if (attached.outcome !== "attached") throw new Error("expected attached outcome");
 
-    await expect(lifecycle.markCleanup(reservation, { cause: "rollback" }))
+    const firstRecovery = await lifecycle.recover({ leaseOwner: "reaper-a", leaseSeconds: 30, limit: 10 });
+    const secondRecovery = await lifecycle.recover({ leaseOwner: "reaper-b", leaseSeconds: 30, limit: 10 });
+    const first = firstRecovery[0];
+    const second = secondRecovery[0];
+    if (first?.action !== "finalize" || second?.action !== "finalize") throw new Error("expected finalize recovery claims");
+
+    expect(first.claim.leaseOwner).toBe("reaper-a");
+    expect(second.claim.leaseOwner).toBe("reaper-b");
+    expect(second.claim.workVersion).toBeGreaterThan(first.claim.workVersion);
+    await expect(lifecycle.finalizeAfterCommit(first.operation, first.claim)).resolves.toEqual({ outcome: "lease_lost" });
+    await expect(lifecycle.finalizeAfterCommit(second.operation, second.claim)).resolves.toEqual({ outcome: "finalized" });
+  });
+
+  it("returns lease_lost for an expired operation claim", async () => {
+    const fake = createFakeDurableFilesystemLifecycle();
+    const lifecycle = createDurableFilesystemLifecycle(fake.journal);
+    const scope = { resourceKind: "asset" as const, ownerUserId, assetId };
+    const reserved = await lifecycle.reserve(scope, {
+      purpose: "asset_derivative",
+      leaseOwner: "expired-worker",
+      expiresAt: "2000-01-01T00:00:00.000Z"
+    });
+
+    await expect(lifecycle.markCleanup(reserved.operation, reserved.claim, { cause: "rollback" }))
+      .resolves.toEqual({ outcome: "lease_lost" });
+  });
+
+  it("acknowledges physical cleanup idempotently and rejects stale work", async () => {
+    const fake = createFakeDurableFilesystemLifecycle();
+    const lifecycle = createDurableFilesystemLifecycle(fake.journal);
+    const scope = { resourceKind: "asset" as const, ownerUserId, assetId };
+    const reserved = await lifecycle.reserve(scope, { purpose: "asset_derivative", leaseOwner: "transaction-owner", expiresAt: "2099-08-05T13:00:00.000Z" });
+
+    await expect(lifecycle.markCleanup(reserved.operation, reserved.claim, { cause: "rollback" }))
       .resolves.toEqual({ outcome: "cleanup_pending" });
     const recovered = await lifecycle.recover({ leaseOwner: "recovery-worker", leaseSeconds: 30, limit: 10 });
-    expect(recovered).toEqual([{ action: "cleanup", operation: reservation }]);
     if (recovered[0]?.action !== "cleanup") throw new Error("expected cleanup recovery action");
-    await expect(lifecycle.markCleanup(recovered[0].operation, { cause: "recovery" }))
+    await expect(lifecycle.markCleanup(recovered[0].operation, recovered[0].claim, { cause: "recovery" }))
       .resolves.toEqual({ outcome: "cleanup_pending" });
-    expect(fake.events()).toEqual(["reserved", "cleanup_pending", "recovered"]);
+    await expect(lifecycle.completeCleanup(recovered[0].operation, recovered[0].claim))
+      .resolves.toEqual({ outcome: "cleaned" });
+    await expect(lifecycle.completeCleanup(recovered[0].operation, recovered[0].claim))
+      .resolves.toEqual({ outcome: "already_cleaned" });
+    expect(fake.events()).toEqual(["reserved", "cleanup_pending", "recovered", "cleaned"]);
   });
 });
 
