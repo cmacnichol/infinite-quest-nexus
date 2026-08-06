@@ -54,6 +54,7 @@ function createPortableArchiveFilesystemAdapter(
 const filesystemRaceHooks = vi.hoisted(() => ({
   beforeOpen: undefined as undefined | ((path: unknown, flags: unknown) => Promise<boolean>),
   afterOpen: undefined as undefined | ((path: unknown, flags: unknown, handle: unknown) => Promise<boolean>),
+  afterHandleStat: undefined as undefined | ((path: unknown, handle: unknown) => Promise<boolean>),
   afterLstat: undefined as undefined | ((path: unknown) => Promise<boolean>),
   beforeRename: undefined as undefined | ((source: unknown, target: unknown) => Promise<boolean>),
   beforeUnlink: undefined as undefined | ((path: unknown) => Promise<boolean>),
@@ -82,6 +83,12 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       try {
         await runHook("afterOpen", [path, flags, handle]);
         const read = handle.read.bind(handle);
+        const handleStat = handle.stat.bind(handle);
+        handle.stat = (async (...args: unknown[]) => {
+          const value = await handleStat(...args as Parameters<typeof handleStat>);
+          await runHook("afterHandleStat", [path, handle]);
+          return value;
+        }) as typeof handle.stat;
         handle.read = (async (...args: unknown[]) => {
           await runHook("beforeRead", [handle, args[3]]);
           return read(...args as Parameters<typeof read>);
@@ -124,6 +131,7 @@ afterEach(async () => {
   process.env = { ...originalEnvironment };
   filesystemRaceHooks.beforeOpen = undefined;
   filesystemRaceHooks.afterOpen = undefined;
+  filesystemRaceHooks.afterHandleStat = undefined;
   filesystemRaceHooks.afterLstat = undefined;
   filesystemRaceHooks.beforeRename = undefined;
   filesystemRaceHooks.beforeUnlink = undefined;
@@ -471,6 +479,27 @@ describe("staged archive uploads", () => {
     });
 
     await expect(stageArchiveUpload(source, root, DEFAULT_LIMITS)).rejects.toThrow("fixture stream failure");
+    expect(await readdir(join(root, "staging"))).toEqual([]);
+  });
+
+  it("removes an owned partial after its final metadata settles during failure teardown", async () => {
+    const root = await temporaryRoot();
+    let statCalls = 0;
+    filesystemRaceHooks.afterHandleStat = async (path, handle) => {
+      if (!String(path).endsWith(".zip") || ++statCalls < 2) return false;
+      const timestamp = new Date("2030-01-01T00:00:00.000Z");
+      await (handle as Awaited<ReturnType<typeof import("node:fs/promises")["open"]>>).utimes(timestamp, timestamp);
+      return true;
+    };
+    const source = new Readable({
+      read() {
+        this.push(Buffer.from("partial"));
+        this.destroy(new Error("fixture stream failure"));
+      }
+    });
+
+    await expect(stageArchiveUpload(source, root, DEFAULT_LIMITS)).rejects.toThrow("fixture stream failure");
+    expect(statCalls).toBe(2);
     expect(await readdir(join(root, "staging"))).toEqual([]);
   });
 

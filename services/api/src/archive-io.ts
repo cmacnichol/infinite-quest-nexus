@@ -250,6 +250,10 @@ function sameFileObject(left: ArchiveFileIdentity, right: ArchiveFileIdentity): 
     && left.modifiedNanoseconds === right.modifiedNanoseconds;
 }
 
+function sameFilesystemNode(left: ArchiveFileIdentity, right: ArchiveFileIdentity): boolean {
+  return left.device === right.device && left.inode === right.inode;
+}
+
 async function openedFileIdentityAtIntendedPath(
   handle: FileHandle,
   intendedPath: string,
@@ -467,9 +471,15 @@ class CompressedByteCounter extends Transform {
   }
 }
 
-function fileHandleWritable(handle: FileHandle, maximumBytes?: number): Writable {
+type FileHandleWritable = {
+  output: Writable;
+  settleActiveWrite(): Promise<void>;
+};
+
+function fileHandleWritable(handle: FileHandle, maximumBytes?: number): FileHandleWritable {
   let position = 0;
-  return new Writable({
+  let activeWrite = Promise.resolve();
+  const output = new Writable({
     write(chunk: Buffer | string, encoding: BufferEncoding, callback) {
       const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
       const nextPosition = position + value.byteLength;
@@ -478,7 +488,7 @@ function fileHandleWritable(handle: FileHandle, maximumBytes?: number): Writable
         callback(archiveError("archive-limit-exceeded", "The compressed archive exceeds the configured byte limit."));
         return;
       }
-      void (async () => {
+      const operation = (async () => {
         let offset = 0;
         while (offset < value.byteLength) {
           const result = await handle.write(
@@ -491,9 +501,15 @@ function fileHandleWritable(handle: FileHandle, maximumBytes?: number): Writable
           offset += result.bytesWritten;
           position += result.bytesWritten;
         }
-      })().then(() => callback(), callback);
+      })();
+      activeWrite = operation.then(() => undefined, () => undefined);
+      void operation.then(() => callback(), callback);
     }
   });
+  return {
+    output,
+    settleActiveWrite: () => activeWrite
+  };
 }
 
 async function stageArchiveUploadInternal(
@@ -511,6 +527,7 @@ async function stageArchiveUploadInternal(
   const counter = new CompressedByteCounter(limits.maxCompressedBytes);
   let handle: FileHandle | undefined;
   let output: Writable | undefined;
+  let settleActiveWrite: (() => Promise<void>) | undefined;
   let identity: ArchiveFileIdentity | undefined;
   let anchorRetained = false;
 
@@ -519,7 +536,7 @@ async function stageArchiveUploadInternal(
     handle = await open(operationPath, "wx", 0o640);
     identity = await openedFileIdentityAtIntendedPath(handle, absolutePath);
     await assertDirectoryStable(stable);
-    output = fileHandleWritable(handle);
+    ({ output, settleActiveWrite } = fileHandleWritable(handle));
     await pipeline(source as Readable, counter, output);
     if ((source as NodeJS.ReadableStream & { truncated?: boolean }).truncated === true) {
       throw archiveError("archive-limit-exceeded", "The compressed archive upload was truncated.");
@@ -543,15 +560,12 @@ async function stageArchiveUploadInternal(
     return staged;
   } catch (error) {
     output?.destroy();
+    await settleActiveWrite?.();
     if (handle) {
-      try {
-        identity = fileIdentity(await handle.stat({ bigint: true }));
-      } catch {
-        // Preserve the last verified identity when the descriptor can no longer be inspected.
-      }
+      identity = await closeAndRefreshOwnedIdentity(handle, operationPath, identity);
+      handle = undefined;
     }
     if (identity) await removePathWithIdentity(operationPath, identity);
-    await closeHandle(handle);
     throw error;
   } finally {
     if (!anchorRetained) await closeHandle(stable.anchor);
@@ -1497,6 +1511,33 @@ async function closeHandle(handle: FileHandle | undefined): Promise<void> {
   }
 }
 
+async function closeAndRefreshOwnedIdentity(
+  handle: FileHandle,
+  operationPath: string,
+  knownIdentity: ArchiveFileIdentity | undefined,
+): Promise<ArchiveFileIdentity | undefined> {
+  let pinnedIdentity = knownIdentity;
+  try {
+    pinnedIdentity = fileIdentity(await handle.stat({ bigint: true }));
+  } catch {
+    // The last known descriptor identity still fences the path reacquisition.
+  }
+  await closeHandle(handle);
+  if (!pinnedIdentity) return undefined;
+  try {
+    const value = await lstat(operationPath, { bigint: true });
+    const current = fileIdentity(value);
+    return value.isFile()
+      && !value.isSymbolicLink()
+      && sameFilesystemNode(current, pinnedIdentity)
+      ? current
+      : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 async function restoreQuarantinedPath(quarantinePath: string, originalPath: string): Promise<void> {
   try {
     await link(quarantinePath, originalPath);
@@ -1570,6 +1611,7 @@ export async function writeArchiveArtifact(
   let handle: FileHandle | undefined;
   let identity: ArchiveFileIdentity | undefined;
   let output: Writable | undefined;
+  let settleActiveWrite: (() => Promise<void>) | undefined;
   let outputCompleted: Promise<void> | undefined;
   let archive: Archiver | undefined;
   let activeSource: Readable | undefined;
@@ -1581,7 +1623,7 @@ export async function writeArchiveArtifact(
     handle = await open(temporaryOperationPath, "wx+", 0o640);
     identity = await openedFileIdentityAtIntendedPath(handle, temporaryPath);
     await assertDirectoryStable(stable);
-    output = fileHandleWritable(handle, limits?.maxCompressedBytes);
+    ({ output, settleActiveWrite } = fileHandleWritable(handle, limits?.maxCompressedBytes));
     outputCompleted = finished(output);
     const outputFailed = new Promise<never>((_resolve, reject) => {
       output!.once("error", (error) => {
@@ -1721,12 +1763,14 @@ export async function writeArchiveArtifact(
     archive?.abort();
     output?.destroy();
     await outputCompleted?.catch(() => undefined);
+    await settleActiveWrite?.();
     if (handle) {
-      try {
-        identity = fileIdentity(await handle.stat({ bigint: true }));
-      } catch {
-        // Preserve the last verified identity when the descriptor can no longer be inspected.
-      }
+      identity = await closeAndRefreshOwnedIdentity(
+        handle,
+        published ? finalOperationPath : temporaryOperationPath,
+        identity,
+      );
+      handle = undefined;
     }
     if (identity) {
       await removePathWithIdentity(
@@ -1734,7 +1778,6 @@ export async function writeArchiveArtifact(
         identity
       ).catch(() => undefined);
     }
-    await closeHandle(handle);
     if (error instanceof ArchiveError && error.code === "archive-limit-exceeded") throw error;
     throw archiveError("archive-export-inconsistent", "The archive artifact could not be completed.");
   } finally {
