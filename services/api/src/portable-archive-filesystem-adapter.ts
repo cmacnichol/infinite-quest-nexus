@@ -624,9 +624,10 @@ export function createPortableArchiveFilesystemAdapter(
         if (staged.compressedBytes !== issued.byteLength) {
           try {
             await cleanupIdentitySafely(options.archiveRoot, staged.relativePath, identity);
-            await releaseAnchoredStagedArchive(staged);
           } catch {
             // The safe diagnostic remains archive_truncated; a later reaper can retry cleanup.
+          } finally {
+            await releaseAnchoredStagedArchive(staged);
           }
           throw new CapabilityFault("archive_truncated");
         }

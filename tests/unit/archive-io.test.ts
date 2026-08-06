@@ -1299,6 +1299,45 @@ describe("archive artifact writing and cleanup", () => {
     })).rejects.toEqual({ code: "asset_too_large" });
   });
 
+  it("releases the staged-directory anchor when declared-length cleanup is forced to fail", async () => {
+    const root = await temporaryRoot();
+    let stagingAnchor: { stat(): Promise<unknown> } | undefined;
+    let ownedPath = "";
+    filesystemRaceHooks.afterOpen = async (path, _flags, handle) => {
+      if (!String(path).endsWith("/staging")) return false;
+      stagingAnchor = handle as { stat(): Promise<unknown> };
+      return true;
+    };
+    filesystemRaceHooks.beforeRename = async (source, target) => {
+      if (!String(target).includes(".cleanup-")) return false;
+      const sourcePath = String(source);
+      const descriptorOwnedPath = `${sourcePath}.owned`;
+      ownedPath = join(root, "staging", basename(descriptorOwnedPath));
+      await rename(sourcePath, descriptorOwnedPath);
+      await writeFile(sourcePath, "replacement must survive");
+      return true;
+    };
+    const adapter = createPortableArchiveFilesystemAdapter({
+      archiveRoot: root,
+      assetRoot: root,
+      limits: DEFAULT_LIMITS
+    });
+    const upload = adapter.issueOwnerBoundUpload(
+      { ownerUserId: "11111111-1111-4111-8111-111111111111" },
+      Readable.from("x"),
+      2
+    );
+
+    await expect(adapter.stagingPort.stagePortableArchive(upload)).rejects.toEqual({ code: "archive_truncated" });
+
+    const replacement = (await readdir(join(root, "staging"))).find((name) => name.endsWith(".zip"));
+    expect(replacement).toBeDefined();
+    expect(await readFile(join(root, "staging", replacement!), "utf8")).toBe("replacement must survive");
+    expect(await readFile(ownedPath, "utf8")).toBe("x");
+    expect(stagingAnchor).toBeDefined();
+    await expect(stagingAnchor!.stat()).rejects.toMatchObject({ code: "EBADF" });
+  });
+
   it("removes a failed writer temporary file and throws a typed error", async () => {
     const root = await temporaryRoot();
     const failingSource = new Readable({
