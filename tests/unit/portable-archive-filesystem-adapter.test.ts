@@ -20,9 +20,11 @@ import { Readable } from "node:stream";
 import { once } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ArchiveEntry, ArchiveManifest } from "../../packages/contracts/src/archives.js";
+import { createFakeDurableFilesystemLifecycle } from "../../packages/application/src/assets/private-storage-lifecycle-fake.js";
 import type { ArchiveLimits } from "../../services/api/src/archive-io.js";
 import {
-  createPortableArchiveFilesystemAdapter,
+  createPortableArchiveFilesystemAdapter as createPersistedPortableArchiveFilesystemAdapter,
+  type PortableArchiveFilesystemOptions,
   type SafeFilesystemCapabilityFailure
 } from "../../services/api/src/portable-archive-filesystem-adapter.js";
 
@@ -38,6 +40,15 @@ const limits: ArchiveLimits = {
   maxOriginalImageBytes: 25 * 1024 * 1024
 };
 const roots: string[] = [];
+
+function createPortableArchiveFilesystemAdapter(
+  options: Omit<PortableArchiveFilesystemOptions, "persistence">
+) {
+  return createPersistedPortableArchiveFilesystemAdapter({
+    ...options,
+    persistence: createFakeDurableFilesystemLifecycle()
+  });
+}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));

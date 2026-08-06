@@ -34,9 +34,22 @@ import {
   type ArchiveLimits,
   type StagedArchive
 } from "../../services/api/src/archive-io.js";
-import { createPortableArchiveFilesystemAdapter } from "../../services/api/src/portable-archive-filesystem-adapter.js";
+import { createFakeDurableFilesystemLifecycle } from "../../packages/application/src/assets/private-storage-lifecycle-fake.js";
+import {
+  createPortableArchiveFilesystemAdapter as createPersistedPortableArchiveFilesystemAdapter,
+  type PortableArchiveFilesystemOptions
+} from "../../services/api/src/portable-archive-filesystem-adapter.js";
 import { loadRuntimeConfig } from "../../packages/database/src/config.js";
 import type { ArchiveEntry, ArchiveManifest } from "../../packages/contracts/src/archives.js";
+
+function createPortableArchiveFilesystemAdapter(
+  options: Omit<PortableArchiveFilesystemOptions, "persistence">
+) {
+  return createPersistedPortableArchiveFilesystemAdapter({
+    ...options,
+    persistence: createFakeDurableFilesystemLifecycle()
+  });
+}
 
 const filesystemRaceHooks = vi.hoisted(() => ({
   beforeOpen: undefined as undefined | ((path: unknown, flags: unknown) => Promise<boolean>),

@@ -1,4 +1,9 @@
 import type { AssetFilesystemDiagnosticCode, AssetOwnerScope, AssetScope } from "./types.js";
+import type {
+  ImportOwnerScope,
+  PortableArchiveExportRetrieval,
+  PortableStagedInput
+} from "../imports/types.js";
 
 declare const durableFilesystemOperationIdBrand: unique symbol;
 declare const databaseIssuedStorageLocatorBrand: unique symbol;
@@ -161,6 +166,61 @@ export interface DurableFilesystemJournalPort {
 }
 
 export interface DurableFilesystemLifecycle extends DurableFilesystemJournalPort {}
+
+export type PrivateCapabilityCleanupPreparation =
+  | Readonly<{ outcome: "cleanup_required"; descriptor: PrivateStorageDescriptor }>
+  | Readonly<{ outcome: "already_cleaned" | "stale" }>;
+
+export type PrivatePublicationCleanupPreparation =
+  | Readonly<{ outcome: "cleanup_required"; descriptor: PrivateStorageDescriptor | null }>
+  | Readonly<{ outcome: "already_cleaned" | "stale" | "lease_lost" }>;
+
+export type PrivateCapabilityCleanupCompletion = Readonly<{
+  outcome: "cleaned" | "already_cleaned" | "stale";
+}>;
+
+/**
+ * Adapter-private persistence boundary. A database implementation issues the
+ * opaque handles and persists only their hashes together with owner, purpose,
+ * lifecycle, immutable identity, content hash, and byte length.
+ */
+export interface PrivateFilesystemCapabilityPersistencePort extends PrivateStorageLocatorRedemptionPort {
+  journal: DurableFilesystemJournalPort;
+  issueStagedInput(owner: ImportOwnerScope, descriptor: PrivateStorageDescriptor): Promise<PortableStagedInput>;
+  redeemStagedInput(owner: ImportOwnerScope, stagedInput: PortableStagedInput): Promise<PrivateStorageDescriptor | null>;
+  beginStagedCleanup(
+    owner: ImportOwnerScope,
+    stagedInput: PortableStagedInput,
+  ): Promise<PrivateCapabilityCleanupPreparation>;
+  completeStagedCleanup(
+    owner: ImportOwnerScope,
+    stagedInput: PortableStagedInput,
+  ): Promise<PrivateCapabilityCleanupCompletion>;
+  issueExportRetrieval(
+    owner: ImportOwnerScope,
+    descriptor: PrivateStorageDescriptor,
+  ): Promise<PortableArchiveExportRetrieval>;
+  redeemExportRetrieval(
+    owner: ImportOwnerScope,
+    retrieval: PortableArchiveExportRetrieval,
+  ): Promise<PrivateStorageDescriptor | null>;
+  beginExportCleanup(
+    owner: ImportOwnerScope,
+    retrieval: PortableArchiveExportRetrieval,
+  ): Promise<PrivateCapabilityCleanupPreparation>;
+  completeExportCleanup(
+    owner: ImportOwnerScope,
+    retrieval: PortableArchiveExportRetrieval,
+  ): Promise<PrivateCapabilityCleanupCompletion>;
+  issuePublicationCandidate(
+    reservation: ReservedFilesystemOperation,
+    descriptor: PrivateStorageDescriptor,
+  ): Promise<AssetPublicationCandidate>;
+  preparePublicationCleanup(
+    operation: ReservedFilesystemOperation | AttachedFilesystemOperation,
+    claim: DurableFilesystemRecoveryClaim,
+  ): Promise<PrivatePublicationCleanupPreparation>;
+}
 
 function nonBlank(value: string): boolean {
   return value.trim().length > 0;

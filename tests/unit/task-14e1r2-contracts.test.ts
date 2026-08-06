@@ -349,7 +349,7 @@ describe("14e1R2 private durable filesystem lifecycle", () => {
       contentHash: "b".repeat(64),
       byteLength: 128
     };
-    const candidate = (fake as FakePublicationCandidateIssuer).issuePublicationCandidate(reservation, descriptor);
+    const candidate = await (fake as FakePublicationCandidateIssuer).issuePublicationCandidate(reservation, descriptor);
     const database = {} as DurableFilesystemTransactionContext;
     // @ts-expect-error A reservation cannot be finalized until its candidate is transactionally attached.
     const invalidFinalizeInput: Parameters<typeof lifecycle.finalizeAfterCommit>[0] = reservation;
@@ -374,7 +374,7 @@ describe("14e1R2 private durable filesystem lifecycle", () => {
     const lifecycle = createDurableFilesystemLifecycle(fake.journal);
     const scope = { resourceKind: "asset" as const, ownerUserId, assetId };
     const reserved = await lifecycle.reserve(scope, { purpose: "asset_original", leaseOwner: "transaction-owner", expiresAt: "2099-08-05T13:00:00.000Z" });
-    const candidate = fake.issuePublicationCandidate(reserved.operation, {
+    const candidate = await fake.issuePublicationCandidate(reserved.operation, {
       relativePath: "objects/aa/content.png",
       identity: { deviceId: "dev-1", fileId: "inode-7", changeToken: "ctime-9" },
       contentHash: "b".repeat(64),

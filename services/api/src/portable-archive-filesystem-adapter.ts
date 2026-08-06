@@ -3,6 +3,7 @@ import { constants as filesystemConstants } from "node:fs";
 import {
   link,
   lstat,
+  mkdir,
   open,
   realpath,
   rename,
@@ -17,16 +18,25 @@ import type {
   AssetFilesystemDiagnosticCode,
   AssetLibraryItemView
 } from "../../../packages/application/src/assets/types.js";
+import {
+  createDurableFilesystemLifecycle,
+  type AssetPublicationCandidate,
+  type AttachedFilesystemOperation,
+  type DatabaseIssuedStorageLocator,
+  type DurableFilesystemCleanupCompletionResult,
+  type DurableFilesystemLifecycle,
+  type DurableFilesystemRecoveryClaim,
+  type DurableFilesystemScope,
+  type PrivateFilesystemCapabilityPersistencePort,
+  type PrivateStorageDescriptor,
+  type ReservedFilesystemOperation
+} from "../../../packages/application/src/assets/private-storage-lifecycle.js";
 import type {
   ImportOwnerScope,
   PortableArchiveDiagnosticCode,
   PortableArchiveExportRetrieval,
   PortableArchiveExportView,
   PortableStagedInput
-} from "../../../packages/application/src/imports/types.js";
-import {
-  toPortableArchiveExportRetrieval,
-  toPortableStagedInput
 } from "../../../packages/application/src/imports/types.js";
 import type {
   PortableArchiveStagingPort,
@@ -36,6 +46,7 @@ import {
   ArchiveError,
   inspectArchive,
   inspectArchiveContainer,
+  rehydratePersistedAnchoredStagedArchive,
   releaseAnchoredStagedArchive,
   readVerifiedContainerEntry,
   readVerifiedEntry,
@@ -95,6 +106,18 @@ export type VerifiedAssetRead = Readonly<{
   maximumBytes: number;
 }>;
 
+export type AssetPublicationInput = Readonly<{
+  content: Uint8Array;
+  mimeType: AssetLibraryItemView["mimeType"];
+}>;
+
+export type PublishedAssetRead = Readonly<{
+  scope: DurableFilesystemScope;
+  locator: DatabaseIssuedStorageLocator;
+  mimeType: AssetLibraryItemView["mimeType"];
+  maximumBytes: number;
+}>;
+
 export type PortableArchiveFilesystemAdapter = Readonly<{
   stagingPort: PortableArchiveStagingPort;
   issueOwnerBoundUpload(
@@ -131,6 +154,16 @@ export type PortableArchiveFilesystemAdapter = Readonly<{
   }>>;
   cleanupExportArtifact(owner: ImportOwnerScope, retrieval: PortableArchiveExportRetrieval): Promise<void>;
   readVerifiedAsset(input: VerifiedAssetRead): Promise<VerifiedFilesystemAsset>;
+  publicationLifecycle: DurableFilesystemLifecycle;
+  publishAssetCandidate(
+    reservation: ReservedFilesystemOperation,
+    input: AssetPublicationInput,
+  ): Promise<AssetPublicationCandidate>;
+  readPublishedAsset(input: PublishedAssetRead): Promise<VerifiedFilesystemAsset>;
+  cleanupPublishedAsset(
+    operation: ReservedFilesystemOperation | AttachedFilesystemOperation,
+    claim: DurableFilesystemRecoveryClaim,
+  ): Promise<DurableFilesystemCleanupCompletionResult>;
 }>;
 
 export type PortableArchiveFilesystemOptions = Readonly<{
@@ -140,6 +173,7 @@ export type PortableArchiveFilesystemOptions = Readonly<{
   platform?: NodeJS.Platform;
   maxImagePixels?: number;
   maxImagePages?: number;
+  persistence: PrivateFilesystemCapabilityPersistencePort;
 }>;
 
 type FileIdentity = Readonly<ArchiveFileIdentity>;
@@ -150,21 +184,11 @@ type UploadRecord = Readonly<{
   byteLength: number;
 }>;
 
-type StagedRecord = {
-  ownerUserId: string;
+type ActiveStagedRecord = {
   staged: StagedArchive;
-  identity: FileIdentity;
   inspection?: InspectedArchive | InspectedArchiveContainer;
   inspectionKind?: ArchiveType | "container";
 };
-
-type ArtifactRecord = Readonly<{
-  ownerUserId: string;
-  relativePath: string;
-  identity: FileIdentity;
-  byteLength: number;
-  sha256: string;
-}>;
 
 class CapabilityFault extends Error {
   constructor(readonly code: SafeDiagnosticCode) {
@@ -516,7 +540,11 @@ function mapArchiveFailure(error: unknown, fallback: PortableArchiveDiagnosticCo
   if (!(error instanceof ArchiveError)) return safeFailure(fallback);
   if (error.code === "archive-limit-exceeded") return safeFailure("archive_size_limit_exceeded");
   if (error.code === "archive-entry-missing") return safeFailure("archive_format_invalid");
-  if (error.code === "archive-checksum-mismatch") return safeFailure("archive_truncated");
+  if (error.code === "archive-checksum-mismatch") {
+    return safeFailure(/identity changed|content changed/i.test(error.message)
+      ? "archive_containment_denied"
+      : "archive_truncated");
+  }
   if (error.code === "archive-entry-unsafe") {
     if (/changed|identity|storage directory|intended storage path|outside the configured storage root/i.test(error.message)) {
       return safeFailure("archive_containment_denied");
@@ -551,28 +579,189 @@ function assertLinux(platform: NodeJS.Platform): void {
   }
 }
 
-function ownedStagedRecord(
-  records: ReadonlyMap<PortableStagedInput, StagedRecord>,
-  owner: ImportOwnerScope,
-  stagedInput: PortableStagedInput
-): StagedRecord {
-  const record = records.get(stagedInput);
-  if (!record || record.ownerUserId !== requireOwner(owner)) {
-    throw new CapabilityFault("archive_unavailable");
-  }
-  return record;
+function privateIdentity(identity: FileIdentity): PrivateStorageDescriptor["identity"] {
+  return {
+    deviceId: identity.device.toString(),
+    fileId: identity.inode.toString(),
+    changeToken: `${identity.modifiedNanoseconds}:${identity.changedNanoseconds}`
+  };
 }
 
-function ownedArtifactRecord(
-  records: ReadonlyMap<PortableArchiveExportRetrieval, ArtifactRecord>,
-  owner: ImportOwnerScope,
-  retrieval: PortableArchiveExportRetrieval
-): ArtifactRecord {
-  const record = records.get(retrieval);
-  if (!record || record.ownerUserId !== requireOwner(owner)) {
-    throw new CapabilityFault("archive_unavailable");
+function persistedIdentity(descriptor: PrivateStorageDescriptor): FileIdentity {
+  const change = descriptor.identity.changeToken.split(":");
+  if (change.length !== 2
+    || !/^\d+$/.test(descriptor.identity.deviceId)
+    || !/^\d+$/.test(descriptor.identity.fileId)
+    || !change.every((value) => /^\d+$/.test(value ?? ""))
+    || !safeInteger(descriptor.byteLength)
+    || !/^[a-f0-9]{64}$/.test(descriptor.contentHash)) {
+    throw new CapabilityFault("filesystem_race_detected");
   }
-  return record;
+  return {
+    device: BigInt(descriptor.identity.deviceId),
+    inode: BigInt(descriptor.identity.fileId),
+    size: BigInt(descriptor.byteLength),
+    modifiedNanoseconds: BigInt(change[0]!),
+    changedNanoseconds: BigInt(change[1]!)
+  };
+}
+
+function privateDescriptor(
+  relativePath: string,
+  identity: FileIdentity,
+  contentHash: string,
+): PrivateStorageDescriptor {
+  return {
+    relativePath,
+    identity: privateIdentity(identity),
+    contentHash,
+    byteLength: Number(identity.size)
+  };
+}
+
+async function decodedAssetMetadata(
+  bytes: Buffer,
+  mimeType: AssetLibraryItemView["mimeType"],
+  maxImagePixels: number,
+  maxImagePages: number,
+): Promise<Pick<VerifiedFilesystemAsset, "width" | "height" | "format" | "pages" | "orientation">> {
+  const signature = ALLOWED_IMAGE_SIGNATURES[mimeType];
+  if (!signature) throw new CapabilityFault("asset_unsupported_media");
+  if (!signature(bytes)) throw new CapabilityFault("asset_content_invalid");
+  let metadata;
+  try {
+    metadata = await sharp(bytes, {
+      animated: true,
+      failOn: "error",
+      limitInputPixels: maxImagePixels
+    }).metadata();
+  } catch {
+    throw new CapabilityFault("asset_content_invalid");
+  }
+  if (!metadata.width
+    || !metadata.height
+    || !metadata.format
+    || metadata.format !== IMAGE_FORMATS[mimeType]) {
+    throw new CapabilityFault("asset_content_invalid");
+  }
+  const pages = metadata.pages ?? 1;
+  const pageHeight = metadata.pageHeight ?? metadata.height;
+  const decodedPixels = BigInt(metadata.width) * BigInt(pageHeight) * BigInt(pages);
+  if (!safeInteger(pages)
+    || pages === 0
+    || pages > maxImagePages
+    || decodedPixels > BigInt(maxImagePixels)) {
+    throw new CapabilityFault("asset_content_invalid");
+  }
+  try {
+    await sharp(bytes, {
+      animated: true,
+      failOn: "error",
+      limitInputPixels: maxImagePixels
+    }).raw().toBuffer();
+  } catch {
+    throw new CapabilityFault("asset_content_invalid");
+  }
+  const rotated = [5, 6, 7, 8].includes(metadata.orientation ?? 0);
+  return {
+    width: rotated ? metadata.height : metadata.width,
+    height: rotated ? metadata.width : metadata.height,
+    format: metadata.format,
+    pages,
+    orientation: metadata.orientation ?? null
+  };
+}
+
+async function ensureAnchoredDirectory(rootPath: string, segments: readonly string[]): Promise<FileHandle> {
+  let current = await openDirectoryAnchor(await realpath(resolve(rootPath)));
+  try {
+    for (const segment of segments) {
+      const childPath = descriptorPath(current, segment);
+      try {
+        await mkdir(childPath, { mode: 0o750 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+      const next = await openDirectoryAnchor(childPath);
+      await closeHandle(current);
+      current = next;
+    }
+    return current;
+  } catch (error) {
+    await closeHandle(current);
+    if (error instanceof CapabilityFault) throw error;
+    throw new CapabilityFault("asset_storage_unavailable");
+  }
+}
+
+async function publishAssetFile(
+  assetRoot: string,
+  reservation: ReservedFilesystemOperation,
+  bytes: Buffer,
+): Promise<PrivateStorageDescriptor> {
+  if (reservation.resourceKind !== "asset"
+    || (reservation.purpose !== "asset_original" && reservation.purpose !== "asset_derivative")) {
+    throw new CapabilityFault("asset_storage_unavailable");
+  }
+  const directoryName = reservation.purpose === "asset_original" ? "originals" : "derivatives";
+  const parent = await ensureAnchoredDirectory(assetRoot, [directoryName]);
+  const finalName = `${createHash("sha256").update(reservation.operationId).digest("hex")}.asset`;
+  const temporaryName = `${finalName}.${randomUUID()}.tmp`;
+  const temporaryPath = descriptorPath(parent, temporaryName);
+  const finalPath = descriptorPath(parent, finalName);
+  const relativePath = `${directoryName}/${finalName}`;
+  let handle: FileHandle | undefined;
+  let identity: FileIdentity | undefined;
+  let published = false;
+  try {
+    handle = await open(
+      temporaryPath,
+      filesystemConstants.O_CREAT
+        | filesystemConstants.O_EXCL
+        | filesystemConstants.O_RDWR
+        | filesystemConstants.O_NOFOLLOW,
+      0o640
+    );
+    await handle.writeFile(bytes);
+    await handle.sync();
+    identity = identityOf(await handle.stat({ bigint: true }));
+    if (identity.size !== BigInt(bytes.byteLength)) {
+      throw new CapabilityFault("asset_content_invalid");
+    }
+    await link(temporaryPath, finalPath);
+    await unlink(temporaryPath);
+    published = true;
+    const opened = await lstat(finalPath, { bigint: true });
+    if (opened.isSymbolicLink()
+      || !opened.isFile()
+      || !sameObject(identity, identityOf(opened as never))) {
+      throw new CapabilityFault("filesystem_race_detected");
+    }
+    await handle.chmod(0o440);
+    await handle.sync();
+    identity = identityOf(await handle.stat({ bigint: true }));
+    const measured = await measureHandleContent(handle, identity.size);
+    const finalIdentity = identityOf(await handle.stat({ bigint: true }));
+    if (!sameIdentity(identity, finalIdentity)
+      || measured.byteLength !== bytes.byteLength
+      || measured.sha256 !== rawSha256(bytes)) {
+      throw new CapabilityFault("filesystem_race_detected");
+    }
+    return privateDescriptor(relativePath, finalIdentity, measured.sha256);
+  } catch (error) {
+    if (identity) {
+      await cleanupIdentitySafely(
+        assetRoot,
+        published ? relativePath : `${directoryName}/${temporaryName}`,
+        identity,
+      ).catch(() => undefined);
+    }
+    if (error instanceof CapabilityFault) throw error;
+    throw new CapabilityFault("asset_storage_unavailable");
+  } finally {
+    await closeHandle(handle);
+    await closeHandle(parent);
+  }
 }
 
 export function createPortableArchiveFilesystemAdapter(
@@ -586,8 +775,38 @@ export function createPortableArchiveFilesystemAdapter(
     throw new Error("Portable archive image decode limits must be positive safe integers.");
   }
   const uploads = new WeakMap<object, UploadRecord>();
-  const stagedRecords = new Map<PortableStagedInput, StagedRecord>();
-  const artifactRecords = new Map<PortableArchiveExportRetrieval, ArtifactRecord>();
+  const activeStagedRecords = new Map<PortableStagedInput, ActiveStagedRecord>();
+  const publicationLifecycle = createDurableFilesystemLifecycle(options.persistence.journal);
+
+  async function loadStagedRecord(
+    owner: ImportOwnerScope,
+    stagedInput: PortableStagedInput,
+  ): Promise<ActiveStagedRecord> {
+    requireOwner(owner);
+    const descriptor = await options.persistence.redeemStagedInput(owner, stagedInput);
+    if (!descriptor) throw new CapabilityFault("archive_unavailable");
+    const expectedIdentity = persistedIdentity(descriptor);
+    const active = activeStagedRecords.get(stagedInput);
+    if (active) {
+      if (!sameIdentity(stagedArchiveIdentity(active.staged), expectedIdentity)) {
+        await releaseAnchoredStagedArchive(active.staged);
+        activeStagedRecords.delete(stagedInput);
+        throw new CapabilityFault("filesystem_race_detected");
+      }
+      return active;
+    }
+    const staged = await rehydratePersistedAnchoredStagedArchive({
+      archiveRoot: options.archiveRoot,
+      relativePath: descriptor.relativePath,
+      compressedBytes: descriptor.byteLength,
+      maximumCompressedBytes: options.limits.maxCompressedBytes,
+      sha256: descriptor.contentHash,
+      identity: expectedIdentity
+    });
+    const record = { staged };
+    activeStagedRecords.set(stagedInput, record);
+    return record;
+  }
 
   const issueOwnerBoundUpload = (
     owner: ImportOwnerScope,
@@ -614,13 +833,16 @@ export function createPortableArchiveFilesystemAdapter(
     async stagePortableArchive(upload) {
       const issued = uploads.get(upload);
       uploads.delete(upload);
+      let staged: StagedArchive | undefined;
+      let identity: FileIdentity | undefined;
+      let persisted = false;
       try {
         assertLinux(platform);
         if (!issued || upload.byteLength !== issued.byteLength) {
           throw new CapabilityFault("archive_unavailable");
         }
-        const staged = await stageAnchoredArchiveUpload(issued.source, options.archiveRoot, options.limits);
-        const identity = stagedArchiveIdentity(staged);
+        staged = await stageAnchoredArchiveUpload(issued.source, options.archiveRoot, options.limits);
+        identity = stagedArchiveIdentity(staged);
         if (staged.compressedBytes !== issued.byteLength) {
           try {
             await cleanupIdentitySafely(options.archiveRoot, staged.relativePath, identity);
@@ -631,14 +853,29 @@ export function createPortableArchiveFilesystemAdapter(
           }
           throw new CapabilityFault("archive_truncated");
         }
-        const stagedInput = toPortableStagedInput(randomUUID());
-        stagedRecords.set(stagedInput, {
-          ownerUserId: issued.ownerUserId,
-          staged,
-          identity
-        });
+        const opened = await openAnchoredRegularFile(options.archiveRoot, staged.relativePath);
+        let measurement: Awaited<ReturnType<typeof measureHandleContent>>;
+        try {
+          if (!sameIdentity(opened.identity, identity)) throw new CapabilityFault("filesystem_race_detected");
+          measurement = await measureHandleContent(opened.handle, opened.identity.size);
+          if (!sameIdentity(opened.identity, identityOf(await opened.handle.stat({ bigint: true })))) {
+            throw new CapabilityFault("filesystem_race_detected");
+          }
+        } finally {
+          await closeHandle(opened.handle);
+        }
+        const stagedInput = await options.persistence.issueStagedInput(
+          { ownerUserId: issued.ownerUserId },
+          privateDescriptor(staged.relativePath, identity, measurement.sha256),
+        );
+        persisted = true;
+        activeStagedRecords.set(stagedInput, { staged });
         return stagedInput;
       } catch (error) {
+        if (staged && identity && !persisted) {
+          await cleanupIdentitySafely(options.archiveRoot, staged.relativePath, identity).catch(() => undefined);
+          await releaseAnchoredStagedArchive(staged);
+        }
         throw mapArchiveFailure(error, "archive_unavailable");
       }
     }
@@ -651,10 +888,12 @@ export function createPortableArchiveFilesystemAdapter(
     async inspectPortableArchive(owner, stagedInput, expectedType) {
       try {
         assertLinux(platform);
-        const record = ownedStagedRecord(stagedRecords, owner, stagedInput);
+        const record = await loadStagedRecord(owner, stagedInput);
         const current = await openAnchoredRegularFile(options.archiveRoot, record.staged.relativePath);
         await closeHandle(current.handle);
-        if (!sameIdentity(record.identity, current.identity)) throw new CapabilityFault("filesystem_race_detected");
+        if (!sameIdentity(stagedArchiveIdentity(record.staged), current.identity)) {
+          throw new CapabilityFault("filesystem_race_detected");
+        }
 
         if (expectedType === "container") {
           const inspection = await inspectArchiveContainer(record.staged, options.limits);
@@ -696,7 +935,7 @@ export function createPortableArchiveFilesystemAdapter(
       try {
         assertLinux(platform);
         if (!safeInteger(maximumBytes)) throw new CapabilityFault("archive_entry_limit_exceeded");
-        const record = ownedStagedRecord(stagedRecords, owner, stagedInput);
+        const record = await loadStagedRecord(owner, stagedInput);
         if (!record.inspection || !record.inspectionKind) {
           throw new CapabilityFault("archive_format_invalid");
         }
@@ -719,10 +958,25 @@ export function createPortableArchiveFilesystemAdapter(
     async cleanupStagedInput(owner, stagedInput) {
       try {
         assertLinux(platform);
-        const record = ownedStagedRecord(stagedRecords, owner, stagedInput);
-        await cleanupIdentitySafely(options.archiveRoot, record.staged.relativePath, record.identity);
-        await releaseAnchoredStagedArchive(record.staged);
-        stagedRecords.delete(stagedInput);
+        requireOwner(owner);
+        const preparation = await options.persistence.beginStagedCleanup(owner, stagedInput);
+        if (preparation.outcome === "already_cleaned") return;
+        if (preparation.outcome !== "cleanup_required") throw new CapabilityFault("archive_unavailable");
+        const active = activeStagedRecords.get(stagedInput);
+        try {
+          await cleanupIdentitySafely(
+            options.archiveRoot,
+            preparation.descriptor.relativePath,
+            persistedIdentity(preparation.descriptor),
+          );
+        } finally {
+          if (active) await releaseAnchoredStagedArchive(active.staged);
+          activeStagedRecords.delete(stagedInput);
+        }
+        const completed = await options.persistence.completeStagedCleanup(owner, stagedInput);
+        if (completed.outcome !== "cleaned" && completed.outcome !== "already_cleaned") {
+          throw new CapabilityFault("archive_unavailable");
+        }
       } catch {
         throw safeFailure("archive_cleanup_required");
       }
@@ -758,14 +1012,10 @@ export function createPortableArchiveFilesystemAdapter(
         if (!matchesZipSignature(measurement.signature)) {
           throw new CapabilityFault("archive_format_invalid");
         }
-        const retrieval = toPortableArchiveExportRetrieval(randomUUID());
-        artifactRecords.set(retrieval, {
-          ownerUserId,
-          relativePath: artifact.relativePath,
-          identity: artifact.identity,
-          byteLength: artifact.byteLength,
-          sha256: artifact.sha256
-        });
+        const retrieval = await options.persistence.issueExportRetrieval(
+          { ownerUserId },
+          privateDescriptor(artifact.relativePath, artifact.identity, artifact.sha256),
+        );
         return {
           retrieval,
           contentType: "application/zip",
@@ -787,16 +1037,18 @@ export function createPortableArchiveFilesystemAdapter(
       try {
         assertLinux(platform);
         if (!safeInteger(maximumBytes)) throw new CapabilityFault("archive_size_limit_exceeded");
-        const record = ownedArtifactRecord(artifactRecords, owner, retrieval);
+        requireOwner(owner);
+        const record = await options.persistence.redeemExportRetrieval(owner, retrieval);
+        if (!record) throw new CapabilityFault("archive_unavailable");
         const read = await readStableFile(
           options.archiveRoot,
           record.relativePath,
           maximumBytes,
-          record.identity
+          persistedIdentity(record),
         );
         const hash = rawSha256(read.bytes);
         if (read.bytes.byteLength !== record.byteLength
-          || hash !== record.sha256
+          || hash !== record.contentHash
           || !matchesZipSignature(read.bytes)) {
           throw new CapabilityFault("archive_format_invalid");
         }
@@ -814,9 +1066,19 @@ export function createPortableArchiveFilesystemAdapter(
     async cleanupExportArtifact(owner, retrieval) {
       try {
         assertLinux(platform);
-        const record = ownedArtifactRecord(artifactRecords, owner, retrieval);
-        await cleanupIdentitySafely(options.archiveRoot, record.relativePath, record.identity);
-        artifactRecords.delete(retrieval);
+        requireOwner(owner);
+        const preparation = await options.persistence.beginExportCleanup(owner, retrieval);
+        if (preparation.outcome === "already_cleaned") return;
+        if (preparation.outcome !== "cleanup_required") throw new CapabilityFault("archive_unavailable");
+        await cleanupIdentitySafely(
+          options.archiveRoot,
+          preparation.descriptor.relativePath,
+          persistedIdentity(preparation.descriptor),
+        );
+        const completed = await options.persistence.completeExportCleanup(owner, retrieval);
+        if (completed.outcome !== "cleaned" && completed.outcome !== "already_cleaned") {
+          throw new CapabilityFault("archive_unavailable");
+        }
       } catch {
         throw safeFailure("archive_cleanup_required");
       }
@@ -834,64 +1096,115 @@ export function createPortableArchiveFilesystemAdapter(
         if (!/^[a-f0-9]{64}$/.test(input.expectedContentHash)) {
           throw new CapabilityFault("asset_hash_mismatch");
         }
-        const signature = ALLOWED_IMAGE_SIGNATURES[input.mimeType];
-        if (!signature) throw new CapabilityFault("asset_unsupported_media");
         const read = await readStableFile(options.assetRoot, input.relativePath, input.maximumBytes);
         if (read.bytes.byteLength !== input.expectedByteLength) {
           throw new CapabilityFault("asset_content_invalid");
         }
-        if (!signature(read.bytes)) throw new CapabilityFault("asset_content_invalid");
         const contentHash = legacyAssetSha256(read.bytes);
         if (contentHash !== input.expectedContentHash) throw new CapabilityFault("asset_hash_mismatch");
-
-        let metadata;
-        try {
-          metadata = await sharp(read.bytes, {
-            animated: true,
-            failOn: "error",
-            limitInputPixels: maxImagePixels
-          }).metadata();
-        } catch {
-          throw new CapabilityFault("asset_content_invalid");
-        }
-        if (!metadata.width
-          || !metadata.height
-          || !metadata.format
-          || metadata.format !== IMAGE_FORMATS[input.mimeType]) {
-          throw new CapabilityFault("asset_content_invalid");
-        }
-        const pages = metadata.pages ?? 1;
-        const pageHeight = metadata.pageHeight ?? metadata.height;
-        const decodedPixels = BigInt(metadata.width) * BigInt(pageHeight) * BigInt(pages);
-        if (!safeInteger(pages)
-          || pages === 0
-          || pages > maxImagePages
-          || decodedPixels > BigInt(maxImagePixels)) {
-          throw new CapabilityFault("asset_content_invalid");
-        }
-        try {
-          await sharp(read.bytes, {
-            animated: true,
-            failOn: "error",
-            limitInputPixels: maxImagePixels
-          }).raw().toBuffer();
-        } catch {
-          throw new CapabilityFault("asset_content_invalid");
-        }
-        const rotated = [5, 6, 7, 8].includes(metadata.orientation ?? 0);
+        const metadata = await decodedAssetMetadata(
+          read.bytes,
+          input.mimeType,
+          maxImagePixels,
+          maxImagePages,
+        );
         return {
           content: new Uint8Array(read.bytes),
           mimeType: input.mimeType,
           byteLength: read.bytes.byteLength,
           contentHash,
-          width: rotated ? metadata.height : metadata.width,
-          height: rotated ? metadata.width : metadata.height,
-          format: metadata.format,
-          pages,
-          orientation: metadata.orientation ?? null
+          ...metadata
         };
       } catch (error) {
         throw mapAssetFailure(error);
+      }
+    },
+
+    publicationLifecycle,
+
+    async publishAssetCandidate(reservation, input) {
+      let descriptor: PrivateStorageDescriptor | undefined;
+      try {
+        assertLinux(platform);
+        if (reservation.resourceKind !== "asset"
+          || (reservation.purpose !== "asset_original" && reservation.purpose !== "asset_derivative")) {
+          throw new CapabilityFault("asset_storage_unavailable");
+        }
+        if (!(input.content instanceof Uint8Array)
+          || input.content.byteLength === 0
+          || input.content.byteLength > options.limits.maxOriginalImageBytes) {
+          throw new CapabilityFault("asset_too_large");
+        }
+        const bytes = Buffer.from(input.content);
+        await decodedAssetMetadata(bytes, input.mimeType, maxImagePixels, maxImagePages);
+        descriptor = await publishAssetFile(options.assetRoot, reservation, bytes);
+        return options.persistence.issuePublicationCandidate(reservation, descriptor);
+      } catch (error) {
+        if (descriptor) {
+          await cleanupIdentitySafely(
+            options.assetRoot,
+            descriptor.relativePath,
+            persistedIdentity(descriptor),
+          ).catch(() => undefined);
+        }
+        throw mapAssetFailure(error);
+      }
+    },
+
+    async readPublishedAsset(input) {
+      try {
+        assertLinux(platform);
+        if (!safeInteger(input.maximumBytes)
+          || input.maximumBytes > options.limits.maxOriginalImageBytes) {
+          throw new CapabilityFault("asset_too_large");
+        }
+        const descriptor = await options.persistence.redeemStorageLocator(input.scope, input.locator);
+        if (!descriptor) throw new CapabilityFault("asset_storage_unavailable");
+        const read = await readStableFile(
+          options.assetRoot,
+          descriptor.relativePath,
+          input.maximumBytes,
+          persistedIdentity(descriptor),
+        );
+        const contentHash = rawSha256(read.bytes);
+        if (read.bytes.byteLength !== descriptor.byteLength
+          || contentHash !== descriptor.contentHash) {
+          throw new CapabilityFault("asset_hash_mismatch");
+        }
+        const metadata = await decodedAssetMetadata(
+          read.bytes,
+          input.mimeType,
+          maxImagePixels,
+          maxImagePages,
+        );
+        return {
+          content: new Uint8Array(read.bytes),
+          mimeType: input.mimeType,
+          byteLength: read.bytes.byteLength,
+          contentHash,
+          ...metadata
+        };
+      } catch (error) {
+        throw mapAssetFailure(error);
+      }
+    },
+
+    async cleanupPublishedAsset(operation, claim) {
+      try {
+        assertLinux(platform);
+        const preparation = await options.persistence.preparePublicationCleanup(operation, claim);
+        if (preparation.outcome === "already_cleaned") return { outcome: "already_cleaned" };
+        if (preparation.outcome !== "cleanup_required") return { outcome: preparation.outcome };
+        if (preparation.descriptor) {
+          await cleanupIdentitySafely(
+            options.assetRoot,
+            preparation.descriptor.relativePath,
+            persistedIdentity(preparation.descriptor),
+          );
+        }
+        return publicationLifecycle.completeCleanup(operation, claim);
+      } catch {
+        throw safeFailure("filesystem_race_detected");
       }
     }
   };

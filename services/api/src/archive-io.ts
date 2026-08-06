@@ -67,6 +67,12 @@ export type PersistedStagedArchiveInput = {
   compressedBytes: number;
 };
 
+export type PersistedAnchoredStagedArchiveInput = PersistedStagedArchiveInput & {
+  maximumCompressedBytes: number;
+  sha256: string;
+  identity: ArchiveFileIdentity;
+};
+
 export type ArchiveStagingDirectory = {
   absolutePath: string;
   operationPath: string;
@@ -633,13 +639,84 @@ export async function rehydratePersistedStagedArchive(
     throw archiveError("archive-checksum-mismatch", "The persisted staged archive compressed size changed.");
   }
 
-  const staged: InternalStagedArchive = {
+  return {
     relativePath,
     absolutePath,
     compressedBytes: input.compressedBytes,
     [STAGED_IDENTITY]: fileIdentity(value)
-  };
-  return staged;
+  } as InternalStagedArchive;
+}
+
+/** Private persisted-capability reopen that retains the verified parent descriptor. */
+export async function rehydratePersistedAnchoredStagedArchive(
+  input: PersistedAnchoredStagedArchiveInput
+): Promise<StagedArchive> {
+  const relativePath = input.relativePath.replaceAll("\\", "/");
+  const pathSegments = relativePath.split("/");
+  if (!relativePath
+    || relativePath.includes("\0")
+    || relativePath.startsWith("/")
+    || /^[A-Za-z]:/.test(relativePath)
+    || isAbsolute(relativePath)
+    || pathSegments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw archiveError("archive-entry-unsafe", "The persisted staged archive path is invalid.");
+  }
+  if (!safeInteger(input.compressedBytes)
+    || !safeInteger(input.maximumCompressedBytes)
+    || input.compressedBytes > input.maximumCompressedBytes
+    || !/^[a-f0-9]{64}$/.test(input.sha256)) {
+    throw archiveError("archive-checksum-mismatch", "The persisted staged archive size is invalid.");
+  }
+
+  let stable: StableDirectory | undefined;
+  let handle: FileHandle | undefined;
+  try {
+    const root = await realpath(resolve(input.archiveRoot));
+    const filename = pathSegments.at(-1)!;
+    const parentPath = resolve(root, ...pathSegments.slice(0, -1));
+    const absolutePath = resolve(parentPath, filename);
+    assertUnderRoot(root, absolutePath);
+    stable = await stabilizeDirectory(root, parentPath);
+    const operationPath = stableChildPath(stable, filename);
+    await assertDirectoryStable(stable);
+    const beforeOpen = await lstat(operationPath, { bigint: true });
+    if (!beforeOpen.isFile() || beforeOpen.isSymbolicLink()) {
+      throw archiveError("archive-entry-unsafe", "The persisted staged archive is not a regular file.");
+    }
+    handle = await open(
+      operationPath,
+      filesystemConstants.O_RDONLY | filesystemConstants.O_NOFOLLOW
+    );
+    const identity = fileIdentity(await handle.stat({ bigint: true }));
+    if (!sameFileIdentity(identity, input.identity)
+      || identity.size !== BigInt(input.compressedBytes)) {
+      throw archiveError("archive-checksum-mismatch", "The persisted staged archive identity changed.");
+    }
+    await openedFileIdentityAtIntendedPath(handle, operationPath, input.identity);
+    await assertDirectoryStable(stable);
+    const sha256 = await hashFileHandle(handle, input.compressedBytes);
+    const finalIdentity = fileIdentity(await handle.stat({ bigint: true }));
+    if (sha256 !== input.sha256 || !sameFileIdentity(identity, finalIdentity)) {
+      throw archiveError("archive-checksum-mismatch", "The persisted staged archive content changed.");
+    }
+    await openedFileIdentityAtIntendedPath(handle, operationPath, finalIdentity);
+    await assertDirectoryStable(stable);
+    const staged: InternalStagedArchive = {
+      relativePath,
+      absolutePath,
+      compressedBytes: input.compressedBytes,
+      [STAGED_IDENTITY]: finalIdentity,
+      [STAGED_ANCHOR]: { directory: stable, filename }
+    };
+    stable = undefined;
+    return staged;
+  } catch (error) {
+    if (error instanceof ArchiveError) throw error;
+    throw archiveError("archive-checksum-mismatch", "The persisted staged archive could not be reopened.");
+  } finally {
+    await closeHandle(handle);
+    await closeHandle(stable?.anchor);
+  }
 }
 
 function inspectUnixEntryType(file: ZipFile, directory: boolean, path: string): void {
