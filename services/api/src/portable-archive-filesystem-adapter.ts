@@ -573,6 +573,35 @@ function mapAssetFailure(error: unknown): SafeFilesystemCapabilityFailure {
   return safeFailure("asset_metadata_unavailable");
 }
 
+function createSafeDurableFilesystemLifecycle(
+  journal: PrivateFilesystemCapabilityPersistencePort["journal"],
+): DurableFilesystemLifecycle {
+  const lifecycle = createDurableFilesystemLifecycle(journal);
+  const guarded = async <T>(operation: () => Promise<T>): Promise<T> => {
+    try {
+      return await operation();
+    } catch {
+      throw safeFailure("asset_storage_unavailable");
+    }
+  };
+  return {
+    reserve: (scope, request) => guarded(() => lifecycle.reserve(scope, request)),
+    attach: (database, reservation, candidate) => guarded(
+      () => lifecycle.attach(database, reservation, candidate),
+    ),
+    finalizeAfterCommit: (operation, claim) => guarded(
+      () => lifecycle.finalizeAfterCommit(operation, claim),
+    ),
+    markCleanup: (operation, claim, request) => guarded(
+      () => lifecycle.markCleanup(operation, claim, request),
+    ),
+    completeCleanup: (operation, claim) => guarded(
+      () => lifecycle.completeCleanup(operation, claim),
+    ),
+    recover: (request) => guarded(() => lifecycle.recover(request))
+  };
+}
+
 function assertLinux(platform: NodeJS.Platform): void {
   if (platform !== "linux" || process.platform !== "linux") {
     throw new CapabilityFault("archive_containment_denied");
@@ -698,7 +727,8 @@ async function publishAssetFile(
   assetRoot: string,
   reservation: ReservedFilesystemOperation,
   bytes: Buffer,
-): Promise<PrivateStorageDescriptor> {
+  persistence: PrivateFilesystemCapabilityPersistencePort,
+): Promise<AssetPublicationCandidate> {
   if (reservation.resourceKind !== "asset"
     || (reservation.purpose !== "asset_original" && reservation.purpose !== "asset_derivative")) {
     throw new CapabilityFault("asset_storage_unavailable");
@@ -710,9 +740,10 @@ async function publishAssetFile(
   const temporaryPath = descriptorPath(parent, temporaryName);
   const finalPath = descriptorPath(parent, finalName);
   const relativePath = `${directoryName}/${finalName}`;
+  const temporaryRelativePath = `${directoryName}/${temporaryName}`;
   let handle: FileHandle | undefined;
   let identity: FileIdentity | undefined;
-  let published = false;
+  let candidate: AssetPublicationCandidate | undefined;
   try {
     handle = await open(
       temporaryPath,
@@ -728,16 +759,37 @@ async function publishAssetFile(
     if (identity.size !== BigInt(bytes.byteLength)) {
       throw new CapabilityFault("asset_content_invalid");
     }
+    await handle.chmod(0o440);
+    await handle.sync();
+    identity = identityOf(await handle.stat({ bigint: true }));
+    const preparedMeasurement = await measureHandleContent(handle, identity.size);
+    const preparedIdentity = identityOf(await handle.stat({ bigint: true }));
+    if (!sameIdentity(identity, preparedIdentity)
+      || preparedMeasurement.byteLength !== bytes.byteLength
+      || preparedMeasurement.sha256 !== rawSha256(bytes)) {
+      throw new CapabilityFault("filesystem_race_detected");
+    }
+    identity = preparedIdentity;
+    const temporaryDescriptor = privateDescriptor(
+      temporaryRelativePath,
+      identity,
+      preparedMeasurement.sha256,
+    );
+    candidate = await persistence.issuePublicationCandidate(reservation, {
+      deliveryRelativePath: relativePath,
+      cleanupDescriptors: [
+        temporaryDescriptor,
+        { ...temporaryDescriptor, relativePath }
+      ]
+    });
     await link(temporaryPath, finalPath);
     await unlink(temporaryPath);
-    published = true;
     const opened = await lstat(finalPath, { bigint: true });
     if (opened.isSymbolicLink()
       || !opened.isFile()
-      || !sameObject(identity, identityOf(opened as never))) {
+      || !sameRenamedIdentity(identity, identityOf(opened as never))) {
       throw new CapabilityFault("filesystem_race_detected");
     }
-    await handle.chmod(0o440);
     await handle.sync();
     identity = identityOf(await handle.stat({ bigint: true }));
     const measured = await measureHandleContent(handle, identity.size);
@@ -747,12 +799,14 @@ async function publishAssetFile(
       || measured.sha256 !== rawSha256(bytes)) {
       throw new CapabilityFault("filesystem_race_detected");
     }
-    return privateDescriptor(relativePath, finalIdentity, measured.sha256);
+    const descriptor = privateDescriptor(relativePath, finalIdentity, measured.sha256);
+    await persistence.completePublicationCandidate(reservation, candidate, descriptor);
+    return candidate;
   } catch (error) {
-    if (identity) {
+    if (identity && !candidate) {
       await cleanupIdentitySafely(
         assetRoot,
-        published ? relativePath : `${directoryName}/${temporaryName}`,
+        temporaryRelativePath,
         identity,
       ).catch(() => undefined);
     }
@@ -776,7 +830,7 @@ export function createPortableArchiveFilesystemAdapter(
   }
   const uploads = new WeakMap<object, UploadRecord>();
   const activeStagedRecords = new Map<PortableStagedInput, ActiveStagedRecord>();
-  const publicationLifecycle = createDurableFilesystemLifecycle(options.persistence.journal);
+  const publicationLifecycle = createSafeDurableFilesystemLifecycle(options.persistence.journal);
 
   async function loadStagedRecord(
     owner: ImportOwnerScope,
@@ -1123,7 +1177,6 @@ export function createPortableArchiveFilesystemAdapter(
     publicationLifecycle,
 
     async publishAssetCandidate(reservation, input) {
-      let descriptor: PrivateStorageDescriptor | undefined;
       try {
         assertLinux(platform);
         if (reservation.resourceKind !== "asset"
@@ -1137,16 +1190,8 @@ export function createPortableArchiveFilesystemAdapter(
         }
         const bytes = Buffer.from(input.content);
         await decodedAssetMetadata(bytes, input.mimeType, maxImagePixels, maxImagePages);
-        descriptor = await publishAssetFile(options.assetRoot, reservation, bytes);
-        return options.persistence.issuePublicationCandidate(reservation, descriptor);
+        return await publishAssetFile(options.assetRoot, reservation, bytes, options.persistence);
       } catch (error) {
-        if (descriptor) {
-          await cleanupIdentitySafely(
-            options.assetRoot,
-            descriptor.relativePath,
-            persistedIdentity(descriptor),
-          ).catch(() => undefined);
-        }
         throw mapAssetFailure(error);
       }
     },
@@ -1195,11 +1240,11 @@ export function createPortableArchiveFilesystemAdapter(
         const preparation = await options.persistence.preparePublicationCleanup(operation, claim);
         if (preparation.outcome === "already_cleaned") return { outcome: "already_cleaned" };
         if (preparation.outcome !== "cleanup_required") return { outcome: preparation.outcome };
-        if (preparation.descriptor) {
+        for (const descriptor of preparation.descriptors) {
           await cleanupIdentitySafely(
             options.assetRoot,
-            preparation.descriptor.relativePath,
-            persistedIdentity(preparation.descriptor),
+            descriptor.relativePath,
+            persistedIdentity(descriptor),
           );
         }
         return publicationLifecycle.completeCleanup(operation, claim);

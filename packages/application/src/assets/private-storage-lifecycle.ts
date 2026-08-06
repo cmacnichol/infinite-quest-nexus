@@ -40,6 +40,12 @@ export type PrivateStorageDescriptor = Readonly<{
   byteLength: number;
 }>;
 
+/** Durable cleanup authority persisted before a temporary asset is adopted. */
+export type PrivatePublicationPreparation = Readonly<{
+  deliveryRelativePath: string;
+  cleanupDescriptors: readonly [PrivateStorageDescriptor, ...PrivateStorageDescriptor[]];
+}>;
+
 export type DurableFilesystemTransactionContext = object;
 export type DurableFilesystemPurpose =
   | "asset_original"
@@ -172,7 +178,7 @@ export type PrivateCapabilityCleanupPreparation =
   | Readonly<{ outcome: "already_cleaned" | "stale" }>;
 
 export type PrivatePublicationCleanupPreparation =
-  | Readonly<{ outcome: "cleanup_required"; descriptor: PrivateStorageDescriptor | null }>
+  | Readonly<{ outcome: "cleanup_required"; descriptors: readonly PrivateStorageDescriptor[] }>
   | Readonly<{ outcome: "already_cleaned" | "stale" | "lease_lost" }>;
 
 export type PrivateCapabilityCleanupCompletion = Readonly<{
@@ -214,8 +220,13 @@ export interface PrivateFilesystemCapabilityPersistencePort extends PrivateStora
   ): Promise<PrivateCapabilityCleanupCompletion>;
   issuePublicationCandidate(
     reservation: ReservedFilesystemOperation,
-    descriptor: PrivateStorageDescriptor,
+    preparation: PrivatePublicationPreparation,
   ): Promise<AssetPublicationCandidate>;
+  completePublicationCandidate(
+    reservation: ReservedFilesystemOperation,
+    candidate: AssetPublicationCandidate,
+    descriptor: PrivateStorageDescriptor,
+  ): Promise<void>;
   preparePublicationCleanup(
     operation: ReservedFilesystemOperation | AttachedFilesystemOperation,
     claim: DurableFilesystemRecoveryClaim,

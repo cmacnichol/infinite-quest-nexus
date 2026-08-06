@@ -349,7 +349,11 @@ describe("14e1R2 private durable filesystem lifecycle", () => {
       contentHash: "b".repeat(64),
       byteLength: 128
     };
-    const candidate = await (fake as FakePublicationCandidateIssuer).issuePublicationCandidate(reservation, descriptor);
+    const candidate = await (fake as FakePublicationCandidateIssuer).issuePublicationCandidate(reservation, {
+      deliveryRelativePath: descriptor.relativePath,
+      cleanupDescriptors: [descriptor]
+    });
+    await fake.completePublicationCandidate(reservation, candidate, descriptor);
     const database = {} as DurableFilesystemTransactionContext;
     // @ts-expect-error A reservation cannot be finalized until its candidate is transactionally attached.
     const invalidFinalizeInput: Parameters<typeof lifecycle.finalizeAfterCommit>[0] = reservation;
@@ -374,12 +378,17 @@ describe("14e1R2 private durable filesystem lifecycle", () => {
     const lifecycle = createDurableFilesystemLifecycle(fake.journal);
     const scope = { resourceKind: "asset" as const, ownerUserId, assetId };
     const reserved = await lifecycle.reserve(scope, { purpose: "asset_original", leaseOwner: "transaction-owner", expiresAt: "2099-08-05T13:00:00.000Z" });
-    const candidate = await fake.issuePublicationCandidate(reserved.operation, {
+    const descriptor: PrivateStorageDescriptor = {
       relativePath: "objects/aa/content.png",
       identity: { deviceId: "dev-1", fileId: "inode-7", changeToken: "ctime-9" },
       contentHash: "b".repeat(64),
       byteLength: 128
+    };
+    const candidate = await fake.issuePublicationCandidate(reserved.operation, {
+      deliveryRelativePath: descriptor.relativePath,
+      cleanupDescriptors: [descriptor]
     });
+    await fake.completePublicationCandidate(reserved.operation, candidate, descriptor);
     const attached = await lifecycle.attach({} as DurableFilesystemTransactionContext, reserved.operation, candidate);
     if (attached.outcome !== "attached") throw new Error("expected attached outcome");
 

@@ -13,9 +13,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFakeDurableFilesystemLifecycle } from "../../packages/application/src/assets/private-storage-lifecycle-fake.js";
-import type { DurableFilesystemScope } from "../../packages/application/src/assets/private-storage-lifecycle.js";
+import type {
+  DurableFilesystemJournalPort,
+  DurableFilesystemScope,
+  PrivateStorageDescriptor,
+  ReservedFilesystemOperation
+} from "../../packages/application/src/assets/private-storage-lifecycle.js";
 import type { ImportOwnerScope } from "../../packages/application/src/imports/types.js";
 import {
   createPortableArchiveFilesystemAdapter,
@@ -48,7 +53,45 @@ const png = Buffer.from(
 );
 const roots: string[] = [];
 
+const filesystemFaultHooks = vi.hoisted(() => ({
+  afterLink: undefined as undefined | ((source: string, target: string) => Promise<boolean>),
+  beforeRename: undefined as undefined | ((source: string, target: string) => Promise<boolean>),
+  beforeUnlink: undefined as undefined | ((path: string) => Promise<boolean>)
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  async function runHook(
+    name: keyof typeof filesystemFaultHooks,
+    args: string[],
+  ): Promise<void> {
+    const hook = filesystemFaultHooks[name];
+    if (!hook) return;
+    filesystemFaultHooks[name] = undefined;
+    const consumed = await (hook as (...values: string[]) => Promise<boolean>)(...args);
+    if (!consumed) filesystemFaultHooks[name] = hook as never;
+  }
+  return {
+    ...actual,
+    link: async (source: string, target: string) => {
+      await actual.link(source, target);
+      await runHook("afterLink", [source, target]);
+    },
+    rename: async (source: string, target: string) => {
+      await runHook("beforeRename", [source, target]);
+      return actual.rename(source, target);
+    },
+    unlink: async (path: string) => {
+      await runHook("beforeUnlink", [path]);
+      return actual.unlink(path);
+    }
+  };
+});
+
 afterEach(async () => {
+  filesystemFaultHooks.afterLink = undefined;
+  filesystemFaultHooks.beforeRename = undefined;
+  filesystemFaultHooks.beforeUnlink = undefined;
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -86,8 +129,9 @@ async function onlyPublishedAsset(assetRoot: string): Promise<string> {
 
 async function expectSafeFailure(
   operation: Promise<unknown>,
-  code: SafeFilesystemCapabilityFailure["code"]
-): Promise<void> {
+  code: SafeFilesystemCapabilityFailure["code"],
+  forbidden: readonly string[] = [],
+): Promise<SafeFilesystemCapabilityFailure> {
   try {
     await operation;
     throw new Error(`Expected ${code}.`);
@@ -95,7 +139,29 @@ async function expectSafeFailure(
     expect(error).toEqual({ code });
     expect(error).not.toBeInstanceOf(Error);
     expect(Object.keys(error as object)).toEqual(["code"]);
+    expect(Object.isFrozen(error)).toBe(true);
+    const serialized = JSON.stringify(error);
+    for (const value of forbidden) expect(serialized).not.toContain(value);
+    return error as SafeFilesystemCapabilityFailure;
   }
+}
+
+const publicationDescriptor: PrivateStorageDescriptor = {
+  relativePath: "originals/private.asset",
+  identity: {
+    deviceId: "1",
+    fileId: "2",
+    changeToken: "3:4:5"
+  },
+  contentHash: "a".repeat(64),
+  byteLength: png.byteLength
+};
+
+function publicationPreparation(descriptor: PrivateStorageDescriptor) {
+  return {
+    deliveryRelativePath: descriptor.relativePath,
+    cleanupDescriptors: [descriptor] as const
+  };
 }
 
 describe("Task 14e2aR persisted filesystem capability", () => {
@@ -309,4 +375,260 @@ describe("Task 14e2aR persisted filesystem capability", () => {
     await expect(restarted.publicationLifecycle.finalizeAfterCommit(recovered[0].operation, recovered[0].claim))
       .resolves.toEqual({ outcome: "finalized" });
   });
+
+  it.each([
+    "reserve",
+    "attach",
+    "finalizeAfterCommit",
+    "markCleanup",
+    "completeCleanup",
+    "recover"
+  ] as const)("maps a hostile %s journal failure to one frozen safe diagnostic", async (method) => {
+    const archiveRoot = await temporaryRoot("iq-hostile-journal-archive-");
+    const assetRoot = await temporaryRoot("iq-hostile-journal-assets-");
+    const persistence = createFakeDurableFilesystemLifecycle();
+    const reserved = await persistence.journal.reserve(assetScope, {
+      purpose: "asset_original",
+      leaseOwner: "publisher",
+      expiresAt: "2099-08-05T13:00:00.000Z"
+    });
+    const candidate = await persistence.issuePublicationCandidate(
+      reserved.operation,
+      publicationPreparation(publicationDescriptor),
+    );
+    await persistence.completePublicationCandidate(reserved.operation, candidate, publicationDescriptor);
+    const attached = await persistence.journal.attach({}, reserved.operation, candidate);
+    if (attached.outcome !== "attached") throw new Error("Expected hostile-journal fixture attachment.");
+    const privateFailure = "postgres-password=private-secret /srv/private/assets";
+    const fail = async () => {
+      throw new Error(privateFailure);
+    };
+    const hostileJournal: DurableFilesystemJournalPort = {
+      reserve: fail,
+      attach: fail,
+      finalizeAfterCommit: fail,
+      markCleanup: fail,
+      completeCleanup: fail,
+      recover: fail
+    };
+    const adapter = createPortableArchiveFilesystemAdapter({
+      archiveRoot,
+      assetRoot,
+      limits,
+      persistence: { ...persistence, journal: hostileJournal }
+    });
+    let operation: Promise<unknown>;
+    switch (method) {
+      case "reserve":
+        operation = adapter.publicationLifecycle.reserve(assetScope, {
+          purpose: "asset_original",
+          leaseOwner: "publisher",
+          expiresAt: "2099-08-05T13:00:00.000Z"
+        });
+        break;
+      case "attach":
+        operation = adapter.publicationLifecycle.attach({}, reserved.operation, candidate);
+        break;
+      case "finalizeAfterCommit":
+        operation = adapter.publicationLifecycle.finalizeAfterCommit(attached.operation, attached.claim);
+        break;
+      case "markCleanup":
+        operation = adapter.publicationLifecycle.markCleanup(
+          attached.operation,
+          attached.claim,
+          { cause: "rollback" },
+        );
+        break;
+      case "completeCleanup":
+        operation = adapter.publicationLifecycle.completeCleanup(attached.operation, attached.claim);
+        break;
+      case "recover":
+        operation = adapter.publicationLifecycle.recover({ leaseOwner: "reaper", leaseSeconds: 30, limit: 1 });
+        break;
+    }
+    await expectSafeFailure(operation, "asset_storage_unavailable", [
+      privateFailure,
+      "private-secret",
+      "/srv/private/assets"
+    ]);
+  });
+
+  it("rejects forged owner and purpose at publication-candidate issuance", async () => {
+    const persistence = createFakeDurableFilesystemLifecycle();
+    const reserved = await persistence.journal.reserve(assetScope, {
+      purpose: "asset_original",
+      leaseOwner: "publisher",
+      expiresAt: "2099-08-05T13:00:00.000Z"
+    });
+
+    await expect(persistence.issuePublicationCandidate({
+      ...reserved.operation,
+      ownerUserId: foreignOwner.ownerUserId
+    } as ReservedFilesystemOperation, publicationPreparation(publicationDescriptor))).rejects.toThrow();
+    await expect(persistence.issuePublicationCandidate({
+      ...reserved.operation,
+      purpose: "asset_derivative"
+    } as ReservedFilesystemOperation, publicationPreparation(publicationDescriptor))).rejects.toThrow();
+  });
+
+  it("does not attach a prepared candidate before its exact delivery identity is completed", async () => {
+    const persistence = createFakeDurableFilesystemLifecycle();
+    const reserved = await persistence.journal.reserve(assetScope, {
+      purpose: "asset_original",
+      leaseOwner: "publisher",
+      expiresAt: "2099-08-05T13:00:00.000Z"
+    });
+    const candidate = await persistence.issuePublicationCandidate(
+      reserved.operation,
+      publicationPreparation(publicationDescriptor),
+    );
+
+    await expect(persistence.journal.attach({}, reserved.operation, candidate))
+      .resolves.toEqual({ outcome: "candidate_mismatch" });
+    await persistence.completePublicationCandidate(reserved.operation, candidate, publicationDescriptor);
+    await expect(persistence.journal.attach({}, reserved.operation, candidate))
+      .resolves.toMatchObject({ outcome: "attached" });
+  });
+
+  it.each(["owner", "purpose"] as const)(
+    "denies publication attachment with a forged %s",
+    async (field) => {
+      const persistence = createFakeDurableFilesystemLifecycle();
+      const reserved = await persistence.journal.reserve(assetScope, {
+        purpose: "asset_original",
+        leaseOwner: "publisher",
+        expiresAt: "2099-08-05T13:00:00.000Z"
+      });
+      const candidate = await persistence.issuePublicationCandidate(
+        reserved.operation,
+        publicationPreparation(publicationDescriptor),
+      );
+      await persistence.completePublicationCandidate(reserved.operation, candidate, publicationDescriptor);
+      const forged = {
+        ...reserved.operation,
+        ...(field === "owner"
+          ? { ownerUserId: foreignOwner.ownerUserId }
+          : { purpose: "asset_derivative" as const })
+      } as ReservedFilesystemOperation;
+
+      await expect(persistence.journal.attach({}, forged, candidate))
+        .resolves.toEqual({ outcome: "stale" });
+    }
+  );
+
+  it("denies locator redemption to foreign scope and after cleanup begins or completes", async () => {
+    const persistence = createFakeDurableFilesystemLifecycle();
+    const reserved = await persistence.journal.reserve(assetScope, {
+      purpose: "asset_original",
+      leaseOwner: "publisher",
+      expiresAt: "2099-08-05T13:00:00.000Z"
+    });
+    const candidate = await persistence.issuePublicationCandidate(
+      reserved.operation,
+      publicationPreparation(publicationDescriptor),
+    );
+    await persistence.completePublicationCandidate(reserved.operation, candidate, publicationDescriptor);
+    const attached = await persistence.journal.attach({}, reserved.operation, candidate);
+    if (attached.outcome !== "attached") throw new Error("Expected locator fixture attachment.");
+
+    await expect(persistence.redeemStorageLocator({
+      ...assetScope,
+      ownerUserId: foreignOwner.ownerUserId
+    }, attached.locator)).resolves.toBeNull();
+    await expect(persistence.redeemStorageLocator(assetScope, attached.locator))
+      .resolves.toEqual(publicationDescriptor);
+    await persistence.journal.markCleanup(attached.operation, attached.claim, { cause: "rollback" });
+    await expect(persistence.redeemStorageLocator(assetScope, attached.locator)).resolves.toBeNull();
+    await persistence.journal.completeCleanup(attached.operation, attached.claim);
+    await expect(persistence.redeemStorageLocator(assetScope, attached.locator)).resolves.toBeNull();
+  });
+
+  it("persists cleanup authority while the publication is still an exclusive temporary file", async () => {
+    const archiveRoot = await temporaryRoot("iq-pre-adoption-archive-");
+    const assetRoot = await temporaryRoot("iq-pre-adoption-assets-");
+    const persistence = createFakeDurableFilesystemLifecycle();
+    const issueCandidate = persistence.issuePublicationCandidate.bind(persistence);
+    persistence.issuePublicationCandidate = async (...args) => {
+      const files = await readdir(assetRoot, { recursive: true });
+      expect(files.filter((path) => path.endsWith(".asset"))).toEqual([]);
+      expect(files.filter((path) => path.endsWith(".tmp"))).toHaveLength(1);
+      return issueCandidate(...args);
+    };
+    const adapter = createPortableArchiveFilesystemAdapter({ archiveRoot, assetRoot, limits, persistence });
+    const reserved = await adapter.publicationLifecycle.reserve(assetScope, {
+      purpose: "asset_original",
+      leaseOwner: "publisher",
+      expiresAt: "2099-08-05T13:00:00.000Z"
+    });
+
+    await expect(adapter.publishAssetCandidate(reserved.operation, {
+      content: png,
+      mimeType: "image/png"
+    })).resolves.toEqual(expect.any(String));
+  });
+
+  it.each(["after_link", "before_temporary_unlink"] as const)(
+    "recovers both publication aliases after a %s interruption and retries without EEXIST",
+    async (fault) => {
+      const archiveRoot = await temporaryRoot("iq-adoption-fault-archive-");
+      const assetRoot = await temporaryRoot("iq-adoption-fault-assets-");
+      const persistence = createFakeDurableFilesystemLifecycle();
+      const adapter = createPortableArchiveFilesystemAdapter({ archiveRoot, assetRoot, limits, persistence });
+      const reserved = await adapter.publicationLifecycle.reserve(assetScope, {
+        purpose: "asset_original",
+        leaseOwner: "publisher",
+        expiresAt: "2099-08-05T13:00:00.000Z"
+      });
+      const interruption = Object.assign(new Error("private crash /srv/private/assets"), { code: "EIO" });
+      if (fault === "after_link") {
+        filesystemFaultHooks.afterLink = async () => {
+          throw interruption;
+        };
+      } else {
+        filesystemFaultHooks.beforeUnlink = async (path) => {
+          if (!path.endsWith(".tmp")) return false;
+          throw interruption;
+        };
+      }
+      filesystemFaultHooks.beforeRename = async (_source, target) => {
+        if (!target.includes(".cleanup-")) return false;
+        throw interruption;
+      };
+
+      await expectSafeFailure(adapter.publishAssetCandidate(reserved.operation, {
+        content: png,
+        mimeType: "image/png"
+      }), "asset_storage_unavailable", ["private crash", "/srv/private/assets"]);
+      filesystemFaultHooks.beforeRename = undefined;
+      const interruptedFiles = await readdir(assetRoot, { recursive: true });
+      expect(interruptedFiles.some((path) => path.endsWith(".asset"))).toBe(true);
+
+      const recovered = await adapter.publicationLifecycle.recover({
+        leaseOwner: "reaper",
+        leaseSeconds: 30,
+        limit: 1
+      });
+      expect(recovered).toHaveLength(1);
+      if (recovered[0]?.action !== "cleanup") throw new Error("Expected cleanup recovery.");
+      await expect(adapter.publicationLifecycle.markCleanup(
+        recovered[0].operation,
+        recovered[0].claim,
+        { cause: "recovery" },
+      )).resolves.toEqual({ outcome: "cleanup_pending" });
+      await expect(adapter.cleanupPublishedAsset(recovered[0].operation, recovered[0].claim))
+        .resolves.toEqual({ outcome: "cleaned" });
+      const cleanedFiles = await readdir(assetRoot, { recursive: true });
+      expect(cleanedFiles.filter((path) => path.endsWith(".asset") || path.endsWith(".tmp"))).toEqual([]);
+
+      const retry = await adapter.publicationLifecycle.reserve(assetScope, {
+        purpose: "asset_original",
+        leaseOwner: "publisher",
+        expiresAt: "2099-08-05T13:00:00.000Z"
+      });
+      await expect(adapter.publishAssetCandidate(retry.operation, {
+        content: png,
+        mimeType: "image/png"
+      })).resolves.toEqual(expect.any(String));
+    }
+  );
 });

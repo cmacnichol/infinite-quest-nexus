@@ -8,6 +8,7 @@ import type {
   DurableFilesystemRecoveryRecord,
   DurableFilesystemScope,
   PrivateFilesystemCapabilityPersistencePort,
+  PrivatePublicationPreparation,
   PrivateStorageLocatorRedemptionPort,
   PrivateStorageDescriptor,
   ReservedFilesystemOperation
@@ -25,7 +26,7 @@ import {
 export interface FakePublicationCandidateIssuer {
   issuePublicationCandidate(
     reservation: ReservedFilesystemOperation,
-    descriptor: PrivateStorageDescriptor,
+    preparation: PrivatePublicationPreparation,
   ): Promise<AssetPublicationCandidate>;
 }
 
@@ -46,6 +47,7 @@ type OperationRecord = Readonly<{
   workVersion: number;
   activeClaim: DurableFilesystemRecoveryClaim;
   descriptor?: PrivateStorageDescriptor;
+  cleanupDescriptors?: readonly PrivateStorageDescriptor[];
 };
 
 type PersistedCapabilityState = "ready" | "cleanup_pending" | "cleaned";
@@ -124,9 +126,12 @@ export function createFakeDurableFilesystemLifecycle(): FakeDurableFilesystemLif
   const operationById = new Map<DurableFilesystemOperationId, OperationRecord>();
   const candidateByHash = new Map<string, Readonly<{
     operationId: DurableFilesystemOperationId;
-    descriptor: PrivateStorageDescriptor;
-  }>>();
+    preparation: PrivatePublicationPreparation;
+  }> & {
+    descriptor?: PrivateStorageDescriptor;
+  }>();
   const locatorByHash = new Map<string, Readonly<{
+    operationId: DurableFilesystemOperationId;
     scope: DurableFilesystemScope;
     descriptor: PrivateStorageDescriptor;
   }>>();
@@ -202,24 +207,30 @@ export function createFakeDurableFilesystemLifecycle(): FakeDurableFilesystemLif
     async attach(_database, reservation, candidate) {
       const operation = operationById.get(reservation.operationId);
       const publication = candidateByHash.get(await tokenHash(candidate));
-      if (!operation || operation.state !== "reserved") return { outcome: "stale" };
-      if (!publication || publication.operationId !== reservation.operationId) {
+      if (!operation
+        || operation.state !== "reserved"
+        || !operationMatches(operation, reservation)) return { outcome: "stale" };
+      if (!publication
+        || publication.operationId !== reservation.operationId
+        || !publication.descriptor) {
         return { outcome: "candidate_mismatch" };
       }
       operation.state = "attached";
       operation.descriptor = publication.descriptor;
       const locator = nextCapabilityToken() as DatabaseIssuedStorageLocator;
-      const scope: DurableFilesystemScope = reservation.resourceKind === "asset"
-        ? { resourceKind: "asset", ownerUserId: reservation.ownerUserId, assetId: reservation.assetId }
-        : { resourceKind: "portable", ownerUserId: reservation.ownerUserId, operationScopeId: reservation.operationScopeId };
+      const canonical = operation.reservation;
+      const scope: DurableFilesystemScope = canonical.resourceKind === "asset"
+        ? { resourceKind: "asset", ownerUserId: canonical.ownerUserId, assetId: canonical.assetId }
+        : { resourceKind: "portable", ownerUserId: canonical.ownerUserId, operationScopeId: canonical.operationScopeId };
       locatorByHash.set(await tokenHash(locator), {
+        operationId: canonical.operationId,
         scope,
         descriptor: publication.descriptor
       });
       const attached = {
         ...scope,
-        operationId: reservation.operationId,
-        purpose: reservation.purpose
+        operationId: canonical.operationId,
+        purpose: canonical.purpose
       } as AttachedFilesystemOperation;
       observedEvents.push("attached");
       return { outcome: "attached", operation: attached, locator, claim: operation.activeClaim };
@@ -336,18 +347,48 @@ export function createFakeDurableFilesystemLifecycle(): FakeDurableFilesystemLif
 
   return {
     journal,
-    async issuePublicationCandidate(reservation, descriptor) {
+    async issuePublicationCandidate(reservation, preparation) {
       const operation = operationById.get(reservation.operationId);
-      if (!operation || operation.state !== "reserved") throw new Error("filesystem_operation_not_reserved");
+      if (!operation
+        || operation.state !== "reserved"
+        || operation.cleanupDescriptors
+        || !operationMatches(operation, reservation)) {
+        throw new Error("filesystem_operation_not_reserved");
+      }
       const candidate = nextCapabilityToken() as AssetPublicationCandidate;
-      candidateByHash.set(await tokenHash(candidate), { operationId: reservation.operationId, descriptor });
-      operation.descriptor = descriptor;
+      candidateByHash.set(await tokenHash(candidate), {
+        operationId: reservation.operationId,
+        preparation
+      });
+      operation.cleanupDescriptors = [...preparation.cleanupDescriptors];
       observedEvents.push("candidate_issued");
       return candidate;
     },
+    async completePublicationCandidate(reservation, candidate, descriptor) {
+      const operation = operationById.get(reservation.operationId);
+      const publication = candidateByHash.get(await tokenHash(candidate));
+      if (!operation
+        || operation.state !== "reserved"
+        || !operationMatches(operation, reservation)
+        || !publication
+        || publication.operationId !== reservation.operationId
+        || publication.descriptor
+        || publication.preparation.deliveryRelativePath !== descriptor.relativePath
+        || publication.preparation.cleanupDescriptors[0].identity.deviceId !== descriptor.identity.deviceId
+        || publication.preparation.cleanupDescriptors[0].identity.fileId !== descriptor.identity.fileId
+        || publication.preparation.cleanupDescriptors[0].contentHash !== descriptor.contentHash
+        || publication.preparation.cleanupDescriptors[0].byteLength !== descriptor.byteLength) {
+        throw new Error("filesystem_candidate_invalid");
+      }
+      publication.descriptor = descriptor;
+      operation.descriptor = descriptor;
+    },
     async redeemStorageLocator(scope, locator) {
       const record = locatorByHash.get(await tokenHash(locator));
+      const operation = record ? operationById.get(record.operationId) : undefined;
       if (!record
+        || !operation
+        || (operation.state !== "attached" && operation.state !== "finalized")
         || record.scope.ownerUserId !== scope.ownerUserId
         || record.scope.resourceKind !== scope.resourceKind
         || (record.scope.resourceKind === "asset" && scope.resourceKind === "asset" && record.scope.assetId !== scope.assetId)
@@ -393,7 +434,10 @@ export function createFakeDurableFilesystemLifecycle(): FakeDurableFilesystemLif
       if (!record) return { outcome: "stale" };
       if (record.state === "cleaned") return { outcome: "already_cleaned" };
       if (record.state !== "cleanup_pending") return { outcome: "stale" };
-      return { outcome: "cleanup_required", descriptor: record.descriptor ?? null };
+      return {
+        outcome: "cleanup_required",
+        descriptors: record.cleanupDescriptors ?? []
+      };
     },
     events() {
       return [...observedEvents];
