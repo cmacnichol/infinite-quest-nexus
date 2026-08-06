@@ -7,8 +7,12 @@ import type {
   PortableArchiveExportView,
   PortableImportCommitCommand,
   PortableImportCommitView,
+  PortableImportKind,
   PortableImportPreviewCommand,
   PortableImportPreviewView,
+  PortableImportResultRetrieval,
+  PortableImportResultView,
+  ImportOwnerScope,
   PortablePreviewDestination,
   PortablePreviewCleanupCommand
 } from "./types.js";
@@ -21,7 +25,11 @@ export interface PortableArchivePort {
   commitPortableImport<Preview extends PortableImportPreviewCommand>(
     database: ImportTransactionContext,
     command: PortableImportCommitCommand<Preview>,
-  ): Promise<PortableImportCommitView>;
+  ): Promise<PortableImportCommitView<Preview["kind"]>>;
+  retrievePortableImportResult<Kind extends PortableImportKind>(
+    scope: ImportOwnerScope,
+    retrieval: PortableImportResultRetrieval<Kind>,
+  ): Promise<PortableImportResultView<Kind>>;
   exportCampaignArchive(scope: CampaignArchiveScope): Promise<PortableArchiveExportView>;
   downloadPortableExport(
     scope: CampaignArchiveScope,

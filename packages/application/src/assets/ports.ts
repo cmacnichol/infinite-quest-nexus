@@ -6,6 +6,10 @@ import type {
   AssetLibraryView,
   AssetMetadataBackfillClaim,
   AssetMetadataBackfillClaimRequest,
+  AssetMetadataBackfillHeartbeatRequest,
+  AssetMetadataBackfillHeartbeatResult,
+  AssetMetadataBackfillRequeueRequest,
+  AssetMetadataBackfillRequeueResult,
   AssetMetadataBackfillResult,
   AssetMetadataUpdateCommand,
   AssetMetadataUpdateView,
@@ -34,6 +38,14 @@ export interface AssetSelectionPort {
 export interface AssetMetadataBackfillPort {
   updateAssetMetadata(scope: AssetScope, command: AssetMetadataUpdateCommand): Promise<AssetMetadataUpdateView>;
   claimNextMetadataBackfill(request: AssetMetadataBackfillClaimRequest): Promise<AssetMetadataBackfillClaim | null>;
+  heartbeatMetadataBackfill(
+    claim: AssetMetadataBackfillClaim,
+    request: AssetMetadataBackfillHeartbeatRequest,
+  ): Promise<AssetMetadataBackfillHeartbeatResult>;
+  requeueMetadataBackfill(
+    claim: AssetMetadataBackfillClaim,
+    request: AssetMetadataBackfillRequeueRequest,
+  ): Promise<AssetMetadataBackfillRequeueResult>;
   backfillMetadata(
     database: AssetTransactionContext,
     claim: AssetMetadataBackfillClaim,

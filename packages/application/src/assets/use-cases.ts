@@ -2,6 +2,7 @@ import type { AssetApplication, AssetApplicationDependencies } from "./ports.js"
 import type {
   AssetMetadataBackfillClaim,
   AssetMetadataBackfillClaimRequest,
+  AssetMetadataBackfillHeartbeatRequest,
   AssetMetadataUpdateCommand,
   AssetScope,
   AssetTransactionContext,
@@ -32,6 +33,24 @@ function requireAsset(scope: AssetScope): void {
 
 function requireWorker(request: AssetMetadataBackfillClaimRequest): void {
   if (!nonBlank(request.workerId) || request.leaseSeconds <= 0) {
+    throw new AssetApplicationError("worker_scope_required");
+  }
+}
+
+function requireLease(claim: AssetMetadataBackfillClaim): void {
+  requireAsset(claim);
+  if (!nonBlank(claim.leaseId)
+    || !nonBlank(claim.leaseOwner)
+    || !Number.isInteger(claim.workVersion)
+    || claim.workVersion <= 0
+    || !nonBlank(claim.leaseExpiresAt)
+    || !Number.isFinite(Date.parse(claim.leaseExpiresAt))) {
+    throw new AssetApplicationError("worker_scope_required");
+  }
+}
+
+function requireHeartbeat(request: AssetMetadataBackfillHeartbeatRequest): void {
+  if (!Number.isInteger(request.leaseSeconds) || request.leaseSeconds <= 0) {
     throw new AssetApplicationError("worker_scope_required");
   }
 }
@@ -93,9 +112,17 @@ export function createAssetApplication(dependencies: AssetApplicationDependencie
       requireWorker(request);
       return dependencies.metadata.claimNextMetadataBackfill(request);
     },
+    heartbeatMetadataBackfill: async (claim, request) => {
+      requireLease(claim);
+      requireHeartbeat(request);
+      return dependencies.metadata.heartbeatMetadataBackfill(claim, request);
+    },
+    requeueMetadataBackfill: async (claim, request) => {
+      requireLease(claim);
+      return dependencies.metadata.requeueMetadataBackfill(claim, request);
+    },
     backfillMetadata: async (database: AssetTransactionContext, claim: AssetMetadataBackfillClaim) => {
-      requireAsset(claim);
-      if (!nonBlank(claim.leaseId)) throw new AssetApplicationError("worker_scope_required");
+      requireLease(claim);
       return dependencies.metadata.backfillMetadata(database, claim);
     }
   };

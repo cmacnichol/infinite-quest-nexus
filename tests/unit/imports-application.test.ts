@@ -7,6 +7,7 @@ import type {
 import {
   createImportApplication,
   toPortableArchiveExportRetrieval,
+  toPortableImportResultRetrieval,
   toPortableImportedRecordId,
   toPortablePreviewHandle,
   toPortableSourceInstallationId,
@@ -69,8 +70,9 @@ function dependencies(worlds = portableWorld()): ImportApplicationDependencies {
   return {
     worlds,
     archives: {
-      previewPortableImport: vi.fn(async (command) => ({ previewHandle: toPortablePreviewHandle(`preview-${command.kind}`, command.destination), kind: command.kind, destination: command.destination, expiresAt: "2026-08-05T13:00:00.000Z", cleanupOwner: "application" as const, diagnostics: [] })),
-      commitPortableImport: vi.fn(async () => ({ importedRecordId: toPortableImportedRecordId("record-1"), duplicate: false, diagnostics: [] })),
+      previewPortableImport: vi.fn(async (command) => ({ previewHandle: toPortablePreviewHandle(`preview-${command.kind}`, command.destination), kind: command.kind, destination: command.destination, expiresAt: "2026-08-05T13:00:00.000Z", cleanupOwner: "application" as const, diagnostics: [], projection: {} as never })) as never,
+      commitPortableImport: vi.fn(async (_database, command) => ({ importedRecordId: toPortableImportedRecordId("record-1"), retrieval: toPortableImportResultRetrieval(`result-${command.kind}`), kind: command.kind, duplicate: false, diagnostics: [], result: {} as never })) as never,
+      retrievePortableImportResult: vi.fn(async () => ({ kind: "campaign_zip", result: {} as never, diagnostics: [] })) as never,
       exportCampaignArchive: vi.fn(async () => ({ retrieval: toPortableArchiveExportRetrieval("archive-retrieval-1"), contentType: "application/zip" as const, byteLength: 3 })),
       downloadPortableExport: vi.fn(async () => ({ content: new Uint8Array([1, 2, 3]), contentType: "application/zip" as const })),
       cleanupPreview: vi.fn(async () => undefined)

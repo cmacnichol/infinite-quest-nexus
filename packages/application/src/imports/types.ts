@@ -1,5 +1,11 @@
-import type { WorldImportRequest } from "@infinite-quest/contracts";
+import type {
+  CampaignArchivePreviewResponse,
+  CyoaImportPreviewResult,
+  StoryImportResult,
+  WorldImportRequest
+} from "@infinite-quest/contracts";
 import type { OwnerScope } from "../generation/types.js";
+import type { WorldImportPreviewView, WorldImportResultView } from "../world-campaign/types.js";
 
 export type ImportOwnerScope = OwnerScope;
 export type CampaignArchiveScope = ImportOwnerScope & Readonly<{
@@ -35,6 +41,14 @@ export type PortableStagedInput = string & Readonly<{
 declare const portableArchiveExportRetrievalBrand: unique symbol;
 export type PortableArchiveExportRetrieval = string & Readonly<{
   [portableArchiveExportRetrievalBrand]: true;
+}>;
+
+/** Owner-scoped durable result capability; it contains no path or transport state. */
+declare const portableImportResultRetrievalBrand: unique symbol;
+declare const portableImportResultKindBrand: unique symbol;
+export type PortableImportResultRetrieval<Kind extends PortableImportKind = PortableImportKind> = string & Readonly<{
+  [portableImportResultRetrievalBrand]: true;
+  [portableImportResultKindBrand]: (kind: Kind) => Kind;
 }>;
 
 export type PortableImportKind =
@@ -107,6 +121,64 @@ export type PortableImportPreviewCommand =
   | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "world_json" }>)
   | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "world_text" }>);
 
+/** Reuses the live route schema while replacing its raw token with our opaque handle. */
+export type CampaignZipPreviewProjection = Readonly<
+  Omit<CampaignArchivePreviewResponse, "previewToken" | "expiresAt">
+>;
+
+export type LegacyStoryPreviewProjection = Readonly<{
+  kind: "campaign";
+  title: string;
+  duplicate: boolean;
+  existingCampaignId: string | null;
+  valid: boolean;
+  counts: Readonly<{
+    turns: number;
+    completeHistoryCharacters: number;
+    estimatedHistoryTokens: number;
+  }>;
+  warnings: readonly string[];
+}>;
+
+export type InfiniteWorldsJsonPreviewProjection = Readonly<Omit<WorldImportPreviewView, "kind"> & {
+  kind: "world_json";
+  valid: boolean;
+  characters: readonly Readonly<{ index: number; name: string }>[];
+}>;
+
+export type CyoaPreviewProjection = Readonly<CyoaImportPreviewResult>;
+
+export type WorldTextPreviewProjection = Readonly<{
+  kind: "world_text";
+  valid: boolean;
+  requiresProvider: true;
+  warnings: readonly string[];
+  counts: Readonly<{ sourceCharacters: number; sourceWords: number }>;
+}>;
+
+export type StoryTextPreviewProjection = Readonly<{
+  kind: "story_text";
+  title: string;
+  duplicate: boolean;
+  existingCampaignId: string | null;
+  targetWorldId: string;
+  diagnostics: readonly string[];
+  characters: readonly Readonly<{ id: string; name: string }>[];
+  selectedCharacterId: string | null;
+  valid: boolean;
+  counts: LegacyStoryPreviewProjection["counts"];
+  warnings: readonly string[];
+}>;
+
+export type PortableImportPreviewProjectionFor<Kind extends PortableImportKind> =
+  Kind extends "campaign_zip" ? CampaignZipPreviewProjection
+    : Kind extends "legacy_story" ? LegacyStoryPreviewProjection
+      : Kind extends "infinite_worlds" | "world_json" ? InfiniteWorldsJsonPreviewProjection
+        : Kind extends "cyoa" ? CyoaPreviewProjection
+          : Kind extends "world_text" ? WorldTextPreviewProjection
+            : Kind extends "story_text" ? StoryTextPreviewProjection
+              : never;
+
 export type PortableImportPreviewView<Command extends PortableImportPreviewCommand = PortableImportPreviewCommand> = Readonly<{
   previewHandle: PortablePreviewHandle<Command["destination"]>;
   kind: Command["kind"];
@@ -115,6 +187,7 @@ export type PortableImportPreviewView<Command extends PortableImportPreviewComma
   expiresAt: string;
   cleanupOwner: "application";
   diagnostics: readonly PortableArchiveDiagnosticCode[];
+  projection: PortableImportPreviewProjectionFor<Command["kind"]>;
 }>;
 
 type PortableImportCommitBase<Preview extends PortableImportPreviewCommand> = ImportOwnerScope & Readonly<{
@@ -131,9 +204,50 @@ export type PortableImportCommitCommandFor<Preview extends PortableImportPreview
 export type PortableImportCommitCommand<Preview extends PortableImportPreviewCommand = PortableImportPreviewCommand> =
   PortableImportCommitCommandFor<Preview>;
 
-export type PortableImportCommitView = Readonly<{
-  importedRecordId: PortableImportedRecordId;
+export type CampaignArchiveImportResultProjection = Readonly<{
+  importId: string;
+  worldId: string;
+  worldVersionId: string;
+  campaignId: string;
   duplicate: boolean;
+  stats: Readonly<{
+    turnCount: number;
+    memoryCount: number;
+    summaryCount: number;
+    assetCount: number;
+    assetBytes: number;
+  }>;
+}>;
+
+export type LegacyStoryImportResultProjection = Readonly<StoryImportResult>;
+
+export type PortableWorldImportResultProjection = WorldImportResultView & Readonly<{
+  kind: "world";
+}>;
+
+export type PortableStoryImportResultProjection = LegacyStoryImportResultProjection & Readonly<{
+  kind: "campaign";
+}>;
+
+export type PortableImportResultProjectionFor<Kind extends PortableImportKind> =
+  Kind extends "campaign_zip" ? CampaignArchiveImportResultProjection
+    : Kind extends "legacy_story" ? LegacyStoryImportResultProjection
+      : Kind extends "story_text" ? PortableStoryImportResultProjection
+        : Kind extends "infinite_worlds" | "cyoa" | "world_json" | "world_text" ? PortableWorldImportResultProjection
+          : never;
+
+export type PortableImportCommitView<Kind extends PortableImportKind = PortableImportKind> = Readonly<{
+  importedRecordId: PortableImportedRecordId;
+  retrieval: PortableImportResultRetrieval<Kind>;
+  kind: Kind;
+  duplicate: boolean;
+  diagnostics: readonly PortableArchiveDiagnosticCode[];
+  result: PortableImportResultProjectionFor<Kind>;
+}>;
+
+export type PortableImportResultView<Kind extends PortableImportKind = PortableImportKind> = Readonly<{
+  kind: Kind;
+  result: PortableImportResultProjectionFor<Kind>;
   diagnostics: readonly PortableArchiveDiagnosticCode[];
 }>;
 
@@ -200,4 +314,10 @@ export function toPortableStagedInput(value: string): PortableStagedInput {
 
 export function toPortableArchiveExportRetrieval(value: string): PortableArchiveExportRetrieval {
   return opaque(value, "portable_archive_export_retrieval_invalid") as PortableArchiveExportRetrieval;
+}
+
+export function toPortableImportResultRetrieval<Kind extends PortableImportKind = PortableImportKind>(
+  value: string,
+): PortableImportResultRetrieval<Kind> {
+  return opaque(value, "portable_import_result_retrieval_invalid") as PortableImportResultRetrieval<Kind>;
 }

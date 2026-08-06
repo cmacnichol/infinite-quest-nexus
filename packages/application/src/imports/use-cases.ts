@@ -88,6 +88,11 @@ export function createImportApplication(dependencies: ImportApplicationDependenc
       requireCommit(command);
       return dependencies.archives.commitPortableImport(database, command);
     },
+    retrievePortableImportResult: async (scope, retrieval) => {
+      requireOwner(scope);
+      if (!nonBlank(retrieval)) throw new ImportApplicationError("import_scope_required");
+      return dependencies.archives.retrievePortableImportResult(scope, retrieval);
+    },
     exportCampaignArchive: async (scope) => {
       requireOwner(scope);
       if (!nonBlank(scope.campaignId) || !nonBlank(scope.worldId) || !nonBlank(scope.worldVersionId)) {
