@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R contracts complete; 14e2a secure filesystem/archive capability is next |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e2a complete; 14e2b owner-scoped PostgreSQL repositories are next |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -7759,6 +7759,23 @@ checkpoint must replace the unsafe backfill semantics recorded in #0446:
 caught exception message, path, or storage-driver detail. Reuse the established
 strong archive-I/O attack tests where possible, but do not treat a path
 preflight/recheck alone as a safe mutation guarantee.
+
+**14e2a completion (2026-08-05):** `9939f42`, `2b58b4d`, and `0abdb1f`
+add the Linux-only, descriptor-anchored filesystem/archive capability behind
+the private staging port. It uses opaque owner-bound one-shot handles,
+`/proc/self/fd` anchors, `O_NOFOLLOW` traversal, retained staged-root
+descriptors, bounded positional reads, inline archive input/output limits,
+writer-pinned identity/hash publication, quarantined identity-safe cleanup, and
+strict bounded image decoding. Unsupported platforms fail closed before
+mutation; all external failures are allowlisted code objects. Two independent
+security reviews drove and approved corrections for stream exhaustion,
+post-publication replacement, root-alias extraction, cleanup substitution,
+concurrent read growth, truncated/oversized image decoding, and failed-cleanup
+descriptor release. Verification passed 86 focused tests, 222 broad
+archive/import/asset tests, 1,307 unit tests, check, build, diff, and precheck.
+No production route, worker, runtime composition, migration, allowlist, legacy
+service, or consumer changed; `#0446` remains open until the safe capability is
+persisted and wired in later 14e checkpoints. **14e2b is next.**
 
 **14e2b — owner-scoped PostgreSQL repositories.** Implement
 `asset-repository.ts` for list/facets, metadata update, original/derivative
