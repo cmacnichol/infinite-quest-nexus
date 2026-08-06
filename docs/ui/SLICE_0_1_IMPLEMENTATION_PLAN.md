@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e2a complete; 14e2b owner-scoped PostgreSQL repositories are next |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e2a complete; 14e1R2 contract/durability correction is next before repositories |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -7775,22 +7775,89 @@ descriptor release. Verification passed 86 focused tests, 222 broad
 archive/import/asset tests, 1,307 unit tests, check, build, diff, and precheck.
 No production route, worker, runtime composition, migration, allowlist, legacy
 service, or consumer changed; `#0446` remains open until the safe capability is
-persisted and wired in later 14e checkpoints. **14e2b is next.**
+persisted and wired in later 14e checkpoints. **14e1R2 is next; do not begin
+repository implementation until its contract and durability correction is
+reviewed.**
 
-**14e2b — owner-scoped PostgreSQL repositories.** Implement
-`asset-repository.ts` for list/facets, metadata update, original/derivative
-descriptors, set/clear selection, worker backfill claim/lease/update, and
-owner/content-scoped asset references. Implement `import-repository.ts` for
-staged-input, destination-bound preview, retrieval, expiry/consumption,
-idempotency, and provenance records. All mutation locks and reads must be
-owner-scoped; worker owner comes from the claimed record, never a browser value.
-Use caller-owned transactions and a durable operation record: under the
-owner/content lock, record intent/reference and safe cleanup/finalization state;
-after rollback clean identity-safely, and after process loss let an owner-scoped
-reaper remove only unreferenced candidates under the same lock and identity
-checks. An orphan must remain unreadable through database owner scope. Preserve
-asset remapping, campaign export, legacy Story, Infinite Worlds/CYOA, and image
-metadata semantics without moving business rules into a transport layer.
+**14e1R2 — route-parity and durable-operation contracts (additive only).**
+Complete the asset and portable-import interfaces before repositories: asset
+list query/view/facet types must model every existing validated search, scope,
+creator, tags/entities, provider/model, review/reuse, date, MIME/aspect, sort,
+cursor, metadata/context, and facet field; no route-visible value is to be
+silently dropped. Portable preview and commit results must retain each family’s
+safe validity/count/warning/choice/destination/result/statistic projection, or
+provide an owner-scoped opaque retrieval that can recover it. Add worker lease
+ID/owner/work-version/expiry fencing, heartbeat/requeue, and stale/lease-lost
+results. Define the durable idempotency ingress for metadata and selection
+commands explicitly (a documented caller key/header or an equally replay-safe
+scheme); request IDs and target-derived permanent keys are not substitutes.
+Add private database-issued storage locator and publication-candidate contracts
+so public delivery remains path-free while secure storage can redeem immutable
+relative path/identity/hash/length. Finally define a three-phase durable
+filesystem lifecycle: reserve a journal before mutation, attach an opaque
+identity-bound candidate in the caller transaction, then finalize after commit
+or mark cleanup after rollback/recovery. Pure/compile-time tests must prove the
+full surface and private-barrel exclusion. No schema, adapter, route, worker,
+or legacy cutover occurs in 14e1R2.
+
+**14e2aR — persisted capability handoff and publication (additive only).**
+Extend the secure filesystem capability with identity-safe original/derivative
+publication and database-issued staged/export/operation rehydration. The
+process-local maps from 14e2a are not authority: a restarted process must redeem
+only a persisted, owner-bound opaque handle whose hash, lifecycle, and immutable
+filesystem identity match. Return opaque publication candidates and idempotent
+cleanup/finalization records; never paths or raw storage errors. Retain the
+descriptor-anchor, bounded I/O, fail-closed platform, and quarantine semantics
+from 14e2a. Add test-only fake persistence/rehydration coverage including stale
+identity, foreign owner, restart, and cleanup retry. Do not add a migration or
+switch a production consumer here.
+
+**14e2b — owner-scoped PostgreSQL repositories.** Deliver the following
+sequential, independently reviewed checkpoints after 14e1R2 and 14e2aR:
+
+**14e2b1 — migration and legacy-data safety.** Add one online migration (or a
+carefully discriminated operation schema) for asset metadata-backfill jobs,
+mutation idempotency, immutable filesystem operations, staged inputs,
+portable previews/import operations, and export artifacts. Tokens are random
+and persisted only as hashes; lifecycle and diagnostic values have CHECK
+constraints, claimed/expiry paths have indexes, and references retain non-null
+owner scope. Scrub historical raw `technical_metadata.backfillError` into a
+generic safe code and seed incomplete-asset backfill jobs. Existing asset rows
+remain authoritative references, never unjournaled reaper candidates; existing
+legacy archive previews require an explicit secure migration or expire/supersede
+and identity-safe drain policy. Preserve current imports/source-hash semantics,
+IDs, and specialized world/segment/generation asset tables.
+
+**14e2b2 — asset library, selection, delivery, and backfill repositories.**
+Implement `asset-repository.ts` for full list/facet parity, metadata revision,
+original/derivative storage-locator redemption, authorized set/clear selection,
+and backfill claim/heartbeat/requeue/fenced completion. Every read and mutation
+joins owner plus campaign/world/version/turn scope; worker identity comes only
+from the claimed row. Test metadata/selection same-key replay and mismatch,
+concurrent revision writers, cross-owner denial, descriptor/thumbnail behavior,
+nullable clears, two-worker `SKIP LOCKED` claims, expiry/reclaim/stale lease,
+and enum-only diagnostic persistence.
+
+**14e2b3 — portable staged/preview/import/export repositories.** Implement
+`import-repository.ts` for hashed opaque staged handles, destination-bound
+preview/payload retrieval, exactly-once consumption, import idempotency, export
+retrieval/expiry, and provenance strings that cannot authorize. Cover all eight
+preview/commit variants, foreign-handle denial, destination/fingerprint
+supersession, replay/mismatch, source provenance non-authority, and legacy
+source-hash compatibility in real PostgreSQL tests.
+
+**14e2b4 — durable operation/reaper matrix.** Couple the repositories with the
+14e2aR capability’s reserve/attach/finalize/cleanup states. Acquire advisory
+locks before row locks using deterministic owner/idempotency and
+owner/kind/fingerprint/destination keys; acquire shared physical asset-path
+locks in sorted order. Authorize operations owner-scopingly, but retain/reap
+physical content globally across all owners: a content-addressed path must not
+be deleted while any owner still references it. Use `FOR UPDATE SKIP LOCKED`,
+lease fencing, persisted identity, and database-derived owner for reaper work.
+Prove crash points before/after publication, before/after domain commit, and
+cleanup-before-state-finalization, as well as rollback, retry, two-owner
+physical-reference retention, and idempotent already-cleaned finalization.
+Only after this matrix and review pass may 14e2c compose test-only adapters.
 
 **14e2c — additive adapter contract matrix.** Compose the 14e2a capability and
 14e2b repositories in test-only/additive archive and illustration adapters.
