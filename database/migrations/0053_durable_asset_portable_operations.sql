@@ -165,12 +165,22 @@ CREATE TABLE durable_filesystem_operations (
       AND candidate_token_hash IS NULL
       AND locator_token_hash IS NULL
       AND attached_at IS NULL)
-    OR lifecycle IN ('cleanup_pending', 'cleaned')
     OR
     (lifecycle IN ('attached', 'finalized')
       AND candidate_token_hash IS NOT NULL
       AND locator_token_hash IS NOT NULL
       AND attached_at IS NOT NULL)
+    OR
+    (lifecycle IN ('cleanup_pending', 'cleaned')
+      AND (
+        (candidate_token_hash IS NULL
+          AND locator_token_hash IS NULL
+          AND attached_at IS NULL)
+        OR
+        (candidate_token_hash IS NOT NULL
+          AND locator_token_hash IS NOT NULL
+          AND attached_at IS NOT NULL)
+      ))
   ),
   CONSTRAINT durable_filesystem_terminal_check CHECK (
     (lifecycle = 'finalized' AND finalized_at IS NOT NULL AND cleaned_at IS NULL)
@@ -190,6 +200,28 @@ CREATE INDEX durable_filesystem_operations_recovery_idx
 CREATE FUNCTION enforce_durable_filesystem_operation_authority() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.lifecycle <> 'reserved'
+      OR NEW.candidate_token_hash IS NOT NULL
+      OR NEW.locator_token_hash IS NOT NULL
+      OR NEW.attached_at IS NOT NULL
+    THEN
+      RAISE EXCEPTION 'durable filesystem operations must be reserved before attachment'
+        USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+  ELSIF TG_OP = 'DELETE' THEN
+    IF OLD.lifecycle <> 'cleaned'
+      OR OLD.candidate_token_hash IS NOT NULL
+      OR OLD.locator_token_hash IS NOT NULL
+      OR OLD.attached_at IS NOT NULL
+    THEN
+      RAISE EXCEPTION 'nonterminal or identity-bearing durable filesystem operations cannot be deleted'
+        USING ERRCODE = '55000';
+    END IF;
+    RETURN OLD;
+  END IF;
+
   IF OLD.owner_user_id IS DISTINCT FROM NEW.owner_user_id
     OR OLD.operation_token_hash IS DISTINCT FROM NEW.operation_token_hash
     OR OLD.purpose IS DISTINCT FROM NEW.purpose
@@ -200,8 +232,42 @@ BEGIN
       AND OLD.candidate_token_hash IS DISTINCT FROM NEW.candidate_token_hash)
     OR (OLD.locator_token_hash IS NOT NULL
       AND OLD.locator_token_hash IS DISTINCT FROM NEW.locator_token_hash)
+    OR (OLD.attached_at IS NOT NULL
+      AND OLD.attached_at IS DISTINCT FROM NEW.attached_at)
   THEN
     RAISE EXCEPTION 'durable filesystem operation authority is write-once'
+      USING ERRCODE = '55000';
+  END IF;
+
+  IF OLD.lifecycle IS DISTINCT FROM NEW.lifecycle
+    AND NOT (
+      (OLD.lifecycle = 'reserved' AND NEW.lifecycle IN ('attached', 'cleanup_pending'))
+      OR (OLD.lifecycle = 'attached' AND NEW.lifecycle IN ('finalized', 'cleanup_pending'))
+      OR (OLD.lifecycle = 'finalized' AND NEW.lifecycle = 'cleanup_pending')
+      OR (OLD.lifecycle = 'cleanup_pending' AND NEW.lifecycle = 'cleaned')
+    )
+  THEN
+    RAISE EXCEPTION 'durable filesystem operation lifecycle transition is invalid'
+      USING ERRCODE = '55000';
+  END IF;
+
+  IF (
+    (OLD.candidate_token_hash IS NULL AND NEW.candidate_token_hash IS NOT NULL)
+    OR (OLD.locator_token_hash IS NULL AND NEW.locator_token_hash IS NOT NULL)
+    OR (OLD.attached_at IS NULL AND NEW.attached_at IS NOT NULL)
+  )
+    AND NOT (
+      OLD.lifecycle = 'reserved'
+      AND NEW.lifecycle = 'attached'
+      AND OLD.candidate_token_hash IS NULL
+      AND OLD.locator_token_hash IS NULL
+      AND OLD.attached_at IS NULL
+      AND NEW.candidate_token_hash IS NOT NULL
+      AND NEW.locator_token_hash IS NOT NULL
+      AND NEW.attached_at IS NOT NULL
+    )
+  THEN
+    RAISE EXCEPTION 'filesystem capabilities may only be minted while attaching a reservation'
       USING ERRCODE = '55000';
   END IF;
   RETURN NEW;
@@ -209,7 +275,7 @@ END;
 $$;
 
 CREATE TRIGGER durable_filesystem_operations_authority_trigger
-BEFORE UPDATE ON durable_filesystem_operations
+BEFORE INSERT OR UPDATE OR DELETE ON durable_filesystem_operations
 FOR EACH ROW EXECUTE FUNCTION enforce_durable_filesystem_operation_authority();
 
 -- Filesystem identities are append-only evidence. Repositories update the

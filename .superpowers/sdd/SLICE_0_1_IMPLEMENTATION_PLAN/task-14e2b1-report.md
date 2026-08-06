@@ -195,3 +195,54 @@ Correction files:
 - `tests/integration/migrations.integration.test.ts`
 - `tests/integration/campaign-archive.integration.test.ts`
 - `.superpowers/sdd/SLICE_0_1_IMPLEMENTATION_PLAN/task-14e2b1-report.md`
+
+## Correction round 2
+
+The two residual Important findings were corrected without reopening the four
+approved round-1 changes.
+
+- Durable filesystem operations must now be inserted as `reserved` journals
+  without candidate, locator, or attachment evidence. This preserves the
+  reserve-before-mutation contract at the database boundary.
+- The operation authority trigger now enforces the lifecycle graph:
+  `reserved -> attached|cleanup_pending`,
+  `attached -> finalized|cleanup_pending`,
+  `finalized -> cleanup_pending`, and
+  `cleanup_pending -> cleaned`. Same-state lease, work-version, diagnostic, and
+  timestamp updates remain valid.
+- Candidate and locator capabilities plus `attached_at` can first appear only
+  together during a valid `reserved -> attached` update. Once present, all
+  three remain immutable. A no-candidate `cleanup_pending`/`cleaned` operation
+  remains a safe no-candidate state and cannot mint capabilities later; an
+  attached operation retains its complete attachment evidence through cleanup.
+- Deletion is rejected for every non-`cleaned` operation journal, preserving
+  recovery authority. Cleaned journals carrying attachment identity remain
+  retained with their immutable descriptor evidence. A deliberately cleaned
+  no-candidate journal may be deleted because it never gained filesystem
+  authority; direct descriptor update/delete remains rejected.
+- Real PostgreSQL coverage now rejects reserved journal deletion,
+  non-reserved capability-bearing insertion, reserved-to-finalized minting,
+  cleanup-pending first minting, invalid lifecycle/diagnostic values, and
+  owner/world/version mutations on each protected parent. It also proves the
+  valid reserve-to-attach path, no-candidate cleanup path, attached cleanup
+  path, attached-evidence retention, and no-candidate terminal deletion.
+
+Correction round-2 TDD evidence:
+
+- Focused RED: 1 migration test failed with five independently reported
+  missing behaviors; 11 other migration tests passed.
+- `pnpm exec vitest run --config vitest.integration.config.ts tests/integration/migrations.integration.test.ts`
+  - 1 file passed, 12 tests passed.
+- `pnpm test`
+  - 116 unit files passed, 1,349 unit tests passed.
+  - 32 integration files passed, 349 integration tests passed.
+- `pnpm check`
+  - repository boundary/data checks and all TypeScript/web checks passed.
+- `pnpm build`
+  - TypeScript, legacy web, and next web builds passed.
+
+Correction round-2 files:
+
+- `database/migrations/0053_durable_asset_portable_operations.sql`
+- `tests/integration/migrations.integration.test.ts`
+- `.superpowers/sdd/SLICE_0_1_IMPLEMENTATION_PLAN/task-14e2b1-report.md`

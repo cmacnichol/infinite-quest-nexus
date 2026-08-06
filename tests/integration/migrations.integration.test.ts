@@ -231,20 +231,23 @@ integration("standard database migration runner", () => {
     const client = await pool.connect();
     const hash = (label: string) => createHash("sha256").update(`${label}-${crypto.randomUUID()}`, "utf8").digest("hex");
     let savepointOrdinal = 0;
-    const statementWasRejected = async (sql: string, parameters: unknown[] = []): Promise<boolean> => {
+    const statementError = async (sql: string, parameters: unknown[] = []): Promise<Error | null> => {
       const savepoint = `task_14e2b1_rejection_${savepointOrdinal += 1}`;
       await client.query(`SAVEPOINT ${savepoint}`);
-      let rejected = false;
+      let rejection: Error | null = null;
       try {
         await client.query(sql, parameters);
-      } catch {
-        rejected = true;
+      } catch (error) {
+        rejection = error instanceof Error ? error : new Error(String(error));
       } finally {
         await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
         await client.query(`RELEASE SAVEPOINT ${savepoint}`);
       }
-      return rejected;
+      return rejection;
     };
+    const statementWasRejected = async (sql: string, parameters: unknown[] = []): Promise<boolean> => (
+      await statementError(sql, parameters)
+    ) !== null;
     try {
       await client.query("BEGIN");
       const ownerOne = (await client.query<{ id: string }>(
@@ -300,6 +303,59 @@ integration("standard database migration runner", () => {
          ) VALUES ($1,$2,'asset_original','asset',$3,gen_random_uuid(),'migration-test',now()+interval '5 minutes',now()+interval '1 hour')`,
         [ownerOne, hash("missing-asset-operation"), crypto.randomUUID()]
       );
+      const nonReservedCapabilityInsertRejected = await statementWasRejected(
+        `INSERT INTO durable_filesystem_operations (
+           owner_user_id,operation_token_hash,purpose,resource_kind,operation_scope_hash,lifecycle,
+           candidate_token_hash,locator_token_hash,lease_id,lease_owner,lease_expires_at,expires_at,attached_at
+         ) VALUES ($1,$2,'portable_staging','portable',$3,'attached',$4,$5,
+                   gen_random_uuid(),'migration-test',now()+interval '5 minutes',now()+interval '1 hour',now())`,
+        [ownerOne, hash("nonreserved-operation"), hash("nonreserved-scope"), hash("nonreserved-candidate"), hash("nonreserved-locator")]
+      );
+
+      const reservedDeletionOperationId = await insertOperation(ownerOne, "asset_derivative", assetTwo);
+      const reservedOperationDeletionRejected = await statementWasRejected(
+        "DELETE FROM durable_filesystem_operations WHERE id=$1",
+        [reservedDeletionOperationId]
+      );
+      const invalidDiagnosticRejected = await statementWasRejected(
+        "UPDATE durable_filesystem_operations SET diagnostic_code='not_allowlisted' WHERE id=$1",
+        [reservedDeletionOperationId]
+      );
+      const invalidLifecycleValueRejected = await statementWasRejected(
+        "UPDATE durable_filesystem_operations SET lifecycle='unknown_state' WHERE id=$1",
+        [reservedDeletionOperationId]
+      );
+      const reservedToFinalizedMintRejected = await statementWasRejected(
+        `UPDATE durable_filesystem_operations
+            SET lifecycle='finalized',candidate_token_hash=$2,locator_token_hash=$3,
+                attached_at=now(),finalized_at=now()
+          WHERE id=$1`,
+        [reservedDeletionOperationId, hash("illegal-finalized-candidate"), hash("illegal-finalized-locator")]
+      );
+
+      const cleanupWithoutCandidateOperationId = await insertOperation(ownerOne, "portable_staging", null);
+      await client.query(
+        `UPDATE durable_filesystem_operations
+            SET lifecycle='cleanup_pending',cleanup_requested_at=now()
+          WHERE id=$1`,
+        [cleanupWithoutCandidateOperationId]
+      );
+      const cleanupPendingFirstMintRejected = await statementWasRejected(
+        `UPDATE durable_filesystem_operations
+            SET candidate_token_hash=$2,locator_token_hash=$3,attached_at=now()
+          WHERE id=$1`,
+        [cleanupWithoutCandidateOperationId, hash("late-candidate"), hash("late-locator")]
+      );
+      await client.query(
+        `UPDATE durable_filesystem_operations
+            SET lifecycle='cleaned',cleaned_at=now()
+          WHERE id=$1`,
+        [cleanupWithoutCandidateOperationId]
+      );
+      const cleanedNoCandidateOperationDeletionAllowed = !(await statementWasRejected(
+        "DELETE FROM durable_filesystem_operations WHERE id=$1",
+        [cleanupWithoutCandidateOperationId]
+      ));
 
       const assetOperationId = await insertOperation(ownerOne, "asset_original", assetOne);
       const operationTokenMutationRejected = await statementWasRejected(
@@ -363,6 +419,22 @@ integration("standard database migration runner", () => {
         "DELETE FROM durable_filesystem_descriptors WHERE operation_id=$1",
         [assetOperationId]
       );
+      await client.query(
+        `UPDATE durable_filesystem_operations
+            SET lifecycle='cleanup_pending',cleanup_requested_at=now()
+          WHERE id=$1`,
+        [assetOperationId]
+      );
+      await client.query(
+        `UPDATE durable_filesystem_operations
+            SET lifecycle='cleaned',cleaned_at=now()
+          WHERE id=$1`,
+        [assetOperationId]
+      );
+      const cleanedAttachedOperationDeletionRejected = await statementWasRejected(
+        "DELETE FROM durable_filesystem_operations WHERE id=$1",
+        [assetOperationId]
+      );
 
       const stagingOperationId = await insertOperation(ownerOne, "portable_staging", null);
       const exportOperationId = await insertOperation(ownerOne, "portable_export", null);
@@ -393,6 +465,10 @@ integration("standard database migration runner", () => {
       )).rows[0]!.id;
       const worldTwo = (await client.query<{ id: string }>(
         "INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Portable world two') RETURNING id",
+        [ownerOne]
+      )).rows[0]!.id;
+      const worldThree = (await client.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Portable world three') RETURNING id",
         [ownerOne]
       )).rows[0]!.id;
       const worldVersionOne = (await client.query<{ id: string }>(
@@ -477,9 +553,33 @@ integration("standard database migration runner", () => {
         [ownerOne, hash("valid-export-token"), exportOperationId, campaignOne, worldOne, worldVersionOne, hash("valid-export-content")]
       );
 
+      const importParentUpdateError = await statementError(
+        "UPDATE imports SET owner_user_id=$2 WHERE id=$1",
+        [localImportId, ownerTwo]
+      );
+      expect(importParentUpdateError?.message).toContain("referenced import owner scope is immutable");
+      const worldVersionParentUpdateError = await statementError(
+        "UPDATE world_versions SET world_id=$2 WHERE id=$1",
+        [worldVersionOne, worldThree]
+      );
+      expect(worldVersionParentUpdateError?.message).toContain("referenced world version portable scope is immutable");
+      const campaignParentUpdateError = await statementError(
+        "UPDATE campaigns SET world_version_id=$2 WHERE id=$1",
+        [campaignOne, worldVersionTwo]
+      );
+      expect(campaignParentUpdateError?.message).toContain("referenced campaign portable scope is immutable");
+
       expect({
         crossOwnerAssetRejected,
         nonexistentAssetRejected,
+        nonReservedCapabilityInsertRejected,
+        reservedOperationDeletionRejected,
+        invalidDiagnosticRejected,
+        invalidLifecycleValueRejected,
+        reservedToFinalizedMintRejected,
+        cleanupPendingFirstMintRejected,
+        cleanedNoCandidateOperationDeletionAllowed,
+        cleanedAttachedOperationDeletionRejected,
         operationTokenMutationRejected,
         purposeMutationRejected,
         assetMutationRejected,
@@ -498,6 +598,14 @@ integration("standard database migration runner", () => {
       }).toEqual({
         crossOwnerAssetRejected: true,
         nonexistentAssetRejected: true,
+        nonReservedCapabilityInsertRejected: true,
+        reservedOperationDeletionRejected: true,
+        invalidDiagnosticRejected: true,
+        invalidLifecycleValueRejected: true,
+        reservedToFinalizedMintRejected: true,
+        cleanupPendingFirstMintRejected: true,
+        cleanedNoCandidateOperationDeletionAllowed: true,
+        cleanedAttachedOperationDeletionRejected: true,
         operationTokenMutationRejected: true,
         purposeMutationRejected: true,
         assetMutationRejected: true,
