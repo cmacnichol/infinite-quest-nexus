@@ -376,7 +376,7 @@ integration("PostgreSQL portable import repository", () => {
         worldId: scope.worldId,
         worldVersionId: scope.worldVersionId,
         ...("campaignId" in seed.result ? { campaignId: scope.campaignId } : {})
-      } as PortableImportResultProjectionFor<PortableImportKind>;
+      } as unknown as PortableImportResultProjectionFor<PortableImportKind>;
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
@@ -510,6 +510,47 @@ integration("PostgreSQL portable import repository", () => {
     expect(statuses.rows.map(({ status }) => status)).toEqual(["superseded", "previewed"]);
   });
 
+  it("expires elapsed matching previews before inserting their replacement", async () => {
+    const fingerprint = hash(`expired-replacement-${crypto.randomUUID()}`);
+    const firstStaged = await stagedInput(ownerUserId, fingerprint);
+    const secondStaged = await stagedInput(ownerUserId, fingerprint);
+    const destination = { kind: "create_world" as const };
+    const projection = {
+      kind: "world_text" as const,
+      valid: true as const,
+      requiresProvider: true as const,
+      warnings: [] as string[],
+      counts: { sourceCharacters: 20, sourceWords: 4 }
+    };
+    const first = await repository.createPreview({
+      command: { ownerUserId, stagedInput: firstStaged.stagedInput, kind: "world_text", destination },
+      contentFingerprint: fingerprint,
+      projection,
+      diagnostics: [],
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    });
+    await pool.query(
+      "UPDATE portable_import_operations SET expires_at=now()-interval '1 second' WHERE preview_token_hash=$1",
+      [hash(first.previewHandle.token)]
+    );
+    const second = await repository.createPreview({
+      command: { ownerUserId, stagedInput: secondStaged.stagedInput, kind: "world_text", destination },
+      contentFingerprint: fingerprint,
+      projection,
+      diagnostics: [],
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    });
+
+    const statuses = await pool.query<{ preview_token_hash: string; status: string }>(
+      `SELECT preview_token_hash,status
+         FROM portable_import_operations
+        WHERE preview_token_hash IN ($1,$2)
+        ORDER BY created_at,id`,
+      [hash(first.previewHandle.token), hash(second.previewHandle.token)]
+    );
+    expect(statuses.rows.map(({ status }) => status)).toEqual(["expired", "previewed"]);
+  });
+
   it("serializes concurrent consumption so one transaction executes and the other replays", async () => {
     const staged = await stagedInput();
     const destination = { kind: "create_world" as const };
@@ -638,6 +679,74 @@ integration("PostgreSQL portable import repository", () => {
     } finally {
       await client.query("ROLLBACK").catch(() => undefined);
       client.release();
+    }
+  });
+
+  it("binds a ready import claim to the exact PostgreSQL transaction that began it", async () => {
+    const staged = await stagedInput();
+    const destination = { kind: "create_world" as const };
+    const preview = await repository.createPreview({
+      command: { ownerUserId, stagedInput: staged.stagedInput, kind: "world_text", destination },
+      contentFingerprint: staged.fingerprint,
+      projection: {
+        kind: "world_text", valid: true, requiresProvider: true, warnings: [],
+        counts: { sourceCharacters: 18, sourceWords: 3 }
+      },
+      diagnostics: [],
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    });
+    const command = {
+      ownerUserId,
+      kind: "world_text" as const,
+      destination,
+      previewHandle: preview.previewHandle,
+      idempotencyKey: `transaction-claim-${crypto.randomUUID()}`
+    };
+    const importId = await completedImport(ownerUserId, staged.fingerprint, scope);
+    const completion = {
+      importId,
+      importedRecordId: toPortableImportedRecordId(importId),
+      duplicate: false,
+      diagnostics: [] as const,
+      result: {
+        kind: "world" as const,
+        importId,
+        worldId: scope.worldId,
+        worldVersionId: scope.worldVersionId,
+        duplicate: false
+      },
+      resultExpiresAt: new Date(Date.now() + 60_000).toISOString()
+    };
+    const origin = await pool.connect();
+    const other = await pool.connect();
+    try {
+      await origin.query("BEGIN");
+      const begun = await repository.beginImport(origin, command);
+      if (begun.outcome !== "ready") throw new Error("expected ready import");
+
+      await other.query("BEGIN");
+      await other.query("SET LOCAL statement_timeout='250ms'");
+      await expect(repository.completeImport(other, begun.claim, completion)).rejects.toMatchObject({
+        code: "transaction_unavailable"
+      });
+      await other.query("ROLLBACK");
+
+      await expect(repository.completeImport(origin, begun.claim, completion)).resolves.toMatchObject({
+        kind: "world_text",
+        result: completion.result
+      });
+      await origin.query("ROLLBACK");
+
+      await origin.query("BEGIN");
+      await expect(repository.completeImport(origin, begun.claim, completion)).rejects.toMatchObject({
+        code: "transaction_unavailable"
+      });
+      await origin.query("ROLLBACK");
+    } finally {
+      await origin.query("ROLLBACK").catch(() => undefined);
+      await other.query("ROLLBACK").catch(() => undefined);
+      origin.release();
+      other.release();
     }
   });
 
@@ -1001,6 +1110,285 @@ integration("PostgreSQL portable import repository", () => {
     )).rejects.toEqual(new PortableImportRepositoryError("archive_unavailable", 503));
   });
 
+  it("reconstructs every persisted preview and result projection from public allowlisted fields", async () => {
+    for (const seed of variants((await stagedInput()).stagedInput)) {
+      const staged = await stagedInput();
+      const command = {
+        ...seed.command,
+        ownerUserId,
+        stagedInput: staged.stagedInput
+      } as PortableImportPreviewCommand;
+      const preview = await repository.createPreview({
+        command,
+        contentFingerprint: staged.fingerprint,
+        projection: seed.projection,
+        diagnostics: [],
+        expiresAt: new Date(Date.now() + 60_000).toISOString()
+      });
+      await pool.query(
+        `UPDATE portable_import_operations
+            SET preview_projection=jsonb_set(
+                  preview_projection || '{"privatePath":"/private/staged","rawDiagnostic":"provider-secret"}'::jsonb,
+                  '{counts,rawTokens}',
+                  '"hidden-chain"'::jsonb,
+                  true
+                )
+          WHERE preview_token_hash=$1`,
+        [hash(preview.previewHandle.token)]
+      );
+      const retrievedPreview = await repository.retrievePreviewPayload(
+        { ownerUserId },
+        command.kind,
+        preview.previewHandle,
+      );
+      expect(retrievedPreview?.projection).toEqual(seed.projection);
+
+      const importId = await completedImport(ownerUserId, staged.fingerprint, scope);
+      const expectedResult = {
+        ...seed.result,
+        importId,
+        worldId: scope.worldId,
+        worldVersionId: scope.worldVersionId,
+        ...(Object.hasOwn(seed.result, "campaignId") ? { campaignId: scope.campaignId } : {})
+      } as PortableImportResultProjectionFor<PortableImportKind>;
+      const taintedResult = {
+        ...expectedResult,
+        privatePath: "/private/result",
+        rawDiagnostic: "provider-stack",
+        ...("stats" in expectedResult
+          ? { stats: { ...expectedResult.stats, rawTokens: "hidden-chain" } }
+          : {})
+      } as unknown as PortableImportResultProjectionFor<PortableImportKind>;
+      const idempotencyKey = `projection-${crypto.randomUUID()}`;
+      const client = await pool.connect();
+      let committed;
+      try {
+        await client.query("BEGIN");
+        const begun = await repository.beginImport(client, {
+          ownerUserId,
+          kind: command.kind,
+          destination: command.destination,
+          previewHandle: preview.previewHandle,
+          idempotencyKey
+        });
+        if (begun.outcome !== "ready") throw new Error("expected ready import");
+        committed = await repository.completeImport(client, begun.claim, {
+          importId,
+          importedRecordId: toPortableImportedRecordId(importId),
+          duplicate: false,
+          diagnostics: [],
+          result: taintedResult,
+          resultExpiresAt: new Date(Date.now() + 60_000).toISOString()
+        });
+        expect(committed.result).toEqual(expectedResult);
+        await client.query("COMMIT");
+      } finally {
+        await client.query("ROLLBACK").catch(() => undefined);
+        client.release();
+      }
+
+      await pool.query(
+        `UPDATE portable_import_operations
+            SET result_projection=jsonb_set(
+                  result_projection || '{"rawDiagnostic":"wrapper-secret"}'::jsonb,
+                  '{result,privatePath}',
+                  '"/private/persisted"'::jsonb,
+                  true
+                )
+          WHERE result_retrieval_token_hash=$1`,
+        [hash(committed!.retrieval)]
+      );
+      await expect(repository.retrieveImportResult(
+        { ownerUserId },
+        command.kind,
+        committed!.retrieval,
+      )).resolves.toEqual({ kind: command.kind, result: expectedResult, diagnostics: [] });
+
+      const replayClient = await pool.connect();
+      try {
+        await replayClient.query("BEGIN");
+        await expect(repository.beginImport(replayClient, {
+          ownerUserId,
+          kind: command.kind,
+          destination: command.destination,
+          previewHandle: preview.previewHandle,
+          idempotencyKey
+        })).resolves.toMatchObject({
+          outcome: "replay",
+          view: { kind: command.kind, result: expectedResult }
+        });
+        await replayClient.query("ROLLBACK");
+      } finally {
+        await replayClient.query("ROLLBACK").catch(() => undefined);
+        replayClient.release();
+      }
+    }
+  });
+
+  it("rebinds persisted committed projections and duplicate wrappers to the owning import row", async () => {
+    const staged = await stagedInput();
+    const destination = { kind: "create_world" as const };
+    const preview = await repository.createPreview({
+      command: { ownerUserId, stagedInput: staged.stagedInput, kind: "world_json", destination },
+      contentFingerprint: staged.fingerprint,
+      projection: {
+        kind: "world_json", valid: true, title: "Bound result", duplicate: false,
+        existingWorldId: null, characters: [],
+        counts: { entities: 0, relationships: 0, triggers: 0 }, warnings: []
+      },
+      diagnostics: [],
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    });
+    const importId = await completedImport(ownerUserId, staged.fingerprint, scope);
+    const idempotencyKey = `result-binding-${crypto.randomUUID()}`;
+    const client = await pool.connect();
+    let committed;
+    try {
+      await client.query("BEGIN");
+      const begun = await repository.beginImport(client, {
+        ownerUserId, kind: "world_json", destination,
+        previewHandle: preview.previewHandle, idempotencyKey
+      });
+      if (begun.outcome !== "ready") throw new Error("expected ready import");
+      committed = await repository.completeImport(client, begun.claim, {
+        importId,
+        importedRecordId: toPortableImportedRecordId(importId),
+        duplicate: false,
+        diagnostics: [],
+        result: {
+          kind: "world", importId, worldId: scope.worldId,
+          worldVersionId: scope.worldVersionId, duplicate: false
+        },
+        resultExpiresAt: new Date(Date.now() + 60_000).toISOString()
+      });
+      await client.query("COMMIT");
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
+    }
+
+    const original = await pool.query<{ result_projection: unknown }>(
+      "SELECT result_projection FROM portable_import_operations WHERE result_retrieval_token_hash=$1",
+      [hash(committed!.retrieval)]
+    );
+    for (const corrupt of [
+      `jsonb_set(result_projection,'{importedRecordId}',to_jsonb('${crypto.randomUUID()}'::text))`,
+      `jsonb_set(result_projection,'{result,importId}',to_jsonb('${crypto.randomUUID()}'::text))`,
+      `jsonb_set(result_projection,'{result,worldId}',to_jsonb('${foreignScope.worldId}'::text))`,
+      `jsonb_set(result_projection,'{duplicate}','true'::jsonb)`,
+      `jsonb_set(result_projection,'{result,duplicate}','true'::jsonb)`
+    ]) {
+      await pool.query(
+        `UPDATE portable_import_operations SET result_projection=${corrupt} WHERE result_retrieval_token_hash=$1`,
+        [hash(committed!.retrieval)]
+      );
+      await expect(repository.retrieveImportResult(
+        { ownerUserId }, "world_json", committed!.retrieval,
+      )).rejects.toEqual(new PortableImportRepositoryError("archive_unavailable", 503));
+      const replay = await pool.connect();
+      try {
+        await replay.query("BEGIN");
+        await expect(repository.beginImport(replay, {
+          ownerUserId, kind: "world_json", destination,
+          previewHandle: preview.previewHandle, idempotencyKey
+        })).rejects.toEqual(new PortableImportRepositoryError("archive_unavailable", 503));
+        await replay.query("ROLLBACK");
+      } finally {
+        await replay.query("ROLLBACK").catch(() => undefined);
+        replay.release();
+      }
+      await pool.query(
+        "UPDATE portable_import_operations SET result_projection=$2::jsonb WHERE result_retrieval_token_hash=$1",
+        [hash(committed!.retrieval), JSON.stringify(original.rows[0]!.result_projection)]
+      );
+    }
+
+    const otherScope = await createWorldScope(ownerUserId, "Different local import scope");
+    const otherImportId = await completedImport(
+      ownerUserId, hash(`different-import-${crypto.randomUUID()}`), otherScope,
+    );
+    await pool.query(
+      "UPDATE portable_import_operations SET import_id=$2 WHERE result_retrieval_token_hash=$1",
+      [hash(committed!.retrieval), otherImportId]
+    );
+    await expect(repository.retrieveImportResult(
+      { ownerUserId }, "world_json", committed!.retrieval,
+    )).rejects.toEqual(new PortableImportRepositoryError("archive_unavailable", 503));
+    const reboundReplay = await pool.connect();
+    try {
+      await reboundReplay.query("BEGIN");
+      await expect(repository.beginImport(reboundReplay, {
+        ownerUserId, kind: "world_json", destination,
+        previewHandle: preview.previewHandle, idempotencyKey
+      })).rejects.toEqual(new PortableImportRepositoryError("archive_unavailable", 503));
+      await reboundReplay.query("ROLLBACK");
+    } finally {
+      await reboundReplay.query("ROLLBACK").catch(() => undefined);
+      reboundReplay.release();
+    }
+    await pool.query(
+      "UPDATE portable_import_operations SET import_id=$2 WHERE result_retrieval_token_hash=$1",
+      [hash(committed!.retrieval), importId]
+    );
+  });
+
+  it("binds story-text targetWorldId to its exact destination on write and read", async () => {
+    const staged = await stagedInput();
+    const destination = {
+      kind: "existing_world_version" as const,
+      worldId: scope.worldId,
+      worldVersionId: scope.worldVersionId
+    };
+    const projection = {
+      kind: "story_text" as const,
+      valid: true as const,
+      title: "Destination-bound story",
+      duplicate: false,
+      existingCampaignId: null,
+      targetWorldId: scope.worldId,
+      diagnostics: [] as string[],
+      characters: [] as { id: string; name: string }[],
+      selectedCharacterId: null,
+      counts: { turns: 1, completeHistoryCharacters: 8, estimatedHistoryTokens: 2 },
+      warnings: [] as string[]
+    };
+    await expect(repository.createPreview({
+      command: { ownerUserId, stagedInput: staged.stagedInput, kind: "story_text", destination },
+      contentFingerprint: staged.fingerprint,
+      projection: { ...projection, targetWorldId: foreignScope.worldId },
+      diagnostics: [],
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    })).rejects.toMatchObject({ code: "import_invalid" });
+
+    const preview = await repository.createPreview({
+      command: { ownerUserId, stagedInput: staged.stagedInput, kind: "story_text", destination },
+      contentFingerprint: staged.fingerprint,
+      projection,
+      diagnostics: [],
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    });
+    await pool.query(
+      "UPDATE portable_import_operations SET preview_projection=jsonb_set(preview_projection,'{targetWorldId}',to_jsonb($2::text)) WHERE preview_token_hash=$1",
+      [hash(preview.previewHandle.token), foreignScope.worldId]
+    );
+    await expect(repository.retrievePreviewPayload(
+      { ownerUserId }, "story_text", preview.previewHandle,
+    )).rejects.toEqual(new PortableImportRepositoryError("archive_unavailable", 503));
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await expect(repository.beginImport(client, {
+        ownerUserId, kind: "story_text", destination,
+        previewHandle: preview.previewHandle,
+        idempotencyKey: `story-target-${crypto.randomUUID()}`
+      })).rejects.toEqual(new PortableImportRepositoryError("archive_unavailable", 503));
+      await client.query("ROLLBACK");
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
+    }
+  });
+
   it("preserves legacy source hashes and never treats source provenance as local authority", async () => {
     const legacySourceHash = hash(`legacy-source-${crypto.randomUUID()}`);
     const importId = await completedImport(ownerUserId, legacySourceHash, scope);
@@ -1185,5 +1573,161 @@ integration("PostgreSQL portable import repository", () => {
       worldId: scope.worldId,
       worldVersionId: scope.worldVersionId
     }, exported.retrieval)).toBeNull();
+  });
+
+  it("fails closed when staged or export metadata diverges from its immutable descriptor", async () => {
+    const staged = await stagedInput();
+    for (const mutation of [
+      { column: "content_hash", value: hash(`staged-tamper-${crypto.randomUUID()}`) },
+      { column: "byte_length", value: "9007199254740992" }
+    ]) {
+      await pool.query(
+        `UPDATE portable_staged_inputs SET ${mutation.column}=$2 WHERE filesystem_operation_id=$1`,
+        [staged.operationId, mutation.value]
+      );
+      await expect(repository.retrieveStagedPayload(
+        { ownerUserId }, staged.stagedInput,
+      )).rejects.toEqual(new PortableImportRepositoryError("archive_unavailable", 503));
+      await pool.query(
+        "UPDATE portable_staged_inputs SET content_hash=$2,byte_length=512 WHERE filesystem_operation_id=$1",
+        [staged.operationId, staged.fingerprint]
+      );
+    }
+
+    const exportHash = hash(`descriptor-export-${crypto.randomUUID()}`);
+    const operationScopeId = `descriptor-export-${crypto.randomUUID()}`;
+    const operationId = await durableOperation(
+      ownerUserId, "portable_export", operationScopeId, exportHash, 1_024,
+    );
+    const exported = await repository.registerExportArtifact({
+      ownerUserId,
+      filesystemOperationId: operationId,
+      operationScopeId,
+      exportKind: "campaign_zip",
+      campaignId: scope.campaignId,
+      worldId: scope.worldId,
+      worldVersionId: scope.worldVersionId,
+      contentType: "application/zip",
+      contentHash: exportHash,
+      byteLength: 1_024,
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    });
+    const exportScope = {
+      ownerUserId,
+      exportKind: "campaign_zip" as const,
+      campaignId: scope.campaignId,
+      worldId: scope.worldId,
+      worldVersionId: scope.worldVersionId
+    };
+    for (const mutation of [
+      { column: "content_hash", value: hash(`export-tamper-${crypto.randomUUID()}`) },
+      { column: "byte_length", value: "9007199254740992" }
+    ]) {
+      await pool.query(
+        `UPDATE portable_export_artifacts SET ${mutation.column}=$2 WHERE filesystem_operation_id=$1`,
+        [operationId, mutation.value]
+      );
+      await expect(repository.retrieveExportArtifact(exportScope, exported.retrieval))
+        .rejects.toEqual(new PortableImportRepositoryError("archive_unavailable", 503));
+      await pool.query(
+        "UPDATE portable_export_artifacts SET content_hash=$2,byte_length=1024 WHERE filesystem_operation_id=$1",
+        [operationId, exportHash]
+      );
+    }
+  });
+
+  it("denies staged capability issuance for every authority or descriptor mismatch", async () => {
+    const cases = ["owner", "scope", "hash", "length", "purpose", "lifecycle"] as const;
+    for (const mismatch of cases) {
+      const expectedHash = hash(`staged-issuance-${mismatch}-${crypto.randomUUID()}`);
+      const operationScopeId = `staged-issuance-${mismatch}-${crypto.randomUUID()}`;
+      const operationOwner = mismatch === "owner" ? foreignOwnerUserId : ownerUserId;
+      const purpose = mismatch === "purpose" ? "portable_export" as const : "portable_staging" as const;
+      const operationId = await durableOperation(
+        operationOwner, purpose, operationScopeId, expectedHash, 512,
+      );
+      if (mismatch === "lifecycle") {
+        await pool.query(
+          "UPDATE durable_filesystem_operations SET lifecycle='cleanup_pending',cleanup_requested_at=now() WHERE id=$1",
+          [operationId]
+        );
+      }
+      await expect(repository.registerStagedInput({
+        ownerUserId,
+        filesystemOperationId: operationId,
+        operationScopeId: mismatch === "scope" ? `${operationScopeId}-wrong` : operationScopeId,
+        contentHash: mismatch === "hash" ? hash(`${expectedHash}-wrong`) : expectedHash,
+        byteLength: mismatch === "length" ? 513 : 512,
+        expiresAt: new Date(Date.now() + 60_000).toISOString()
+      })).rejects.toEqual(new PortableImportRepositoryError("archive_unavailable", 404));
+    }
+  });
+
+  it("denies both export kinds for every authority or descriptor mismatch and issues valid capabilities", async () => {
+    const exportKinds = [
+      { exportKind: "campaign_zip" as const, campaignId: scope.campaignId, contentType: "application/zip" as const },
+      { exportKind: "world_json" as const, campaignId: null, contentType: "application/json" as const }
+    ];
+    const cases = ["owner", "scope", "hash", "length", "purpose", "lifecycle"] as const;
+    for (const exportVariant of exportKinds) {
+      for (const mismatch of cases) {
+        const expectedHash = hash(`${exportVariant.exportKind}-${mismatch}-${crypto.randomUUID()}`);
+        const operationScopeId = `${exportVariant.exportKind}-${mismatch}-${crypto.randomUUID()}`;
+        const operationOwner = mismatch === "owner" ? foreignOwnerUserId : ownerUserId;
+        const purpose = mismatch === "purpose" ? "portable_staging" as const : "portable_export" as const;
+        const operationId = await durableOperation(
+          operationOwner, purpose, operationScopeId, expectedHash, 1_024,
+        );
+        if (mismatch === "lifecycle") {
+          await pool.query(
+            "UPDATE durable_filesystem_operations SET lifecycle='cleanup_pending',cleanup_requested_at=now() WHERE id=$1",
+            [operationId]
+          );
+        }
+        await expect(repository.registerExportArtifact({
+          ownerUserId,
+          filesystemOperationId: operationId,
+          operationScopeId: mismatch === "scope" ? `${operationScopeId}-wrong` : operationScopeId,
+          exportKind: exportVariant.exportKind,
+          campaignId: exportVariant.campaignId,
+          worldId: scope.worldId,
+          worldVersionId: scope.worldVersionId,
+          contentType: exportVariant.contentType,
+          contentHash: mismatch === "hash" ? hash(`${expectedHash}-wrong`) : expectedHash,
+          byteLength: mismatch === "length" ? 1_025 : 1_024,
+          expiresAt: new Date(Date.now() + 60_000).toISOString()
+        })).rejects.toEqual(new PortableImportRepositoryError("archive_unavailable", 404));
+      }
+
+      const contentHash = hash(`valid-${exportVariant.exportKind}-${crypto.randomUUID()}`);
+      const operationScopeId = `valid-${exportVariant.exportKind}-${crypto.randomUUID()}`;
+      const operationId = await durableOperation(
+        ownerUserId, "portable_export", operationScopeId, contentHash, 1_024,
+      );
+      const exported = await repository.registerExportArtifact({
+        ownerUserId,
+        filesystemOperationId: operationId,
+        operationScopeId,
+        exportKind: exportVariant.exportKind,
+        campaignId: exportVariant.campaignId,
+        worldId: scope.worldId,
+        worldVersionId: scope.worldVersionId,
+        contentType: exportVariant.contentType,
+        contentHash,
+        byteLength: 1_024,
+        expiresAt: new Date(Date.now() + 60_000).toISOString()
+      });
+      await expect(repository.retrieveExportArtifact({
+        ownerUserId,
+        exportKind: exportVariant.exportKind,
+        campaignId: exportVariant.campaignId,
+        worldId: scope.worldId,
+        worldVersionId: scope.worldVersionId
+      }, exported.retrieval)).resolves.toMatchObject({
+        contentType: exportVariant.contentType,
+        contentHash,
+        byteLength: 1_024
+      });
+    }
   });
 });

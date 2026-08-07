@@ -118,12 +118,18 @@ type StagedStateRow = Readonly<{
 }>;
 
 declare const portableImportCommitClaimBrand: unique symbol;
+const portableImportTransactionIdentity: unique symbol = Symbol("portableImportTransactionIdentity");
+type PostgreSqlTransactionIdentity = Readonly<{
+  backendId: string;
+  transactionId: string;
+}>;
 export type PortableImportCommitClaim<Kind extends PortableImportKind = PortableImportKind> = Readonly<{
   operationId: string;
   ownerUserId: string;
   kind: Kind;
   requestFingerprint: string;
   resultRetrieval: PortableImportResultRetrieval<Kind>;
+  [portableImportTransactionIdentity]: PostgreSqlTransactionIdentity;
   [portableImportCommitClaimBrand]: true;
 }>;
 
@@ -275,6 +281,29 @@ async function requireCallerTransaction(client: DatabaseClient): Promise<void> {
   }
 }
 
+async function currentTransactionIdentity(client: DatabaseClient): Promise<PostgreSqlTransactionIdentity> {
+  const selected = await client.query<Readonly<{ backend_id: string; transaction_id: string }>>(
+    `SELECT pg_backend_pid()::text AS backend_id,
+            pg_current_xact_id()::text AS transaction_id`
+  );
+  const row = selected.rows[0];
+  if (!row) throw repositoryError("transaction_unavailable", 503);
+  return { backendId: row.backend_id, transactionId: row.transaction_id };
+}
+
+async function requireClaimTransaction<Kind extends PortableImportKind>(
+  client: DatabaseClient,
+  claim: PortableImportCommitClaim<Kind>,
+): Promise<void> {
+  const expected = claim[portableImportTransactionIdentity];
+  const current = await currentTransactionIdentity(client);
+  if (!expected
+    || expected.backendId !== current.backendId
+    || expected.transactionId !== current.transactionId) {
+    throw repositoryError("transaction_unavailable", 503);
+  }
+}
+
 async function safeRepositoryCall<T>(work: () => Promise<T>): Promise<T> {
   try {
     return await work();
@@ -355,7 +384,36 @@ function databaseDestination(destination: PortablePreviewDestination): DatabaseD
   };
 }
 
-function privateDescriptor(row: DescriptorRow): PrivateStorageDescriptor {
+function databaseByteLength(value: string): number {
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw repositoryError("archive_unavailable", 503);
+  }
+  const parsed = BigInt(value);
+  if (parsed > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw repositoryError("archive_unavailable", 503);
+  }
+  return Number(parsed);
+}
+
+function databaseContentHash(value: string): string {
+  if (!/^[0-9a-f]{64}$/.test(value)) {
+    throw repositoryError("archive_unavailable", 503);
+  }
+  return value;
+}
+
+function privateDescriptor(
+  row: DescriptorRow,
+  expectedContentHash: string,
+  expectedByteLength: string,
+): PrivateStorageDescriptor {
+  const descriptorHash = databaseContentHash(row.content_hash);
+  const descriptorLength = databaseByteLength(row.byte_length);
+  const storedHash = databaseContentHash(expectedContentHash);
+  const storedLength = databaseByteLength(expectedByteLength);
+  if (storedHash !== descriptorHash || storedLength !== descriptorLength) {
+    throw repositoryError("archive_unavailable", 503);
+  }
   return {
     relativePath: row.relative_path,
     identity: {
@@ -363,8 +421,8 @@ function privateDescriptor(row: DescriptorRow): PrivateStorageDescriptor {
       fileId: row.file_id,
       changeToken: row.change_token
     },
-    contentHash: row.content_hash,
-    byteLength: Number(row.byte_length)
+    contentHash: descriptorHash,
+    byteLength: descriptorLength
   };
 }
 
@@ -495,7 +553,9 @@ function validLegacyStoryPreview(value: JsonRecord): boolean {
 function validWorldJsonPreview(value: JsonRecord): boolean {
   return value.kind === "world_json"
     && typeof value.valid === "boolean"
-    && (value.valid === false || isString(value.title))
+    && (value.valid === true
+      ? isString(value.title)
+      : value.duplicate === false && value.existingWorldId === null)
     && typeof value.duplicate === "boolean"
     && isNullableString(value.existingWorldId)
     && isCharacterArray(value.characters, "index")
@@ -612,8 +672,174 @@ function resultMatchesImport(
 }
 
 function projectionFor<Kind extends PortableImportKind>(kind: Kind, value: unknown): PortableImportPreviewProjectionFor<Kind> {
-  if (!isPreviewProjection(kind, value)) throw repositoryError("archive_unavailable", 503);
-  return value as PortableImportPreviewProjectionFor<Kind>;
+  if (!isRecord(value) || !isPreviewProjection(kind, value)) {
+    throw repositoryError("archive_unavailable", 503);
+  }
+  let projection: unknown;
+  switch (kind) {
+    case "campaign_zip": {
+      const campaign = value.campaign as JsonRecord;
+      const world = value.world as JsonRecord;
+      const chronicle = value.chronicle as JsonRecord;
+      const assets = value.assets as JsonRecord;
+      const destination = value.destination as JsonRecord;
+      const selectedCharacter = campaign.selectedCharacter as JsonRecord | null;
+      projection = {
+        valid: true,
+        archiveType: "campaign",
+        formatVersion: 1,
+        contentFingerprint: value.contentFingerprint,
+        campaign: {
+          title: campaign.title,
+          sourceCampaignId: campaign.sourceCampaignId,
+          acceptedTurnCount: campaign.acceptedTurnCount,
+          activeTurnNumber: campaign.activeTurnNumber,
+          selectedCharacter: selectedCharacter === null ? null : {
+            id: selectedCharacter.id,
+            name: selectedCharacter.name
+          }
+        },
+        world: {
+          title: world.title,
+          sourceWorldId: world.sourceWorldId,
+          sourceWorldVersionId: world.sourceWorldVersionId,
+          versionNumber: world.versionNumber
+        },
+        chronicle: {
+          memoryCount: chronicle.memoryCount,
+          summaryCount: chronicle.summaryCount
+        },
+        assets: {
+          originalCount: assets.originalCount,
+          totalBytes: assets.totalBytes
+        },
+        destination: destination.kind === "embedded" ? {
+          kind: "embedded",
+          operation: "create_world",
+          worldId: null,
+          worldVersionId: null
+        } : {
+          kind: "existing_world_version",
+          operation: "attach_existing_world_version",
+          worldId: destination.worldId,
+          worldVersionId: destination.worldVersionId
+        },
+        providerDataIncluded: false,
+        warnings: [...value.warnings as string[]]
+      };
+      break;
+    }
+    case "legacy_story": {
+      const counts = value.counts as JsonRecord;
+      projection = {
+        kind: "campaign",
+        valid: value.valid,
+        title: value.title,
+        duplicate: value.duplicate,
+        existingCampaignId: value.existingCampaignId,
+        counts: {
+          turns: counts.turns,
+          completeHistoryCharacters: counts.completeHistoryCharacters,
+          estimatedHistoryTokens: counts.estimatedHistoryTokens
+        },
+        warnings: [...value.warnings as string[]]
+      };
+      break;
+    }
+    case "infinite_worlds":
+    case "world_json": {
+      const counts = value.counts as JsonRecord;
+      projection = {
+        kind: "world_json",
+        valid: value.valid,
+        ...(value.valid === true ? { title: value.title } : {}),
+        duplicate: value.duplicate,
+        existingWorldId: value.existingWorldId,
+        characters: (value.characters as JsonRecord[]).map((character) => ({
+          index: character.index,
+          name: character.name
+        })),
+        counts: {
+          entities: counts.entities,
+          relationships: counts.relationships,
+          triggers: counts.triggers
+        },
+        warnings: [...value.warnings as string[]]
+      };
+      break;
+    }
+    case "cyoa": {
+      const counts = value.counts as JsonRecord;
+      projection = {
+        kind: "cyoa_json",
+        valid: value.valid,
+        requiresProvider: value.requiresProvider,
+        warnings: [...value.warnings as string[]],
+        counts: {
+          topLevelTitle: counts.topLevelTitle,
+          layer1ChaptersCount: counts.layer1ChaptersCount,
+          characterTarget: counts.characterTarget
+        }
+      };
+      break;
+    }
+    case "world_text": {
+      const counts = value.counts as JsonRecord;
+      projection = {
+        kind: "world_text",
+        valid: value.valid,
+        requiresProvider: true,
+        warnings: [...value.warnings as string[]],
+        counts: {
+          sourceCharacters: counts.sourceCharacters,
+          sourceWords: counts.sourceWords
+        }
+      };
+      break;
+    }
+    case "story_text": {
+      const counts = value.counts as JsonRecord;
+      if (!("targetWorldId" in value)) {
+        projection = {
+          kind: "story_text",
+          valid: false,
+          warnings: [...value.warnings as string[]],
+          counts: { turns: counts.turns }
+        };
+        break;
+      }
+      const common = {
+        kind: "story_text" as const,
+        targetWorldId: value.targetWorldId,
+        diagnostics: [...value.diagnostics as string[]],
+        characters: (value.characters as JsonRecord[]).map((character) => ({
+          id: character.id,
+          name: character.name
+        })),
+        selectedCharacterId: value.selectedCharacterId,
+        valid: value.valid,
+        warnings: [...value.warnings as string[]]
+      };
+      projection = !("title" in value) ? {
+        ...common,
+        selectedCharacterId: null,
+        valid: false,
+        counts: { turns: counts.turns }
+      } : {
+        ...common,
+        title: value.title,
+        duplicate: value.duplicate,
+        existingCampaignId: value.existingCampaignId,
+        counts: {
+          turns: counts.turns,
+          completeHistoryCharacters: counts.completeHistoryCharacters,
+          estimatedHistoryTokens: counts.estimatedHistoryTokens
+        }
+      };
+      break;
+    }
+  }
+  return projection as PortableImportPreviewProjectionFor<Kind>;
 }
 
 function boundProjectionFor<Kind extends PortableImportKind>(
@@ -625,12 +851,65 @@ function boundProjectionFor<Kind extends PortableImportKind>(
   if (kind === "campaign_zip" && !campaignDestinationMatches(projection, destination)) {
     throw repositoryError("archive_unavailable", 503);
   }
+  if (kind === "story_text"
+    && isRecord(projection)
+    && "targetWorldId" in projection
+    && (destination.kind !== "existing_world_version"
+      || projection.targetWorldId !== destination.worldId)) {
+    throw repositoryError("archive_unavailable", 503);
+  }
   return projection;
 }
 
 function resultFor<Kind extends PortableImportKind>(kind: Kind, value: unknown): PortableImportResultProjectionFor<Kind> {
-  if (!isResultProjection(kind, value)) throw repositoryError("archive_unavailable", 503);
-  return value as PortableImportResultProjectionFor<Kind>;
+  if (!isRecord(value) || !isResultProjection(kind, value)) {
+    throw repositoryError("archive_unavailable", 503);
+  }
+  let result: unknown;
+  if (kind === "campaign_zip") {
+    const stats = value.stats as JsonRecord;
+    result = {
+      importId: value.importId,
+      worldId: value.worldId,
+      worldVersionId: value.worldVersionId,
+      campaignId: value.campaignId,
+      duplicate: value.duplicate,
+      stats: {
+        turnCount: stats.turnCount,
+        memoryCount: stats.memoryCount,
+        summaryCount: stats.summaryCount,
+        assetCount: stats.assetCount,
+        assetBytes: stats.assetBytes
+      }
+    };
+  } else if (kind === "legacy_story" || kind === "story_text") {
+    const stats = value.stats as JsonRecord;
+    result = {
+      ...(kind === "story_text" ? { kind: "campaign" as const } : {}),
+      importId: value.importId,
+      worldId: value.worldId,
+      worldVersionId: value.worldVersionId,
+      campaignId: value.campaignId,
+      duplicate: value.duplicate,
+      stats: {
+        turnCount: stats.turnCount,
+        memoryCount: stats.memoryCount,
+        completeHistoryCharacters: stats.completeHistoryCharacters,
+        estimatedHistoryTokens: stats.estimatedHistoryTokens,
+        importedSummary: stats.importedSummary,
+        sanitizedMemoryCount: stats.sanitizedMemoryCount
+      }
+    };
+  } else {
+    result = {
+      kind: "world",
+      importId: value.importId,
+      worldId: value.worldId,
+      worldVersionId: value.worldVersionId,
+      duplicate: value.duplicate
+    };
+  }
+  return result as PortableImportResultProjectionFor<Kind>;
 }
 
 function commitRequestFingerprint(
@@ -670,23 +949,51 @@ function storedCommit(value: unknown): StoredCommitProjection {
     || Array.isArray(record.result)) {
     throw repositoryError("archive_unavailable", 503);
   }
-  return record as StoredCommitProjection;
+  return {
+    importedRecordId: record.importedRecordId,
+    duplicate: record.duplicate,
+    result: record.result
+  };
 }
 
 function commitView<Kind extends PortableImportKind>(
   kind: Kind,
   row: PreviewRow,
   retrieval: PortableImportResultRetrieval<Kind>,
+  imported: ImportScopeRow,
 ): PortableImportCommitView<Kind> {
   const stored = storedCommit(row.result_projection);
+  const result = resultFor(kind, stored.result);
+  if (stored.importedRecordId !== imported.id
+    || !resultMatchesImport(kind, result, imported, stored.duplicate)) {
+    throw repositoryError("archive_unavailable", 503);
+  }
   return {
     importedRecordId: toPortableImportedRecordId(stored.importedRecordId),
     retrieval,
     kind,
     duplicate: stored.duplicate,
     diagnostics: portableDiagnostics(row.diagnostic_codes),
-    result: resultFor(kind, stored.result)
+    result
   };
+}
+
+async function completedImportScope(
+  client: DatabaseClient,
+  ownerUserId: string,
+  importId: string | null,
+): Promise<ImportScopeRow> {
+  if (importId === null) throw repositoryError("archive_unavailable", 503);
+  const selected = await client.query<ImportScopeRow>(
+    `SELECT id,world_id,world_version_id,campaign_id
+       FROM imports
+      WHERE id=$1 AND owner_user_id=$2 AND status='completed'
+      FOR KEY SHARE`,
+    [importId, ownerUserId]
+  );
+  const imported = selected.rows[0];
+  if (!imported) throw repositoryError("archive_unavailable", 503);
+  return imported;
 }
 
 function destinationMatches(row: PreviewRow, destination: DatabaseDestination): boolean {
@@ -773,14 +1080,16 @@ async function retrieveStagedPayload(
       [owner.ownerUserId, sha256(stagedInput)]
     );
     const row = selected.rows[0];
-    return row ? {
+    if (!row) return null;
+    const descriptor = privateDescriptor(row, row.staged_content_hash, row.staged_byte_length);
+    return {
       stagedInputId: row.staged_input_id,
       filesystemOperationId: row.filesystem_operation_id as DurableFilesystemOperationId,
-      contentHash: row.staged_content_hash,
-      byteLength: Number(row.staged_byte_length),
+      contentHash: descriptor.contentHash,
+      byteLength: descriptor.byteLength,
       expiresAt: row.expires_at.toISOString(),
-      descriptor: privateDescriptor(row)
-    } : null;
+      descriptor
+    };
   });
 }
 
@@ -793,18 +1102,30 @@ async function createPreview<Command extends PortableImportPreviewCommand>(
   const fingerprint = contentHash(request.contentFingerprint);
   const expiresAt = finiteFutureTimestamp(request.expiresAt, "archive_expired");
   const diagnosticCodes = diagnostics(request.diagnostics);
-  const projection = jsonValue(request.projection);
-  if (!isPreviewProjection(request.command.kind, projection)
+  const rawProjection = jsonValue(request.projection);
+  if (!isPreviewProjection(request.command.kind, rawProjection)
     || (request.command.kind === "campaign_zip"
-      && !campaignDestinationMatches(projection, request.command.destination))) {
+      && !campaignDestinationMatches(rawProjection, request.command.destination))
+    || (request.command.kind === "story_text"
+      && isRecord(rawProjection)
+      && "targetWorldId" in rawProjection
+      && rawProjection.targetWorldId !== request.command.destination.worldId)) {
     throw repositoryError("import_invalid", 400);
   }
+  const projection = projectionFor<Command["kind"]>(request.command.kind, rawProjection);
   const inserted = await withTransaction(pool, async (client) => {
+    await client.query(
+      `UPDATE portable_import_operations
+          SET status='expired',updated_at=now()
+        WHERE owner_user_id=$1 AND import_kind=$2 AND content_fingerprint=$3
+          AND destination_fingerprint=$4 AND status='previewed' AND expires_at <= now()`,
+      [request.command.ownerUserId, request.command.kind, fingerprint, destination.fingerprint]
+    );
     await client.query(
       `UPDATE portable_import_operations
           SET status='superseded',updated_at=now()
         WHERE owner_user_id=$1 AND import_kind=$2 AND content_fingerprint=$3
-          AND destination_fingerprint=$4 AND status='previewed'`,
+          AND destination_fingerprint=$4 AND status='previewed' AND expires_at > now()`,
       [request.command.ownerUserId, request.command.kind, fingerprint, destination.fingerprint]
     );
     return client.query<{ expires_at: Date }>(
@@ -848,7 +1169,7 @@ async function createPreview<Command extends PortableImportPreviewCommand>(
     expiresAt: row.expires_at.toISOString(),
     cleanupOwner: "application",
     diagnostics: diagnosticCodes,
-    projection: projection as PortableImportPreviewProjectionFor<Command["kind"]>
+    projection
   };
 }
 
@@ -920,6 +1241,7 @@ async function beginImport<Kind extends PortableImportKind, Destination extends 
   command: PortableImportCommitRepositoryCommand<Kind, Destination>,
 ): Promise<PortableImportBeginResult<Kind>> {
   await requireCallerTransaction(client);
+  const transactionIdentity = await currentTransactionIdentity(client);
   if (command.idempotencyKey.trim().length === 0) {
     throw repositoryError("import_invalid", 400);
   }
@@ -943,7 +1265,8 @@ async function beginImport<Kind extends PortableImportKind, Destination extends 
       || !row.result_projection) {
       throw repositoryError("import_idempotency_mismatch", 409);
     }
-    return { outcome: "replay", view: commitView<Kind>(command.kind, row, retrieval) };
+    const imported = await completedImportScope(client, command.ownerUserId, row.import_id);
+    return { outcome: "replay", view: commitView<Kind>(command.kind, row, retrieval, imported) };
   }
   if (row.status !== "previewed") throw repositoryError("import_conflict", 409);
   if (row.expires_at.getTime() <= Date.now()) {
@@ -1039,7 +1362,8 @@ async function beginImport<Kind extends PortableImportKind, Destination extends 
       ownerUserId: command.ownerUserId,
       kind: command.kind,
       requestFingerprint,
-      resultRetrieval: retrieval
+      resultRetrieval: retrieval,
+      [portableImportTransactionIdentity]: transactionIdentity
     } as PortableImportCommitClaim<Kind>,
     preview: {
       projection: previewProjection,
@@ -1057,12 +1381,14 @@ async function completeImport<Kind extends PortableImportKind>(
   completion: CompletePortableImportRequest<Kind>,
 ): Promise<PortableImportCommitView<Kind>> {
   await requireCallerTransaction(client);
+  await requireClaimTransaction(client, claim);
   const expiresAt = finiteFutureTimestamp(completion.resultExpiresAt, "archive_expired");
   const diagnosticCodes = diagnostics(completion.diagnostics);
-  const result = jsonValue(completion.result);
-  if (!isResultProjection(claim.kind, result)) {
+  const rawResult = jsonValue(completion.result);
+  if (!isResultProjection(claim.kind, rawResult)) {
     throw repositoryError("import_invalid", 400);
   }
+  const result = resultFor(claim.kind, rawResult);
   const selectedImport = await client.query<ImportScopeRow>(
     `SELECT id,world_id,world_version_id,campaign_id
        FROM imports
@@ -1071,7 +1397,9 @@ async function completeImport<Kind extends PortableImportKind>(
     [completion.importId, claim.ownerUserId]
   );
   const imported = selectedImport.rows[0];
-  if (!imported || !resultMatchesImport(claim.kind, result, imported, completion.duplicate)) {
+  if (!imported
+    || completion.importedRecordId !== imported.id
+    || !resultMatchesImport(claim.kind, result, imported, completion.duplicate)) {
     throw repositoryError("import_invalid", 409);
   }
   const stored: StoredCommitProjection = {
@@ -1110,7 +1438,7 @@ async function completeImport<Kind extends PortableImportKind>(
   );
   const row = completed.rows[0];
   if (!row) throw repositoryError("import_invalid", 409);
-  return commitView(claim.kind, row, claim.resultRetrieval);
+  return commitView(claim.kind, row, claim.resultRetrieval, imported);
 }
 
 async function retrieveImportResult<Kind extends PortableImportKind>(
@@ -1119,20 +1447,31 @@ async function retrieveImportResult<Kind extends PortableImportKind>(
   kind: Kind,
   retrieval: PortableImportResultRetrieval<Kind>,
 ): Promise<PortableImportResultView<Kind> | null> {
-  const selected = await pool.query<Pick<PreviewRow, "result_projection" | "diagnostic_codes">>(
-    `SELECT result_projection,diagnostic_codes
-       FROM portable_import_operations
-      WHERE owner_user_id=$1 AND import_kind=$2 AND result_retrieval_token_hash=$3
-        AND status='committed' AND expires_at > now()
+  const selected = await pool.query<Pick<PreviewRow, "result_projection" | "diagnostic_codes"> & ImportScopeRow>(
+    `SELECT operation.result_projection,operation.diagnostic_codes,
+            imported.id,imported.world_id,imported.world_version_id,imported.campaign_id
+       FROM portable_import_operations operation
+       JOIN imports imported
+         ON imported.id=operation.import_id
+        AND imported.owner_user_id=operation.owner_user_id
+        AND imported.status='completed'
+      WHERE operation.owner_user_id=$1 AND operation.import_kind=$2
+        AND operation.result_retrieval_token_hash=$3
+        AND operation.status='committed' AND operation.expires_at > now()
       LIMIT 1`,
     [owner.ownerUserId, kind, sha256(retrieval)]
   );
   const row = selected.rows[0];
   if (!row) return null;
   const stored = storedCommit(row.result_projection);
+  const result = resultFor(kind, stored.result);
+  if (stored.importedRecordId !== row.id
+    || !resultMatchesImport(kind, result, row, stored.duplicate)) {
+    throw repositoryError("archive_unavailable", 503);
+  }
   return {
     kind,
-    result: resultFor(kind, stored.result),
+    result,
     diagnostics: portableDiagnostics(row.diagnostic_codes)
   };
 }
@@ -1182,7 +1521,7 @@ async function registerExportArtifact(
   return {
     retrieval: toPortableArchiveExportRetrieval(token),
     contentType: request.contentType,
-    byteLength: Number(row.byte_length)
+    byteLength: databaseByteLength(row.byte_length)
   };
 }
 
@@ -1236,14 +1575,16 @@ async function retrieveExportArtifact(
       ]
     );
     const row = selected.rows[0];
-    return row ? {
+    if (!row) return null;
+    const descriptor = privateDescriptor(row, row.artifact_content_hash, row.artifact_byte_length);
+    return {
       artifactId: row.artifact_id,
       contentType: row.content_type,
-      contentHash: row.artifact_content_hash,
-      byteLength: Number(row.artifact_byte_length),
+      contentHash: descriptor.contentHash,
+      byteLength: descriptor.byteLength,
       expiresAt: row.expires_at.toISOString(),
-      descriptor: privateDescriptor(row)
-    } : null;
+      descriptor
+    };
   });
 }
 

@@ -153,3 +153,59 @@ run above is authoritative and passed completely.
   allowlist, physical cleanup, or `#0446` state changed in this checkpoint.
 - Existing unrelated working-tree changes were preserved and are not part of
   this task.
+
+## Correction round 1
+
+Independent review findings `#0484` through `#0489` were addressed without
+expanding this checkpoint into migration, route, service, worker, runtime,
+cutover, reaper, or global-retention work.
+
+- `#0484`: a ready claim now carries a runtime-private PostgreSQL backend and
+  transaction identity captured by `beginImport`. `completeImport` rejects the
+  claim on another client or a later transaction, while same-transaction
+  completion remains valid.
+- `#0485`: every preview and result family is validated and reconstructed from
+  exact public allowlisted fields. Commit replay and result retrieval re-bind
+  the stored wrapper and result to the owner-scoped, completed `imports` row,
+  including local import identity, world/campaign scope, and duplicate flags.
+- `#0486`: any `story_text` projection with a target world must match its exact
+  `existing_world_version` destination on both write and read.
+- `#0487`: staged and export redemption now validate the row hash and byte
+  length against the immutable storage descriptor and reject malformed or
+  unsafe-integer database lengths.
+- `#0488`: matching elapsed previews are marked `expired` before replacement;
+  only still-live matching previews are marked `superseded`.
+- `#0489`: real-PostgreSQL issuance matrices now cover wrong owner, scope,
+  descriptor hash, descriptor length, purpose, and lifecycle for staged
+  capabilities and for both `campaign_zip` and `world_json` export artifacts.
+
+Correction RED evidence:
+
+- cross-client claim completion returned `import_invalid` instead of rejecting
+  the foreign transaction as `transaction_unavailable`;
+- valid-shaped persisted projection extras were returned, wrong-scope committed
+  projections were accepted, and a wrong-world story target was accepted;
+- descriptor metadata tampering still resolved a staged payload;
+- an elapsed matching preview became `superseded` instead of `expired`;
+- the issuance matrices passed immediately, documenting existing SQL gates
+  rather than requiring a production change.
+
+Correction GREEN and full verification:
+
+- `pnpm exec vitest run --config vitest.integration.config.ts tests/integration/import-repository.integration.test.ts`
+  - 1 file passed, 20 tests passed in 4.01 seconds.
+- `pnpm check`
+  - repository boundary/data checks and all TypeScript/web checks passed.
+- `pnpm test:unit`
+  - 116 files passed, 1,349 tests passed in 35.38 seconds.
+- `pnpm test:integration`
+  - 34 files passed, 381 tests passed in 91.30 seconds.
+- `pnpm build`
+  - TypeScript, legacy web, and Next web builds passed.
+- `git diff --check`
+  - passed before this report append; rerun before commit.
+
+The correction changes remain limited to the repository adapter, its real-
+PostgreSQL integration tests, and this report. Existing unrelated working-tree
+changes remain preserved. Per the correction-round instruction, no projectmem
+write tools were used.
