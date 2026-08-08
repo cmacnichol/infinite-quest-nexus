@@ -52,6 +52,7 @@ type WorkRow = Readonly<{
 }>;
 
 type AuthorityRow = Readonly<{
+  operation_id: string;
   normalized_payload: unknown;
   authority_fingerprint: string | null;
   provider_configuration_fingerprint: string | null;
@@ -96,6 +97,27 @@ export interface PostgresPortableImportAuthorityRepository extends PrivatePortab
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const HASH_PATTERN = /^[0-9a-f]{64}$/u;
+
+type ReservationIntentRow = Readonly<{
+  ordinal: number;
+  asset_id: string;
+  asset_idempotency_key_hash: string;
+  asset_request_fingerprint: string;
+  commit_idempotency_key_hash: string;
+  command_fingerprint: string;
+  identity_lifecycle?: string;
+}>;
+
+function exactAssetIds(assetIds: readonly string[]): void {
+  if (assetIds.length > 1000
+    || assetIds.some((assetId) => !UUID_PATTERN.test(assetId))
+    || new Set(assetIds).size !== assetIds.length) {
+    throw new Error("portable_import_asset_reservations_invalid");
+  }
 }
 
 function jsonObject(value: unknown): Readonly<Record<string, import("../../application/src/imports/private-portable-composition.js").PortableJsonValue>> {
@@ -187,12 +209,13 @@ export function createPostgresPortableImportAuthorityRepository(
   const readPreviewAuthority = async (input: Readonly<{
     command: PortableImportCommitCommand;
   }>): Promise<Readonly<{
+    operationId: string;
     authority: PortableCanonicalImportAuthority;
     authorityFingerprint: string;
   }> | null> => {
     const destination = destinationParameters(input.command.destination);
     const selected = await pool.query<AuthorityRow>(
-      `SELECT normalized_payload,authority_fingerprint,provider_configuration_fingerprint,
+      `SELECT id AS operation_id,normalized_payload,authority_fingerprint,provider_configuration_fingerprint,
               selected_character_id,source_installation_id,source_record_id
          FROM portable_import_operations
         WHERE owner_user_id=$1 AND import_kind=$2 AND preview_token_hash=$3
@@ -221,7 +244,11 @@ export function createPostgresPortableImportAuthorityRepository(
     if (sha256(canonicalPortableImportAuthority(authority)) !== row.authority_fingerprint) {
       throw new Error("portable_import_authority_mismatch");
     }
-    return Object.freeze({ authority, authorityFingerprint: row.authority_fingerprint });
+    return Object.freeze({
+      operationId: row.operation_id,
+      authority,
+      authorityFingerprint: row.authority_fingerprint
+    });
   };
   const persistPreviewAuthority = async <Command extends PortableImportPreviewCommand>(input: Readonly<{
     command: Command;
@@ -255,7 +282,7 @@ export function createPostgresPortableImportAuthorityRepository(
     );
     if (begun.outcome === "replay") return begun;
     const selected = await database.query<AuthorityRow>(
-      `SELECT normalized_payload,authority_fingerprint,provider_configuration_fingerprint,
+      `SELECT id AS operation_id,normalized_payload,authority_fingerprint,provider_configuration_fingerprint,
               selected_character_id,source_installation_id,source_record_id
          FROM portable_import_operations
         WHERE id=$1 AND owner_user_id=$2 AND import_kind=$3 AND status='consuming'
@@ -341,7 +368,144 @@ export function createPostgresPortableImportAuthorityRepository(
           AND status='running' AND lease_expires_at > clock_timestamp()`,
       [...exactClaimParameters(claim)]
     );
-    if (updated.rowCount !== 1) throw new Error("portable_import_claim_lost");
+    if (updated.rowCount === 1) return;
+    const alreadyCompleted = await database.query(
+      `SELECT 1
+         FROM portable_import_work work
+         JOIN portable_import_operations operation
+           ON operation.id=work.operation_id AND operation.owner_user_id=work.owner_user_id
+        WHERE work.operation_id=$1 AND work.owner_user_id=$2
+          AND work.status='completed' AND operation.status='committed'`,
+      [claim.operationId, claim.ownerUserId],
+    );
+    if (alreadyCompleted.rowCount !== 1) throw new Error("portable_import_claim_lost");
+  };
+
+  const readReservationIntents = async (
+    database: DatabaseClient,
+    operationId: string,
+    ownerUserId: string,
+    lock: boolean,
+  ): Promise<readonly ReservationIntentRow[]> => {
+    const selected = await database.query<ReservationIntentRow>(
+      `SELECT intent.ordinal,intent.asset_id,intent.asset_idempotency_key_hash,
+              intent.asset_request_fingerprint,intent.commit_idempotency_key_hash,
+              intent.command_fingerprint,identity.lifecycle AS identity_lifecycle
+         FROM portable_import_asset_reservation_intents intent
+         JOIN asset_publication_identities identity
+           ON identity.asset_id=intent.asset_id
+          AND identity.owner_user_id=intent.owner_user_id
+        WHERE intent.operation_id=$1 AND intent.owner_user_id=$2
+        ORDER BY intent.ordinal
+        ${lock ? "FOR UPDATE OF intent,identity" : ""}`,
+      [operationId, ownerUserId],
+    );
+    return selected.rows;
+  };
+
+  const lockAssetReservationIntentAuthority: PrivatePortableImportAuthorityPort["lockAssetReservationIntentAuthority"] = async (
+    databaseContext,
+    input,
+  ) => {
+    if (!UUID_PATTERN.test(input.operationId) || !HASH_PATTERN.test(input.authorityFingerprint)) {
+      throw new Error("portable_import_asset_reservations_invalid");
+    }
+    const database = databaseContext as DatabaseClient;
+    const operation = await database.query(
+      `SELECT 1 FROM portable_import_operations operation
+        JOIN portable_import_work work
+          ON work.operation_id=operation.id AND work.owner_user_id=operation.owner_user_id
+       WHERE operation.id=$1 AND operation.owner_user_id=$2
+         AND operation.import_kind='campaign_zip' AND operation.status='previewed'
+         AND operation.authority_fingerprint=$3
+         AND operation.expires_at > clock_timestamp()
+         AND work.status IN ('running','recoverable') AND work.expires_at > clock_timestamp()
+       FOR UPDATE OF operation,work`,
+      [input.operationId, input.owner.ownerUserId, input.authorityFingerprint],
+    );
+    if (operation.rowCount !== 1) throw new Error("portable_import_asset_reservations_unavailable");
+  };
+
+  const recordAssetReservationIntents: PrivatePortableImportAuthorityPort["recordAssetReservationIntents"] = async (
+    databaseContext,
+    input,
+  ) => {
+    const database = databaseContext as DatabaseClient;
+    exactAssetIds(input.assetIds);
+    if (!UUID_PATTERN.test(input.operationId)
+      || !HASH_PATTERN.test(input.authorityFingerprint)
+      || !HASH_PATTERN.test(input.commitIdempotencyKeyHash)
+      || !HASH_PATTERN.test(input.commandFingerprint)) {
+      throw new Error("portable_import_asset_reservations_invalid");
+    }
+    await lockAssetReservationIntentAuthority(database, input);
+    if (input.assetIds.length > 0) {
+      await database.query(
+        `INSERT INTO portable_import_asset_reservation_intents (
+           operation_id,owner_user_id,ordinal,asset_id,commit_idempotency_key_hash,
+           command_fingerprint,asset_idempotency_key_hash,asset_request_fingerprint
+         )
+         SELECT $1,$2,asset.ordinality-1,identity.asset_id,$4,$5,
+                identity.idempotency_key_hash,identity.request_fingerprint
+           FROM unnest($3::uuid[]) WITH ORDINALITY AS asset(asset_id,ordinality)
+           JOIN asset_publication_identities identity
+             ON identity.asset_id=asset.asset_id AND identity.owner_user_id=$2
+          WHERE identity.lifecycle='prepared'
+         ON CONFLICT DO NOTHING`,
+        [
+          input.operationId,
+          input.owner.ownerUserId,
+          input.assetIds,
+          input.commitIdempotencyKeyHash,
+          input.commandFingerprint
+        ],
+      );
+    }
+    const exact = await readReservationIntents(
+      database,
+      input.operationId,
+      input.owner.ownerUserId,
+      true,
+    );
+    if (exact.length !== input.assetIds.length
+      || exact.some((intent, ordinal) => intent.ordinal !== ordinal
+        || intent.asset_id !== input.assetIds[ordinal]
+        || intent.commit_idempotency_key_hash !== input.commitIdempotencyKeyHash
+        || intent.command_fingerprint !== input.commandFingerprint
+        || intent.identity_lifecycle !== "prepared")) {
+      throw new Error("portable_import_asset_reservation_mismatch");
+    }
+  };
+
+  const releaseAssetReservationIntents: PrivatePortableImportAuthorityPort["releaseAssetReservationIntents"] = async (
+    databaseContext,
+    input,
+  ) => {
+    const database = databaseContext as DatabaseClient;
+    exactAssetIds(input.assetIds);
+    if (!UUID_PATTERN.test(input.operationId)) {
+      throw new Error("portable_import_asset_reservations_invalid");
+    }
+    const exact = await readReservationIntents(
+      database,
+      input.operationId,
+      input.owner.ownerUserId,
+      true,
+    );
+    if (exact.length !== input.assetIds.length
+      || exact.some((intent, ordinal) => intent.ordinal !== ordinal
+        || intent.asset_id !== input.assetIds[ordinal])) {
+      throw new Error("portable_import_asset_reservation_mismatch");
+    }
+    if (exact.length === 0) return;
+    const removed = await database.query(
+      `DELETE FROM portable_import_asset_reservation_intents
+        WHERE operation_id=$1 AND owner_user_id=$2`,
+      [input.operationId, input.owner.ownerUserId],
+    );
+    if (removed.rowCount !== exact.length) {
+      throw new Error("portable_import_asset_reservations_unavailable");
+    }
   };
 
   const recordAssetPublications = async (
@@ -350,13 +514,18 @@ export function createPostgresPortableImportAuthorityRepository(
     importId: string,
     assetIds: readonly string[],
   ): Promise<void> => {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(importId)
-      || assetIds.length > 1000
-      || assetIds.some((assetId) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(assetId))
-      || new Set(assetIds).size !== assetIds.length) {
+    if (!UUID_PATTERN.test(importId)) {
       throw new Error("portable_import_asset_publications_invalid");
     }
+    exactAssetIds(assetIds);
     if (assetIds.length === 0) return;
+    const intents = await readReservationIntents(database, claim.operationId, claim.ownerUserId, true);
+    if (intents.length !== assetIds.length
+      || intents.some((intent, ordinal) => intent.ordinal !== ordinal
+        || intent.asset_id !== assetIds[ordinal]
+        || !["attached", "published"].includes(intent.identity_lifecycle ?? ""))) {
+      throw new Error("portable_import_asset_reservation_mismatch");
+    }
     const inserted = await database.query<{ asset_id: string }>(
       `WITH exact_claim AS (
          SELECT operation_id,owner_user_id
@@ -377,6 +546,14 @@ export function createPostgresPortableImportAuthorityRepository(
     if (inserted.rows.length !== assetIds.length) {
       throw new Error("portable_import_asset_publications_unavailable");
     }
+    const retired = await database.query(
+      `DELETE FROM portable_import_asset_reservation_intents
+        WHERE operation_id=$1 AND owner_user_id=$2`,
+      [claim.operationId, claim.ownerUserId],
+    );
+    if (retired.rowCount !== assetIds.length) {
+      throw new Error("portable_import_asset_reservations_unavailable");
+    }
   };
 
   const readCommittedAssetPublicationIds = async (
@@ -389,14 +566,29 @@ export function createPostgresPortableImportAuthorityRepository(
                   FILTER (WHERE publication.asset_id IS NOT NULL),
                 '{}'::uuid[]
               ) AS asset_ids
-         FROM portable_import_operations operation
-         LEFT JOIN portable_import_asset_publications publication
-           ON publication.operation_id=operation.id
-          AND publication.owner_user_id=operation.owner_user_id
-          AND publication.import_id=operation.import_id
-        WHERE operation.owner_user_id=$1 AND operation.preview_token_hash=$2
-          AND operation.status='committed'
-        GROUP BY operation.id`,
+         FROM portable_import_operations replay
+         JOIN imports imported
+           ON imported.id=replay.import_id
+          AND imported.owner_user_id=replay.owner_user_id
+          AND imported.source_hash=replay.authority_fingerprint
+          AND imported.source_type='portable_campaign_zip'
+          AND imported.status='completed'
+         LEFT JOIN LATERAL (
+           SELECT mapped.asset_id
+             FROM portable_import_asset_publications mapped
+             JOIN portable_import_operations canonical
+               ON canonical.id=mapped.operation_id
+              AND canonical.owner_user_id=mapped.owner_user_id
+              AND canonical.import_id=mapped.import_id
+              AND canonical.import_kind='campaign_zip'
+              AND canonical.status='committed'
+              AND canonical.authority_fingerprint=replay.authority_fingerprint
+            WHERE mapped.owner_user_id=replay.owner_user_id
+              AND mapped.import_id=replay.import_id
+         ) publication ON true
+        WHERE replay.owner_user_id=$1 AND replay.preview_token_hash=$2
+          AND replay.import_kind='campaign_zip' AND replay.status='committed'
+        GROUP BY replay.id`,
       [owner.ownerUserId, sha256(previewToken)],
     );
     const row = selected.rows[0];
@@ -404,11 +596,71 @@ export function createPostgresPortableImportAuthorityRepository(
     return Object.freeze(row.asset_ids);
   };
 
+  const discardAbandonedReservationIntents = async (
+    database: DatabaseClient,
+    operationId: string,
+    ownerUserId: string,
+  ): Promise<void> => {
+    const intents = await readReservationIntents(database, operationId, ownerUserId, true);
+    if (intents.some((intent) => !["prepared", "cleanup_pending"].includes(intent.identity_lifecycle ?? ""))) {
+      throw new Error("portable_import_asset_reservation_advanced");
+    }
+    if (intents.length === 0) return;
+    const removed = await database.query(
+      `DELETE FROM portable_import_asset_reservation_intents
+        WHERE operation_id=$1 AND owner_user_id=$2`,
+      [operationId, ownerUserId],
+    );
+    if (removed.rowCount !== intents.length) {
+      throw new Error("portable_import_asset_reservations_unavailable");
+    }
+    for (const intent of intents) {
+      if (intent.identity_lifecycle === "cleanup_pending") continue;
+      const operations = await database.query<{ lifecycle: string }>(
+        `SELECT lifecycle FROM durable_filesystem_operations
+          WHERE asset_id=$1 AND owner_user_id=$2 FOR UPDATE`,
+        [intent.asset_id, ownerUserId],
+      );
+      if (operations.rows.some((operation) => operation.lifecycle !== "cleaned")) {
+        throw new Error("portable_import_asset_reservation_advanced");
+      }
+      if (operations.rows.length === 0) {
+        const deleted = await database.query(
+          `DELETE FROM asset_publication_identities
+            WHERE asset_id=$1 AND owner_user_id=$2 AND lifecycle='prepared'
+              AND idempotency_key_hash=$3 AND request_fingerprint=$4`,
+          [
+            intent.asset_id,
+            ownerUserId,
+            intent.asset_idempotency_key_hash,
+            intent.asset_request_fingerprint
+          ],
+        );
+        if (deleted.rowCount !== 1) throw new Error("portable_import_asset_reservation_mismatch");
+      } else {
+        const retired = await database.query(
+          `UPDATE asset_publication_identities
+              SET lifecycle='cleanup_pending',updated_at=clock_timestamp()
+            WHERE asset_id=$1 AND owner_user_id=$2 AND lifecycle='prepared'
+              AND idempotency_key_hash=$3 AND request_fingerprint=$4`,
+          [
+            intent.asset_id,
+            ownerUserId,
+            intent.asset_idempotency_key_hash,
+            intent.asset_request_fingerprint
+          ],
+        );
+        if (retired.rowCount !== 1) throw new Error("portable_import_asset_reservation_mismatch");
+      }
+    }
+  };
+
   const expireOrRead = async (owner: ImportOwnerScope, previewToken: string): Promise<PortableImportProgressView | null> => (
     withTransaction(pool, async (database) => {
       let row = await progressByPreview(database, owner, previewToken, true);
       if (!row) return null;
       if (["running", "recoverable"].includes(row.status) && row.expires_at.getTime() <= Date.now()) {
+        await discardAbandonedReservationIntents(database, row.operation_id, row.owner_user_id);
         const expired = await database.query<WorkRow>(
           `UPDATE portable_import_work
               SET status='expired',diagnostic_code='archive_expired',
@@ -440,6 +692,7 @@ export function createPostgresPortableImportAuthorityRepository(
       if (!current) return null;
       if (current.status === "committed") return safePortableImportProgress(workRecord(row));
       if (current.status !== "previewed") throw new Error("portable_import_abort_conflict");
+      await discardAbandonedReservationIntents(database, row.operation_id, row.owner_user_id);
       await database.query(
         `UPDATE portable_import_operations SET status='failed',updated_at=clock_timestamp()
           WHERE id=$1 AND owner_user_id=$2 AND status='previewed'`,
@@ -529,6 +782,7 @@ export function createPostgresPortableImportAuthorityRepository(
         [limit],
       );
       for (const row of due.rows) {
+        await discardAbandonedReservationIntents(database, row.operation_id, row.owner_user_id);
         const expiredOperation = await database.query(
           `UPDATE portable_import_operations
               SET status='expired',updated_at=clock_timestamp()
@@ -556,6 +810,9 @@ export function createPostgresPortableImportAuthorityRepository(
     persistPreviewAuthority,
     claimPreviewAuthority,
     updateProgress,
+    lockAssetReservationIntentAuthority,
+    recordAssetReservationIntents,
+    releaseAssetReservationIntents,
     recordAssetPublications,
     readCommittedAssetPublicationIds,
     completeProgress,

@@ -8667,8 +8667,8 @@ task-owned diff review. No API route, worker, illustration writer, legacy
 consumer, public barrel, or cross-role allowlist binding changed. Task 14e3e is
 next; route binding remains deferred to 14e3g.
 
-**14e3d post-completion correction (2026-08-08, implemented and
-verification-complete; final review pending).** A completed-work audit found
+**14e3d post-completion correction (2026-08-08, implementation and full
+verification complete; final review pending).** A completed-work audit found
 that the initial composition proof still left restart, rollback, concurrency,
 destination, and boundary-inventory gaps that could make a successful portable
 import irrecoverable or allow an incomplete operation to escape the intended
@@ -8681,28 +8681,44 @@ closing each gap before 14e3e begins:
 - portable reaping first atomically expires due import work and clears its
   lease before staged-storage cleanup, so restart does not leave a running or
   recoverable progress projection behind;
-- asset identities are durably reserved before the caller transaction and the
-  caller client uses only the second pool connection for advisory/content
-  locks plus `FOR KEY SHARE` identity validation. Real `max: 2` and direct
-  two-client races prove no nested pool deadlock and retain same-content
-  publisher fencing;
+- asset reservation is now a durable two-phase authority rather than a
+  process-local interval between identity reservation and import claim. Before
+  any filesystem attachment, the composition locks the exact portable
+  operation/work authority, reserves each asset identity in the same caller
+  transaction, and writes an immutable ordered reservation intent containing
+  the operation, owner, commit-key hash, command fingerprint, asset identity,
+  asset idempotency-key hash, and asset request fingerprint. A restart can
+  therefore rediscover and exactly reuse the intended UUIDs before the import
+  claim exists; it cannot guess by campaign, content hash, or current asset
+  state;
 - Campaign ZIP and Legacy Story mutation validate and key-share-lock the exact
   owner-scoped world/world-version pair before any write. Campaign ZIP also
   performs a durable owner/authority duplicate probe before archive asset
   extraction or reservation, then rechecks under the caller transaction's
-  advisory lock before mutation. A distinct-key duplicate therefore cannot
-  reach asset reservation, while an interruption after reservation but before
-  claim leaves no identity residue and remains safely retryable;
-- rollback compensation now discards prepared identities only after the caller
-  transaction has rolled back, drives any attached operation through durable
-  cleanup, and retains audit-safe `cleanup_pending` identity state. A later
-  same-command retry may reuse that identity only when every prior operation is
-  cleaned;
+  advisory lock before mutation. Same-key and different-key committed replay
+  both recover only the canonical committed operation's exact ordered 0062
+  publication mapping. A different-key duplicate therefore finalizes those
+  mapped assets and never scans or finalizes unrelated same-campaign assets;
+- rollback compensation now retires the exact reservation intent before it
+  discards prepared identities, and does so only after the caller transaction
+  has rolled back. Abort, expiry, and reaping apply the same exact-set rule:
+  they delete an unreferenced `prepared` identity with no durable filesystem
+  operation, move an identity with only cleaned operations to audit-safe
+  `cleanup_pending`, and refuse to touch an advanced/shared identity or an
+  active durable operation. A later same-command retry may reuse an identity
+  only when these database authorities allow it;
 - partial multi-asset reservation failure compensates every reservation already
-  created in that batch. Concurrent same-command commits compare the exact
-  identity and canonical request fingerprint, treat only an exact identity that
-  advanced to `attached`/`published` as the winner's idempotent replay, and
-  retain mismatch plus unexpected-active-operation fences;
+  created in that batch. Concurrent same-command commits use one global lock
+  order—portable operation/work first, then asset identity—so the import path,
+  retry path, and cleanup path cannot form the previous operation↔asset lock
+  cycle. Real `max: 2` and deterministic two-caller races prove bounded-pool
+  progress, absence of deadlock, exact same-result replay, and one published
+  winner;
+- progress completion now performs the exact lease/claim update first. A zero-
+  row update is accepted only when the same owner-scoped operation is already
+  committed and its work projection is already completed, covering the narrow
+  idempotent concurrent-completion race without weakening stale-token,
+  foreign-owner, or wrong-state rejection;
 - the portable-composition boundary check is now a repository-wide AST
   inventory over all supported JavaScript/TypeScript source extensions. It
   rejects aliased/default/namespace/computed, `require`, dynamic-import, and
@@ -8710,26 +8726,35 @@ closing each gap before 14e3e begins:
   and public buffered export while asserting one canonical private factory and
   its deliberately unconsumed production graph.
 
-Additive migration **0062** records the immutable, owner-scoped
-operation/import/asset identities published by each Campaign ZIP commit. The
-mapping is written only inside the successful caller transaction after the
-import claim and asset attachment are authoritative, is protected by exact
-composite foreign keys and mutation guards, and deliberately retains those
-authorities against deletion. Committed replay reads only the mapped asset IDs;
-it has no campaign-wide recovery fallback, so an unrelated attached or
-recoverable asset on the same campaign is never finalized by this import.
+Additive migration **0062** now records both sides of the two-phase protocol.
+`portable_import_asset_reservation_intents` is the pre-claim authority and
+`portable_import_asset_publications` is the immutable committed mapping. The
+intent table is protected by exact composite foreign keys, identity/hash
+guards, ordered-set uniqueness, immutable updates, and deletion rules that
+permit only an exact final-map handoff or safe preview/cleanup retirement. The
+publication mapping is written only inside the successful caller transaction
+after the import claim and asset attachment are authoritative, then consumes
+the matching intent set. Both populated authority tables make the 0062 down
+migration fail closed; the empty rollback/up path remains covered. Committed
+replay reads only the canonical committed operation's mapped asset IDs, so an
+unrelated attached or recoverable asset on the same campaign is never
+finalized by this import.
 
-The correction matrix includes close/reopen finalization recovery, mixed
+The correction matrix includes close/reopen reservation-intent recovery before
+claim, close/reopen finalization recovery, mixed
 multi-artifact crashes, database-before-projection expiry, exact destination
 denial, duplicate-before-assets behavior, interruption between reservation and
-claim, caller rollback cleanup, partial reservation compensation, exact mapped-
-asset replay, unrelated-campaign-asset isolation, and a deterministic concurrent
-same-command winner/loser replay. Final verification is 1,457 unit tests and
-504 integration tests, including 18/18 focused Task 14e3d composition cases and
-25/25 migration/rollback inventory cases, plus `pnpm check`, build,
-`git diff --check`, `pjm precheck`, and correction-only diff review. No route,
-worker, illustration writer, legacy consumer, public barrel, or cross-role
-allowlist binding changed; migration 0062 is additive and rollback-covered.
+claim, expiry/reaper intent retirement, caller rollback cleanup, partial
+reservation compensation, canonical different-key exact mapped-asset replay,
+unrelated-campaign-asset isolation, stale/foreign completion denial, and a
+deterministic concurrent same-command winner/loser replay. Verification is
+1,457 unit tests and 507 integration tests, including 21/21 focused Task 14e3d
+PostgreSQL/temp-filesystem cases and 25/25 combined migration/rollback/runtime-
+wiring cases, plus `pnpm check`, build, `git diff --check`, and `pjm precheck`.
+Independent final review remains required before this correction is approved.
+No route, worker, illustration writer,
+legacy consumer, public barrel, or cross-role allowlist binding changed;
+migration 0062 remains additive and rollback-covered.
 **14e3e remains the next implementation task after final review; route binding
 remains deferred to 14e3g.**
 

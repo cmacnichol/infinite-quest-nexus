@@ -173,6 +173,16 @@ export async function createAssetPublicationComposition(
       async rollback() {}
     });
   };
+  const snapshotCommands = (
+    commands: readonly PrivateAssetPublicationCommand[],
+  ): readonly PrivateAssetPublicationCommand[] => commands.map((command) => {
+    const snapshot = snapshotPrivateAssetPublicationCommand(command);
+    verifyPrivateAssetPublicationContentHashes(
+      snapshot,
+      (bytes) => createHash("sha256").update(bytes).digest("hex"),
+    );
+    return snapshot;
+  });
   const discardPreparedReservations = async (
     database: DatabaseClient,
     reservations: readonly PrivateReservedImportedAsset[],
@@ -191,17 +201,9 @@ export async function createAssetPublicationComposition(
     async reserveImportedAssets(
       commands: readonly PrivateAssetPublicationCommand[],
     ) {
-      const snapshots = commands.map((command) => {
-        const snapshot = snapshotPrivateAssetPublicationCommand(command);
-        verifyPrivateAssetPublicationContentHashes(
-          snapshot,
-          (bytes) => createHash("sha256").update(bytes).digest("hex"),
-        );
-        return snapshot;
-      });
       const reservations: PrivateReservedImportedAsset[] = [];
       try {
-        for (const snapshot of snapshots) {
+        for (const snapshot of snapshotCommands(commands)) {
           reservations.push(Object.freeze({
             command: snapshot,
             identity: await publication.prepareIdentity(snapshot)
@@ -217,6 +219,19 @@ export async function createAssetPublicationComposition(
           );
         }
         throw error;
+      }
+      return Object.freeze(reservations);
+    },
+    async reserveImportedAssetsInTransaction(
+      database: DatabaseClient,
+      commands: readonly PrivateAssetPublicationCommand[],
+    ) {
+      const reservations: PrivateReservedImportedAsset[] = [];
+      for (const snapshot of snapshotCommands(commands)) {
+        reservations.push(Object.freeze({
+          command: snapshot,
+          identity: await publication.prepareIdentityInTransaction(database, snapshot)
+        }));
       }
       return Object.freeze(reservations);
     },

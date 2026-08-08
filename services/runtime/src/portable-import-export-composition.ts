@@ -19,6 +19,7 @@ import {
 } from "../../../packages/application/src/assets/private-secure-storage.js";
 import { toAssetMutationIdempotencyKey } from "../../../packages/application/src/assets/types.js";
 import {
+  canonicalPortableAssetReservationCommand,
   canonicalPortableImportAuthority,
   type PortableImportExportComposition,
   type PortableCanonicalImportAuthority,
@@ -801,22 +802,31 @@ export async function createPortableImportExportComposition(
   };
 
   const commit = async (command: PortableImportCommitCommand) => {
+    // Campaign ZIP must open and validate its staged input before contending on
+    // the operation lock used by reservation intents. Otherwise a replay probe
+    // can briefly win that lock, roll back, and let another caller consume the
+    // staged input before the first caller opens it.
+    let previewAuthority = command.kind === "campaign_zip"
+      ? await authority.readPreviewAuthority({ command })
+      : null;
     const preparationOnly = Symbol("portable-import-preparation-only");
-    try {
-      const replay = await withTransaction(options.pool, async (database) => {
-        const begun = await authority.claimPreviewAuthority(database, {
-          command,
-          leaseOwner: options.leaseOwner,
-          leaseSeconds
+    if (!previewAuthority) {
+      try {
+        const replay = await withTransaction(options.pool, async (database) => {
+          const begun = await authority.claimPreviewAuthority(database, {
+            command,
+            leaseOwner: options.leaseOwner,
+            leaseSeconds
+          });
+          if (begun.outcome === "replay") return begun.view;
+          throw preparationOnly;
         });
-        if (begun.outcome === "replay") return begun.view;
-        throw preparationOnly;
-      });
-      return completeCommittedReplay(command, replay);
-    } catch (error) {
-      if (error !== preparationOnly) throw error;
+        return completeCommittedReplay(command, replay);
+      } catch (error) {
+        if (error !== preparationOnly) throw error;
+      }
+      previewAuthority = await authority.readPreviewAuthority({ command });
     }
-    const previewAuthority = await authority.readPreviewAuthority({ command });
     if (!previewAuthority) throw new Error("portable_import_authority_unavailable");
     const duplicateBeforeReservation = command.kind === "campaign_zip"
       || command.kind === "legacy_story"
@@ -845,9 +855,38 @@ export async function createPortableImportExportComposition(
         throw error;
       }
     }
-    const reservedAssets = await assets.transactionalPublisher.reserveImportedAssets(
-      buildAssetCommands(command, assetArtifacts),
-    );
+    const assetCommands = buildAssetCommands(command, assetArtifacts);
+    const commitIdempotencyKeyHash = sha256(command.idempotencyKey);
+    const reservationCommandFingerprint = sha256(canonicalPortableAssetReservationCommand({
+      operationId: previewAuthority.operationId,
+      ownerUserId: command.ownerUserId,
+      kind: "campaign_zip",
+      authorityFingerprint: previewAuthority.authorityFingerprint,
+      commitIdempotencyKeyHash
+    }));
+    let reservedAssets: Awaited<ReturnType<typeof assets.transactionalPublisher.reserveImportedAssets>> = [];
+    if (command.kind === "campaign_zip" && !duplicateBeforeReservation) {
+      reservedAssets = await withTransaction(options.pool, async (database) => {
+        await authority.lockAssetReservationIntentAuthority(database, {
+          operationId: previewAuthority.operationId,
+          owner: owner(command.ownerUserId),
+          authorityFingerprint: previewAuthority.authorityFingerprint
+        });
+        const reservations = await assets.transactionalPublisher.reserveImportedAssetsInTransaction(
+          database,
+          assetCommands,
+        );
+        await authority.recordAssetReservationIntents(database, {
+          operationId: previewAuthority.operationId,
+          owner: owner(command.ownerUserId),
+          authorityFingerprint: previewAuthority.authorityFingerprint,
+          commitIdempotencyKeyHash,
+          commandFingerprint: reservationCommandFingerprint,
+          assetIds: reservations.map(({ identity }) => identity.assetId)
+        });
+        return reservations;
+      });
+    }
     let attachments: Awaited<ReturnType<typeof assets.transactionalPublisher.attachImportedAssets>> = [];
     let finalClaim: import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableImportWorkClaim | undefined;
     let committed: import("../../../packages/application/src/imports/types.js").PortableImportCommitView | undefined;
@@ -859,9 +898,6 @@ export async function createPortableImportExportComposition(
           leaseSeconds
         });
         if (begun.outcome === "replay") {
-          if (reservedAssets.length > 0) {
-            await assets.transactionalPublisher.discardPreparedImportedAssets(database, reservedAssets);
-          }
           return begun.view;
         }
         if (authorityHash(begun.authority) !== previewAuthority.authorityFingerprint
@@ -883,6 +919,11 @@ export async function createPortableImportExportComposition(
           })
           : null;
         if (duplicate && reservedAssets.length > 0) {
+          await authority.releaseAssetReservationIntents(database, {
+            operationId: previewAuthority.operationId,
+            owner: owner(command.ownerUserId),
+            assetIds: reservedAssets.map(({ identity }) => identity.assetId)
+          });
           await assets.transactionalPublisher.discardPreparedImportedAssets(database, reservedAssets);
         }
         if (command.kind === "campaign_zip" && !duplicate) {
@@ -951,9 +992,14 @@ export async function createPortableImportExportComposition(
       const preparedReservations = reservedAssets.filter(({ identity }) => identity.lifecycle === "prepared");
       if (preparedReservations.length > 0) {
         try {
-          await withTransaction(options.pool, (database) => (
-            assets.transactionalPublisher.discardPreparedImportedAssets(database, preparedReservations)
-          ));
+          await withTransaction(options.pool, async (database) => {
+            await authority.releaseAssetReservationIntents(database, {
+              operationId: previewAuthority.operationId,
+              owner: owner(command.ownerUserId),
+              assetIds: preparedReservations.map(({ identity }) => identity.assetId)
+            });
+            await assets.transactionalPublisher.discardPreparedImportedAssets(database, preparedReservations);
+          });
         } catch (cleanupError) {
           throw new AggregateError(
             [error, cleanupError],
@@ -966,6 +1012,9 @@ export async function createPortableImportExportComposition(
     if (!committed) throw new Error("portable_import_result_unavailable");
     if (!finalClaim) return completeCommittedReplay(command, committed);
     try {
+      if (command.kind === "campaign_zip" && committed.duplicate) {
+        return await completeCommittedReplay(command, committed);
+      }
       await assets.transactionalPublisher.finalizeImportedAssets(attachments);
       await withTransaction(options.pool, (database) => authority.completeProgress(database, finalClaim!));
       return committed;

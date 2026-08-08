@@ -63,6 +63,16 @@ export function canonicalPortableImportAuthority(value: PortableCanonicalImportA
   return canonicalJson(value as unknown as PortableJsonValue);
 }
 
+export function canonicalPortableAssetReservationCommand(value: Readonly<{
+  operationId: string;
+  ownerUserId: string;
+  kind: "campaign_zip";
+  authorityFingerprint: string;
+  commitIdempotencyKeyHash: string;
+}>): string {
+  return canonicalJson(value as unknown as PortableJsonValue);
+}
+
 export type PortableImportProgressPhase =
   | "staged"
   | "decoding"
@@ -132,6 +142,7 @@ export interface PrivatePortableImportAuthorityPort {
   readPreviewAuthority(input: Readonly<{
     command: PortableImportCommitCommand;
   }>): Promise<Readonly<{
+    operationId: string;
     authority: PortableCanonicalImportAuthority;
     authorityFingerprint: string;
   }> | null>;
@@ -158,6 +169,24 @@ export interface PrivatePortableImportAuthorityPort {
     percentage: number;
     diagnosticCode: PortableArchiveDiagnosticCode | null;
   }>): Promise<PrivatePortableImportWorkClaim>;
+  lockAssetReservationIntentAuthority(database: PrivatePortableTransactionContext, input: Readonly<{
+    operationId: string;
+    owner: ImportOwnerScope;
+    authorityFingerprint: string;
+  }>): Promise<void>;
+  recordAssetReservationIntents(database: PrivatePortableTransactionContext, input: Readonly<{
+    operationId: string;
+    owner: ImportOwnerScope;
+    authorityFingerprint: string;
+    commitIdempotencyKeyHash: string;
+    commandFingerprint: string;
+    assetIds: readonly string[];
+  }>): Promise<void>;
+  releaseAssetReservationIntents(database: PrivatePortableTransactionContext, input: Readonly<{
+    operationId: string;
+    owner: ImportOwnerScope;
+    assetIds: readonly string[];
+  }>): Promise<void>;
   recordAssetPublications(
     database: PrivatePortableTransactionContext,
     claim: PrivatePortableImportWorkClaim,
@@ -187,6 +216,10 @@ export type PrivateReservedImportedAsset = Readonly<{
 
 export interface PrivateCallerTransactionAssetPublisher {
   reserveImportedAssets(
+    commands: readonly PrivateAssetPublicationCommand[],
+  ): Promise<readonly PrivateReservedImportedAsset[]>;
+  reserveImportedAssetsInTransaction(
+    database: PrivatePortableTransactionContext,
     commands: readonly PrivateAssetPublicationCommand[],
   ): Promise<readonly PrivateReservedImportedAsset[]>;
   attachImportedAssets(

@@ -414,6 +414,57 @@ integration("generation job notification delivery", () => {
       await migrateDatabase(migrationPool, resolve("database/migrations"));
       const client = await migrationPool.connect();
       try {
+        await client.query("SET session_replication_role = 'replica'");
+        await client.query(
+          `INSERT INTO portable_import_asset_publications (
+             operation_id,owner_user_id,import_id,asset_id
+           ) VALUES (gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),gen_random_uuid())`,
+        );
+        await client.query("SET session_replication_role = 'origin'");
+        await expect(runner({
+          dbClient: client,
+          dir: resolve("database/migrations"),
+          direction: "down",
+          count: 1,
+          migrationsTable: "schema_migrations",
+          checkOrder: true,
+          singleTransaction: true,
+          verbose: false,
+          logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
+        })).rejects.toThrow("cannot downgrade portable import asset publications while retained mappings exist");
+        await expect(client.query(
+          "SELECT to_regclass('public.portable_import_asset_publications') AS table_name",
+        )).resolves.toMatchObject({ rows: [{ table_name: "portable_import_asset_publications" }] });
+        await client.query("SET session_replication_role = 'replica'");
+        await client.query("DELETE FROM portable_import_asset_publications");
+        await client.query(
+          `INSERT INTO portable_import_asset_reservation_intents (
+             operation_id,owner_user_id,ordinal,asset_id,commit_idempotency_key_hash,
+             command_fingerprint,asset_idempotency_key_hash,asset_request_fingerprint
+           ) VALUES (
+             gen_random_uuid(),gen_random_uuid(),0,gen_random_uuid(),
+             repeat('a',64),repeat('b',64),repeat('c',64),repeat('d',64)
+           )`,
+        );
+        await client.query("SET session_replication_role = 'origin'");
+        await expect(runner({
+          dbClient: client,
+          dir: resolve("database/migrations"),
+          direction: "down",
+          count: 1,
+          migrationsTable: "schema_migrations",
+          checkOrder: true,
+          singleTransaction: true,
+          verbose: false,
+          logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
+        })).rejects.toThrow("cannot downgrade portable import asset publications while retained mappings exist");
+        await expect(client.query(
+          "SELECT to_regclass('public.portable_import_asset_reservation_intents') AS table_name",
+        )).resolves.toMatchObject({ rows: [{ table_name: "portable_import_asset_reservation_intents" }] });
+        await client.query("SET session_replication_role = 'replica'");
+        await client.query("DELETE FROM portable_import_asset_reservation_intents");
+        await client.query("SET session_replication_role = 'origin'");
+
         const reverted = await runner({
           dbClient: client,
           dir: resolve("database/migrations"),
