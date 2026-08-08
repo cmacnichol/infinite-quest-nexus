@@ -1,7 +1,7 @@
 import { z } from "zod";
-import type { DatabasePool } from "../../../packages/database/src/pool.js";
+import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
-import type { InfiniteWorldsImportRequest, LegacyStory } from "../../../packages/contracts/src/imports.js";
+import type { InfiniteWorldsImportRequest, LegacyStory, StoryImportRequest, StoryImportResult } from "../../../packages/contracts/src/imports.js";
 import {
   canonicalizeWorldContent,
   characterProfileSchema,
@@ -24,7 +24,7 @@ import {
   type ProviderRequest,
   type ProviderResult
 } from "../../../packages/story-engine/src/index.js";
-import { importLegacyStory, previewLegacyStoryImport } from "./import-service.js";
+import { importLegacyStory, importLegacyStoryWithClient, previewLegacyStoryImport } from "./import-service.js";
 import type { FilesystemAssetStore } from "./asset-service.js";
 import { resolvePlayableCharacters } from "../../../packages/domain/src/world-characters.js";
 import {
@@ -157,9 +157,9 @@ function resolveKind(request: InfiniteWorldsImportRequest): ResolvedKind {
   }
 }
 
-async function targetWorldContent(pool: DatabasePool, targetWorldVersionId: string): Promise<{ worldId: string; content: WorldContent }> {
-  const ownerUserId = await initialOwnerId(pool);
-  const result = await pool.query<{ world_id: string; content: unknown }>(
+async function targetWorldContent(database: DatabaseClient | DatabasePool, targetWorldVersionId: string): Promise<{ worldId: string; content: WorldContent }> {
+  const ownerUserId = await initialOwnerId(database);
+  const result = await database.query<{ world_id: string; content: unknown }>(
     "SELECT world_id, content FROM world_versions WHERE id = $1 AND owner_user_id = $2",
     [targetWorldVersionId, ownerUserId]
   );
@@ -359,13 +359,13 @@ async function requestConvertedWorld(
 }
 
 async function convertWorldText(
-  pool: DatabasePool,
+  database: DatabaseClient | DatabasePool,
   request: InfiniteWorldsImportRequest,
   providers: InfiniteWorldsApiProviders,
   importId: string,
 ) {
   if (!request.providerProfileId) throw Object.assign(new Error("Select a text provider to convert an Infinite Worlds world TXT export."), { statusCode: 400 });
-  const ownerUserId = await initialOwnerId(pool);
+  const ownerUserId = await initialOwnerId(database);
   const resolution = await providers.resolution.resolveDirect({
     ownerUserId,
     providerRole: "text",
@@ -426,7 +426,7 @@ async function convertWorldText(
 }
 
 async function enrichFinalTurn(
-  pool: DatabasePool,
+  database: DatabaseClient | DatabasePool,
   request: InfiniteWorldsImportRequest,
   story: LegacyStory,
   providers: InfiniteWorldsApiProviders,
@@ -435,7 +435,7 @@ async function enrichFinalTurn(
   const finalTurn = story.turns.at(-1);
   if (!request.enrichFinalTurn || !finalTurn || (Array.isArray(finalTurn.choices) && finalTurn.choices.length)) return;
   if (!request.providerProfileId) throw Object.assign(new Error("Select a text provider to generate missing final-turn choices."), { statusCode: 400 });
-  const ownerUserId = await initialOwnerId(pool);
+  const ownerUserId = await initialOwnerId(database);
   const resolution = await providers.resolution.resolveDirect({
     ownerUserId,
     providerRole: "text",
@@ -554,13 +554,12 @@ export async function previewInfiniteWorldsImport(
   };
 }
 
-export async function importInfiniteWorlds(
-  pool: DatabasePool,
+async function runInfiniteWorldsImport(
+  database: DatabaseClient | DatabasePool,
   request: InfiniteWorldsImportRequest,
   providers: InfiniteWorldsApiProviders,
-  memory: MemoryGenerationTransactionPort,
   portableWorld: PortableWorldApplicationPort,
-  assetStore?: FilesystemAssetStore
+  importStory: (request: StoryImportRequest) => Promise<StoryImportResult>,
 ) {
   const kind = resolveKind(request);
   const progressKey = request.sourceName + ":" + request.sourceText.length;
@@ -580,7 +579,7 @@ export async function importInfiniteWorlds(
       }
       const extracted = extractCyoaLayers(parsed, request.sourceName);
       const generated = await providers.generateCyoaWorld({
-        ownerUserId: await initialOwnerId(pool),
+        ownerUserId: await initialOwnerId(database),
         providerProfileId: request.providerProfileId || "",
         input: extracted,
         worldId: progressKey,
@@ -638,21 +637,47 @@ export async function importInfiniteWorlds(
   if (kind === "world_json" || kind === "world_text") {
     const worldExport = kind === "world_json"
       ? convertInfiniteWorldsWorld(parseJsonText(request.sourceText))
-      : await convertWorldText(pool, request, providers, progressKey);
+      : await convertWorldText(database, request, providers, progressKey);
     const result = await portableWorld.importWorld({ sourceName: request.sourceName, worldExport });
     return { kind: "world" as const, ...result };
   }
   if (!request.targetWorldVersionId) throw Object.assign(new Error("Select a published target world before importing matching story text."), { statusCode: 400 });
-  const target = await targetWorldContent(pool, request.targetWorldVersionId);
+  const target = await targetWorldContent(database, request.targetWorldVersionId);
   const parsed = parseInfiniteWorldsStory(request.sourceText);
   const selectedCharacterId = matchedStoryCharacterId(target.content, parsed.characterText, request.selectedCharacterId);
   const story = infiniteWorldsStoryToLegacyStory(parsed, target.content, request.sourceName, selectedCharacterId);
-  await enrichFinalTurn(pool, request, story, providers, progressKey);
-  const result = await importLegacyStory(
-    pool,
-    { sourceName: request.sourceName, story, targetWorldVersionId: request.targetWorldVersionId, selectedCharacterId },
-    memory,
-    assetStore,
-  );
+  await enrichFinalTurn(database, request, story, providers, progressKey);
+  const result = await importStory({
+    sourceName: request.sourceName,
+    story,
+    targetWorldVersionId: request.targetWorldVersionId,
+    selectedCharacterId
+  });
   return { kind: "campaign" as const, ...result };
+}
+
+export function importInfiniteWorldsWithClient(
+  client: DatabaseClient,
+  request: InfiniteWorldsImportRequest,
+  providers: InfiniteWorldsApiProviders,
+  memory: MemoryGenerationTransactionPort,
+  portableWorld: PortableWorldApplicationPort,
+  assetStore?: FilesystemAssetStore
+) {
+  return runInfiniteWorldsImport(client, request, providers, portableWorld, (storyRequest) => (
+    importLegacyStoryWithClient(client, storyRequest, memory, assetStore)
+  ));
+}
+
+export function importInfiniteWorlds(
+  pool: DatabasePool,
+  request: InfiniteWorldsImportRequest,
+  providers: InfiniteWorldsApiProviders,
+  memory: MemoryGenerationTransactionPort,
+  portableWorld: PortableWorldApplicationPort,
+  assetStore?: FilesystemAssetStore
+) {
+  return runInfiniteWorldsImport(pool, request, providers, portableWorld, (storyRequest) => (
+    importLegacyStory(pool, storyRequest, memory, assetStore)
+  ));
 }

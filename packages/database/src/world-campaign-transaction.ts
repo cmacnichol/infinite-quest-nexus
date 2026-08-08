@@ -16,6 +16,13 @@ function context(client: DatabaseClient): PostgresWorldCampaignContext {
   return Object.freeze({ [databaseClient]: client });
 }
 
+export function runPostgresWorldCampaignCommandWithClient<T>(
+  client: DatabaseClient,
+  work: (transaction: WorldCampaignCommandContext) => Promise<T>,
+): Promise<T> {
+  return work(context(client));
+}
+
 export function worldCampaignDatabaseClient(
   transaction: WorldCampaignCommandContext | WorldCampaignReadContext,
 ): DatabaseClient {

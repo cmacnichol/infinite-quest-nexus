@@ -534,16 +534,15 @@ async function matchingWorldVersion(client: DatabaseClient, ownerUserId: string,
   return result.rows[0] ?? null;
 }
 
-export async function importLegacyStory(
-  pool: DatabasePool,
+async function importLegacyStoryWithTransaction(
+  transaction: <T>(work: (client: DatabaseClient) => Promise<T>) => Promise<T>,
   request: StoryImportRequest,
   memory: MemoryGenerationTransactionPort,
   assetStore?: FilesystemAssetStore,
   legacyAssets?: LegacyAssets
 ): Promise<StoryImportResult> {
   const sourceHash = importSourceHash(request);
-
-  return withTransaction(pool, async (client) => {
+  return transaction(async (client) => {
     const ownerUserId = await initialOwnerId(client);
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${ownerUserId}:${sourceHash}`]);
     const prior = await existingImport(client, ownerUserId, sourceHash);
@@ -888,6 +887,38 @@ export async function importLegacyStory(
 
     return { importId, worldId, worldVersionId, campaignId, duplicate: false, stats };
   });
+}
+
+export function importLegacyStoryWithClient(
+  client: DatabaseClient,
+  request: StoryImportRequest,
+  memory: MemoryGenerationTransactionPort,
+  assetStore?: FilesystemAssetStore,
+  legacyAssets?: LegacyAssets
+): Promise<StoryImportResult> {
+  return importLegacyStoryWithTransaction(
+    (work) => work(client),
+    request,
+    memory,
+    assetStore,
+    legacyAssets,
+  );
+}
+
+export async function importLegacyStory(
+  pool: DatabasePool,
+  request: StoryImportRequest,
+  memory: MemoryGenerationTransactionPort,
+  assetStore?: FilesystemAssetStore,
+  legacyAssets?: LegacyAssets
+): Promise<StoryImportResult> {
+  return importLegacyStoryWithTransaction(
+    (work) => withTransaction(pool, work),
+    request,
+    memory,
+    assetStore,
+    legacyAssets,
+  );
 }
 
 export async function previewLegacyStoryImport(pool: DatabasePool, request: StoryImportRequest) {

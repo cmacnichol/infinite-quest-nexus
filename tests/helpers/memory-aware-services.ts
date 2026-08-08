@@ -1,8 +1,18 @@
 import type { MemoryContextQuery } from "../../packages/contracts/src/memory.js";
 import type { ChronicleMetricsView, MemoryPublicResult } from "../../packages/application/src/memory/index.js";
-import { initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
-import { importLegacyStory as importLegacyStoryApplication } from "../../services/api/src/import-service.js";
-import { importInfiniteWorlds as importInfiniteWorldsApplication } from "../../services/api/src/infinite-worlds-import-service.js";
+import { initialOwnerId, withTransaction, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createPostgresWorldRepositoryAdapters } from "../../packages/database/src/world-repository.js";
+import { runPostgresWorldCampaignCommandWithClient } from "../../packages/database/src/world-campaign-transaction.js";
+import { mapWorldCampaignTransitionFailure, type PortableWorldApplicationPort } from "../../packages/application/src/world-campaign/index.js";
+import {
+  importLegacyStory as importLegacyStoryApplication,
+  importLegacyStoryWithClient as importLegacyStoryWithClientApplication
+} from "../../services/api/src/import-service.js";
+import {
+  importInfiniteWorlds as importInfiniteWorldsApplication,
+  importInfiniteWorldsWithClient as importInfiniteWorldsWithClientApplication,
+  type InfiniteWorldsApiProviders
+} from "../../services/api/src/infinite-worlds-import-service.js";
 import {
   createOwnerBoundPortableWorldApplicationPort,
   createWorldCampaignApplicationAdapter
@@ -275,6 +285,16 @@ export function importLegacyStory(
   return importLegacyStoryApplication(pool, request, memoryGeneration(pool), assetStore, legacyAssets);
 }
 
+export function importLegacyStoryWithClient(
+  pool: DatabasePool,
+  client: DatabaseClient,
+  request: Parameters<typeof importLegacyStoryWithClientApplication>[1],
+  assetStore?: Parameters<typeof importLegacyStoryWithClientApplication>[3],
+  legacyAssets?: Parameters<typeof importLegacyStoryWithClientApplication>[4],
+) {
+  return importLegacyStoryWithClientApplication(client, request, memoryGeneration(pool), assetStore, legacyAssets);
+}
+
 export function importInfiniteWorlds(
   pool: DatabasePool,
   request: Parameters<typeof importInfiniteWorldsApplication>[1],
@@ -298,6 +318,46 @@ export function portableWorldApplicationForTest(pool: DatabasePool, credentialSe
   return createOwnerBoundPortableWorldApplicationPort(
     adapter,
     async () => adapter.ownerScope(await initialOwnerId(pool))
+  );
+}
+
+export async function transactionBoundPortableWorldApplicationForTest(
+  pool: DatabasePool,
+  client: DatabaseClient,
+  credentialSecret: string,
+): Promise<PortableWorldApplicationPort> {
+  const fallback = portableWorldApplicationForTest(pool, credentialSecret);
+  const ownerUserId = await initialOwnerId(client);
+  const worlds = createPostgresWorldRepositoryAdapters(pool, { memory: memoryGeneration(pool) }).worlds;
+  return Object.freeze({
+    exportWorld: fallback.exportWorld,
+    previewWorldImport: fallback.previewWorldImport,
+    async importWorld(request: Parameters<PortableWorldApplicationPort["importWorld"]>[0]) {
+      const result = await runPostgresWorldCampaignCommandWithClient(
+        client,
+        (transaction) => worlds.importWorld(transaction, { ownerUserId }, request),
+      );
+      if (!result.ok) throw mapWorldCampaignTransitionFailure(result.failure);
+      return result.value;
+    }
+  });
+}
+
+export function importInfiniteWorldsWithClient(
+  pool: DatabasePool,
+  client: DatabaseClient,
+  request: Parameters<typeof importInfiniteWorldsWithClientApplication>[1],
+  providers: InfiniteWorldsApiProviders,
+  portableWorld: PortableWorldApplicationPort,
+  assetStore?: Parameters<typeof importInfiniteWorldsWithClientApplication>[5],
+) {
+  return importInfiniteWorldsWithClientApplication(
+    client,
+    request,
+    providers,
+    memoryGeneration(pool),
+    portableWorld,
+    assetStore,
   );
 }
 

@@ -19,6 +19,7 @@ import {
   infiniteWorldsImportRequestSchema,
   storyImportRequestSchema
 } from "../../packages/contracts/src/imports.js";
+import { PROMPT_TEMPLATE_CATALOG, type PromptSnapshot } from "../../packages/contracts/src/prompt-library.js";
 import { convertInfiniteWorldsWorld } from "../../packages/domain/src/infinite-worlds.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
@@ -29,12 +30,16 @@ import {
   type ArchiveIdMap
 } from "../../services/api/src/asset-archive-service.js";
 import { previewLegacyStoryImport } from "../../services/api/src/import-service.js";
-import { previewInfiniteWorldsImport } from "../../services/api/src/infinite-worlds-import-service.js";
+import {
+  previewInfiniteWorldsImport,
+  type InfiniteWorldsApiProviders
+} from "../../services/api/src/infinite-worlds-import-service.js";
 import { createTask14e2cAdapters } from "../helpers/task-14e2c-adapters.js";
 import {
-  importInfiniteWorlds,
-  importLegacyStory,
-  portableWorldApplicationForTest
+  importInfiniteWorldsWithClient,
+  importLegacyStoryWithClient,
+  portableWorldApplicationForTest,
+  transactionBoundPortableWorldApplicationForTest
 } from "../helpers/memory-aware-services.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -53,6 +58,88 @@ const tinyPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
+
+function deterministicInfiniteWorldsProviders(): InfiniteWorldsApiProviders {
+  const snapshot = Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG).map(([key, definition]) => [
+    key,
+    { content: definition.defaultContent, hash: `task-14e2c-${key}`, source: "shipped" }
+  ])) as PromptSnapshot;
+  const convertedWorld = JSON.stringify({
+    title: "Task 14e2c provider-converted world text",
+    genre: "Archive fantasy",
+    tone: "Deterministic",
+    backgroundStory: "A quiet archive city preserves every authoritative record.",
+    premise: "Test Character verifies the durable archive.",
+    firstAction: "Inspect the transaction ledger.",
+    story_rules: "Every committed record must be recoverable.",
+    player_character: "",
+    playable_characters: [{
+      name: "Test Character",
+      character_text: "A careful archivist who verifies transaction boundaries.",
+      rpg_statistics: [],
+      default_triggers: []
+    }],
+    rpg_statistics: [],
+    default_triggers: [],
+    event_triggers: []
+  });
+  return {
+    resolution: {
+      async resolveDirect(request) {
+        return {
+          status: "resolved",
+          requestedRole: request.providerRole,
+          resolvedRole: request.providerRole,
+          providerProfileId: request.selectedProviderProfileId ?? "task-14e2c-provider",
+          providerType: "openai_compatible",
+          model: request.model ?? "task-14e2c-model"
+        };
+      },
+      async resolveEmbedding() {
+        return { status: "unconfigured", requestedRole: "embedding", resolvedRole: null, source: "none" };
+      }
+    },
+    prompts: {
+      async loadInfiniteWorldsPromptSnapshot() {
+        return { catalogVersion: "task-14e2c", protocolVersion: "task-14e2c", snapshot };
+      }
+    },
+    promptTools: {
+      content(current, key) {
+        return current[key].content;
+      }
+    },
+    execution: {
+      async text() {
+        return {
+          async execute() {
+            return {
+              content: convertedWorld,
+              responseId: "task-14e2c-response",
+              finishReason: "stop",
+              outputLimited: false,
+              modelInstanceId: "task-14e2c-instance",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              reportedCost: null,
+              rawMetadata: {}
+            };
+          }
+        };
+      }
+    },
+    async generateCyoaWorld() {
+      const generated = convertInfiniteWorldsWorld({
+        title: "Task 14e2c provider-generated CYOA world",
+        background: "A generated archive realm proves the CYOA service branch ran.",
+        possibleCharacters: [{ name: "Test Character", description: "A deterministic generated character." }]
+      });
+      return { title: generated.title, content: generated.content };
+    },
+    diagnoseWorldGenerationFailure(error) {
+      return { message: error instanceof Error ? error.message : "Deterministic world generation failed." };
+    }
+  };
+}
 
 integration("Task 14e2c additive adapter contract matrix", () => {
   let pool: DatabasePool;
@@ -460,6 +547,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
     const adapters = createTask14e2cAdapters({ pool, archiveRoot: storageRoot, assetRoot: storageRoot, limits });
     const scope = await worldScope();
     const portableWorld = portableWorldApplicationForTest(pool, "task-14e2c-credential-secret");
+    const providers = deterministicInfiniteWorldsProviders();
     const embeddedCampaign = await legacyCampaignZip("Campaign ZIP embedded create-world");
     const existingCampaign = await legacyCampaignZip("Campaign ZIP existing version");
     const storyText = `-- Story Background --
@@ -641,8 +729,8 @@ The durable record is verified.`;
         });
         const parsedPreview = await previewLegacyStoryImport(pool, request);
         expect(parsedPreview).toMatchObject({ valid: true, counts: { turns: 2 } });
-        const imported = await importLegacyStory(pool, request);
         completion = async (client) => {
+          const imported = await importLegacyStoryWithClient(pool, client, request);
           const destinationTurns = await client.query<{ id: string; source_turn_id: string }>(
             `SELECT id,source_turn_id FROM turns
               WHERE owner_user_id=$1 AND campaign_id=$2 AND source_turn_id IS NOT NULL`,
@@ -696,15 +784,17 @@ The durable record is verified.`;
             targetWorldVersionId: scope.worldVersionId
           });
           projection = await previewLegacyStoryImport(pool, request);
-          const imported = await importLegacyStory(pool, request);
-          completion = async () => ({
-            importId: imported.importId,
-            importedRecordId: toPortableImportedRecordId(imported.importId),
-            duplicate: imported.duplicate,
-            diagnostics: [],
-            result: imported,
-            resultExpiresAt: new Date(Date.now() + 60_000).toISOString()
-          });
+          completion = async (client) => {
+            const imported = await importLegacyStoryWithClient(pool, client, request);
+            return {
+              importId: imported.importId,
+              importedRecordId: toPortableImportedRecordId(imported.importId),
+              duplicate: imported.duplicate,
+              diagnostics: [],
+              result: imported,
+              resultExpiresAt: new Date(Date.now() + 60_000).toISOString()
+            };
+          };
         } else {
           const request = infiniteWorldsImportRequestSchema.parse({
             sourceName: variant.entryPath,
@@ -716,26 +806,28 @@ The durable record is verified.`;
               : {})
           });
           projection = await previewInfiniteWorldsImport(pool, request, portableWorld) as typeof projection;
-          const imported = variant.kind === "cyoa" || variant.kind === "world_text"
-            ? await portableWorld.importWorld({
-                sourceName: `${variant.kind}-${crypto.randomUUID()}.json`,
-                worldExport: convertInfiniteWorldsWorld({
-                  title: `${variant.label} parsed source`,
-                  background: sourceText.slice(0, 200),
-                  possibleCharacters: [{ name: "Test Character" }]
-                })
-              })
-            : await importInfiniteWorlds(pool, request, "task-14e2c-credential-secret");
-          completion = async () => ({
-            importId: imported.importId,
-            importedRecordId: toPortableImportedRecordId(imported.importId),
-            duplicate: imported.duplicate,
-            diagnostics: [],
-            result: variant.kind === "story_text"
-              ? { ...imported, kind: "campaign" }
-              : { ...imported, kind: "world" },
-            resultExpiresAt: new Date(Date.now() + 60_000).toISOString()
-          });
+          completion = async (client) => {
+            const transactionBoundPortableWorld = await transactionBoundPortableWorldApplicationForTest(
+              pool,
+              client,
+              "task-14e2c-credential-secret",
+            );
+            const imported = await importInfiniteWorldsWithClient(
+              pool,
+              client,
+              request,
+              providers,
+              transactionBoundPortableWorld,
+            );
+            return {
+              importId: imported.importId,
+              importedRecordId: toPortableImportedRecordId(imported.importId),
+              duplicate: imported.duplicate,
+              diagnostics: [],
+              result: imported,
+              resultExpiresAt: new Date(Date.now() + 60_000).toISOString()
+            };
+          };
         }
       }
       const command = {
@@ -808,6 +900,99 @@ The durable record is verified.`;
       [foreignOwnerUserId]
     );
     expect(provenance.rows).toEqual([{ owner_user_id: ownerUserId, source_installation_id: foreignOwnerUserId }]);
+  });
+
+  it("rolls back real import domain state with portable completion, then succeeds and replays exactly", async () => {
+    const storageRoot = await root("iq-14e2c-transaction-bound-import-");
+    const adapters = createTask14e2cAdapters({ pool, archiveRoot: storageRoot, assetRoot: storageRoot, limits });
+    const scope = await worldScope();
+    const sourceName = `task-14e2c-transaction-${crypto.randomUUID()}.json`;
+    const campaignTitle = `Task 14e2c transaction ${crypto.randomUUID()}`;
+    const story = {
+      ...structuredClone(legacyStoryFixture),
+      world: { ...(legacyStoryFixture.world as object), title: campaignTitle }
+    };
+    const bytes = await wrapPortableSource("records/transaction-bound-legacy.json", JSON.stringify(story));
+    const stagedInput = await adapters.archive.stage(
+      { ownerUserId },
+      Readable.from(bytes),
+      bytes.byteLength,
+    );
+    await adapters.archive.inspect({ ownerUserId }, stagedInput, "system");
+    const extracted = await adapters.archive.extract(
+      { ownerUserId },
+      stagedInput,
+      "records/transaction-bound-legacy.json",
+      limits.maxJsonEntryBytes,
+    );
+    const request = storyImportRequestSchema.parse({
+      sourceName,
+      story: JSON.parse(Buffer.from(extracted.content).toString("utf8")),
+      targetWorldVersionId: scope.worldVersionId
+    });
+    const projection = await previewLegacyStoryImport(pool, request);
+    const command = {
+      ownerUserId,
+      stagedInput,
+      kind: "legacy_story" as const,
+      destination: {
+        kind: "existing_world_version" as const,
+        worldId: scope.worldId,
+        worldVersionId: scope.worldVersionId
+      }
+    };
+    const preview = await adapters.archive.preview({ command, projection });
+    const commitCommand = {
+      ownerUserId,
+      kind: command.kind,
+      destination: command.destination,
+      previewHandle: preview.previewHandle,
+      idempotencyKey: `task-14e2c-transaction-${crypto.randomUUID()}`
+    };
+
+    await expect(adapters.archive.commit(commitCommand, async (client) => {
+      const imported = await importLegacyStoryWithClient(pool, client, request);
+      expect((await client.query(
+        "SELECT 1 FROM imports WHERE owner_user_id=$1 AND id=$2",
+        [ownerUserId, imported.importId]
+      )).rowCount).toBe(1);
+      throw new Error("task_14e2c_forced_after_domain_mutation");
+    })).rejects.toThrow("task_14e2c_forced_after_domain_mutation");
+
+    expect((await pool.query(
+      "SELECT 1 FROM imports WHERE owner_user_id=$1 AND source_name=$2",
+      [ownerUserId, sourceName]
+    )).rowCount).toBe(0);
+    expect((await pool.query(
+      "SELECT 1 FROM campaigns WHERE owner_user_id=$1 AND title=$2",
+      [ownerUserId, campaignTitle]
+    )).rowCount).toBe(0);
+    expect((await pool.query<{ status: string }>(
+      "SELECT status FROM portable_import_operations WHERE owner_user_id=$1 AND preview_token_hash=$2",
+      [ownerUserId, hash(preview.previewHandle.token)]
+    )).rows[0]).toEqual({ status: "previewed" });
+
+    const committed = await adapters.archive.commit(commitCommand, async (client) => {
+      const imported = await importLegacyStoryWithClient(pool, client, request);
+      return {
+        importId: imported.importId,
+        importedRecordId: toPortableImportedRecordId(imported.importId),
+        duplicate: imported.duplicate,
+        diagnostics: [],
+        result: imported,
+        resultExpiresAt: new Date(Date.now() + 60_000).toISOString()
+      };
+    });
+    expect(committed.duplicate).toBe(false);
+    const replay = await adapters.archive.commit(commitCommand, async () => {
+      throw new Error("Exact replay must not repeat transaction-bound domain work.");
+    });
+    expect(replay).toEqual(committed);
+    expect((await pool.query(
+      "SELECT 1 FROM imports WHERE owner_user_id=$1 AND source_name=$2 AND status='completed'",
+      [ownerUserId, sourceName]
+    )).rowCount).toBe(1);
+    await adapters.archive.cleanup({ ownerUserId }, stagedInput);
   });
 
   it("cleans superseded, expired, aborted, rolled-back, and crash-recovered portable work", async () => {
