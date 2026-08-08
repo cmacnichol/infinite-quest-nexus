@@ -15,13 +15,22 @@ import {
   mapPortableImportCommitHttpResult,
   resolveArchivePreviewExpiryDisposition,
   toPortableImportIdempotencyKey,
-  type PortableImportCommitIngressRequest
+  type PortableImportCommitIngressRequest,
+  type ValidatedAtomicRepreviewPayload
 } from "../../packages/application/src/imports/index.js";
-import { toServerStableReplayKey } from "../../packages/application/src/imports/http-compatibility.js";
+import {
+  bindOwnerBoundPortableStagedInput,
+  bindValidatedAtomicRepreviewPayload,
+  executeAtomicPortableImportCommit,
+  toServerStableReplayKey,
+  toValidatedPortableContentFingerprint
+} from "../../packages/application/src/imports/http-compatibility.js";
 import {
   bindAssetMetadataHttpIngress,
   bindTurnAssetSelectionHttpIngress,
   bindWorldAssetSelectionHttpIngress,
+  mapLegacyTurnAssetSelectionHttpResult,
+  mapLegacyWorldAssetSelectionHttpResult,
   toAssetServerStableReplayKey
 } from "../../packages/application/src/assets/http-compatibility.js";
 import {
@@ -46,6 +55,7 @@ const worldId = "22222222-2222-4222-8222-222222222222";
 const worldVersionId = "33333333-3333-4333-8333-333333333333";
 const campaignId = "44444444-4444-4444-8444-444444444444";
 const assetId = "55555555-5555-4555-8555-555555555555";
+const providerProfileId = "88888888-8888-4888-8888-888888888888";
 
 // @ts-expect-error Private delivery resolution stays out of the public asset barrel.
 type LeakedPrivateDeliveryResolution = PublicAssetContracts.PrivateFinalizedAssetDeliveryResolution;
@@ -55,23 +65,90 @@ type LeakedDatabaseLocator = PublicAssetContracts.DatabaseIssuedStorageLocator;
 type LeakedStableReplayKeyIssuer = PublicImportContracts.toServerStableReplayKey;
 // @ts-expect-error Only trusted server adapters may mint asset stable replay keys.
 type LeakedAssetStableReplayKeyIssuer = PublicAssetContracts.toAssetServerStableReplayKey;
+// @ts-expect-error Only trusted adapters may bind validated atomic payloads.
+type LeakedAtomicPayloadIssuer = PublicImportContracts.bindValidatedAtomicRepreviewPayload;
+
+type RequireCyoaPayload<Payload extends ValidatedAtomicRepreviewPayload<"cyoa">> = Payload;
+// @ts-expect-error A Legacy Story validated payload cannot satisfy the CYOA family contract.
+type CrossFamilyAtomicPayload = RequireCyoaPayload<ValidatedAtomicRepreviewPayload<"legacy_story">>;
+type RequireCreateWorldDestination<Destination extends Readonly<{ kind: "create_world" }>> = Destination;
+// @ts-expect-error A Legacy Story existing-world destination cannot satisfy a create-world contract.
+type CrossDestinationAtomicPayload = RequireCreateWorldDestination<ValidatedAtomicRepreviewPayload<"legacy_story">["destination"]>;
 
 const campaignDestination = { kind: "embedded", operation: "create_world" } as const;
 const existingDestination = { kind: "existing_world_version", worldId, worldVersionId } as const;
 const createWorldDestination = { kind: "create_world" } as const;
+
+function atomicPayload(kind: Exclude<PortableImportPreviewCommand["kind"], "campaign_zip">) {
+  if (kind === "legacy_story") {
+    return {
+      sourceName: "legacy.story",
+      story: { world: { title: "Legacy World" }, turns: [] },
+      targetWorldVersionId: worldVersionId
+    };
+  }
+  if (kind === "world_json") {
+    return {
+      sourceName: "world.json",
+      worldExport: {
+        format: "infinite-quest-world",
+        formatVersion: 1,
+        title: "Portable World",
+        content: { world: { title: "Portable World" } }
+      }
+    };
+  }
+  const sourceKind = kind === "infinite_worlds" ? "world_json" : kind === "cyoa" ? "cyoa_json" : kind;
+  return {
+    sourceName: `${kind}.txt`,
+    sourceText: kind === "cyoa" ? "{\"chapters\":{}}" : "validated source text",
+    sourceKind,
+    selectedCharacterIndex: 0,
+    enrichFinalTurn: false,
+    ...(kind === "story_text" ? { targetWorldVersionId: worldVersionId } : {}),
+    ...(kind === "cyoa" || kind === "world_text" ? { providerProfileId } : {})
+  };
+}
 
 function ingressRequest<Destination extends PortableImportPreviewCommand["destination"]>(
   kind: PortableImportPreviewCommand["kind"],
   destination: Destination,
   previewHandle?: ReturnType<typeof toPortablePreviewHandle<Destination>>,
 ): PortableImportCommitIngressRequest<Destination> {
+  if (kind !== "campaign_zip") {
+    const contentFingerprint = toValidatedPortableContentFingerprint("a".repeat(64));
+    const stagedInputHandle = toPortableStagedInput(`staged-${kind}`);
+    const validatedPayload = bindValidatedAtomicRepreviewPayload({
+      owner: { ownerUserId },
+      kind,
+      destination,
+      contentFingerprint,
+      stagedInput: stagedInputHandle,
+      payload: atomicPayload(kind)
+    } as never);
+    const stagedInput = bindOwnerBoundPortableStagedInput({
+      owner: { ownerUserId },
+      kind,
+      destination,
+      contentFingerprint,
+      stagedInput: stagedInputHandle
+    } as never);
+    return {
+      owner: { ownerUserId },
+      kind,
+      destination,
+      validatedPayload,
+      stagedInput,
+      ...(previewHandle === undefined ? {} : { previewHandle })
+    } as PortableImportCommitIngressRequest<Destination>;
+  }
   return {
     owner: { ownerUserId },
     kind,
     destination,
     serverStableReplayKey: toServerStableReplayKey(`server-replay-${kind}`),
     ...(previewHandle === undefined ? {} : { previewHandle })
-  };
+  } as unknown as PortableImportCommitIngressRequest<Destination>;
 }
 
 describe("Task 14e3a HTTP compatibility contracts", () => {
@@ -99,7 +176,9 @@ describe("Task 14e3a HTTP compatibility contracts", () => {
     expect(ingress.choreography.kind).toBe(expected);
     expect(ingress.idempotency).toEqual({
       source: "server_stable_compatibility",
-      key: `server-replay-${kind}`
+      key: kind === "campaign_zip"
+        ? `server-replay-${kind}`
+        : expect.stringMatching(/^pr\|11111111-1111-4111-8111-111111111111\|/u)
     });
     expect(ingress).not.toHaveProperty("sourceInstallationId");
     expect(ingress).not.toHaveProperty("importedRecordId");
@@ -121,13 +200,160 @@ describe("Task 14e3a HTTP compatibility contracts", () => {
       idempotencyHeader: "browser-action-42"
     };
 
-    expect(bindPortableImportCommitIngress(request).idempotency).toEqual({
+    expect(bindPortableImportCommitIngress(request as never).idempotency).toEqual({
       source: "idempotency_header",
       key: "browser-action-42"
     });
     expect(() => toPortableImportIdempotencyKey(" leading-space")).toThrow("portable_import_idempotency_key_invalid");
     expect(() => toPortableImportIdempotencyKey("line\nbreak")).toThrow("portable_import_idempotency_key_invalid");
     expect(() => toPortableImportIdempotencyKey("x".repeat(201))).toThrow("portable_import_idempotency_key_invalid");
+  });
+
+  it("executes atomic re-preview, mutation, and portable completion inside the caller transaction", async () => {
+    const ingress = bindPortableImportCommitIngress(ingressRequest("cyoa", createWorldDestination));
+    if (ingress.choreography.kind !== "atomic_repreview") throw new Error("expected atomic choreography");
+    const events: string[] = [];
+    const result = await executeAtomicPortableImportCommit(
+      ingress,
+      {
+        run: async (work) => {
+          events.push("transaction-open");
+          const value = await work({ transactionId: "caller-transaction" });
+          events.push("transaction-commit");
+          return value;
+        }
+      },
+      async (transaction, command) => {
+        events.push("preview-domain-consume");
+        expect(transaction).toEqual({ transactionId: "caller-transaction" });
+        expect(command.kind).toBe("cyoa");
+        expect(command.owner).toEqual({ ownerUserId });
+        expect(command.destination).toEqual(createWorldDestination);
+        expect(command.payload).toMatchObject({ sourceKind: "cyoa_json", providerProfileId });
+        expect(command.stagedInput).toBe("staged-cyoa");
+        return "committed";
+      },
+    );
+
+    expect(result).toBe("committed");
+    expect(events).toEqual(["transaction-open", "preview-domain-consume", "transaction-commit"]);
+  });
+
+  it("rechecks the bound ingress scope before opening the atomic transaction", async () => {
+    const ingress = bindPortableImportCommitIngress(ingressRequest("legacy_story", existingDestination));
+    const events: string[] = [];
+    const transactionRunner = {
+      run: async <Result>(work: (transaction: object) => Promise<Result>) => {
+        events.push("transaction-open");
+        return work({ transactionId: "must-not-open" });
+      }
+    };
+    const core = async () => {
+      events.push("core-called");
+      return "committed";
+    };
+
+    await expect(executeAtomicPortableImportCommit(
+      { ...ingress, kind: "story_text" } as never,
+      transactionRunner,
+      core,
+    )).rejects.toThrow("portable_atomic_kind_mismatch");
+    await expect(executeAtomicPortableImportCommit(
+      { ...ingress, destination: createWorldDestination } as never,
+      transactionRunner,
+      core,
+    )).rejects.toThrow("portable_atomic_destination_mismatch");
+    await expect(executeAtomicPortableImportCommit(
+      {
+        ...ingress,
+        idempotency: {
+          source: "server_stable_compatibility",
+          key: toPortableImportIdempotencyKey("substituted-stable-idempotency")
+        }
+      } as never,
+      transactionRunner,
+      core,
+    )).rejects.toThrow("portable_atomic_replay_key_mismatch");
+
+    expect(events).toEqual([]);
+  });
+
+  it.each(["legacy_story", "story_text", "infinite_worlds", "cyoa", "world_json", "world_text"] as const)(
+    "carries the exact validated %s payload and owner-bound staged identity",
+    (kind) => {
+      const destination = kind === "legacy_story" || kind === "story_text"
+        ? existingDestination
+        : createWorldDestination;
+      const ingress = bindPortableImportCommitIngress(ingressRequest(kind, destination));
+      if (ingress.choreography.kind !== "atomic_repreview") throw new Error("expected atomic choreography");
+
+      expect(ingress.choreography.validatedPayload.kind).toBe(kind);
+      expect(ingress.choreography.validatedPayload.owner).toEqual({ ownerUserId });
+      expect(ingress.choreography.validatedPayload.destination).toEqual(destination);
+      expect(ingress.choreography.stagedInput).toMatchObject({
+        owner: { ownerUserId },
+        kind,
+        destination,
+        stagedInput: `staged-${kind}`
+      });
+      expect(ingress.choreography.replayKey).toBe(ingress.choreography.validatedPayload.replayKey);
+    },
+  );
+
+  it("rejects cross-owner, family, destination, staged-input, and replay-key substitution", () => {
+    const base = ingressRequest("legacy_story", existingDestination) as Extract<
+      PortableImportCommitIngressRequest,
+      { kind: "legacy_story" }
+    >;
+    const foreignOwner = "99999999-9999-4999-8999-999999999999";
+
+    expect(() => bindPortableImportCommitIngress({
+      ...base,
+      validatedPayload: { ...base.validatedPayload, owner: { ownerUserId: foreignOwner } }
+    } as never)).toThrow("portable_atomic_owner_mismatch");
+    expect(() => bindPortableImportCommitIngress({
+      ...base,
+      validatedPayload: { ...base.validatedPayload, kind: "story_text" }
+    } as never)).toThrow("portable_atomic_kind_mismatch");
+    expect(() => bindPortableImportCommitIngress({
+      ...base,
+      validatedPayload: { ...base.validatedPayload, destination: createWorldDestination }
+    } as never)).toThrow("portable_atomic_destination_mismatch");
+    expect(() => bindPortableImportCommitIngress({
+      ...base,
+      stagedInput: { ...base.stagedInput, contentFingerprint: "b".repeat(64) }
+    } as never)).toThrow("portable_atomic_staged_input_mismatch");
+    expect(() => bindPortableImportCommitIngress({
+      ...base,
+      stagedInput: {
+        ...base.stagedInput,
+        stagedInput: toPortableStagedInput("substituted-staged-input")
+      }
+    } as never)).toThrow("portable_atomic_staged_input_mismatch");
+    expect(() => bindPortableImportCommitIngress({
+      ...base,
+      validatedPayload: { ...base.validatedPayload, replayKey: toServerStableReplayKey("tampered-replay") }
+    } as never)).toThrow("portable_atomic_replay_key_mismatch");
+  });
+
+  it("rejects format-confused or provider-incomplete validated payloads", () => {
+    const contentFingerprint = toValidatedPortableContentFingerprint("c".repeat(64));
+    expect(() => bindValidatedAtomicRepreviewPayload({
+      owner: { ownerUserId },
+      kind: "cyoa",
+      destination: createWorldDestination,
+      contentFingerprint,
+      stagedInput: toPortableStagedInput("staged-cyoa-mismatch"),
+      payload: { ...atomicPayload("cyoa"), sourceKind: "world_text" }
+    })).toThrow("portable_atomic_payload_kind_mismatch");
+    expect(() => bindValidatedAtomicRepreviewPayload({
+      owner: { ownerUserId },
+      kind: "world_text",
+      destination: createWorldDestination,
+      contentFingerprint,
+      stagedInput: toPortableStagedInput("staged-world-text-provider"),
+      payload: { ...atomicPayload("world_text"), providerProfileId: undefined }
+    })).toThrow("portable_atomic_provider_required");
   });
 
   it("binds campaign and world exports to the server owner and full resource scope", () => {
@@ -199,6 +425,19 @@ describe("Task 14e3a HTTP compatibility contracts", () => {
     )).toThrow("asset_idempotency_key_invalid");
   });
 
+  it("maps selected and explicitly-cleared asset results to the legacy URL-only response", () => {
+    expect(mapLegacyWorldAssetSelectionHttpResult({ assetId, selected: true })).toEqual({
+      assetUrl: `/api/v1/assets/${assetId}`
+    });
+    expect(mapLegacyTurnAssetSelectionHttpResult({
+      assetId: null,
+      selected: false,
+      privatePath: "/private/assets/should-not-escape.png"
+    } as never)).toEqual({ assetUrl: "" });
+    expect(() => mapLegacyTurnAssetSelectionHttpResult({ assetId, selected: false }))
+      .toThrow("asset_selection_result_invalid");
+  });
+
   it("maps campaign preview handles and commit results without exposing private retrieval capabilities", () => {
     const projection: PortableImportPreviewProjectionByKind["campaign_zip"] = {
       valid: true,
@@ -245,11 +484,23 @@ describe("Task 14e3a HTTP compatibility contracts", () => {
       result
     };
 
-    expect(mapCampaignArchivePreviewHttpResult(preview)).toEqual({
+    const campaignHttpPreview = mapCampaignArchivePreviewHttpResult({
+      ...preview,
+      projection: {
+        ...projection,
+        retrieval: "private-preview-retrieval",
+        sourceInstallationId: "foreign-installation",
+        campaign: { ...projection.campaign, privatePath: "/private/campaign.json" }
+      }
+    } as never);
+    expect(campaignHttpPreview).toEqual({
       ...projection,
       previewToken: "p".repeat(40),
       expiresAt: "2026-08-08T13:00:00.000Z"
     });
+    expect(campaignHttpPreview).not.toHaveProperty("retrieval");
+    expect(campaignHttpPreview).not.toHaveProperty("sourceInstallationId");
+    expect(campaignHttpPreview.campaign).not.toHaveProperty("privatePath");
     expect(mapPortableImportCommitHttpResult(commit)).toEqual({ statusCode: 201, body: result });
     expect(mapPortableImportCommitHttpResult({ ...commit, duplicate: true, result: { ...result, duplicate: true } }))
       .toEqual({ statusCode: 200, body: { ...result, duplicate: true } });
@@ -281,9 +532,106 @@ describe("Task 14e3a HTTP compatibility contracts", () => {
       projection
     };
 
-    expect(mapHandlelessPortablePreviewHttpResult(view)).toEqual(projection);
-    expect(mapHandlelessPortablePreviewHttpResult(view)).not.toHaveProperty("previewHandle");
-    expect(mapHandlelessPortablePreviewHttpResult(view)).not.toHaveProperty("previewToken");
+    const poisonedView = {
+      ...view,
+      projection: {
+        ...projection,
+        retrieval: "private-preview-retrieval",
+        sourceInstallationId: "foreign-installation",
+        counts: { ...projection.counts, internalCounter: 99 }
+      }
+    } as never;
+    const mapped = mapHandlelessPortablePreviewHttpResult("legacy_story", poisonedView);
+
+    expect(mapped).toEqual(projection);
+    expect(mapped).not.toHaveProperty("previewHandle");
+    expect(mapped).not.toHaveProperty("previewToken");
+    expect(mapped).not.toHaveProperty("retrieval");
+    expect(mapped).not.toHaveProperty("sourceInstallationId");
+    expect(mapped.counts).not.toHaveProperty("internalCounter");
+  });
+
+  it.each([
+    ["infinite_worlds", {
+      kind: "world_json", valid: true, title: "World", duplicate: false, existingWorldId: null,
+      characters: [{ index: 0, name: "Ari" }], counts: { entities: 1, relationships: 0, triggers: 0 }, warnings: []
+    }],
+    ["world_json", {
+      kind: "world_json", valid: false, duplicate: false, existingWorldId: null,
+      characters: [], counts: { entities: 0, relationships: 0, triggers: 0 }, warnings: ["invalid"]
+    }],
+    ["cyoa", {
+      kind: "cyoa_json", valid: true, requiresProvider: true, warnings: [],
+      counts: { topLevelTitle: "Forks", layer1ChaptersCount: 2, characterTarget: "3-4" }
+    }],
+    ["world_text", {
+      kind: "world_text", valid: true, requiresProvider: true, warnings: [],
+      counts: { sourceCharacters: 20, sourceWords: 4 }
+    }],
+    ["story_text", {
+      kind: "story_text", title: "Story", duplicate: false, existingCampaignId: null,
+      targetWorldId: worldId, diagnostics: ["parsed"], characters: [{ id: "hero", name: "Hero" }],
+      selectedCharacterId: "hero", valid: true,
+      counts: { turns: 2, completeHistoryCharacters: 20, estimatedHistoryTokens: 5 }, warnings: []
+    }]
+  ] as const)("reconstructs the %s preview from its family allowlist", (kind, projection) => {
+    const mapped = mapHandlelessPortablePreviewHttpResult(kind, {
+      projection: {
+        ...projection,
+        retrieval: "private-preview-retrieval",
+        sourceInstallationId: "foreign-installation",
+        internalCounter: 77
+      }
+    } as never);
+
+    expect(mapped).toEqual(projection);
+    expect(mapped).not.toHaveProperty("retrieval");
+    expect(mapped).not.toHaveProperty("sourceInstallationId");
+    expect(mapped).not.toHaveProperty("internalCounter");
+  });
+
+  it.each([
+    ["campaign_zip", {
+      importId: "66666666-6666-4666-8666-666666666666", worldId, worldVersionId, campaignId,
+      duplicate: false, stats: { turnCount: 2, memoryCount: 1, summaryCount: 1, assetCount: 1, assetBytes: 4 }
+    }],
+    ["legacy_story", {
+      importId: "66666666-6666-4666-8666-666666666666", worldId, worldVersionId, campaignId,
+      duplicate: false, stats: {
+        turnCount: 2, memoryCount: 1, completeHistoryCharacters: 20, estimatedHistoryTokens: 5,
+        importedSummary: true, sanitizedMemoryCount: 1
+      }
+    }],
+    ["infinite_worlds", { kind: "world", importId: "66666666-6666-4666-8666-666666666666", worldId, worldVersionId, duplicate: false }],
+    ["cyoa", { kind: "world", importId: "66666666-6666-4666-8666-666666666666", worldId, worldVersionId, duplicate: false }],
+    ["world_json", { kind: "world", importId: "66666666-6666-4666-8666-666666666666", worldId, worldVersionId, duplicate: false }],
+    ["world_text", { kind: "world", importId: "66666666-6666-4666-8666-666666666666", worldId, worldVersionId, duplicate: false }],
+    ["story_text", {
+      kind: "campaign", importId: "66666666-6666-4666-8666-666666666666", worldId, worldVersionId, campaignId,
+      duplicate: false, stats: {
+        turnCount: 2, memoryCount: 1, completeHistoryCharacters: 20, estimatedHistoryTokens: 5,
+        importedSummary: true, sanitizedMemoryCount: 1
+      }
+    }]
+  ] as const)("reconstructs the %s commit result without private capabilities", (kind, expected) => {
+    const mapped = mapPortableImportCommitHttpResult({
+      kind,
+      duplicate: false,
+      importedRecordId: "private-imported-record",
+      retrieval: "private-result-retrieval",
+      diagnostics: ["internal-diagnostic"],
+      result: {
+        ...expected,
+        retrieval: "nested-private-retrieval",
+        sourceInstallationId: "foreign-installation",
+        internalCounter: 77
+      }
+    } as never);
+
+    expect(mapped).toEqual({ statusCode: 201, body: expected });
+    expect(mapped.body).not.toHaveProperty("retrieval");
+    expect(mapped.body).not.toHaveProperty("sourceInstallationId");
+    expect(mapped.body).not.toHaveProperty("internalCounter");
   });
 
   it("retains /imports/progress as a bounded owner-scoped status lookup, not authority", () => {

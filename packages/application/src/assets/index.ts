@@ -1,11 +1,14 @@
 export {
   bindAssetMetadataHttpIngress,
   bindTurnAssetSelectionHttpIngress,
-  bindWorldAssetSelectionHttpIngress
+  bindWorldAssetSelectionHttpIngress,
+  mapLegacyTurnAssetSelectionHttpResult,
+  mapLegacyWorldAssetSelectionHttpResult
 } from "./http-compatibility.js";
 export type {
   AssetHttpIdempotencyInput,
-  AssetServerStableReplayKey
+  AssetServerStableReplayKey,
+  LegacyAssetSelectionHttpResponse
 } from "./http-compatibility.js";
 export * from "./ports.js";
 export * from "./types.js";

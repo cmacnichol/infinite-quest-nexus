@@ -4,6 +4,7 @@ import type {
   AssetOwnerScope,
   AssetScope,
   AssetSelectionCommand,
+  AssetSelectionView,
   TurnAssetSelectionScope,
   WorldAssetSelectionScope
 } from "./types.js";
@@ -29,6 +30,8 @@ type AssetMutationHttpIngress<Scope, Command> = Readonly<{
   command: Command;
   idempotencySource: "idempotency_header" | "server_stable_compatibility";
 }>;
+
+export type LegacyAssetSelectionHttpResponse = Readonly<{ assetUrl: string }>;
 
 function nonBlank(value: string): boolean {
   return value.trim().length > 0;
@@ -108,4 +111,29 @@ export function bindWorldAssetSelectionHttpIngress(
     command: { ...body, idempotencyKey: resolved.key },
     idempotencySource: resolved.source
   };
+}
+
+function mapLegacyAssetSelectionHttpResult(
+  result: AssetSelectionView,
+): LegacyAssetSelectionHttpResponse {
+  if (!result.selected) {
+    if (result.assetId !== null) throw new Error("asset_selection_result_invalid");
+    return { assetUrl: "" };
+  }
+  if (result.assetId === null || !/^[0-9a-f-]+$/iu.test(result.assetId)) {
+    throw new Error("asset_selection_result_invalid");
+  }
+  return { assetUrl: `/api/v1/assets/${result.assetId}` };
+}
+
+export function mapLegacyTurnAssetSelectionHttpResult(
+  result: AssetSelectionView,
+): LegacyAssetSelectionHttpResponse {
+  return mapLegacyAssetSelectionHttpResult(result);
+}
+
+export function mapLegacyWorldAssetSelectionHttpResult(
+  result: AssetSelectionView,
+): LegacyAssetSelectionHttpResponse {
+  return mapLegacyAssetSelectionHttpResult(result);
 }

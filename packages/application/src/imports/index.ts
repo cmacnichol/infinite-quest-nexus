@@ -4,6 +4,7 @@ export {
   bindImportProgressLookup,
   bindPortableImportCommitIngress,
   bindWorldJsonExportScope,
+  executeAtomicPortableImportCommit,
   mapCampaignArchivePreviewHttpResult,
   mapHandlelessPortablePreviewHttpResult,
   mapImportProgressHttpResult,
@@ -12,12 +13,20 @@ export {
   toPortableImportIdempotencyKey
 } from "./http-compatibility.js";
 export type {
+  AtomicPortableImportCore,
+  AtomicPortableImportCoreCommand,
+  AtomicPortableImportKind,
+  AtomicPortableImportPayloadByKind,
+  CallerOwnedImportTransactionRunner,
   ImportProgressHttpResult,
   ImportProgressLookup,
   PortableImportCommitIngress,
   PortableImportCommitIngressRequest,
   PortableImportIdempotencyKey,
-  ServerStableReplayKey
+  ServerStableReplayKey,
+  OwnerBoundPortableStagedInput,
+  ValidatedAtomicRepreviewPayload,
+  ValidatedPortableContentFingerprint
 } from "./http-compatibility.js";
 export * from "./legacy-preview-retention.js";
 export * from "./ports.js";
