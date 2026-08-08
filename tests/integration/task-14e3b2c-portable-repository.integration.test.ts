@@ -10,6 +10,7 @@ import type { PortableExportScope } from "../../packages/application/src/imports
 import type {
   PrivatePortableExportCleanupPreparation,
   PrivatePortableExportRehydration,
+  PrivatePortableRecoveryCleanupResult,
   PrivatePortableStagedCleanupPreparation,
   PrivatePortableStagedRehydration
 } from "../../packages/application/src/imports/private-portable-repository.js";
@@ -98,12 +99,12 @@ integration("Task 14e3b2c private portable repository", () => {
     purpose: "portable_staging" | "portable_export",
     descriptor: PrivateStorageDescriptor,
     cleanupDescriptor: PrivateStorageDescriptor = descriptor,
+    expiresAt: string = new Date(Date.now() + 60_000).toISOString(),
   ): Promise<Readonly<{
     operationScopeId: string;
     operation: AttachedFilesystemOperation;
   }>> {
     const operationScopeId = `${purpose}:${crypto.randomUUID()}`;
-    const expiresAt = new Date(Date.now() + 60_000).toISOString();
     const reserved = await durable.journal.reserve(
       { resourceKind: "portable", ownerUserId, operationScopeId },
       { purpose, leaseOwner: `b2c-${purpose}`, expiresAt },
@@ -164,23 +165,53 @@ integration("Task 14e3b2c private portable repository", () => {
     return value;
   }
 
-  async function stagedFixture() {
+  function isRecoveryStagedPreparation(
+    value: PrivatePortableRecoveryCleanupResult,
+  ): value is PrivatePortableStagedCleanupPreparation {
+    return value.outcome === "cleanup_required" && value.identity.portableKind === "staged_input";
+  }
+
+  function requireRecoveryStagedPreparation(
+    value: PrivatePortableRecoveryCleanupResult,
+  ): PrivatePortableStagedCleanupPreparation {
+    if (!isRecoveryStagedPreparation(value)) {
+      throw new Error(`b2c_staged_recovery_prepare_${value.outcome}`);
+    }
+    return value;
+  }
+
+  function isRecoveryExportPreparation(
+    value: PrivatePortableRecoveryCleanupResult,
+  ): value is PrivatePortableExportCleanupPreparation {
+    return value.outcome === "cleanup_required" && value.identity.portableKind === "export_artifact";
+  }
+
+  function requireRecoveryExportPreparation(
+    value: PrivatePortableRecoveryCleanupResult,
+  ): PrivatePortableExportCleanupPreparation {
+    if (!isRecoveryExportPreparation(value)) {
+      throw new Error(`b2c_export_recovery_prepare_${value.outcome}`);
+    }
+    return value;
+  }
+
+  async function stagedFixture(expiresAt: string = new Date(Date.now() + 60_000).toISOString()) {
     const value = descriptor("staged");
-    const attached = await attachedPortable("portable_staging", value);
+    const attached = await attachedPortable("portable_staging", value, value, expiresAt);
     const stagedInput = await imports.registerStagedInput({
       ownerUserId,
       filesystemOperationId: attached.operation.operationId,
       operationScopeId: attached.operationScopeId,
       contentHash: value.contentHash,
       byteLength: value.byteLength,
-      expiresAt: new Date(Date.now() + 60_000).toISOString()
+      expiresAt
     });
     return { ...attached, descriptor: value, stagedInput };
   }
 
-  async function exportFixture() {
+  async function exportFixture(expiresAt: string = new Date(Date.now() + 60_000).toISOString()) {
     const value = descriptor("export");
-    const attached = await attachedPortable("portable_export", value);
+    const attached = await attachedPortable("portable_export", value, value, expiresAt);
     const scope: PortableExportScope = {
       ownerUserId,
       exportKind: "campaign_zip",
@@ -195,9 +226,18 @@ integration("Task 14e3b2c private portable repository", () => {
       contentType: "application/zip",
       contentHash: value.contentHash,
       byteLength: value.byteLength,
-      expiresAt: new Date(Date.now() + 60_000).toISOString()
+      expiresAt
     });
     return { ...attached, descriptor: value, scope, retrieval: view.retrieval };
+  }
+
+  async function waitForDatabaseExpiry(expiresAt: string): Promise<void> {
+    await pool.query(
+      `SELECT pg_sleep(
+         GREATEST(0,EXTRACT(EPOCH FROM ($1::timestamptz-clock_timestamp())))+0.05
+       )`,
+      [expiresAt]
+    );
   }
 
   it("requires a caller-owned transaction before portable cleanup preparation", async () => {
@@ -330,6 +370,51 @@ integration("Task 14e3b2c private portable repository", () => {
       (client) => imports.prepareRecoveryCleanup(client, forgedReservedRecord),
     )).toEqual({ outcome: "stale" });
 
+    const rawScopePreimage = {
+      ...recovery,
+      operation: {
+        ...recovery!.operation,
+        operationScopeId: staged.operationScopeId
+      }
+    } as DurableFilesystemRecoveryRecord;
+    expect(await withTransaction(
+      pool,
+      (client) => imports.prepareRecoveryCleanup(client, rawScopePreimage),
+    )).toEqual({ outcome: "stale" });
+
+    const wrongOwner = {
+      ...recovery,
+      operation: { ...recovery!.operation, ownerUserId: foreignOwnerUserId }
+    } as DurableFilesystemRecoveryRecord;
+    const wrongOperation = {
+      ...recovery,
+      operation: { ...recovery!.operation, operationId: crypto.randomUUID() }
+    } as DurableFilesystemRecoveryRecord;
+    const wrongPurpose = {
+      ...recovery,
+      operation: { ...recovery!.operation, purpose: "portable_export" }
+    } as DurableFilesystemRecoveryRecord;
+    const wrongWork = {
+      ...recovery,
+      claim: { ...recovery!.claim, workVersion: recovery!.claim.workVersion - 1 }
+    } as DurableFilesystemRecoveryRecord;
+    const wrongLease = {
+      ...recovery,
+      claim: { ...recovery!.claim, leaseId: crypto.randomUUID() }
+    } as DurableFilesystemRecoveryRecord;
+    for (const [substitution, outcome] of [
+      [wrongOwner, "stale"],
+      [wrongOperation, "stale"],
+      [wrongPurpose, "stale"],
+      [wrongWork, "stale"],
+      [wrongLease, "lease_lost"]
+    ] as const) {
+      expect(await withTransaction(
+        pool,
+        (client) => imports.prepareRecoveryCleanup(client, substitution),
+      )).toEqual({ outcome });
+    }
+
     const prepared = await withTransaction(
       pool,
       (client) => imports.prepareRecoveryCleanup(client, recovery as DurableFilesystemRecoveryRecord),
@@ -344,6 +429,137 @@ integration("Task 14e3b2c private portable repository", () => {
       descriptors: [staged.descriptor, staged.descriptor]
     });
     expect(prepared).not.toHaveProperty("stagedInput");
+  });
+
+  it("recovers and acknowledges staged cleanup after the portable authority expires", async () => {
+    const expiresAt = new Date(Date.now() + 3_000).toISOString();
+    const staged = await stagedFixture(expiresAt);
+    const rehydrated = requireStagedRehydration(await imports.rehydrateStagedInput(
+      { ownerUserId },
+      staged.stagedInput,
+      { leaseOwner: "b2c-expired-staged-active", leaseSeconds: 30 },
+    ));
+    expect(await withTransaction(
+      pool,
+      (client) => imports.prepareStagedCleanup(client, rehydrated),
+    )).toMatchObject({ outcome: "cleanup_required" });
+
+    await waitForDatabaseExpiry(expiresAt);
+    const recovered = (await durable.journal.recover({
+      leaseOwner: "b2c-expired-staged-recovery",
+      leaseSeconds: 30,
+      limit: 100
+    })).find((record) => record.operation.operationId === staged.operation.operationId);
+    if (!recovered || recovered.action !== "cleanup") throw new Error("b2c_expired_staged_recovery_missing");
+
+    const restartedImports = createPostgresImportRepository(pool);
+    const preparation = requireRecoveryStagedPreparation(await withTransaction(
+      pool,
+      (client) => restartedImports.prepareRecoveryCleanup(client, recovered),
+    ));
+    expect(preparation).not.toHaveProperty("stagedInput");
+    expect(await withTransaction(
+      pool,
+      (client) => restartedImports.acknowledgeStagedCleanup(client, preparation),
+    )).toEqual({ outcome: "cleaned" });
+    await expect(pool.query<{ operation_expired: boolean; portable_expired: boolean; lifecycle: string; status: string }>(
+      `SELECT clock_timestamp() >= operation.expires_at AS operation_expired,
+              clock_timestamp() >= staged.expires_at AS portable_expired,
+              operation.lifecycle,staged.status
+         FROM durable_filesystem_operations operation
+         JOIN portable_staged_inputs staged ON staged.filesystem_operation_id=operation.id
+        WHERE operation.id=$1`,
+      [staged.operation.operationId]
+    )).resolves.toMatchObject({
+      rows: [{ operation_expired: true, portable_expired: true, lifecycle: "cleaned", status: "cleaned" }]
+    });
+  });
+
+  it("reconstructs full export scope after restart and cleans expired authority with an exact recovery claim", async () => {
+    const expiresAt = new Date(Date.now() + 3_000).toISOString();
+    const exported = await exportFixture(expiresAt);
+    const rehydrated = requireExportRehydration(await imports.rehydrateExportArtifact(
+      exported.scope,
+      exported.retrieval,
+      { leaseOwner: "b2c-expired-export-active", leaseSeconds: 30 },
+    ));
+    expect(await withTransaction(
+      pool,
+      (client) => imports.prepareExportCleanup(client, rehydrated),
+    )).toMatchObject({ outcome: "cleanup_required" });
+
+    await waitForDatabaseExpiry(expiresAt);
+    const recovered = (await durable.journal.recover({
+      leaseOwner: "b2c-expired-export-recovery",
+      leaseSeconds: 30,
+      limit: 100
+    })).find((record) => record.operation.operationId === exported.operation.operationId);
+    if (!recovered || recovered.action !== "cleanup") throw new Error("b2c_expired_export_recovery_missing");
+
+    const restartedImports = createPostgresImportRepository(pool);
+    const preparation = requireRecoveryExportPreparation(await withTransaction(
+      pool,
+      (client) => restartedImports.prepareRecoveryCleanup(client, recovered),
+    ));
+    expect(preparation.identity.exportScope).toEqual(exported.scope);
+    expect(preparation).not.toHaveProperty("retrieval");
+    const rawScopePreimage = {
+      ...preparation,
+      operation: { ...preparation.operation, operationScopeId: exported.operationScopeId }
+    } as PrivatePortableExportCleanupPreparation;
+    const forgedScope = {
+      ...preparation,
+      identity: {
+        ...preparation.identity,
+        exportScope: { ...preparation.identity.exportScope, worldVersionId: crypto.randomUUID() }
+      }
+    } as PrivatePortableExportCleanupPreparation;
+    expect(await withTransaction(
+      pool,
+      (client) => restartedImports.acknowledgeExportCleanup(client, rawScopePreimage),
+    )).toEqual({ outcome: "stale" });
+    expect(await withTransaction(
+      pool,
+      (client) => restartedImports.acknowledgeExportCleanup(client, forgedScope),
+    )).toEqual({ outcome: "stale" });
+    expect(await withTransaction(
+      pool,
+      (client) => restartedImports.acknowledgeExportCleanup(client, preparation),
+    )).toEqual({ outcome: "cleaned" });
+    await expect(pool.query<{ operation_expired: boolean; portable_expired: boolean; lifecycle: string; status: string }>(
+      `SELECT clock_timestamp() >= operation.expires_at AS operation_expired,
+              clock_timestamp() >= artifact.expires_at AS portable_expired,
+              operation.lifecycle,artifact.status
+         FROM durable_filesystem_operations operation
+         JOIN portable_export_artifacts artifact ON artifact.filesystem_operation_id=operation.id
+        WHERE operation.id=$1`,
+      [exported.operation.operationId]
+    )).resolves.toMatchObject({
+      rows: [{ operation_expired: true, portable_expired: true, lifecycle: "cleaned", status: "cleaned" }]
+    });
+  });
+
+  it("keeps expired active portable authority ineligible for interactive cleanup", async () => {
+    const expiresAt = new Date(Date.now() + 3_000).toISOString();
+    const staged = await stagedFixture(expiresAt);
+    const rehydrated = requireStagedRehydration(await imports.rehydrateStagedInput(
+      { ownerUserId },
+      staged.stagedInput,
+      { leaseOwner: "b2c-expired-interactive", leaseSeconds: 30 },
+    ));
+
+    await waitForDatabaseExpiry(expiresAt);
+    expect(await withTransaction(
+      pool,
+      (client) => imports.prepareStagedCleanup(client, rehydrated),
+    )).toEqual({ outcome: "lease_lost" });
+    await expect(pool.query<{ lifecycle: string; status: string }>(
+      `SELECT operation.lifecycle,staged.status
+         FROM durable_filesystem_operations operation
+         JOIN portable_staged_inputs staged ON staged.filesystem_operation_id=operation.id
+        WHERE operation.id=$1`,
+      [staged.operation.operationId]
+    )).resolves.toMatchObject({ rows: [{ lifecycle: "finalized", status: "staged" }] });
   });
 
   it("atomically prepares and acknowledges both rows, including rollback and idempotent acknowledgement", async () => {
@@ -618,6 +834,10 @@ integration("Task 14e3b2c private portable repository", () => {
       ...preparation,
       operation: { ...preparation.operation, operationScopeId: "forged-scope" }
     } as PrivatePortableStagedCleanupPreparation;
+    const rawScopePreimage = {
+      ...preparation,
+      operation: { ...preparation.operation, operationScopeId: staged.operationScopeId }
+    } as PrivatePortableStagedCleanupPreparation;
     const forgedWork = {
       ...preparation,
       claim: { ...preparation.claim, workVersion: preparation.claim.workVersion - 1 }
@@ -632,6 +852,7 @@ integration("Task 14e3b2c private portable repository", () => {
       [forgedIdentity, "stale"],
       [forgedOwner, "stale"],
       [forgedOperation, "stale"],
+      [rawScopePreimage, "stale"],
       [forgedWork, "stale"],
       [forgedLease, "lease_lost"]
     ] as const) {

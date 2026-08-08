@@ -1102,6 +1102,17 @@ function portableOperationMatches(
       || row.operation_scope_hash === sha256(operation.operationScopeId));
 }
 
+function portableRecoveryOperationMatches(
+  row: PortableFilesystemAuthorityRow,
+  operation: AttachedFilesystemOperation,
+): boolean {
+  return operation.resourceKind === "portable"
+    && row.id === operation.operationId
+    && row.owner_user_id === operation.ownerUserId
+    && row.purpose === operation.purpose
+    && row.operation_scope_hash === operation.operationScopeId;
+}
+
 function portableClaimIdentity(
   row: PortableFilesystemAuthorityRow,
   claim: DurableFilesystemRecoveryClaim,
@@ -1375,15 +1386,25 @@ function unavailable(outcome: PrivatePortableCleanupUnavailable["outcome"]): Pri
   return { outcome };
 }
 
-function claimOutcome(
+function cleanupClaimOutcome(
   row: PortableFilesystemAuthorityRow,
   claim: DurableFilesystemRecoveryClaim,
   currentTime: Date,
 ): "valid" | "stale" | "lease_lost" {
   const identity = portableClaimIdentity(row, claim);
   if (identity !== "valid") return identity;
-  if (currentTime >= row.lease_expires_at || currentTime >= row.expires_at) return "lease_lost";
+  if (currentTime >= row.lease_expires_at) return "lease_lost";
   return "valid";
+}
+
+function activeClaimOutcome(
+  row: PortableFilesystemAuthorityRow,
+  claim: DurableFilesystemRecoveryClaim,
+  currentTime: Date,
+): "valid" | "stale" | "lease_lost" {
+  const outcome = cleanupClaimOutcome(row, claim, currentTime);
+  if (outcome !== "valid") return outcome;
+  return currentTime >= row.expires_at ? "lease_lost" : "valid";
 }
 
 async function prepareStagedCleanup(
@@ -1418,7 +1439,7 @@ async function prepareStagedCleanup(
   const delivery = descriptors[descriptors.length - 1]!;
   if (!descriptorsMatch([delivery], [rehydration.descriptor])) return unavailable("stale");
   const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
-  const classification = claimOutcome(operation, rehydration.claim, currentTime);
+  const classification = activeClaimOutcome(operation, rehydration.claim, currentTime);
   if (classification !== "valid") return unavailable(classification);
   if (operation.lifecycle === "cleaned" && staged.status === "cleaned") return unavailable("already_cleaned");
   if (operation.lifecycle === "cleanup_pending" || staged.status === "cleanup_pending") return unavailable("stale");
@@ -1509,7 +1530,7 @@ async function prepareExportCleanup(
   const delivery = descriptors[descriptors.length - 1]!;
   if (!descriptorsMatch([delivery], [rehydration.descriptor])) return unavailable("stale");
   const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
-  const classification = claimOutcome(operation, rehydration.claim, currentTime);
+  const classification = activeClaimOutcome(operation, rehydration.claim, currentTime);
   if (classification !== "valid") return unavailable(classification);
   if (operation.lifecycle === "cleaned" && artifact.status === "cleaned") return unavailable("already_cleaned");
   if (operation.lifecycle === "cleanup_pending" || artifact.status === "cleanup_pending") return unavailable("stale");
@@ -1576,7 +1597,7 @@ async function prepareRecoveryCleanup(
   const operation = await lockedPortableOperation(client, recovery.operation.operationId);
   if (!operation
     || operation.candidate_token_hash === null
-    || !portableOperationMatches(operation, recovery.operation as AttachedFilesystemOperation)) {
+    || !portableRecoveryOperationMatches(operation, recovery.operation as AttachedFilesystemOperation)) {
     return unavailable("stale");
   }
   const initialClaim = portableClaimIdentity(operation, recovery.claim);
@@ -1595,7 +1616,7 @@ async function prepareRecoveryCleanup(
     const rows = await portableDescriptorRows(client, operation.id);
     const descriptors = portableCleanupDescriptors(rows, staged.staged_content_hash, staged.staged_byte_length);
     const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
-    const classification = claimOutcome(operation, recovery.claim, currentTime);
+    const classification = cleanupClaimOutcome(operation, recovery.claim, currentTime);
     if (classification !== "valid") return unavailable(classification);
     if (operation.lifecycle === "cleaned" && staged.status === "cleaned") return unavailable("already_cleaned");
     if (operation.lifecycle !== "cleanup_pending" || staged.status !== "cleanup_pending") return unavailable("stale");
@@ -1636,7 +1657,7 @@ async function prepareRecoveryCleanup(
   const rows = await portableDescriptorRows(client, operation.id);
   const descriptors = portableCleanupDescriptors(rows, artifact.artifact_content_hash, artifact.artifact_byte_length);
   const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
-  const classification = claimOutcome(operation, recovery.claim, currentTime);
+  const classification = cleanupClaimOutcome(operation, recovery.claim, currentTime);
   if (classification !== "valid") return unavailable(classification);
   if (operation.lifecycle === "cleaned" && artifact.status === "cleaned") return unavailable("already_cleaned");
   if (operation.lifecycle !== "cleanup_pending" || artifact.status !== "cleanup_pending") return unavailable("stale");
@@ -1665,7 +1686,7 @@ async function acknowledgeStagedCleanup(
     || preparation.identity.portableKind !== "staged_input"
     || preparation.identity.filesystemOperationId !== preparation.operation.operationId
     || preparation.identity.ownerUserId !== preparation.operation.ownerUserId
-    || !portableOperationMatches(operation, preparation.operation)) return { outcome: "stale" };
+    || !portableRecoveryOperationMatches(operation, preparation.operation)) return { outcome: "stale" };
   const initialClaim = portableClaimIdentity(operation, preparation.claim);
   if (initialClaim !== "valid") return { outcome: initialClaim };
   const staged = await lockedStagedAuthority(
@@ -1679,7 +1700,7 @@ async function acknowledgeStagedCleanup(
   const descriptors = portableCleanupDescriptors(rows, staged.staged_content_hash, staged.staged_byte_length);
   if (!descriptorsMatch(descriptors, preparation.descriptors)) return { outcome: "stale" };
   const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
-  const classification = claimOutcome(operation, preparation.claim, currentTime);
+  const classification = cleanupClaimOutcome(operation, preparation.claim, currentTime);
   if (classification !== "valid") return { outcome: classification };
   if (operation.lifecycle === "cleaned" && staged.status === "cleaned") return { outcome: "already_cleaned" };
   if (operation.lifecycle !== "cleanup_pending" || staged.status !== "cleanup_pending") return { outcome: "stale" };
@@ -1691,7 +1712,7 @@ async function acknowledgeStagedCleanup(
         AND lifecycle='cleanup_pending' AND work_version=$3
         AND lease_id=$4 AND lease_owner=$5
         AND date_trunc('milliseconds',lease_expires_at)=$6::timestamptz
-        AND lease_expires_at > clock_timestamp() AND expires_at > clock_timestamp()`,
+        AND lease_expires_at > clock_timestamp()`,
     [
       operation.id,
       operation.owner_user_id,
@@ -1726,7 +1747,7 @@ async function acknowledgeExportCleanup(
     || preparation.identity.filesystemOperationId !== preparation.operation.operationId
     || preparation.identity.ownerUserId !== preparation.operation.ownerUserId
     || preparation.identity.exportScope.ownerUserId !== preparation.identity.ownerUserId
-    || !portableOperationMatches(operation, preparation.operation)) return { outcome: "stale" };
+    || !portableRecoveryOperationMatches(operation, preparation.operation)) return { outcome: "stale" };
   const initialClaim = portableClaimIdentity(operation, preparation.claim);
   if (initialClaim !== "valid") return { outcome: initialClaim };
   const artifact = await lockedExportAuthority(
@@ -1740,7 +1761,7 @@ async function acknowledgeExportCleanup(
   const descriptors = portableCleanupDescriptors(rows, artifact.artifact_content_hash, artifact.artifact_byte_length);
   if (!descriptorsMatch(descriptors, preparation.descriptors)) return { outcome: "stale" };
   const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
-  const classification = claimOutcome(operation, preparation.claim, currentTime);
+  const classification = cleanupClaimOutcome(operation, preparation.claim, currentTime);
   if (classification !== "valid") return { outcome: classification };
   if (operation.lifecycle === "cleaned" && artifact.status === "cleaned") return { outcome: "already_cleaned" };
   if (operation.lifecycle !== "cleanup_pending" || artifact.status !== "cleanup_pending") return { outcome: "stale" };
@@ -1752,7 +1773,7 @@ async function acknowledgeExportCleanup(
         AND lifecycle='cleanup_pending' AND work_version=$3
         AND lease_id=$4 AND lease_owner=$5
         AND date_trunc('milliseconds',lease_expires_at)=$6::timestamptz
-        AND lease_expires_at > clock_timestamp() AND expires_at > clock_timestamp()`,
+        AND lease_expires_at > clock_timestamp()`,
     [
       operation.id,
       operation.owner_user_id,
