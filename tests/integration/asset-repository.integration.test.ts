@@ -582,6 +582,30 @@ integration("PostgreSQL asset repository", () => {
     )).resolves.toMatchObject({ rows: [{ metadata_revision: 2 }] });
   });
 
+  it("serializes an owner-scoped mutation on its deterministic advisory key before mutation row locks", async () => {
+    const target = await asset();
+    const idempotencyKey = toAssetMutationIdempotencyKey(`advisory-${crypto.randomUUID()}`);
+    const keyHash = hash(idempotencyKey);
+    const advisoryKey = `infinite-quest-nexus:asset-mutation:${ownerUserId}:asset_metadata_update:${keyHash}`;
+    const blocker = await pool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [advisoryKey]);
+      let settled = false;
+      const update = application().updateAssetMetadata(
+        { ownerUserId, assetId: target.assetId },
+        { expectedRevision: 1, title: "Advisory serialized", idempotencyKey },
+      ).finally(() => { settled = true; });
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+      expect(settled).toBe(false);
+      await blocker.query("COMMIT");
+      await expect(update).resolves.toEqual({ assetId: target.assetId, metadataRevision: 2 });
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+    }
+  });
+
   it("sets, replays, mismatches, and explicitly clears scoped turn and world selections", async () => {
     const fixture = await campaign();
     const target = await asset();

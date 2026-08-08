@@ -317,6 +317,29 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function portableImportLockKey(
+  ownerUserId: string,
+  kind: PortableImportKind,
+  contentFingerprint: string,
+  destinationFingerprint: string,
+): string {
+  return `infinite-quest-nexus:portable-import:${ownerUserId}:${kind}:${contentFingerprint}:${destinationFingerprint}`;
+}
+
+function portableImportIdempotencyLockKey(
+  ownerUserId: string,
+  kind: PortableImportKind,
+  idempotencyKeyHash: string,
+): string {
+  return `infinite-quest-nexus:portable-import-idempotency:${ownerUserId}:${kind}:${idempotencyKeyHash}`;
+}
+
+async function lockPortableImportKeys(client: DatabaseClient, keys: readonly string[]): Promise<void> {
+  for (const key of [...new Set(keys)].sort()) {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [key]);
+  }
+}
+
 function randomToken(): string {
   return randomBytes(32).toString("base64url");
 }
@@ -1114,6 +1137,12 @@ async function createPreview<Command extends PortableImportPreviewCommand>(
   }
   const projection = projectionFor<Command["kind"]>(request.command.kind, rawProjection);
   const inserted = await withTransaction(pool, async (client) => {
+    await lockPortableImportKeys(client, [portableImportLockKey(
+      request.command.ownerUserId,
+      request.command.kind,
+      fingerprint,
+      destination.fingerprint,
+    )]);
     await client.query(
       `UPDATE portable_import_operations
           SET status='expired',updated_at=now()
@@ -1245,6 +1274,23 @@ async function beginImport<Kind extends PortableImportKind, Destination extends 
   if (command.idempotencyKey.trim().length === 0) {
     throw repositoryError("import_invalid", 400);
   }
+  const advisoryPreview = await client.query<Pick<PreviewRow, "content_fingerprint" | "destination_fingerprint">>(
+    `SELECT content_fingerprint,destination_fingerprint
+       FROM portable_import_operations
+      WHERE owner_user_id=$1 AND import_kind=$2 AND preview_token_hash=$3`,
+    [command.ownerUserId, command.kind, sha256(command.previewHandle.token)]
+  );
+  const advisoryRow = advisoryPreview.rows[0];
+  if (!advisoryRow) throw repositoryError("import_invalid", 404);
+  await lockPortableImportKeys(client, [
+    portableImportIdempotencyLockKey(command.ownerUserId, command.kind, sha256(command.idempotencyKey)),
+    portableImportLockKey(
+      command.ownerUserId,
+      command.kind,
+      advisoryRow.content_fingerprint,
+      advisoryRow.destination_fingerprint,
+    )
+  ]);
   const row = await lockedPreview(client, command);
   const destination = databaseDestination(command.destination);
   const idempotencyKeyHash = sha256(command.idempotencyKey);

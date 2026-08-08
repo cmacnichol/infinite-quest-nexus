@@ -5,6 +5,7 @@ export * from "./generation-repository.js";
 export * from "./generation-execution-repository.js";
 export * from "./illustration-repository.js";
 export * from "./asset-repository.js";
+export * from "./durable-filesystem-repository.js";
 export * from "./cost-repository.js";
 export * from "./prompt-repository.js";
 export {

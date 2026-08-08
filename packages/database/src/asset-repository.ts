@@ -395,6 +395,26 @@ type IdempotencyRecord = Readonly<{
   result: unknown;
 }>;
 
+function assetMutationLockKey(
+  ownerUserId: string,
+  mutationKind: MutationKind,
+  idempotencyKeyHash: string,
+): string {
+  return `infinite-quest-nexus:asset-mutation:${ownerUserId}:${mutationKind}:${idempotencyKeyHash}`;
+}
+
+async function lockAssetMutation(
+  client: DatabaseClient,
+  ownerUserId: string,
+  mutationKind: MutationKind,
+  idempotencyKeyHash: string,
+): Promise<void> {
+  await client.query(
+    "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+    [assetMutationLockKey(ownerUserId, mutationKind, idempotencyKeyHash)]
+  );
+}
+
 async function beginIdempotency(
   client: DatabaseClient,
   input: Readonly<{
@@ -410,6 +430,7 @@ async function beginIdempotency(
   }>,
 ): Promise<Readonly<{ replay: boolean; result: unknown }>> {
   const keyHash = sha256(input.idempotencyKey);
+  await lockAssetMutation(client, input.ownerUserId, input.mutationKind, keyHash);
   await client.query(
     `INSERT INTO asset_mutation_idempotency (
        owner_user_id, mutation_kind, idempotency_key_hash, request_fingerprint,
@@ -471,6 +492,8 @@ async function updateMetadata(
 ) {
   if (command.reuseScope === "shared") throw repositoryError("asset_shared_unavailable", 409);
   return withTransaction(pool, async (client) => {
+    const fingerprint = metadataFingerprint(ownerUserId, assetId, command);
+    await lockAssetMutation(client, ownerUserId, "asset_metadata_update", sha256(command.idempotencyKey));
     const current = await client.query<{ metadata_revision: number }>(
       `SELECT le.metadata_revision
          FROM assets a
@@ -481,7 +504,6 @@ async function updateMetadata(
       [assetId, ownerUserId]
     );
     if (!current.rows[0]) throw repositoryError("asset_not_found", 404);
-    const fingerprint = metadataFingerprint(ownerUserId, assetId, command);
     const idempotency = await beginIdempotency(client, {
       ownerUserId,
       mutationKind: "asset_metadata_update",
@@ -558,6 +580,12 @@ async function selectTurn(
   command: AssetSelectionCommand,
 ): Promise<AssetSelectionView> {
   return withTransaction(pool, async (client) => {
+    await lockAssetMutation(
+      client,
+      scope.ownerUserId,
+      "turn_asset_selection",
+      sha256(command.idempotencyKey),
+    );
     const turn = await client.query(
       `SELECT 1 FROM turns
         WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3
@@ -606,6 +634,12 @@ async function selectWorld(
   command: AssetSelectionCommand,
 ): Promise<AssetSelectionView> {
   return withTransaction(pool, async (client) => {
+    await lockAssetMutation(
+      client,
+      scope.ownerUserId,
+      "world_asset_selection",
+      sha256(command.idempotencyKey),
+    );
     const world = await client.query(
       "SELECT 1 FROM worlds WHERE id=$1 AND owner_user_id=$2 FOR UPDATE",
       [scope.worldId, scope.ownerUserId]

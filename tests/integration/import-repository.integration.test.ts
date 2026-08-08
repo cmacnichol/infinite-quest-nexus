@@ -510,6 +510,37 @@ integration("PostgreSQL portable import repository", () => {
     expect(statuses.rows.map(({ status }) => status)).toEqual(["superseded", "previewed"]);
   });
 
+  it("serializes preview replacement on the deterministic owner, kind, content, and destination advisory key", async () => {
+    const fingerprint = hash(`advisory-preview-${crypto.randomUUID()}`);
+    const staged = await stagedInput(ownerUserId, fingerprint);
+    const destination = { kind: "create_world" as const };
+    const destinationFingerprint = hash(JSON.stringify(destination));
+    const advisoryKey = `infinite-quest-nexus:portable-import:${ownerUserId}:world_text:${fingerprint}:${destinationFingerprint}`;
+    const blocker = await pool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [advisoryKey]);
+      let settled = false;
+      const preview = repository.createPreview({
+        command: { ownerUserId, stagedInput: staged.stagedInput, kind: "world_text", destination },
+        contentFingerprint: fingerprint,
+        projection: {
+          kind: "world_text", valid: true, requiresProvider: true, warnings: [],
+          counts: { sourceCharacters: 24, sourceWords: 4 }
+        },
+        diagnostics: [],
+        expiresAt: new Date(Date.now() + 60_000).toISOString()
+      }).finally(() => { settled = true; });
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+      expect(settled).toBe(false);
+      await blocker.query("COMMIT");
+      await expect(preview).resolves.toMatchObject({ kind: "world_text", destination });
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+    }
+  });
+
   it("expires elapsed matching previews before inserting their replacement", async () => {
     const fingerprint = hash(`expired-replacement-${crypto.randomUUID()}`);
     const firstStaged = await stagedInput(ownerUserId, fingerprint);
