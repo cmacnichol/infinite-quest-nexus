@@ -25,9 +25,27 @@ import {
   type PortableStagedInput
 } from "../../application/src/imports/index.js";
 import type {
+  AttachedFilesystemOperation,
+  DurableFilesystemCleanupCompletionResult,
+  DurableFilesystemRecoveryClaim,
+  DurableFilesystemRecoveryRecord,
   DurableFilesystemOperationId,
+  DurableFilesystemTransactionContext,
   PrivateStorageDescriptor
 } from "../../application/src/assets/private-storage-lifecycle.js";
+import {
+  bindPrivatePortableExportCleanupPreparation,
+  bindPrivatePortableExportRehydration,
+  bindPrivatePortableStagedCleanupPreparation,
+  bindPrivatePortableStagedRehydration,
+  type PrivatePortableCleanupUnavailable,
+  type PrivatePortableExportCleanupPreparation,
+  type PrivatePortableExportRehydration,
+  type PrivatePortableRepositoryPort,
+  type PrivatePortableStagedCleanupPreparation,
+  type PrivatePortableStagedRehydration
+} from "../../application/src/imports/private-portable-repository.js";
+import type { PortableExportScope as PrivatePortableExportScope } from "../../application/src/imports/private-portable-authority.js";
 import { stableStringify } from "../../domain/src/text.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
@@ -79,6 +97,53 @@ type DescriptorRow = Readonly<{
   change_token: string;
   content_hash: string;
   byte_length: string;
+}>;
+
+type PortableDescriptorRow = DescriptorRow & Readonly<{
+  descriptor_role: "delivery" | "cleanup";
+  ordinal: number;
+}>;
+
+type PortableFilesystemLifecycle = "attached" | "finalized" | "cleanup_pending" | "cleaned";
+
+type PortableFilesystemAuthorityRow = Readonly<{
+  id: string;
+  owner_user_id: string;
+  operation_scope_hash: string;
+  purpose: "portable_staging" | "portable_export";
+  lifecycle: PortableFilesystemLifecycle;
+  candidate_token_hash: string | null;
+  lease_id: string;
+  lease_owner: string;
+  work_version: number;
+  lease_expires_at: Date;
+  expires_at: Date;
+}>;
+
+type PortableStagedAuthorityRow = Readonly<{
+  staged_input_id: string;
+  staged_owner_user_id: string;
+  handle_token_hash: string;
+  filesystem_operation_id: string;
+  status: "staged" | "consumed" | "expired" | "failed" | "cleanup_pending" | "cleaned";
+  staged_content_hash: string;
+  staged_byte_length: string;
+  staged_expires_at: Date;
+}>;
+
+type PortableExportAuthorityRow = Readonly<{
+  artifact_id: string;
+  artifact_owner_user_id: string;
+  retrieval_token_hash: string;
+  filesystem_operation_id: string;
+  export_kind: "campaign_zip" | "world_json";
+  campaign_id: string | null;
+  world_id: string;
+  world_version_id: string;
+  status: "ready" | "consumed" | "expired" | "failed" | "cleanup_pending" | "cleaned";
+  artifact_content_hash: string;
+  artifact_byte_length: string;
+  artifact_expires_at: Date;
 }>;
 
 type PreviewRow = Readonly<{
@@ -168,12 +233,7 @@ export type PortableStagedPayload = Readonly<{
   descriptor: PrivateStorageDescriptor;
 }>;
 
-export type PortableExportScope = ImportOwnerScope & Readonly<{
-  exportKind: "campaign_zip" | "world_json";
-  campaignId: string | null;
-  worldId: string;
-  worldVersionId: string;
-}>;
+export type PortableExportScope = PrivatePortableExportScope;
 
 export type PortableExportPayload = Readonly<{
   artifactId: string;
@@ -228,7 +288,7 @@ export type RegisterPortableExportRequest = PortableExportScope & Readonly<{
   expiresAt: string;
 }>;
 
-export interface PostgresPortableImportRepository {
+export interface PostgresPortableImportRepository extends PrivatePortableRepositoryPort {
   registerStagedInput(request: RegisterStagedInputRequest): Promise<PortableStagedInput>;
   retrieveStagedPayload(owner: ImportOwnerScope, stagedInput: PortableStagedInput): Promise<PortableStagedPayload | null>;
   createPreview<Command extends PortableImportPreviewCommand>(
@@ -272,13 +332,14 @@ function postgresErrorCode(error: unknown): string | null {
   return typeof error.code === "string" ? error.code : null;
 }
 
-async function requireCallerTransaction(client: DatabaseClient): Promise<void> {
+async function requireCallerTransaction(client: DatabaseClient): Promise<DatabaseClient> {
   try {
     await client.query("SAVEPOINT portable_import_repository_context");
     await client.query("RELEASE SAVEPOINT portable_import_repository_context");
   } catch {
     throw repositoryError("transaction_unavailable", 503);
   }
+  return client;
 }
 
 async function currentTransactionIdentity(client: DatabaseClient): Promise<PostgreSqlTransactionIdentity> {
@@ -1001,6 +1062,719 @@ function commitView<Kind extends PortableImportKind>(
   };
 }
 
+function requirePortableClaimRequest(request: Readonly<{ leaseOwner: string; leaseSeconds: number }>): void {
+  if (request.leaseOwner.trim().length === 0
+    || !Number.isSafeInteger(request.leaseSeconds)
+    || request.leaseSeconds <= 0) {
+    throw repositoryError("import_invalid", 400);
+  }
+}
+
+function portableOperation(row: PortableFilesystemAuthorityRow): AttachedFilesystemOperation {
+  return {
+    resourceKind: "portable",
+    ownerUserId: row.owner_user_id,
+    operationScopeId: row.operation_scope_hash,
+    operationId: row.id as DurableFilesystemOperationId,
+    purpose: row.purpose
+  } as AttachedFilesystemOperation;
+}
+
+function portableClaim(row: PortableFilesystemAuthorityRow): DurableFilesystemRecoveryClaim {
+  return {
+    operationId: row.id as DurableFilesystemOperationId,
+    leaseId: row.lease_id,
+    leaseOwner: row.lease_owner,
+    workVersion: row.work_version,
+    leaseExpiresAt: row.lease_expires_at.toISOString()
+  } as DurableFilesystemRecoveryClaim;
+}
+
+function portableOperationMatches(
+  row: PortableFilesystemAuthorityRow,
+  operation: AttachedFilesystemOperation,
+): boolean {
+  return operation.resourceKind === "portable"
+    && row.id === operation.operationId
+    && row.owner_user_id === operation.ownerUserId
+    && row.purpose === operation.purpose
+    && (row.operation_scope_hash === operation.operationScopeId
+      || row.operation_scope_hash === sha256(operation.operationScopeId));
+}
+
+function portableClaimIdentity(
+  row: PortableFilesystemAuthorityRow,
+  claim: DurableFilesystemRecoveryClaim,
+): "valid" | "stale" | "lease_lost" {
+  if (row.id !== claim.operationId || row.work_version !== claim.workVersion) return "stale";
+  if (row.lease_id !== claim.leaseId
+    || row.lease_owner !== claim.leaseOwner
+    || row.lease_expires_at.toISOString() !== claim.leaseExpiresAt) return "lease_lost";
+  return "valid";
+}
+
+async function databaseClock(client: DatabaseClient): Promise<Date> {
+  const selected = await client.query<{ database_time: Date }>(
+    "SELECT clock_timestamp() AS database_time"
+  );
+  const value = selected.rows[0]?.database_time;
+  if (!value) throw repositoryError("archive_unavailable", 503);
+  return value;
+}
+
+async function lockPortablePhysicalPaths(
+  client: DatabaseClient,
+  paths: readonly string[],
+): Promise<Date> {
+  let currentTime = await databaseClock(client);
+  for (const relativePath of [...new Set(paths)].sort()) {
+    const selected = await client.query<{ database_time: Date }>(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1,0)),
+              clock_timestamp() AS database_time`,
+      [`infinite-quest-nexus:asset-path:${relativePath}`]
+    );
+    currentTime = selected.rows[0]?.database_time ?? await databaseClock(client);
+  }
+  return currentTime;
+}
+
+async function lockedPortableOperation(
+  client: DatabaseClient,
+  operationId: string,
+): Promise<PortableFilesystemAuthorityRow | null> {
+  const selected = await client.query<PortableFilesystemAuthorityRow>(
+    `SELECT id,owner_user_id,operation_scope_hash,purpose,lifecycle,candidate_token_hash,
+            lease_id,lease_owner,work_version,lease_expires_at,expires_at
+       FROM durable_filesystem_operations
+      WHERE id=$1 AND resource_kind='portable'
+        AND purpose IN ('portable_staging','portable_export')
+      FOR UPDATE`,
+    [operationId]
+  );
+  await databaseClock(client);
+  return selected.rows[0] ?? null;
+}
+
+async function portableDescriptorRows(
+  client: DatabaseClient,
+  operationId: string,
+): Promise<PortableDescriptorRow[]> {
+  const selected = await client.query<PortableDescriptorRow>(
+    `SELECT descriptor_role,ordinal,relative_path,device_id,file_id,change_token,
+            content_hash,byte_length::text
+       FROM durable_filesystem_descriptors
+      WHERE operation_id=$1
+      ORDER BY CASE descriptor_role WHEN 'cleanup' THEN 0 ELSE 1 END,ordinal`,
+    [operationId]
+  );
+  return selected.rows;
+}
+
+function portableCleanupDescriptors(
+  rows: readonly PortableDescriptorRow[],
+  expectedContentHash: string,
+  expectedByteLength: string,
+): readonly [PrivateStorageDescriptor, ...PrivateStorageDescriptor[]] {
+  const delivery = rows.filter((row) => row.descriptor_role === "delivery");
+  if (delivery.length !== 1) throw repositoryError("archive_unavailable", 503);
+  privateDescriptor(delivery[0]!, expectedContentHash, expectedByteLength);
+  if (rows.length === 0) throw repositoryError("archive_unavailable", 503);
+  return rows.map((row) => privateDescriptor(row, row.content_hash, row.byte_length)) as [
+    PrivateStorageDescriptor,
+    ...PrivateStorageDescriptor[]
+  ];
+}
+
+function descriptorsMatch(
+  actual: readonly PrivateStorageDescriptor[],
+  expected: readonly PrivateStorageDescriptor[],
+): boolean {
+  return actual.length === expected.length && actual.every((descriptor, index) => {
+    const value = expected[index];
+    return value !== undefined
+      && descriptor.relativePath === value.relativePath
+      && descriptor.identity.deviceId === value.identity.deviceId
+      && descriptor.identity.fileId === value.identity.fileId
+      && descriptor.identity.changeToken === value.identity.changeToken
+      && descriptor.contentHash === value.contentHash
+      && descriptor.byteLength === value.byteLength;
+  });
+}
+
+async function issuePortableClaim(
+  client: DatabaseClient,
+  row: PortableFilesystemAuthorityRow,
+  portableExpiresAt: Date,
+  request: Readonly<{ leaseOwner: string; leaseSeconds: number }>,
+): Promise<PortableFilesystemAuthorityRow | null> {
+  const updated = await client.query<PortableFilesystemAuthorityRow>(
+    `UPDATE durable_filesystem_operations
+        SET lease_id=gen_random_uuid(),lease_owner=$2,work_version=work_version+1,
+            lease_expires_at=LEAST(expires_at,$3::timestamptz,
+              clock_timestamp()+($4::text || ' seconds')::interval),
+            updated_at=clock_timestamp()
+      WHERE id=$1 AND owner_user_id=$5 AND resource_kind='portable' AND purpose=$6
+        AND lifecycle IN ('attached','finalized')
+        AND clock_timestamp() < expires_at
+        AND clock_timestamp() < $3::timestamptz
+      RETURNING id,owner_user_id,operation_scope_hash,purpose,lifecycle,candidate_token_hash,
+                lease_id,lease_owner,work_version,lease_expires_at,expires_at`,
+    [row.id, request.leaseOwner, portableExpiresAt, request.leaseSeconds, row.owner_user_id, row.purpose]
+  );
+  return updated.rows[0] ?? null;
+}
+
+async function lockedStagedAuthority(
+  client: DatabaseClient,
+  stagedInputId: string,
+  ownerUserId: string,
+  operationId: string,
+  bearerHash?: string,
+): Promise<PortableStagedAuthorityRow | null> {
+  const selected = await client.query<PortableStagedAuthorityRow>(
+    `SELECT id AS staged_input_id,owner_user_id AS staged_owner_user_id,
+            handle_token_hash,filesystem_operation_id,status,
+            content_hash AS staged_content_hash,byte_length::text AS staged_byte_length,
+            expires_at AS staged_expires_at
+       FROM portable_staged_inputs
+      WHERE id=$1 AND owner_user_id=$2 AND filesystem_operation_id=$3
+        AND ($4::text IS NULL OR handle_token_hash=$4)
+      FOR UPDATE`,
+    [stagedInputId, ownerUserId, operationId, bearerHash ?? null]
+  );
+  await databaseClock(client);
+  return selected.rows[0] ?? null;
+}
+
+async function lockedExportAuthority(
+  client: DatabaseClient,
+  artifactId: string,
+  scope: PortableExportScope,
+  operationId: string,
+  bearerHash?: string,
+): Promise<PortableExportAuthorityRow | null> {
+  const selected = await client.query<PortableExportAuthorityRow>(
+    `SELECT id AS artifact_id,owner_user_id AS artifact_owner_user_id,
+            retrieval_token_hash,filesystem_operation_id,export_kind,campaign_id,
+            world_id,world_version_id,status,content_hash AS artifact_content_hash,
+            byte_length::text AS artifact_byte_length,expires_at AS artifact_expires_at
+       FROM portable_export_artifacts
+      WHERE id=$1 AND owner_user_id=$2 AND filesystem_operation_id=$3
+        AND export_kind=$4 AND campaign_id IS NOT DISTINCT FROM $5::uuid
+        AND world_id=$6 AND world_version_id=$7
+        AND ($8::text IS NULL OR retrieval_token_hash=$8)
+      FOR UPDATE`,
+    [
+      artifactId,
+      scope.ownerUserId,
+      operationId,
+      scope.exportKind,
+      scope.campaignId,
+      scope.worldId,
+      scope.worldVersionId,
+      bearerHash ?? null
+    ]
+  );
+  await databaseClock(client);
+  return selected.rows[0] ?? null;
+}
+
+async function rehydrateStagedInput(
+  pool: DatabasePool,
+  owner: ImportOwnerScope,
+  stagedInput: PortableStagedInput,
+  request: Readonly<{ leaseOwner: string; leaseSeconds: number }>,
+): Promise<PrivatePortableStagedRehydration | null> {
+  requirePortableClaimRequest(request);
+  return withTransaction(pool, async (client) => {
+    const bearerHash = sha256(stagedInput);
+    const candidate = await client.query<{ staged_input_id: string; filesystem_operation_id: string }>(
+      `SELECT id AS staged_input_id,filesystem_operation_id
+         FROM portable_staged_inputs
+        WHERE owner_user_id=$1 AND handle_token_hash=$2
+        LIMIT 1`,
+      [owner.ownerUserId, bearerHash]
+    );
+    const identity = candidate.rows[0];
+    if (!identity) return null;
+    const operation = await lockedPortableOperation(client, identity.filesystem_operation_id);
+    if (!operation
+      || operation.owner_user_id !== owner.ownerUserId
+      || operation.purpose !== "portable_staging"
+      || !operation.operation_scope_hash
+      || !(["attached", "finalized"] as PortableFilesystemLifecycle[]).includes(operation.lifecycle)) return null;
+    const staged = await lockedStagedAuthority(
+      client,
+      identity.staged_input_id,
+      owner.ownerUserId,
+      operation.id,
+      bearerHash,
+    );
+    if (!staged || staged.status !== "staged") return null;
+    const rows = await portableDescriptorRows(client, operation.id);
+    const descriptors = portableCleanupDescriptors(rows, staged.staged_content_hash, staged.staged_byte_length);
+    const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
+    if (currentTime >= operation.expires_at || currentTime >= staged.staged_expires_at) return null;
+    const claimed = await issuePortableClaim(client, operation, staged.staged_expires_at, request);
+    if (!claimed) return null;
+    const delivery = descriptors[descriptors.length - 1]!;
+    return bindPrivatePortableStagedRehydration(
+      { ownerUserId: owner.ownerUserId, stagedInput },
+      portableOperation(claimed),
+      portableClaim(claimed),
+      delivery,
+    );
+  });
+}
+
+async function rehydrateExportArtifact(
+  pool: DatabasePool,
+  scope: PortableExportScope,
+  retrieval: PortableArchiveExportRetrieval,
+  request: Readonly<{ leaseOwner: string; leaseSeconds: number }>,
+): Promise<PrivatePortableExportRehydration | null> {
+  requirePortableClaimRequest(request);
+  return withTransaction(pool, async (client) => {
+    const bearerHash = sha256(retrieval);
+    const candidate = await client.query<{ artifact_id: string; filesystem_operation_id: string }>(
+      `SELECT id AS artifact_id,filesystem_operation_id
+         FROM portable_export_artifacts
+        WHERE owner_user_id=$1 AND retrieval_token_hash=$2
+          AND export_kind=$3 AND campaign_id IS NOT DISTINCT FROM $4::uuid
+          AND world_id=$5 AND world_version_id=$6
+        LIMIT 1`,
+      [scope.ownerUserId, bearerHash, scope.exportKind, scope.campaignId, scope.worldId, scope.worldVersionId]
+    );
+    const identity = candidate.rows[0];
+    if (!identity) return null;
+    const operation = await lockedPortableOperation(client, identity.filesystem_operation_id);
+    if (!operation
+      || operation.owner_user_id !== scope.ownerUserId
+      || operation.purpose !== "portable_export"
+      || !operation.operation_scope_hash
+      || !(["attached", "finalized"] as PortableFilesystemLifecycle[]).includes(operation.lifecycle)) return null;
+    const artifact = await lockedExportAuthority(client, identity.artifact_id, scope, operation.id, bearerHash);
+    if (!artifact || artifact.status !== "ready") return null;
+    const rows = await portableDescriptorRows(client, operation.id);
+    const descriptors = portableCleanupDescriptors(rows, artifact.artifact_content_hash, artifact.artifact_byte_length);
+    const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
+    if (currentTime >= operation.expires_at || currentTime >= artifact.artifact_expires_at) return null;
+    const claimed = await issuePortableClaim(client, operation, artifact.artifact_expires_at, request);
+    if (!claimed) return null;
+    const delivery = descriptors[descriptors.length - 1]!;
+    return bindPrivatePortableExportRehydration(
+      { exportScope: scope, retrieval },
+      portableOperation(claimed),
+      portableClaim(claimed),
+      delivery,
+    );
+  });
+}
+
+function unavailable(outcome: PrivatePortableCleanupUnavailable["outcome"]): PrivatePortableCleanupUnavailable {
+  return { outcome };
+}
+
+function claimOutcome(
+  row: PortableFilesystemAuthorityRow,
+  claim: DurableFilesystemRecoveryClaim,
+  currentTime: Date,
+): "valid" | "stale" | "lease_lost" {
+  const identity = portableClaimIdentity(row, claim);
+  if (identity !== "valid") return identity;
+  if (currentTime >= row.lease_expires_at || currentTime >= row.expires_at) return "lease_lost";
+  return "valid";
+}
+
+async function prepareStagedCleanup(
+  database: DurableFilesystemTransactionContext,
+  rehydration: PrivatePortableStagedRehydration,
+): Promise<PrivatePortableStagedCleanupPreparation | PrivatePortableCleanupUnavailable> {
+  const client = await requireCallerTransaction(database as DatabaseClient);
+  const operation = await lockedPortableOperation(client, rehydration.operation.operationId);
+  if (!operation || !portableOperationMatches(operation, rehydration.operation)) return unavailable("stale");
+  const initialClaim = portableClaimIdentity(operation, rehydration.claim);
+  if (initialClaim !== "valid") return unavailable(initialClaim);
+
+  const candidate = await client.query<{ staged_input_id: string }>(
+    `SELECT id AS staged_input_id
+       FROM portable_staged_inputs
+      WHERE owner_user_id=$1 AND handle_token_hash=$2 AND filesystem_operation_id=$3
+      LIMIT 1`,
+    [rehydration.identity.ownerUserId, sha256(rehydration.identity.stagedInput), operation.id]
+  );
+  const stagedInputId = candidate.rows[0]?.staged_input_id;
+  if (!stagedInputId) return unavailable("stale");
+  const staged = await lockedStagedAuthority(
+    client,
+    stagedInputId,
+    rehydration.identity.ownerUserId,
+    operation.id,
+    sha256(rehydration.identity.stagedInput),
+  );
+  if (!staged) return unavailable("stale");
+  const rows = await portableDescriptorRows(client, operation.id);
+  const descriptors = portableCleanupDescriptors(rows, staged.staged_content_hash, staged.staged_byte_length);
+  const delivery = descriptors[descriptors.length - 1]!;
+  if (!descriptorsMatch([delivery], [rehydration.descriptor])) return unavailable("stale");
+  const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
+  const classification = claimOutcome(operation, rehydration.claim, currentTime);
+  if (classification !== "valid") return unavailable(classification);
+  if (operation.lifecycle === "cleaned" && staged.status === "cleaned") return unavailable("already_cleaned");
+  if (operation.lifecycle === "cleanup_pending" || staged.status === "cleanup_pending") return unavailable("stale");
+  if (!(["attached", "finalized"] as PortableFilesystemLifecycle[]).includes(operation.lifecycle)
+    || staged.status !== "staged"
+    || currentTime >= staged.staged_expires_at) return unavailable("stale");
+
+  const operationUpdate = await client.query(
+    `UPDATE durable_filesystem_operations
+        SET lifecycle='cleanup_pending',cleanup_requested_at=clock_timestamp(),updated_at=clock_timestamp()
+      WHERE id=$1 AND owner_user_id=$2 AND purpose='portable_staging'
+        AND lifecycle IN ('attached','finalized') AND work_version=$3
+        AND lease_id=$4 AND lease_owner=$5
+        AND date_trunc('milliseconds',lease_expires_at)=$6::timestamptz
+        AND lease_expires_at > clock_timestamp() AND expires_at > clock_timestamp()`,
+    [
+      operation.id,
+      operation.owner_user_id,
+      rehydration.claim.workVersion,
+      rehydration.claim.leaseId,
+      rehydration.claim.leaseOwner,
+      rehydration.claim.leaseExpiresAt
+    ]
+  );
+  const stagedUpdate = await client.query(
+    `UPDATE portable_staged_inputs
+        SET status='cleanup_pending',updated_at=clock_timestamp()
+      WHERE id=$1 AND owner_user_id=$2 AND filesystem_operation_id=$3
+        AND handle_token_hash=$4 AND status='staged'
+        AND expires_at > clock_timestamp()`,
+    [staged.staged_input_id, operation.owner_user_id, operation.id, staged.handle_token_hash]
+  );
+  if (operationUpdate.rowCount !== 1 || stagedUpdate.rowCount !== 1) {
+    throw repositoryError("archive_unavailable", 503);
+  }
+  return bindPrivatePortableStagedCleanupPreparation(
+    {
+      portableKind: "staged_input",
+      stagedInputId: staged.staged_input_id,
+      ownerUserId: operation.owner_user_id,
+      filesystemOperationId: operation.id as DurableFilesystemOperationId
+    },
+    portableOperation(operation),
+    rehydration.claim,
+    descriptors,
+  );
+}
+
+async function prepareExportCleanup(
+  database: DurableFilesystemTransactionContext,
+  rehydration: PrivatePortableExportRehydration,
+): Promise<PrivatePortableExportCleanupPreparation | PrivatePortableCleanupUnavailable> {
+  const client = await requireCallerTransaction(database as DatabaseClient);
+  const operation = await lockedPortableOperation(client, rehydration.operation.operationId);
+  if (!operation || !portableOperationMatches(operation, rehydration.operation)) return unavailable("stale");
+  const initialClaim = portableClaimIdentity(operation, rehydration.claim);
+  if (initialClaim !== "valid") return unavailable(initialClaim);
+  const scope = rehydration.identity.exportScope;
+  const candidate = await client.query<{ artifact_id: string }>(
+    `SELECT id AS artifact_id
+       FROM portable_export_artifacts
+      WHERE owner_user_id=$1 AND retrieval_token_hash=$2 AND filesystem_operation_id=$3
+        AND export_kind=$4 AND campaign_id IS NOT DISTINCT FROM $5::uuid
+        AND world_id=$6 AND world_version_id=$7
+      LIMIT 1`,
+    [
+      scope.ownerUserId,
+      sha256(rehydration.identity.retrieval),
+      operation.id,
+      scope.exportKind,
+      scope.campaignId,
+      scope.worldId,
+      scope.worldVersionId
+    ]
+  );
+  const artifactId = candidate.rows[0]?.artifact_id;
+  if (!artifactId) return unavailable("stale");
+  const artifact = await lockedExportAuthority(
+    client,
+    artifactId,
+    scope,
+    operation.id,
+    sha256(rehydration.identity.retrieval),
+  );
+  if (!artifact) return unavailable("stale");
+  const rows = await portableDescriptorRows(client, operation.id);
+  const descriptors = portableCleanupDescriptors(rows, artifact.artifact_content_hash, artifact.artifact_byte_length);
+  const delivery = descriptors[descriptors.length - 1]!;
+  if (!descriptorsMatch([delivery], [rehydration.descriptor])) return unavailable("stale");
+  const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
+  const classification = claimOutcome(operation, rehydration.claim, currentTime);
+  if (classification !== "valid") return unavailable(classification);
+  if (operation.lifecycle === "cleaned" && artifact.status === "cleaned") return unavailable("already_cleaned");
+  if (operation.lifecycle === "cleanup_pending" || artifact.status === "cleanup_pending") return unavailable("stale");
+  if (!(["attached", "finalized"] as PortableFilesystemLifecycle[]).includes(operation.lifecycle)
+    || artifact.status !== "ready"
+    || currentTime >= artifact.artifact_expires_at) return unavailable("stale");
+
+  const operationUpdate = await client.query(
+    `UPDATE durable_filesystem_operations
+        SET lifecycle='cleanup_pending',cleanup_requested_at=clock_timestamp(),updated_at=clock_timestamp()
+      WHERE id=$1 AND owner_user_id=$2 AND purpose='portable_export'
+        AND lifecycle IN ('attached','finalized') AND work_version=$3
+        AND lease_id=$4 AND lease_owner=$5
+        AND date_trunc('milliseconds',lease_expires_at)=$6::timestamptz
+        AND lease_expires_at > clock_timestamp() AND expires_at > clock_timestamp()`,
+    [
+      operation.id,
+      operation.owner_user_id,
+      rehydration.claim.workVersion,
+      rehydration.claim.leaseId,
+      rehydration.claim.leaseOwner,
+      rehydration.claim.leaseExpiresAt
+    ]
+  );
+  const artifactUpdate = await client.query(
+    `UPDATE portable_export_artifacts
+        SET status='cleanup_pending',updated_at=clock_timestamp()
+      WHERE id=$1 AND owner_user_id=$2 AND filesystem_operation_id=$3
+        AND retrieval_token_hash=$4 AND status='ready'
+        AND expires_at > clock_timestamp()`,
+    [artifact.artifact_id, operation.owner_user_id, operation.id, artifact.retrieval_token_hash]
+  );
+  if (operationUpdate.rowCount !== 1 || artifactUpdate.rowCount !== 1) {
+    throw repositoryError("archive_unavailable", 503);
+  }
+  return bindPrivatePortableExportCleanupPreparation(
+    {
+      portableKind: "export_artifact",
+      artifactId: artifact.artifact_id,
+      ownerUserId: operation.owner_user_id,
+      filesystemOperationId: operation.id as DurableFilesystemOperationId,
+      exportScope: scope
+    },
+    portableOperation(operation),
+    rehydration.claim,
+    descriptors,
+  );
+}
+
+async function prepareRecoveryCleanup(
+  database: DurableFilesystemTransactionContext,
+  recovery: DurableFilesystemRecoveryRecord,
+): Promise<
+  PrivatePortableStagedCleanupPreparation
+  | PrivatePortableExportCleanupPreparation
+  | PrivatePortableCleanupUnavailable
+> {
+  const client = await requireCallerTransaction(database as DatabaseClient);
+  if (recovery.action !== "cleanup"
+    || recovery.operation.resourceKind !== "portable"
+    || Object.hasOwn(recovery.operation, "expiresAt")) {
+    return unavailable("stale");
+  }
+  const operation = await lockedPortableOperation(client, recovery.operation.operationId);
+  if (!operation
+    || operation.candidate_token_hash === null
+    || !portableOperationMatches(operation, recovery.operation as AttachedFilesystemOperation)) {
+    return unavailable("stale");
+  }
+  const initialClaim = portableClaimIdentity(operation, recovery.claim);
+  if (initialClaim !== "valid") return unavailable(initialClaim);
+
+  if (operation.purpose === "portable_staging") {
+    const selected = await client.query<{ staged_input_id: string }>(
+      `SELECT id AS staged_input_id FROM portable_staged_inputs
+        WHERE filesystem_operation_id=$1 AND owner_user_id=$2 LIMIT 1`,
+      [operation.id, operation.owner_user_id]
+    );
+    const stagedInputId = selected.rows[0]?.staged_input_id;
+    if (!stagedInputId) return unavailable("stale");
+    const staged = await lockedStagedAuthority(client, stagedInputId, operation.owner_user_id, operation.id);
+    if (!staged) return unavailable("stale");
+    const rows = await portableDescriptorRows(client, operation.id);
+    const descriptors = portableCleanupDescriptors(rows, staged.staged_content_hash, staged.staged_byte_length);
+    const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
+    const classification = claimOutcome(operation, recovery.claim, currentTime);
+    if (classification !== "valid") return unavailable(classification);
+    if (operation.lifecycle === "cleaned" && staged.status === "cleaned") return unavailable("already_cleaned");
+    if (operation.lifecycle !== "cleanup_pending" || staged.status !== "cleanup_pending") return unavailable("stale");
+    return bindPrivatePortableStagedCleanupPreparation(
+      {
+        portableKind: "staged_input",
+        stagedInputId: staged.staged_input_id,
+        ownerUserId: operation.owner_user_id,
+        filesystemOperationId: operation.id as DurableFilesystemOperationId
+      },
+      portableOperation(operation),
+      recovery.claim,
+      descriptors,
+    );
+  }
+
+  const selected = await client.query<PortableExportAuthorityRow>(
+    `SELECT id AS artifact_id,owner_user_id AS artifact_owner_user_id,
+            retrieval_token_hash,filesystem_operation_id,export_kind,campaign_id,
+            world_id,world_version_id,status,content_hash AS artifact_content_hash,
+            byte_length::text AS artifact_byte_length,expires_at AS artifact_expires_at
+       FROM portable_export_artifacts
+      WHERE filesystem_operation_id=$1 AND owner_user_id=$2
+      LIMIT 1`,
+    [operation.id, operation.owner_user_id]
+  );
+  const exportRow = selected.rows[0];
+  if (!exportRow) return unavailable("stale");
+  const scope: PortableExportScope = {
+    ownerUserId: exportRow.artifact_owner_user_id,
+    exportKind: exportRow.export_kind,
+    campaignId: exportRow.campaign_id,
+    worldId: exportRow.world_id,
+    worldVersionId: exportRow.world_version_id
+  };
+  const artifact = await lockedExportAuthority(client, exportRow.artifact_id, scope, operation.id);
+  if (!artifact) return unavailable("stale");
+  const rows = await portableDescriptorRows(client, operation.id);
+  const descriptors = portableCleanupDescriptors(rows, artifact.artifact_content_hash, artifact.artifact_byte_length);
+  const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
+  const classification = claimOutcome(operation, recovery.claim, currentTime);
+  if (classification !== "valid") return unavailable(classification);
+  if (operation.lifecycle === "cleaned" && artifact.status === "cleaned") return unavailable("already_cleaned");
+  if (operation.lifecycle !== "cleanup_pending" || artifact.status !== "cleanup_pending") return unavailable("stale");
+  return bindPrivatePortableExportCleanupPreparation(
+    {
+      portableKind: "export_artifact",
+      artifactId: artifact.artifact_id,
+      ownerUserId: operation.owner_user_id,
+      filesystemOperationId: operation.id as DurableFilesystemOperationId,
+      exportScope: scope
+    },
+    portableOperation(operation),
+    recovery.claim,
+    descriptors,
+  );
+}
+
+async function acknowledgeStagedCleanup(
+  database: DurableFilesystemTransactionContext,
+  preparation: PrivatePortableStagedCleanupPreparation,
+): Promise<DurableFilesystemCleanupCompletionResult> {
+  const client = await requireCallerTransaction(database as DatabaseClient);
+  const operation = await lockedPortableOperation(client, preparation.operation.operationId);
+  if (!operation
+    || preparation.outcome !== "cleanup_required"
+    || preparation.identity.portableKind !== "staged_input"
+    || preparation.identity.filesystemOperationId !== preparation.operation.operationId
+    || preparation.identity.ownerUserId !== preparation.operation.ownerUserId
+    || !portableOperationMatches(operation, preparation.operation)) return { outcome: "stale" };
+  const initialClaim = portableClaimIdentity(operation, preparation.claim);
+  if (initialClaim !== "valid") return { outcome: initialClaim };
+  const staged = await lockedStagedAuthority(
+    client,
+    preparation.identity.stagedInputId,
+    preparation.identity.ownerUserId,
+    preparation.identity.filesystemOperationId,
+  );
+  if (!staged) return { outcome: "stale" };
+  const rows = await portableDescriptorRows(client, operation.id);
+  const descriptors = portableCleanupDescriptors(rows, staged.staged_content_hash, staged.staged_byte_length);
+  if (!descriptorsMatch(descriptors, preparation.descriptors)) return { outcome: "stale" };
+  const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
+  const classification = claimOutcome(operation, preparation.claim, currentTime);
+  if (classification !== "valid") return { outcome: classification };
+  if (operation.lifecycle === "cleaned" && staged.status === "cleaned") return { outcome: "already_cleaned" };
+  if (operation.lifecycle !== "cleanup_pending" || staged.status !== "cleanup_pending") return { outcome: "stale" };
+
+  const operationUpdate = await client.query(
+    `UPDATE durable_filesystem_operations
+        SET lifecycle='cleaned',cleaned_at=clock_timestamp(),updated_at=clock_timestamp()
+      WHERE id=$1 AND owner_user_id=$2 AND purpose='portable_staging'
+        AND lifecycle='cleanup_pending' AND work_version=$3
+        AND lease_id=$4 AND lease_owner=$5
+        AND date_trunc('milliseconds',lease_expires_at)=$6::timestamptz
+        AND lease_expires_at > clock_timestamp() AND expires_at > clock_timestamp()`,
+    [
+      operation.id,
+      operation.owner_user_id,
+      preparation.claim.workVersion,
+      preparation.claim.leaseId,
+      preparation.claim.leaseOwner,
+      preparation.claim.leaseExpiresAt
+    ]
+  );
+  const stagedUpdate = await client.query(
+    `UPDATE portable_staged_inputs
+        SET status='cleaned',updated_at=clock_timestamp()
+      WHERE id=$1 AND owner_user_id=$2 AND filesystem_operation_id=$3
+        AND status='cleanup_pending'`,
+    [staged.staged_input_id, operation.owner_user_id, operation.id]
+  );
+  if (operationUpdate.rowCount !== 1 || stagedUpdate.rowCount !== 1) {
+    throw repositoryError("archive_unavailable", 503);
+  }
+  return { outcome: "cleaned" };
+}
+
+async function acknowledgeExportCleanup(
+  database: DurableFilesystemTransactionContext,
+  preparation: PrivatePortableExportCleanupPreparation,
+): Promise<DurableFilesystemCleanupCompletionResult> {
+  const client = await requireCallerTransaction(database as DatabaseClient);
+  const operation = await lockedPortableOperation(client, preparation.operation.operationId);
+  if (!operation
+    || preparation.outcome !== "cleanup_required"
+    || preparation.identity.portableKind !== "export_artifact"
+    || preparation.identity.filesystemOperationId !== preparation.operation.operationId
+    || preparation.identity.ownerUserId !== preparation.operation.ownerUserId
+    || preparation.identity.exportScope.ownerUserId !== preparation.identity.ownerUserId
+    || !portableOperationMatches(operation, preparation.operation)) return { outcome: "stale" };
+  const initialClaim = portableClaimIdentity(operation, preparation.claim);
+  if (initialClaim !== "valid") return { outcome: initialClaim };
+  const artifact = await lockedExportAuthority(
+    client,
+    preparation.identity.artifactId,
+    preparation.identity.exportScope,
+    preparation.identity.filesystemOperationId,
+  );
+  if (!artifact) return { outcome: "stale" };
+  const rows = await portableDescriptorRows(client, operation.id);
+  const descriptors = portableCleanupDescriptors(rows, artifact.artifact_content_hash, artifact.artifact_byte_length);
+  if (!descriptorsMatch(descriptors, preparation.descriptors)) return { outcome: "stale" };
+  const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
+  const classification = claimOutcome(operation, preparation.claim, currentTime);
+  if (classification !== "valid") return { outcome: classification };
+  if (operation.lifecycle === "cleaned" && artifact.status === "cleaned") return { outcome: "already_cleaned" };
+  if (operation.lifecycle !== "cleanup_pending" || artifact.status !== "cleanup_pending") return { outcome: "stale" };
+
+  const operationUpdate = await client.query(
+    `UPDATE durable_filesystem_operations
+        SET lifecycle='cleaned',cleaned_at=clock_timestamp(),updated_at=clock_timestamp()
+      WHERE id=$1 AND owner_user_id=$2 AND purpose='portable_export'
+        AND lifecycle='cleanup_pending' AND work_version=$3
+        AND lease_id=$4 AND lease_owner=$5
+        AND date_trunc('milliseconds',lease_expires_at)=$6::timestamptz
+        AND lease_expires_at > clock_timestamp() AND expires_at > clock_timestamp()`,
+    [
+      operation.id,
+      operation.owner_user_id,
+      preparation.claim.workVersion,
+      preparation.claim.leaseId,
+      preparation.claim.leaseOwner,
+      preparation.claim.leaseExpiresAt
+    ]
+  );
+  const artifactUpdate = await client.query(
+    `UPDATE portable_export_artifacts
+        SET status='cleaned',updated_at=clock_timestamp()
+      WHERE id=$1 AND owner_user_id=$2 AND filesystem_operation_id=$3
+        AND status='cleanup_pending'`,
+    [artifact.artifact_id, operation.owner_user_id, operation.id]
+  );
+  if (operationUpdate.rowCount !== 1 || artifactUpdate.rowCount !== 1) {
+    throw repositoryError("archive_unavailable", 503);
+  }
+  return { outcome: "cleaned" };
+}
+
 async function completedImportScope(
   client: DatabaseClient,
   ownerUserId: string,
@@ -1667,6 +2441,27 @@ export function createPostgresImportRepository(pool: DatabasePool): PostgresPort
     },
     retrieveExportArtifact(scope, retrieval) {
       return safeRepositoryCall(() => retrieveExportArtifact(pool, scope, retrieval));
+    },
+    rehydrateStagedInput(owner, stagedInput, request) {
+      return safeRepositoryCall(() => rehydrateStagedInput(pool, owner, stagedInput, request));
+    },
+    prepareStagedCleanup(database, rehydration) {
+      return safeRepositoryCall(() => prepareStagedCleanup(database, rehydration));
+    },
+    acknowledgeStagedCleanup(database, preparation) {
+      return safeRepositoryCall(() => acknowledgeStagedCleanup(database, preparation));
+    },
+    rehydrateExportArtifact(scope, retrieval, request) {
+      return safeRepositoryCall(() => rehydrateExportArtifact(pool, scope, retrieval, request));
+    },
+    prepareExportCleanup(database, rehydration) {
+      return safeRepositoryCall(() => prepareExportCleanup(database, rehydration));
+    },
+    acknowledgeExportCleanup(database, preparation) {
+      return safeRepositoryCall(() => acknowledgeExportCleanup(database, preparation));
+    },
+    prepareRecoveryCleanup(database, recovery) {
+      return safeRepositoryCall(() => prepareRecoveryCleanup(database, recovery));
     }
   };
 }

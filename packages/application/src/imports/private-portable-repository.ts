@@ -1,7 +1,9 @@
 import type {
   AttachedFilesystemOperation,
   DurableFilesystemCleanupCompletionResult,
+  DurableFilesystemOperationId,
   DurableFilesystemRecoveryClaim,
+  DurableFilesystemRecoveryRecord,
   DurableFilesystemTransactionContext,
   PrivateStorageDescriptor
 } from "../assets/private-storage-lifecycle.js";
@@ -32,6 +34,21 @@ export type PrivatePortableExportIdentity = Readonly<{
   retrieval: PortableArchiveExportRetrieval;
 }>;
 
+export type PrivatePortableStagedCleanupIdentity = Readonly<{
+  portableKind: "staged_input";
+  stagedInputId: string;
+  ownerUserId: string;
+  filesystemOperationId: DurableFilesystemOperationId;
+}>;
+
+export type PrivatePortableExportCleanupIdentity = Readonly<{
+  portableKind: "export_artifact";
+  artifactId: string;
+  ownerUserId: string;
+  filesystemOperationId: DurableFilesystemOperationId;
+  exportScope: PortableExportScope;
+}>;
+
 export type PrivatePortableStagedRehydration = Readonly<{
   identity: PrivatePortableStagedIdentity;
   operation: AttachedFilesystemOperation;
@@ -49,7 +66,8 @@ export type PrivatePortableExportRehydration = Readonly<{
 }>;
 
 export type PrivatePortableStagedCleanupPreparation = Readonly<{
-  identity: PrivatePortableStagedIdentity;
+  outcome: "cleanup_required";
+  identity: PrivatePortableStagedCleanupIdentity;
   operation: AttachedFilesystemOperation;
   claim: DurableFilesystemRecoveryClaim;
   descriptors: readonly [PrivateStorageDescriptor, ...PrivateStorageDescriptor[]];
@@ -57,12 +75,30 @@ export type PrivatePortableStagedCleanupPreparation = Readonly<{
 }>;
 
 export type PrivatePortableExportCleanupPreparation = Readonly<{
-  identity: PrivatePortableExportIdentity;
+  outcome: "cleanup_required";
+  identity: PrivatePortableExportCleanupIdentity;
   operation: AttachedFilesystemOperation;
   claim: DurableFilesystemRecoveryClaim;
   descriptors: readonly [PrivateStorageDescriptor, ...PrivateStorageDescriptor[]];
   [privatePortableExportCleanupPreparationBrand]: true;
 }>;
+
+export type PrivatePortableCleanupUnavailable = Readonly<{
+  outcome: "already_cleaned" | "stale" | "lease_lost";
+}>;
+
+export type PrivatePortableStagedCleanupResult =
+  | PrivatePortableStagedCleanupPreparation
+  | PrivatePortableCleanupUnavailable;
+
+export type PrivatePortableExportCleanupResult =
+  | PrivatePortableExportCleanupPreparation
+  | PrivatePortableCleanupUnavailable;
+
+export type PrivatePortableRecoveryCleanupResult =
+  | PrivatePortableStagedCleanupPreparation
+  | PrivatePortableExportCleanupPreparation
+  | PrivatePortableCleanupUnavailable;
 
 export interface PrivatePortableRepositoryPort {
   rehydrateStagedInput(
@@ -71,8 +107,9 @@ export interface PrivatePortableRepositoryPort {
     request: PrivatePortableClaimRequest,
   ): Promise<PrivatePortableStagedRehydration | null>;
   prepareStagedCleanup(
+    database: DurableFilesystemTransactionContext,
     rehydration: PrivatePortableStagedRehydration,
-  ): Promise<PrivatePortableStagedCleanupPreparation>;
+  ): Promise<PrivatePortableStagedCleanupResult>;
   acknowledgeStagedCleanup(
     database: DurableFilesystemTransactionContext,
     preparation: PrivatePortableStagedCleanupPreparation,
@@ -83,12 +120,17 @@ export interface PrivatePortableRepositoryPort {
     request: PrivatePortableClaimRequest,
   ): Promise<PrivatePortableExportRehydration | null>;
   prepareExportCleanup(
+    database: DurableFilesystemTransactionContext,
     rehydration: PrivatePortableExportRehydration,
-  ): Promise<PrivatePortableExportCleanupPreparation>;
+  ): Promise<PrivatePortableExportCleanupResult>;
   acknowledgeExportCleanup(
     database: DurableFilesystemTransactionContext,
     preparation: PrivatePortableExportCleanupPreparation,
   ): Promise<DurableFilesystemCleanupCompletionResult>;
+  prepareRecoveryCleanup(
+    database: DurableFilesystemTransactionContext,
+    recovery: DurableFilesystemRecoveryRecord,
+  ): Promise<PrivatePortableRecoveryCleanupResult>;
 }
 
 function nonBlank(value: string): boolean {
@@ -238,33 +280,52 @@ export function bindPrivatePortableExportRehydration(
 }
 
 export function bindPrivatePortableStagedCleanupPreparation(
-  rehydration: PrivatePortableStagedRehydration,
+  identity: PrivatePortableStagedCleanupIdentity,
+  operation: AttachedFilesystemOperation,
+  claim: DurableFilesystemRecoveryClaim,
   descriptors: readonly [PrivateStorageDescriptor, ...PrivateStorageDescriptor[]],
 ): PrivatePortableStagedCleanupPreparation {
-  requireOperation(rehydration.operation, rehydration.identity.ownerUserId, "portable_staging");
-  requireFreshClaim(rehydration.operation, rehydration.claim);
+  if (identity.portableKind !== "staged_input"
+    || !nonBlank(identity.stagedInputId)
+    || !nonBlank(identity.ownerUserId)
+    || identity.filesystemOperationId !== operation.operationId) {
+    throw new Error("portable_cleanup_identity_mismatch");
+  }
+  requireOperation(operation, identity.ownerUserId, "portable_staging");
+  requireFreshClaim(operation, claim);
   return Object.freeze({
-    identity: Object.freeze({ ...rehydration.identity }),
-    operation: snapshotOperation(rehydration.operation),
-    claim: snapshotClaim(rehydration.claim),
+    outcome: "cleanup_required" as const,
+    identity: Object.freeze({ ...identity }),
+    operation: snapshotOperation(operation),
+    claim: snapshotClaim(claim),
     descriptors: snapshotDescriptors(descriptors)
   }) as PrivatePortableStagedCleanupPreparation;
 }
 
 export function bindPrivatePortableExportCleanupPreparation(
-  rehydration: PrivatePortableExportRehydration,
+  identity: PrivatePortableExportCleanupIdentity,
+  operation: AttachedFilesystemOperation,
+  claim: DurableFilesystemRecoveryClaim,
   descriptors: readonly [PrivateStorageDescriptor, ...PrivateStorageDescriptor[]],
 ): PrivatePortableExportCleanupPreparation {
-  requireExportScope(rehydration.identity.exportScope);
-  requireOperation(rehydration.operation, rehydration.identity.exportScope.ownerUserId, "portable_export");
-  requireFreshClaim(rehydration.operation, rehydration.claim);
+  requireExportScope(identity.exportScope);
+  if (identity.portableKind !== "export_artifact"
+    || !nonBlank(identity.artifactId)
+    || !nonBlank(identity.ownerUserId)
+    || identity.ownerUserId !== identity.exportScope.ownerUserId
+    || identity.filesystemOperationId !== operation.operationId) {
+    throw new Error("portable_cleanup_identity_mismatch");
+  }
+  requireOperation(operation, identity.ownerUserId, "portable_export");
+  requireFreshClaim(operation, claim);
   return Object.freeze({
+    outcome: "cleanup_required" as const,
     identity: Object.freeze({
-      exportScope: Object.freeze({ ...rehydration.identity.exportScope }),
-      retrieval: rehydration.identity.retrieval
+      ...identity,
+      exportScope: Object.freeze({ ...identity.exportScope })
     }),
-    operation: snapshotOperation(rehydration.operation),
-    claim: snapshotClaim(rehydration.claim),
+    operation: snapshotOperation(operation),
+    claim: snapshotClaim(claim),
     descriptors: snapshotDescriptors(descriptors)
   }) as PrivatePortableExportCleanupPreparation;
 }

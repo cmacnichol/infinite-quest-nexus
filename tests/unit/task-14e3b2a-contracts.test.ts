@@ -173,7 +173,14 @@ describe("Task 14e3b2a private repository contracts", () => {
         descriptor,
       );
       const preparation = bindPrivatePortableStagedCleanupPreparation(
-        rehydrated,
+        {
+          portableKind: "staged_input",
+          stagedInputId: "66666666-6666-4666-8666-666666666666",
+          ownerUserId,
+          filesystemOperationId: operation.operationId
+        },
+        rehydrated.operation,
+        rehydrated.claim,
         [descriptor],
       );
 
@@ -184,7 +191,11 @@ describe("Task 14e3b2a private repository contracts", () => {
         descriptor
       });
       expect(preparation.claim).toEqual(rehydrated.claim);
-      expect(preparation.identity).toEqual(rehydrated.identity);
+      expect(preparation.identity).toMatchObject({
+        ownerUserId,
+        filesystemOperationId: operation.operationId
+      });
+      expect(preparation.identity).not.toHaveProperty("stagedInput");
       expect(preparation.descriptors).toEqual([descriptor]);
       expect(Object.isFrozen(preparation.descriptors)).toBe(true);
     } finally {
@@ -204,13 +215,26 @@ describe("Task 14e3b2a private repository contracts", () => {
         descriptor,
       );
       const preparation = bindPrivatePortableExportCleanupPreparation(
-        rehydrated,
+        {
+          portableKind: "export_artifact",
+          artifactId: "77777777-7777-4777-8777-777777777777",
+          ownerUserId,
+          filesystemOperationId: operation.operationId,
+          exportScope
+        },
+        rehydrated.operation,
+        rehydrated.claim,
         [descriptor],
       );
       const port = null as unknown as PrivatePortableRepositoryPort;
 
       expect(rehydrated.identity.exportScope).toEqual(exportScope);
-      expect(preparation.identity).toEqual(rehydrated.identity);
+      expect(preparation.identity).toMatchObject({
+        ownerUserId,
+        filesystemOperationId: operation.operationId,
+        exportScope
+      });
+      expect(preparation.identity).not.toHaveProperty("retrieval");
       expect(preparation.claim).toEqual(rehydrated.claim);
       expect(Object.isFrozen(rehydrated.identity.exportScope)).toBe(true);
 
