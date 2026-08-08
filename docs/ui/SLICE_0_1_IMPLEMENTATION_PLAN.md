@@ -8193,19 +8193,71 @@ not change that consumer. Verification passed 49 focused contracts, 14 focused
 real-PostgreSQL migration tests, 1,398 unit tests, 411 integration tests, and
 root `pnpm check`. **14e3b2 is next.**
 
-**14e3b2 — PostgreSQL capability and cleanup repository.** Implement named
-repository APIs for durable staged/export/publication rehydration, private
-candidate/grant redemption, and fresh lease-fenced cleanup. Every operation
-must validate owner/resource/purpose/full scope, token hash, immutable
-descriptor, work version, lease ID/owner/expiry, and exact asset/derivative
-binding. Beginning cleanup must transition the portable row and journal to
-`cleanup_pending` atomically; only successful identity-safe filesystem cleanup
-may acknowledge both clean states. Wrong, expired, stale, and substituted
-claims fail closed; failures remain recoverable. Process memory may cache an
-already redeemed open descriptor/handle only, never authority. Add restart,
-cross-owner, race, rollback, and reaper matrices.
+**14e3b2 readiness correction — split the repository authority before
+implementation.** `0054` provides b1's immutable candidate/grant records, but
+the existing repository contracts cannot consume them safely: its candidate
+authority map is process-local, attach lacks an exact recovery fence, import
+cleanup can be split across portable and journal transactions, and the legacy
+owner-plus-descriptor persistence seam remains only for b4's later replacement.
+Do not implement, extend, or promote that seam in this series. Preserve 0054;
+add the following b2-only checkpoints before a b3 delivery resolver consumes
+any authority.
 
-**14e3b3 — finalized delivery resolver.** Implement private original and
+**14e3b2a — private repository contracts and additive `0055` guards.** Add
+adapter-private candidate persistence/redemption and one-time delivery-grant
+ports. Candidate attachment must consume an exact `operationId`, owner,
+resource, purpose, immutable descriptor, work version, lease ID, lease owner,
+and unexpired lease claim; a bare reservation/candidate is insufficient.
+Define staged/export rehydration and cleanup preparation results that carry the
+same fresh claim plus exact portable identity and descriptor(s). Cleanup
+acknowledgement must consume the preparation result, not owner plus the
+original bearer. Export retrieval/recovery/cleanup must require full
+`PortableExportScope`, never owner alone. In additive `0055`, enforce one
+portable staged input or export artifact per filesystem operation with lookup
+indexes; make portable bearer hash, operation, owner, immutable content
+descriptor, expiry, and export scope write-once; and constrain legal portable
+lifecycle transitions. Database guards must require matched journal and
+portable transitions into `cleanup_pending` and `cleaned` so repository code
+cannot create a durable split state. Add contract and real-PostgreSQL tests for
+private-barrel denial, missing/forged claim, full-scope substitution, unique
+operation binding, immutable authority, and legal/illegal lifecycle paths.
+No route, worker, runtime, public barrel, legacy consumer, or `0053` change.
+
+**14e3b2b — durable candidate/grant repository.** In the named PostgreSQL
+filesystem repository, replace process-local `candidateAuthorities` as
+authority with `0054` candidate records. Persist and rehydrate candidates from
+their hashed bearer evidence; attach atomically validates the full fresh claim,
+operation lifecycle, database-time expiry, descriptor, and exact asset or
+derivative `filesystem_operation_id` binding, then advances candidate state to
+`attached`. Issue/redeem a fresh delivery grant exactly once against the
+candidate/finalized descriptor; wrong owner/resource/purpose/descriptor,
+expired/replayed grant, stale work version, wrong lease ID/owner, and expired
+lease fail closed. Recovery classification must use the exact 0054 binding, not
+`storage_path` or a same-owner/source/path derivative heuristic. Process memory
+may cache only an already redeemed open descriptor/handle and must discard it
+on close. Add restart, attach rollback, candidate-vs-reaper race, one-time
+grant replay, and exact original/derivative binding real-PostgreSQL coverage.
+
+**14e3b2c — portable rehydration and atomic cleanup repository.** Implement
+named staged/export rehydration and fresh cleanup-claim operations in the
+import repository. Each begins `cleanup_pending` for the portable row and its
+journal operation in one caller-owned transaction; only the exact preparation
+claim may acknowledge both `cleaned` after identity-safe filesystem cleanup.
+Failed physical cleanup remains recoverable as `cleanup_pending`; a stale or
+foreign claimant cannot acknowledge it. Test restart rehydration, staged and
+export full-scope substitution, concurrent cleanup winner, transaction
+rollback, failed cleanup/reaper retry, dual acknowledgement, and stale-claim
+denial. Existing compatibility retrieval methods remain unchanged until b4
+replaces their consumer.
+
+**14e3b2 completion gate.** Run the b2a contract/migration suite plus b2b and
+b2c real-PostgreSQL restart, owner, race, rollback, and reaper matrices. Only
+after all three checkpoints receive independent review may b3 use the new
+private grant/redemption repository. No `AsyncLocalStorage`, raw cleanup SQL
+outside named database adapters, process-local authority map, or test-helper
+composition may appear.
+
+**14e3b3 — finalized delivery resolver.** After b2a-b2c, implement private original and
 derivative resolution by exact owner-scoped asset ID and intent using the 0054
 binding and a fresh database-backed redemption grant. Freeze route-compatible
 derivative selection deliberately: preserve the legacy highest pixel-width
@@ -8218,7 +8270,7 @@ fallback, substitution, owner/purpose denial, shared-hash retention, and
 restart behavior.
 
 **14e3b4 — explicit secure staging, export, and bounded streaming lifecycle.**
-Build the storage adapter from b1/b2 authority so it reserves before the first
+Build the storage adapter from b1/b2a-b2c authority so it reserves before the first
 filesystem byte mutation and carries full export scope without ambient binding.
 Export delivery must be a bounded private stream session with a PostgreSQL-
 derived descriptor and claim. Normal end, source close, response abort, read
