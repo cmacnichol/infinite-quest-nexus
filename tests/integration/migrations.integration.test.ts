@@ -227,6 +227,358 @@ integration("standard database migration runner", () => {
     ]);
   });
 
+  it("adds restart-realizable private filesystem authority without classifying legacy asset paths", async () => {
+    const authorityTables = [
+      "durable_filesystem_candidate_authorities",
+      "private_filesystem_delivery_grants"
+    ];
+    const tables = await pool.query<{ table_name: string }>(
+      `SELECT table_name
+         FROM information_schema.tables
+        WHERE table_schema='public' AND table_name=ANY($1::text[])
+        ORDER BY table_name`,
+      [authorityTables]
+    );
+    expect(tables.rows.map((row) => row.table_name)).toEqual(authorityTables.sort());
+
+    const privateColumns = await pool.query<{ table_name: string; column_name: string }>(
+      `SELECT table_name,column_name
+         FROM information_schema.columns
+        WHERE table_schema='public'
+          AND table_name=ANY($1::text[])
+          AND column_name ~ '(token|candidate|grant|locator)'
+        ORDER BY table_name,column_name`,
+      [authorityTables]
+    );
+    expect(privateColumns.rows).not.toHaveLength(0);
+    expect(privateColumns.rows.filter((row) => (
+      row.column_name !== "change_token" && !row.column_name.endsWith("_hash")
+    ))).toEqual([]);
+
+    const bindings = await pool.query<{ table_name: string; column_name: string; is_nullable: string }>(
+      `SELECT table_name,column_name,is_nullable
+         FROM information_schema.columns
+        WHERE table_schema='public'
+          AND table_name IN ('assets','asset_derivatives')
+          AND column_name IN ('filesystem_operation_id','filesystem_operation_purpose')
+        ORDER BY table_name,column_name`
+    );
+    expect(bindings.rows).toEqual([
+      { table_name: "asset_derivatives", column_name: "filesystem_operation_id", is_nullable: "YES" },
+      { table_name: "asset_derivatives", column_name: "filesystem_operation_purpose", is_nullable: "NO" },
+      { table_name: "assets", column_name: "filesystem_operation_id", is_nullable: "YES" },
+      { table_name: "assets", column_name: "filesystem_operation_purpose", is_nullable: "NO" }
+    ]);
+
+    const legacyRows = await pool.query<{
+      asset_bindings: string;
+      derivative_bindings: string;
+    }>(
+      `SELECT
+         (SELECT count(*)::text FROM assets WHERE filesystem_operation_id IS NOT NULL) AS asset_bindings,
+         (SELECT count(*)::text FROM asset_derivatives WHERE filesystem_operation_id IS NOT NULL) AS derivative_bindings`
+    );
+    expect(legacyRows.rows).toEqual([{ asset_bindings: "0", derivative_bindings: "0" }]);
+
+    const indexes = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+        WHERE schemaname='public' AND indexname=ANY($1::text[])
+        ORDER BY indexname`,
+      [[
+        "assets_filesystem_operation_idx",
+        "asset_derivatives_filesystem_operation_idx",
+        "durable_filesystem_candidate_authorities_expiry_idx",
+        "private_filesystem_delivery_grants_expiry_idx"
+      ]]
+    );
+    expect(indexes.rows.map((row) => row.indexname)).toEqual([
+      "asset_derivatives_filesystem_operation_idx",
+      "assets_filesystem_operation_idx",
+      "durable_filesystem_candidate_authorities_expiry_idx",
+      "private_filesystem_delivery_grants_expiry_idx"
+    ]);
+  });
+
+  it("enforces exact asset bindings and restart-safe candidate and delivery grant authority", async () => {
+    const client = await pool.connect();
+    const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+    let savepointOrdinal = 0;
+    const statementWasRejected = async (sql: string, parameters: unknown[] = []): Promise<boolean> => {
+      const savepoint = `task_14e3b1_rejection_${savepointOrdinal += 1}`;
+      await client.query(`SAVEPOINT ${savepoint}`);
+      let rejected = false;
+      try {
+        await client.query(sql, parameters);
+      } catch {
+        rejected = true;
+      } finally {
+        await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      }
+      return rejected;
+    };
+
+    try {
+      await client.query("BEGIN");
+      const ownerOne = (await client.query<{ id: string }>(
+        "SELECT id FROM users WHERE system_key='initial-owner'"
+      )).rows[0]!.id;
+      const ownerTwo = (await client.query<{ id: string }>(
+        "INSERT INTO users (display_name) VALUES ('Task 14e3b1 foreign owner') RETURNING id"
+      )).rows[0]!.id;
+      const insertAsset = async (ownerUserId: string, label: string): Promise<string> => (
+        await client.query<{ id: string }>(
+          `INSERT INTO assets (
+             owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,pixel_width,pixel_height
+           ) VALUES ($1,$2,'filesystem',$3,'image/png',7,1,1) RETURNING id`,
+          [ownerUserId, hash(`asset-${label}-${crypto.randomUUID()}`), `legacy/${label}.png`]
+        )
+      ).rows[0]!.id;
+      const assetOne = await insertAsset(ownerOne, "one");
+      const assetTwo = await insertAsset(ownerOne, "two");
+      const foreignAsset = await insertAsset(ownerTwo, "foreign");
+      const derivative = (await client.query<{ id: string }>(
+        `INSERT INTO asset_derivatives (
+           owner_user_id,source_asset_id,derivative_kind,transform_version,pixel_width,pixel_height,
+           storage_driver,storage_path,mime_type,byte_length,content_hash
+         ) VALUES ($1,$2,'thumbnail',1,1,1,'filesystem','legacy/one-thumb.webp','image/webp',3,$3)
+         RETURNING id`,
+        [ownerOne, assetOne, hash(`derivative-${crypto.randomUUID()}`)]
+      )).rows[0]!.id;
+
+      const insertAssetOperation = async (
+        ownerUserId: string,
+        purpose: "asset_original" | "asset_derivative",
+        assetId: string,
+        label: string,
+      ): Promise<string> => (await client.query<{ id: string }>(
+        `INSERT INTO durable_filesystem_operations (
+           owner_user_id,operation_token_hash,purpose,resource_kind,asset_id,
+           lease_id,lease_owner,lease_expires_at,expires_at
+         ) VALUES ($1,$2,$3,'asset',$4,gen_random_uuid(),'task-14e3b1',
+                   now()+interval '5 minutes',now()+interval '1 hour') RETURNING id`,
+        [ownerUserId, hash(`operation-${label}-${crypto.randomUUID()}`), purpose, assetId]
+      )).rows[0]!.id;
+
+      const originalOperation = await insertAssetOperation(ownerOne, "asset_original", assetOne, "original");
+      const derivativeOperation = await insertAssetOperation(ownerOne, "asset_derivative", assetOne, "derivative");
+      const otherAssetOperation = await insertAssetOperation(ownerOne, "asset_original", assetTwo, "other");
+      const foreignOperation = await insertAssetOperation(ownerTwo, "asset_original", foreignAsset, "foreign");
+
+      const initialBindings = await client.query<{
+        asset_one: string | null;
+        asset_two: string | null;
+        derivative: string | null;
+      }>(
+        `SELECT
+           (SELECT filesystem_operation_id::text FROM assets WHERE id=$1) AS asset_one,
+           (SELECT filesystem_operation_id::text FROM assets WHERE id=$2) AS asset_two,
+           (SELECT filesystem_operation_id::text FROM asset_derivatives WHERE id=$3) AS derivative`,
+        [assetOne, assetTwo, derivative]
+      );
+      expect(initialBindings.rows).toEqual([{ asset_one: null, asset_two: null, derivative: null }]);
+
+      await client.query("UPDATE assets SET filesystem_operation_id=$2 WHERE id=$1", [assetOne, originalOperation]);
+      await client.query(
+        "UPDATE asset_derivatives SET filesystem_operation_id=$2 WHERE id=$1",
+        [derivative, derivativeOperation]
+      );
+      expect(await statementWasRejected(
+        "UPDATE assets SET filesystem_operation_id=$2 WHERE id=$1",
+        [assetTwo, derivativeOperation]
+      )).toBe(true);
+      expect(await statementWasRejected(
+        "UPDATE assets SET filesystem_operation_id=$2 WHERE id=$1",
+        [assetTwo, originalOperation]
+      )).toBe(true);
+      expect(await statementWasRejected(
+        "UPDATE assets SET filesystem_operation_id=$2 WHERE id=$1",
+        [assetTwo, foreignOperation]
+      )).toBe(true);
+      expect(await statementWasRejected(
+        "UPDATE assets SET filesystem_operation_id=$2 WHERE id=$1",
+        [assetOne, otherAssetOperation]
+      )).toBe(true);
+      expect(await statementWasRejected(
+        "UPDATE assets SET filesystem_operation_id=NULL WHERE id=$1",
+        [assetOne]
+      )).toBe(true);
+
+      const rawCandidate = `raw-candidate-${crypto.randomUUID()}`;
+      const candidateHash = hash(rawCandidate);
+      const descriptorHash = hash(`descriptor-${crypto.randomUUID()}`);
+      const insertCandidateSql = `INSERT INTO durable_filesystem_candidate_authorities (
+        candidate_token_hash,operation_id,owner_user_id,purpose,resource_kind,asset_id,
+        relative_path,device_id,file_id,change_token,content_hash,byte_length,expires_at
+      ) VALUES ($1,$2,$3,$4,'asset',$5,'private/original.png','device-1','file-1','change-1',$6,7,$7)`;
+      await client.query(insertCandidateSql, [
+        candidateHash,
+        originalOperation,
+        ownerOne,
+        "asset_original",
+        assetOne,
+        descriptorHash,
+        new Date(Date.now() + 30 * 60_000)
+      ]);
+      const persistedCandidate = await client.query<{
+        candidate_token_hash: string;
+        relative_path: string;
+        lifecycle: string;
+      }>(
+        `SELECT candidate_token_hash,relative_path,lifecycle
+           FROM durable_filesystem_candidate_authorities WHERE operation_id=$1`,
+        [originalOperation]
+      );
+      expect(persistedCandidate.rows).toEqual([{
+        candidate_token_hash: candidateHash,
+        relative_path: "private/original.png",
+        lifecycle: "issued"
+      }]);
+      expect(persistedCandidate.rows[0]!.candidate_token_hash).not.toContain(rawCandidate);
+
+      expect(await statementWasRejected(insertCandidateSql, [
+        hash(`wrong-owner-${crypto.randomUUID()}`), originalOperation, ownerTwo, "asset_original",
+        assetOne, descriptorHash, new Date(Date.now() + 20 * 60_000)
+      ])).toBe(true);
+      expect(await statementWasRejected(insertCandidateSql, [
+        hash(`wrong-purpose-${crypto.randomUUID()}`), originalOperation, ownerOne, "asset_derivative",
+        assetOne, descriptorHash, new Date(Date.now() + 20 * 60_000)
+      ])).toBe(true);
+      expect(await statementWasRejected(insertCandidateSql, [
+        hash(`wrong-asset-${crypto.randomUUID()}`), originalOperation, ownerOne, "asset_original",
+        assetTwo, descriptorHash, new Date(Date.now() + 20 * 60_000)
+      ])).toBe(true);
+      expect(await statementWasRejected(insertCandidateSql, [
+        hash(`stale-${crypto.randomUUID()}`), otherAssetOperation, ownerOne, "asset_original",
+        assetTwo, descriptorHash, new Date(Date.now() - 60_000)
+      ])).toBe(true);
+      expect(await statementWasRejected(
+        "UPDATE durable_filesystem_candidate_authorities SET relative_path='private/mutated.png' WHERE operation_id=$1",
+        [originalOperation]
+      )).toBe(true);
+      expect(await statementWasRejected(
+        "DELETE FROM durable_filesystem_candidate_authorities WHERE operation_id=$1",
+        [originalOperation]
+      )).toBe(true);
+
+      await client.query(
+        `UPDATE durable_filesystem_operations
+            SET lifecycle='attached',candidate_token_hash=$2,locator_token_hash=$3,attached_at=now()
+          WHERE id=$1`,
+        [originalOperation, candidateHash, hash(`locator-${crypto.randomUUID()}`)]
+      );
+      await client.query(
+        `INSERT INTO durable_filesystem_descriptors (
+           operation_id,owner_user_id,descriptor_role,ordinal,relative_path,device_id,file_id,
+           change_token,content_hash,byte_length
+         ) VALUES ($1,$2,'delivery',0,'private/original.png','device-1','file-1','change-1',$3,7)`,
+        [originalOperation, ownerOne, descriptorHash]
+      );
+      await client.query(
+        "UPDATE durable_filesystem_candidate_authorities SET lifecycle='attached',updated_at=now() WHERE operation_id=$1",
+        [originalOperation]
+      );
+
+      const insertGrantSql = `INSERT INTO private_filesystem_delivery_grants (
+        grant_token_hash,candidate_token_hash,operation_id,owner_user_id,purpose,
+        resource_kind,asset_id,expires_at
+      ) VALUES ($1,$2,$3,$4,$5,'asset',$6,$7)`;
+      expect(await statementWasRejected(insertGrantSql, [
+        hash(`premature-grant-${crypto.randomUUID()}`), candidateHash, originalOperation,
+        ownerOne, "asset_original", assetOne, new Date(Date.now() + 5 * 60_000)
+      ])).toBe(true);
+
+      await client.query(
+        "UPDATE durable_filesystem_operations SET lifecycle='finalized',finalized_at=now() WHERE id=$1",
+        [originalOperation]
+      );
+      expect(await statementWasRejected(insertGrantSql, [
+        hash(`overlong-grant-${crypto.randomUUID()}`), candidateHash, originalOperation,
+        ownerOne, "asset_original", assetOne, new Date(Date.now() + 45 * 60_000)
+      ])).toBe(true);
+      const rawGrant = `raw-grant-${crypto.randomUUID()}`;
+      const grantHash = hash(rawGrant);
+      await client.query(insertGrantSql, [
+        grantHash, candidateHash, originalOperation, ownerOne, "asset_original",
+        assetOne, new Date(Date.now() + 5 * 60_000)
+      ]);
+      const persistedGrant = await client.query<{
+        grant_token_hash: string;
+        candidate_token_hash: string;
+        lifecycle: string;
+      }>(
+        `SELECT grant_token_hash,candidate_token_hash,lifecycle
+           FROM private_filesystem_delivery_grants WHERE grant_token_hash=$1`,
+        [grantHash]
+      );
+      expect(persistedGrant.rows).toEqual([{
+        grant_token_hash: grantHash,
+        candidate_token_hash: candidateHash,
+        lifecycle: "issued"
+      }]);
+      expect(persistedGrant.rows[0]!.grant_token_hash).not.toContain(rawGrant);
+
+      expect(await statementWasRejected(insertGrantSql, [
+        hash(`wrong-scope-grant-${crypto.randomUUID()}`), candidateHash, originalOperation,
+        ownerOne, "asset_original", assetTwo, new Date(Date.now() + 5 * 60_000)
+      ])).toBe(true);
+      expect(await statementWasRejected(insertGrantSql, [
+        hash(`stale-grant-${crypto.randomUUID()}`), candidateHash, originalOperation,
+        ownerOne, "asset_original", assetOne, new Date(Date.now() - 60_000)
+      ])).toBe(true);
+      expect(await statementWasRejected(
+        "UPDATE private_filesystem_delivery_grants SET expires_at=expires_at+interval '1 minute' WHERE grant_token_hash=$1",
+        [grantHash]
+      )).toBe(true);
+      expect(await statementWasRejected(
+        "DELETE FROM private_filesystem_delivery_grants WHERE grant_token_hash=$1",
+        [grantHash]
+      )).toBe(true);
+
+      await client.query(
+        `UPDATE private_filesystem_delivery_grants
+            SET lifecycle='redeemed',redeemed_at=now(),updated_at=now()
+          WHERE grant_token_hash=$1`,
+        [grantHash]
+      );
+      expect(await statementWasRejected(
+        "UPDATE private_filesystem_delivery_grants SET redeemed_at=now() WHERE grant_token_hash=$1",
+        [grantHash]
+      )).toBe(true);
+
+      const revokedCandidateGrantHash = hash(`revoked-candidate-grant-${crypto.randomUUID()}`);
+      await client.query(insertGrantSql, [
+        revokedCandidateGrantHash, candidateHash, originalOperation, ownerOne, "asset_original",
+        assetOne, new Date(Date.now() + 5 * 60_000)
+      ]);
+      await client.query(
+        "UPDATE durable_filesystem_candidate_authorities SET lifecycle='revoked',updated_at=now() WHERE operation_id=$1",
+        [originalOperation]
+      );
+      expect(await statementWasRejected(
+        `UPDATE private_filesystem_delivery_grants
+            SET lifecycle='redeemed',redeemed_at=now(),updated_at=now()
+          WHERE grant_token_hash=$1`,
+        [revokedCandidateGrantHash]
+      )).toBe(true);
+
+      const legacyStillUnclassified = await client.query<{
+        filesystem_operation_id: string | null;
+        storage_path: string;
+      }>(
+        "SELECT filesystem_operation_id::text,storage_path FROM assets WHERE id=$1",
+        [assetTwo]
+      );
+      expect(legacyStillUnclassified.rows).toEqual([{
+        filesystem_operation_id: null,
+        storage_path: "legacy/two.png"
+      }]);
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+  });
+
   it("enforces durable authority, purpose, owner, retention, and portable scope relationships in PostgreSQL", async () => {
     const client = await pool.connect();
     const hash = (label: string) => createHash("sha256").update(`${label}-${crypto.randomUUID()}`, "utf8").digest("hex");
@@ -811,7 +1163,10 @@ integration("standard database migration runner", () => {
       await expect(isolatedPool.query("SELECT name FROM schema_migrations WHERE name = $1", [migrationName]))
         .resolves.toMatchObject({ rows: [] });
 
-      await expect(migrateDatabase(isolatedPool, resolve("database/migrations"))).resolves.toEqual([migrationName]);
+      await expect(migrateDatabase(isolatedPool, resolve("database/migrations"))).resolves.toEqual([
+        migrationName,
+        "0054_private_filesystem_authority"
+      ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
         "SELECT technical_metadata FROM assets WHERE id = $1",

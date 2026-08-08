@@ -11,6 +11,9 @@ declare const assetPublicationCandidateBrand: unique symbol;
 declare const reservedFilesystemOperationBrand: unique symbol;
 declare const attachedFilesystemOperationBrand: unique symbol;
 declare const durableFilesystemRecoveryClaimBrand: unique symbol;
+declare const privateFilesystemCandidateAuthorityBrand: unique symbol;
+declare const privateFilesystemDeliveryGrantBrand: unique symbol;
+declare const privateFilesystemDeliveryGrantRequestBrand: unique symbol;
 
 export type DurableFilesystemOperationId = string & Readonly<{
   [durableFilesystemOperationIdBrand]: true;
@@ -24,6 +27,11 @@ export type DatabaseIssuedStorageLocator = string & Readonly<{
 /** Filesystem-issued, immutable-identity-bound candidate for transactional attachment. */
 export type AssetPublicationCandidate = string & Readonly<{
   [assetPublicationCandidateBrand]: true;
+}>;
+
+/** Short-lived raw bearer value; persistence stores only its cryptographic hash. */
+export type PrivateFilesystemDeliveryGrant = string & Readonly<{
+  [privateFilesystemDeliveryGrantBrand]: true;
 }>;
 
 export type PrivateFilesystemIdentity = Readonly<{
@@ -68,6 +76,29 @@ export type AttachedFilesystemOperation = DurableFilesystemScope & Readonly<{
   operationId: DurableFilesystemOperationId;
   purpose: DurableFilesystemPurpose;
   [attachedFilesystemOperationBrand]: true;
+}>;
+
+/**
+ * Immutable adapter-private proof that one candidate belongs to one reserved
+ * operation and one observed filesystem identity. Persisted adapters can
+ * reconstruct this authority from hashed candidate evidence after restart.
+ */
+export type PrivateFilesystemCandidateAuthority = Readonly<{
+  reservation: ReservedFilesystemOperation;
+  candidate: AssetPublicationCandidate;
+  descriptor: PrivateStorageDescriptor;
+  expiresAt: string;
+  [privateFilesystemCandidateAuthorityBrand]: true;
+}>;
+
+/** Exact finalized authority required before a private delivery grant is minted. */
+export type PrivateFilesystemDeliveryGrantRequest = Readonly<{
+  operation: AttachedFilesystemOperation;
+  lifecycle: "finalized";
+  candidate: AssetPublicationCandidate;
+  descriptor: PrivateStorageDescriptor;
+  expiresAt: string;
+  [privateFilesystemDeliveryGrantRequestBrand]: true;
 }>;
 
 /** Opaque journal-issued authority fenced to one operation work version and lease. */
@@ -246,6 +277,99 @@ function requireScope(scope: DurableFilesystemScope): void {
 function requireOperation(operation: ReservedFilesystemOperation | AttachedFilesystemOperation): void {
   requireScope(operation);
   if (!nonBlank(operation.operationId)) throw new Error("filesystem_operation_invalid");
+}
+
+function requireFutureTimestamp(value: string, diagnostic: string): void {
+  const timestamp = Date.parse(value);
+  if (!nonBlank(value) || !Number.isFinite(timestamp) || timestamp <= Date.now()) {
+    throw new Error(diagnostic);
+  }
+}
+
+function requireDescriptor(descriptor: PrivateStorageDescriptor): void {
+  const pathIsInvalid = !nonBlank(descriptor.relativePath)
+    || descriptor.relativePath.startsWith("/")
+    || /^[A-Za-z]:/u.test(descriptor.relativePath)
+    || descriptor.relativePath.includes("\\")
+    || descriptor.relativePath.split("/").some((segment) => segment === "." || segment === "..");
+  if (pathIsInvalid
+    || !nonBlank(descriptor.identity.deviceId)
+    || !nonBlank(descriptor.identity.fileId)
+    || !nonBlank(descriptor.identity.changeToken)
+    || !/^[0-9a-f]{64}$/u.test(descriptor.contentHash)
+    || !Number.isSafeInteger(descriptor.byteLength)
+    || descriptor.byteLength < 0) {
+    throw new Error("filesystem_descriptor_invalid");
+  }
+}
+
+function snapshotScope<Operation extends ReservedFilesystemOperation | AttachedFilesystemOperation>(
+  operation: Operation,
+): Operation {
+  const scope = operation.resourceKind === "asset"
+    ? { resourceKind: "asset" as const, ownerUserId: operation.ownerUserId, assetId: operation.assetId }
+    : {
+      resourceKind: "portable" as const,
+      ownerUserId: operation.ownerUserId,
+      operationScopeId: operation.operationScopeId
+    };
+  return Object.freeze({
+    ...scope,
+    operationId: operation.operationId,
+    purpose: operation.purpose,
+    ...(Object.hasOwn(operation, "expiresAt")
+      ? { expiresAt: (operation as ReservedFilesystemOperation).expiresAt }
+      : {})
+  }) as Operation;
+}
+
+function snapshotDescriptor(descriptor: PrivateStorageDescriptor): PrivateStorageDescriptor {
+  return Object.freeze({
+    relativePath: descriptor.relativePath,
+    identity: Object.freeze({ ...descriptor.identity }),
+    contentHash: descriptor.contentHash,
+    byteLength: descriptor.byteLength
+  });
+}
+
+/** Pure validation/binding; raw candidate persistence remains an adapter concern. */
+export function bindPrivateFilesystemCandidateAuthority(
+  reservation: ReservedFilesystemOperation,
+  candidate: AssetPublicationCandidate,
+  descriptor: PrivateStorageDescriptor,
+): PrivateFilesystemCandidateAuthority {
+  requireOperation(reservation);
+  if (!nonBlank(candidate)) throw new Error("filesystem_candidate_invalid");
+  requireDescriptor(descriptor);
+  requireFutureTimestamp(reservation.expiresAt, "filesystem_operation_expired");
+  return Object.freeze({
+    reservation: snapshotScope(reservation),
+    candidate,
+    descriptor: snapshotDescriptor(descriptor),
+    expiresAt: reservation.expiresAt
+  }) as PrivateFilesystemCandidateAuthority;
+}
+
+/** Pure validation/binding for a short-lived grant backed by finalized evidence. */
+export function bindPrivateFilesystemDeliveryGrantRequest(
+  operation: AttachedFilesystemOperation,
+  lifecycle: "finalized",
+  candidate: AssetPublicationCandidate,
+  descriptor: PrivateStorageDescriptor,
+  expiresAt: string,
+): PrivateFilesystemDeliveryGrantRequest {
+  requireOperation(operation);
+  if (lifecycle !== "finalized") throw new Error("filesystem_lifecycle_invalid");
+  if (!nonBlank(candidate)) throw new Error("filesystem_candidate_invalid");
+  requireDescriptor(descriptor);
+  requireFutureTimestamp(expiresAt, "filesystem_delivery_grant_expired");
+  return Object.freeze({
+    operation: snapshotScope(operation),
+    lifecycle,
+    candidate,
+    descriptor: snapshotDescriptor(descriptor),
+    expiresAt
+  }) as PrivateFilesystemDeliveryGrantRequest;
 }
 
 function requireClaim(claim: DurableFilesystemRecoveryClaim): void {

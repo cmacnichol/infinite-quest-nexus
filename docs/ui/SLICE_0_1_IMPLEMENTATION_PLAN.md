@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 through 14e2c complete; 14e3 atomic API/worker cutover and legacy removal is next |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 through 14e3b1 complete; 14e3b2 PostgreSQL capability and cleanup repository is next |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -8172,6 +8172,20 @@ Add exact nullable asset/derivative-to-filesystem-operation bindings with
 owner/asset/purpose guards and lookup indexes; null is the sole legacy-retained
 classification. Test foreign owner/scope/purpose, mutation, deletion, stale
 grant, and legacy-null rejection. No consumer changes.
+
+**14e3b1 completion (2026-08-08):** The adapter-private contracts now require
+an immutable reservation/candidate/descriptor authority for staging and full
+campaign/world/version scope for export issuance; owner-only issuance cannot
+compile. Finalized delivery-grant requests and the legacy anchored-read
+capability remain outside public barrels, and the latter carries explicit
+`cleanupAuthority: "none"` without a path or locator. Additive migration
+`0054_private_filesystem_authority` persists hashed candidate and delivery
+grant authority, exact immutable descriptor and owner/resource/purpose/
+operation scope, expiry and lifecycle guards, and nullable write-once asset and
+derivative bindings. It does not rewrite `0053`, infer a binding from a legacy
+path, or change a consumer. Verification passed 49 focused contracts, 14
+focused real-PostgreSQL migration tests, 1,398 unit tests, 411 integration
+tests, and root `pnpm check`. **14e3b2 is next.**
 
 **14e3b2 — PostgreSQL capability and cleanup repository.** Implement named
 repository APIs for durable staged/export/publication rehydration, private

@@ -418,7 +418,7 @@ integration("generation job notification delivery", () => {
           dbClient: client,
           dir: resolve("database/migrations"),
           direction: "down",
-          count: 2,
+          count: 3,
           migrationsTable: "schema_migrations",
           checkOrder: true,
           singleTransaction: true,
@@ -426,6 +426,7 @@ integration("generation job notification delivery", () => {
           logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
         });
         expect(reverted.map((migration) => migration.name)).toEqual([
+          "0054_private_filesystem_authority",
           "0053_durable_asset_portable_operations",
           "0052_generation_job_notifications"
         ]);
@@ -445,7 +446,8 @@ integration("generation job notification delivery", () => {
       await expect(migrateDatabase(migrationPool, resolve("database/migrations")))
         .resolves.toEqual([
           "0052_generation_job_notifications",
-          "0053_durable_asset_portable_operations"
+          "0053_durable_asset_portable_operations",
+          "0054_private_filesystem_authority"
         ]);
       await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
          `SELECT (

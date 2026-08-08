@@ -45,6 +45,7 @@ import {
 } from "../../packages/application/src/imports/index.js";
 import type {
   FinalizedAssetDeliveryResolverPort,
+  PrivateLegacyAnchoredReadCapability,
   PrivateFinalizedAssetDeliveryResolution
 } from "../../packages/application/src/assets/private-finalized-delivery.js";
 import type * as PublicAssetContracts from "../../packages/application/src/assets/index.js";
@@ -764,6 +765,7 @@ describe("Task 14e3a legacy retention and private delivery contracts", () => {
       scope: { ownerUserId, assetId },
       request: { kind: "derivative", derivativeKind: "thumbnail" },
       descriptor: { assetId, kind: "derivative", derivativeKind: "thumbnail", mimeType: "image/png", byteLength: 2, etag: "thumb-hash" },
+      anchoredRead: { cleanupAuthority: "none" } as PrivateLegacyAnchoredReadCapability,
       cleanupAuthority: "none"
     } satisfies PrivateFinalizedAssetDeliveryResolution;
     const resolver: FinalizedAssetDeliveryResolverPort = {
