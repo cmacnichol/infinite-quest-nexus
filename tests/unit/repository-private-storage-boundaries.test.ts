@@ -34,6 +34,15 @@ describe("private storage repository boundary guard", () => {
         expect.stringContaining("production source must not import historical storage helpers")
       ]);
     }
+    for (const source of [
+      `export const value = repository["redeemStorageLocator"](scope, locator);`,
+      "export const value = repository[`issueDeliveryGrant`](request);",
+      `export const value = repository?.["redeemDeliveryGrant"](redemption);`
+    ]) {
+      expect(checkPrivateStorageBoundaries("services/api/src/example.ts", source)).toEqual([
+        expect.stringContaining("retired private storage member")
+      ]);
+    }
   });
 
   it("allows the explicit new private ports and historical helpers inside tests", () => {
@@ -46,5 +55,12 @@ describe("private storage repository boundary guard", () => {
       "tests/helpers/example.ts",
       `export interface PrivateFilesystemCapabilityPersistencePort {}`,
     )).toEqual([]);
+    for (const source of [
+      `export const value = repository[memberName];`,
+      "export const value = repository[`redeem${kind}`];",
+      `export const redeemStorageLocatorForDiagnostics = () => undefined;`
+    ]) {
+      expect(checkPrivateStorageBoundaries("services/api/src/example.ts", source)).toEqual([]);
+    }
   });
 });

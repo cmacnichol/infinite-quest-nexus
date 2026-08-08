@@ -6,6 +6,7 @@ import type {
 } from "./private-storage-lifecycle.js";
 
 declare const privatePrewriteNodeAuthorityBrand: unique symbol;
+declare const privatePrewriteTargetAuthorityBrand: unique symbol;
 declare const privatePrewriteCleanupPreparationBrand: unique symbol;
 declare const privateBoundedStreamLimitsBrand: unique symbol;
 declare const legacyPathV1PreviewDescriptorBrand: unique symbol;
@@ -13,6 +14,13 @@ declare const legacyPathV1PreviewDescriptorBrand: unique symbol;
 export type PrivateFilesystemNodeIdentity = Readonly<{
   deviceId: string;
   fileId: string;
+}>;
+
+/** Operation-derived target persisted before attempting O_EXCL creation. */
+export type PrivatePrewriteTargetAuthority = Readonly<{
+  operation: ReservedFilesystemOperation;
+  relativePath: string;
+  [privatePrewriteTargetAuthorityBrand]: true;
 }>;
 
 /**
@@ -38,14 +46,41 @@ export type PrivatePrewriteCleanupPreparation = Readonly<{
 
 export type PrivatePrewriteCleanupResult =
   | PrivatePrewriteCleanupPreparation
-  | Readonly<{ outcome: "already_cleaned" | "stale" | "lease_lost" }>;
+  | Readonly<{ outcome: "already_cleaned" | "stale" | "lease_lost" | "quarantined" }>;
 
 export interface PrivatePrewriteNodeRepositoryPort {
+  recordPrewriteTarget(authority: PrivatePrewriteTargetAuthority): Promise<void>;
   recordPrewriteNode(authority: PrivatePrewriteNodeAuthority): Promise<void>;
   preparePrewriteCleanup(
     database: DurableFilesystemTransactionContext,
     recovery: DurableFilesystemRecoveryRecord,
   ): Promise<PrivatePrewriteCleanupResult>;
+}
+
+function requireOperation(operation: ReservedFilesystemOperation): void {
+  if (!nonBlank(operation.operationId)
+    || !nonBlank(operation.ownerUserId)
+    || !nonBlank(operation.expiresAt)
+    || !Number.isFinite(Date.parse(operation.expiresAt))
+    || Date.parse(operation.expiresAt) <= Date.now()) {
+    throw new Error("filesystem_operation_invalid");
+  }
+  if ((operation.resourceKind === "asset" && !nonBlank(operation.assetId))
+    || (operation.resourceKind === "portable" && !nonBlank(operation.operationScopeId))) {
+    throw new Error("filesystem_scope_invalid");
+  }
+}
+
+export function bindPrivatePrewriteTargetAuthority(
+  operation: ReservedFilesystemOperation,
+  relativePath: string,
+): PrivatePrewriteTargetAuthority {
+  requireOperation(operation);
+  requireRelativePath(relativePath);
+  return Object.freeze({
+    operation: Object.freeze({ ...operation }),
+    relativePath
+  }) as PrivatePrewriteTargetAuthority;
 }
 
 export interface PrivatePortableExpiryRecoveryPort {
@@ -108,17 +143,7 @@ export function bindPrivatePrewriteNodeAuthority(
   relativePath: string,
   identity: PrivateFilesystemNodeIdentity,
 ): PrivatePrewriteNodeAuthority {
-  if (!nonBlank(operation.operationId)
-    || !nonBlank(operation.ownerUserId)
-    || !nonBlank(operation.expiresAt)
-    || !Number.isFinite(Date.parse(operation.expiresAt))
-    || Date.parse(operation.expiresAt) <= Date.now()) {
-    throw new Error("filesystem_operation_invalid");
-  }
-  if ((operation.resourceKind === "asset" && !nonBlank(operation.assetId))
-    || (operation.resourceKind === "portable" && !nonBlank(operation.operationScopeId))) {
-    throw new Error("filesystem_scope_invalid");
-  }
+  requireOperation(operation);
   requireRelativePath(relativePath);
   if (!nonBlank(identity.deviceId) || !nonBlank(identity.fileId)) {
     throw new Error("filesystem_identity_invalid");

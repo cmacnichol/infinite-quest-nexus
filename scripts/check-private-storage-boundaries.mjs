@@ -40,6 +40,24 @@ function isHistoricalStorageHelper(target) {
     || normalized.includes("private-storage-lifecycle-fake");
 }
 
+function staticMember(node) {
+  const member = node.property ?? node.key;
+  if (!member) return null;
+  if (!node.computed && member.type === "Identifier") {
+    return { node: member, name: member.name };
+  }
+  if (node.computed && member.type === "StringLiteral") {
+    return { node: member, name: member.value };
+  }
+  if (node.computed
+    && member.type === "TemplateLiteral"
+    && member.expressions.length === 0
+    && member.quasis.length === 1) {
+    return { node: member, name: member.quasis[0]?.value.cooked ?? member.quasis[0]?.value.raw };
+  }
+  return null;
+}
+
 export function checkPrivateStorageBoundaries(file, text) {
   const normalized = file.replaceAll("\\", "/");
   if (!PRODUCTION_SOURCE.test(normalized) || !/\.(?:cjs|js|mjs|mts|ts|tsx)$/u.test(normalized)) {
@@ -68,15 +86,11 @@ export function checkPrivateStorageBoundaries(file, text) {
     if (node.type === "Identifier" && RETIRED_IDENTIFIERS.has(node.name)) {
       add(node, `retired private storage seam identifier ${node.name} is prohibited`);
     }
-    const member = node.property?.type === "Identifier"
-      ? node.property
-      : node.key?.type === "Identifier"
-        ? node.key
-        : null;
+    const member = staticMember(node);
     if (["MemberExpression", "OptionalMemberExpression", "ObjectMethod", "ObjectProperty", "ClassMethod"].includes(node.type)
       && member
       && RETIRED_MEMBER_NAMES.has(member.name)) {
-      add(member, `retired private storage member ${member.name} is prohibited`);
+      add(member.node, `retired private storage member ${member.name} is prohibited`);
     }
     for (const [key, value] of Object.entries(node)) {
       if (["loc", "start", "end", "extra", "errors", "tokens", "comments"].includes(key)) continue;

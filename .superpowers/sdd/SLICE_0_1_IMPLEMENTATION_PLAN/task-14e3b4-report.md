@@ -20,10 +20,12 @@ coverage described below.
   candidate attachment in the caller transaction. Portable row insertion and
   durable candidate attachment commit or roll back together, and replay or
   substituted scope/candidate/descriptor inputs fail closed.
-- Migration 0058 persists an immutable operation-derived prewrite target and
-  created-node identity after exclusive creation/fstat and before the first
-  content byte. Recovery can therefore clean a crash between node creation and
-  content completion without guessing from ambient paths.
+- Migrations 0058 and 0059 persist an immutable operation-derived prewrite
+  target before exclusive creation, then permit one exact target-only to
+  identity-bound transition after fstat and before the first content byte.
+  Recovery can clean an identity-bound partial write without guessing from
+  ambient paths; a crash before identity persistence is quarantined without a
+  path-only delete.
 - The bearer-free expiry producer claims only exact expired portable rows using
   current database time, ordered locking, `SKIP LOCKED`, and rotated recovery
   claims. It transitions both the portable row and durable journal to cleanup
@@ -34,14 +36,16 @@ coverage described below.
   reads, growth sentinel, incremental digest, and final identity.
 - Export terminal paths share one memoized finalizer with the required order:
   close the file handle, identity-safe delete, then acknowledge database
-  cleanup. EOF, explicit close, abort, timeout, pre-send failure, and read
-  failure converge on the same operation.
+  cleanup. A creation-time deadline timer invokes that finalizer even if the
+  consumer never pulls or stalls between chunks. EOF, explicit close, abort,
+  timeout, pre-send failure, and read failure converge on the same operation.
 - Asset sessions redeem finalized or isolated legacy anchored authority,
   anchored-open and verify the descriptor, and enforce the same bounded read
   rules without deleting asset files.
 - Adapter shutdown tracks and closes portable, asset, and legacy-preview stream
-  handles. Portable handles remain indexed by operation so a reaper closes
-  them before physical cleanup.
+  handles. A closing fence rejects concurrent session publication so an open
+  cannot escape the shutdown snapshot. Portable handles remain indexed by
+  operation so a reaper closes them before physical cleanup.
 - Identity-safe cleanup treats `ENOENT` as idempotent only after an exact
   prepared descriptor and fresh claim have already established the deletion
   target. A substituted node or identity mismatch remains a failure and cannot
@@ -84,18 +88,37 @@ API emits or redeems that value.
    verbatim, allowing ambient extra properties to cross the narrowed contract.
    It now returns exactly `{ outcome, operation, claim }` for an attached
    result and preserves stale/candidate-mismatch results.
+8. A cooperative-only stream deadline allowed idle or between-chunk consumers
+   to retain descriptors and export cleanup authority indefinitely. A
+   creation-time, memoized deadline finalizer now closes sessions autonomously,
+   clears its timer on every terminal path, performs export delete/ack only
+   after close, preserves assets, and rejects late pulls.
+9. A crash between `O_EXCL` creation and 0058 identity persistence left an
+   untracked `.pending` node. Additive migration 0059 records target intent
+   before creation, permits one database-clock-guarded identity CAS after
+   fstat, and quarantines target-only recovery without deleting by path or
+   completing cleanup. Target collisions likewise remain pending rather than
+   deleting an unknown node.
+10. The private-storage AST guard missed computed string and static-template
+    member access. It now rejects those exact retired members, including
+    optional computed access, while allowing dynamic templates and computed
+    identifiers.
+11. Shutdown could race an anchored open after the active-handle snapshot. A
+    synchronous closing fence at registration closes and rejects unpublished
+    handles deterministically.
 
 ## Verification
 
 - `pnpm check`: passed, including repository/data boundary checks and all
   TypeScript/web checks.
-- Focused Task 14e3b4 and compatibility unit matrix: 6 files, 56 tests passed.
+- Focused correction matrix: 3 unit files, 17 tests passed; 0059 migration
+  and secure repository matrix: 2 integration files, 11 tests passed.
 - Affected PostgreSQL/filesystem matrix: passed for durable filesystem,
   Task 14e2c adapters, portable repository, finalized delivery, 0058 migration,
-  and secure storage repository.
+  additive 0059 target-intent migration, and secure storage repository.
 - Full `pnpm test`:
-  - unit: 124 files, 1,418 tests passed;
-  - integration: 42 files, 461 tests passed.
+  - unit: 124 files, 1,424 tests passed;
+  - integration: 42 files, 464 tests passed.
 - `git diff --check`: passed.
 - Production raw-authority scan: no forbidden production references; remaining
   matches are negative assertions, the AST guard itself, and isolated

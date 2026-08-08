@@ -9,6 +9,7 @@ describe("Task 14e3b4 private secure-storage contracts", () => {
   });
 
   it("exposes immutable pre-write and bounded-stream authority binders", () => {
+    expect(PrivateSecureStorage).toHaveProperty("bindPrivatePrewriteTargetAuthority");
     expect(PrivateSecureStorage).toHaveProperty("bindPrivatePrewriteNodeAuthority");
     expect(PrivateSecureStorage).toHaveProperty("bindPrivateBoundedStreamLimits");
   });

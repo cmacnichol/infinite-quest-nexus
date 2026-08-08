@@ -1169,7 +1169,8 @@ integration("standard database migration runner", () => {
         "0055_private_portable_repository_guards",
         "0056_private_filesystem_current_clock",
         "0057_finalized_asset_delivery_authority",
-        "0058_secure_storage_lifecycle"
+        "0058_secure_storage_lifecycle",
+        "0059_secure_storage_target_intent"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(

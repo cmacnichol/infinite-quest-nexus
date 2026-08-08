@@ -4,6 +4,7 @@ import {
   bindPrivatePrewriteCleanupPreparation,
   type PrivatePortableExpiryRecoveryPort,
   type PrivatePrewriteNodeAuthority,
+  type PrivatePrewriteTargetAuthority,
   type PrivatePrewriteNodeRepositoryPort
 } from "../../application/src/assets/private-secure-storage.js";
 import type {
@@ -53,8 +54,9 @@ type PrewriteRow = Readonly<{
   owner_user_id: string;
   purpose: DurableFilesystemPurpose;
   relative_path: string;
-  device_id: string;
-  file_id: string;
+  device_id: string | null;
+  file_id: string | null;
+  authority_state: "target_only" | "identity_bound" | "quarantined";
 }>;
 
 type PortableCandidateRow = OperationRow & Readonly<{
@@ -262,11 +264,32 @@ export function createPostgresSecureStorageRepository(
     };
   };
 
-  const recordPrewriteNode = async (authority: PrivatePrewriteNodeAuthority): Promise<void> => {
+  const recordPrewriteTarget = async (authority: PrivatePrewriteTargetAuthority): Promise<void> => {
     await pool.query(
       `INSERT INTO durable_filesystem_prewrite_nodes (
-         operation_id,owner_user_id,purpose,relative_path,device_id,file_id
-       ) VALUES ($1,$2,$3,$4,$5,$6)`,
+         operation_id,owner_user_id,purpose,relative_path,authority_state
+       ) VALUES ($1,$2,$3,$4,'target_only')`,
+      [
+        authority.operation.operationId,
+        authority.operation.ownerUserId,
+        authority.operation.purpose,
+        authority.relativePath
+      ],
+    );
+  };
+
+  const recordPrewriteNode = async (authority: PrivatePrewriteNodeAuthority): Promise<void> => {
+    const updated = await pool.query(
+      `UPDATE durable_filesystem_prewrite_nodes
+          SET authority_state='identity_bound',device_id=$5,file_id=$6,
+              identity_bound_at=clock_timestamp()
+        WHERE operation_id=$1
+          AND owner_user_id=$2
+          AND purpose=$3
+          AND relative_path=$4
+          AND authority_state='target_only'
+          AND device_id IS NULL
+          AND file_id IS NULL`,
       [
         authority.operation.operationId,
         authority.operation.ownerUserId,
@@ -276,6 +299,7 @@ export function createPostgresSecureStorageRepository(
         authority.identity.fileId
       ],
     );
+    if (updated.rowCount !== 1) throw new Error("secure_storage_prewrite_target_mismatch");
   };
 
   const preparePrewriteCleanup = async (
@@ -285,14 +309,15 @@ export function createPostgresSecureStorageRepository(
     const client = await requireCallerTransaction(database);
     const selected = await client.query<OperationRow & PrewriteRow>(
       `SELECT ${operationColumns()},prewrite.operation_id,prewrite.owner_user_id,
-              prewrite.purpose,prewrite.relative_path,prewrite.device_id,prewrite.file_id
+              prewrite.purpose,prewrite.relative_path,prewrite.device_id,prewrite.file_id,
+              prewrite.authority_state
          FROM durable_filesystem_operations operation
          JOIN durable_filesystem_prewrite_nodes prewrite
            ON prewrite.operation_id=operation.id
           AND prewrite.owner_user_id=operation.owner_user_id
           AND prewrite.purpose=operation.purpose
         WHERE operation.id=$1
-        FOR UPDATE OF operation`,
+        FOR UPDATE OF operation,prewrite`,
       [recovery.operation.operationId],
     );
     const row = selected.rows[0];
@@ -304,6 +329,19 @@ export function createPostgresSecureStorageRepository(
     );
     if (row.lease_expires_at <= now.rows[0]!.current_time) return { outcome: "lease_lost" as const };
     await lockPhysicalPaths(client, [row.relative_path]);
+    if (row.authority_state === "quarantined") return { outcome: "quarantined" as const };
+    if (row.authority_state === "target_only") {
+      const quarantined = await client.query(
+        `UPDATE durable_filesystem_prewrite_nodes
+            SET authority_state='quarantined',quarantined_at=clock_timestamp(),
+                quarantine_reason='identity_not_persisted'
+          WHERE operation_id=$1 AND authority_state='target_only'`,
+        [row.operation_id],
+      );
+      if (quarantined.rowCount !== 1) return { outcome: "stale" as const };
+      return { outcome: "quarantined" as const };
+    }
+    if (row.device_id === null || row.file_id === null) return { outcome: "stale" as const };
     return bindPrivatePrewriteCleanupPreparation(
       reservedOperation(row),
       recoveryClaim(row),
@@ -350,7 +388,12 @@ export function createPostgresSecureStorageRepository(
                   OR COALESCE(staged.expires_at,artifact.expires_at) <= clock_timestamp()))
               OR
               (operation.lifecycle='cleanup_pending'
-                AND operation.lease_expires_at <= clock_timestamp())
+                AND operation.lease_expires_at <= clock_timestamp()
+                AND NOT EXISTS (
+                  SELECT 1 FROM durable_filesystem_prewrite_nodes prewrite
+                   WHERE prewrite.operation_id=operation.id
+                     AND prewrite.authority_state='quarantined'
+                ))
             )
           ORDER BY operation.created_at,operation.id
           FOR UPDATE OF operation SKIP LOCKED
@@ -428,6 +471,7 @@ export function createPostgresSecureStorageRepository(
   return {
     issueStagedInput,
     issueExportRetrieval,
+    recordPrewriteTarget,
     recordPrewriteNode,
     preparePrewriteCleanup,
     claimExpiredPortableWork

@@ -43,14 +43,22 @@ integration("Task 14e3b4 pre-write and portable recovery migration", () => {
     return inserted.rows[0]!.id;
   }
 
-  it("persists only the operation-derived immutable pre-write target and created node identity", async () => {
+  it("persists target intent before allowing one immutable identity binding", async () => {
     const operationId = await reserve("portable_staging");
     const relativePath = `staging/${operationId}.pending`;
     await expect(pool.query(
       `INSERT INTO durable_filesystem_prewrite_nodes (
-         operation_id,owner_user_id,purpose,relative_path,device_id,file_id
-       ) VALUES ($1,$2,'portable_staging',$3,'device-1','file-1')`,
+         operation_id,owner_user_id,purpose,relative_path,authority_state
+       ) VALUES ($1,$2,'portable_staging',$3,'target_only')`,
       [operationId, ownerUserId, relativePath],
+    )).resolves.toMatchObject({ rowCount: 1 });
+
+    await expect(pool.query(
+      `UPDATE durable_filesystem_prewrite_nodes
+          SET authority_state='identity_bound',device_id='device-1',file_id='file-1',
+              identity_bound_at=clock_timestamp()
+        WHERE operation_id=$1 AND authority_state='target_only'`,
+      [operationId],
     )).resolves.toMatchObject({ rowCount: 1 });
 
     await expect(pool.query(
@@ -67,8 +75,8 @@ integration("Task 14e3b4 pre-write and portable recovery migration", () => {
     const wrongPathOperation = await reserve("portable_export");
     await expect(pool.query(
       `INSERT INTO durable_filesystem_prewrite_nodes (
-         operation_id,owner_user_id,purpose,relative_path,device_id,file_id
-       ) VALUES ($1,$2,'portable_export','exports/caller-selected.pending','device-2','file-2')`,
+         operation_id,owner_user_id,purpose,relative_path,authority_state
+       ) VALUES ($1,$2,'portable_export','exports/caller-selected.pending','target_only')`,
       [wrongPathOperation, ownerUserId],
     )).rejects.toMatchObject({ code: "23514" });
 
@@ -79,9 +87,31 @@ integration("Task 14e3b4 pre-write and portable recovery migration", () => {
     );
     await expect(pool.query(
       `INSERT INTO durable_filesystem_prewrite_nodes (
-         operation_id,owner_user_id,purpose,relative_path,device_id,file_id
-       ) VALUES ($1,$2,'portable_staging',$3,'device-3','file-3')`,
+         operation_id,owner_user_id,purpose,relative_path,authority_state
+       ) VALUES ($1,$2,'portable_staging',$3,'target_only')`,
       [lateOperation, ownerUserId, `staging/${lateOperation}.pending`],
+    )).rejects.toMatchObject({ code: "55000" });
+  });
+
+  it("uses the current database clock when binding identity after target creation", async () => {
+    const operationId = await reserve("portable_staging");
+    const relativePath = `staging/${operationId}.pending`;
+    await pool.query(
+      `INSERT INTO durable_filesystem_prewrite_nodes (
+         operation_id,owner_user_id,purpose,relative_path,authority_state
+       ) VALUES ($1,$2,'portable_staging',$3,'target_only')`,
+      [operationId, ownerUserId, relativePath],
+    );
+    await pool.query(
+      "UPDATE durable_filesystem_operations SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+      [operationId],
+    );
+    await expect(pool.query(
+      `UPDATE durable_filesystem_prewrite_nodes
+          SET authority_state='identity_bound',device_id='late-device',file_id='late-file',
+              identity_bound_at=clock_timestamp()
+        WHERE operation_id=$1`,
+      [operationId],
     )).rejects.toMatchObject({ code: "55000" });
   });
 

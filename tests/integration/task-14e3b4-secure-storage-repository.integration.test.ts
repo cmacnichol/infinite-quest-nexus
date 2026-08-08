@@ -7,6 +7,7 @@ import {
 } from "../../packages/application/src/assets/private-filesystem-repository.js";
 import {
   bindPrivatePrewriteNodeAuthority,
+  bindPrivatePrewriteTargetAuthority,
   type PrivatePrewriteCleanupPreparation
 } from "../../packages/application/src/assets/private-secure-storage.js";
 import type {
@@ -242,6 +243,10 @@ integration("Task 14e3b4 secure storage repository", () => {
       { purpose: "portable_staging", leaseOwner: "b4-prewrite", expiresAt },
     );
     const relativePath = `staging/${reserved.operation.operationId}.pending`;
+    await secure.recordPrewriteTarget(bindPrivatePrewriteTargetAuthority(
+      reserved.operation,
+      relativePath,
+    ));
     await secure.recordPrewriteNode(bindPrivatePrewriteNodeAuthority(
       reserved.operation,
       relativePath,
@@ -271,6 +276,113 @@ integration("Task 14e3b4 secure storage repository", () => {
     expect(preparation).toMatchObject({
       relativePath,
       identity: { deviceId: "prewrite-device", fileId: "prewrite-file" }
+    });
+  });
+
+  it("quarantines target-only crash recovery without inventing filesystem identity", async () => {
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const scopeId = `target-only:${crypto.randomUUID()}`;
+    const reserved = await durable.journal.reserve(
+      { resourceKind: "portable", ownerUserId, operationScopeId: scopeId },
+      { purpose: "portable_export", leaseOwner: "b4-target-only", expiresAt },
+    );
+    const relativePath = `exports/${reserved.operation.operationId}.pending`;
+    await secure.recordPrewriteTarget(bindPrivatePrewriteTargetAuthority(
+      reserved.operation,
+      relativePath,
+    ));
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET lease_expires_at=clock_timestamp()-interval '1 second'
+        WHERE id=$1`,
+      [reserved.operation.operationId],
+    );
+
+    const claimed = await secure.claimExpiredPortableWork({
+      leaseOwner: "b4-target-only-reaper",
+      leaseSeconds: 30,
+      limit: 20
+    });
+    const recovery = claimed.find((value) => value.operation.operationId === reserved.operation.operationId);
+    expect(recovery).toBeDefined();
+    expect(JSON.stringify(recovery)).not.toContain(scopeId);
+    await expect(withTransaction(
+      pool,
+      (client) => secure.preparePrewriteCleanup(client, recovery!),
+    )).resolves.toEqual({ outcome: "quarantined" });
+
+    const row = await pool.query<{
+      authority_state: string;
+      device_id: string | null;
+      file_id: string | null;
+      quarantine_reason: string | null;
+    }>(
+      `SELECT authority_state,device_id,file_id,quarantine_reason
+         FROM durable_filesystem_prewrite_nodes WHERE operation_id=$1`,
+      [reserved.operation.operationId],
+    );
+    expect(row.rows[0]).toEqual({
+      authority_state: "quarantined",
+      device_id: null,
+      file_id: null,
+      quarantine_reason: "identity_not_persisted"
+    });
+
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET lease_expires_at=clock_timestamp()-interval '1 second'
+        WHERE id=$1`,
+      [reserved.operation.operationId],
+    );
+    const repeated = await secure.claimExpiredPortableWork({
+      leaseOwner: "b4-target-only-reaper-2",
+      leaseSeconds: 30,
+      limit: 20
+    });
+    expect(repeated.find((value) => value.operation.operationId === reserved.operation.operationId))
+      .toBeUndefined();
+  });
+
+  it("atomically rejects late or substituted identity binding and retains target-only intent", async () => {
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const reserved = await durable.journal.reserve(
+      { resourceKind: "portable", ownerUserId, operationScopeId: `cas:${crypto.randomUUID()}` },
+      { purpose: "portable_staging", leaseOwner: "b4-cas", expiresAt },
+    );
+    const relativePath = `staging/${reserved.operation.operationId}.pending`;
+    await secure.recordPrewriteTarget(bindPrivatePrewriteTargetAuthority(
+      reserved.operation,
+      relativePath,
+    ));
+
+    await expect(secure.recordPrewriteNode(bindPrivatePrewriteNodeAuthority(
+      reserved.operation,
+      `staging/${crypto.randomUUID()}.pending`,
+      { deviceId: "substituted-device", fileId: "substituted-file" },
+    ))).rejects.toThrow("secure_storage_prewrite_target_mismatch");
+
+    await pool.query(
+      "UPDATE durable_filesystem_operations SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+      [reserved.operation.operationId],
+    );
+    await expect(secure.recordPrewriteNode(bindPrivatePrewriteNodeAuthority(
+      reserved.operation,
+      relativePath,
+      { deviceId: "late-device", fileId: "late-file" },
+    ))).rejects.toBeTruthy();
+
+    const row = await pool.query<{
+      authority_state: string;
+      device_id: string | null;
+      file_id: string | null;
+    }>(
+      "SELECT authority_state,device_id,file_id FROM durable_filesystem_prewrite_nodes WHERE operation_id=$1",
+      [reserved.operation.operationId],
+    );
+    expect(row.rows[0]).toEqual({
+      authority_state: "target_only",
+      device_id: null,
+      file_id: null
     });
   });
 

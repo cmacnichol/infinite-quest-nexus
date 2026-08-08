@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, rename, stat, symlink, truncate, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, open, readdir, readlink, rename, stat, symlink, truncate, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -75,8 +75,96 @@ function unsupported(): never {
   throw new Error("unexpected_port_call");
 }
 
+async function hasOpenDescriptorFor(path: string): Promise<boolean> {
+  const descriptors = await readdir("/proc/self/fd");
+  const targets = await Promise.all(descriptors.map(
+    (value) => readlink(`/proc/self/fd/${value}`).catch(() => ""),
+  ));
+  return targets.some((value) => value === path || value === `${path} (deleted)`);
+}
+
+async function timeoutExportFixture(input: Readonly<{
+  deadlineAt: string;
+  contentHash?: string;
+  chunkBytes?: number;
+}>) {
+  const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-timeout-export-"));
+  const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
+  await mkdir(join(archiveRoot, "exports"));
+  const content = Buffer.from("autonomous timeout export bytes");
+  const relativePath = "exports/operation-1.pending";
+  const physicalPath = join(archiveRoot, relativePath);
+  await writeFile(physicalPath, content);
+  const expected = {
+    ...await descriptor(archiveRoot, relativePath, content),
+    contentHash: input.contentHash ?? sha256(content)
+  };
+  const scope: PortableExportScope = {
+    ownerUserId: "owner-1",
+    exportKind: "campaign_zip",
+    campaignId: "campaign-1",
+    worldId: "world-1",
+    worldVersionId: "version-1"
+  };
+  const retrieval = "retrieval-timeout" as PortableArchiveExportRetrieval;
+  const operation = attachedOperation(scope);
+  const recoveryClaim = claim(operation);
+  const rehydration = {
+    identity: { exportScope: scope, retrieval, contentType: "application/zip" },
+    operation,
+    claim: recoveryClaim,
+    descriptor: expected
+  } as PrivatePortableExportRehydration;
+  const preparation = {
+    outcome: "cleanup_required",
+    identity: {
+      portableKind: "export_artifact",
+      artifactId: "artifact-timeout",
+      ownerUserId: scope.ownerUserId,
+      filesystemOperationId: operation.operationId,
+      exportScope: scope
+    },
+    operation,
+    claim: recoveryClaim,
+    descriptors: [expected]
+  } as unknown as PrivatePortableExportCleanupPreparation;
+  const events: string[] = [];
+  const acknowledge = vi.fn(async () => {
+    events.push("ack");
+    expect(await hasOpenDescriptorFor(physicalPath)).toBe(false);
+    await expect(stat(physicalPath)).rejects.toMatchObject({ code: "ENOENT" });
+    return { outcome: "cleaned" as const };
+  });
+  const adapter = await createSecureFilesystemAdapter({
+    archiveRoot,
+    assetRoot,
+    platform: "linux",
+    portable: {
+      async rehydrateExportArtifact() { return rehydration; },
+      async prepareExportCleanup() { return preparation; },
+      acknowledgeExportCleanup: acknowledge,
+      rehydrateStagedInput: unsupported,
+      prepareStagedCleanup: unsupported,
+      acknowledgeStagedCleanup: unsupported,
+      prepareRecoveryCleanup: unsupported
+    },
+    transactions: { async run(work) { return work({}); } }
+  });
+  const session = await adapter.openExportSession({
+    scope,
+    retrieval,
+    claim: { leaseOwner: "api-timeout", leaseSeconds: 30 },
+    limits: bindPrivateBoundedStreamLimits({
+      maximumBytes: 1024,
+      chunkBytes: input.chunkBytes ?? 4,
+      deadlineAt: input.deadlineAt
+    })
+  });
+  return { acknowledge, adapter, content, events, physicalPath, session };
+}
+
 describe("Task 14e3b4 secure filesystem adapter", () => {
-  it("reserves and records the O_EXCL node identity before writing staged bytes", async () => {
+  it("records durable target intent before O_EXCL and binds node identity before writing staged bytes", async () => {
     const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-stage-"));
     const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
     const content = Buffer.from("staged archive bytes");
@@ -112,6 +200,12 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
       recover: unsupported
     };
     const prewrite = {
+      async recordPrewriteTarget(authority: { relativePath: string }) {
+        events.push("target");
+        expect(authority.relativePath).toBe(`staging/${operationId}.pending`);
+        await expect(stat(join(archiveRoot, authority.relativePath)))
+          .rejects.toMatchObject({ code: "ENOENT" });
+      },
       async recordPrewriteNode(authority: { relativePath: string }) {
         events.push("prewrite");
         expect(authority.relativePath).toBe(`staging/${operationId}.pending`);
@@ -170,12 +264,81 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     });
     expect(events).toEqual([
       "reserve",
+      "target",
       "prewrite",
       "candidate_issue",
       "candidate_complete",
       "atomic_issue",
       "finalize"
     ]);
+    await adapter.close();
+  });
+
+  it("leaves target-only O_EXCL failure pending without deleting or completing cleanup", async () => {
+    const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-target-collision-"));
+    const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
+    await mkdir(join(archiveRoot, "staging"));
+    const operationId = "12121212-1212-4121-8121-121212121212" as DurableFilesystemOperationId;
+    const physicalPath = join(archiveRoot, `staging/${operationId}.pending`);
+    await writeFile(physicalPath, "preexisting unknown node");
+    const reservation = {
+      resourceKind: "portable",
+      ownerUserId: "owner-1",
+      operationScopeId: "target-collision",
+      operationId,
+      purpose: "portable_staging",
+      expiresAt: FUTURE
+    } as ReservedFilesystemOperation;
+    const recoveryClaim = {
+      operationId,
+      leaseId: "lease-collision",
+      leaseOwner: "api-1",
+      workVersion: 1,
+      leaseExpiresAt: FUTURE
+    } as DurableFilesystemRecoveryClaim;
+    const recordNode = vi.fn();
+    const completeCleanup = vi.fn();
+    const adapter = await createSecureFilesystemAdapter({
+      archiveRoot,
+      assetRoot,
+      platform: "linux",
+      journal: {
+        async reserve() { return { operation: reservation, claim: recoveryClaim }; },
+        async markCleanup() { return { outcome: "cleanup_pending" as const }; },
+        completeCleanup,
+        finalizeAfterCommit: unsupported,
+        attach: unsupported,
+        recover: unsupported
+      },
+      prewrite: {
+        async recordPrewriteTarget() {},
+        recordPrewriteNode: recordNode,
+        preparePrewriteCleanup: unsupported
+      },
+      candidates: {
+        issuePublicationCandidate: unsupported,
+        completePublicationCandidate: unsupported,
+        persistCandidate: unsupported,
+        redeemCandidate: unsupported,
+        attachCandidate: unsupported
+      },
+      atomicPortable: {
+        issueStagedInput: unsupported,
+        issueExportRetrieval: unsupported
+      },
+      transactions: { async run(work) { return work({}); } }
+    });
+    await expect(adapter.stagePortableInput({
+      owner: { ownerUserId: "owner-1" },
+      operationScopeId: "target-collision",
+      leaseOwner: "api-1",
+      expiresAt: FUTURE,
+      byteLength: 1,
+      source: [Buffer.from("x")]
+    })).rejects.toMatchObject({ code: "EEXIST" });
+    expect(recordNode).not.toHaveBeenCalled();
+    expect(completeCleanup).not.toHaveBeenCalled();
+    await expect(stat(physicalPath)).resolves.toBeTruthy();
     await adapter.close();
   });
 
@@ -214,6 +377,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
         recover: unsupported
       },
       prewrite: {
+        async recordPrewriteTarget() {},
         async recordPrewriteNode() {},
         preparePrewriteCleanup: unsupported
       },
@@ -332,6 +496,101 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     expect(events).toEqual(["rehydrate", "prepare", "ack"]);
     expect(acknowledge).toHaveBeenCalledTimes(1);
     await adapter.close();
+  });
+
+  it("autonomously times out idle and between-chunk exports, cleans once, and denies late pulls", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      vi.setSystemTime("2026-08-08T12:00:00.000Z");
+      const idle = await timeoutExportFixture({
+        deadlineAt: "2026-08-08T12:00:01.000Z"
+      });
+      await vi.advanceTimersByTimeAsync(1_001);
+      await idle.session.finalize("timeout");
+      expect(idle.acknowledge).toHaveBeenCalledTimes(1);
+      await expect(collect(idle.session.chunks)).rejects.toThrow("filesystem_stream_timeout");
+      await idle.session.finalize("close");
+      expect(idle.acknowledge).toHaveBeenCalledTimes(1);
+      await idle.adapter.close();
+
+      vi.setSystemTime("2026-08-08T13:00:00.000Z");
+      const between = await timeoutExportFixture({
+        deadlineAt: "2026-08-08T13:00:01.000Z",
+        chunkBytes: 4
+      });
+      const iterator = between.session.chunks[Symbol.asyncIterator]();
+      await expect(iterator.next()).resolves.toMatchObject({ done: false });
+      await vi.advanceTimersByTimeAsync(1_001);
+      await between.session.finalize("timeout");
+      expect(between.acknowledge).toHaveBeenCalledTimes(1);
+      await expect(iterator.next()).rejects.toThrow("filesystem_stream_timeout");
+      await between.session.finalize("abort");
+      expect(between.acknowledge).toHaveBeenCalledTimes(1);
+      await between.adapter.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("autonomously closes timed-out asset sessions without deleting assets and denies late pulls", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      vi.setSystemTime("2026-08-08T14:00:00.000Z");
+      const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-timeout-asset-"));
+      const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
+      await mkdir(join(assetRoot, "assets"));
+      const bytes = Buffer.from("asset timeout bytes");
+      const assetPath = "assets/timed.png";
+      const physicalPath = join(assetRoot, assetPath);
+      await writeFile(physicalPath, bytes);
+      const value = await descriptor(assetRoot, assetPath, bytes);
+      const scope: AssetScope = { ownerUserId: "owner-1", assetId: "asset-timeout" };
+      const adapter = await createSecureFilesystemAdapter({
+        archiveRoot,
+        assetRoot,
+        platform: "linux",
+        delivery: {
+          async resolveFinalizedAssetDelivery() {
+            return {
+              kind: "durable_finalized" as const,
+              scope,
+              request: { kind: "original" as const },
+              descriptor: {
+                assetId: scope.assetId,
+                kind: "original" as const,
+                derivativeKind: null,
+                mimeType: "image/png",
+                byteLength: bytes.byteLength,
+                etag: sha256(bytes)
+              },
+              grant: "asset-timeout-grant" as never,
+              cleanupAuthority: "none" as const
+            };
+          },
+          async redeemFinalizedDeliveryGrant() { return value; },
+          redeemLegacyAnchoredRead: unsupported
+        },
+        transactions: { async run(work) { return work({}); } }
+      });
+      const session = await adapter.openAssetSession({
+        scope,
+        request: { kind: "original" },
+        limits: bindPrivateBoundedStreamLimits({
+          maximumBytes: 1024,
+          chunkBytes: 4,
+          deadlineAt: "2026-08-08T14:00:01.000Z"
+        })
+      });
+      expect(session).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(1_001);
+      await session!.finalize("close");
+      expect(await hasOpenDescriptorFor(physicalPath)).toBe(false);
+      await expect(stat(physicalPath)).resolves.toBeTruthy();
+      await expect(collect(session!.chunks)).rejects.toThrow("filesystem_stream_timeout");
+      await adapter.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("streams durable and legacy assets without granting cleanup authority", async () => {
@@ -520,6 +779,170 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     }
   });
 
+  it("closes before fail-closed export fault cleanup and only acknowledges an identity-safe delete", async () => {
+    for (const fault of ["partial", "growing", "hash"] as const) {
+      const fixture = await timeoutExportFixture({
+        deadlineAt: FUTURE,
+        ...(fault === "hash" ? { contentHash: "0".repeat(64) } : {})
+      });
+      if (fault === "partial") {
+        await truncate(fixture.physicalPath, fixture.content.byteLength - 2);
+      }
+      if (fault === "growing") await appendFile(fixture.physicalPath, "growth");
+      await expect(collect(fixture.session.chunks)).rejects.toThrow();
+      expect(await hasOpenDescriptorFor(fixture.physicalPath)).toBe(false);
+      if (fault === "hash") {
+        expect(fixture.acknowledge).toHaveBeenCalledTimes(1);
+        expect(fixture.events).toEqual(["ack"]);
+        await fixture.session.finalize("close");
+        expect(fixture.acknowledge).toHaveBeenCalledTimes(1);
+      } else {
+        expect(fixture.acknowledge).not.toHaveBeenCalled();
+        await expect(stat(fixture.physicalPath)).resolves.toBeTruthy();
+        await fixture.session.finalize("close").catch(() => undefined);
+      }
+      await fixture.adapter.close();
+    }
+  });
+
+  it("fails an asset open racing shutdown and closes the unpublished handle", async () => {
+    const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-close-race-"));
+    const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
+    const bytes = Buffer.from("shutdown race asset");
+    const assetPath = "race.png";
+    const physicalPath = join(assetRoot, assetPath);
+    await writeFile(physicalPath, bytes);
+    const value = await descriptor(assetRoot, assetPath, bytes);
+    const scope: AssetScope = { ownerUserId: "owner-1", assetId: "asset-race" };
+    const adapter = await createSecureFilesystemAdapter({
+      archiveRoot,
+      assetRoot,
+      platform: "linux",
+      delivery: {
+        async resolveFinalizedAssetDelivery() {
+          return {
+            kind: "durable_finalized" as const,
+            scope,
+            request: { kind: "original" as const },
+            descriptor: {
+              assetId: scope.assetId,
+              kind: "original" as const,
+              derivativeKind: null,
+              mimeType: "image/png",
+              byteLength: bytes.byteLength,
+              etag: sha256(bytes)
+            },
+            grant: "asset-race-grant" as never,
+            cleanupAuthority: "none" as const
+          };
+        },
+        async redeemFinalizedDeliveryGrant() { return value; },
+        redeemLegacyAnchoredRead: unsupported
+      },
+      transactions: { async run(work) { return work({}); } }
+    });
+    const probe = await open(physicalPath);
+    const prototype = Object.getPrototypeOf(probe) as { stat: FileHandle["stat"] };
+    await probe.close();
+    const originalStat = prototype.stat;
+    let enteredResolve!: () => void;
+    let releaseResolve!: () => void;
+    const entered = new Promise<void>((resolve) => { enteredResolve = resolve; });
+    const release = new Promise<void>((resolve) => { releaseResolve = resolve; });
+    let block = true;
+    const statSpy = vi.spyOn(prototype, "stat").mockImplementation(function (this: FileHandle, options) {
+      if (!block) return originalStat.call(this, options);
+      block = false;
+      enteredResolve();
+      return release.then(() => originalStat.call(this, options)) as ReturnType<FileHandle["stat"]>;
+    });
+    try {
+      const opening = adapter.openAssetSession({
+        scope,
+        request: { kind: "original" },
+        limits: bindPrivateBoundedStreamLimits({
+          maximumBytes: 1024,
+          chunkBytes: 4,
+          deadlineAt: FUTURE
+        })
+      });
+      await entered;
+      await adapter.close();
+      releaseResolve();
+      await expect(opening).rejects.toThrow("filesystem_adapter_closed");
+      expect(await hasOpenDescriptorFor(physicalPath)).toBe(false);
+    } finally {
+      releaseResolve();
+      statSpy.mockRestore();
+    }
+  });
+
+  it("quarantines target-only recovery without path deletion or cleanup completion", async () => {
+    const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-target-only-"));
+    const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
+    await mkdir(join(archiveRoot, "exports"));
+    const relativePath = "exports/44444444-4444-4444-8444-444444444444.pending";
+    const physicalPath = join(archiveRoot, relativePath);
+    await writeFile(physicalPath, "unknown substituted node");
+    const operation = {
+      resourceKind: "portable",
+      ownerUserId: "owner-1",
+      operationScopeId: "target-only-scope",
+      operationId: "44444444-4444-4444-8444-444444444444",
+      purpose: "portable_export",
+      expiresAt: FUTURE
+    } as ReservedFilesystemOperation;
+    const recovery = {
+      action: "cleanup" as const,
+      operation,
+      claim: {
+        operationId: operation.operationId,
+        leaseId: "target-only-lease",
+        leaseOwner: "reaper-target-only",
+        workVersion: 2,
+        leaseExpiresAt: FUTURE
+      }
+    } as never;
+    const completeCleanup = vi.fn();
+    const adapter = await createSecureFilesystemAdapter({
+      archiveRoot,
+      assetRoot,
+      platform: "linux",
+      expiry: { async claimExpiredPortableWork() { return [recovery]; } },
+      portable: {
+        async prepareRecoveryCleanup() { return { outcome: "already_cleaned" as const }; },
+        acknowledgeExportCleanup: unsupported,
+        rehydrateStagedInput: unsupported,
+        prepareStagedCleanup: unsupported,
+        acknowledgeStagedCleanup: unsupported,
+        rehydrateExportArtifact: unsupported,
+        prepareExportCleanup: unsupported
+      },
+      prewrite: {
+        async preparePrewriteCleanup() { return { outcome: "quarantined" as const }; },
+        recordPrewriteTarget: unsupported,
+        recordPrewriteNode: unsupported
+      },
+      journal: {
+        completeCleanup,
+        reserve: unsupported,
+        attach: unsupported,
+        finalizeAfterCommit: unsupported,
+        markCleanup: unsupported,
+        recover: unsupported
+      },
+      transactions: { async run(work) { return work({}); } }
+    });
+    await expect(adapter.reapExpiredPortable({
+      leaseOwner: "reaper-target-only",
+      leaseSeconds: 30,
+      limit: 10
+    })).resolves.toEqual({ claimed: 1, cleaned: 0, pending: 1 });
+    await expect(stat(physicalPath)).resolves.toBeTruthy();
+    expect(completeCleanup).not.toHaveBeenCalled();
+    await adapter.close();
+  });
+
   it("reaps bearer-free expired export work by deleting before b2c acknowledgement", async () => {
     const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-reaper-"));
     const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
@@ -588,6 +1011,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
       },
       prewrite: {
         async preparePrewriteCleanup() { return { outcome: "already_cleaned" as const }; },
+        recordPrewriteTarget: unsupported,
         recordPrewriteNode: unsupported
       },
       journal: {

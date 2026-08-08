@@ -17,7 +17,10 @@ import type {
   PrivateStorageDescriptor,
   ReservedFilesystemOperation
 } from "../../../packages/application/src/assets/private-storage-lifecycle.js";
-import { bindPrivatePrewriteNodeAuthority } from "../../../packages/application/src/assets/private-secure-storage.js";
+import {
+  bindPrivatePrewriteNodeAuthority,
+  bindPrivatePrewriteTargetAuthority
+} from "../../../packages/application/src/assets/private-secure-storage.js";
 import {
   bindPrivateFilesystemCandidateAttachment,
   type PrivateFilesystemCandidatePersistencePort
@@ -383,20 +386,47 @@ function boundedReadSession(input: Readonly<{
 }>): PrivateBoundedStreamSession {
   requireLimits(input.limits, input.descriptor.byteLength);
   let finalization: Promise<void> | undefined;
+  let terminalReason: PrivateStreamTerminalReason | undefined;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   const finalize = (reason: PrivateStreamTerminalReason): Promise<void> => {
+    terminalReason ??= reason;
+    if (deadlineTimer) {
+      clearTimeout(deadlineTimer);
+      deadlineTimer = undefined;
+    }
     finalization ??= (async () => {
-      await input.handle.close();
-      input.onClosed?.();
-      await input.afterClose(reason);
+      let closeError: unknown;
+      try {
+        await input.handle.close();
+      } catch (error) {
+        closeError = error;
+      } finally {
+        input.onClosed?.();
+      }
+      await input.afterClose(terminalReason!);
+      if (closeError) throw closeError;
     })();
     return finalization;
   };
+  const throwIfTerminated = (): void => {
+    if (terminalReason === "timeout") throw new Error("filesystem_stream_timeout");
+    if (terminalReason) throw new Error("filesystem_stream_closed");
+  };
+  const timeoutMilliseconds = Math.min(
+    2_147_483_647,
+    Math.max(0, Date.parse(input.limits.deadlineAt) - Date.now()),
+  );
+  deadlineTimer = setTimeout(() => {
+    void finalize("timeout").catch(() => undefined);
+  }, timeoutMilliseconds);
+  deadlineTimer.unref?.();
   const chunks = (async function* (): AsyncGenerator<Uint8Array> {
     let reason: PrivateStreamTerminalReason = "abort";
     const hash = createHash("sha256");
     let position = 0;
     try {
       while (position < input.descriptor.byteLength) {
+        throwIfTerminated();
         if (Date.now() >= Date.parse(input.limits.deadlineAt)) {
           reason = "timeout";
           throw new Error("filesystem_stream_timeout");
@@ -407,17 +437,22 @@ function boundedReadSession(input: Readonly<{
         );
         const buffer = Buffer.allocUnsafe(requested);
         const { bytesRead } = await input.handle.read(buffer, 0, requested, position);
+        throwIfTerminated();
         if (bytesRead !== requested) throw new Error("filesystem_stream_partial");
         const chunk = buffer.subarray(0, bytesRead);
         hash.update(chunk);
         position += bytesRead;
         yield Uint8Array.from(chunk);
       }
+      throwIfTerminated();
       const sentinel = Buffer.allocUnsafe(1);
-      if ((await input.handle.read(sentinel, 0, 1, position)).bytesRead !== 0) {
+      const sentinelRead = await input.handle.read(sentinel, 0, 1, position);
+      throwIfTerminated();
+      if (sentinelRead.bytesRead !== 0) {
         throw new Error("filesystem_stream_grew");
       }
       const finalStat = await input.handle.stat({ bigint: true }) as BigIntStat;
+      throwIfTerminated();
       const initial = statIdentity(input.initialStat);
       const final = statIdentity(finalStat);
       if (!finalStat.isFile()
@@ -432,6 +467,10 @@ function boundedReadSession(input: Readonly<{
       }
       reason = "eof";
     } catch (error) {
+      if (terminalReason === "timeout") {
+        reason = "timeout";
+        throw new Error("filesystem_stream_timeout");
+      }
       if (reason !== "timeout") reason = "read_failure";
       throw error;
     } finally {
@@ -462,7 +501,12 @@ export async function createSecureFilesystemAdapter(
   }
   const activeStreamHandles = new Set<FileHandle>();
   const activePortableHandles = new Map<string, Set<FileHandle>>();
+  let closing = false;
+  const requireAdapterOpen = (): void => {
+    if (closing) throw new Error("filesystem_adapter_closed");
+  };
   const registerStreamHandle = (handle: FileHandle): (() => void) => {
+    requireAdapterOpen();
     activeStreamHandles.add(handle);
     return () => activeStreamHandles.delete(handle);
   };
@@ -497,6 +541,7 @@ export async function createSecureFilesystemAdapter(
     byteLength: number;
     source: AsyncIterable<Uint8Array> | Iterable<Uint8Array>;
   }>) => {
+    requireAdapterOpen();
     if (!options.journal || !options.prewrite || !options.candidates) {
       throw new Error("portable_publication_repository_unavailable");
     }
@@ -529,9 +574,10 @@ export async function createSecureFilesystemAdapter(
           { cause: "rollback" },
         );
         if (cleanup.outcome !== "cleanup_pending") return;
-        if (nodeIdentity) {
-          await identitySafeDeletePrewrite(archiveRoot, relativePath, nodeIdentity);
-        }
+        // A target-only row has no durable inode identity. Leave it pending for
+        // fail-closed quarantine instead of deleting or declaring it cleaned.
+        if (!nodeIdentity) return;
+        await identitySafeDeletePrewrite(archiveRoot, relativePath, nodeIdentity);
         const completed = await options.journal!.completeCleanup(operation, reserved.claim);
         if (!["cleaned", "already_cleaned"].includes(completed.outcome)) {
           throw new Error(`filesystem_cleanup_${completed.outcome}`);
@@ -541,6 +587,9 @@ export async function createSecureFilesystemAdapter(
     };
     try {
       await ensureAnchoredDirectory(archiveRoot, input.directory);
+      await options.prewrite.recordPrewriteTarget(
+        bindPrivatePrewriteTargetAuthority(operation, relativePath),
+      );
       handle = await openAnchored(archiveRoot, relativePath, CREATE_FLAGS, 0o600);
       const created = statIdentity(await handle.stat({ bigint: true }) as BigIntStat);
       nodeIdentity = { deviceId: created.deviceId, fileId: created.fileId };
@@ -647,6 +696,7 @@ export async function createSecureFilesystemAdapter(
   };
 
   const openExportSession: SecureFilesystemAdapter["openExportSession"] = async (input) => {
+    requireAdapterOpen();
     if (!options.portable) throw new Error("portable_repository_unavailable");
     const rehydration = await options.portable.rehydrateExportArtifact(
       input.scope,
@@ -696,6 +746,7 @@ export async function createSecureFilesystemAdapter(
   };
 
   const openAssetSession: SecureFilesystemAdapter["openAssetSession"] = async (input) => {
+    requireAdapterOpen();
     if (!options.delivery) throw new Error("asset_delivery_repository_unavailable");
     const resolution = await options.delivery.resolveFinalizedAssetDelivery(input.scope, input.request);
     if (!resolution) return null;
@@ -730,6 +781,7 @@ export async function createSecureFilesystemAdapter(
   };
 
   const openLegacyPathV1Preview: SecureFilesystemAdapter["openLegacyPathV1Preview"] = async (input) => {
+    requireAdapterOpen();
     if (input.descriptor.kind !== "legacy_path_v1") {
       throw new Error("legacy_path_v1_descriptor_invalid");
     }
@@ -758,6 +810,7 @@ export async function createSecureFilesystemAdapter(
   };
 
   const reapExpiredPortable: SecureFilesystemAdapter["reapExpiredPortable"] = async (input) => {
+    requireAdapterOpen();
     if (!options.expiry || !options.portable || !options.prewrite || !options.journal) {
       throw new Error("portable_reaper_repository_unavailable");
     }
@@ -822,6 +875,7 @@ export async function createSecureFilesystemAdapter(
     openLegacyPathV1Preview,
     reapExpiredPortable,
     close() {
+      closing = true;
       const streamHandles = [...activeStreamHandles];
       activeStreamHandles.clear();
       activePortableHandles.clear();
