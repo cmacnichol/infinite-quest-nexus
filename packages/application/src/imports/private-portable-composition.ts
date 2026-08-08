@@ -170,11 +170,28 @@ export type PrivateImportedAssetAttachment = Readonly<{
   rollback(): Promise<void>;
 }>;
 
+export type PrivateReservedImportedAsset = Readonly<{
+  command: PrivateAssetPublicationCommand;
+  identity: PrivateAssetPublicationIdentity;
+}>;
+
 export interface PrivateCallerTransactionAssetPublisher {
+  reserveImportedAssets(
+    commands: readonly PrivateAssetPublicationCommand[],
+  ): Promise<readonly PrivateReservedImportedAsset[]>;
   attachImportedAssets(
     database: PrivatePortableTransactionContext,
-    commands: readonly PrivateAssetPublicationCommand[],
+    reservations: readonly PrivateReservedImportedAsset[],
   ): Promise<readonly PrivateImportedAssetAttachment[]>;
+  discardPreparedImportedAssets(
+    database: PrivatePortableTransactionContext,
+    reservations: readonly PrivateReservedImportedAsset[],
+  ): Promise<void>;
+  recoverImportedAssets(
+    owner: ImportOwnerScope,
+    campaignId: string,
+    recovery: Readonly<{ leaseOwner: string; leaseSeconds: number }>,
+  ): Promise<void>;
   finalizeImportedAssets(attachments: readonly PrivateImportedAssetAttachment[]): Promise<void>;
 }
 
@@ -190,6 +207,11 @@ export type PrivatePortableFamilyMutationResult = Readonly<{
 
 /** Named caller-client authority. No loose callback can substitute for domain persistence. */
 export interface PrivatePortableFamilyMutationPort {
+  findCampaignDuplicate(database: PrivatePortableTransactionContext, input: Readonly<{
+    owner: ImportOwnerScope;
+    kind: "campaign_zip" | "legacy_story" | "story_text";
+    authorityFingerprint: string;
+  }>): Promise<PrivatePortableFamilyMutationResult | null>;
   commitCampaignZip(database: PrivatePortableTransactionContext, input: Readonly<{
     owner: ImportOwnerScope;
     destination: PortablePreviewDestination;

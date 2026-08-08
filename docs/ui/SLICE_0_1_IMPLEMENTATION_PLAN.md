@@ -8667,6 +8667,57 @@ task-owned diff review. No API route, worker, illustration writer, legacy
 consumer, public barrel, or cross-role allowlist binding changed. Task 14e3e is
 next; route binding remains deferred to 14e3g.
 
+**14e3d post-completion correction (2026-08-08, implemented and
+verification-complete; final review pending).** A completed-work audit found
+that the initial composition proof still left restart, rollback, concurrency,
+destination, and boundary-inventory gaps that could make a successful portable
+import irrecoverable or allow an incomplete operation to escape the intended
+authority fences. The correction keeps 14e3d private and unconsumed while
+closing each gap before 14e3e begins:
+
+- restart replay now discovers the exact campaign/publication identities and
+  reconciles mixed multi-artifact `attached`/`finalized` sets, rotating only
+  expired unfinished claims and preserving artifacts already finalized;
+- portable reaping first atomically expires due import work and clears its
+  lease before staged-storage cleanup, so restart does not leave a running or
+  recoverable progress projection behind;
+- asset identities are durably reserved before the caller transaction and the
+  caller client uses only the second pool connection for advisory/content
+  locks plus `FOR KEY SHARE` identity validation. Real `max: 2` and direct
+  two-client races prove no nested pool deadlock and retain same-content
+  publisher fencing;
+- Campaign ZIP and Legacy Story mutation validate and key-share-lock the exact
+  owner-scoped world/world-version pair before any write. Campaign ZIP also
+  acquires owner/authority duplicate protection before asset reservation, so a
+  different-key replay cannot publish unreferenced files;
+- rollback compensation now discards prepared identities only after the caller
+  transaction has rolled back, drives any attached operation through durable
+  cleanup, and retains audit-safe `cleanup_pending` identity state. A later
+  same-command retry may reuse that identity only when every prior operation is
+  cleaned;
+- partial multi-asset reservation failure compensates every reservation already
+  created in that batch. Concurrent same-command commits compare the exact
+  identity and canonical request fingerprint, treat only an exact identity that
+  advanced to `attached`/`published` as the winner's idempotent replay, and
+  retain mismatch plus unexpected-active-operation fences;
+- the portable-composition boundary check is now a repository-wide AST
+  inventory over all supported JavaScript/TypeScript source extensions. It
+  rejects aliased/default/namespace/computed, `require`, dynamic-import, and
+  re-export bypasses for legacy authorities, raw paths, process-local progress,
+  and public buffered export while asserting one canonical private factory and
+  its deliberately unconsumed production graph.
+
+The correction matrix includes close/reopen finalization recovery, mixed
+multi-artifact crashes, database-before-projection expiry, exact destination
+denial, duplicate-before-assets behavior, caller rollback cleanup, partial
+reservation compensation, and a deterministic concurrent same-command winner/
+loser replay. Final verification is 1,457 unit tests and 502 integration tests,
+including the 30 focused 14e3c/14e3d correction cases, plus `pnpm check`, build,
+`git diff --check`, `pjm precheck`, and correction-only diff review. No route,
+worker, illustration writer, legacy consumer, public barrel, migration, or
+cross-role allowlist binding changed. **14e3e remains the next implementation
+task after final review; route binding remains deferred to 14e3g.**
+
 **14e3e — illustration/import writers and worker composition.** Move real
 illustration image persistence, imported asset publication, runtime illustration
 bindings, metadata backfill, and durable filesystem recovery behind these

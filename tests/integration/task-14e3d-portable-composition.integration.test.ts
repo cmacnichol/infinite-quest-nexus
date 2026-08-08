@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import JSZip from "jszip";
@@ -24,7 +24,8 @@ import { createPortableImportExportComposition } from "../../services/runtime/sr
 import {
   createDatabasePool,
   initialOwnerId,
-  type DatabasePool
+  type DatabasePool,
+  withTransaction
 } from "../../packages/database/src/pool.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -135,8 +136,8 @@ integration("Task 14e3d durable portable composition authority", () => {
     return { repository, command, authority, authorityFingerprint, preview: value };
   }
 
-  function worldRepository() {
-    return createPostgresWorldRepositoryAdapters(pool, {
+  function worldRepository(databasePool = pool) {
+    return createPostgresWorldRepositoryAdapters(databasePool, {
       memory: { async autoEnableCampaignEmbedding() { return { enabled: false }; } }
     }).worlds;
   }
@@ -165,12 +166,14 @@ integration("Task 14e3d durable portable composition authority", () => {
     target: Awaited<ReturnType<typeof createWorldScope>>;
     leaseOwner: string;
     previewTtlSeconds?: number;
+    databasePool?: DatabasePool;
     exports?: Parameters<typeof createPortableImportExportComposition>[0]["exports"];
   }>) {
+    const databasePool = input.databasePool ?? pool;
     return createPortableImportExportComposition({
-      pool,
+      pool: databasePool,
       roots: { archiveRoot: input.archiveRoot, assetRoot: input.assetRoot },
-      worlds: worldRepository(),
+      worlds: worldRepository(databasePool),
       leaseOwner: input.leaseOwner,
       ...(input.previewTtlSeconds === undefined ? {} : { previewTtlSeconds: input.previewTtlSeconds }),
       provider: {
@@ -225,6 +228,46 @@ integration("Task 14e3d durable portable composition authority", () => {
       source: [bytes]
     });
     return staged.stagedInput;
+  }
+
+  async function campaignArchiveWithAssets(
+    label: string,
+    sourceAssetIds: readonly string[],
+  ): Promise<Uint8Array> {
+    const archive = new JSZip();
+    archive.file("campaign.json", JSON.stringify({
+      format: "infinite-quest-campaign",
+      formatVersion: 1,
+      campaign: { title: `${label} campaign` },
+      world: { title: `${label} world`, character: "Hero\nA durable explorer" },
+      turns: [{ id: `${label}-turn`, action: "Look", narration: "Hero enters the archive hall." }]
+    }));
+    for (const [index, sourceAssetId] of sourceAssetIds.entries()) {
+      archive.file(
+        `assets/${sourceAssetId}.png`,
+        new TextEncoder().encode(`portable-asset-${label}-${index}`),
+      );
+    }
+    return archive.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+  }
+
+  async function campaignArchive(label: string): Promise<Uint8Array> {
+    return campaignArchiveWithAssets(label, [crypto.randomUUID()]);
+  }
+
+  async function waitForAdvisoryWaiters(minimum: number): Promise<void> {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const waiting = await pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count
+           FROM pg_stat_activity
+          WHERE datname=current_database() AND wait_event_type='Lock'
+            AND (query ILIKE '%asset_publication_identities%'
+              OR query ILIKE '%pg_advisory_xact_lock%')`,
+      );
+      if ((waiting.rows[0]?.count ?? 0) >= minimum) return;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    throw new Error("task_14e3d_advisory_wait_timeout");
   }
 
   it("persists private canonical authority and rolls a caller claim back without consuming staging", async () => {
@@ -615,6 +658,416 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
+  it("recovers attached imported assets before returning committed replay after restart", async () => {
+    const target = await createWorldScope(`14e3d finalize recovery target ${crypto.randomUUID()}`);
+    const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-finalize-archive-`);
+    const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-finalize-assets-`);
+    let composition = await createRealComposition({ archiveRoot, assetRoot, target, leaseOwner: "14e3d-finalize-a" });
+    const bytes = await campaignArchive(`finalize-${crypto.randomUUID()}`);
+    const staged = await stagedInput(composition, bytes, "14e3d-finalize");
+    const preview = await composition.previewCampaignZip({
+      ownerUserId,
+      stagedInput: staged,
+      kind: "campaign_zip",
+      destination: { kind: "embedded", operation: "create_world" }
+    });
+    const command = {
+      ownerUserId,
+      kind: "campaign_zip" as const,
+      destination: preview.destination,
+      previewHandle: preview.previewHandle,
+      idempotencyKey: `14e3d-finalize-${crypto.randomUUID()}`
+    };
+    await pool.query(`CREATE FUNCTION task_14e3d_finalize_fault() RETURNS trigger
+      LANGUAGE plpgsql AS $fault$ BEGIN RAISE EXCEPTION 'task_14e3d_finalize_fault'; END; $fault$`);
+    await pool.query(`CREATE TRIGGER task_14e3d_finalize_fault_trigger
+      BEFORE UPDATE ON durable_filesystem_operations
+      FOR EACH ROW WHEN (NEW.lifecycle='finalized' AND OLD.lifecycle='attached')
+      EXECUTE FUNCTION task_14e3d_finalize_fault()`);
+    try {
+      await expect(composition.commit(command)).rejects.toThrow("task_14e3d_finalize_fault");
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS task_14e3d_finalize_fault_trigger ON durable_filesystem_operations");
+      await pool.query("DROP FUNCTION IF EXISTS task_14e3d_finalize_fault()");
+      await composition.close();
+    }
+    composition = await createRealComposition({ archiveRoot, assetRoot, target, leaseOwner: "14e3d-finalize-b" });
+    try {
+      const replay = await composition.commit(command);
+      expect(replay).toMatchObject({ kind: "campaign_zip", result: { stats: { assetCount: 1 } } });
+      const lifecycle = await pool.query<{ lifecycle: string; operation_lifecycle: string }>(
+        `SELECT identity.lifecycle,operation.lifecycle AS operation_lifecycle
+           FROM asset_publication_identities identity
+           JOIN durable_filesystem_operations operation ON operation.asset_id=identity.asset_id
+           JOIN asset_references reference ON reference.asset_id=identity.asset_id
+          WHERE reference.campaign_id=$1 AND identity.owner_user_id=$2`,
+        [(replay.result as { campaignId: string }).campaignId, ownerUserId],
+      );
+      expect(lifecycle.rows).not.toHaveLength(0);
+      expect(lifecycle.rows.every((row) => row.lifecycle === "published" && row.operation_lifecycle === "finalized")).toBe(true);
+    } finally {
+      await composition.close();
+    }
+  });
+
+  it("does not attach assets for a distinct-key duplicate Campaign ZIP authority", async () => {
+    const target = await createWorldScope(`14e3d duplicate target ${crypto.randomUUID()}`);
+    const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-duplicate-archive-`);
+    const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-duplicate-assets-`);
+    const composition = await createRealComposition({ archiveRoot, assetRoot, target, leaseOwner: "14e3d-duplicate" });
+    const bytes = await campaignArchive(`duplicate-${crypto.randomUUID()}`);
+    try {
+      const firstStaged = await stagedInput(composition, bytes, "14e3d-duplicate-first");
+      const firstPreview = await composition.previewCampaignZip({
+        ownerUserId, stagedInput: firstStaged, kind: "campaign_zip", destination: { kind: "embedded", operation: "create_world" }
+      });
+      const first = await composition.commit({
+        ownerUserId,
+        kind: "campaign_zip",
+        destination: firstPreview.destination,
+        previewHandle: firstPreview.previewHandle,
+        idempotencyKey: `14e3d-duplicate-first-${crypto.randomUUID()}`
+      });
+      const beforeIdentities = await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM asset_publication_identities WHERE owner_user_id=$1",
+        [ownerUserId],
+      );
+      const beforeOperations = await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM durable_filesystem_operations WHERE owner_user_id=$1 AND resource_kind='asset'",
+        [ownerUserId],
+      );
+      const beforeFiles = await readdir(assetRoot, { recursive: true });
+      const secondStaged = await stagedInput(composition, bytes, "14e3d-duplicate-second");
+      const secondPreview = await composition.previewCampaignZip({
+        ownerUserId, stagedInput: secondStaged, kind: "campaign_zip", destination: { kind: "embedded", operation: "create_world" }
+      });
+      const duplicate = await composition.commit({
+        ownerUserId,
+        kind: "campaign_zip",
+        destination: secondPreview.destination,
+        previewHandle: secondPreview.previewHandle,
+        idempotencyKey: `14e3d-duplicate-second-${crypto.randomUUID()}`
+      });
+      expect(duplicate).toMatchObject({ duplicate: true, importedRecordId: first.importedRecordId });
+      await expect(pool.query(
+        "SELECT count(*)::int AS count FROM asset_publication_identities WHERE owner_user_id=$1",
+        [ownerUserId],
+      )).resolves.toMatchObject({ rows: beforeIdentities.rows });
+      await expect(pool.query(
+        "SELECT count(*)::int AS count FROM durable_filesystem_operations WHERE owner_user_id=$1 AND resource_kind='asset'",
+        [ownerUserId],
+      )).resolves.toMatchObject({ rows: beforeOperations.rows });
+      expect(await readdir(assetRoot, { recursive: true })).toEqual(beforeFiles);
+    } finally {
+      await composition.close();
+    }
+  });
+
+  it("imports a Campaign ZIP without exhausting a two-connection pool", async () => {
+    const twoConnectionPool = createDatabasePool(databaseUrl!, 2);
+    const target = await createWorldScope(`14e3d pool target ${crypto.randomUUID()}`);
+    const composition = await createRealComposition({
+      archiveRoot: await mkdtemp(`${tmpdir()}/iqn-14e3d-pool-archive-`),
+      assetRoot: await mkdtemp(`${tmpdir()}/iqn-14e3d-pool-assets-`),
+      target,
+      leaseOwner: "14e3d-pool",
+      databasePool: twoConnectionPool
+    });
+    try {
+      const bytes = await campaignArchive(`pool-${crypto.randomUUID()}`);
+      const staged = await stagedInput(composition, bytes, "14e3d-pool");
+      const preview = await composition.previewCampaignZip({
+        ownerUserId, stagedInput: staged, kind: "campaign_zip", destination: { kind: "embedded", operation: "create_world" }
+      });
+      await expect(composition.commit({
+        ownerUserId,
+        kind: "campaign_zip",
+        destination: preview.destination,
+        previewHandle: preview.previewHandle,
+        idempotencyKey: `14e3d-pool-${crypto.randomUUID()}`
+      })).resolves.toMatchObject({ kind: "campaign_zip", duplicate: false });
+    } finally {
+      await composition.close();
+      await twoConnectionPool.end();
+    }
+  }, 20_000);
+
+  it("discards durable asset reservations only after a caller transaction rollback", async () => {
+    const target = await createWorldScope(`14e3d reservation rollback target ${crypto.randomUUID()}`);
+    const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-reservation-rollback-archive-`);
+    const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-reservation-rollback-assets-`);
+    const composition = await createRealComposition({
+      archiveRoot,
+      assetRoot,
+      target,
+      leaseOwner: "14e3d-reservation-rollback"
+    });
+    const bytes = await campaignArchive(`reservation-rollback-${crypto.randomUUID()}`);
+    const staged = await stagedInput(composition, bytes, "14e3d-reservation-rollback");
+    const preview = await composition.previewCampaignZip({
+      ownerUserId,
+      stagedInput: staged,
+      kind: "campaign_zip",
+      destination: { kind: "embedded", operation: "create_world" }
+    });
+    const command = {
+      ownerUserId,
+      kind: "campaign_zip" as const,
+      destination: preview.destination,
+      previewHandle: preview.previewHandle,
+      idempotencyKey: `14e3d-reservation-rollback-${crypto.randomUUID()}`
+    };
+    const before = await pool.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM asset_publication_identities
+        WHERE owner_user_id=$1 AND lifecycle='prepared'`,
+      [ownerUserId],
+    );
+    await pool.query(`CREATE FUNCTION task_14e3d_reservation_rollback_fault() RETURNS trigger
+      LANGUAGE plpgsql AS $fault$
+      BEGIN
+        IF NEW.phase='mutating' AND OLD.phase='publishing_assets' THEN
+          RAISE EXCEPTION 'task_14e3d_reservation_rollback_fault';
+        END IF;
+        RETURN NEW;
+      END;
+      $fault$`);
+    await pool.query(`CREATE TRIGGER task_14e3d_reservation_rollback_fault_trigger
+      BEFORE UPDATE ON portable_import_work
+      FOR EACH ROW EXECUTE FUNCTION task_14e3d_reservation_rollback_fault()`);
+    try {
+      await expect(composition.commit(command)).rejects.toThrow("task_14e3d_reservation_rollback_fault");
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS task_14e3d_reservation_rollback_fault_trigger ON portable_import_work");
+      await pool.query("DROP FUNCTION IF EXISTS task_14e3d_reservation_rollback_fault()");
+    }
+    try {
+      await expect(pool.query(
+        `SELECT identity.lifecycle,operation.lifecycle AS operation_lifecycle
+           FROM asset_publication_identities identity
+           JOIN durable_filesystem_operations operation
+             ON operation.asset_id=identity.asset_id AND operation.owner_user_id=identity.owner_user_id
+          WHERE identity.owner_user_id=$1 AND identity.lifecycle='cleanup_pending'
+          ORDER BY identity.created_at DESC,operation.created_at
+          LIMIT 1`,
+        [ownerUserId],
+      )).resolves.toMatchObject({
+        rows: [{ lifecycle: "cleanup_pending", operation_lifecycle: "cleaned" }]
+      });
+      await expect(pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM asset_publication_identities
+          WHERE owner_user_id=$1 AND lifecycle='prepared'`,
+        [ownerUserId],
+      )).resolves.toMatchObject({ rows: before.rows });
+      await expect(composition.commit(command)).resolves.toMatchObject({
+        kind: "campaign_zip",
+        duplicate: false,
+        result: { stats: { assetCount: 1 } }
+      });
+    } finally {
+      await composition.close();
+    }
+  });
+
+  it("compensates earlier durable reservations when a later asset reservation fails", async () => {
+    const target = await createWorldScope(`14e3d partial reservation target ${crypto.randomUUID()}`);
+    const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-partial-reservation-archive-`);
+    const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-partial-reservation-assets-`);
+    const composition = await createRealComposition({
+      archiveRoot,
+      assetRoot,
+      target,
+      leaseOwner: "14e3d-partial-reservation"
+    });
+    const label = `partial-reservation-${crypto.randomUUID()}`;
+    const sourceAssetIds = [crypto.randomUUID(), crypto.randomUUID()];
+    const bytes = await campaignArchiveWithAssets(label, sourceAssetIds);
+    const staged = await stagedInput(composition, bytes, "14e3d-partial-reservation");
+    const preview = await composition.previewCampaignZip({
+      ownerUserId,
+      stagedInput: staged,
+      kind: "campaign_zip",
+      destination: { kind: "embedded", operation: "create_world" }
+    });
+    const command = {
+      ownerUserId,
+      kind: "campaign_zip" as const,
+      destination: preview.destination,
+      previewHandle: preview.previewHandle,
+      idempotencyKey: `14e3d-partial-reservation-${crypto.randomUUID()}`
+    };
+    const secondContentHash = hash(`portable-asset-${label}-1`);
+    const secondPublicationKey = `portable-${hash(
+      `${command.idempotencyKey}:1:${sourceAssetIds[1]}:${secondContentHash}`,
+    )}`;
+    const secondPublicationKeyHash = hash(secondPublicationKey);
+    const before = await pool.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM asset_publication_identities
+        WHERE owner_user_id=$1 AND lifecycle='prepared'`,
+      [ownerUserId],
+    );
+    await pool.query(`CREATE FUNCTION task_14e3d_second_reservation_fault() RETURNS trigger
+      LANGUAGE plpgsql AS $fault$
+      BEGIN
+        IF NEW.idempotency_key_hash='${secondPublicationKeyHash}' THEN
+          RAISE EXCEPTION 'task_14e3d_second_reservation_fault';
+        END IF;
+        RETURN NEW;
+      END;
+      $fault$`);
+    await pool.query(`CREATE TRIGGER task_14e3d_second_reservation_fault_trigger
+      BEFORE INSERT ON asset_publication_identities
+      FOR EACH ROW EXECUTE FUNCTION task_14e3d_second_reservation_fault()`);
+    try {
+      await expect(composition.commit(command)).rejects.toThrow("task_14e3d_second_reservation_fault");
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS task_14e3d_second_reservation_fault_trigger ON asset_publication_identities");
+      await pool.query("DROP FUNCTION IF EXISTS task_14e3d_second_reservation_fault()");
+    }
+    try {
+      await expect(pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM asset_publication_identities
+          WHERE owner_user_id=$1 AND lifecycle='prepared'`,
+        [ownerUserId],
+      )).resolves.toMatchObject({ rows: before.rows });
+      await expect(composition.commit(command)).resolves.toMatchObject({
+        kind: "campaign_zip",
+        duplicate: false,
+        result: { stats: { assetCount: 2 } }
+      });
+    } finally {
+      await composition.close();
+    }
+  });
+
+  it("returns the committed replay to a concurrent same-command loser without cleaning the winner", async () => {
+    const target = await createWorldScope(`14e3d concurrent replay target ${crypto.randomUUID()}`);
+    const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-concurrent-replay-archive-`);
+    const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-concurrent-replay-assets-`);
+    const composition = await createRealComposition({
+      archiveRoot,
+      assetRoot,
+      target,
+      leaseOwner: "14e3d-concurrent-replay"
+    });
+    const label = `concurrent-replay-${crypto.randomUUID()}`;
+    const sourceAssetId = crypto.randomUUID();
+    const bytes = await campaignArchiveWithAssets(label, [sourceAssetId]);
+    const staged = await stagedInput(composition, bytes, "14e3d-concurrent-replay");
+    const preview = await composition.previewCampaignZip({
+      ownerUserId,
+      stagedInput: staged,
+      kind: "campaign_zip",
+      destination: { kind: "embedded", operation: "create_world" }
+    });
+    const command = {
+      ownerUserId,
+      kind: "campaign_zip" as const,
+      destination: preview.destination,
+      previewHandle: preview.previewHandle,
+      idempotencyKey: `14e3d-concurrent-replay-${crypto.randomUUID()}`
+    };
+    const contentHash = hash(`portable-asset-${label}-0`);
+    const publicationKey = `portable-${hash(
+      `${command.idempotencyKey}:0:${sourceAssetId}:${contentHash}`,
+    )}`;
+    const publicationKeyHash = hash(publicationKey);
+    const gateName = `task-14e3d-concurrent-${crypto.randomUUID()}`;
+    const gate = await pool.connect();
+    let gateHeld = false;
+    let attempts: readonly PromiseSettledResult<Awaited<ReturnType<typeof composition.commit>>>[] = [];
+    try {
+      await pool.query(`CREATE FUNCTION task_14e3d_concurrent_reservation_gate() RETURNS trigger
+        LANGUAGE plpgsql AS $gate$
+        BEGIN
+          IF NEW.idempotency_key_hash='${publicationKeyHash}' THEN
+            PERFORM pg_advisory_xact_lock(hashtextextended('${gateName}',0));
+          END IF;
+          RETURN NEW;
+        END;
+        $gate$`);
+      await pool.query(`CREATE TRIGGER task_14e3d_concurrent_reservation_gate_trigger
+        BEFORE INSERT ON asset_publication_identities
+        FOR EACH ROW EXECUTE FUNCTION task_14e3d_concurrent_reservation_gate()`);
+      await gate.query("SELECT pg_advisory_lock(hashtextextended($1,0))", [gateName]);
+      gateHeld = true;
+      const winner = composition.commit(command);
+      await waitForAdvisoryWaiters(1);
+      const loser = composition.commit(command);
+      await waitForAdvisoryWaiters(2);
+      await gate.query("SELECT pg_advisory_unlock(hashtextextended($1,0))", [gateName]);
+      gateHeld = false;
+      attempts = await Promise.allSettled([winner, loser]);
+    } finally {
+      if (gateHeld) await gate.query("SELECT pg_advisory_unlock(hashtextextended($1,0))", [gateName]);
+      gate.release();
+      await pool.query("DROP TRIGGER IF EXISTS task_14e3d_concurrent_reservation_gate_trigger ON asset_publication_identities");
+      await pool.query("DROP FUNCTION IF EXISTS task_14e3d_concurrent_reservation_gate()");
+    }
+    try {
+      expect(attempts.every((attempt) => attempt.status === "fulfilled")).toBe(true);
+      if (attempts[0]?.status !== "fulfilled" || attempts[1]?.status !== "fulfilled") {
+        throw new Error("task_14e3d_concurrent_replay_failed");
+      }
+      expect(attempts[1].value).toEqual(attempts[0].value);
+      await expect(pool.query(
+        `SELECT identity.lifecycle,operation.lifecycle AS operation_lifecycle
+           FROM asset_publication_identities identity
+           JOIN durable_filesystem_operations operation
+             ON operation.asset_id=identity.asset_id AND operation.owner_user_id=identity.owner_user_id
+          WHERE identity.owner_user_id=$1 AND identity.idempotency_key_hash=$2`,
+        [ownerUserId, publicationKeyHash],
+      )).resolves.toMatchObject({
+        rows: [{ lifecycle: "published", operation_lifecycle: "finalized" }]
+      });
+    } finally {
+      await composition.close();
+    }
+  }, 20_000);
+
+  it("rejects foreign preview scope and wrong same-owner destination pairs again inside commit", async () => {
+    const foreignWorld = await pool.query<{ id: string }>(
+      "INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Foreign portable world') RETURNING id",
+      [foreignOwnerUserId],
+    );
+    const foreignVersion = await pool.query<{ id: string }>(
+      "INSERT INTO world_versions (world_id,owner_user_id,version_number,content) VALUES ($1,$2,1,'{}') RETURNING id",
+      [foreignWorld.rows[0]!.id, foreignOwnerUserId],
+    );
+    const targetA = await createWorldScope(`14e3d destination A ${crypto.randomUUID()}`);
+    const targetB = await createWorldScope(`14e3d destination B ${crypto.randomUUID()}`);
+    const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-destination-archive-`);
+    const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-destination-assets-`);
+    const composition = await createRealComposition({ archiveRoot, assetRoot, target: targetA, leaseOwner: "14e3d-destination" });
+    const bytes = new TextEncoder().encode(JSON.stringify({ world: { title: "Scoped legacy" }, turns: [] }));
+    try {
+      const staged = await stagedInput(composition, bytes, "14e3d-foreign-preview");
+      await expect(composition.previewLegacyStory({
+        ownerUserId,
+        stagedInput: staged,
+        kind: "legacy_story",
+        destination: {
+          kind: "existing_world_version",
+          worldId: foreignWorld.rows[0]!.id,
+          worldVersionId: foreignVersion.rows[0]!.id
+        }
+      })).rejects.toThrow();
+
+      const mutations = createPostgresPortableFamilyMutationRepository(worldRepository());
+      await expect(withTransaction(pool, (database) => mutations.commitLegacyStory(database, {
+        owner: { ownerUserId },
+        destination: {
+          kind: "existing_world_version",
+          worldId: targetA.worldId,
+          worldVersionId: targetB.worldVersionId
+        },
+        authorityFingerprint: hash(`14e3d-wrong-pair-${crypto.randomUUID()}`),
+        payload: { sourceName: "wrong-pair.json", story: { world: { title: "Wrong pair" }, turns: [] } }
+      }))).rejects.toThrow("portable_import_destination_invalid");
+    } finally {
+      await composition.close();
+    }
+  });
+
   it("resumes a persisted preview after composition restart and preserves replay", async () => {
     const target = await createWorldScope(`14e3d restart target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-restart-archive-`);
@@ -670,14 +1123,6 @@ integration("Task 14e3d durable portable composition authority", () => {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_200));
     composition = await createRealComposition({ archiveRoot, assetRoot, target, leaseOwner: "14e3d-expiry-b" });
     try {
-      expect(await composition.progress({ ownerUserId }, preview.previewHandle.token)).toMatchObject({ status: "expired" });
-      await expect(composition.commit({
-        ownerUserId,
-        kind: "legacy_story",
-        destination,
-        previewHandle: preview.previewHandle,
-        idempotencyKey: `14e3d-expired-${crypto.randomUUID()}`
-      })).rejects.toThrow("archive_expired");
       const reaped = await composition.reap({
         leaseOwner: "14e3d-expiry-reaper",
         leaseSeconds: 60,
@@ -686,6 +1131,21 @@ integration("Task 14e3d durable portable composition authority", () => {
       expect(reaped.claimed).toBeGreaterThanOrEqual(1);
       expect(reaped.cleaned).toBeGreaterThanOrEqual(1);
       expect(reaped.pending).toBe(0);
+      await expect(pool.query(
+        `SELECT operation.status,work.status AS work_status,work.lease_id
+           FROM portable_import_operations operation
+           JOIN portable_import_work work ON work.operation_id=operation.id
+          WHERE operation.preview_token_hash=$1`,
+        [hash(preview.previewHandle.token)],
+      )).resolves.toMatchObject({ rows: [{ status: "expired", work_status: "expired", lease_id: null }] });
+      await expect(composition.commit({
+        ownerUserId,
+        kind: "legacy_story",
+        destination,
+        previewHandle: preview.previewHandle,
+        idempotencyKey: `14e3d-expired-${crypto.randomUUID()}`
+      })).rejects.toThrow();
+      expect(await composition.progress({ ownerUserId }, preview.previewHandle.token)).toMatchObject({ status: "expired" });
     } finally {
       await composition.close();
     }

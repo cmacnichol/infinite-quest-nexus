@@ -45,6 +45,10 @@ export interface PrivateFilesystemCandidatePersistencePort {
  * while a caller reserves, verifies/reuses, and attaches a physical node.
  */
 export interface PrivateFilesystemPublicationLockPort {
+  lockPublicationContent(
+    database: DurableFilesystemTransactionContext,
+    contentHashes: readonly string[],
+  ): Promise<void>;
   withPublicationContentLocks<Result>(
     contentHashes: readonly string[],
     work: () => Promise<Result>,

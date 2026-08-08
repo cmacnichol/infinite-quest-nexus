@@ -778,6 +778,28 @@ export async function createPortableImportExportComposition(
     provenance: { origin: "imported" as const }
   }));
 
+  const completeCommittedReplay = async (
+    command: PortableImportCommitCommand,
+    view: import("../../../packages/application/src/imports/types.js").PortableImportCommitView,
+  ) => {
+    if (command.kind === "campaign_zip") {
+      const result = view.result as Readonly<{ campaignId?: unknown }>;
+      if (typeof result.campaignId !== "string" || result.campaignId.trim().length === 0) {
+        throw new Error("portable_import_result_unavailable");
+      }
+      await assets.transactionalPublisher.recoverImportedAssets(
+        owner(command.ownerUserId),
+        result.campaignId,
+        { leaseOwner: options.leaseOwner, leaseSeconds },
+      );
+    }
+    await authority.completeCommittedReplay(
+      owner(command.ownerUserId),
+      command.previewHandle.token,
+    );
+    return view;
+  };
+
   const commit = async (command: PortableImportCommitCommand) => {
     const preparationOnly = Symbol("portable-import-preparation-only");
     try {
@@ -790,7 +812,7 @@ export async function createPortableImportExportComposition(
         if (begun.outcome === "replay") return begun.view;
         throw preparationOnly;
       });
-      return replay;
+      return completeCommittedReplay(command, replay);
     } catch (error) {
       if (error !== preparationOnly) throw error;
     }
@@ -814,6 +836,9 @@ export async function createPortableImportExportComposition(
         throw error;
       }
     }
+    const reservedAssets = await assets.transactionalPublisher.reserveImportedAssets(
+      buildAssetCommands(command, assetArtifacts),
+    );
     let attachments: Awaited<ReturnType<typeof assets.transactionalPublisher.attachImportedAssets>> = [];
     let finalClaim: import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableImportWorkClaim | undefined;
     let committed: import("../../../packages/application/src/imports/types.js").PortableImportCommitView | undefined;
@@ -824,7 +849,12 @@ export async function createPortableImportExportComposition(
           leaseOwner: options.leaseOwner,
           leaseSeconds
         });
-        if (begun.outcome === "replay") return begun.view;
+        if (begun.outcome === "replay") {
+          if (reservedAssets.length > 0) {
+            await assets.transactionalPublisher.discardPreparedImportedAssets(database, reservedAssets);
+          }
+          return begun.view;
+        }
         if (authorityHash(begun.authority) !== previewAuthority.authorityFingerprint
           || authorityHash(begun.authority) !== authorityHash(previewAuthority.authority)) {
           throw new Error("portable_import_authority_mismatch");
@@ -834,10 +864,22 @@ export async function createPortableImportExportComposition(
           percentage: command.kind === "campaign_zip" ? 45 : 55,
           diagnosticCode: null
         });
-        if (command.kind === "campaign_zip") {
+        const duplicate = command.kind === "campaign_zip"
+          || command.kind === "legacy_story"
+          || command.kind === "story_text"
+          ? await mutations.findCampaignDuplicate(database, {
+            owner: owner(command.ownerUserId),
+            kind: command.kind,
+            authorityFingerprint: previewAuthority.authorityFingerprint
+          })
+          : null;
+        if (duplicate && reservedAssets.length > 0) {
+          await assets.transactionalPublisher.discardPreparedImportedAssets(database, reservedAssets);
+        }
+        if (command.kind === "campaign_zip" && !duplicate) {
           attachments = await assets.transactionalPublisher.attachImportedAssets(
             database,
-            buildAssetCommands(command, assetArtifacts),
+            reservedAssets,
           );
           claim = await authority.updateProgress(database, claim, {
             phase: "mutating",
@@ -852,7 +894,7 @@ export async function createPortableImportExportComposition(
           payload: begun.authority.normalizedPayload
         };
         const mutation: import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableFamilyMutationResult =
-          command.kind === "campaign_zip"
+          duplicate ?? (command.kind === "campaign_zip"
             ? await mutations.commitCampaignZip(database, {
               ...mutationInput,
               publishedAssets: attachments.map((attachment) => attachment.result)
@@ -866,7 +908,7 @@ export async function createPortableImportExportComposition(
                   kind: command.kind,
                   authorityFingerprint: mutationInput.authorityFingerprint,
                   payload: mutationInput.payload
-                });
+                }));
         claim = await authority.updateProgress(database, claim, {
           phase: "committing",
           percentage: 85,
@@ -889,10 +931,23 @@ export async function createPortableImportExportComposition(
       });
     } catch (error) {
       await Promise.allSettled(attachments.map((attachment) => attachment.rollback()));
+      const preparedReservations = reservedAssets.filter(({ identity }) => identity.lifecycle === "prepared");
+      if (preparedReservations.length > 0) {
+        try {
+          await withTransaction(options.pool, (database) => (
+            assets.transactionalPublisher.discardPreparedImportedAssets(database, preparedReservations)
+          ));
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            `${error instanceof Error ? error.message : "portable_import_failed"}; asset reservation cleanup failed`,
+          );
+        }
+      }
       throw error;
     }
     if (!committed) throw new Error("portable_import_result_unavailable");
-    if (!finalClaim) return committed;
+    if (!finalClaim) return completeCommittedReplay(command, committed);
     try {
       await assets.transactionalPublisher.finalizeImportedAssets(attachments);
       await withTransaction(options.pool, (database) => authority.completeProgress(database, finalClaim!));
@@ -973,7 +1028,10 @@ export async function createPortableImportExportComposition(
     },
     progress: (value, previewToken) => authority.readProgress(value, previewToken),
     abort: (value, previewToken) => authority.abort(value, previewToken),
-    reap: (input) => assets.storage.adapter.reapExpiredPortable(input),
+    async reap(input) {
+      await authority.expireDueWork(input.limit);
+      return assets.storage.adapter.reapExpiredPortable(input);
+    },
     close: () => assets.close()
   };
   return Object.freeze(composition);

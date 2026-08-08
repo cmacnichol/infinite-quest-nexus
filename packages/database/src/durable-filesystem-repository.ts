@@ -430,6 +430,22 @@ async function cleanupPathFenced(
 export function createPostgresDurableFilesystemRepository(
   pool: DatabasePool,
 ): PostgresDurableFilesystemRepository {
+  const lockPublicationContent: PrivateFilesystemPublicationLockPort["lockPublicationContent"] = async (
+    database,
+    contentHashes,
+  ) => {
+    const hashes = [...new Set(contentHashes)].sort();
+    if (hashes.length === 0 || hashes.some((contentHash) => !/^[0-9a-f]{64}$/u.test(contentHash))) {
+      throw new Error("durable_filesystem_content_hash_invalid");
+    }
+    const client = await requireCallerTransaction(database);
+    for (const contentHash of hashes) {
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+        [`infinite-quest-nexus:asset-content:${contentHash}`],
+      );
+    }
+  };
   const withPublicationContentLocks: PrivateFilesystemPublicationLockPort["withPublicationContentLocks"] = async (
     contentHashes,
     work,
@@ -834,6 +850,7 @@ export function createPostgresDurableFilesystemRepository(
     persistCandidate,
     redeemCandidate,
     attachCandidate,
+    lockPublicationContent,
     withPublicationContentLocks,
     issuePublicationCandidate,
     completePublicationCandidate,

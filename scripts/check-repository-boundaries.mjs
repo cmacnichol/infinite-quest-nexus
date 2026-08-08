@@ -6,7 +6,10 @@ import {
   checkPrivateStorageBoundaries,
   isPrivateStorageInventorySource
 } from "./check-private-storage-boundaries.mjs";
-import { checkPortableCompositionBoundaries } from "./check-portable-composition-boundaries.mjs";
+import {
+  checkPortableCompositionBoundaries,
+  checkPortableCompositionInventory
+} from "./check-portable-composition-boundaries.mjs";
 
 const output = execFileSync(
   "git",
@@ -129,6 +132,7 @@ for (const file of files) {
 }
 
 violations.push(...checkAssetImportStorageCompositionInventory(sourceInventory));
+violations.push(...checkPortableCompositionInventory(sourceInventory));
 
 for (const migrationFile of LEGACY_MIGRATION_ALLOWLIST) {
   if (!files.includes(migrationFile)) {

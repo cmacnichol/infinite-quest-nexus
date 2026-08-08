@@ -95,8 +95,26 @@ export type PrivateAttachedAssetPublicationReconciliation =
   | Readonly<{ outcome: "ready_to_finalize"; identity: PrivateAssetPublicationIdentity }>
   | Readonly<{ outcome: "recoverable" }>;
 
+export type PrivateAssetPublicationRecoveryRequest = Readonly<{
+  leaseOwner: string;
+  leaseSeconds: number;
+}>;
+
 export interface PrivateAssetPublicationIdentityPort {
   prepareIdentity(command: PrivateAssetPublicationCommand): Promise<PrivateAssetPublicationIdentity>;
+  prepareIdentityInTransaction(
+    database: DurableFilesystemTransactionContext,
+    command: PrivateAssetPublicationCommand,
+  ): Promise<PrivateAssetPublicationIdentity>;
+  discardPreparedIdentityInTransaction(
+    database: DurableFilesystemTransactionContext,
+    identity: PrivateAssetPublicationIdentity,
+    command: PrivateAssetPublicationCommand,
+  ): Promise<void>;
+  listCampaignPublicationIdentities(
+    ownerUserId: string,
+    campaignId: string,
+  ): Promise<readonly PrivateAssetPublicationIdentity[]>;
   attachPublication(
     database: DurableFilesystemTransactionContext,
     identity: PrivateAssetPublicationIdentity,
@@ -105,6 +123,7 @@ export interface PrivateAssetPublicationIdentityPort {
   ): Promise<PrivateAttachedAssetPublication>;
   reconcileAttachedPublication(
     identity: PrivateAssetPublicationIdentity,
+    recovery?: PrivateAssetPublicationRecoveryRequest,
   ): Promise<PrivateAttachedAssetPublicationReconciliation>;
   completePublication(identity: PrivateAssetPublicationIdentity): Promise<PrivateAssetPublicationResult>;
 }

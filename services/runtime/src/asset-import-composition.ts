@@ -23,9 +23,11 @@ import {
   type DurableFilesystemLifecycle
 } from "../../../packages/application/src/assets/private-storage-lifecycle.js";
 import type { PrivateAtomicPortableIssuancePort } from "../../../packages/application/src/imports/private-portable-authority.js";
+import type { ImportOwnerScope } from "../../../packages/application/src/imports/types.js";
 import type {
   PrivateCallerTransactionAssetPublisher,
-  PrivateImportedAssetAttachment
+  PrivateImportedAssetAttachment,
+  PrivateReservedImportedAsset
 } from "../../../packages/application/src/imports/private-portable-composition.js";
 import type { AssetApplication } from "../../../packages/application/src/assets/ports.js";
 import { createPostgresAssetPublicationRepository } from "../../../packages/database/src/asset-publication-repository.js";
@@ -171,9 +173,22 @@ export async function createAssetPublicationComposition(
       async rollback() {}
     });
   };
+  const discardPreparedReservations = async (
+    database: DatabaseClient,
+    reservations: readonly PrivateReservedImportedAsset[],
+  ): Promise<void> => {
+    for (const reservation of reservations) {
+      if (reservation.identity.lifecycle === "prepared") {
+        await publication.discardPreparedIdentityInTransaction(
+          database,
+          reservation.identity,
+          reservation.command,
+        );
+      }
+    }
+  };
   const transactionalPublisher: PrivateCallerTransactionAssetPublisher = Object.freeze({
-    async attachImportedAssets(
-      database: DatabaseClient,
+    async reserveImportedAssets(
       commands: readonly PrivateAssetPublicationCommand[],
     ) {
       const snapshots = commands.map((command) => {
@@ -184,48 +199,103 @@ export async function createAssetPublicationComposition(
         );
         return snapshot;
       });
-      if (snapshots.length === 0) return Object.freeze([]);
-      return storage.candidate.withPublicationContentLocks(
-        snapshots.flatMap((snapshot) => [
-          snapshot.original.contentHash,
-          ...snapshot.derivatives.map((derivative) => derivative.contentHash)
+      const reservations: PrivateReservedImportedAsset[] = [];
+      try {
+        for (const snapshot of snapshots) {
+          reservations.push(Object.freeze({
+            command: snapshot,
+            identity: await publication.prepareIdentity(snapshot)
+          }));
+        }
+      } catch (error) {
+        try {
+          await withTransaction(pool, (database) => discardPreparedReservations(database, reservations));
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            `${error instanceof Error ? error.message : "asset_publication_reservation_failed"}; asset reservation cleanup failed`,
+          );
+        }
+        throw error;
+      }
+      return Object.freeze(reservations);
+    },
+    async attachImportedAssets(
+      database: DatabaseClient,
+      reservations: readonly PrivateReservedImportedAsset[],
+    ) {
+      if (reservations.length === 0) return Object.freeze([]);
+      await storage.candidate.lockPublicationContent(
+        database,
+        reservations.flatMap(({ command }) => [
+          command.original.contentHash,
+          ...command.derivatives.map((derivative) => derivative.contentHash)
         ]),
-        async () => {
-          const attachments: PrivateImportedAssetAttachment[] = [];
+      );
+      const attachments: PrivateImportedAssetAttachment[] = [];
+      try {
+        for (const reservation of reservations) {
+          const snapshot = reservation.command;
+          const identity = await publication.prepareIdentityInTransaction(database, snapshot);
+          if (identity.assetId !== reservation.identity.assetId
+            || identity.ownerUserId !== reservation.identity.ownerUserId) {
+            throw new Error("asset_publication_identity_mismatch");
+          }
+          if (identity.lifecycle !== "prepared") {
+            attachments.push(await existingAttachment(identity));
+            continue;
+          }
+          const prepared = await storage.adapter.prepareAssetPublication(snapshot, identity);
+          const rollback = async (): Promise<void> => {
+            await Promise.allSettled([
+              prepared.original.rollback(),
+              ...prepared.derivatives.map((derivative) => derivative.rollback())
+            ]);
+          };
           try {
-            for (const snapshot of snapshots) {
-              const identity = await publication.prepareIdentity(snapshot);
-              if (identity.lifecycle !== "prepared") {
-                attachments.push(await existingAttachment(identity));
-                continue;
-              }
-              const prepared = await storage.adapter.prepareAssetPublication(snapshot, identity);
-              const rollback = async (): Promise<void> => {
-                await Promise.allSettled([
-                  prepared.original.rollback(),
-                  ...prepared.derivatives.map((derivative) => derivative.rollback())
-                ]);
-              };
-              try {
-                const attached = await publication.attachPublication(database, identity, snapshot, prepared);
-                attachments.push(Object.freeze({
-                  identity: attached.identity,
-                  result: attached.result,
-                  finalization: attached.finalization,
-                  rollback
-                }));
-              } catch (error) {
-                await rollback();
-                throw error;
-              }
-            }
-            return Object.freeze(attachments);
+            const attached = await publication.attachPublication(database, identity, snapshot, prepared);
+            attachments.push(Object.freeze({
+              identity: attached.identity,
+              result: attached.result,
+              finalization: attached.finalization,
+              rollback
+            }));
           } catch (error) {
-            await Promise.allSettled(attachments.map((attachment) => attachment.rollback()));
+            await rollback();
             throw error;
           }
-        },
+        }
+        return Object.freeze(attachments);
+      } catch (error) {
+        await Promise.allSettled(attachments.map((attachment) => attachment.rollback()));
+        throw error;
+      }
+    },
+    async discardPreparedImportedAssets(
+      database: DatabaseClient,
+      reservations: readonly PrivateReservedImportedAsset[],
+    ) {
+      await discardPreparedReservations(database, reservations);
+    },
+    async recoverImportedAssets(
+      owner: ImportOwnerScope,
+      campaignId: string,
+      recovery: Readonly<{ leaseOwner: string; leaseSeconds: number }>,
+    ) {
+      const identities = await publication.listCampaignPublicationIdentities(
+        owner.ownerUserId,
+        campaignId,
       );
+      for (const identity of identities) {
+        if (identity.lifecycle === "published") continue;
+        const reconciliation = await publication.reconcileAttachedPublication(identity, recovery);
+        if (reconciliation.outcome === "published") continue;
+        if (reconciliation.outcome === "recoverable") {
+          throw new Error("asset_publication_finalization_recoverable");
+        }
+        await storage.adapter.finalizeAssetPublication(reconciliation.identity.finalization!);
+        await publication.completePublication(reconciliation.identity);
+      }
     },
     async finalizeImportedAssets(attachments: readonly PrivateImportedAssetAttachment[]) {
       for (const attachment of attachments) {

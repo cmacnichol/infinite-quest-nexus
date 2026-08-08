@@ -217,6 +217,7 @@ async function lockedExactAssetPublicationOperations(
       WHERE owner_user_id=$1
         AND asset_id=$2
         AND purpose IN ('asset_original','asset_derivative')
+        AND lifecycle<>'cleaned'
       FOR UPDATE`,
     [ownerUserId, assetId],
   );
@@ -326,37 +327,138 @@ export function createPostgresAssetPublicationRepository(
   pool: DatabasePool,
   candidates: PrivateFilesystemCandidatePersistencePort,
 ): PrivateAssetPublicationIdentityPort {
-  const prepareIdentity: PrivateAssetPublicationIdentityPort["prepareIdentity"] = async (command) => {
+  const prepareIdentityWithClient = async (
+    client: DatabaseClient,
+    command: PrivateAssetPublicationCommand,
+  ): Promise<PrivateAssetPublicationIdentity> => {
     validatePrivateAssetPublicationCommand(command);
     const requestFingerprint = fingerprint(command);
     const keyHash = idempotencyHash(command);
-    return withTransaction(pool, async (client) => {
-      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
-        `infinite-quest-nexus:asset-publication:${command.owner.ownerUserId}:${keyHash}`,
-      ]);
-      const existing = await client.query<IdentityRow>(
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+      `infinite-quest-nexus:asset-publication:${command.owner.ownerUserId}:${keyHash}`,
+    ]);
+    const existing = await client.query<IdentityRow>(
         `SELECT asset_id,owner_user_id,request_fingerprint,lifecycle,result,pending_finalization
-           FROM asset_publication_identities
+          FROM asset_publication_identities
           WHERE owner_user_id=$1 AND idempotency_key_hash=$2
-          FOR UPDATE`,
+          FOR KEY SHARE`,
         [command.owner.ownerUserId, keyHash],
       );
-      const row = existing.rows[0];
-      if (row) {
-        if (row.request_fingerprint !== requestFingerprint) {
-          throw new Error("asset_publication_idempotency_mismatch");
-        }
-        return identity(row);
+    const row = existing.rows[0];
+    if (row) {
+      if (row.request_fingerprint !== requestFingerprint) {
+        throw new Error("asset_publication_idempotency_mismatch");
       }
-      const created = await client.query<IdentityRow>(
+      if (row.lifecycle === "cleanup_pending") {
+        const operations = await client.query<{ lifecycle: string }>(
+          `SELECT lifecycle FROM durable_filesystem_operations
+            WHERE asset_id=$1 AND owner_user_id=$2
+            FOR UPDATE`,
+          [row.asset_id, row.owner_user_id],
+        );
+        if (operations.rows.length === 0
+          || operations.rows.some((operation) => operation.lifecycle !== "cleaned")) {
+          throw new Error("asset_publication_cleanup_pending");
+        }
+        const reset = await client.query<IdentityRow>(
+          `UPDATE asset_publication_identities
+              SET lifecycle='prepared',updated_at=clock_timestamp()
+            WHERE asset_id=$1 AND owner_user_id=$2 AND lifecycle='cleanup_pending'
+          RETURNING asset_id,owner_user_id,request_fingerprint,lifecycle,result,pending_finalization`,
+          [row.asset_id, row.owner_user_id],
+        );
+        if (reset.rowCount !== 1) throw new Error("asset_publication_identity_unavailable");
+        return identity(reset.rows[0]!);
+      }
+      return identity(row);
+    }
+    const created = await client.query<IdentityRow>(
         `INSERT INTO asset_publication_identities (
            asset_id,owner_user_id,idempotency_key_hash,request_fingerprint,lifecycle
          ) VALUES (gen_random_uuid(),$1,$2,$3,'prepared')
          RETURNING asset_id,owner_user_id,request_fingerprint,lifecycle,result,pending_finalization`,
         [command.owner.ownerUserId, keyHash, requestFingerprint],
       );
-      return identity(created.rows[0]!);
-    });
+    return identity(created.rows[0]!);
+  };
+  const prepareIdentity: PrivateAssetPublicationIdentityPort["prepareIdentity"] = (command) => (
+    withTransaction(pool, (client) => prepareIdentityWithClient(client, command))
+  );
+  const prepareIdentityInTransaction: PrivateAssetPublicationIdentityPort["prepareIdentityInTransaction"] = async (
+    database,
+    command,
+  ) => prepareIdentityWithClient(await callerTransaction(database), command);
+  const discardPreparedIdentityInTransaction: PrivateAssetPublicationIdentityPort["discardPreparedIdentityInTransaction"] = async (
+    database,
+    publicationIdentity,
+    command,
+  ) => {
+    validatePrivateAssetPublicationCommand(command);
+    if (command.owner.ownerUserId !== publicationIdentity.ownerUserId) {
+      throw new Error("asset_publication_identity_mismatch");
+    }
+    const client = await callerTransaction(database);
+    const found = await client.query<IdentityRow>(
+      `SELECT asset_id,owner_user_id,request_fingerprint,lifecycle,result,pending_finalization
+         FROM asset_publication_identities
+        WHERE asset_id=$1 AND owner_user_id=$2
+        FOR UPDATE`,
+      [publicationIdentity.assetId, publicationIdentity.ownerUserId],
+    );
+    const row = found.rows[0];
+    if (!row) throw new Error("asset_publication_identity_unavailable");
+    if (row.request_fingerprint !== fingerprint(command)) {
+      throw new Error("asset_publication_idempotency_mismatch");
+    }
+    if (row.lifecycle === "attached" || row.lifecycle === "published") return;
+    if (row.lifecycle !== "prepared") throw new Error("asset_publication_identity_unavailable");
+    const operations = await client.query<{ lifecycle: string }>(
+      `SELECT lifecycle FROM durable_filesystem_operations
+        WHERE asset_id=$1 AND owner_user_id=$2
+        FOR UPDATE`,
+      [publicationIdentity.assetId, publicationIdentity.ownerUserId],
+    );
+    if (operations.rows.length === 0) {
+      const removed = await client.query(
+        `DELETE FROM asset_publication_identities
+          WHERE asset_id=$1 AND owner_user_id=$2 AND lifecycle='prepared'`,
+        [publicationIdentity.assetId, publicationIdentity.ownerUserId],
+      );
+      if (removed.rowCount !== 1) throw new Error("asset_publication_identity_unavailable");
+      return;
+    }
+    if (operations.rows.some((operation) => operation.lifecycle !== "cleaned")) {
+      throw new Error("asset_publication_cleanup_incomplete");
+    }
+    const retired = await client.query(
+      `UPDATE asset_publication_identities
+          SET lifecycle='cleanup_pending',updated_at=clock_timestamp()
+        WHERE asset_id=$1 AND owner_user_id=$2 AND lifecycle='prepared'`,
+      [publicationIdentity.assetId, publicationIdentity.ownerUserId],
+    );
+    if (retired.rowCount !== 1) throw new Error("asset_publication_identity_unavailable");
+  };
+
+  const listCampaignPublicationIdentities: PrivateAssetPublicationIdentityPort["listCampaignPublicationIdentities"] = async (
+    ownerUserId,
+    campaignId,
+  ) => {
+    if (ownerUserId.trim().length === 0 || campaignId.trim().length === 0) {
+      throw new Error("asset_publication_campaign_scope_invalid");
+    }
+    const selected = await pool.query<IdentityRow>(
+      `SELECT DISTINCT identity.asset_id,identity.owner_user_id,identity.request_fingerprint,
+              identity.lifecycle,identity.result,identity.pending_finalization
+         FROM asset_publication_identities identity
+         JOIN asset_references reference
+           ON reference.asset_id=identity.asset_id
+          AND reference.owner_user_id=identity.owner_user_id
+        WHERE identity.owner_user_id=$1 AND reference.campaign_id=$2
+          AND identity.lifecycle IN ('attached','published')
+        ORDER BY identity.asset_id`,
+      [ownerUserId, campaignId],
+    );
+    return Object.freeze(selected.rows.map(identity));
   };
 
   const attachPublication: PrivateAssetPublicationIdentityPort["attachPublication"] = async (
@@ -580,6 +682,7 @@ export function createPostgresAssetPublicationRepository(
 
   const reconcileAttachedPublication: PrivateAssetPublicationIdentityPort["reconcileAttachedPublication"] = async (
     publicationIdentity,
+    recovery,
   ): Promise<PrivateAttachedAssetPublicationReconciliation> => {
     if (publicationIdentity.lifecycle !== "attached") {
       throw new Error("asset_publication_identity_unavailable");
@@ -599,15 +702,15 @@ export function createPostgresAssetPublicationRepository(
       }
       if (row.lifecycle !== "attached") throw new Error("asset_publication_identity_unavailable");
       const persisted = storedFinalization(row.pending_finalization, row.asset_id, row.owner_user_id);
-      const selected = await lockedExactAssetPublicationOperations(
+      let selected = await lockedExactAssetPublicationOperations(
         client,
         row.owner_user_id,
         row.asset_id,
         persisted,
       );
       if (!selected) return Object.freeze({ outcome: "recoverable" as const });
-      const byId = new Map(selected.map((operation) => [operation.id, operation]));
       const result = storedResult(row.result);
+      let byId = new Map(selected.map((operation) => [operation.id, operation]));
       if (persisted.every(({ operation }) => byId.get(operation.operationId)?.lifecycle === "finalized")) {
         const updated = await client.query(
           `UPDATE asset_publication_identities
@@ -618,15 +721,55 @@ export function createPostgresAssetPublicationRepository(
         if (updated.rowCount !== 1) throw new Error("asset_publication_identity_unavailable");
         return Object.freeze({ outcome: "published" as const, result });
       }
+      if (selected.some((operation) => (
+        operation.lifecycle !== "attached" && operation.lifecycle !== "finalized"
+      ))) {
+        return Object.freeze({ outcome: "recoverable" as const });
+      }
+      const unfinishedOperationIds = selected
+        .filter((operation) => operation.lifecycle === "attached")
+        .map((operation) => operation.id);
+      if (selected.some((operation) => operation.lifecycle === "attached" && !operation.lease_current)
+        && recovery) {
+        if (recovery.leaseOwner.trim().length === 0
+          || recovery.leaseOwner.length > 512
+          || !Number.isSafeInteger(recovery.leaseSeconds)
+          || recovery.leaseSeconds <= 0
+          || recovery.leaseSeconds > 300) {
+          throw new Error("asset_publication_recovery_invalid");
+        }
+        const rotated = await client.query(
+          `UPDATE durable_filesystem_operations
+              SET work_version=work_version+1,lease_id=gen_random_uuid(),lease_owner=$3,
+                  lease_expires_at=LEAST(expires_at,clock_timestamp()+($4::text || ' seconds')::interval),
+                  updated_at=clock_timestamp()
+            WHERE owner_user_id=$1 AND asset_id=$2 AND id=ANY($5::uuid[])
+              AND lifecycle='attached' AND expires_at > clock_timestamp()`,
+          [row.owner_user_id, row.asset_id, recovery.leaseOwner, recovery.leaseSeconds, unfinishedOperationIds],
+        );
+        if (rotated.rowCount !== unfinishedOperationIds.length) {
+          return Object.freeze({ outcome: "recoverable" as const });
+        }
+        selected = await lockedExactAssetPublicationOperations(
+          client,
+          row.owner_user_id,
+          row.asset_id,
+          persisted,
+        );
+        if (!selected) return Object.freeze({ outcome: "recoverable" as const });
+        byId = new Map(selected.map((operation) => [operation.id, operation]));
+      }
       if (persisted.some(({ operation }) => {
         const current = byId.get(operation.operationId);
-        return current?.lifecycle !== "attached" || !current.lease_current;
+        return current?.lifecycle !== "finalized"
+          && (current?.lifecycle !== "attached" || !current.lease_current);
       })) {
         return Object.freeze({ outcome: "recoverable" as const });
       }
-      const currentFinalization = persisted.map(({ operation }) => {
+      const currentFinalization = persisted.flatMap(({ operation }) => {
         const current = byId.get(operation.operationId)!;
-        return Object.freeze({
+        if (current.lifecycle === "finalized") return [];
+        return [Object.freeze({
           operation,
           claim: Object.freeze({
             operationId: operation.operationId,
@@ -635,7 +778,7 @@ export function createPostgresAssetPublicationRepository(
             workVersion: current.work_version,
             leaseExpiresAt: current.lease_expires_at.toISOString()
           }) as PrivateAssetPublicationFinalization["claim"]
-        });
+        })];
       });
       const identity = Object.freeze({
         assetId: row.asset_id,
@@ -648,5 +791,13 @@ export function createPostgresAssetPublicationRepository(
     });
   };
 
-  return Object.freeze({ prepareIdentity, attachPublication, reconcileAttachedPublication, completePublication });
+  return Object.freeze({
+    prepareIdentity,
+    prepareIdentityInTransaction,
+    discardPreparedIdentityInTransaction,
+    listCampaignPublicationIdentities,
+    attachPublication,
+    reconcileAttachedPublication,
+    completePublication
+  });
 }

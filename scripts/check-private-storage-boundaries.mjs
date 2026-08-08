@@ -2,7 +2,7 @@ import { parse } from "@babel/parser";
 import { posix } from "node:path";
 
 const PRODUCTION_SOURCE = /^(?:apps|packages|services)\//u;
-const JAVASCRIPT_TYPESCRIPT_SOURCE = /\.(?:cjs|js|jsx|mjs|mts|ts|tsx)$/u;
+const JAVASCRIPT_TYPESCRIPT_SOURCE = /\.(?:cjs|cts|js|jsx|mjs|mts|ts|tsx)$/u;
 const STORAGE_COMPOSITION_FILE = "services/runtime/src/asset-import-composition.ts";
 const STORAGE_COMPOSITION_FACTORY = "createAssetImportStorageComposition";
 const ASSET_PUBLICATION_COMPOSITION_FACTORY = "createAssetPublicationComposition";
@@ -38,8 +38,8 @@ function lineNumber(node) {
   return node.loc?.start.line ?? 1;
 }
 
-function syntaxTree(file, text) {
-  const languagePlugins = /\.(?:ts|mts)$/u.test(file)
+export function parseProductionSourceAst(file, text) {
+  const languagePlugins = /\.(?:cts|mts|ts)$/u.test(file)
     ? ["typescript"]
     : /\.(?:tsx)$/u.test(file)
       ? ["typescript", "jsx"]
@@ -49,7 +49,7 @@ function syntaxTree(file, text) {
     sourceFilename: file,
     errorRecovery: true,
     plugins: [...languagePlugins, "importAttributes"]
-  });
+  }).program;
 }
 
 function importedName(specifier) {
@@ -151,12 +151,12 @@ function staticMember(node) {
 
 export function checkPrivateStorageBoundaries(file, text) {
   const normalized = file.replaceAll("\\", "/");
-  if (!PRODUCTION_SOURCE.test(normalized) || !/\.(?:cjs|js|jsx|mjs|mts|ts|tsx)$/u.test(normalized)) {
+  if (!isPrivateStorageInventorySource(normalized)) {
     return [];
   }
   let parsed;
   try {
-    parsed = syntaxTree(normalized, text);
+    parsed = parseProductionSourceAst(normalized, text);
   } catch (error) {
     return [`${normalized}: private storage boundary AST parse failed: ${(error).message}`];
   }
@@ -272,7 +272,7 @@ export function checkPrivateStorageBoundaries(file, text) {
       }
     }
   };
-  visit(parsed.program);
+  visit(parsed);
   return [...violations];
 }
 
@@ -285,7 +285,7 @@ export function checkAssetImportStorageCompositionInventory(sources) {
   const parsed = new Map();
   for (const source of production) {
     try {
-      parsed.set(source.file, syntaxTree(source.file, source.text).program);
+      parsed.set(source.file, parseProductionSourceAst(source.file, source.text));
     } catch (error) {
       violations.push(`${source.file}: storage composition inventory AST parse failed: ${error.message}`);
     }

@@ -211,6 +211,63 @@ integration("Task 14e3c asset-publication composition", () => {
     await thumbnailSession!.finalize("eof");
   });
 
+  it("resumes a multi-artifact publication after one artifact finalized before restart", async () => {
+    let composition = await compose();
+    const request = command(`14e3c-partial-finalize:${crypto.randomUUID()}`, ":partial-finalize");
+    await pool.query(`CREATE FUNCTION task_14e3c_partial_finalize_fault() RETURNS trigger
+      LANGUAGE plpgsql AS $fault$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM durable_filesystem_operations operation
+           WHERE operation.asset_id=OLD.asset_id
+             AND operation.owner_user_id=OLD.owner_user_id
+             AND operation.id<>OLD.id
+             AND operation.lifecycle='finalized'
+        ) THEN
+          RAISE EXCEPTION 'task_14e3c_partial_finalize_fault';
+        END IF;
+        RETURN NEW;
+      END;
+      $fault$`);
+    await pool.query(`CREATE TRIGGER task_14e3c_partial_finalize_fault_trigger
+      BEFORE UPDATE ON durable_filesystem_operations
+      FOR EACH ROW WHEN (NEW.lifecycle='finalized' AND OLD.lifecycle='attached')
+      EXECUTE FUNCTION task_14e3c_partial_finalize_fault()`);
+    try {
+      await expect(composition.publisher.publishAsset(request))
+        .rejects.toThrow("task_14e3c_partial_finalize_fault");
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS task_14e3c_partial_finalize_fault_trigger ON durable_filesystem_operations");
+      await pool.query("DROP FUNCTION IF EXISTS task_14e3c_partial_finalize_fault()");
+      await composition.close();
+      compositions.delete(composition);
+    }
+    await expect(pool.query<{ lifecycle: string }>(
+      `SELECT operation.lifecycle
+         FROM durable_filesystem_operations operation
+         JOIN asset_publication_identities identity ON identity.asset_id=operation.asset_id
+        WHERE identity.owner_user_id=$1 AND identity.idempotency_key_hash=$2
+        ORDER BY operation.purpose`,
+      [ownerUserId, sha256(request.idempotencyKey)],
+    )).resolves.toMatchObject({
+      rows: expect.arrayContaining([{ lifecycle: "attached" }, { lifecycle: "finalized" }])
+    });
+
+    composition = await compose();
+    await expect(composition.publisher.publishAsset(request)).resolves.toMatchObject({
+      derivativeIds: [{ derivativeKind: "thumbnail" }]
+    });
+    await expect(pool.query<{ lifecycle: string }>(
+      `SELECT operation.lifecycle
+         FROM durable_filesystem_operations operation
+         JOIN asset_publication_identities identity ON identity.asset_id=operation.asset_id
+        WHERE identity.owner_user_id=$1 AND identity.idempotency_key_hash=$2`,
+      [ownerUserId, sha256(request.idempotencyKey)],
+    )).resolves.toMatchObject({
+      rows: [{ lifecycle: "finalized" }, { lifecycle: "finalized" }]
+    });
+  });
+
   it("rejects original and derivative byte/hash mismatches before it creates durable publication state", async () => {
     const composition = await compose();
     const isolatedOwner = await pool.query<{ id: string }>(

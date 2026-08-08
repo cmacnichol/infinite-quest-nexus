@@ -90,6 +90,8 @@ export interface PostgresPortableImportAuthorityRepository extends PrivatePortab
     claim: PrivatePortableImportWorkClaim,
     diagnosticCode: PortableArchiveDiagnosticCode,
   ): Promise<PortableImportProgressView | null>;
+  completeCommittedReplay(owner: ImportOwnerScope, previewToken: string): Promise<void>;
+  expireDueWork(limit: number): Promise<number>;
 }
 
 function sha256(value: string): string {
@@ -419,6 +421,76 @@ export function createPostgresPortableImportAuthorityRepository(
     return updated.rows[0] ? safePortableImportProgress(workRecord(updated.rows[0])) : null;
   });
 
+  const completeCommittedReplay = async (
+    owner: ImportOwnerScope,
+    previewToken: string,
+  ): Promise<void> => withTransaction(pool, async (database) => {
+    const selected = await database.query<WorkRow & { operation_status: string }>(
+      `SELECT ${JOINED_WORK_COLUMNS},operation.status AS operation_status
+         FROM portable_import_work work
+         JOIN portable_import_operations operation
+           ON operation.id=work.operation_id AND operation.owner_user_id=work.owner_user_id
+        WHERE work.owner_user_id=$1 AND operation.preview_token_hash=$2
+        FOR UPDATE OF work,operation`,
+      [owner.ownerUserId, sha256(previewToken)],
+    );
+    const row = selected.rows[0];
+    if (!row || row.operation_status !== "committed") {
+      throw new Error("portable_import_replay_unavailable");
+    }
+    if (row.status === "completed") return;
+    const completed = await database.query(
+      `UPDATE portable_import_work
+          SET phase='completed',percentage=100,status='completed',diagnostic_code=NULL,
+              lease_id=NULL,lease_owner=NULL,lease_expires_at=NULL,
+              terminal_at=clock_timestamp(),updated_at=clock_timestamp()
+        WHERE operation_id=$1 AND owner_user_id=$2 AND status IN ('running','recoverable')`,
+      [row.operation_id, row.owner_user_id],
+    );
+    if (completed.rowCount !== 1) throw new Error("portable_import_replay_unavailable");
+  });
+
+  const expireDueWork = async (limit: number): Promise<number> => {
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 1000) {
+      throw new Error("portable_import_reap_invalid");
+    }
+    return withTransaction(pool, async (database) => {
+      const due = await database.query<Pick<WorkRow, "operation_id" | "owner_user_id">>(
+        `SELECT work.operation_id,work.owner_user_id
+           FROM portable_import_work work
+           JOIN portable_import_operations operation
+             ON operation.id=work.operation_id AND operation.owner_user_id=work.owner_user_id
+          WHERE work.status IN ('running','recoverable')
+            AND work.expires_at <= clock_timestamp()
+            AND operation.status='previewed'
+          ORDER BY work.expires_at,work.operation_id
+          FOR UPDATE OF work,operation SKIP LOCKED
+          LIMIT $1`,
+        [limit],
+      );
+      for (const row of due.rows) {
+        const expiredOperation = await database.query(
+          `UPDATE portable_import_operations
+              SET status='expired',updated_at=clock_timestamp()
+            WHERE id=$1 AND owner_user_id=$2 AND status='previewed'`,
+          [row.operation_id, row.owner_user_id],
+        );
+        const expiredWork = await database.query(
+          `UPDATE portable_import_work
+              SET status='expired',diagnostic_code='archive_expired',
+                  lease_id=NULL,lease_owner=NULL,lease_expires_at=NULL,
+                  terminal_at=clock_timestamp(),updated_at=clock_timestamp()
+            WHERE operation_id=$1 AND owner_user_id=$2 AND status IN ('running','recoverable')`,
+          [row.operation_id, row.owner_user_id],
+        );
+        if (expiredOperation.rowCount !== 1 || expiredWork.rowCount !== 1) {
+          throw new Error("portable_import_reap_conflict");
+        }
+      }
+      return due.rows.length;
+    });
+  };
+
   return Object.freeze({
     readPreviewAuthority,
     persistPreviewAuthority,
@@ -434,7 +506,9 @@ export function createPostgresPortableImportAuthorityRepository(
     ) {
       return portable.completeImport<PortableImportKind>(database, claim, completion);
     },
-    markRecoverable
+    markRecoverable,
+    completeCommittedReplay,
+    expireDueWork
   });
 }
 
@@ -485,6 +559,29 @@ async function existingImportResult(
   return selected.rows[0] ?? null;
 }
 
+function existingMutationResult(
+  value: NonNullable<Awaited<ReturnType<typeof existingImportResult>>>,
+  kind: "campaign_zip" | "legacy_story" | "story_text",
+): PrivatePortableFamilyMutationResult {
+  return {
+    importId: value.id,
+    importedRecordId: value.id,
+    worldId: value.world_id,
+    worldVersionId: value.world_version_id,
+    campaignId: value.campaign_id,
+    duplicate: true,
+    result: {
+      ...(kind === "story_text" ? { kind: "campaign" } : {}),
+      importId: value.id,
+      worldId: value.world_id,
+      worldVersionId: value.world_version_id,
+      campaignId: value.campaign_id,
+      duplicate: true,
+      stats: value.stats as Readonly<Record<string, PortableJsonValue>>
+    }
+  };
+}
+
 async function commitPortableCampaign(
   database: DatabaseClient,
   input: Parameters<PrivatePortableFamilyMutationPort["commitLegacyStory"]>[1],
@@ -495,18 +592,23 @@ async function commitPortableCampaign(
     || input.destination.kind !== "existing_world_version") {
     throw new Error("portable_import_destination_invalid");
   }
+  const destination = await database.query(
+    `SELECT 1
+       FROM worlds world
+       JOIN world_versions version
+         ON version.world_id=world.id AND version.owner_user_id=world.owner_user_id
+      WHERE world.id=$1 AND version.id=$2 AND world.owner_user_id=$3
+      FOR KEY SHARE OF world,version`,
+    [input.destination.worldId, input.destination.worldVersionId, input.owner.ownerUserId],
+  );
+  if (destination.rowCount !== 1) throw new Error("portable_import_destination_invalid");
   const duplicate = await existingImportResult(database, input.owner.ownerUserId, input.authorityFingerprint);
-  if (duplicate) {
-    return {
-      importId: duplicate.id,
-      importedRecordId: duplicate.id,
-      worldId: duplicate.world_id,
-      worldVersionId: duplicate.world_version_id,
-      campaignId: duplicate.campaign_id,
-      duplicate: true,
-      result: duplicate.stats as Readonly<Record<string, PortableJsonValue>>
-    };
-  }
+  if (duplicate) return existingMutationResult(
+    duplicate,
+    sourceType === "portable_campaign_zip"
+      ? "campaign_zip"
+      : sourceType === "portable_story_text" ? "story_text" : "legacy_story",
+  );
   const storyValue = input.payload.story ?? input.payload.campaign;
   const story = legacyStorySchema.parse(storyValue);
   const title = story.campaign?.title?.trim() || story.world.title?.trim() || "Imported campaign";
@@ -650,6 +752,21 @@ export function createPostgresPortableFamilyMutationRepository(
   worlds: WorldRepositoryPort,
 ): PrivatePortableFamilyMutationPort {
   const repository: PrivatePortableFamilyMutationPort = {
+    async findCampaignDuplicate(database, input) {
+      const client = portableDatabaseClient(database);
+      if (!/^[0-9a-f]{64}$/u.test(input.authorityFingerprint)) {
+        throw new Error("portable_import_authority_invalid");
+      }
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `infinite-quest-nexus:portable-campaign:${input.owner.ownerUserId}:${input.authorityFingerprint}`
+      ]);
+      const duplicate = await existingImportResult(
+        client,
+        input.owner.ownerUserId,
+        input.authorityFingerprint,
+      );
+      return duplicate ? existingMutationResult(duplicate, input.kind) : null;
+    },
     async commitCampaignZip(database, input) {
       const client = portableDatabaseClient(database);
       if (input.destination.kind === "embedded") {

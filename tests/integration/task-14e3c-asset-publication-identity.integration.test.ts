@@ -1,9 +1,12 @@
 import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { runner } from "node-pg-migrate";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { createPostgresAssetPublicationRepository } from "../../packages/database/src/asset-publication-repository.js";
+import { toAssetMutationIdempotencyKey } from "../../packages/application/src/assets/types.js";
 import {
   createDatabasePool,
   initialOwnerId,
@@ -60,6 +63,54 @@ integration("Task 14e3c asset-publication identities", () => {
     )).resolves.toMatchObject({
       rows: [{ asset_id: assetId, owner_user_id: ownerUserId, lifecycle: "prepared" }]
     });
+  });
+
+  it("allows storage reservation under caller revalidation while retaining the publication fence", async () => {
+    const bytes = new Uint8Array([14, 3, 7]);
+    const contentHash = createHash("sha256").update(bytes).digest("hex");
+    const command = {
+      owner: { ownerUserId },
+      idempotencyKey: toAssetMutationIdempotencyKey(`14e3c-lock-${crypto.randomUUID()}`),
+      leaseOwner: "14e3c-lock",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      original: {
+        bytes,
+        mimeType: "image/png" as const,
+        byteLength: bytes.byteLength,
+        contentHash,
+      },
+      derivatives: [],
+      provenance: { origin: "imported" as const },
+    };
+    const repository = createPostgresAssetPublicationRepository(pool, {} as never);
+    const identity = await repository.prepareIdentity(command);
+    const caller = await pool.connect();
+    try {
+      await caller.query("BEGIN");
+      await expect(repository.prepareIdentityInTransaction(caller, command)).resolves.toMatchObject({
+        assetId: identity.assetId,
+        lifecycle: "prepared",
+      });
+      await expect(pool.query(
+        `INSERT INTO durable_filesystem_operations (
+           owner_user_id,operation_token_hash,purpose,resource_kind,asset_id,
+           lease_id,lease_owner,lease_expires_at,expires_at
+         ) VALUES ($1,$2,'asset_original','asset',$3,gen_random_uuid(),'14e3c-storage',
+                   clock_timestamp()+interval '1 minute',clock_timestamp()+interval '1 minute')`,
+        [ownerUserId, createHash("sha256").update(crypto.randomUUID()).digest("hex"), identity.assetId],
+      )).resolves.toMatchObject({ rowCount: 1 });
+
+      const competingPublication = repository.prepareIdentity(command);
+      await expect(Promise.race([
+        competingPublication.then(() => "released"),
+        new Promise<string>((resolveBlocked) => setTimeout(() => resolveBlocked("blocked"), 100)),
+      ])).resolves.toBe("blocked");
+      await caller.query("COMMIT");
+      await expect(competingPublication).resolves.toMatchObject({ assetId: identity.assetId });
+    } finally {
+      await caller.query("ROLLBACK").catch(() => undefined);
+      caller.release();
+    }
   });
 
   it("rejects cross-owner and nonexistent identities, and rolls back an uncommitted reservation", async () => {
