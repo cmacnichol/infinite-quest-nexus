@@ -188,6 +188,8 @@ export type AssetFilesystemDiagnosticCode =
   | "filesystem_race_detected";
 
 export function toAssetMutationIdempotencyKey(value: string): AssetMutationIdempotencyKey {
-  if (value.trim().length === 0) throw new Error("asset_idempotency_key_invalid");
+  if (value.length < 1 || value.length > 200 || !/^[!-~]+$/u.test(value)) {
+    throw new Error("asset_idempotency_key_invalid");
+  }
   return value as AssetMutationIdempotencyKey;
 }
