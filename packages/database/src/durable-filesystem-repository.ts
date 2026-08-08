@@ -230,6 +230,21 @@ async function descriptorRows(
   return selected.rows;
 }
 
+function cleanupDescriptorsByPath(
+  cleanup: readonly DescriptorRow[],
+  delivery: readonly DescriptorRow[],
+): DescriptorRow[] {
+  const deliveryByPath = new Map(delivery.map((value) => [value.relative_path, value]));
+  const selected: DescriptorRow[] = [];
+  const seen = new Set<string>();
+  for (const value of [...cleanup, ...delivery]) {
+    if (seen.has(value.relative_path)) continue;
+    seen.add(value.relative_path);
+    selected.push(deliveryByPath.get(value.relative_path) ?? value);
+  }
+  return selected;
+}
+
 async function insertDescriptor(
   client: DatabaseClient,
   operationId: string,
@@ -412,7 +427,6 @@ export function createPostgresDurableFilesystemRepository(
     if (!prepared
       || prepared.device_id !== value.identity.deviceId
       || prepared.file_id !== value.identity.fileId
-      || prepared.change_token !== value.identity.changeToken
       || prepared.content_hash !== value.contentHash
       || Number(prepared.byte_length) !== value.byteLength) {
       throw new Error("durable_filesystem_candidate_mismatch");
@@ -566,7 +580,9 @@ export function createPostgresDurableFilesystemRepository(
     if (row.lifecycle === "cleaned") return { outcome: "already_cleaned" };
     if (row.lease_expires_at.getTime() <= Date.now()) return { outcome: "lease_lost" };
     if (row.lifecycle !== "cleanup_pending") return { outcome: "stale" };
-    const rows = await descriptorRows(client, row.id, "cleanup");
+    const cleanup = await descriptorRows(client, row.id, "cleanup");
+    const delivery = await descriptorRows(client, row.id, "delivery");
+    const rows = cleanupDescriptorsByPath(cleanup, delivery);
     await lockPhysicalPaths(client, rows.map((item) => item.relative_path));
     const retained = new Set<string>();
     for (const value of rows) {

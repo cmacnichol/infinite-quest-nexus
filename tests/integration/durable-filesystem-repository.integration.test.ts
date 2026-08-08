@@ -191,6 +191,145 @@ integration("PostgreSQL durable filesystem repository", () => {
     )).resolves.toBeNull();
   });
 
+  it("accepts only an adoption change-token transition and persists the actual delivery descriptor", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const assetId = await asset();
+    const operationScope = scope(assetId);
+    const provisional = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "provisional-adoption");
+    const delivery = {
+      ...provisional,
+      identity: {
+        ...provisional.identity,
+        changeToken: "change-after-link-and-unlink"
+      }
+    } satisfies PrivateStorageDescriptor;
+    const reserved = await repository.journal.reserve(operationScope, {
+      purpose: "asset_original",
+      leaseOwner: "publisher",
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    });
+    const candidate = await repository.issuePublicationCandidate(reserved.operation, {
+      deliveryRelativePath: delivery.relativePath,
+      cleanupDescriptors: [provisional]
+    });
+
+    await expect(repository.completePublicationCandidate(reserved.operation, candidate, delivery))
+      .resolves.toBeUndefined();
+    const persisted = await pool.query<{
+      descriptor_role: string;
+      change_token: string;
+    }>(
+      `SELECT descriptor_role,change_token
+         FROM durable_filesystem_descriptors
+        WHERE operation_id=$1
+        ORDER BY descriptor_role`,
+      [reserved.operation.operationId]
+    );
+    expect(persisted.rows).toEqual([
+      { descriptor_role: "cleanup", change_token: provisional.identity.changeToken },
+      { descriptor_role: "delivery", change_token: delivery.identity.changeToken }
+    ]);
+
+    const attached = await attachAndCommit(
+      repository,
+      reserved.operation,
+      candidate,
+      true,
+      delivery.relativePath,
+    );
+    if (attached.outcome !== "attached") throw new Error("attachment failed");
+    await expect(repository.journal.finalizeAfterCommit(attached.operation, attached.claim))
+      .resolves.toEqual({ outcome: "finalized" });
+
+    const restarted = createPostgresDurableFilesystemRepository(pool);
+    await expect(restarted.redeemStorageLocator(operationScope, attached.locator))
+      .resolves.toEqual(delivery);
+  });
+
+  it.each([
+    {
+      mismatch: "relative path",
+      mutate: (value: PrivateStorageDescriptor): PrivateStorageDescriptor => ({
+        ...value,
+        relativePath: `originals/${hash(crypto.randomUUID())}.png`
+      })
+    },
+    {
+      mismatch: "device",
+      mutate: (value: PrivateStorageDescriptor): PrivateStorageDescriptor => ({
+        ...value,
+        identity: { ...value.identity, deviceId: "different-device" }
+      })
+    },
+    {
+      mismatch: "inode",
+      mutate: (value: PrivateStorageDescriptor): PrivateStorageDescriptor => ({
+        ...value,
+        identity: { ...value.identity, fileId: "different-file" }
+      })
+    },
+    {
+      mismatch: "content hash",
+      mutate: (value: PrivateStorageDescriptor): PrivateStorageDescriptor => ({
+        ...value,
+        contentHash: hash("different-content")
+      })
+    },
+    {
+      mismatch: "byte length",
+      mutate: (value: PrivateStorageDescriptor): PrivateStorageDescriptor => ({
+        ...value,
+        byteLength: value.byteLength + 1
+      })
+    }
+  ])("rejects a publication candidate with a mismatched $mismatch", async ({ mutate }) => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const provisional = descriptor(`originals/${hash(crypto.randomUUID())}.png`, crypto.randomUUID());
+    const reserved = await repository.journal.reserve(scope(await asset()), {
+      purpose: "asset_original",
+      leaseOwner: "publisher",
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    });
+    const candidate = await repository.issuePublicationCandidate(reserved.operation, {
+      deliveryRelativePath: provisional.relativePath,
+      cleanupDescriptors: [provisional]
+    });
+
+    await expect(repository.completePublicationCandidate(
+      reserved.operation,
+      candidate,
+      mutate(provisional),
+    )).rejects.toThrow("durable_filesystem_candidate_mismatch");
+  });
+
+  it("deduplicates cleanup paths and prefers the immutable actual delivery identity", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const provisional = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "cleanup-provisional");
+    const temporary = descriptor(`tmp/${crypto.randomUUID()}.part`, "cleanup-temporary");
+    const delivery = {
+      ...provisional,
+      identity: { ...provisional.identity, changeToken: "cleanup-after-adoption" }
+    } satisfies PrivateStorageDescriptor;
+    const reserved = await repository.journal.reserve(scope(await asset()), {
+      purpose: "asset_original",
+      leaseOwner: "publisher",
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    });
+    const candidate = await repository.issuePublicationCandidate(reserved.operation, {
+      deliveryRelativePath: delivery.relativePath,
+      cleanupDescriptors: [temporary, provisional, provisional]
+    });
+    await repository.completePublicationCandidate(reserved.operation, candidate, delivery);
+    await expect(repository.journal.markCleanup(
+      reserved.operation,
+      reserved.claim,
+      { cause: "rollback" },
+    )).resolves.toEqual({ outcome: "cleanup_pending" });
+
+    await expect(repository.preparePublicationCleanup(reserved.operation, reserved.claim))
+      .resolves.toEqual({ outcome: "cleanup_required", descriptors: [temporary, delivery] });
+  });
+
   it("recovers crashes before publication, after publication, after rollback, and on either side of the domain commit", async () => {
     const repository = createPostgresDurableFilesystemRepository(pool);
 
