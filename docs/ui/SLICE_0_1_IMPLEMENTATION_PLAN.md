@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 through 14e3b5 complete; 14e3c asset composition and three-phase publication is next |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 through 14e3c complete; 14e3d portable import/export composition is next |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -8512,6 +8512,23 @@ for uncomposed world/campaign/image-job fixtures, never for the durable
 publication transitions under test. Add AST/import guards preventing new
 production consumers from importing legacy publication helpers or the private
 composition before their named later checkpoint.
+
+**14e3c completion (2026-08-08).** Commit `816c570` adds migration 0060's
+owner-scoped stable publication identities, the private publication command and
+PostgreSQL/secure-filesystem composition, and an unconsumed asset composition
+that retains the b5 graph. Publication validates copied bytes and canonical
+provenance before reservation, reserves and writes each original/derivative
+under durable prewrite authority, attaches all domain records in the caller
+transaction, and exposes a result only after the exact complete operation set
+has finalized. It preserves legacy asset deletion protection, content-addressed
+cross-owner retention, target-only quarantine, post-crash lease-rotation
+reconciliation, and owner-scoped final delivery. The review-driven matrix
+covered transaction rollback, two-client deletion races, hash/provenance
+replays, finalize/recovery retries, unexpected-operation fences, corrupt/EEXIST
+paths, and durable delivery. Final evidence: 1,436 unit tests, 483 integration
+tests, `pnpm check`, build, diff/precheck, and independent final approval. No
+route, worker, illustration/import writer, or allowlist consumer changed; 14e3d
+is next.
 
 **14e3d — portable import/export composition.** Compose all eight preview/
 commit families, real Legacy Story/Infinite Worlds/CYOA/Campaign ZIP/world JSON
