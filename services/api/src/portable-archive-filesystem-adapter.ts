@@ -501,6 +501,7 @@ export async function createSecureFilesystemAdapter(
   }
   const activeStreamHandles = new Set<FileHandle>();
   const activePortableHandles = new Map<string, Set<FileHandle>>();
+  const inFlightOpens = new Set<Promise<void>>();
   let closing = false;
   const requireAdapterOpen = (): void => {
     if (closing) throw new Error("filesystem_adapter_closed");
@@ -509,6 +510,22 @@ export async function createSecureFilesystemAdapter(
     requireAdapterOpen();
     activeStreamHandles.add(handle);
     return () => activeStreamHandles.delete(handle);
+  };
+  const trackOpen = <Result>(work: () => Promise<Result>): Promise<Result> => {
+    requireAdapterOpen();
+    let resolveCompletion!: () => void;
+    const completion = new Promise<void>((resolve) => { resolveCompletion = resolve; });
+    inFlightOpens.add(completion);
+    const finish = (): void => {
+      inFlightOpens.delete(completion);
+      resolveCompletion();
+    };
+    try {
+      return work().finally(finish);
+    } catch (error) {
+      finish();
+      throw error;
+    }
   };
   const registerPortableHandle = (operationId: string, handle: FileHandle): (() => void) => {
     const unregisterStream = registerStreamHandle(handle);
@@ -695,8 +712,7 @@ export async function createSecureFilesystemAdapter(
     return issued;
   };
 
-  const openExportSession: SecureFilesystemAdapter["openExportSession"] = async (input) => {
-    requireAdapterOpen();
+  const openExportSession: SecureFilesystemAdapter["openExportSession"] = (input) => trackOpen(async () => {
     if (!options.portable) throw new Error("portable_repository_unavailable");
     const rehydration = await options.portable.rehydrateExportArtifact(
       input.scope,
@@ -743,10 +759,9 @@ export async function createSecureFilesystemAdapter(
       await acknowledge();
       throw error;
     }
-  };
+  });
 
-  const openAssetSession: SecureFilesystemAdapter["openAssetSession"] = async (input) => {
-    requireAdapterOpen();
+  const openAssetSession: SecureFilesystemAdapter["openAssetSession"] = (input) => trackOpen(async () => {
     if (!options.delivery) throw new Error("asset_delivery_repository_unavailable");
     const resolution = await options.delivery.resolveFinalizedAssetDelivery(input.scope, input.request);
     if (!resolution) return null;
@@ -778,10 +793,9 @@ export async function createSecureFilesystemAdapter(
       await handle.close().catch(() => undefined);
       throw error;
     }
-  };
+  });
 
-  const openLegacyPathV1Preview: SecureFilesystemAdapter["openLegacyPathV1Preview"] = async (input) => {
-    requireAdapterOpen();
+  const openLegacyPathV1Preview: SecureFilesystemAdapter["openLegacyPathV1Preview"] = (input) => trackOpen(async () => {
     if (input.descriptor.kind !== "legacy_path_v1") {
       throw new Error("legacy_path_v1_descriptor_invalid");
     }
@@ -807,7 +821,7 @@ export async function createSecureFilesystemAdapter(
       await handle.close().catch(() => undefined);
       throw error;
     }
-  };
+  });
 
   const reapExpiredPortable: SecureFilesystemAdapter["reapExpiredPortable"] = async (input) => {
     requireAdapterOpen();
@@ -877,16 +891,22 @@ export async function createSecureFilesystemAdapter(
     close() {
       closing = true;
       const streamHandles = [...activeStreamHandles];
+      const pendingOpens = [...inFlightOpens];
       activeStreamHandles.clear();
       activePortableHandles.clear();
-      closed ??= Promise.allSettled([
-        ...streamHandles.map((handle) => handle.close()),
-        archiveRoot.handle.close(),
-        assetRoot.handle.close()
-      ]).then((results) => {
-        const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      closed ??= (async () => {
+        const streamResults = await Promise.allSettled(
+          streamHandles.map((handle) => handle.close()),
+        );
+        await Promise.all(pendingOpens);
+        const rootResults = await Promise.allSettled([
+          archiveRoot.handle.close(),
+          assetRoot.handle.close()
+        ]);
+        const rejected = [...streamResults, ...rootResults]
+          .find((result): result is PromiseRejectedResult => result.status === "rejected");
         if (rejected) throw rejected.reason;
-      });
+      })();
       return closed;
     }
   });

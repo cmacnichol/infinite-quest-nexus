@@ -41,7 +41,20 @@ function isHistoricalStorageHelper(target) {
 }
 
 function staticMember(node) {
-  const member = node.property ?? node.key;
+  const unwrap = (value) => {
+    let current = value;
+    while (current && [
+      "TSAsExpression",
+      "TSTypeAssertion",
+      "TSNonNullExpression",
+      "TSSatisfiesExpression",
+      "ParenthesizedExpression"
+    ].includes(current.type)) {
+      current = current.expression;
+    }
+    return current;
+  };
+  const member = unwrap(node.property ?? node.key);
   if (!member) return null;
   if (!node.computed && member.type === "Identifier") {
     return { node: member, name: member.name };
@@ -60,16 +73,21 @@ function staticMember(node) {
 
 export function checkPrivateStorageBoundaries(file, text) {
   const normalized = file.replaceAll("\\", "/");
-  if (!PRODUCTION_SOURCE.test(normalized) || !/\.(?:cjs|js|mjs|mts|ts|tsx)$/u.test(normalized)) {
+  if (!PRODUCTION_SOURCE.test(normalized) || !/\.(?:cjs|js|jsx|mjs|mts|ts|tsx)$/u.test(normalized)) {
     return [];
   }
+  const languagePlugins = /\.(?:ts|mts)$/u.test(normalized)
+    ? ["typescript"]
+    : /\.(?:tsx)$/u.test(normalized)
+      ? ["typescript", "jsx"]
+      : ["jsx"];
   let syntaxTree;
   try {
     syntaxTree = parse(text, {
       sourceType: "unambiguous",
       sourceFilename: normalized,
       errorRecovery: true,
-      plugins: ["typescript", "jsx", "importAttributes"]
+      plugins: [...languagePlugins, "importAttributes"]
     });
   } catch (error) {
     return [`${normalized}: private storage boundary AST parse failed: ${(error).message}`];

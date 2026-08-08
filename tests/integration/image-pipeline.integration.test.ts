@@ -1505,7 +1505,7 @@ integration("independent illustration pipeline", () => {
 
   it("reuses retained generated assets for world covers and turn illustrations", async () => {
     failImages = false;
-    const sourceTitle = `Synthetic library source ${crypto.randomUUID()}`;
+    const sourceTitle = "Synthetic library source Moonlit Archive";
     const sourceWorld = await createWorld(pool, worldCreateSchema.parse({ title: sourceTitle }));
     const queued = await enqueueWorldCover(pool, sourceWorld.id, worldCoverRequestSchema.parse({}));
     const completed = await processThroughTerminal(queued.id, "synthetic-library-worker");

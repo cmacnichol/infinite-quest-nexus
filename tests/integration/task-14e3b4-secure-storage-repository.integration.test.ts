@@ -386,6 +386,109 @@ integration("Task 14e3b4 secure storage repository", () => {
     });
   });
 
+  it("rejects identity binding that starts live but crosses expiry behind an operation row lock", async () => {
+    const reserved = await durable.journal.reserve(
+      { resourceKind: "portable", ownerUserId, operationScopeId: `locked-cas:${crypto.randomUUID()}` },
+      {
+        purpose: "portable_export",
+        leaseOwner: "b4-locked-cas",
+        expiresAt: new Date(Date.now() + 60_000).toISOString()
+      },
+    );
+    const relativePath = `exports/${reserved.operation.operationId}.pending`;
+    await secure.recordPrewriteTarget(bindPrivatePrewriteTargetAuthority(
+      reserved.operation,
+      relativePath,
+    ));
+    const authority = bindPrivatePrewriteNodeAuthority(
+      reserved.operation,
+      relativePath,
+      { deviceId: "locked-device", fileId: "locked-file" },
+    );
+    const locker = await pool.connect();
+    const binder = await pool.connect();
+    let binding: Promise<
+      | Readonly<{ ok: true }>
+      | Readonly<{ ok: false; error: unknown }>
+    > | undefined;
+    try {
+      const expiry = await pool.query<{ expires_at: Date }>(
+        `UPDATE durable_filesystem_operations
+            SET expires_at=clock_timestamp()+interval '2 seconds'
+          WHERE id=$1
+        RETURNING expires_at`,
+        [reserved.operation.operationId],
+      );
+      const expiresAt = expiry.rows[0]!.expires_at;
+      const binderPid = await binder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const binderSecure = createPostgresSecureStorageRepository(
+        binder as unknown as DatabasePool,
+        durable,
+      );
+      await binder.query("BEGIN");
+      const binderStart = await binder.query<{
+        transaction_started_at: Date;
+        observed_at: Date;
+      }>(
+        `SELECT now() AS transaction_started_at,
+                clock_timestamp() AS observed_at`,
+      );
+      expect(binderStart.rows[0]!.transaction_started_at.getTime())
+        .toBeLessThan(expiresAt.getTime());
+      expect(binderStart.rows[0]!.observed_at.getTime())
+        .toBeLessThan(expiresAt.getTime());
+      await locker.query("BEGIN");
+      await locker.query(
+        "SELECT id FROM durable_filesystem_operations WHERE id=$1 FOR UPDATE",
+        [reserved.operation.operationId],
+      );
+      binding = binderSecure.recordPrewriteNode(authority).then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      let blocked = false;
+      for (let attempt = 0; attempt < 100 && !blocked; attempt += 1) {
+        const activity = await locker.query<{ blocked: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+              WHERE datname=current_database()
+                AND pid=$1
+                AND state='active'
+                AND wait_event_type='Lock'
+           ) AS blocked`,
+          [binderPid.rows[0]!.pid],
+        );
+        blocked = activity.rows[0]!.blocked;
+        if (!blocked) await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      expect(blocked).toBe(true);
+      await locker.query(
+        `SELECT pg_sleep(
+           GREATEST(0,EXTRACT(EPOCH FROM ($1::timestamptz-clock_timestamp())))+0.05
+         )`,
+        [expiresAt],
+      );
+      await locker.query("COMMIT");
+      await expect(binding).resolves.toEqual({
+        ok: false,
+        error: expect.objectContaining({ code: "55000" })
+      });
+    } finally {
+      await locker.query("ROLLBACK").catch(() => undefined);
+      await binding?.catch(() => undefined);
+      await binder.query("ROLLBACK").catch(() => undefined);
+      binder.release();
+      locker.release();
+    }
+    await expect(pool.query(
+      `SELECT authority_state,device_id,file_id
+         FROM durable_filesystem_prewrite_nodes WHERE operation_id=$1`,
+      [reserved.operation.operationId],
+    )).resolves.toMatchObject({
+      rows: [{ authority_state: "target_only", device_id: null, file_id: null }]
+    });
+  });
+
   it("atomically moves an expired finalized export pair to cleanup_pending for b2c recovery", async () => {
     const expiresAt = new Date(Date.now() + 1_500).toISOString();
     const fixture = await candidate("portable_export", expiresAt);

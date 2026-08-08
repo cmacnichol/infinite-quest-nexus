@@ -83,6 +83,12 @@ async function hasOpenDescriptorFor(path: string): Promise<boolean> {
   return targets.some((value) => value === path || value === `${path} (deleted)`);
 }
 
+async function waitForFileEffect(predicate: () => Promise<boolean>): Promise<void> {
+  while (!(await predicate())) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
 async function timeoutExportFixture(input: Readonly<{
   deadlineAt: string;
   contentHash?: string;
@@ -129,10 +135,15 @@ async function timeoutExportFixture(input: Readonly<{
     descriptors: [expected]
   } as unknown as PrivatePortableExportCleanupPreparation;
   const events: string[] = [];
+  let resolveAcknowledged!: () => void;
+  const acknowledged = new Promise<void>((resolve) => {
+    resolveAcknowledged = resolve;
+  });
   const acknowledge = vi.fn(async () => {
     events.push("ack");
     expect(await hasOpenDescriptorFor(physicalPath)).toBe(false);
     await expect(stat(physicalPath)).rejects.toMatchObject({ code: "ENOENT" });
+    resolveAcknowledged();
     return { outcome: "cleaned" as const };
   });
   const adapter = await createSecureFilesystemAdapter({
@@ -160,7 +171,7 @@ async function timeoutExportFixture(input: Readonly<{
       deadlineAt: input.deadlineAt
     })
   });
-  return { acknowledge, adapter, content, events, physicalPath, session };
+  return { acknowledge, acknowledged, adapter, content, events, physicalPath, session };
 }
 
 describe("Task 14e3b4 secure filesystem adapter", () => {
@@ -506,7 +517,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
         deadlineAt: "2026-08-08T12:00:01.000Z"
       });
       await vi.advanceTimersByTimeAsync(1_001);
-      await idle.session.finalize("timeout");
+      await idle.acknowledged;
       expect(idle.acknowledge).toHaveBeenCalledTimes(1);
       await expect(collect(idle.session.chunks)).rejects.toThrow("filesystem_stream_timeout");
       await idle.session.finalize("close");
@@ -521,7 +532,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
       const iterator = between.session.chunks[Symbol.asyncIterator]();
       await expect(iterator.next()).resolves.toMatchObject({ done: false });
       await vi.advanceTimersByTimeAsync(1_001);
-      await between.session.finalize("timeout");
+      await between.acknowledged;
       expect(between.acknowledge).toHaveBeenCalledTimes(1);
       await expect(iterator.next()).rejects.toThrow("filesystem_stream_timeout");
       await between.session.finalize("abort");
@@ -583,7 +594,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
       });
       expect(session).not.toBeNull();
       await vi.advanceTimersByTimeAsync(1_001);
-      await session!.finalize("close");
+      await waitForFileEffect(async () => !(await hasOpenDescriptorFor(physicalPath)));
       expect(await hasOpenDescriptorFor(physicalPath)).toBe(false);
       await expect(stat(physicalPath)).resolves.toBeTruthy();
       await expect(collect(session!.chunks)).rejects.toThrow("filesystem_stream_timeout");
@@ -866,10 +877,23 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
           deadlineAt: FUTURE
         })
       });
+      const openingOutcome = opening.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
       await entered;
-      await adapter.close();
+      let closeResolved = false;
+      const closing = adapter.close().then(() => { closeResolved = true; });
+      const resolvedBeforeRelease = await Promise.race([
+        closing.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 50))
+      ]);
       releaseResolve();
-      await expect(opening).rejects.toThrow("filesystem_adapter_closed");
+      await closing;
+      const outcome = await openingOutcome;
+      expect(resolvedBeforeRelease).toBe(false);
+      expect(outcome).toHaveProperty("error");
+      expect((outcome as { error: Error }).error.message).toBe("filesystem_adapter_closed");
       expect(await hasOpenDescriptorFor(physicalPath)).toBe(false);
     } finally {
       releaseResolve();

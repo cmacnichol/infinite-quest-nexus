@@ -7,12 +7,12 @@ explicit secure storage authority and bounded filesystem sessions without
 composing routes, runtime consumers, workers, public barrels, or the Task
 14e3b5 production composition.
 
-The implementation is split across two focused commits. The first checkpoint,
+The implementation is delivered across focused commits. The first checkpoint,
 `8a5f8cd` (`feat(storage): add secure portable authority`), adds the additive
 0058 schema, atomic portable issuance, secure storage contracts, and the
-PostgreSQL repository. The second checkpoint contains the filesystem adapter,
-reaper behavior, compatibility retirement, boundary guard, and regression
-coverage described below.
+PostgreSQL repository. Later checkpoints contain the filesystem adapter,
+additive 0059 target-intent hardening, reaper behavior, compatibility
+retirement, boundary guard, and regression coverage described below.
 
 ## Implemented behavior
 
@@ -43,9 +43,10 @@ coverage described below.
   anchored-open and verify the descriptor, and enforce the same bounded read
   rules without deleting asset files.
 - Adapter shutdown tracks and closes portable, asset, and legacy-preview stream
-  handles. A closing fence rejects concurrent session publication so an open
-  cannot escape the shutdown snapshot. Portable handles remain indexed by
-  operation so a reaper closes them before physical cleanup.
+  handles. A synchronous closing fence rejects opens that begin after shutdown,
+  and shutdown drains opens already in flight before closing root handles or
+  resolving. Portable handles remain indexed by operation so a reaper closes
+  them before physical cleanup.
 - Identity-safe cleanup treats `ENOENT` as idempotent only after an exact
   prepared descriptor and fresh claim have already established the deletion
   target. A substituted node or identity mismatch remains a failure and cannot
@@ -57,7 +58,10 @@ coverage described below.
   ambient locator at runtime.
 - The private-storage AST guard rejects forbidden imports, re-exports, dynamic
   imports, `require` calls, and forbidden member access in production source.
-  It is included in the repository check command.
+  Static computed members remain detectable through nested TypeScript `as`,
+  angle-bracket assertion, `satisfies`, non-null, and parenthesized wrappers;
+  dynamic computed members remain allowed. It is included in the repository
+  check command.
 - The named non-reaped `legacy_path_v1` preview reader remains available only
   for server-derived legacy preview descriptors.
 
@@ -106,6 +110,39 @@ API emits or redeems that value.
 11. Shutdown could race an anchored open after the active-handle snapshot. A
     synchronous closing fence at registration closes and rejects unpublished
     handles deterministically.
+12. The closing fence alone still allowed `close()` to resolve while an open
+    that began before shutdown held a descriptor but had not registered it.
+    Every open is now synchronously registered in an in-flight barrier set;
+    shutdown closes published sessions, drains those barriers, and resolves
+    only after any unpublished descriptor has been closed.
+13. The AST guard still missed static retired member names nested inside
+    TypeScript expression wrappers. Static-member inspection now recursively
+    unwraps assertions, `satisfies`, non-null expressions, and explicit
+    parentheses, and selects TypeScript/JSX parser plugins by source extension
+    so angle-bracket assertions in `.ts` are inspectable without weakening JSX
+    support.
+14. Earlier deadline tests called manual finalizers before inspecting cleanup,
+    so they did not prove autonomous expiration. Idle export, between-chunk
+    export, and asset tests now wait for observable close/delete/ack behavior
+    before any manual finalization; late finalization remains an idempotency
+    assertion only.
+15. Earlier current-clock coverage did not force identity binding to wait past
+    expiry. A dedicated binder connection now starts while authority is live,
+    is observed waiting on the operation row lock by exact backend PID, crosses
+    expiry behind that lock, then rejects with SQLSTATE `55000` while the
+    durable row remains `target_only` with no persisted identity.
+16. Independent review found the row-lock fixture still inferred its pre-expiry
+    start from a two-second process clock window. The fixture now gives the
+    binder its own transaction, sets expiry from PostgreSQL immediately before
+    that transaction, asserts both its transaction timestamp and current
+    database timestamp precede expiry, and then starts the blocked update. A
+    regression to transaction-start `now()` would therefore accept and fail the
+    test, while `clock_timestamp()` rejects after the lock wait.
+17. Independent review also found that the source-extension parser branches
+    were exercised only as `.ts`. Valid JSX-containing `.tsx` and `.js`
+    fixtures now cover both wrapped static retired members and dynamic computed
+    members, proving JSX parsing remains enabled without masking TypeScript
+    angle-bracket assertions in `.ts`.
 
 ## Verification
 
@@ -113,12 +150,18 @@ API emits or redeems that value.
   TypeScript/web checks.
 - Focused correction matrix: 3 unit files, 17 tests passed; 0059 migration
   and secure repository matrix: 2 integration files, 11 tests passed.
+- Second correction matrix: private-boundary and secure-adapter unit files,
+  16 tests passed; secure-storage PostgreSQL integration file, 8 tests passed.
+  The matrix includes wrapped static-member positives/dynamic negatives,
+  autonomous idle/stalled export cleanup before manual finalization,
+  autonomous asset descriptor close, close-versus-in-flight-open draining, and
+  the exact-backend row-lock expiry race.
 - Affected PostgreSQL/filesystem matrix: passed for durable filesystem,
   Task 14e2c adapters, portable repository, finalized delivery, 0058 migration,
   additive 0059 target-intent migration, and secure storage repository.
 - Full `pnpm test`:
-  - unit: 124 files, 1,424 tests passed;
-  - integration: 42 files, 464 tests passed.
+  - unit: 124 files, 1,425 tests passed;
+  - integration: 42 files, 465 tests passed.
 - `git diff --check`: passed.
 - Production raw-authority scan: no forbidden production references; remaining
   matches are negative assertions, the AST guard itself, and isolated
@@ -128,6 +171,12 @@ The historical archive fixture still emits a non-failing Node `FileHandle`
 garbage-collection warning in focused and full runs. It does not originate from
 the new production adapter composition (there is none in b4), and all tests
 pass; track it as test-harness hygiene rather than a Task 14e3b4 blocker.
+
+One post-review full integration attempt exposed a pre-existing randomized
+world-cover fixture: the prompt-facing title included a UUID whose substrings
+can match mechanics tokens such as `ac01`. The fixture now uses stable fiction-
+only title text. The image-pipeline file passed 26/26 in isolation and the full
+integration suite passed 42 files/465 tests after that test-only correction.
 
 ## Scope deliberately deferred
 
