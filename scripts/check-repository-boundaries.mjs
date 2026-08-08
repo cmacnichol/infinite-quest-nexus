@@ -1,7 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { checkClientBoundaries } from "./check-client-boundaries.mjs";
-import { checkPrivateStorageBoundaries } from "./check-private-storage-boundaries.mjs";
+import {
+  checkAssetImportStorageCompositionInventory,
+  checkPrivateStorageBoundaries,
+  isPrivateStorageInventorySource
+} from "./check-private-storage-boundaries.mjs";
 
 const output = execFileSync(
   "git",
@@ -10,6 +14,7 @@ const output = execFileSync(
 );
 const files = [...new Set(output.split(/\r?\n/u).filter(Boolean))].sort();
 const violations = [];
+const sourceInventory = [];
 
 // The root client is retained as a historical artifact, but is never shipped or
 // exercised by the application. Compatibility code is limited to explicit data
@@ -48,7 +53,7 @@ const RETIRED_PROVIDER_AUTHORITY = [
   "services/api/src/task-14d-world-generation-bridge.ts"
 ];
 
-const codeExtension = /\.(?:cjs|html|js|mjs|ts)$/u;
+const codeExtension = /\.(?:cjs|html|js|jsx|mjs|mts|ts|tsx)$/u;
 const activeCode = /^(?:apps|packages|services)\//u;
 const runtimeConfiguration = /^(?:Dockerfile|compose(?:\.[^/]+)?\.ya?ml|\.env\.example|deploy\/.*\.ya?ml|apps\/|packages\/|services\/)/u;
 const consoleWrite = /\bconsole\s*\.\s*(?:debug|error|info|log|trace|warn)\s*\(/u;
@@ -99,6 +104,9 @@ for (const file of files) {
 
   const text = normalizedText(file);
   if (text === null) continue;
+  if (isPrivateStorageInventorySource(normalized)) {
+    sourceInventory.push({ file: normalized, text });
+  }
 
   if (codeExtension.test(normalized) && consoleWrite.test(text) && !HISTORICAL_CLIENT_ALLOWLIST.has(normalized)) {
     violations.push(`${normalized}: direct console writes are prohibited; use the shared logger`);
@@ -115,6 +123,8 @@ for (const file of files) {
   if (activeCode.test(normalized)) checkBrowserNetworkCalls(normalized, text);
   violations.push(...checkPrivateStorageBoundaries(normalized, text));
 }
+
+violations.push(...checkAssetImportStorageCompositionInventory(sourceInventory));
 
 for (const migrationFile of LEGACY_MIGRATION_ALLOWLIST) {
   if (!files.includes(migrationFile)) {
