@@ -485,7 +485,7 @@ integration("standard database migration runner", () => {
       ) VALUES ($1,$2,$3,$4,$5,'asset',$6,$7)`;
       expect(await statementWasRejected(insertGrantSql, [
         hash(`premature-grant-${crypto.randomUUID()}`), candidateHash, originalOperation,
-        ownerOne, "asset_original", assetOne, new Date(Date.now() + 5 * 60_000)
+        ownerOne, "asset_original", assetOne, new Date(Date.now() + 30_000)
       ])).toBe(true);
 
       await client.query(
@@ -494,13 +494,13 @@ integration("standard database migration runner", () => {
       );
       expect(await statementWasRejected(insertGrantSql, [
         hash(`overlong-grant-${crypto.randomUUID()}`), candidateHash, originalOperation,
-        ownerOne, "asset_original", assetOne, new Date(Date.now() + 45 * 60_000)
+        ownerOne, "asset_original", assetOne, new Date(Date.now() + 2 * 60_000)
       ])).toBe(true);
       const rawGrant = `raw-grant-${crypto.randomUUID()}`;
       const grantHash = hash(rawGrant);
       await client.query(insertGrantSql, [
         grantHash, candidateHash, originalOperation, ownerOne, "asset_original",
-        assetOne, new Date(Date.now() + 5 * 60_000)
+        assetOne, new Date(Date.now() + 30_000)
       ]);
       const persistedGrant = await client.query<{
         grant_token_hash: string;
@@ -520,7 +520,7 @@ integration("standard database migration runner", () => {
 
       expect(await statementWasRejected(insertGrantSql, [
         hash(`wrong-scope-grant-${crypto.randomUUID()}`), candidateHash, originalOperation,
-        ownerOne, "asset_original", assetTwo, new Date(Date.now() + 5 * 60_000)
+        ownerOne, "asset_original", assetTwo, new Date(Date.now() + 30_000)
       ])).toBe(true);
       expect(await statementWasRejected(insertGrantSql, [
         hash(`stale-grant-${crypto.randomUUID()}`), candidateHash, originalOperation,
@@ -549,7 +549,7 @@ integration("standard database migration runner", () => {
       const revokedCandidateGrantHash = hash(`revoked-candidate-grant-${crypto.randomUUID()}`);
       await client.query(insertGrantSql, [
         revokedCandidateGrantHash, candidateHash, originalOperation, ownerOne, "asset_original",
-        assetOne, new Date(Date.now() + 5 * 60_000)
+        assetOne, new Date(Date.now() + 30_000)
       ]);
       await client.query(
         "UPDATE durable_filesystem_candidate_authorities SET lifecycle='revoked',updated_at=now() WHERE operation_id=$1",

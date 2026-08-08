@@ -15,6 +15,9 @@ declare const privateFilesystemCandidateAuthorityBrand: unique symbol;
 declare const privateFilesystemDeliveryGrantBrand: unique symbol;
 declare const privateFilesystemDeliveryGrantRequestBrand: unique symbol;
 
+/** Maximum validity of a raw, one-time private filesystem delivery capability. */
+export const PRIVATE_FILESYSTEM_DELIVERY_GRANT_MAX_LIFETIME_MS = 60_000;
+
 export type DurableFilesystemOperationId = string & Readonly<{
   [durableFilesystemOperationIdBrand]: true;
 }>;
@@ -286,6 +289,17 @@ function requireFutureTimestamp(value: string, diagnostic: string): void {
   }
 }
 
+function requireDeliveryGrantTimestamp(value: string): void {
+  const currentTime = Date.now();
+  const timestamp = Date.parse(value);
+  if (!nonBlank(value) || !Number.isFinite(timestamp) || timestamp <= currentTime) {
+    throw new Error("filesystem_delivery_grant_expired");
+  }
+  if (timestamp - currentTime > PRIVATE_FILESYSTEM_DELIVERY_GRANT_MAX_LIFETIME_MS) {
+    throw new Error("filesystem_delivery_grant_lifetime_invalid");
+  }
+}
+
 function requireDescriptor(descriptor: PrivateStorageDescriptor): void {
   const pathIsInvalid = !nonBlank(descriptor.relativePath)
     || descriptor.relativePath.startsWith("/")
@@ -362,7 +376,7 @@ export function bindPrivateFilesystemDeliveryGrantRequest(
   if (lifecycle !== "finalized") throw new Error("filesystem_lifecycle_invalid");
   if (!nonBlank(candidate)) throw new Error("filesystem_candidate_invalid");
   requireDescriptor(descriptor);
-  requireFutureTimestamp(expiresAt, "filesystem_delivery_grant_expired");
+  requireDeliveryGrantTimestamp(expiresAt);
   return Object.freeze({
     operation: snapshotScope(operation),
     lifecycle,

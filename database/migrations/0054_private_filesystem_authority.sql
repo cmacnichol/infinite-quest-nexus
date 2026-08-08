@@ -276,6 +276,14 @@ CREATE INDEX private_filesystem_delivery_grants_expiry_idx
   ON private_filesystem_delivery_grants(lifecycle, expires_at, created_at, operation_id)
   WHERE lifecycle = 'issued';
 
+-- This named 60-second ceiling mirrors
+-- PRIVATE_FILESYSTEM_DELIVERY_GRANT_MAX_LIFETIME_MS in the adapter-private
+-- application contract. The grant is a raw, one-time bearer capability.
+CREATE FUNCTION private_filesystem_delivery_grant_max_lifetime() RETURNS interval
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+  SELECT interval '60 seconds';
+$$;
+
 CREATE FUNCTION enforce_private_filesystem_delivery_grant() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -345,6 +353,7 @@ BEGIN
 
   IF NEW.lifecycle <> 'issued'
     OR NEW.expires_at <= now()
+    OR NEW.expires_at > clock_timestamp() + private_filesystem_delivery_grant_max_lifetime()
     OR NEW.expires_at > candidate.expires_at
     OR operation.lifecycle <> 'finalized'
     OR operation.owner_user_id IS DISTINCT FROM NEW.owner_user_id
@@ -379,6 +388,7 @@ DROP TRIGGER IF EXISTS private_filesystem_delivery_grants_trigger
   ON private_filesystem_delivery_grants;
 DROP FUNCTION IF EXISTS enforce_private_filesystem_delivery_grant();
 DROP TABLE IF EXISTS private_filesystem_delivery_grants;
+DROP FUNCTION IF EXISTS private_filesystem_delivery_grant_max_lifetime();
 
 DROP TRIGGER IF EXISTS durable_filesystem_candidate_authorities_trigger
   ON durable_filesystem_candidate_authorities;

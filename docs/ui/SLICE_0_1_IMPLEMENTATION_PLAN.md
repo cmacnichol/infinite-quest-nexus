@@ -8175,17 +8175,23 @@ grant, and legacy-null rejection. No consumer changes.
 
 **14e3b1 completion (2026-08-08):** The adapter-private contracts now require
 an immutable reservation/candidate/descriptor authority for staging and full
-campaign/world/version scope for export issuance; owner-only issuance cannot
-compile. Finalized delivery-grant requests and the legacy anchored-read
+campaign/world/version scope for export issuance; the new adapter-private
+`PrivatePortableCapabilityIssuancePort` exposes no owner-only issuance
+signature. Finalized delivery-grant requests and the legacy anchored-read
 capability remain outside public barrels, and the latter carries explicit
-`cleanupAuthority: "none"` without a path or locator. Additive migration
-`0054_private_filesystem_authority` persists hashed candidate and delivery
-grant authority, exact immutable descriptor and owner/resource/purpose/
-operation scope, expiry and lifecycle guards, and nullable write-once asset and
-derivative bindings. It does not rewrite `0053`, infer a binding from a legacy
-path, or change a consumer. Verification passed 49 focused contracts, 14
-focused real-PostgreSQL migration tests, 1,398 unit tests, 411 integration
-tests, and root `pnpm check`. **14e3b2 is next.**
+`cleanupAuthority: "none"` without a path or locator. A raw one-time delivery
+grant has one named maximum lifetime of 60 seconds from application or database
+issuance and remains further bounded by candidate expiry; both the private
+contract binder and the `0054` trigger reject a longer lifetime. Additive
+migration `0054_private_filesystem_authority` persists hashed candidate and
+delivery grant authority, exact immutable descriptor and owner/resource/
+purpose/operation scope, expiry and lifecycle guards, and nullable write-once
+asset and derivative bindings. It does not rewrite `0053`, infer a binding from
+a legacy path, or change a consumer. Issue #0518 remains required 14e3b4 work:
+remove or fence the existing legacy owner-only compatibility seam; 14e3b1 does
+not change that consumer. Verification passed 49 focused contracts, 14 focused
+real-PostgreSQL migration tests, 1,398 unit tests, 411 integration tests, and
+root `pnpm check`. **14e3b2 is next.**
 
 **14e3b2 — PostgreSQL capability and cleanup repository.** Implement named
 repository APIs for durable staged/export/publication rehydration, private

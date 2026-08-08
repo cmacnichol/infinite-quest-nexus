@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type * as PublicAssetContracts from "../../packages/application/src/assets/index.js";
 import type * as PublicImportContracts from "../../packages/application/src/imports/index.js";
 import {
@@ -146,36 +146,56 @@ describe("Task 14e3b1 private authority contracts", () => {
     )).toThrow("portable_export_scope_invalid");
   });
 
-  it("requires finalized lifecycle and exact descriptor/candidate identity before a private delivery grant can be issued", () => {
+  it("requires finalized lifecycle and limits private delivery grants to 60 seconds", () => {
     const operation = {
       ...portableReservation("portable_export"),
       operationId: "finalized-export-operation"
     } as unknown as AttachedFilesystemOperation;
 
-    const request = bindPrivateFilesystemDeliveryGrantRequest(
-      operation,
-      "finalized",
-      candidate,
-      descriptor,
-      "2099-01-01T00:05:00.000Z",
-    );
-    expect(request).toMatchObject({ lifecycle: "finalized", operation, candidate, descriptor });
-    expect(Object.isFrozen(request)).toBe(true);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime("2026-08-08T12:00:00.000Z");
+      const request = bindPrivateFilesystemDeliveryGrantRequest(
+        operation,
+        "finalized",
+        candidate,
+        descriptor,
+        "2026-08-08T12:01:00.000Z",
+      );
+      expect(request).toMatchObject({ lifecycle: "finalized", operation, candidate, descriptor });
+      expect(Object.isFrozen(request)).toBe(true);
 
-    expect(() => bindPrivateFilesystemDeliveryGrantRequest(
-      operation,
-      "attached" as "finalized",
-      candidate,
-      descriptor,
-      "2099-01-01T00:05:00.000Z",
-    )).toThrow("filesystem_lifecycle_invalid");
-    expect(() => bindPrivateFilesystemDeliveryGrantRequest(
-      operation,
-      "finalized",
-      candidate,
-      descriptor,
-      "2000-01-01T00:00:00.000Z",
-    )).toThrow("filesystem_delivery_grant_expired");
+      expect(() => bindPrivateFilesystemDeliveryGrantRequest(
+        operation,
+        "attached" as "finalized",
+        candidate,
+        descriptor,
+        "2026-08-08T12:01:00.000Z",
+      )).toThrow("filesystem_lifecycle_invalid");
+      expect(() => bindPrivateFilesystemDeliveryGrantRequest(
+        operation,
+        "finalized",
+        candidate,
+        descriptor,
+        "2000-01-01T00:00:00.000Z",
+      )).toThrow("filesystem_delivery_grant_expired");
+      expect(() => bindPrivateFilesystemDeliveryGrantRequest(
+        operation,
+        "finalized",
+        candidate,
+        descriptor,
+        "2026-08-08T12:01:00.001Z",
+      )).toThrow("filesystem_delivery_grant_lifetime_invalid");
+      expect(() => bindPrivateFilesystemDeliveryGrantRequest(
+        operation,
+        "finalized",
+        candidate,
+        descriptor,
+        "2099-01-01T00:00:00.000Z",
+      )).toThrow("filesystem_delivery_grant_lifetime_invalid");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not permit owner-only staged or export issuance signatures", () => {
