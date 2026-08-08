@@ -8153,15 +8153,69 @@ correction re-review. No migration, route, runtime, worker, allowlist, legacy
 service, or production consumer changed. **14e3b is next.**
 
 **14e3b — durable production persistence, delivery, and streaming adapters.**
-Implement named database/runtime adapters and `asset-import-composition` using
-explicit owner/resource/purpose/scope arguments. No `AsyncLocalStorage`, raw
-path, or process-local map may authorize staging, export, delivery, abort, or
-cleanup. Rehydrate staged/export/publication work from PostgreSQL, obtain fresh
-fenced claims, and resolve private finalized original/derivative delivery by
-asset ID. Bounded export stream completion, close, abort, and failure must
-acknowledge fenced cleanup or leave recoverable durable work. Prove restart
-cleanup, owner/scope and descriptor-substitution denial, and legacy retention.
-No existing consumer changes here.
+This is a prerequisite series, not a promotion of the 14e2c test helper. No
+`AsyncLocalStorage`, raw path, process-local map, plaintext capability, or
+ambiguous owner-only handle may authorize staging, export, delivery, abort, or
+cleanup. Do not alter migration `0053`; it is the legacy baseline. New durable
+relations belong in an additive `0054` migration. Pre-0053 path-only rows may
+expire logically but are retained read-only and never receive cleanup authority.
+
+**14e3b1 — private authority contracts and `0054` schema.** Refine the
+adapter-private lifecycle contracts so staged input and export issuance carry
+an explicit reservation authority, exact owner/resource/purpose/operation
+scope, full `PortableExportScope`, descriptor snapshot, and candidate/delivery
+grant identity. Production authority must be restart-realizable: raw operation
+or locator tokens may be hashed at rest but cannot be reconstructed from a
+process map. Persist a candidate binding and short-lived, hashed private
+delivery grant (or an equivalent directly redeemable internal descriptor).
+Add exact nullable asset/derivative-to-filesystem-operation bindings with
+owner/asset/purpose guards and lookup indexes; null is the sole legacy-retained
+classification. Test foreign owner/scope/purpose, mutation, deletion, stale
+grant, and legacy-null rejection. No consumer changes.
+
+**14e3b2 — PostgreSQL capability and cleanup repository.** Implement named
+repository APIs for durable staged/export/publication rehydration, private
+candidate/grant redemption, and fresh lease-fenced cleanup. Every operation
+must validate owner/resource/purpose/full scope, token hash, immutable
+descriptor, work version, lease ID/owner/expiry, and exact asset/derivative
+binding. Beginning cleanup must transition the portable row and journal to
+`cleanup_pending` atomically; only successful identity-safe filesystem cleanup
+may acknowledge both clean states. Wrong, expired, stale, and substituted
+claims fail closed; failures remain recoverable. Process memory may cache an
+already redeemed open descriptor/handle only, never authority. Add restart,
+cross-owner, race, rollback, and reaper matrices.
+
+**14e3b3 — finalized delivery resolver.** Implement private original and
+derivative resolution by exact owner-scoped asset ID and intent using the 0054
+binding and a fresh database-backed redemption grant. Freeze route-compatible
+derivative selection deliberately: preserve the legacy highest pixel-width
+algorithm and its missing-thumbnail original fallback, or make an explicitly
+reviewed parity change; never silently choose by unrelated transform ordering.
+For durable rows, validate the final descriptor identity/hash/length after
+restart. For legacy-null rows, return an anchored read-only compatibility
+capability only—no locator minting or cleanup claim. Prove original/thumbnail,
+fallback, substitution, owner/purpose denial, shared-hash retention, and
+restart behavior.
+
+**14e3b4 — explicit secure staging, export, and bounded streaming lifecycle.**
+Build the storage adapter from b1/b2 authority so it reserves before the first
+filesystem byte mutation and carries full export scope without ambient binding.
+Export delivery must be a bounded private stream session with a PostgreSQL-
+derived descriptor and claim. Normal end, source close, response abort, read
+failure, and pre-send failure converge exactly once after handle close on
+fenced cleanup; if physical cleanup cannot be proven, leave `cleanup_pending`
+for the reaper. Cover descriptor substitution, staging/export restart abort,
+stream partial-read, duplicate completion, and retention of legacy preview
+paths. No production route binding.
+
+**14e3b5 — named production composition and adapter matrix.** Compose the
+database repositories and secure filesystem adapter in
+`services/runtime/src/asset-import-composition.ts` using explicit injected
+dependencies and an AST/import inventory. Add production-composed real-
+PostgreSQL/filesystem contract tests for b1-b4, including scope/grant
+redemption, lifecycle and streaming cleanup. Do not promote
+`tests/helpers/task-14e2c-adapters.ts`, and do not change a route, runtime
+consumer, worker, or allowlist yet. Only after b5 passes may 14e3c begin.
 
 **14e3c — asset composition and three-phase publication.** Compose the asset
 ports for library/facets, metadata, selection, delivery, and backfill while
