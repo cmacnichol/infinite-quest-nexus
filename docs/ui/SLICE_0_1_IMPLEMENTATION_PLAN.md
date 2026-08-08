@@ -8344,15 +8344,45 @@ barrel, b2c change, legacy-helper promotion, or #0518 seam consumer belongs
 here.
 
 **14e3b4 — explicit secure staging, export, and bounded streaming lifecycle.**
-Build the storage adapter from b1/b2a-b2c authority so it reserves before the first
-filesystem byte mutation and carries full export scope without ambient binding.
-Export delivery must be a bounded private stream session with a PostgreSQL-
-derived descriptor and claim. Normal end, source close, response abort, read
-failure, and pre-send failure converge exactly once after handle close on
-fenced cleanup; if physical cleanup cannot be proven, leave `cleanup_pending`
-for the reaper. Cover descriptor substitution, staging/export restart abort,
-stream partial-read, duplicate completion, and retention of legacy preview
-paths. No production route binding.
+Before implementation, replace loose portable issuance with a named atomic
+caller-transaction operation: it consumes the exact b2b candidate attachment,
+owner, immutable expiry, operation scope, descriptor and (for exports) full
+scope/content type; it inserts the portable row and exact-attaches the candidate
+in one transaction, returning its bearer/retrieval plus attached operation and
+fresh claim. Every injected statement rollback, replay, substitution, and
+restart must leave no split state.
+
+Add additive `0058` pre-write/recovery authority. Reservation must precede every
+operation-specific filesystem mutation; after `O_EXCL` create/fstat but before
+the first byte, persist operation-derived immutable relative target and created
+node identity. This lets recovery identity-safely remove/quarantine partial
+files after crashes instead of marking an orphaned reserved operation clean.
+Add a bearer-free portable-expiry producer: with `clock_timestamp()`,
+`SKIP LOCKED`, ordered path locks, and exact DB rows only, it claims expired
+attached/finalized/cleanup-pending portable work, rotates lease/work version,
+and atomically puts journal and staged/export pair in `cleanup_pending`; include
+a recovery index. Never select finalized assets. The reaper closes handles,
+identity-safely deletes, then invokes b2c acknowledgement; delete/identity/ack
+failure leaves the pair pending for a fresh claim.
+
+Implement bounded export and asset stream sessions. Export rehydrates exact full
+scope, prepares paired cleanup before bytes escape, anchored-opens and verifies
+the descriptor, enforces deadline/maximum/positional exact-length reads, growth
+sentinel, incremental hash and final identity; EOF, close, abort, timeout,
+pre-send and read failure memoize one finalizer: close handle, then delete, then
+acknowledge. Asset durable/legacy grants similarly anchored-open and verify but
+never delete assets. Retain only a named non-reaped `legacy_path_v1` preview
+reader with server-derived descriptor.
+
+Close #0518 in this checkpoint: remove owner-plus-descriptor issue/redeem/cleanup
+and `redeemStorageLocator` from production contracts/repository surface; isolate
+any historical behavior in test-only helpers and add AST/import guards proving
+no production source can import it. The new adapter may use only explicit
+journal, candidate, atomic portable, b2c, and b3 private ports. Cover current-
+clock lock races, paired transitions, no plaintext bearer, restart/reaper,
+prewrite crashes, descriptor/path/symlink/root swaps, partial/growing/hash-
+mismatched streams, duplicate terminals, close-before-delete-before-ack,
+legacy preview parity, and zero route/runtime/worker/public-barrel/b5 changes.
 
 **14e3b5 — named production composition and adapter matrix.** Compose the
 database repositories and secure filesystem adapter in
