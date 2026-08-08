@@ -1,5 +1,10 @@
 import type { ImportOwnerScope, PortableArchiveExportRetrieval, PortableStagedInput } from "./types.js";
-import type { PrivateFilesystemCandidateAuthority } from "../assets/private-storage-lifecycle.js";
+import type {
+  AttachedFilesystemOperation,
+  DurableFilesystemRecoveryClaim,
+  DurableFilesystemTransactionContext
+} from "../assets/private-storage-lifecycle.js";
+import type { PrivateFilesystemCandidateAttachment } from "../assets/private-filesystem-repository.js";
 
 declare const privatePortableStagedIssuanceBrand: unique symbol;
 declare const privatePortableExportIssuanceBrand: unique symbol;
@@ -14,62 +19,87 @@ export type PortableExportScope = Readonly<{
 
 export type PrivatePortableStagedIssuance = Readonly<{
   owner: ImportOwnerScope;
-  reservation: PrivateFilesystemCandidateAuthority["reservation"];
-  candidate: PrivateFilesystemCandidateAuthority["candidate"];
-  descriptor: PrivateFilesystemCandidateAuthority["descriptor"];
+  attachment: PrivateFilesystemCandidateAttachment;
   expiresAt: string;
   [privatePortableStagedIssuanceBrand]: true;
 }>;
 
 export type PrivatePortableExportIssuance = PrivatePortableStagedIssuance & Readonly<{
   exportScope: PortableExportScope;
+  contentType: "application/zip" | "application/json";
   [privatePortableExportIssuanceBrand]: true;
 }>;
 
-/** Secure adapter seam: issuance always consumes a fully validated authority. */
-export interface PrivatePortableCapabilityIssuancePort {
-  issueStagedInput(issuance: PrivatePortableStagedIssuance): Promise<PortableStagedInput>;
-  issueExportRetrieval(issuance: PrivatePortableExportIssuance): Promise<PortableArchiveExportRetrieval>;
+export type PrivateAtomicStagedIssuanceResult = Readonly<{
+  stagedInput: PortableStagedInput;
+  operation: AttachedFilesystemOperation;
+  claim: DurableFilesystemRecoveryClaim;
+}>;
+
+export type PrivateAtomicExportIssuanceResult = Readonly<{
+  retrieval: PortableArchiveExportRetrieval;
+  operation: AttachedFilesystemOperation;
+  claim: DurableFilesystemRecoveryClaim;
+}>;
+
+/**
+ * Adapter-private atomic issuance. The caller owns the database transaction;
+ * the repository inserts the portable row and exact-attaches its candidate in
+ * that same transaction or returns no authority at all.
+ */
+export interface PrivateAtomicPortableIssuancePort {
+  issueStagedInput(
+    database: DurableFilesystemTransactionContext,
+    issuance: PrivatePortableStagedIssuance,
+  ): Promise<PrivateAtomicStagedIssuanceResult>;
+  issueExportRetrieval(
+    database: DurableFilesystemTransactionContext,
+    issuance: PrivatePortableExportIssuance,
+  ): Promise<PrivateAtomicExportIssuanceResult>;
 }
 
 function nonBlank(value: string): boolean {
   return value.trim().length > 0;
 }
 
-function requirePortableAuthority(
+function requirePortableAttachment(
   owner: ImportOwnerScope,
-  authority: PrivateFilesystemCandidateAuthority,
+  attachment: PrivateFilesystemCandidateAttachment,
   purpose: "portable_staging" | "portable_export",
 ): void {
   if (!nonBlank(owner.ownerUserId)
-    || authority.reservation.ownerUserId !== owner.ownerUserId
-    || authority.reservation.resourceKind !== "portable") {
+    || attachment.operation.ownerUserId !== owner.ownerUserId
+    || attachment.operation.resourceKind !== "portable") {
     throw new Error("filesystem_scope_invalid");
   }
-  if (authority.reservation.purpose !== purpose) {
+  if (attachment.operation.purpose !== purpose) {
     throw new Error("filesystem_purpose_invalid");
+  }
+  if (!nonBlank(attachment.operation.operationScopeId)
+    || !nonBlank(attachment.operation.expiresAt)
+    || !Number.isFinite(Date.parse(attachment.operation.expiresAt))
+    || Date.parse(attachment.operation.expiresAt) <= Date.now()) {
+    throw new Error("filesystem_scope_invalid");
   }
 }
 
 function snapshotIssuance(
   owner: ImportOwnerScope,
-  authority: PrivateFilesystemCandidateAuthority,
+  attachment: PrivateFilesystemCandidateAttachment,
 ): PrivatePortableStagedIssuance {
   return Object.freeze({
     owner: Object.freeze({ ownerUserId: owner.ownerUserId }),
-    reservation: authority.reservation,
-    candidate: authority.candidate,
-    descriptor: authority.descriptor,
-    expiresAt: authority.expiresAt
+    attachment,
+    expiresAt: attachment.operation.expiresAt
   }) as PrivatePortableStagedIssuance;
 }
 
-export function bindPrivatePortableStagedIssuance(
+export function bindPrivateAtomicStagedIssuance(
   owner: ImportOwnerScope,
-  authority: PrivateFilesystemCandidateAuthority,
+  attachment: PrivateFilesystemCandidateAttachment,
 ): PrivatePortableStagedIssuance {
-  requirePortableAuthority(owner, authority, "portable_staging");
-  return snapshotIssuance(owner, authority);
+  requirePortableAttachment(owner, attachment, "portable_staging");
+  return snapshotIssuance(owner, attachment);
 }
 
 function requireExportScope(scope: PortableExportScope): void {
@@ -82,15 +112,21 @@ function requireExportScope(scope: PortableExportScope): void {
   if (baseIsInvalid || kindIsInvalid) throw new Error("portable_export_scope_invalid");
 }
 
-export function bindPrivatePortableExportIssuance(
+export function bindPrivateAtomicExportIssuance(
   exportScope: PortableExportScope,
-  authority: PrivateFilesystemCandidateAuthority,
+  contentType: "application/zip" | "application/json",
+  attachment: PrivateFilesystemCandidateAttachment,
 ): PrivatePortableExportIssuance {
   requireExportScope(exportScope);
-  requirePortableAuthority({ ownerUserId: exportScope.ownerUserId }, authority, "portable_export");
-  const issuance = snapshotIssuance({ ownerUserId: exportScope.ownerUserId }, authority);
+  const expectedContentType = exportScope.exportKind === "campaign_zip"
+    ? "application/zip"
+    : "application/json";
+  if (contentType !== expectedContentType) throw new Error("portable_export_content_type_invalid");
+  requirePortableAttachment({ ownerUserId: exportScope.ownerUserId }, attachment, "portable_export");
+  const issuance = snapshotIssuance({ ownerUserId: exportScope.ownerUserId }, attachment);
   return Object.freeze({
     ...issuance,
-    exportScope: Object.freeze({ ...exportScope })
+    exportScope: Object.freeze({ ...exportScope }),
+    contentType
   }) as PrivatePortableExportIssuance;
 }

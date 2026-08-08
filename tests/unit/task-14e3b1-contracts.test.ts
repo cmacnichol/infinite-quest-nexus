@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import type * as PublicAssetContracts from "../../packages/application/src/assets/index.js";
 import type * as PublicImportContracts from "../../packages/application/src/imports/index.js";
 import {
-  bindPrivateFilesystemCandidateAuthority,
   bindPrivateFilesystemDeliveryGrantRequest,
   type AssetPublicationCandidate,
   type AttachedFilesystemOperation,
@@ -10,12 +9,13 @@ import {
   type PrivateStorageDescriptor,
   type ReservedFilesystemOperation
 } from "../../packages/application/src/assets/private-storage-lifecycle.js";
+import { bindPrivateFilesystemCandidateAttachment } from "../../packages/application/src/assets/private-filesystem-repository.js";
 import type { PrivateLegacyAnchoredReadCapability } from "../../packages/application/src/assets/private-finalized-delivery.js";
 import {
-  bindPrivatePortableExportIssuance,
-  bindPrivatePortableStagedIssuance,
+  bindPrivateAtomicExportIssuance,
+  bindPrivateAtomicStagedIssuance,
   type PortableExportScope,
-  type PrivatePortableCapabilityIssuancePort
+  type PrivateAtomicPortableIssuancePort
 } from "../../packages/application/src/imports/private-portable-authority.js";
 
 const ownerUserId = "11111111-1111-4111-8111-111111111111";
@@ -55,63 +55,73 @@ function portableReservation(
 
 const candidate = "candidate-secret" as AssetPublicationCandidate;
 
+function portableAttachment(purpose: "portable_staging" | "portable_export") {
+  const reservation = portableReservation(purpose);
+  return bindPrivateFilesystemCandidateAttachment(
+    reservation,
+    candidate,
+    descriptor,
+    {
+      operationId: reservation.operationId,
+      leaseId: `lease-${purpose}`,
+      leaseOwner: "b4-contract",
+      workVersion: 1,
+      leaseExpiresAt: "2099-01-01T00:00:00.000Z"
+    } as never,
+  );
+}
+
 describe("Task 14e3b1 private authority contracts", () => {
   it("binds staged issuance to one exact reservation, owner, purpose, candidate, and immutable descriptor snapshot", () => {
-    const reservation = portableReservation("portable_staging");
-    const authority = bindPrivateFilesystemCandidateAuthority(reservation, candidate, descriptor);
-    const issuance = bindPrivatePortableStagedIssuance({ ownerUserId }, authority);
+    const attachment = portableAttachment("portable_staging");
+    const issuance = bindPrivateAtomicStagedIssuance({ ownerUserId }, attachment);
 
     expect(issuance).toMatchObject({
       owner: { ownerUserId },
-      reservation: {
-        operationId: "operation-portable_staging",
-        operationScopeId: "scope-portable_staging",
-        resourceKind: "portable",
-        purpose: "portable_staging"
-      },
-      candidate,
-      descriptor
+      attachment: {
+        operation: {
+          operationId: "operation-portable_staging",
+          operationScopeId: "scope-portable_staging",
+          resourceKind: "portable",
+          purpose: "portable_staging"
+        },
+        candidate,
+        descriptor
+      }
     });
-    expect(issuance).not.toBe(authority);
+    expect(issuance).not.toBe(attachment);
     expect(Object.isFrozen(issuance)).toBe(true);
-    expect(Object.isFrozen(issuance.descriptor)).toBe(true);
-    expect(Object.isFrozen(issuance.descriptor.identity)).toBe(true);
+    expect(Object.isFrozen(issuance.attachment.descriptor)).toBe(true);
+    expect(Object.isFrozen(issuance.attachment.descriptor.identity)).toBe(true);
   });
 
   it("rejects foreign owner, wrong resource or purpose, malformed descriptor, and stale reservation authority", () => {
-    const staging = bindPrivateFilesystemCandidateAuthority(
-      portableReservation("portable_staging"),
-      candidate,
-      descriptor,
-    );
-    expect(() => bindPrivatePortableStagedIssuance({ ownerUserId: "foreign-owner" }, staging))
+    const staging = portableAttachment("portable_staging");
+    expect(() => bindPrivateAtomicStagedIssuance({ ownerUserId: "foreign-owner" }, staging))
       .toThrow("filesystem_scope_invalid");
 
-    const wrongPurpose = bindPrivateFilesystemCandidateAuthority(
-      portableReservation("portable_export"),
-      candidate,
-      descriptor,
-    );
-    expect(() => bindPrivatePortableStagedIssuance({ ownerUserId }, wrongPurpose))
+    const wrongPurpose = portableAttachment("portable_export");
+    expect(() => bindPrivateAtomicStagedIssuance({ ownerUserId }, wrongPurpose))
       .toThrow("filesystem_purpose_invalid");
 
-    const assetScoped = bindPrivateFilesystemCandidateAuthority(
-      portableReservation("portable_staging", { resourceKind: "asset", assetId } as Partial<ReservedFilesystemOperation>),
-      candidate,
-      descriptor,
-    );
-    expect(() => bindPrivatePortableStagedIssuance({ ownerUserId }, assetScoped))
+    const assetScoped = {
+      ...staging,
+      operation: { ...staging.operation, resourceKind: "asset", assetId }
+    } as typeof staging;
+    expect(() => bindPrivateAtomicStagedIssuance({ ownerUserId }, assetScoped))
       .toThrow("filesystem_scope_invalid");
 
-    expect(() => bindPrivateFilesystemCandidateAuthority(
+    expect(() => bindPrivateFilesystemCandidateAttachment(
       portableReservation("portable_staging"),
       candidate,
       { ...descriptor, contentHash: "raw-content" },
+      staging.claim,
     )).toThrow("filesystem_descriptor_invalid");
-    expect(() => bindPrivateFilesystemCandidateAuthority(
+    expect(() => bindPrivateFilesystemCandidateAttachment(
       portableReservation("portable_staging", { expiresAt: "2000-01-01T00:00:00.000Z" }),
       candidate,
       descriptor,
+      staging.claim,
     )).toThrow("filesystem_operation_expired");
   });
 
@@ -123,27 +133,26 @@ describe("Task 14e3b1 private authority contracts", () => {
       worldId,
       worldVersionId
     };
-    const authority = bindPrivateFilesystemCandidateAuthority(
-      portableReservation("portable_export"),
-      candidate,
-      descriptor,
-    );
-    const issuance = bindPrivatePortableExportIssuance(scope, authority);
+    const attachment = portableAttachment("portable_export");
+    const issuance = bindPrivateAtomicExportIssuance(scope, "application/zip", attachment);
 
     expect(issuance.exportScope).toEqual(scope);
-    expect(issuance.reservation.purpose).toBe("portable_export");
+    expect(issuance.attachment.operation.purpose).toBe("portable_export");
     expect(Object.isFrozen(issuance.exportScope)).toBe(true);
 
-    expect(() => bindPrivatePortableExportIssuance({ ...scope, ownerUserId: "foreign-owner" }, authority))
+    expect(() => bindPrivateAtomicExportIssuance({ ...scope, ownerUserId: "foreign-owner" }, "application/zip", attachment))
       .toThrow("filesystem_scope_invalid");
-    expect(() => bindPrivatePortableExportIssuance({ ...scope, campaignId: null }, authority))
+    expect(() => bindPrivateAtomicExportIssuance({ ...scope, campaignId: null }, "application/zip", attachment))
       .toThrow("portable_export_scope_invalid");
-    expect(() => bindPrivatePortableExportIssuance({ ...scope, exportKind: "world_json" }, authority))
+    expect(() => bindPrivateAtomicExportIssuance({ ...scope, exportKind: "world_json" }, "application/json", attachment))
       .toThrow("portable_export_scope_invalid");
-    expect(() => bindPrivatePortableExportIssuance(
+    expect(() => bindPrivateAtomicExportIssuance(
       { ...scope, exportKind: "unsupported_export" } as never,
-      authority,
+      "application/zip",
+      attachment,
     )).toThrow("portable_export_scope_invalid");
+    expect(() => bindPrivateAtomicExportIssuance(scope, "application/json", attachment))
+      .toThrow("portable_export_content_type_invalid");
   });
 
   it("requires finalized lifecycle and limits private delivery grants to 60 seconds", () => {
@@ -199,16 +208,16 @@ describe("Task 14e3b1 private authority contracts", () => {
   });
 
   it("does not permit owner-only staged or export issuance signatures", () => {
-    const port = null as unknown as PrivatePortableCapabilityIssuancePort;
+    const port = null as unknown as PrivateAtomicPortableIssuancePort;
     const grant = "private-delivery-grant" as PrivateFilesystemDeliveryGrant;
     const legacyRead = "private-legacy-read" as PrivateLegacyAnchoredReadCapability;
     expect(grant).toBe("private-delivery-grant");
     expect(legacyRead).toBe("private-legacy-read");
 
     if (false) {
-      // @ts-expect-error Staged issuance requires one validated authority object, not owner plus descriptor.
+      // @ts-expect-error Staged issuance requires a transaction and one atomic issuance object.
       void port.issueStagedInput({ ownerUserId }, descriptor);
-      // @ts-expect-error Export issuance requires full export scope and validated authority, not owner plus descriptor.
+      // @ts-expect-error Export issuance requires a transaction and one atomic export issuance object.
       void port.issueExportRetrieval({ ownerUserId }, descriptor);
     }
   });
