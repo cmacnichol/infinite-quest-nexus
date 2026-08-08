@@ -230,6 +230,13 @@ integration("Task 14e3b3 PostgreSQL finalized delivery repository", () => {
   }
 
   async function bindReservedOperation(selection: Selection): Promise<string> {
+    const operationId = await createReservedOperation(selection);
+    const table = selection.selectedRowKind === "asset" ? "assets" : "asset_derivatives";
+    await pool.query(`UPDATE ${table} SET filesystem_operation_id=$2 WHERE id=$1`, [selection.selectedRowId, operationId]);
+    return operationId;
+  }
+
+  async function createReservedOperation(selection: Selection): Promise<string> {
     const result = await pool.query<{ id: string }>(
       `INSERT INTO durable_filesystem_operations (
          owner_user_id,operation_token_hash,purpose,resource_kind,asset_id,
@@ -239,10 +246,67 @@ integration("Task 14e3b3 PostgreSQL finalized delivery repository", () => {
        RETURNING id`,
       [selection.ownerUserId, hash(crypto.randomUUID()), selection.purpose, selection.assetId],
     );
-    const operationId = result.rows[0]!.id;
-    const table = selection.selectedRowKind === "asset" ? "assets" : "asset_derivatives";
-    await pool.query(`UPDATE ${table} SET filesystem_operation_id=$2 WHERE id=$1`, [selection.selectedRowId, operationId]);
-    return operationId;
+    return result.rows[0]!.id;
+  }
+
+  async function waitForCondition<T>(
+    label: string,
+    inspect: () => Promise<T | null>,
+  ): Promise<T> {
+    const deadline = performance.now() + 5_000;
+    while (performance.now() < deadline) {
+      const result = await inspect();
+      if (result !== null) return result;
+      await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
+    }
+    throw new Error(`timed out waiting for ${label}`);
+  }
+
+  async function waitForAdvisoryWaiter(lockClass: number, lockKey: number): Promise<number> {
+    return waitForCondition("legacy race advisory waiter", async () => {
+      const result = await pool.query<{ pid: number }>(
+        `SELECT activity.pid
+           FROM pg_locks lock_state
+           JOIN pg_stat_activity activity ON activity.pid=lock_state.pid
+          WHERE lock_state.locktype='advisory'
+            AND lock_state.classid::bigint=$1
+            AND lock_state.objid::bigint=$2
+            AND lock_state.objsubid=2
+            AND lock_state.granted=false
+            AND activity.datname=current_database()
+          LIMIT 1`,
+        [lockClass, lockKey],
+      );
+      return result.rows[0]?.pid ?? null;
+    });
+  }
+
+  async function waitForBackendLock(pid: number): Promise<void> {
+    await waitForCondition("binding backend row-lock wait", async () => {
+      const result = await pool.query<{ waiting: boolean }>(
+        `SELECT wait_event_type='Lock'
+                AND query LIKE 'UPDATE assets SET filesystem_operation_id=%' AS waiting
+           FROM pg_stat_activity WHERE pid=$1`,
+        [pid],
+      );
+      return result.rows[0]?.waiting === true ? true : null;
+    });
+  }
+
+  async function waitForWaiterBlockedBy(pid: number): Promise<number> {
+    return waitForCondition("finalized-delivery repository row-lock wait", async () => {
+      const result = await pool.query<{ pid: number }>(
+        `SELECT waiting.pid
+           FROM pg_stat_activity waiting
+          WHERE waiting.datname=current_database()
+            AND waiting.wait_event_type='Lock'
+            AND $1=ANY(pg_blocking_pids(waiting.pid))
+            AND waiting.query LIKE '%FOR SHARE OF a%'
+          LIMIT 1`,
+        [pid],
+      );
+      return result.rows[0]?.pid ?? null;
+    });
   }
 
   it("issues a hash-only original grant after candidate TTL expiry and redeems it once after restart", async () => {
@@ -535,6 +599,263 @@ integration("Task 14e3b3 PostgreSQL finalized delivery repository", () => {
       { kind: "original" },
       resolution.anchoredRead,
     )).resolves.toBeNull();
+  });
+
+  it("serializes both legacy null-to-bound lock orderings without exposing a post-bind descriptor", async () => {
+    const lockClass = 140_033;
+    let nextLockKey = 1;
+    const repository = createPostgresFinalizedAssetDeliveryRepository(pool);
+    type Settled<T> = Readonly<{ kind: "value"; value: T }> | Readonly<{ kind: "error"; error: unknown }>;
+    const settled = <T>(promise: Promise<T>): Promise<Settled<T>> => promise.then(
+      (value) => ({ kind: "value", value }),
+      (error: unknown) => ({ kind: "error", error }),
+    );
+    const expectFailClosed = (outcome: Settled<unknown>): void => {
+      if (outcome.kind === "error") {
+        expect(outcome.error).toMatchObject({ code: "40001" });
+      } else {
+        expect(outcome.value).toBeNull();
+      }
+    };
+
+    await pool.query(
+      `CREATE TABLE task_14e3b3_legacy_race_gates (
+         asset_id uuid PRIMARY KEY,
+         lock_key integer UNIQUE NOT NULL
+       )`,
+    );
+    await pool.query(
+      `CREATE FUNCTION task_14e3b3_legacy_race_gate() RETURNS trigger
+       LANGUAGE plpgsql AS $$
+       DECLARE
+         gate_key integer;
+       BEGIN
+         SELECT lock_key INTO gate_key
+           FROM task_14e3b3_legacy_race_gates
+          WHERE asset_id=NEW.asset_id;
+         IF gate_key IS NOT NULL THEN
+           PERFORM pg_advisory_xact_lock(${lockClass},gate_key);
+         END IF;
+         RETURN NEW;
+       END;
+       $$`,
+    );
+    await pool.query(
+      `CREATE TRIGGER aaa_task_14e3b3_legacy_race_gate
+       BEFORE INSERT OR UPDATE ON private_legacy_asset_read_capabilities
+       FOR EACH ROW EXECUTE FUNCTION task_14e3b3_legacy_race_gate()`,
+    );
+
+    const registerGate = async (assetId: string, lockKey: number): Promise<void> => {
+      await pool.query(
+        `INSERT INTO task_14e3b3_legacy_race_gates (asset_id,lock_key)
+         VALUES ($1,$2)`,
+        [assetId, lockKey],
+      );
+    };
+    const unregisterGate = async (assetId: string): Promise<void> => {
+      await pool.query("DELETE FROM task_14e3b3_legacy_race_gates WHERE asset_id=$1", [assetId]);
+    };
+
+    try {
+      // Resolve wins the selected-row lock first. Its insert is held only after
+      // the production selector has taken FOR SHARE on the still-null row.
+      const resolveFirst = await createOriginal();
+      const resolveFirstKey = nextLockKey++;
+      await registerGate(resolveFirst.assetId, resolveFirstKey);
+      const resolveGate = await pool.connect();
+      const resolveBinder = await pool.connect();
+      let resolveGateHeld = false;
+      let resolveBinderTransaction = false;
+      try {
+        await resolveGate.query("SELECT pg_advisory_lock($1,$2)", [lockClass, resolveFirstKey]);
+        resolveGateHeld = true;
+        const resolutionOutcome = settled(repository.resolveFinalizedAssetDelivery(
+          { ownerUserId, assetId: resolveFirst.assetId },
+          { kind: "original" },
+        ));
+        await waitForAdvisoryWaiter(lockClass, resolveFirstKey);
+
+        const operationId = await createReservedOperation(resolveFirst);
+        await resolveBinder.query("BEGIN");
+        resolveBinderTransaction = true;
+        const backend = await resolveBinder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        const bind = resolveBinder.query(
+          "UPDATE assets SET filesystem_operation_id=$2 WHERE id=$1",
+          [resolveFirst.assetId, operationId],
+        );
+        await waitForBackendLock(backend.rows[0]!.pid);
+
+        await resolveGate.query("SELECT pg_advisory_unlock($1,$2)", [lockClass, resolveFirstKey]);
+        resolveGateHeld = false;
+        const resolution = await resolutionOutcome;
+        expect(resolution.kind).toBe("value");
+        if (resolution.kind !== "value"
+          || !resolution.value
+          || resolution.value.kind !== "legacy_retained") {
+          throw new Error("resolve-first legacy capability expected");
+        }
+        await bind;
+        await resolveBinder.query("COMMIT");
+        resolveBinderTransaction = false;
+
+        await expect(repository.redeemLegacyAnchoredRead(
+          { ownerUserId, assetId: resolveFirst.assetId },
+          { kind: "original" },
+          resolution.value.anchoredRead,
+        )).resolves.toBeNull();
+      } finally {
+        if (resolveGateHeld) {
+          await resolveGate.query("SELECT pg_advisory_unlock($1,$2)", [lockClass, resolveFirstKey]);
+        }
+        if (resolveBinderTransaction) await resolveBinder.query("ROLLBACK");
+        resolveGate.release();
+        resolveBinder.release();
+        await unregisterGate(resolveFirst.assetId);
+      }
+
+      // A preexisting anchored read wins the selected-row lock first. The bind
+      // waits, the one already-authorized read succeeds, and no later read can.
+      const redeemFirst = await createOriginal();
+      const issued = await repository.resolveFinalizedAssetDelivery(
+        { ownerUserId, assetId: redeemFirst.assetId },
+        { kind: "original" },
+      );
+      if (!issued || issued.kind !== "legacy_retained") throw new Error("legacy capability expected");
+      const redeemFirstKey = nextLockKey++;
+      await registerGate(redeemFirst.assetId, redeemFirstKey);
+      const redeemGate = await pool.connect();
+      const redeemBinder = await pool.connect();
+      let redeemGateHeld = false;
+      let redeemBinderTransaction = false;
+      try {
+        await redeemGate.query("SELECT pg_advisory_lock($1,$2)", [lockClass, redeemFirstKey]);
+        redeemGateHeld = true;
+        const redemptionOutcome = settled(repository.redeemLegacyAnchoredRead(
+          { ownerUserId, assetId: redeemFirst.assetId },
+          { kind: "original" },
+          issued.anchoredRead,
+        ));
+        await waitForAdvisoryWaiter(lockClass, redeemFirstKey);
+
+        const operationId = await createReservedOperation(redeemFirst);
+        await redeemBinder.query("BEGIN");
+        redeemBinderTransaction = true;
+        const backend = await redeemBinder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        const bind = redeemBinder.query(
+          "UPDATE assets SET filesystem_operation_id=$2 WHERE id=$1",
+          [redeemFirst.assetId, operationId],
+        );
+        await waitForBackendLock(backend.rows[0]!.pid);
+
+        await redeemGate.query("SELECT pg_advisory_unlock($1,$2)", [lockClass, redeemFirstKey]);
+        redeemGateHeld = false;
+        const redemption = await redemptionOutcome;
+        expect(redemption).toEqual({
+          kind: "value",
+          value: {
+            relativePath: redeemFirst.relativePath,
+            contentHash: redeemFirst.contentHash,
+            byteLength: redeemFirst.byteLength
+          }
+        });
+        await bind;
+        await redeemBinder.query("COMMIT");
+        redeemBinderTransaction = false;
+
+        await expect(repository.redeemLegacyAnchoredRead(
+          { ownerUserId, assetId: redeemFirst.assetId },
+          { kind: "original" },
+          issued.anchoredRead,
+        )).resolves.toBeNull();
+        await expect(repository.resolveFinalizedAssetDelivery(
+          { ownerUserId, assetId: redeemFirst.assetId },
+          { kind: "original" },
+        )).resolves.toBeNull();
+      } finally {
+        if (redeemGateHeld) {
+          await redeemGate.query("SELECT pg_advisory_unlock($1,$2)", [lockClass, redeemFirstKey]);
+        }
+        if (redeemBinderTransaction) await redeemBinder.query("ROLLBACK");
+        redeemGate.release();
+        redeemBinder.release();
+        await unregisterGate(redeemFirst.assetId);
+      }
+
+      // Bind wins first: a resolver waiting on its row lock may return null or
+      // PostgreSQL 40001 under REPEATABLE READ, but never a legacy capability.
+      const bindFirstResolve = await createOriginal();
+      const resolveOperationId = await createReservedOperation(bindFirstResolve);
+      const resolveWinner = await pool.connect();
+      let resolveWinnerTransaction = false;
+      try {
+        await resolveWinner.query("BEGIN");
+        resolveWinnerTransaction = true;
+        const backend = await resolveWinner.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        await resolveWinner.query(
+          "UPDATE assets SET filesystem_operation_id=$2 WHERE id=$1",
+          [bindFirstResolve.assetId, resolveOperationId],
+        );
+        const outcome = settled(repository.resolveFinalizedAssetDelivery(
+          { ownerUserId, assetId: bindFirstResolve.assetId },
+          { kind: "original" },
+        ));
+        await waitForWaiterBlockedBy(backend.rows[0]!.pid);
+        await resolveWinner.query("COMMIT");
+        resolveWinnerTransaction = false;
+        expectFailClosed(await outcome);
+      } finally {
+        if (resolveWinnerTransaction) await resolveWinner.query("ROLLBACK");
+        resolveWinner.release();
+      }
+
+      // Bind also wins against redemption of an already-issued capability.
+      // The blocked redemption may return null or 40001, never a descriptor.
+      const bindFirstRedeem = await createOriginal();
+      const preexisting = await repository.resolveFinalizedAssetDelivery(
+        { ownerUserId, assetId: bindFirstRedeem.assetId },
+        { kind: "original" },
+      );
+      if (!preexisting || preexisting.kind !== "legacy_retained") {
+        throw new Error("preexisting legacy capability expected");
+      }
+      const redeemOperationId = await createReservedOperation(bindFirstRedeem);
+      const redeemWinner = await pool.connect();
+      let redeemWinnerTransaction = false;
+      try {
+        await redeemWinner.query("BEGIN");
+        redeemWinnerTransaction = true;
+        const backend = await redeemWinner.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        await redeemWinner.query(
+          "UPDATE assets SET filesystem_operation_id=$2 WHERE id=$1",
+          [bindFirstRedeem.assetId, redeemOperationId],
+        );
+        const outcome = settled(repository.redeemLegacyAnchoredRead(
+          { ownerUserId, assetId: bindFirstRedeem.assetId },
+          { kind: "original" },
+          preexisting.anchoredRead,
+        ));
+        await waitForWaiterBlockedBy(backend.rows[0]!.pid);
+        await redeemWinner.query("COMMIT");
+        redeemWinnerTransaction = false;
+        expectFailClosed(await outcome);
+        await expect(repository.redeemLegacyAnchoredRead(
+          { ownerUserId, assetId: bindFirstRedeem.assetId },
+          { kind: "original" },
+          preexisting.anchoredRead,
+        )).resolves.toBeNull();
+      } finally {
+        if (redeemWinnerTransaction) await redeemWinner.query("ROLLBACK");
+        redeemWinner.release();
+      }
+    } finally {
+      await pool.query(
+        `DROP TRIGGER IF EXISTS aaa_task_14e3b3_legacy_race_gate
+           ON private_legacy_asset_read_capabilities`,
+      );
+      await pool.query("DROP FUNCTION IF EXISTS task_14e3b3_legacy_race_gate()");
+      await pool.query("DROP TABLE IF EXISTS task_14e3b3_legacy_race_gates");
+    }
   });
 
   it("keeps equal physical content owner-scoped for durable and legacy delivery", async () => {
