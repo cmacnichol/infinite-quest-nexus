@@ -159,14 +159,16 @@ integration("Task 14e2c additive adapter contract matrix", () => {
     // 0057 finalized-delivery authority, 0058 secure storage lifecycle, and
     // 0059 prewrite target intent and subsequent additive migrations are
     // covered by focused PostgreSQL suites; 14e3b2c owns the future atomically
-    // composed adapter matrix.
+    // composed adapter matrix. The public legacy createPreview path deliberately
+    // retains its pre-0061 INSERT shape; only private createCanonicalPreview may
+    // require the 0061 authority columns and durable work row.
     const migrationClient = await pool.connect();
     try {
       const reverted = await runner({
         dbClient: migrationClient,
         dir: resolve("database/migrations"),
         direction: "down",
-        count: 6,
+        count: 7,
         migrationsTable: "schema_migrations",
         checkOrder: true,
         singleTransaction: true,
@@ -174,6 +176,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
       });
       expect(reverted.map((migration) => migration.name)).toEqual([
+        "0061_portable_import_composition",
         "0060_asset_publication_identities",
         "0059_secure_storage_target_intent",
         "0058_secure_storage_lifecycle",
@@ -220,7 +223,8 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         "0057_finalized_asset_delivery_authority",
         "0058_secure_storage_lifecycle",
         "0059_secure_storage_target_intent",
-        "0060_asset_publication_identities"
+        "0060_asset_publication_identities",
+        "0061_portable_import_composition"
       ]);
     } finally {
       await pool.end();

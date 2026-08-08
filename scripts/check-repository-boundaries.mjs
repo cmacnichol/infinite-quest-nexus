@@ -6,6 +6,7 @@ import {
   checkPrivateStorageBoundaries,
   isPrivateStorageInventorySource
 } from "./check-private-storage-boundaries.mjs";
+import { checkPortableCompositionBoundaries } from "./check-portable-composition-boundaries.mjs";
 
 const output = execFileSync(
   "git",
@@ -27,7 +28,9 @@ const LEGACY_MIGRATION_ALLOWLIST = [
   "services/api/src/archive-routes.ts",
   "services/api/src/import-service.ts",
   "services/api/src/infinite-worlds-import-service.ts",
-  "services/api/src/server.ts"
+  "services/api/src/server.ts",
+  "packages/database/src/portable-import-family-repository.ts",
+  "services/runtime/src/portable-import-export-composition.ts"
 ];
 
 const RETIRED_WORLD_CAMPAIGN_AUTHORITY = [
@@ -122,6 +125,7 @@ for (const file of files) {
 
   if (activeCode.test(normalized)) checkBrowserNetworkCalls(normalized, text);
   violations.push(...checkPrivateStorageBoundaries(normalized, text));
+  violations.push(...checkPortableCompositionBoundaries(normalized, text));
 }
 
 violations.push(...checkAssetImportStorageCompositionInventory(sourceInventory));

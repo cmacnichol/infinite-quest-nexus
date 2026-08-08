@@ -48,6 +48,15 @@ const FACTORY_FIXTURES: readonly Source[] = [
       }
       export function createAssetPublicationComposition() { return {}; }
     `
+  },
+  {
+    file: "services/runtime/src/portable-import-export-composition.ts",
+    text: `
+      import { createAssetPublicationComposition } from "./asset-import-composition.js";
+      export function createPortableImportExportComposition() {
+        return createAssetPublicationComposition(pool, roots);
+      }
+    `
   }
 ];
 

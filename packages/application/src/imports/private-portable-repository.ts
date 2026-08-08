@@ -11,10 +11,14 @@ import type { PortableExportScope } from "./private-portable-authority.js";
 import type {
   ImportOwnerScope,
   PortableArchiveExportRetrieval,
+  PortableImportKind,
+  PortablePreviewDestination,
+  PortablePreviewHandle,
   PortableStagedInput
 } from "./types.js";
 
 declare const privatePortableStagedRehydrationBrand: unique symbol;
+declare const privatePortablePreviewRehydrationBrand: unique symbol;
 declare const privatePortableExportRehydrationBrand: unique symbol;
 declare const privatePortableStagedCleanupPreparationBrand: unique symbol;
 declare const privatePortableExportCleanupPreparationBrand: unique symbol;
@@ -56,6 +60,17 @@ export type PrivatePortableStagedRehydration = Readonly<{
   claim: DurableFilesystemRecoveryClaim;
   descriptor: PrivateStorageDescriptor;
   [privatePortableStagedRehydrationBrand]: true;
+}>;
+
+export type PrivatePortablePreviewRehydration = Readonly<{
+  identity: Readonly<{
+    ownerUserId: string;
+    kind: PortableImportKind;
+  }>;
+  operation: AttachedFilesystemOperation;
+  claim: DurableFilesystemRecoveryClaim;
+  descriptor: PrivateStorageDescriptor;
+  [privatePortablePreviewRehydrationBrand]: true;
 }>;
 
 export type PrivatePortableExportRehydration = Readonly<{
@@ -101,6 +116,15 @@ export type PrivatePortableRecoveryCleanupResult =
   | PrivatePortableExportCleanupPreparation
   | PrivatePortableCleanupUnavailable;
 
+export interface PrivatePortablePreviewRepositoryPort {
+  rehydratePreviewInput<Destination extends PortablePreviewDestination>(
+    owner: ImportOwnerScope,
+    kind: PortableImportKind,
+    previewHandle: PortablePreviewHandle<Destination>,
+    request: PrivatePortableClaimRequest,
+  ): Promise<PrivatePortablePreviewRehydration | null>;
+}
+
 export interface PrivatePortableRepositoryPort {
   rehydrateStagedInput(
     owner: ImportOwnerScope,
@@ -132,6 +156,26 @@ export interface PrivatePortableRepositoryPort {
     database: DurableFilesystemTransactionContext,
     recovery: DurableFilesystemRecoveryRecord,
   ): Promise<PrivatePortableRecoveryCleanupResult>;
+}
+
+export function bindPrivatePortablePreviewRehydration(
+  identity: Readonly<{ ownerUserId: string; kind: PortableImportKind }>,
+  operation: AttachedFilesystemOperation,
+  claim: DurableFilesystemRecoveryClaim,
+  descriptor: PrivateStorageDescriptor,
+): PrivatePortablePreviewRehydration {
+  if (!nonBlank(identity.ownerUserId)
+    || !["campaign_zip", "legacy_story", "infinite_worlds", "cyoa", "world_json", "world_text", "story_text"].includes(identity.kind)) {
+    throw new Error("portable_preview_identity_invalid");
+  }
+  requireOperation(operation, identity.ownerUserId, "portable_staging");
+  requireFreshClaim(operation, claim);
+  return Object.freeze({
+    identity: Object.freeze({ ...identity }),
+    operation: snapshotOperation(operation),
+    claim: snapshotClaim(claim),
+    descriptor: snapshotDescriptor(descriptor)
+  }) as PrivatePortablePreviewRehydration;
 }
 
 function nonBlank(value: string): boolean {

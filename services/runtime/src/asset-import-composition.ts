@@ -6,6 +6,7 @@ import type {
 import type { FinalizedAssetDeliveryResolverPort } from "../../../packages/application/src/assets/private-finalized-delivery.js";
 import type {
   PrivateAssetPublicationCommand,
+  PrivateAssetPublicationIdentity,
   PrivateAssetPublicationIdentityPort,
   PrivateAssetPublicationResult
 } from "../../../packages/application/src/assets/private-asset-publication.js";
@@ -22,14 +23,20 @@ import {
   type DurableFilesystemLifecycle
 } from "../../../packages/application/src/assets/private-storage-lifecycle.js";
 import type { PrivateAtomicPortableIssuancePort } from "../../../packages/application/src/imports/private-portable-authority.js";
-import type { PrivatePortableRepositoryPort } from "../../../packages/application/src/imports/private-portable-repository.js";
+import type {
+  PrivateCallerTransactionAssetPublisher,
+  PrivateImportedAssetAttachment
+} from "../../../packages/application/src/imports/private-portable-composition.js";
 import type { AssetApplication } from "../../../packages/application/src/assets/ports.js";
 import { createPostgresAssetPublicationRepository } from "../../../packages/database/src/asset-publication-repository.js";
 import { createPostgresAssetRepositories } from "../../../packages/database/src/asset-repository.js";
 import { createPostgresDurableFilesystemRepository } from "../../../packages/database/src/durable-filesystem-repository.js";
 import { createPostgresFinalizedAssetDeliveryRepository } from "../../../packages/database/src/finalized-asset-delivery-repository.js";
-import { createPostgresImportRepository } from "../../../packages/database/src/import-repository.js";
-import { withTransaction, type DatabasePool } from "../../../packages/database/src/pool.js";
+import {
+  createPostgresImportRepository,
+  type PostgresPortableImportRepository
+} from "../../../packages/database/src/import-repository.js";
+import { withTransaction, type DatabaseClient, type DatabasePool } from "../../../packages/database/src/pool.js";
 import { createPostgresSecureStorageRepository } from "../../../packages/database/src/secure-storage-repository.js";
 import {
   createSecureFilesystemAdapter,
@@ -41,7 +48,7 @@ export type AssetImportStorageComposition = Readonly<{
   journal: DurableFilesystemLifecycle;
   candidate: PrivateFilesystemCandidatePersistencePort & PrivateFilesystemPublicationLockPort;
   atomicPortable: PrivateAtomicPortableIssuancePort;
-  portable: PrivatePortableRepositoryPort;
+  portable: PostgresPortableImportRepository;
   prewrite: PrivatePrewriteNodeRepositoryPort;
   expiryRecovery: PrivatePortableExpiryRecoveryPort;
   finalizedDelivery: FinalizedAssetDeliveryResolverPort;
@@ -57,6 +64,7 @@ export type AssetPublicationComposition = Readonly<{
   publisher: Readonly<{
     publishAsset(command: PrivateAssetPublicationCommand): Promise<PrivateAssetPublicationResult>;
   }>;
+  transactionalPublisher: PrivateCallerTransactionAssetPublisher;
   storage: AssetImportStorageComposition;
   close(): Promise<void>;
 }>;
@@ -79,6 +87,7 @@ export async function createAssetImportStorageComposition(
       candidates: durableRepository,
       atomicPortable: secureStorageRepository,
       portable: importRepository,
+      portablePreview: importRepository,
       prewrite: secureStorageRepository,
       expiry: secureStorageRepository,
       delivery: finalizedDeliveryRepository,
@@ -125,6 +134,110 @@ export async function createAssetPublicationComposition(
     ...dependencies.selection,
     ...dependencies.metadata,
     ...dependencies.delivery
+  });
+  const existingAttachment = async (
+    identity: PrivateAssetPublicationIdentity,
+  ): Promise<PrivateImportedAssetAttachment> => {
+    if (identity.lifecycle === "published") {
+      if (!identity.result) throw new Error("asset_publication_result_invalid");
+      return Object.freeze({
+        identity,
+        result: identity.result,
+        finalization: Object.freeze([]),
+        async rollback() {}
+      });
+    }
+    if (identity.lifecycle !== "attached" || !identity.result || !identity.finalization) {
+      throw new Error("asset_publication_identity_unavailable");
+    }
+    const reconciliation = await publication.reconcileAttachedPublication(identity);
+    if (reconciliation.outcome === "published") {
+      return Object.freeze({
+        identity,
+        result: reconciliation.result,
+        finalization: Object.freeze([]),
+        async rollback() {}
+      });
+    }
+    if (reconciliation.outcome === "recoverable"
+      || !reconciliation.identity.result
+      || !reconciliation.identity.finalization) {
+      throw new Error("asset_publication_finalization_recoverable");
+    }
+    return Object.freeze({
+      identity: reconciliation.identity,
+      result: reconciliation.identity.result,
+      finalization: reconciliation.identity.finalization,
+      async rollback() {}
+    });
+  };
+  const transactionalPublisher: PrivateCallerTransactionAssetPublisher = Object.freeze({
+    async attachImportedAssets(
+      database: DatabaseClient,
+      commands: readonly PrivateAssetPublicationCommand[],
+    ) {
+      const snapshots = commands.map((command) => {
+        const snapshot = snapshotPrivateAssetPublicationCommand(command);
+        verifyPrivateAssetPublicationContentHashes(
+          snapshot,
+          (bytes) => createHash("sha256").update(bytes).digest("hex"),
+        );
+        return snapshot;
+      });
+      if (snapshots.length === 0) return Object.freeze([]);
+      return storage.candidate.withPublicationContentLocks(
+        snapshots.flatMap((snapshot) => [
+          snapshot.original.contentHash,
+          ...snapshot.derivatives.map((derivative) => derivative.contentHash)
+        ]),
+        async () => {
+          const attachments: PrivateImportedAssetAttachment[] = [];
+          try {
+            for (const snapshot of snapshots) {
+              const identity = await publication.prepareIdentity(snapshot);
+              if (identity.lifecycle !== "prepared") {
+                attachments.push(await existingAttachment(identity));
+                continue;
+              }
+              const prepared = await storage.adapter.prepareAssetPublication(snapshot, identity);
+              const rollback = async (): Promise<void> => {
+                await Promise.allSettled([
+                  prepared.original.rollback(),
+                  ...prepared.derivatives.map((derivative) => derivative.rollback())
+                ]);
+              };
+              try {
+                const attached = await publication.attachPublication(database, identity, snapshot, prepared);
+                attachments.push(Object.freeze({
+                  identity: attached.identity,
+                  result: attached.result,
+                  finalization: attached.finalization,
+                  rollback
+                }));
+              } catch (error) {
+                await rollback();
+                throw error;
+              }
+            }
+            return Object.freeze(attachments);
+          } catch (error) {
+            await Promise.allSettled(attachments.map((attachment) => attachment.rollback()));
+            throw error;
+          }
+        },
+      );
+    },
+    async finalizeImportedAssets(attachments: readonly PrivateImportedAssetAttachment[]) {
+      for (const attachment of attachments) {
+        if (attachment.finalization.length === 0) continue;
+        await storage.adapter.finalizeAssetPublication(attachment.finalization);
+        const result = await publication.completePublication(attachment.identity);
+        if (result.assetId !== attachment.result.assetId
+          || result.contentHash !== attachment.result.contentHash) {
+          throw new Error("asset_publication_result_mismatch");
+        }
+      }
+    }
   });
   const publisher = Object.freeze({
     async publishAsset(command: PrivateAssetPublicationCommand): Promise<PrivateAssetPublicationResult> {
@@ -197,6 +310,7 @@ export async function createAssetPublicationComposition(
   return Object.freeze({
     assets,
     publisher,
+    transactionalPublisher,
     storage,
     close() {
       closed ??= storage.close();

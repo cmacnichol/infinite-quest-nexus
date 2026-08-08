@@ -29,6 +29,7 @@ import type { FinalizedAssetDeliveryResolverPort } from "../../../packages/appli
 import type { AssetDeliveryRequest, AssetScope } from "../../../packages/application/src/assets/types.js";
 import type {
   PrivatePortableExportCleanupPreparation,
+  PrivatePortablePreviewRepositoryPort,
   PrivatePortableStagedCleanupPreparation,
   PrivatePortableRepositoryPort
 } from "../../../packages/application/src/imports/private-portable-repository.js";
@@ -50,8 +51,14 @@ import {
   type PortableExportScope,
   type PrivateAtomicPortableIssuancePort
 } from "../../../packages/application/src/imports/private-portable-authority.js";
-import type { PortableArchiveExportRetrieval } from "../../../packages/application/src/imports/types.js";
-import type { ImportOwnerScope, PortableStagedInput } from "../../../packages/application/src/imports/types.js";
+import type {
+  ImportOwnerScope,
+  PortableArchiveExportRetrieval,
+  PortableImportKind,
+  PortablePreviewDestination,
+  PortablePreviewHandle,
+  PortableStagedInput
+} from "../../../packages/application/src/imports/types.js";
 
 const READ_FLAGS = filesystemConstants.O_RDONLY | filesystemConstants.O_NOFOLLOW;
 const DIRECTORY_FLAGS = READ_FLAGS | filesystemConstants.O_DIRECTORY;
@@ -71,6 +78,7 @@ export type SecureFilesystemAdapterOptions = Readonly<{
   assetRoot: string;
   platform?: NodeJS.Platform;
   portable?: PrivatePortableRepositoryPort;
+  portablePreview?: PrivatePortablePreviewRepositoryPort;
   delivery?: FinalizedAssetDeliveryResolverPort;
   journal?: DurableFilesystemJournalPort;
   candidates?: PrivateFilesystemCandidatePersistencePort;
@@ -108,6 +116,19 @@ export type SecureFilesystemAdapter = Readonly<{
     operation: import("../../../packages/application/src/assets/private-storage-lifecycle.js").AttachedFilesystemOperation;
     claim: import("../../../packages/application/src/assets/private-storage-lifecycle.js").DurableFilesystemRecoveryClaim;
   }>>;
+  openStagedInputSession(input: Readonly<{
+    owner: ImportOwnerScope;
+    stagedInput: PortableStagedInput;
+    claim: Readonly<{ leaseOwner: string; leaseSeconds: number }>;
+    limits: PrivateBoundedStreamLimits;
+  }>): Promise<PrivateBoundedStreamSession>;
+  openPreviewInputSession<Destination extends PortablePreviewDestination>(input: Readonly<{
+    owner: ImportOwnerScope;
+    kind: PortableImportKind;
+    previewHandle: PortablePreviewHandle<Destination>;
+    claim: Readonly<{ leaseOwner: string; leaseSeconds: number }>;
+    limits: PrivateBoundedStreamLimits;
+  }>): Promise<PrivateBoundedStreamSession>;
   openExportSession(input: Readonly<{
     scope: PortableExportScope;
     retrieval: PortableArchiveExportRetrieval;
@@ -914,6 +935,69 @@ export async function createSecureFilesystemAdapter(
     return issued;
   };
 
+  const openStagedInputSession: SecureFilesystemAdapter["openStagedInputSession"] = (input) => trackOpen(async () => {
+    if (!options.portable) throw new Error("portable_repository_unavailable");
+    const rehydration = await options.portable.rehydrateStagedInput(
+      input.owner,
+      input.stagedInput,
+      input.claim,
+    );
+    if (!rehydration) throw new Error("portable_staged_input_unavailable");
+    const handle = await openAnchored(archiveRoot, rehydration.descriptor.relativePath);
+    let unregister: () => void = () => undefined;
+    try {
+      const initialStat = await handle.stat({ bigint: true }) as BigIntStat;
+      requireDescriptorIdentity(initialStat, rehydration.descriptor);
+      unregister = registerPortableHandle(rehydration.operation.operationId, handle);
+      return boundedReadSession({
+        handle,
+        contentType: "application/octet-stream",
+        descriptor: rehydration.descriptor,
+        initialStat,
+        limits: input.limits,
+        onClosed: unregister,
+        // Preview reads never consume or delete staging authority. Commit or
+        // durable expiry/reaping owns that lifecycle separately.
+        afterClose: async () => undefined
+      });
+    } catch (error) {
+      unregister();
+      await handle.close().catch(() => undefined);
+      throw error;
+    }
+  });
+
+  const openPreviewInputSession: SecureFilesystemAdapter["openPreviewInputSession"] = (input) => trackOpen(async () => {
+    if (!options.portablePreview) throw new Error("portable_preview_repository_unavailable");
+    const rehydration = await options.portablePreview.rehydratePreviewInput(
+      input.owner,
+      input.kind,
+      input.previewHandle,
+      input.claim,
+    );
+    if (!rehydration) throw new Error("portable_preview_input_unavailable");
+    const handle = await openAnchored(archiveRoot, rehydration.descriptor.relativePath);
+    let unregister: () => void = () => undefined;
+    try {
+      const initialStat = await handle.stat({ bigint: true }) as BigIntStat;
+      requireDescriptorIdentity(initialStat, rehydration.descriptor);
+      unregister = registerPortableHandle(rehydration.operation.operationId, handle);
+      return boundedReadSession({
+        handle,
+        contentType: "application/octet-stream",
+        descriptor: rehydration.descriptor,
+        initialStat,
+        limits: input.limits,
+        onClosed: unregister,
+        afterClose: async () => undefined
+      });
+    } catch (error) {
+      unregister();
+      await handle.close().catch(() => undefined);
+      throw error;
+    }
+  });
+
   const openExportSession: SecureFilesystemAdapter["openExportSession"] = (input) => trackOpen(async () => {
     if (!options.portable) throw new Error("portable_repository_unavailable");
     const rehydration = await options.portable.rehydrateExportArtifact(
@@ -1088,6 +1172,8 @@ export async function createSecureFilesystemAdapter(
     finalizeAssetPublication,
     stagePortableInput,
     publishPortableExport,
+    openStagedInputSession,
+    openPreviewInputSession,
     openExportSession,
     openAssetSession,
     openLegacyPathV1Preview,

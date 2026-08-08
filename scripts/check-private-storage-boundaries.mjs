@@ -6,6 +6,7 @@ const JAVASCRIPT_TYPESCRIPT_SOURCE = /\.(?:cjs|js|jsx|mjs|mts|ts|tsx)$/u;
 const STORAGE_COMPOSITION_FILE = "services/runtime/src/asset-import-composition.ts";
 const STORAGE_COMPOSITION_FACTORY = "createAssetImportStorageComposition";
 const ASSET_PUBLICATION_COMPOSITION_FACTORY = "createAssetPublicationComposition";
+const PORTABLE_COMPOSITION_FILE = "services/runtime/src/portable-import-export-composition.ts";
 const CONCRETE_STORAGE_FACTORIES = new Map([
   ["createPostgresDurableFilesystemRepository", "packages/database/src/durable-filesystem-repository.ts"],
   ["createPostgresAssetPublicationRepository", "packages/database/src/asset-publication-repository.ts"],
@@ -197,7 +198,8 @@ export function checkPrivateStorageBoundaries(file, text) {
           add(specifier, `concrete storage factory ${name} may be consumed only by ${STORAGE_COMPOSITION_FILE}`);
         }
         if ([STORAGE_COMPOSITION_FACTORY, ASSET_PUBLICATION_COMPOSITION_FACTORY].includes(name)
-          && normalized !== STORAGE_COMPOSITION_FILE) {
+          && normalized !== STORAGE_COMPOSITION_FILE
+          && !(name === ASSET_PUBLICATION_COMPOSITION_FACTORY && normalized === PORTABLE_COMPOSITION_FILE)) {
           add(specifier, "private storage composition must remain unconsumed before its named later checkpoint");
         }
         if (isPrivateContractName(name) && isApplicationPublicBarrel(target)) {
@@ -251,7 +253,8 @@ export function checkPrivateStorageBoundaries(file, text) {
         add(member.node, `concrete storage factory ${member.name} may be consumed only by ${STORAGE_COMPOSITION_FILE}`);
       }
       if ([STORAGE_COMPOSITION_FACTORY, ASSET_PUBLICATION_COMPOSITION_FACTORY].includes(member.name)
-        && normalized !== STORAGE_COMPOSITION_FILE) {
+        && normalized !== STORAGE_COMPOSITION_FILE
+        && !(member.name === ASSET_PUBLICATION_COMPOSITION_FACTORY && normalized === PORTABLE_COMPOSITION_FILE)) {
         add(member.node, "private storage composition must remain unconsumed before its named later checkpoint");
       }
     }
@@ -474,10 +477,15 @@ export function checkAssetImportStorageCompositionInventory(sources) {
     || assetPublicationCompositionDefinitions[0] !== STORAGE_COMPOSITION_FILE) {
     violations.push(`${ASSET_PUBLICATION_COMPOSITION_FACTORY} must be defined exactly once in ${STORAGE_COMPOSITION_FILE}`);
   }
-  if (imports.get(ASSET_PUBLICATION_COMPOSITION_FACTORY).length !== 0
+  const publicationImports = imports.get(ASSET_PUBLICATION_COMPOSITION_FACTORY);
+  const publicationCalls = calls.get(ASSET_PUBLICATION_COMPOSITION_FACTORY);
+  if (publicationImports.length !== 1
+    || publicationImports[0].file !== PORTABLE_COMPOSITION_FILE
+    || publicationCalls.length !== 1
+    || publicationCalls[0] !== PORTABLE_COMPOSITION_FILE
     || unsafeExposures.get(ASSET_PUBLICATION_COMPOSITION_FACTORY).length !== 0
-    || calls.get(ASSET_PUBLICATION_COMPOSITION_FACTORY).some((file) => file !== STORAGE_COMPOSITION_FILE)) {
-    violations.push(`${ASSET_PUBLICATION_COMPOSITION_FACTORY} must remain unconsumed before its named later checkpoint`);
+    || publicationCalls.some((file) => file !== PORTABLE_COMPOSITION_FILE)) {
+    violations.push(`${ASSET_PUBLICATION_COMPOSITION_FACTORY} must be consumed exactly once by ${PORTABLE_COMPOSITION_FILE}`);
   }
   return violations;
 }

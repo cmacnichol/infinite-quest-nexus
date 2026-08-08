@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 through 14e3c complete; 14e3d portable import/export composition is next |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 through 14e3d complete; 14e3e illustration/import writers and worker composition is next |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -8632,6 +8632,40 @@ and abort status, include expiry/reaper indexes, seed/rollback assertions, and
 no raw input, credential, path, or provider response fields. The composition
 surface must enumerate seven import kinds and both campaign/world export
 families explicitly; do not collapse them into an untyped generic parser.
+
+**14e3d completion (2026-08-08).** The private, deliberately unconsumed
+portable composition now covers all seven import families and both export
+families through typed ports. Migration 0061 stores immutable canonical
+normalized authority and durable lease/work-version-fenced progress/abort
+state without raw input, credentials, paths, or provider responses. Preview
+rehydrates the exact staged descriptor through a bounded read session;
+Campaign ZIP uses streaming local-entry parsing plus a bounded central-
+directory validation tail and rejects traversal, links, ZIP64/multidisk, and
+limit violations. Commit claims, all domain/ledger/asset-reference mutations,
+portable result persistence, and staged-input consumption share one caller
+transaction. Asset files use caller-transaction prepare/attach followed by
+post-commit finalization or recoverable work. Canonical replay comparison is
+independent of JSON object-key order, and campaign/world exports use bounded
+private sessions with terminal cleanup rather than the public buffered view.
+
+The completion review corrected four issues before approval: the initial
+PostgreSQL matrix did not exercise every concrete family through composition;
+Campaign ZIP manifest equality incorrectly used `JSON.stringify` and therefore
+treated JSONB key reordering as a mismatch; expiry coverage tried to mutate
+durable work directly instead of exercising database time and the public
+reaper path; and the shared public preview INSERT had accidentally acquired
+0061-only columns, breaking the intentional pre-0061 Task 14e2c migration
+matrix. The final matrix now executes preview → commit → same-key replay for
+Legacy Story, Infinite Worlds, CYOA, Campaign ZIP, world JSON, world text, and
+story text; exercises campaign and world export sessions separately; proves
+real clock expiry/restart/reap behavior; and keeps the legacy public
+`createPreview` SQL shape separate from private canonical preview creation.
+Final evidence is 1,452 unit tests and 493 integration tests, including 9/9
+Task 14e3d PostgreSQL/temp-filesystem cases, 7/7 Task 14e2c regressions, 14/14
+migration cases, plus typecheck, `pnpm check`, build, diff/precheck, and exact
+task-owned diff review. No API route, worker, illustration writer, legacy
+consumer, public barrel, or cross-role allowlist binding changed. Task 14e3e is
+next; route binding remains deferred to 14e3g.
 
 **14e3e — illustration/import writers and worker composition.** Move real
 illustration image persistence, imported asset publication, runtime illustration

@@ -36,16 +36,23 @@ import type {
 import {
   bindPrivatePortableExportCleanupPreparation,
   bindPrivatePortableExportRehydration,
+  bindPrivatePortablePreviewRehydration,
   bindPrivatePortableStagedCleanupPreparation,
   bindPrivatePortableStagedRehydration,
   type PrivatePortableCleanupUnavailable,
   type PrivatePortableExportCleanupPreparation,
   type PrivatePortableExportRehydration,
+  type PrivatePortablePreviewRehydration,
+  type PrivatePortablePreviewRepositoryPort,
   type PrivatePortableRepositoryPort,
   type PrivatePortableStagedCleanupPreparation,
   type PrivatePortableStagedRehydration
 } from "../../application/src/imports/private-portable-repository.js";
 import type { PortableExportScope as PrivatePortableExportScope } from "../../application/src/imports/private-portable-authority.js";
+import {
+  canonicalPortableImportAuthority,
+  type PortableCanonicalImportAuthority
+} from "../../application/src/imports/private-portable-composition.js";
 import { stableStringify } from "../../domain/src/text.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
@@ -261,6 +268,12 @@ export type CreatePortablePreviewRequest<Command extends PortableImportPreviewCo
   expiresAt: string;
 }>;
 
+export type CreateCanonicalPortablePreviewRequest<Command extends PortableImportPreviewCommand> =
+  CreatePortablePreviewRequest<Command> & Readonly<{
+    authority: PortableCanonicalImportAuthority;
+    authorityFingerprint: string;
+  }>;
+
 export type CompletePortableImportRequest<Kind extends PortableImportKind> = Readonly<{
   importId: string;
   importedRecordId: PortableImportedRecordId;
@@ -289,11 +302,15 @@ export type RegisterPortableExportRequest = PortableExportScope & Readonly<{
   expiresAt: string;
 }>;
 
-export interface PostgresPortableImportRepository extends PrivatePortableRepositoryPort {
+export interface PostgresPortableImportRepository
+  extends PrivatePortableRepositoryPort, PrivatePortablePreviewRepositoryPort {
   registerStagedInput(request: RegisterStagedInputRequest): Promise<PortableStagedInput>;
   retrieveStagedPayload(owner: ImportOwnerScope, stagedInput: PortableStagedInput): Promise<PortableStagedPayload | null>;
   createPreview<Command extends PortableImportPreviewCommand>(
     request: CreatePortablePreviewRequest<Command>,
+  ): Promise<PortableImportPreviewView<Command>>;
+  createCanonicalPreview<Command extends PortableImportPreviewCommand>(
+    request: CreateCanonicalPortablePreviewRequest<Command>,
   ): Promise<PortableImportPreviewView<Command>>;
   retrievePreviewPayload<Kind extends PortableImportKind, Destination extends PortablePreviewDestination>(
     owner: ImportOwnerScope,
@@ -1344,6 +1361,69 @@ async function rehydrateStagedInput(
   });
 }
 
+async function rehydratePreviewInput<Destination extends PortablePreviewDestination>(
+  pool: DatabasePool,
+  owner: ImportOwnerScope,
+  kind: PortableImportKind,
+  previewHandle: PortablePreviewHandle<Destination>,
+  request: Readonly<{ leaseOwner: string; leaseSeconds: number }>,
+): Promise<PrivatePortablePreviewRehydration | null> {
+  requirePortableClaimRequest(request);
+  const destination = databaseDestination(previewHandle.destination);
+  return withTransaction(pool, async (client) => {
+    const selected = await client.query<Readonly<{
+      staged_input_id: string;
+      filesystem_operation_id: string;
+      preview_expires_at: Date;
+    }>>(
+      `SELECT operation.staged_input_id,staged.filesystem_operation_id,
+              operation.expires_at AS preview_expires_at
+         FROM portable_import_operations operation
+         JOIN portable_staged_inputs staged
+           ON staged.id=operation.staged_input_id AND staged.owner_user_id=operation.owner_user_id
+        WHERE operation.owner_user_id=$1 AND operation.import_kind=$2
+          AND operation.preview_token_hash=$3 AND operation.destination_fingerprint=$4
+          AND operation.status='previewed' AND operation.expires_at > clock_timestamp()
+          AND staged.status='staged' AND staged.expires_at > clock_timestamp()
+        LIMIT 1`,
+      [owner.ownerUserId, kind, sha256(previewHandle.token), destination.fingerprint]
+    );
+    const identity = selected.rows[0];
+    if (!identity) return null;
+    const operation = await lockedPortableOperation(client, identity.filesystem_operation_id);
+    if (!operation
+      || operation.owner_user_id !== owner.ownerUserId
+      || operation.purpose !== "portable_staging"
+      || !(operation.lifecycle === "attached" || operation.lifecycle === "finalized")) return null;
+    const staged = await lockedStagedAuthority(
+      client,
+      identity.staged_input_id,
+      owner.ownerUserId,
+      operation.id,
+    );
+    if (!staged || staged.status !== "staged") return null;
+    const rows = await portableDescriptorRows(client, operation.id);
+    const descriptors = portableCleanupDescriptors(rows, staged.staged_content_hash, staged.staged_byte_length);
+    const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
+    if (currentTime >= operation.expires_at
+      || currentTime >= staged.staged_expires_at
+      || currentTime >= identity.preview_expires_at) return null;
+    const claimed = await issuePortableClaim(
+      client,
+      operation,
+      new Date(Math.min(staged.staged_expires_at.getTime(), identity.preview_expires_at.getTime())),
+      request,
+    );
+    if (!claimed) return null;
+    return bindPrivatePortablePreviewRehydration(
+      { ownerUserId: owner.ownerUserId, kind },
+      portableOperation(claimed),
+      portableClaim(claimed),
+      descriptors[descriptors.length - 1]!,
+    );
+  });
+}
+
 async function rehydrateExportArtifact(
   pool: DatabasePool,
   scope: PortableExportScope,
@@ -1920,6 +2000,10 @@ async function retrieveStagedPayload(
 async function createPreview<Command extends PortableImportPreviewCommand>(
   pool: DatabasePool,
   request: CreatePortablePreviewRequest<Command>,
+  privateAuthority?: Readonly<{
+    authority: PortableCanonicalImportAuthority;
+    authorityFingerprint: string;
+  }>,
 ): Promise<PortableImportPreviewView<Command>> {
   const token = randomPreviewToken();
   const destination = databaseDestination(request.command.destination);
@@ -1937,7 +2021,18 @@ async function createPreview<Command extends PortableImportPreviewCommand>(
     throw repositoryError("import_invalid", 400);
   }
   const projection = projectionFor<Command["kind"]>(request.command.kind, rawProjection);
-  const inserted = await withTransaction(pool, async (client) => {
+  if (privateAuthority) {
+    const authority = privateAuthority.authority;
+    const authorityFingerprint = contentHash(privateAuthority.authorityFingerprint);
+    if (authority.kind !== request.command.kind
+      || stableStringify(authority.destination) !== stableStringify(request.command.destination)
+      || authority.sourceInstallationId !== (request.command.sourceInstallationId ?? null)
+      || authority.sourceRecordId !== (request.command.importedRecordId ?? null)
+      || sha256(canonicalPortableImportAuthority(authority)) !== authorityFingerprint) {
+      throw repositoryError("import_invalid", 400);
+    }
+  }
+  const row = await withTransaction(pool, async (client) => {
     await lockPortableImportKeys(client, [portableImportLockKey(
       request.command.ownerUserId,
       request.command.kind,
@@ -1958,39 +2053,74 @@ async function createPreview<Command extends PortableImportPreviewCommand>(
           AND destination_fingerprint=$4 AND status='previewed' AND expires_at > now()`,
       [request.command.ownerUserId, request.command.kind, fingerprint, destination.fingerprint]
     );
-    return client.query<{ expires_at: Date }>(
-      `INSERT INTO portable_import_operations (
-         owner_user_id,staged_input_id,import_kind,preview_token_hash,
-         content_fingerprint,destination_fingerprint,destination_kind,
-         destination_world_id,destination_world_version_id,
-         source_installation_id,source_record_id,status,preview_projection,
-         diagnostic_codes,expires_at
-       )
-       SELECT staged.owner_user_id,staged.id,$3,$4,$5,$6,$7,$8,$9,$10,$11,
-              'previewed',$12::jsonb,$13::text[],$14
-         FROM portable_staged_inputs staged
-        WHERE staged.owner_user_id=$1 AND staged.handle_token_hash=$2
-          AND staged.status='staged' AND staged.expires_at > now()
-       RETURNING expires_at`,
-      [
-        request.command.ownerUserId,
-        sha256(request.command.stagedInput),
-        request.command.kind,
-        sha256(token),
-        fingerprint,
-        destination.fingerprint,
-        destination.destinationKind,
-        destination.destinationWorldId,
-        destination.destinationWorldVersionId,
-        request.command.sourceInstallationId ?? null,
-        request.command.importedRecordId ?? null,
-        JSON.stringify(projection),
-        diagnosticCodes,
-        expiresAt
-      ]
-    );
+    const baseParameters = [
+      request.command.ownerUserId,
+      sha256(request.command.stagedInput),
+      request.command.kind,
+      sha256(token),
+      fingerprint,
+      destination.fingerprint,
+      destination.destinationKind,
+      destination.destinationWorldId,
+      destination.destinationWorldVersionId,
+      request.command.sourceInstallationId ?? null,
+      request.command.importedRecordId ?? null,
+      JSON.stringify(projection),
+      diagnosticCodes,
+      expiresAt
+    ];
+    const inserted = privateAuthority
+      ? await client.query<{ id: string; expires_at: Date }>(
+        `INSERT INTO portable_import_operations (
+           owner_user_id,staged_input_id,import_kind,preview_token_hash,
+           content_fingerprint,destination_fingerprint,destination_kind,
+           destination_world_id,destination_world_version_id,
+           source_installation_id,source_record_id,status,preview_projection,
+           diagnostic_codes,expires_at,normalized_payload,authority_fingerprint,
+           provider_configuration_fingerprint,selected_character_id
+         )
+         SELECT staged.owner_user_id,staged.id,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+                'previewed',$12::jsonb,$13::text[],$14,$15::jsonb,$16,$17,$18
+           FROM portable_staged_inputs staged
+          WHERE staged.owner_user_id=$1 AND staged.handle_token_hash=$2
+            AND staged.status='staged' AND staged.expires_at > now()
+         RETURNING id,expires_at`,
+        [
+          ...baseParameters,
+          JSON.stringify(privateAuthority.authority.normalizedPayload),
+          privateAuthority.authorityFingerprint,
+          privateAuthority.authority.providerConfigurationFingerprint,
+          privateAuthority.authority.selectedCharacterId
+        ]
+      )
+      : await client.query<{ id: string; expires_at: Date }>(
+        `INSERT INTO portable_import_operations (
+           owner_user_id,staged_input_id,import_kind,preview_token_hash,
+           content_fingerprint,destination_fingerprint,destination_kind,
+           destination_world_id,destination_world_version_id,
+           source_installation_id,source_record_id,status,preview_projection,
+           diagnostic_codes,expires_at
+         )
+         SELECT staged.owner_user_id,staged.id,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+                'previewed',$12::jsonb,$13::text[],$14
+           FROM portable_staged_inputs staged
+          WHERE staged.owner_user_id=$1 AND staged.handle_token_hash=$2
+            AND staged.status='staged' AND staged.expires_at > now()
+         RETURNING id,expires_at`,
+        baseParameters,
+      );
+    const value = inserted.rows[0];
+    if (!value) return null;
+    if (privateAuthority) {
+      await client.query(
+        `INSERT INTO portable_import_work (
+           operation_id,owner_user_id,phase,percentage,status,work_version,expires_at
+         ) VALUES ($1,$2,'previewed',20,'running',1,$3)`,
+        [value.id, request.command.ownerUserId, value.expires_at]
+      );
+    }
+    return value;
   });
-  const row = inserted.rows[0];
   if (!row) throw repositoryError("archive_unavailable", 404);
   return {
     previewHandle: toPortablePreviewHandle(token, request.command.destination),
@@ -2451,6 +2581,12 @@ export function createPostgresImportRepository(pool: DatabasePool): PostgresPort
     createPreview(request) {
       return safeRepositoryCall(() => createPreview(pool, request));
     },
+    createCanonicalPreview(request) {
+      return safeRepositoryCall(() => createPreview(pool, request, {
+        authority: request.authority,
+        authorityFingerprint: request.authorityFingerprint
+      }));
+    },
     retrievePreviewPayload(owner, kind, previewHandle) {
       return safeRepositoryCall(() => retrievePreviewPayload(pool, owner, kind, previewHandle));
     },
@@ -2471,6 +2607,9 @@ export function createPostgresImportRepository(pool: DatabasePool): PostgresPort
     },
     rehydrateStagedInput(owner, stagedInput, request) {
       return safeRepositoryCall(() => rehydrateStagedInput(pool, owner, stagedInput, request));
+    },
+    rehydratePreviewInput(owner, kind, previewHandle, request) {
+      return safeRepositoryCall(() => rehydratePreviewInput(pool, owner, kind, previewHandle, request));
     },
     prepareStagedCleanup(database, rehydration) {
       return safeRepositoryCall(() => prepareStagedCleanup(database, rehydration));

@@ -115,7 +115,10 @@ export type PortableImportPreviewCommand =
   | (PortableImportPreviewBase<Extract<CampaignZipPreviewDestination, { kind: "embedded" }>> & Readonly<{ kind: "campaign_zip" }>)
   | (PortableImportPreviewBase<ExistingWorldVersionPreviewDestination> & Readonly<{ kind: "campaign_zip" }>)
   | (PortableImportPreviewBase<ExistingWorldVersionPreviewDestination> & Readonly<{ kind: "legacy_story" }>)
-  | (PortableImportPreviewBase<ExistingWorldVersionPreviewDestination> & Readonly<{ kind: "story_text" }>)
+  | (PortableImportPreviewBase<ExistingWorldVersionPreviewDestination> & Readonly<{
+    kind: "story_text";
+    selectedCharacterId?: string;
+  }>)
   | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "infinite_worlds" }>)
   | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "cyoa" }>)
   | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "world_json" }>)
