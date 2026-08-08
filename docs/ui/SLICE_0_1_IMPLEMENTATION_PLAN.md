@@ -8384,14 +8384,40 @@ prewrite crashes, descriptor/path/symlink/root swaps, partial/growing/hash-
 mismatched streams, duplicate terminals, close-before-delete-before-ack,
 legacy preview parity, and zero route/runtime/worker/public-barrel/b5 changes.
 
-**14e3b5 — named production composition and adapter matrix.** Compose the
-database repositories and secure filesystem adapter in
-`services/runtime/src/asset-import-composition.ts` using explicit injected
-dependencies and an AST/import inventory. Add production-composed real-
-PostgreSQL/filesystem contract tests for b1-b4, including scope/grant
-redemption, lifecycle and streaming cleanup. Do not promote
-`tests/helpers/task-14e2c-adapters.ts`, and do not change a route, runtime
-consumer, worker, or allowlist yet. Only after b5 passes may 14e3c begin.
+**14e3b5 — named production composition and adapter matrix.** Create the
+additive, unconsumed `services/runtime/src/asset-import-composition.ts` factory
+`createAssetImportStorageComposition(pool, { archiveRoot, assetRoot })`. It
+constructs exactly one each of the durable filesystem, secure-storage, import,
+and finalized-delivery PostgreSQL repositories; wraps the durable journal with
+the validated lifecycle; and constructs the secure adapter with explicit
+archive/asset roots, all b1-b4 private ports, and
+`withTransaction(pool, client => work(client))`. No optional production
+dependency, repository override, fake, ambient scope, or process-local
+authority is allowed.
+
+Return readonly private port-typed capabilities only (adapter, validated
+journal, candidate, atomic portable, portable cleanup/rehydration, prewrite,
+expiry recovery, finalized delivery) plus idempotent `close()` that drains the
+adapter and root handles, including construction-failure cleanup. Do not add a
+public barrel. An executable AST/import inventory must prove the five concrete
+factories are consumed only here outside their definitions; no production code
+imports `tests/helpers`, a retired authority, or private contracts through a
+public barrel; and this unconsumed factory has no importer in routes/server,
+main/runtime role wiring, workers, allowlists, or legacy services.
+
+Add one real PostgreSQL plus temporary-filesystem composition suite which uses
+only this factory (never the 14e2c adapters/fakes). Cover real caller
+transactions and rollback; private port presence/readonly close; reserve/write/
+candidate attach/finalize and full fencing/restart/hash-only persistence;
+atomic portable stage/export scope/content-type/replay/expiry behavior;
+durable and legacy finalized delivery/restart/replay/substitution/shared-hash
+retention; export EOF/close/abort/timeout/pre-send/read failure with exact
+close-delete-ack order; duplicate terminal idempotence; stream path/symlink/
+root/length/hash/identity faults; expired portable/prewrite recovery and
+pending retry; and non-reaped server-bound legacy preview. Direct SQL may seed
+uncomposed domain rows, but must not bypass the durable transitions being
+tested. Do not change a route, runtime consumer, worker, allowlist, or b5
+binding; only after b5 passes may 14e3c begin.
 
 **14e3c — asset composition and three-phase publication.** Compose the asset
 ports for library/facets, metadata, selection, delivery, and backfill while
