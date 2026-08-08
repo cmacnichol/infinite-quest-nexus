@@ -22,6 +22,7 @@ import type {
   PrivateStorageLocatorRedemptionPort
 } from "../../application/src/assets/private-storage-lifecycle.js";
 import { stableStringify } from "../../domain/src/text.js";
+import { selectAssetDeliveryRow } from "./asset-delivery-selection.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 
@@ -665,53 +666,31 @@ async function selectWorld(
   });
 }
 
-type DeliveryRow = Readonly<{
-  mime_type: string;
-  byte_length: string;
-  content_hash: string;
-}>;
-
 async function deliveryDescriptor(
   pool: DatabasePool,
   ownerUserId: string,
   assetId: string,
   request: Readonly<{ kind: "original" }> | Readonly<{ kind: "derivative"; derivativeKind: "thumbnail" }>,
 ): Promise<AssetDeliveryDescriptor> {
-  const original = await pool.query<DeliveryRow>(
-    "SELECT mime_type, byte_length::text, content_hash FROM assets WHERE id=$1 AND owner_user_id=$2",
-    [assetId, ownerUserId]
-  );
-  if (!original.rows[0]) throw repositoryError("asset_not_found", 404);
-  let row = original.rows[0];
-  if (request.kind === "derivative") {
-    const derivative = await pool.query<DeliveryRow>(
-      `SELECT d.mime_type, d.byte_length::text, d.content_hash
-         FROM asset_derivatives d
-         JOIN assets a ON a.id=d.source_asset_id AND a.owner_user_id=d.owner_user_id
-        WHERE d.source_asset_id=$1 AND d.owner_user_id=$2 AND d.derivative_kind='thumbnail'
-        ORDER BY d.transform_version DESC, d.pixel_width DESC, d.pixel_height DESC, d.id DESC
-        LIMIT 1`,
-      [assetId, ownerUserId]
-    );
-    row = derivative.rows[0] ?? row;
-  }
-  if (!validMimeType(row.mime_type)) throw repositoryError("asset_repository_unavailable", 503);
+  const row = await selectAssetDeliveryRow(pool, ownerUserId, assetId, request);
+  if (!row) throw repositoryError("asset_not_found", 404);
+  if (!validMimeType(row.mimeType)) throw repositoryError("asset_repository_unavailable", 503);
   return request.kind === "original"
     ? {
       assetId,
       kind: "original",
       derivativeKind: null,
-      mimeType: row.mime_type,
-      byteLength: Number(row.byte_length),
-      etag: row.content_hash
+      mimeType: row.mimeType,
+      byteLength: row.byteLength,
+      etag: row.contentHash
     }
     : {
       assetId,
       kind: "derivative",
       derivativeKind: "thumbnail",
-      mimeType: row.mime_type,
-      byteLength: Number(row.byte_length),
-      etag: row.content_hash
+      mimeType: row.mimeType,
+      byteLength: row.byteLength,
+      etag: row.contentHash
     };
 }
 

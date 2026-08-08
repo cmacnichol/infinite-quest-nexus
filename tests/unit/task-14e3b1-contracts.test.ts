@@ -201,9 +201,9 @@ describe("Task 14e3b1 private authority contracts", () => {
   it("does not permit owner-only staged or export issuance signatures", () => {
     const port = null as unknown as PrivatePortableCapabilityIssuancePort;
     const grant = "private-delivery-grant" as PrivateFilesystemDeliveryGrant;
-    const legacyRead = { cleanupAuthority: "none" } as PrivateLegacyAnchoredReadCapability;
+    const legacyRead = "private-legacy-read" as PrivateLegacyAnchoredReadCapability;
     expect(grant).toBe("private-delivery-grant");
-    expect(legacyRead.cleanupAuthority).toBe("none");
+    expect(legacyRead).toBe("private-legacy-read");
 
     if (false) {
       // @ts-expect-error Staged issuance requires one validated authority object, not owner plus descriptor.

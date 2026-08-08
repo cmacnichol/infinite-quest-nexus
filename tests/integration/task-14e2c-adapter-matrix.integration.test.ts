@@ -155,7 +155,8 @@ integration("Task 14e2c additive adapter contract matrix", () => {
     pool = createDatabasePool(databaseUrl!, 8);
     await migrateDatabase(pool, resolve("database/migrations"));
     // This matrix freezes the historical 14e2c split-transaction test helper.
-    // Current 0055 split-state rejection and 0056 current-clock fences are
+    // Current 0055 split-state rejection, 0056 current-clock fences, and
+    // 0057 finalized-delivery authority are
     // covered by the 14e3b2 PostgreSQL
     // suite; 14e3b2c owns the future atomically composed adapter matrix.
     const migrationClient = await pool.connect();
@@ -164,7 +165,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         dbClient: migrationClient,
         dir: resolve("database/migrations"),
         direction: "down",
-        count: 2,
+        count: 3,
         migrationsTable: "schema_migrations",
         checkOrder: true,
         singleTransaction: true,
@@ -172,6 +173,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
       });
       expect(reverted.map((migration) => migration.name)).toEqual([
+        "0057_finalized_asset_delivery_authority",
         "0056_private_filesystem_current_clock",
         "0055_private_portable_repository_guards"
       ]);
@@ -210,7 +212,8 @@ integration("Task 14e2c additive adapter contract matrix", () => {
       await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
       await expect(migrateDatabase(pool, resolve("database/migrations"))).resolves.toEqual([
         "0055_private_portable_repository_guards",
-        "0056_private_filesystem_current_clock"
+        "0056_private_filesystem_current_clock",
+        "0057_finalized_asset_delivery_authority"
       ]);
     } finally {
       await pool.end();

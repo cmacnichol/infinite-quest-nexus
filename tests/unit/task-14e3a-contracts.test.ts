@@ -45,6 +45,7 @@ import {
 } from "../../packages/application/src/imports/index.js";
 import type {
   FinalizedAssetDeliveryResolverPort,
+  PrivateFinalizedAssetDeliveryGrant,
   PrivateLegacyAnchoredReadCapability,
   PrivateFinalizedAssetDeliveryResolution
 } from "../../packages/application/src/assets/private-finalized-delivery.js";
@@ -751,28 +752,31 @@ describe("Task 14e3a legacy retention and private delivery contracts", () => {
     });
   });
 
-  it("models finalized delivery as durable locator authority or retained legacy read-only fallback", () => {
+  it("models finalized delivery as a durable one-time grant or retained legacy read-only fallback", () => {
     const durable = {
       kind: "durable_finalized",
       scope: { ownerUserId, assetId },
       request: { kind: "original" },
       descriptor: { assetId, kind: "original", derivativeKind: null, mimeType: "image/png", byteLength: 3, etag: "hash" },
-      locator: "private-database-locator",
-      cleanupAuthority: "durable_journal_only"
-    } as unknown as PrivateFinalizedAssetDeliveryResolution;
+      grant: "private-finalized-grant" as PrivateFinalizedAssetDeliveryGrant,
+      cleanupAuthority: "none"
+    } satisfies PrivateFinalizedAssetDeliveryResolution;
     const legacy = {
       kind: "legacy_retained",
       scope: { ownerUserId, assetId },
       request: { kind: "derivative", derivativeKind: "thumbnail" },
       descriptor: { assetId, kind: "derivative", derivativeKind: "thumbnail", mimeType: "image/png", byteLength: 2, etag: "thumb-hash" },
-      anchoredRead: { cleanupAuthority: "none" } as PrivateLegacyAnchoredReadCapability,
+      anchoredRead: "private-legacy-read" as PrivateLegacyAnchoredReadCapability,
       cleanupAuthority: "none"
     } satisfies PrivateFinalizedAssetDeliveryResolution;
     const resolver: FinalizedAssetDeliveryResolverPort = {
-      resolveFinalizedAssetDelivery: async (_scope, request) => request.kind === "original" ? durable : legacy
+      resolveFinalizedAssetDelivery: async (_scope, request) => request.kind === "original" ? durable : legacy,
+      redeemFinalizedDeliveryGrant: async () => null,
+      redeemLegacyAnchoredRead: async () => null
     };
 
     expect(durable.kind).toBe("durable_finalized");
+    expect(durable).not.toHaveProperty("locator");
     expect(legacy).not.toHaveProperty("locator");
     expect(legacy).not.toHaveProperty("path");
     expect(legacy.cleanupAuthority).toBe("none");
