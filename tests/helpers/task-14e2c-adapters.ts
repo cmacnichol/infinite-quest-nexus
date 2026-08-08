@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import type { Readable } from "node:stream";
 import { createAssetApplication } from "../../packages/application/src/assets/index.js";
 import { toPortableStagedInput } from "../../packages/application/src/imports/index.js";
@@ -6,6 +7,7 @@ import type {
   AssetPublicationCandidate,
   AttachedFilesystemOperation,
   DurableFilesystemRecoveryClaim,
+  DurableFilesystemOperationId,
   PrivateFilesystemCapabilityPersistencePort,
   PrivateStorageDescriptor,
   ReservedFilesystemOperation
@@ -39,7 +41,15 @@ import {
   createPortableArchiveFilesystemAdapter,
   type PortableArchiveFilesystemAdapter
 } from "../../services/api/src/portable-archive-filesystem-adapter.js";
-import type { ArchiveLimits } from "../../services/api/src/archive-io.js";
+import {
+  rehydratePersistedAnchoredStagedArchive,
+  releaseAnchoredStagedArchive,
+  type ArchiveLimits
+} from "../../services/api/src/archive-io.js";
+import {
+  adaptLegacyCampaignZip,
+  type DecodedCampaignArchive
+} from "../../services/api/src/campaign-archive-service.js";
 
 type PortableReservation = Readonly<{
   kind: "staged" | "export";
@@ -51,13 +61,6 @@ type PortableReservation = Readonly<{
   exportScope?: PortableExportScope;
   skipFinalize?: boolean;
   skipDomainRegistration?: boolean;
-}>;
-
-type PersistedCapability = Readonly<{
-  ownerUserId: string;
-  operation: AttachedFilesystemOperation;
-  claim: DurableFilesystemRecoveryClaim;
-  descriptor: PrivateStorageDescriptor;
 }>;
 
 export type Task14e2cAdapters = Readonly<{
@@ -77,6 +80,16 @@ export type Task14e2cAdapters = Readonly<{
       stagedInput: PortableStagedInput,
       expectedType: ArchiveType | "container",
     ): ReturnType<PortableArchiveFilesystemAdapter["inspectPortableArchive"]>;
+    extract(
+      owner: ImportOwnerScope,
+      stagedInput: PortableStagedInput,
+      path: string,
+      maximumBytes: number,
+    ): ReturnType<PortableArchiveFilesystemAdapter["extractVerifiedEntry"]>;
+    parseLegacyCampaignZip(
+      owner: ImportOwnerScope,
+      stagedInput: PortableStagedInput,
+    ): Promise<DecodedCampaignArchive>;
     cleanup(owner: ImportOwnerScope, stagedInput: PortableStagedInput): Promise<void>;
     preview<Command extends PortableImportPreviewCommand>(input: Readonly<{
       command: Command;
@@ -122,6 +135,10 @@ export type Task14e2cAdapters = Readonly<{
       mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
       failBeforeDomainCommit?: boolean;
       simulateCrashAfterAttach?: boolean;
+      failFinalizedTransitionAfterDomainCommit?: boolean;
+      captureAttachedLocator?: (
+        locator: import("../../packages/application/src/assets/private-storage-lifecycle.js").DatabaseIssuedStorageLocator,
+      ) => void;
     }>): Promise<Readonly<{
       locator: import("../../packages/application/src/assets/private-storage-lifecycle.js").DatabaseIssuedStorageLocator;
       relativePath: string;
@@ -146,6 +163,10 @@ function operationExpiry(): string {
   return new Date(Date.now() + 60 * 60 * 1000).toISOString();
 }
 
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 function requireAttached(
   result: Awaited<ReturnType<ReturnType<typeof createPostgresDurableFilesystemRepository>["journal"]["attach"]>>,
 ): Extract<typeof result, { outcome: "attached" }> {
@@ -164,9 +185,184 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
   const durable = createPostgresDurableFilesystemRepository(options.pool);
   const reservationContext = new AsyncLocalStorage<PortableReservation>();
   const exportRedemptionContext = new AsyncLocalStorage<PortableExportScope>();
-  const stagedCapabilities = new Map<string, PersistedCapability>();
-  const exportCapabilities = new Map<string, PersistedCapability>();
   const candidateDescriptors = new Map<AssetPublicationCandidate, PrivateStorageDescriptor>();
+
+  type PortableCleanupRow = Readonly<{
+    id: string;
+    owner_user_id: string;
+    operation_scope_hash: string;
+    purpose: "portable_staging" | "portable_export";
+    lifecycle: "reserved" | "attached" | "finalized" | "cleanup_pending" | "cleaned";
+    lease_id: string;
+    lease_owner: string;
+    work_version: number;
+    lease_expires_at: Date;
+    relative_path: string;
+    device_id: string;
+    file_id: string;
+    change_token: string;
+    content_hash: string;
+    byte_length: string;
+  }>;
+
+  function portableCleanupCapability(row: PortableCleanupRow): Readonly<{
+    descriptor: PrivateStorageDescriptor;
+    operation: AttachedFilesystemOperation;
+    claim: DurableFilesystemRecoveryClaim;
+  }> {
+    return {
+      descriptor: {
+        relativePath: row.relative_path,
+        identity: {
+          deviceId: row.device_id,
+          fileId: row.file_id,
+          changeToken: row.change_token
+        },
+        contentHash: row.content_hash,
+        byteLength: Number(row.byte_length)
+      },
+      operation: {
+        resourceKind: "portable",
+        ownerUserId: row.owner_user_id,
+        operationScopeId: row.operation_scope_hash,
+        operationId: row.id as DurableFilesystemOperationId,
+        purpose: row.purpose
+      } as AttachedFilesystemOperation,
+      claim: {
+        operationId: row.id as DurableFilesystemOperationId,
+        leaseId: row.lease_id,
+        leaseOwner: row.lease_owner,
+        workVersion: row.work_version,
+        leaseExpiresAt: row.lease_expires_at.toISOString()
+      } as DurableFilesystemRecoveryClaim
+    };
+  }
+
+  async function claimStagedCleanup(
+    owner: ImportOwnerScope,
+    stagedInput: PortableStagedInput,
+  ): Promise<Readonly<{ outcome: "already_cleaned" }> | Readonly<{
+    outcome: "claimed";
+    descriptor: PrivateStorageDescriptor;
+    operation: AttachedFilesystemOperation;
+    claim: DurableFilesystemRecoveryClaim;
+  }> | null> {
+    return withTransaction(options.pool, async (client) => {
+      const selected = await client.query<PortableCleanupRow>(
+        `SELECT operation.id,operation.owner_user_id,operation.operation_scope_hash,
+                operation.purpose,operation.lifecycle,operation.lease_id,operation.lease_owner,
+                operation.work_version,operation.lease_expires_at,
+                descriptor.relative_path,descriptor.device_id,descriptor.file_id,
+                descriptor.change_token,descriptor.content_hash,descriptor.byte_length::text
+           FROM portable_staged_inputs staged
+           JOIN durable_filesystem_operations operation
+             ON operation.id=staged.filesystem_operation_id
+            AND operation.owner_user_id=staged.owner_user_id
+            AND operation.resource_kind='portable'
+            AND operation.purpose='portable_staging'
+           JOIN durable_filesystem_descriptors descriptor
+             ON descriptor.operation_id=operation.id
+            AND descriptor.owner_user_id=operation.owner_user_id
+            AND descriptor.descriptor_role='delivery'
+          WHERE staged.owner_user_id=$1 AND staged.handle_token_hash=$2
+          FOR UPDATE OF operation`,
+        [owner.ownerUserId, sha256(stagedInput)]
+      );
+      const row = selected.rows[0];
+      if (!row) return null;
+      if (row.lifecycle === "cleaned") return { outcome: "already_cleaned" };
+      const claimed = await client.query<PortableCleanupRow>(
+        `UPDATE durable_filesystem_operations operation
+            SET lease_id=gen_random_uuid(),lease_owner=$2,work_version=operation.work_version+1,
+                lease_expires_at=now()+interval '60 seconds',updated_at=now()
+          WHERE operation.id=$1 AND operation.owner_user_id=$3
+            AND operation.resource_kind='portable' AND operation.purpose='portable_staging'
+            AND operation.lifecycle IN ('attached','finalized','cleanup_pending')
+        RETURNING operation.id,operation.owner_user_id,operation.operation_scope_hash,
+                  operation.purpose,operation.lifecycle,operation.lease_id,operation.lease_owner,
+                  operation.work_version,operation.lease_expires_at,
+                  $4::text AS relative_path,$5::text AS device_id,$6::text AS file_id,
+                  $7::text AS change_token,$8::text AS content_hash,$9::bigint::text AS byte_length`,
+        [
+          row.id,
+          `task-14e2c-staged-cleanup:${crypto.randomUUID()}`,
+          owner.ownerUserId,
+          row.relative_path,
+          row.device_id,
+          row.file_id,
+          row.change_token,
+          row.content_hash,
+          row.byte_length
+        ]
+      );
+      const value = claimed.rows[0];
+      return value ? { outcome: "claimed", ...portableCleanupCapability(value) } : null;
+    });
+  }
+
+  async function claimExportCleanup(
+    scope: PortableExportScope,
+    retrieval: PortableArchiveExportRetrieval,
+  ): Promise<Readonly<{ outcome: "already_cleaned" }> | Readonly<{
+    outcome: "claimed";
+    descriptor: PrivateStorageDescriptor;
+    operation: AttachedFilesystemOperation;
+    claim: DurableFilesystemRecoveryClaim;
+  }> | null> {
+    return withTransaction(options.pool, async (client) => {
+      const selected = await client.query<PortableCleanupRow>(
+        `SELECT operation.id,operation.owner_user_id,operation.operation_scope_hash,
+                operation.purpose,operation.lifecycle,operation.lease_id,operation.lease_owner,
+                operation.work_version,operation.lease_expires_at,
+                descriptor.relative_path,descriptor.device_id,descriptor.file_id,
+                descriptor.change_token,descriptor.content_hash,descriptor.byte_length::text
+           FROM portable_export_artifacts artifact
+           JOIN durable_filesystem_operations operation
+             ON operation.id=artifact.filesystem_operation_id
+            AND operation.owner_user_id=artifact.owner_user_id
+            AND operation.resource_kind='portable'
+            AND operation.purpose='portable_export'
+           JOIN durable_filesystem_descriptors descriptor
+             ON descriptor.operation_id=operation.id
+            AND descriptor.owner_user_id=operation.owner_user_id
+            AND descriptor.descriptor_role='delivery'
+          WHERE artifact.owner_user_id=$1 AND artifact.retrieval_token_hash=$2
+            AND artifact.export_kind=$3 AND artifact.campaign_id IS NOT DISTINCT FROM $4::uuid
+            AND artifact.world_id=$5 AND artifact.world_version_id=$6
+          FOR UPDATE OF operation`,
+        [scope.ownerUserId, sha256(retrieval), scope.exportKind, scope.campaignId, scope.worldId, scope.worldVersionId]
+      );
+      const row = selected.rows[0];
+      if (!row) return null;
+      if (row.lifecycle === "cleaned") return { outcome: "already_cleaned" };
+      const claimed = await client.query<PortableCleanupRow>(
+        `UPDATE durable_filesystem_operations operation
+            SET lease_id=gen_random_uuid(),lease_owner=$2,work_version=operation.work_version+1,
+                lease_expires_at=now()+interval '60 seconds',updated_at=now()
+          WHERE operation.id=$1 AND operation.owner_user_id=$3
+            AND operation.resource_kind='portable' AND operation.purpose='portable_export'
+            AND operation.lifecycle IN ('attached','finalized','cleanup_pending')
+        RETURNING operation.id,operation.owner_user_id,operation.operation_scope_hash,
+                  operation.purpose,operation.lifecycle,operation.lease_id,operation.lease_owner,
+                  operation.work_version,operation.lease_expires_at,
+                  $4::text AS relative_path,$5::text AS device_id,$6::text AS file_id,
+                  $7::text AS change_token,$8::text AS content_hash,$9::bigint::text AS byte_length`,
+        [
+          row.id,
+          `task-14e2c-export-cleanup:${crypto.randomUUID()}`,
+          scope.ownerUserId,
+          row.relative_path,
+          row.device_id,
+          row.file_id,
+          row.change_token,
+          row.content_hash,
+          row.byte_length
+        ]
+      );
+      const value = claimed.rows[0];
+      return value ? { outcome: "claimed", ...portableCleanupCapability(value) } : null;
+    });
+  }
 
   async function attachPortable(
     pending: PortableReservation,
@@ -195,12 +391,6 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
       const attached = await attachPortable(pending, descriptor);
       if (pending.skipDomainRegistration) {
         const stagedInput = toPortableStagedInput(`crashed:${crypto.randomUUID()}`);
-        stagedCapabilities.set(stagedInput, {
-          ownerUserId: owner.ownerUserId,
-          operation: attached.operation,
-          claim: attached.claim,
-          descriptor
-        });
         return stagedInput;
       }
       const stagedInput = await imports.registerStagedInput({
@@ -217,12 +407,6 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
           throw new Error(`task_14e2c_staging_finalize_${finalized.outcome}`);
         }
       }
-      stagedCapabilities.set(stagedInput, {
-        ownerUserId: owner.ownerUserId,
-        operation: attached.operation,
-        claim: attached.claim,
-        descriptor
-      });
       return stagedInput;
     },
 
@@ -232,8 +416,9 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
     },
 
     async beginStagedCleanup(owner, stagedInput) {
-      const record = stagedCapabilities.get(stagedInput);
-      if (!record || record.ownerUserId !== owner.ownerUserId) return { outcome: "stale" };
+      const record = await claimStagedCleanup(owner, stagedInput);
+      if (!record) return { outcome: "stale" };
+      if (record.outcome === "already_cleaned") return record;
       const marked = await durable.journal.markCleanup(record.operation, record.claim, { cause: "rollback" });
       if (marked.outcome === "already_cleaned") return { outcome: "already_cleaned" };
       if (marked.outcome !== "cleanup_pending") return { outcome: "stale" };
@@ -248,8 +433,9 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
     },
 
     async completeStagedCleanup(owner, stagedInput) {
-      const record = stagedCapabilities.get(stagedInput);
-      if (!record || record.ownerUserId !== owner.ownerUserId) return { outcome: "stale" };
+      const record = await claimStagedCleanup(owner, stagedInput);
+      if (!record) return { outcome: "stale" };
+      if (record.outcome === "already_cleaned") return record;
       const completed = await durable.journal.completeCleanup(record.operation, record.claim);
       if (completed.outcome === "cleaned" || completed.outcome === "already_cleaned") {
         await options.pool.query(
@@ -284,12 +470,6 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
       if (finalized.outcome !== "finalized" && finalized.outcome !== "already_finalized") {
         throw new Error(`task_14e2c_export_finalize_${finalized.outcome}`);
       }
-      exportCapabilities.set(retrieval.retrieval, {
-        ownerUserId: owner.ownerUserId,
-        operation: attached.operation,
-        claim: attached.claim,
-        descriptor
-      });
       return retrieval.retrieval;
     },
 
@@ -300,8 +480,11 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
     },
 
     async beginExportCleanup(owner, retrieval) {
-      const record = exportCapabilities.get(retrieval);
-      if (!record || record.ownerUserId !== owner.ownerUserId) return { outcome: "stale" };
+      const scope = exportRedemptionContext.getStore();
+      if (!scope || scope.ownerUserId !== owner.ownerUserId) return { outcome: "stale" };
+      const record = await claimExportCleanup(scope, retrieval);
+      if (!record) return { outcome: "stale" };
+      if (record.outcome === "already_cleaned") return record;
       const marked = await durable.journal.markCleanup(record.operation, record.claim, { cause: "rollback" });
       if (marked.outcome === "already_cleaned") return { outcome: "already_cleaned" };
       if (marked.outcome !== "cleanup_pending") return { outcome: "stale" };
@@ -316,8 +499,11 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
     },
 
     async completeExportCleanup(owner, retrieval) {
-      const record = exportCapabilities.get(retrieval);
-      if (!record || record.ownerUserId !== owner.ownerUserId) return { outcome: "stale" };
+      const scope = exportRedemptionContext.getStore();
+      if (!scope || scope.ownerUserId !== owner.ownerUserId) return { outcome: "stale" };
+      const record = await claimExportCleanup(scope, retrieval);
+      if (!record) return { outcome: "stale" };
+      if (record.outcome === "already_cleaned") return record;
       const completed = await durable.journal.completeCleanup(record.operation, record.claim);
       if (completed.outcome === "cleaned" || completed.outcome === "already_cleaned") {
         await options.pool.query(
@@ -384,6 +570,7 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
     illustration: {
       async publishOriginal(input) {
         const expiresAt = operationExpiry();
+        let domainCommitted = false;
         const reserved = await durable.journal.reserve(
           { resourceKind: "asset", ownerUserId: input.ownerUserId, assetId: input.assetId },
           { purpose: "asset_original", leaseOwner: "task-14e2c-image", expiresAt },
@@ -411,6 +598,11 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
           }));
           if (input.simulateCrashAfterAttach) {
             throw new Task14e2cSimulatedCrash("task_14e2c_simulated_image_crash");
+          }
+          domainCommitted = true;
+          input.captureAttachedLocator?.(attached.locator);
+          if (input.failFinalizedTransitionAfterDomainCommit) {
+            throw new Error("task_14e2c_forced_image_finalize_failure");
           }
           const finalized = await durable.journal.finalizeAfterCommit(attached.operation, attached.claim);
           if (finalized.outcome !== "finalized" && finalized.outcome !== "already_finalized") {
@@ -444,7 +636,7 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
             contentHash: verified.contentHash
           };
         } catch (error) {
-          if (error instanceof Task14e2cSimulatedCrash) throw error;
+          if (error instanceof Task14e2cSimulatedCrash || domainCommitted) throw error;
           const marked = await durable.journal.markCleanup(
             reserved.operation,
             reserved.claim,
@@ -489,6 +681,36 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
 
       inspect(owner, stagedInput, expectedType) {
         return filesystem.inspectPortableArchive(owner, stagedInput, expectedType);
+      },
+
+      extract(owner, stagedInput, path, maximumBytes) {
+        return filesystem.extractVerifiedEntry(owner, stagedInput, path, maximumBytes);
+      },
+
+      async parseLegacyCampaignZip(owner, stagedInput) {
+        const payload = await imports.retrieveStagedPayload(owner, stagedInput);
+        if (!payload) throw new Error("task_14e2c_staged_input_unavailable");
+        const changeToken = payload.descriptor.identity.changeToken.split(":");
+        if (changeToken.length !== 2) throw new Error("task_14e2c_staged_identity_invalid");
+        const staged = await rehydratePersistedAnchoredStagedArchive({
+          archiveRoot: options.archiveRoot,
+          relativePath: payload.descriptor.relativePath,
+          compressedBytes: payload.byteLength,
+          maximumCompressedBytes: options.limits.maxCompressedBytes,
+          sha256: payload.contentHash,
+          identity: {
+            device: BigInt(payload.descriptor.identity.deviceId),
+            inode: BigInt(payload.descriptor.identity.fileId),
+            size: BigInt(payload.byteLength),
+            modifiedNanoseconds: BigInt(changeToken[0]!),
+            changedNanoseconds: BigInt(changeToken[1]!)
+          }
+        });
+        try {
+          return await adaptLegacyCampaignZip(staged, options.limits);
+        } finally {
+          await releaseAnchoredStagedArchive(staged);
+        }
       },
 
       cleanup(owner, stagedInput) {
