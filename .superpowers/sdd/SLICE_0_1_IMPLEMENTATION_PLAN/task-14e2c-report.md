@@ -130,7 +130,7 @@ preference/deduplication.
 - Affected import service unit suites: 4 files, 43/43 tests passed.
 - Affected import and generation integration suites: 4 files, 38/38 tests
   passed.
-- Focused durable repository plus adapter matrix: 2 files, 25/25 tests passed.
+- Focused durable repository plus adapter matrix: 2 files, 26/26 tests passed.
 - Asset archive, asset repository, import repository, durable filesystem
   repository, and adapter matrix: 5 files, 64/64 tests passed.
 - `pnpm check`: passed, including repository boundary and data-safety checks.

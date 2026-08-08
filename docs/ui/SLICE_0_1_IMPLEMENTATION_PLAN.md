@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e1R2/14e2a/14e2aR/14e2b1/14e2b2/14e2b3/14e2b4 complete; 14e2c test-only adapter matrix is next |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 through 14e2c complete; 14e3 atomic API/worker cutover and legacy removal is next |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -7972,6 +7972,97 @@ asset persistence leaving no reachable partial file. Run campaign ZIP, legacy
 Story, Infinite Worlds/CYOA, asset remapping, and image metadata behavior
 through the new adapters. Do not change a production consumer or delete old
 authority in this checkpoint.
+
+**14e2c correction — post-adoption publication descriptor and recovery.** The
+real illustration composition must account for the POSIX hard-link adoption
+protocol: linking the prepared temporary inode to its final name and unlinking
+the temporary name can legitimately change ctime/the serialized `changeToken`
+while retaining the same device, inode, content hash, byte length, and
+delivery-relative path. The durable repository must therefore accept the
+post-adoption descriptor only when it retains those stable, candidate-bound
+facts, then append it as the immutable delivery descriptor used for locator
+redemption and restart rehydration. It must not weaken owner, operation,
+candidate, relative-path, device, inode, SHA-256, or byte-length binding.
+
+The provisional cleanup descriptor remains append-only crash evidence, but it
+must never supersede a post-adoption delivery descriptor for the same physical
+path. Cleanup preparation must choose the delivery descriptor as the current
+identity for that path and use cleanup descriptors only for paths without a
+delivery descriptor, deduplicating paths before filesystem cleanup. This lets
+the reaper remove a failed, unattached publication after adoption without a
+stale pre-link token rejecting cleanup, while still retaining globally
+referenced final bytes. Add real-PostgreSQL regressions for the allowed
+change-token transition; rejection of every other descriptor mismatch; restart
+locator rehydration; post-adoption failure/reaper cleanup with no partial file;
+and successful illustration metadata persistence. Re-run the 14e2c composed
+image path. This is an additive repository/capability correction only: do not
+switch a route, worker, runtime composition, or legacy consumer; #0446 remains
+open until 14e3.
+
+**14e2c matrix-depth and commit-point correction.** A projection supplied by a
+test is not evidence that the new adapter can run that import family. The
+matrix must drive the actual compatible Legacy Story, Infinite Worlds, CYOA,
+Campaign ZIP, and asset-remapping parser/validation paths through the test-only
+composition for the declared variants; raw SQL may arrange durable fixtures but
+must not stand in for the family parse, validation, remapping, or application
+result. The composed backfill path must prove two-worker `SKIP LOCKED`
+contention, heartbeat, expiry/requeue, stale/wrong-fence denial, and the
+database-derived owner. A fresh filesystem capability created from persisted
+PostgreSQL callbacks must redeem and read the actual post-adoption delivery
+file, not merely redeem its descriptor from the repository. Process-local maps
+may cache active descriptors/handles but must not authorize staged-input or
+export cleanup: after restart, a fresh composed adapter must derive the exact
+operation from the persisted opaque handle, claim cleanup with a new fenced
+database lease, and complete owner/scope/purpose-bound staged abort and export
+cleanup. Add restart tests for both paths.
+
+Illustration publication must split errors by the durable commit point. Before
+the caller transaction commits the asset-domain reference, rollback and
+identity-safe cleanup are required. Once attach plus the asset storage update
+commit, later finalization/read/metadata failure must preserve the attached
+operation and referenced bytes for database-derived recovery to finalize; it
+must not mark that operation cleaned and strand the asset's locator. Add a
+real-PostgreSQL injected-finalization-failure regression proving an attached
+post-commit operation is recovered/finalized and remains redeemable, plus a
+crash-after-domain-commit/finalize-recovery matrix row. These remain test-only
+adapter/repository evidence corrections and do not authorize a production
+consumer cutover.
+
+**14e2c format-commit atomicity correction.** Invoking an existing import
+service before `archive.commit` is not composition evidence: a later portable
+claim/completion failure would retain domain rows while the preview remains
+unconsumed. Extract or reuse each service's transaction-bound import core so
+the test-only adapter invokes it with the caller-owned `DatabaseClient` *inside*
+the `archive.commit` callback; keep the current route-facing service wrapper as
+the owner of its outer transaction and do not cut over a production consumer.
+The composed Legacy Story, Infinite Worlds, Campaign ZIP/remapping, CYOA, and
+world-text paths must run their actual parser/application execution there.
+CYOA/world-text must use deterministic provider fakes through the real service
+path, not a test conversion followed by a direct portable-world call. Add a
+fault after domain mutation but before portable `completeImport`, asserting the
+same transaction rolls back both domain state and portable authority, followed
+by successful exact replay. Do not declare 14e2c complete from parse or
+preview evidence alone.
+
+**14e2c completion (2026-08-08):** `fe80a88`, `e3d6976`, and `ea50219`
+deliver the real-PostgreSQL, test-only adapter contract matrix and its three
+findings-driven correction rounds. The final composition reserves before
+filesystem mutation; binds owner, scope, descriptor, and fenced cleanup
+authority through PostgreSQL across restart; and drives nullable selection,
+metadata, delivery, two-worker backfill fencing, archive recovery, exports,
+and independent image publication/failure recovery. It runs the actual Legacy
+Story, Infinite Worlds, CYOA, Campaign ZIP/asset-remapping, and world-text
+paths. Every format now executes domain mutation and portable completion inside
+one caller-owned transaction; an injected post-domain/pre-completion fault
+rolls back domain state and leaves the previewed portable operation for a
+successful idempotent retry. The post-adoption descriptor correction allows
+only the legitimate change-token transition while retaining exact
+operation/candidate/path/device/inode/hash/length fences and uses delivery
+evidence for recovery cleanup. Final verification passed the 26-test focused
+durable-plus-matrix suite, 55 relevant unit tests, 1,349 total unit tests, 409
+integration tests, `pnpm check`, build, diff/precheck, and independent final
+review. No route, worker, runtime composition, legacy consumer, or cross-role
+allowlist changed; #0446 remains open until 14e3. **14e3 is next.**
 
 **14e3 — atomic API/worker cutover and legacy removal.** Create named API and
 worker asset/import compositions and a thin archive API adapter. In one reviewed
