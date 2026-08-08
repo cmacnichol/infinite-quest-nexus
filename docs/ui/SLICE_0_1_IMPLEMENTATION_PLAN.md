@@ -8238,17 +8238,57 @@ may cache only an already redeemed open descriptor/handle and must discard it
 on close. Add restart, attach rollback, candidate-vs-reaper race, one-time
 grant replay, and exact original/derivative binding real-PostgreSQL coverage.
 
-**14e3b2c — portable rehydration and atomic cleanup repository.** Implement
-named staged/export rehydration and fresh cleanup-claim operations in the
-import repository. Each begins `cleanup_pending` for the portable row and its
-journal operation in one caller-owned transaction; only the exact preparation
-claim may acknowledge both `cleaned` after identity-safe filesystem cleanup.
-Failed physical cleanup remains recoverable as `cleanup_pending`; a stale or
-foreign claimant cannot acknowledge it. Test restart rehydration, staged and
-export full-scope substitution, concurrent cleanup winner, transaction
-rollback, failed cleanup/reaper retry, dual acknowledgement, and stale-claim
-denial. Existing compatibility retrieval methods remain unchanged until b4
-replaces their consumer.
+**14e3b2c — portable rehydration and atomic cleanup repository.** Before
+implementation, correct the private portable contract: staged and export
+cleanup preparation must accept the caller-owned
+`DurableFilesystemTransactionContext`, rather than leaving only acknowledgement
+transaction-bound. Add a database-derived recovery-cleanup entry point that
+consumes an exact fenced `DurableFilesystemRecoveryRecord` rather than a raw
+staged/export bearer: bearer hashes are intentionally irreversible, and a
+restart/reaper must reconstruct the unique staged identity or full immutable
+export scope through `filesystem_operation_id`, never mint or recover a bearer.
+Cleanup preparations must carry durable row identity (staged/artifact row ID,
+owner, exact operation; exports also carry complete `PortableExportScope`), a
+fresh exact claim, and immutable descriptor list—not an inherited raw bearer.
+Return a typed `cleanup_required` / `already_cleaned` / `stale` / `lease_lost`
+result so normal contention does not surface as an unsafe generic archive
+error.
+
+Implement the corresponding private methods in the named import repository,
+using direct private runtime binders rather than a public import barrel. For a
+fresh preparation: lock the operation then portable row, take sorted
+physical-path advisory locks under the established durable-filesystem protocol,
+issue a new lease ID/work version with nonblank owner and positive integral
+lease duration, and use `clock_timestamp()` after every potentially blocking
+lock. Interactive bearer rehydration accepts only live `staged`/`ready`,
+unexpired owner-bound rows; expired, failed, consumed, or `cleanup_pending`
+work must use the database-derived recovery entry point. Revalidate full owner,
+operation/purpose/scope hash, descriptor, work version, lease ID/owner/expiry,
+and current database time immediately before mutation. In the supplied caller
+transaction, move the portable row and bound journal operation together to
+`cleanup_pending`; a paired pending row may issue a fresh retry preparation.
+Never call the independently transactional journal `markCleanup` path for a
+bound portable row. Only the exact current preparation may acknowledge both
+rows to `cleaned` in that same transaction; validate claims even before
+idempotent `already_cleaned` success, and throw on an unexpected paired update
+failure so the caller transaction rolls back. A physical filesystem failure
+does not acknowledge, leaving both rows recoverable as `cleanup_pending`.
+
+`0055` already provides the unique operation binding, immutable authority, and
+deferred paired-state enforcement; do not alter migrations `0053`–`0056` for
+this checkpoint. Add direct latest-schema private contract and real-PostgreSQL
+coverage for: transaction-required preparation and private-barrel denial;
+restart staged/export rehydration with hash-only bearer storage; every owner,
+bearer, descriptor, operation, and export-scope substitution; atomic
+prepare/ack commit and rollback; retry from paired pending; one concurrent
+cleanup winner; stale work, wrong lease, and deterministic post-lock expiry;
+failed physical cleanup followed by recovery-record retry; and exact dual-row
+acknowledgement. Keep delivery and cleanup descriptors distinct even when paths
+coincide. Retain the historical 14e2c helper's `0055` rollback isolation and
+do not use it as b2c evidence. Existing compatibility retrieval methods remain
+unchanged until b4 replaces their consumer; no route, service, worker, runtime
+composition, public barrel, b3 delivery resolver, b4 storage adapter, or
+test-helper composition change belongs here.
 
 **14e3b2 completion gate.** Run the b2a contract/migration suite plus b2b and
 b2c real-PostgreSQL restart, owner, race, rollback, and reaper matrices. Only
