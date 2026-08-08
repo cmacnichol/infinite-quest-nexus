@@ -107,6 +107,27 @@ export type OwnerBoundPortableStagedInput<Kind extends AtomicPortableImportKind 
     [ownerBoundPortableStagedInputBrand]: true;
   }> : never;
 
+type ValidatedAtomicBindingSnapshot = Readonly<{
+  owner: ImportOwnerScope;
+  kind: AtomicPortableImportKind;
+  destination: AtomicPortableImportDestinationByKind[AtomicPortableImportKind];
+  contentFingerprint: ValidatedPortableContentFingerprint;
+  stagedInput: PortableStagedInput;
+  replayKey: ServerStableReplayKey;
+  payload: AtomicPortableImportPayloadByKind[AtomicPortableImportKind];
+}>;
+
+type OwnerBoundStagedInputSnapshot = Readonly<{
+  owner: ImportOwnerScope;
+  kind: AtomicPortableImportKind;
+  destination: AtomicPortableImportDestinationByKind[AtomicPortableImportKind];
+  contentFingerprint: ValidatedPortableContentFingerprint;
+  stagedInput: PortableStagedInput;
+}>;
+
+const validatedAtomicBindingSnapshots = new WeakMap<object, ValidatedAtomicBindingSnapshot>();
+const ownerBoundStagedInputSnapshots = new WeakMap<object, OwnerBoundStagedInputSnapshot>();
+
 export const PORTABLE_IMPORT_IDEMPOTENCY_HEADER = "idempotency-key" as const;
 
 type CampaignZipCommitIngressRequest<Destination extends CampaignZipPreviewDestination> = Readonly<{
@@ -359,6 +380,64 @@ function parseAtomicPayload<Kind extends AtomicPortableImportKind>(
   return payload as AtomicPortableImportPayloadByKind[Kind];
 }
 
+function freezeRecursively<Value>(value: Value): Value {
+  if (value === null || typeof value !== "object") return value;
+  for (const nested of Object.values(value as Record<string, unknown>)) {
+    freezeRecursively(nested);
+  }
+  return Object.isFrozen(value) ? value : Object.freeze(value);
+}
+
+function immutableOwner(owner: ImportOwnerScope): ImportOwnerScope {
+  return Object.freeze({ ownerUserId: owner.ownerUserId });
+}
+
+function immutableAtomicDestination<Kind extends AtomicPortableImportKind>(
+  destination: AtomicPortableImportDestinationByKind[Kind],
+): AtomicPortableImportDestinationByKind[Kind] {
+  return Object.freeze(destination.kind === "create_world"
+    ? { kind: "create_world" }
+    : {
+      kind: "existing_world_version",
+      worldId: destination.worldId,
+      worldVersionId: destination.worldVersionId
+    }) as AtomicPortableImportDestinationByKind[Kind];
+}
+
+function requireValidatedAtomicBindingSnapshot(
+  binding: ValidatedAtomicRepreviewPayload,
+): ValidatedAtomicBindingSnapshot {
+  const snapshot = validatedAtomicBindingSnapshots.get(binding as object);
+  if (snapshot === undefined
+    || !Object.isFrozen(binding)
+    || binding.owner !== snapshot.owner
+    || binding.destination !== snapshot.destination
+    || binding.kind !== snapshot.kind
+    || binding.contentFingerprint !== snapshot.contentFingerprint
+    || binding.stagedInput !== snapshot.stagedInput
+    || binding.replayKey !== snapshot.replayKey
+    || binding.payload !== snapshot.payload) {
+    throw new Error("portable_atomic_binding_invalid");
+  }
+  return snapshot;
+}
+
+function requireOwnerBoundStagedInputSnapshot(
+  binding: OwnerBoundPortableStagedInput,
+): OwnerBoundStagedInputSnapshot {
+  const snapshot = ownerBoundStagedInputSnapshots.get(binding as object);
+  if (snapshot === undefined
+    || !Object.isFrozen(binding)
+    || binding.owner !== snapshot.owner
+    || binding.destination !== snapshot.destination
+    || binding.kind !== snapshot.kind
+    || binding.contentFingerprint !== snapshot.contentFingerprint
+    || binding.stagedInput !== snapshot.stagedInput) {
+    throw new Error("portable_atomic_binding_invalid");
+  }
+  return snapshot;
+}
+
 /**
  * Adapter-private constructor. The caller supplies a fingerprint produced by
  * its validated request/staging boundary; this function parses the exact
@@ -376,22 +455,34 @@ export function bindValidatedAtomicRepreviewPayload<Kind extends AtomicPortableI
 ): ValidatedAtomicRepreviewPayload<Kind> {
   requireOwner(input.owner);
   requireKindDestination(input.kind, input.destination);
-  const payload = parseAtomicPayload(input.kind, input.destination, input.payload);
+  const owner = immutableOwner(input.owner);
+  const destination = immutableAtomicDestination(input.destination);
+  const payload = freezeRecursively(parseAtomicPayload(input.kind, destination, input.payload));
   const replayKey = deriveAtomicReplayKey(
-    input.owner,
+    owner,
     input.kind,
-    input.destination,
+    destination,
     input.contentFingerprint,
   );
-  return {
-    owner: input.owner,
+  const binding = Object.freeze({
+    owner,
     kind: input.kind,
-    destination: input.destination,
+    destination,
     contentFingerprint: input.contentFingerprint,
     stagedInput: input.stagedInput,
     replayKey,
     payload
-  } as ValidatedAtomicRepreviewPayload<Kind>;
+  }) as ValidatedAtomicRepreviewPayload<Kind>;
+  validatedAtomicBindingSnapshots.set(binding, Object.freeze({
+    owner,
+    kind: input.kind,
+    destination,
+    contentFingerprint: input.contentFingerprint,
+    stagedInput: input.stagedInput,
+    replayKey,
+    payload
+  }) as ValidatedAtomicBindingSnapshot);
+  return binding;
 }
 
 /** Adapter-private constructor for the durable staged-input identity. */
@@ -406,7 +497,23 @@ export function bindOwnerBoundPortableStagedInput<Kind extends AtomicPortableImp
 ): OwnerBoundPortableStagedInput<Kind> {
   requireOwner(input.owner);
   requireKindDestination(input.kind, input.destination);
-  return { ...input } as OwnerBoundPortableStagedInput<Kind>;
+  const owner = immutableOwner(input.owner);
+  const destination = immutableAtomicDestination(input.destination);
+  const binding = Object.freeze({
+    owner,
+    kind: input.kind,
+    destination,
+    contentFingerprint: input.contentFingerprint,
+    stagedInput: input.stagedInput
+  }) as OwnerBoundPortableStagedInput<Kind>;
+  ownerBoundStagedInputSnapshots.set(binding, Object.freeze({
+    owner,
+    kind: input.kind,
+    destination,
+    contentFingerprint: input.contentFingerprint,
+    stagedInput: input.stagedInput
+  }) as OwnerBoundStagedInputSnapshot);
+  return binding;
 }
 
 function ownersMatch(left: ImportOwnerScope, right: ImportOwnerScope): boolean {
@@ -415,9 +522,12 @@ function ownersMatch(left: ImportOwnerScope, right: ImportOwnerScope): boolean {
 
 function assertAtomicRequestCorrelation(
   request: AtomicRepreviewCommitIngressRequest<AtomicPortableImportKind>,
-): void {
-  const validated = request.validatedPayload;
-  const staged = request.stagedInput;
+): Readonly<{
+  validated: ValidatedAtomicBindingSnapshot;
+  staged: OwnerBoundStagedInputSnapshot;
+}> {
+  const validated = requireValidatedAtomicBindingSnapshot(request.validatedPayload);
+  const staged = requireOwnerBoundStagedInputSnapshot(request.stagedInput);
   if (!ownersMatch(request.owner, validated.owner) || !ownersMatch(request.owner, staged.owner)) {
     throw new Error("portable_atomic_owner_mismatch");
   }
@@ -442,6 +552,7 @@ function assertAtomicRequestCorrelation(
   if (validated.replayKey !== expectedReplayKey) {
     throw new Error("portable_atomic_replay_key_mismatch");
   }
+  return { validated, staged };
 }
 
 /**
@@ -488,8 +599,8 @@ export function bindPortableImportCommitIngress<Destination extends PortablePrev
   if ((atomicRequest as { previewHandle?: unknown }).previewHandle !== undefined) {
     throw new Error("portable_preview_handle_unexpected");
   }
-  assertAtomicRequestCorrelation(atomicRequest);
-  const replayKey = atomicRequest.validatedPayload.replayKey;
+  const snapshot = assertAtomicRequestCorrelation(atomicRequest);
+  const replayKey = snapshot.validated.replayKey;
   const idempotency = atomicRequest.idempotencyHeader === undefined
     ? {
       source: "server_stable_compatibility" as const,
@@ -530,15 +641,15 @@ export async function executeAtomicPortableImportCommit<
   if (ingress.choreography.kind !== "atomic_repreview") {
     throw new Error("portable_atomic_choreography_required");
   }
-  const validated = ingress.choreography.validatedPayload;
-  const staged = ingress.choreography.stagedInput;
-  assertAtomicRequestCorrelation({
+  const bindings = assertAtomicRequestCorrelation({
     owner: ingress.owner,
     kind: ingress.kind,
     destination: ingress.destination,
-    validatedPayload: validated,
-    stagedInput: staged
+    validatedPayload: ingress.choreography.validatedPayload,
+    stagedInput: ingress.choreography.stagedInput
   } as AtomicRepreviewCommitIngressRequest<AtomicPortableImportKind>);
+  const validated = bindings.validated;
+  const staged = bindings.staged;
   if (ingress.choreography.replayKey !== validated.replayKey) {
     throw new Error("portable_atomic_replay_key_mismatch");
   }

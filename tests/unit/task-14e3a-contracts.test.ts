@@ -278,6 +278,60 @@ describe("Task 14e3a HTTP compatibility contracts", () => {
     expect(events).toEqual([]);
   });
 
+  it("rejects cloned bindings and coordinated staged-input plus payload substitution", async () => {
+    const ingress = bindPortableImportCommitIngress(ingressRequest("legacy_story", existingDestination));
+    if (ingress.choreography.kind !== "atomic_repreview") throw new Error("expected atomic choreography");
+    const events: string[] = [];
+    const transactionRunner = {
+      run: async <Result>(work: (transaction: object) => Promise<Result>) => {
+        events.push("transaction-open");
+        return work({ transactionId: "must-not-open" });
+      }
+    };
+    const core = async () => {
+      events.push("core-called");
+      return "committed";
+    };
+
+    await expect(executeAtomicPortableImportCommit(
+      {
+        ...ingress,
+        choreography: {
+          ...ingress.choreography,
+          validatedPayload: { ...ingress.choreography.validatedPayload }
+        }
+      } as never,
+      transactionRunner,
+      core,
+    )).rejects.toThrow("portable_atomic_binding_invalid");
+
+    const substitutedStagedInput = toPortableStagedInput("coordinated-substitution");
+    await expect(executeAtomicPortableImportCommit(
+      {
+        ...ingress,
+        choreography: {
+          ...ingress.choreography,
+          validatedPayload: {
+            ...ingress.choreography.validatedPayload,
+            stagedInput: substitutedStagedInput,
+            payload: {
+              ...ingress.choreography.validatedPayload.payload,
+              sourceName: "forged.story"
+            }
+          },
+          stagedInput: {
+            ...ingress.choreography.stagedInput,
+            stagedInput: substitutedStagedInput
+          }
+        }
+      } as never,
+      transactionRunner,
+      core,
+    )).rejects.toThrow("portable_atomic_binding_invalid");
+
+    expect(events).toEqual([]);
+  });
+
   it.each(["legacy_story", "story_text", "infinite_worlds", "cyoa", "world_json", "world_text"] as const)(
     "carries the exact validated %s payload and owner-bound staged identity",
     (kind) => {
@@ -300,7 +354,7 @@ describe("Task 14e3a HTTP compatibility contracts", () => {
     },
   );
 
-  it("rejects cross-owner, family, destination, staged-input, and replay-key substitution", () => {
+  it("rejects forged binding copies carrying owner, family, destination, staged-input, or replay substitutions", () => {
     const base = ingressRequest("legacy_story", existingDestination) as Extract<
       PortableImportCommitIngressRequest,
       { kind: "legacy_story" }
@@ -310,30 +364,30 @@ describe("Task 14e3a HTTP compatibility contracts", () => {
     expect(() => bindPortableImportCommitIngress({
       ...base,
       validatedPayload: { ...base.validatedPayload, owner: { ownerUserId: foreignOwner } }
-    } as never)).toThrow("portable_atomic_owner_mismatch");
+    } as never)).toThrow("portable_atomic_binding_invalid");
     expect(() => bindPortableImportCommitIngress({
       ...base,
       validatedPayload: { ...base.validatedPayload, kind: "story_text" }
-    } as never)).toThrow("portable_atomic_kind_mismatch");
+    } as never)).toThrow("portable_atomic_binding_invalid");
     expect(() => bindPortableImportCommitIngress({
       ...base,
       validatedPayload: { ...base.validatedPayload, destination: createWorldDestination }
-    } as never)).toThrow("portable_atomic_destination_mismatch");
+    } as never)).toThrow("portable_atomic_binding_invalid");
     expect(() => bindPortableImportCommitIngress({
       ...base,
       stagedInput: { ...base.stagedInput, contentFingerprint: "b".repeat(64) }
-    } as never)).toThrow("portable_atomic_staged_input_mismatch");
+    } as never)).toThrow("portable_atomic_binding_invalid");
     expect(() => bindPortableImportCommitIngress({
       ...base,
       stagedInput: {
         ...base.stagedInput,
         stagedInput: toPortableStagedInput("substituted-staged-input")
       }
-    } as never)).toThrow("portable_atomic_staged_input_mismatch");
+    } as never)).toThrow("portable_atomic_binding_invalid");
     expect(() => bindPortableImportCommitIngress({
       ...base,
       validatedPayload: { ...base.validatedPayload, replayKey: toServerStableReplayKey("tampered-replay") }
-    } as never)).toThrow("portable_atomic_replay_key_mismatch");
+    } as never)).toThrow("portable_atomic_binding_invalid");
   });
 
   it("rejects format-confused or provider-incomplete validated payloads", () => {
