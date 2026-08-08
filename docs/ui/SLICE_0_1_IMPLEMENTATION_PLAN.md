@@ -8297,17 +8297,51 @@ private grant/redemption repository. No `AsyncLocalStorage`, raw cleanup SQL
 outside named database adapters, process-local authority map, or test-helper
 composition may appear.
 
-**14e3b3 — finalized delivery resolver.** After b2a-b2c, implement private original and
-derivative resolution by exact owner-scoped asset ID and intent using the 0054
-binding and a fresh database-backed redemption grant. Freeze route-compatible
-derivative selection deliberately: preserve the legacy highest pixel-width
-algorithm and its missing-thumbnail original fallback, or make an explicitly
-reviewed parity change; never silently choose by unrelated transform ordering.
-For durable rows, validate the final descriptor identity/hash/length after
-restart. For legacy-null rows, return an anchored read-only compatibility
-capability only—no locator minting or cleanup claim. Prove original/thumbnail,
-fallback, substitution, owner/purpose denial, shared-hash retention, and
-restart behavior.
+**14e3b3 — finalized delivery resolver.** Before implementation, replace the
+provisional durable locator result with an opaque one-time finalized-delivery
+grant: it carries no path, candidate bearer, storage locator, or cleanup claim.
+The existing raw-candidate grant issue path cannot survive restart because only
+the candidate hash remains, and its pre-attach expiry must not render a
+correctly finalized asset undeliverable. Add a private database-side exact
+owner/asset/intent issuance operation that selects an exact finalized 0054
+binding and descriptor, internally uses only the stored candidate hash, and
+persists explicit `original`/`thumbnail` delivery intent plus selected-row
+identity. A fresh grant remains one-time and at most 60 seconds, but its
+post-finalization eligibility is independent of the expired raw staging bearer.
+Retain the old raw-candidate path only as b4-deferred compatibility; b3 must
+not consume it or `redeemStorageLocator`.
+
+Add a usable private legacy anchored-read capability for rows whose
+`filesystem_operation_id IS NULL`: hash the opaque one-time capability at rest
+and bind it exactly to owner, asset, delivery intent, selected row, and
+descriptor snapshot. Its private redemption rechecks that the row remains
+legacy-null and returns only a read-only private descriptor; it never mints a
+durable locator, recovery claim, or cleanup authority. A non-null operation ID
+that is missing, non-finalized, owner/asset/purpose-mismatched, or descriptor
+mismatched must fail closed and must never downgrade to the legacy path.
+
+Use additive `0057` rather than modifying `0053`–`0056` to guard immutable
+finalized-grant identity/intent, hash-only bearer storage, one-time current-clock
+redemption, exact 0054 operation binding, and legacy-null anchored capability
+issuance/redemption. Implement a named PostgreSQL finalized-delivery repository
+with an atomic selection-and-grant insert, and share its deterministic selection
+helper with the asset repository. Preserve legacy parity: select the thumbnail
+with highest pixel width first, use a deterministic row-ID tie-break only after
+width, and fall back to the original only when no thumbnail exists while
+retaining the thumbnail delivery intent.
+
+Add private-barrel and real-PostgreSQL tests for durable original and thumbnail
+delivery; lower-width/newer-transform versus higher-width/older-transform;
+tie-break; missing-thumbnail fallback; fresh-repository grant issue then
+redemption after restart; publication candidate TTL elapsed after finalization;
+one-time replay and 60-second expiry; every owner/asset/intent/purpose/
+operation/descriptor/hash/length substitution; broken non-null binding without
+legacy fallback; legacy original/thumbnail/fallback and null-to-bound race;
+and shared physical hashes across owners. Verify descriptor identity/hash/length
+tuple persistence, but leave actual filesystem open, byte verification,
+streaming, close/abort, and cleanup to b4. No route, worker, runtime, public
+barrel, b2c change, legacy-helper promotion, or #0518 seam consumer belongs
+here.
 
 **14e3b4 — explicit secure staging, export, and bounded streaming lifecycle.**
 Build the storage adapter from b1/b2a-b2c authority so it reserves before the first
