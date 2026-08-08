@@ -8605,6 +8605,34 @@ handle denial, and no route/worker/allowlist/legacy-consumer change. Add AST
 guards for raw path, `activeProgressMap`, legacy authority imports, and public
 buffered export use outside test compatibility.
 
+**14e3d implementation seam correction.** B5 currently offers bounded export
+and asset sessions but not a bounded, descriptor-anchored staged-input read
+session; add the parallel private staged session instead of rehydrating a path
+or buffering uploaded archives. Its close/abort/timeout/read-failure behavior
+must preserve staging ownership (never delete a still-previewed input) and
+coordinate only through durable preview/portable cleanup state. The 14e3c
+publisher's current convenience method owns its own transaction, so add a
+private caller-transaction prepare/attach/finalize variant: an import commit
+can publish/remap all assets in its one database transaction and finalize only
+after that transaction commits. Do not simulate atomicity with a callback or a
+second nested transaction.
+
+Add a private PostgreSQL family-mutation port with explicit `DatabaseClient`,
+owner, exact destination, and canonical normalized-payload types for campaign
+ZIP and Legacy Story; use the existing caller-client world/campaign command
+adapters for the world families. It is the sole composition authority for
+creating/importing records, and must not import `import-service.ts`,
+`campaign-archive-service.ts`, or `infinite-worlds-import-service.ts`. Parser
+and optional provider conversion run before the commit transaction, but their
+complete canonical normalized output and the provider/configuration fingerprint
+are stored privately with the durable preview—safe preview projections are not
+reconstructed as commit authority. Additive migration **0061** must persist
+that private normalized payload plus owner-scoped work-version-fenced progress
+and abort status, include expiry/reaper indexes, seed/rollback assertions, and
+no raw input, credential, path, or provider response fields. The composition
+surface must enumerate seven import kinds and both campaign/world export
+families explicitly; do not collapse them into an untyped generic parser.
+
 **14e3e — illustration/import writers and worker composition.** Move real
 illustration image persistence, imported asset publication, runtime illustration
 bindings, metadata backfill, and durable filesystem recovery behind these
