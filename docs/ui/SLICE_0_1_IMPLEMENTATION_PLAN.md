@@ -8688,8 +8688,11 @@ closing each gap before 14e3e begins:
   publisher fencing;
 - Campaign ZIP and Legacy Story mutation validate and key-share-lock the exact
   owner-scoped world/world-version pair before any write. Campaign ZIP also
-  acquires owner/authority duplicate protection before asset reservation, so a
-  different-key replay cannot publish unreferenced files;
+  performs a durable owner/authority duplicate probe before archive asset
+  extraction or reservation, then rechecks under the caller transaction's
+  advisory lock before mutation. A distinct-key duplicate therefore cannot
+  reach asset reservation, while an interruption after reservation but before
+  claim leaves no identity residue and remains safely retryable;
 - rollback compensation now discards prepared identities only after the caller
   transaction has rolled back, drives any attached operation through durable
   cleanup, and retains audit-safe `cleanup_pending` identity state. A later
@@ -8707,16 +8710,28 @@ closing each gap before 14e3e begins:
   and public buffered export while asserting one canonical private factory and
   its deliberately unconsumed production graph.
 
+Additive migration **0062** records the immutable, owner-scoped
+operation/import/asset identities published by each Campaign ZIP commit. The
+mapping is written only inside the successful caller transaction after the
+import claim and asset attachment are authoritative, is protected by exact
+composite foreign keys and mutation guards, and deliberately retains those
+authorities against deletion. Committed replay reads only the mapped asset IDs;
+it has no campaign-wide recovery fallback, so an unrelated attached or
+recoverable asset on the same campaign is never finalized by this import.
+
 The correction matrix includes close/reopen finalization recovery, mixed
 multi-artifact crashes, database-before-projection expiry, exact destination
-denial, duplicate-before-assets behavior, caller rollback cleanup, partial
-reservation compensation, and a deterministic concurrent same-command winner/
-loser replay. Final verification is 1,457 unit tests and 502 integration tests,
-including the 30 focused 14e3c/14e3d correction cases, plus `pnpm check`, build,
+denial, duplicate-before-assets behavior, interruption between reservation and
+claim, caller rollback cleanup, partial reservation compensation, exact mapped-
+asset replay, unrelated-campaign-asset isolation, and a deterministic concurrent
+same-command winner/loser replay. Final verification is 1,457 unit tests and
+504 integration tests, including 18/18 focused Task 14e3d composition cases and
+25/25 migration/rollback inventory cases, plus `pnpm check`, build,
 `git diff --check`, `pjm precheck`, and correction-only diff review. No route,
-worker, illustration writer, legacy consumer, public barrel, migration, or
-cross-role allowlist binding changed. **14e3e remains the next implementation
-task after final review; route binding remains deferred to 14e3g.**
+worker, illustration writer, legacy consumer, public barrel, or cross-role
+allowlist binding changed; migration 0062 is additive and rollback-covered.
+**14e3e remains the next implementation task after final review; route binding
+remains deferred to 14e3g.**
 
 **14e3e — illustration/import writers and worker composition.** Move real
 illustration image persistence, imported asset publication, runtime illustration

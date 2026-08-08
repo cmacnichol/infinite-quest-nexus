@@ -279,12 +279,12 @@ export async function createAssetPublicationComposition(
     },
     async recoverImportedAssets(
       owner: ImportOwnerScope,
-      campaignId: string,
+      assetIds: readonly string[],
       recovery: Readonly<{ leaseOwner: string; leaseSeconds: number }>,
     ) {
-      const identities = await publication.listCampaignPublicationIdentities(
+      const identities = await publication.readPublicationIdentities(
         owner.ownerUserId,
-        campaignId,
+        assetIds,
       );
       for (const identity of identities) {
         if (identity.lifecycle === "published") continue;

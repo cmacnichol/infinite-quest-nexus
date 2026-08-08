@@ -344,6 +344,66 @@ export function createPostgresPortableImportAuthorityRepository(
     if (updated.rowCount !== 1) throw new Error("portable_import_claim_lost");
   };
 
+  const recordAssetPublications = async (
+    database: DatabaseClient,
+    claim: PrivatePortableImportWorkClaim,
+    importId: string,
+    assetIds: readonly string[],
+  ): Promise<void> => {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(importId)
+      || assetIds.length > 1000
+      || assetIds.some((assetId) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(assetId))
+      || new Set(assetIds).size !== assetIds.length) {
+      throw new Error("portable_import_asset_publications_invalid");
+    }
+    if (assetIds.length === 0) return;
+    const inserted = await database.query<{ asset_id: string }>(
+      `WITH exact_claim AS (
+         SELECT operation_id,owner_user_id
+           FROM portable_import_work
+          WHERE operation_id=$1 AND owner_user_id=$2 AND work_version=$3
+            AND lease_id=$4 AND lease_owner=$5
+            AND date_trunc('milliseconds',lease_expires_at)=$6::timestamptz
+            AND status='running' AND lease_expires_at > clock_timestamp()
+       )
+       INSERT INTO portable_import_asset_publications (
+         operation_id,owner_user_id,import_id,asset_id
+       )
+       SELECT exact_claim.operation_id,exact_claim.owner_user_id,$7,asset_id
+         FROM exact_claim CROSS JOIN unnest($8::uuid[]) AS asset(asset_id)
+       RETURNING asset_id`,
+      [...exactClaimParameters(claim), importId, assetIds],
+    );
+    if (inserted.rows.length !== assetIds.length) {
+      throw new Error("portable_import_asset_publications_unavailable");
+    }
+  };
+
+  const readCommittedAssetPublicationIds = async (
+    owner: ImportOwnerScope,
+    previewToken: string,
+  ): Promise<readonly string[]> => {
+    const selected = await pool.query<{ asset_ids: string[] }>(
+      `SELECT COALESCE(
+                array_agg(publication.asset_id ORDER BY publication.asset_id)
+                  FILTER (WHERE publication.asset_id IS NOT NULL),
+                '{}'::uuid[]
+              ) AS asset_ids
+         FROM portable_import_operations operation
+         LEFT JOIN portable_import_asset_publications publication
+           ON publication.operation_id=operation.id
+          AND publication.owner_user_id=operation.owner_user_id
+          AND publication.import_id=operation.import_id
+        WHERE operation.owner_user_id=$1 AND operation.preview_token_hash=$2
+          AND operation.status='committed'
+        GROUP BY operation.id`,
+      [owner.ownerUserId, sha256(previewToken)],
+    );
+    const row = selected.rows[0];
+    if (!row) throw new Error("portable_import_replay_unavailable");
+    return Object.freeze(row.asset_ids);
+  };
+
   const expireOrRead = async (owner: ImportOwnerScope, previewToken: string): Promise<PortableImportProgressView | null> => (
     withTransaction(pool, async (database) => {
       let row = await progressByPreview(database, owner, previewToken, true);
@@ -496,6 +556,8 @@ export function createPostgresPortableImportAuthorityRepository(
     persistPreviewAuthority,
     claimPreviewAuthority,
     updateProgress,
+    recordAssetPublications,
+    readCommittedAssetPublicationIds,
     completeProgress,
     readProgress: expireOrRead,
     abort,

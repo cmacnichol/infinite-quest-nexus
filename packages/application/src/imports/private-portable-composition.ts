@@ -158,6 +158,16 @@ export interface PrivatePortableImportAuthorityPort {
     percentage: number;
     diagnosticCode: PortableArchiveDiagnosticCode | null;
   }>): Promise<PrivatePortableImportWorkClaim>;
+  recordAssetPublications(
+    database: PrivatePortableTransactionContext,
+    claim: PrivatePortableImportWorkClaim,
+    importId: string,
+    assetIds: readonly string[],
+  ): Promise<void>;
+  readCommittedAssetPublicationIds(
+    owner: ImportOwnerScope,
+    previewToken: string,
+  ): Promise<readonly string[]>;
   completeProgress(database: PrivatePortableTransactionContext, claim: PrivatePortableImportWorkClaim): Promise<void>;
   readProgress(owner: ImportOwnerScope, previewToken: string): Promise<PortableImportProgressView | null>;
   abort(owner: ImportOwnerScope, previewToken: string): Promise<PortableImportProgressView | null>;
@@ -189,7 +199,7 @@ export interface PrivateCallerTransactionAssetPublisher {
   ): Promise<void>;
   recoverImportedAssets(
     owner: ImportOwnerScope,
-    campaignId: string,
+    assetIds: readonly string[],
     recovery: Readonly<{ leaseOwner: string; leaseSeconds: number }>,
   ): Promise<void>;
   finalizeImportedAssets(attachments: readonly PrivateImportedAssetAttachment[]): Promise<void>;

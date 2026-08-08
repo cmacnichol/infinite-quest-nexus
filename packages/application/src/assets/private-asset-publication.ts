@@ -111,9 +111,9 @@ export interface PrivateAssetPublicationIdentityPort {
     identity: PrivateAssetPublicationIdentity,
     command: PrivateAssetPublicationCommand,
   ): Promise<void>;
-  listCampaignPublicationIdentities(
+  readPublicationIdentities(
     ownerUserId: string,
-    campaignId: string,
+    assetIds: readonly string[],
   ): Promise<readonly PrivateAssetPublicationIdentity[]>;
   attachPublication(
     database: DurableFilesystemTransactionContext,

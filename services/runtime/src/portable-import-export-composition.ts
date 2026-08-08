@@ -783,13 +783,13 @@ export async function createPortableImportExportComposition(
     view: import("../../../packages/application/src/imports/types.js").PortableImportCommitView,
   ) => {
     if (command.kind === "campaign_zip") {
-      const result = view.result as Readonly<{ campaignId?: unknown }>;
-      if (typeof result.campaignId !== "string" || result.campaignId.trim().length === 0) {
-        throw new Error("portable_import_result_unavailable");
-      }
+      const publicationAssetIds = await authority.readCommittedAssetPublicationIds(
+        owner(command.ownerUserId),
+        command.previewHandle.token,
+      );
       await assets.transactionalPublisher.recoverImportedAssets(
         owner(command.ownerUserId),
-        result.campaignId,
+        publicationAssetIds,
         { leaseOwner: options.leaseOwner, leaseSeconds },
       );
     }
@@ -818,8 +818,17 @@ export async function createPortableImportExportComposition(
     }
     const previewAuthority = await authority.readPreviewAuthority({ command });
     if (!previewAuthority) throw new Error("portable_import_authority_unavailable");
+    const duplicateBeforeReservation = command.kind === "campaign_zip"
+      || command.kind === "legacy_story"
+      || command.kind === "story_text"
+      ? await withTransaction(options.pool, (database) => mutations.findCampaignDuplicate(database, {
+        owner: owner(command.ownerUserId),
+        kind: command.kind,
+        authorityFingerprint: previewAuthority.authorityFingerprint
+      }))
+      : null;
     let assetArtifacts: Awaited<ReturnType<PrivatePortableFamilyPreviewPort["extractCampaignZipAssets"]>> = [];
-    if (command.kind === "campaign_zip") {
+    if (command.kind === "campaign_zip" && !duplicateBeforeReservation) {
       const campaignCommand = command as Extract<PortableImportCommitCommand, { kind: "campaign_zip" }>;
       const session = await assets.storage.adapter.openPreviewInputSession<PortablePreviewDestination>({
         owner: owner(command.ownerUserId),
@@ -909,6 +918,14 @@ export async function createPortableImportExportComposition(
                   authorityFingerprint: mutationInput.authorityFingerprint,
                   payload: mutationInput.payload
                 }));
+        if (command.kind === "campaign_zip" && !duplicate) {
+          await authority.recordAssetPublications(
+            database,
+            claim,
+            mutation.importId,
+            attachments.map((attachment) => attachment.identity.assetId),
+          );
+        }
         claim = await authority.updateProgress(database, claim, {
           phase: "committing",
           percentage: 85,

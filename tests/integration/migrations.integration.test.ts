@@ -197,13 +197,16 @@ integration("standard database migration runner", () => {
     expect(definitions).toMatch(/portable_import_operations:.*campaign_zip.*legacy_story.*infinite_worlds.*cyoa.*world_json.*world_text.*story_text/i);
     expect(definitions).toMatch(/asset_metadata_unavailable.*filesystem_race_detected/i);
 
-    const blockingImportConstraint = await pool.query<{ constraint_name: string }>(
+    // The exact portable-import publication mapping uses this owner-scoped key
+    // as its composite foreign-key target; it does not prevent import cleanup
+    // unless an immutable publication mapping still retains the import.
+    const importOwnerConstraint = await pool.query<{ constraint_name: string }>(
       `SELECT constraint_name
          FROM information_schema.table_constraints
         WHERE table_schema='public' AND table_name='imports'
           AND constraint_name='imports_id_owner_unique'`
     );
-    expect(blockingImportConstraint.rows).toEqual([]);
+    expect(importOwnerConstraint.rows).toEqual([{ constraint_name: "imports_id_owner_unique" }]);
 
     const indexes = await pool.query<{ indexname: string }>(
       `SELECT indexname
@@ -1172,7 +1175,8 @@ integration("standard database migration runner", () => {
         "0058_secure_storage_lifecycle",
         "0059_secure_storage_target_intent",
         "0060_asset_publication_identities",
-        "0061_portable_import_composition"
+        "0061_portable_import_composition",
+        "0062_portable_import_asset_publications"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(

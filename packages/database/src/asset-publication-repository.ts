@@ -439,25 +439,29 @@ export function createPostgresAssetPublicationRepository(
     if (retired.rowCount !== 1) throw new Error("asset_publication_identity_unavailable");
   };
 
-  const listCampaignPublicationIdentities: PrivateAssetPublicationIdentityPort["listCampaignPublicationIdentities"] = async (
+  const readPublicationIdentities: PrivateAssetPublicationIdentityPort["readPublicationIdentities"] = async (
     ownerUserId,
-    campaignId,
+    assetIds,
   ) => {
-    if (ownerUserId.trim().length === 0 || campaignId.trim().length === 0) {
-      throw new Error("asset_publication_campaign_scope_invalid");
+    if (ownerUserId.trim().length === 0
+      || assetIds.length > 1000
+      || assetIds.some((assetId) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(assetId))
+      || new Set(assetIds).size !== assetIds.length) {
+      throw new Error("asset_publication_identity_set_invalid");
     }
+    if (assetIds.length === 0) return Object.freeze([]);
     const selected = await pool.query<IdentityRow>(
-      `SELECT DISTINCT identity.asset_id,identity.owner_user_id,identity.request_fingerprint,
+      `SELECT identity.asset_id,identity.owner_user_id,identity.request_fingerprint,
               identity.lifecycle,identity.result,identity.pending_finalization
          FROM asset_publication_identities identity
-         JOIN asset_references reference
-           ON reference.asset_id=identity.asset_id
-          AND reference.owner_user_id=identity.owner_user_id
-        WHERE identity.owner_user_id=$1 AND reference.campaign_id=$2
+        WHERE identity.owner_user_id=$1 AND identity.asset_id=ANY($2::uuid[])
           AND identity.lifecycle IN ('attached','published')
         ORDER BY identity.asset_id`,
-      [ownerUserId, campaignId],
+      [ownerUserId, assetIds],
     );
+    if (selected.rows.length !== assetIds.length) {
+      throw new Error("asset_publication_identity_set_unavailable");
+    }
     return Object.freeze(selected.rows.map(identity));
   };
 
@@ -795,7 +799,7 @@ export function createPostgresAssetPublicationRepository(
     prepareIdentity,
     prepareIdentityInTransaction,
     discardPreparedIdentityInTransaction,
-    listCampaignPublicationIdentities,
+    readPublicationIdentities,
     attachPublication,
     reconcileAttachedPublication,
     completePublication

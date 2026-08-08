@@ -168,7 +168,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         dbClient: migrationClient,
         dir: resolve("database/migrations"),
         direction: "down",
-        count: 7,
+        count: 8,
         migrationsTable: "schema_migrations",
         checkOrder: true,
         singleTransaction: true,
@@ -176,6 +176,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
       });
       expect(reverted.map((migration) => migration.name)).toEqual([
+        "0062_portable_import_asset_publications",
         "0061_portable_import_composition",
         "0060_asset_publication_identities",
         "0059_secure_storage_target_intent",
@@ -224,7 +225,8 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         "0058_secure_storage_lifecycle",
         "0059_secure_storage_target_intent",
         "0060_asset_publication_identities",
-        "0061_portable_import_composition"
+        "0061_portable_import_composition",
+        "0062_portable_import_asset_publications"
       ]);
     } finally {
       await pool.end();
