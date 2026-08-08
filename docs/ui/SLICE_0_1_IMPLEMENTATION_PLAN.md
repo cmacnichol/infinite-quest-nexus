@@ -8065,8 +8065,9 @@ review. No route, worker, runtime composition, legacy consumer, or cross-role
 allowlist changed; #0446 remains open until 14e3. **14e3 is next.**
 
 **14e3 — atomic API/worker cutover and legacy removal.** Create named API and
-worker asset/import compositions and a thin archive API adapter. In one reviewed
-checkpoint, migrate `server.ts` asset/import routes, `archive-routes.ts`,
+worker asset/import compositions and a thin archive API adapter. After the
+additive prerequisites below pass, make one reviewed binding-switch checkpoint
+that migrates `server.ts` asset/import routes, `archive-routes.ts`,
 legacy Story and Infinite Worlds/CYOA preview/commit paths, campaign/world JSON
 and ZIP export, image/world consumers, runtime illustration bindings, and worker
 asset metadata backfill to the new ports. API code retains multipart parsing,
@@ -8077,6 +8078,93 @@ binding, and the final `service-helpers.ts` consumer. Delete or reduce the old
 asset/import/archive callable services only after production-composed route and
 worker tests prove the replacements; no anonymous compatibility callback,
 browser-supplied owner, raw path, or raw filesystem error may remain.
+
+**14e3 readiness correction and required subtask order.** The test-only 14e2c
+composition is not production authority: its `AsyncLocalStorage`, raw setup
+SQL, opaque-handle maps, and scope binding must not become an ambient runtime
+dependency. The production cutover is therefore an atomic *binding switch* only
+after the following additive, independently reviewed checkpoints. Re-measure
+direct imports and callable authority at each start/end; a repository-only or
+fake-only test never authorizes a later checkpoint.
+
+**14e3a — compatibility and durable contract freeze.** Inventory every current
+asset library/metadata/selection/delivery, Legacy Story, Infinite Worlds/CYOA,
+Campaign ZIP, world JSON, campaign/world export, and `/api/v1/imports/progress`
+HTTP shape. Define server-resolved owner, campaign/world/version scope,
+validated `Idempotency-Key`, preview-handle, and result mapping behavior. A
+browser commit without a durable preview handle must receive a server-issued
+opaque handle or use a bounded atomic internal re-preview with a stable replay
+key; source IDs/hashes/provenance are never authority. Define a private,
+non-public finalized-delivery resolver for owner-scoped asset ID plus
+original/derivative intent: routes cannot redeem a locator token they do not
+hold. It must distinguish journaled durable assets from pre-0053 legacy rows
+without inventing legacy cleanup authority. Freeze the legacy
+`archive_previews` cutover policy as typed expiry/retention with no path-based
+deletion, and add any required additive schema relation/index. No route or
+worker binding changes here.
+
+**14e3b — durable production persistence, delivery, and streaming adapters.**
+Implement named database/runtime adapters and `asset-import-composition` using
+explicit owner/resource/purpose/scope arguments. No `AsyncLocalStorage`, raw
+path, or process-local map may authorize staging, export, delivery, abort, or
+cleanup. Rehydrate staged/export/publication work from PostgreSQL, obtain fresh
+fenced claims, and resolve private finalized original/derivative delivery by
+asset ID. Bounded export stream completion, close, abort, and failure must
+acknowledge fenced cleanup or leave recoverable durable work. Prove restart
+cleanup, owner/scope and descriptor-substitution denial, and legacy retention.
+No existing consumer changes here.
+
+**14e3c — asset composition and three-phase publication.** Compose the asset
+ports for library/facets, metadata, selection, delivery, and backfill while
+leaving routes unchanged. Implement publication for originals, thumbnails, and
+every generated/imported artifact as `prepare identity -> reserve before
+mutation -> publish candidate -> caller transaction attaches candidate and
+domain references -> commit -> finalize`. Rollback cleans every candidate;
+post-commit failure remains attached for reaping. Cover content-hash sharing,
+original/thumbnail restart delivery, multi-artifact cleanup, idempotency, and
+owner-scoped turn campaign resolution.
+
+**14e3d — portable import/export composition.** Compose all eight preview/
+commit families, real Legacy Story/Infinite Worlds/CYOA/Campaign ZIP/world JSON
+parsers, campaign asset remapping, progress, abort, expiry, replay, and
+portable result projections. Domain mutation and portable consume/complete must
+share one caller transaction. Replace `activeProgressMap` with a durable
+owner-scoped projection or bounded status read. Move the test-only campaign
+JSON export overload into named authority or retire it. Prove multipart limits,
+malformed/aborted archives, foreign handles, server-owner binding, export
+stream close/abort cleanup, and restart recovery before route binding.
+
+**14e3e — illustration/import writers and worker composition.** Move real
+illustration image persistence, imported asset publication, runtime illustration
+bindings, metadata backfill, and durable filesystem recovery behind these
+compositions. The worker uses database-derived owner/lease authority and
+schedules both backfill and filesystem recovery with heartbeat, expiry/requeue,
+drain/forced-stop, and lane-fairness evidence. Preserve illustration
+independence; do not import API implementation from the worker.
+
+**14e3f — production-composed parity before switch.** With legacy bindings
+still active, add real-Fastify, real-worker, and real-PostgreSQL matrices for
+each route family, local owner/cross-owner behavior, idempotency,
+preview/commit atomicity, restart original/thumbnail delivery, image rollback,
+backfill/reaper races, archive limits, export streaming cleanup, and safe error
+projection.
+
+**14e3g — one atomic production binding switch.** In one reviewed commit,
+migrate `server.ts`, `archive-routes.ts`, runtime illustration composition, and
+`worker.ts` to named production compositions. Fastify retains multipart
+parsing, validation, server-owner binding, and response mapping; worker retains
+scheduling. Remove the worker-to-API `asset-service` import and its
+`CROSS_ROLE_IMPORT_ALLOWLIST` entry. No anonymous compatibility callback or
+browser-supplied owner may remain.
+
+**14e3h — legacy authority removal and inventory.** After 14e3f/14e3g tests,
+delete or reduce `asset-service.ts`, `asset-archive-service.ts`,
+`campaign-archive-service.ts`, `import-service.ts`,
+`infinite-worlds-import-service.ts`, and the final `service-helpers.ts`
+consumer to documented transport/runtime work. Re-run consumer/function/import
+inventory and assert no old callable authority, temporary runtime binding,
+cross-role exception, raw path, or raw filesystem error is reachable. This
+closes #0446; only then may 14e4 begin.
 
 **14e4 — parity, security, and completion audit.** Re-measure the complete
 function/import/allowlist inventory and prove each old callable authority is
