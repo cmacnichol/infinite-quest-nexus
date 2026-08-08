@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 through 14e3b4 complete; 14e3b5 named production composition and adapter matrix is next |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 through 14e3b5 complete; 14e3c asset composition and three-phase publication is next |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -8418,6 +8418,21 @@ pending retry; and non-reaped server-bound legacy preview. Direct SQL may seed
 uncomposed domain rows, but must not bypass the durable transitions being
 tested. Do not change a route, runtime consumer, worker, allowlist, or b5
 binding; only after b5 passes may 14e3c begin.
+
+**14e3b5 completion (2026-08-08).** Commit `d67860f` adds the additive,
+unconsumed `createAssetImportStorageComposition` production graph: exactly one
+instance of each durable, secure-storage, import, finalized-delivery, and
+filesystem-adapter factory, validated journal, explicit caller transaction, and
+idempotent adapter close. Its AST inventory permits the concrete graph only at
+this composition and rejects static, re-export, namespace, default, alias,
+`require`, dynamic-import, and wrapped/computed-member bypasses across every
+production JavaScript/TypeScript extension while excluding HTML and tests. The
+real PostgreSQL/temp-filesystem suite proves transaction/restart/fencing,
+portable expiry, durable and legacy delivery, stream cleanup, failure ordering,
+and shared-path retention. Final evidence: 1,433 unit tests, 472 integration
+tests, `pnpm check`, build, repository/data scans, diff/precheck, and an
+independent correction re-review with no findings. The factory remains
+unconsumed until 14e3c.
 
 **14e3c — asset composition and three-phase publication.** Compose the asset
 ports for library/facets, metadata, selection, delivery, and backfill while
