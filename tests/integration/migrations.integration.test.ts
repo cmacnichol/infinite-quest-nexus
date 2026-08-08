@@ -1166,7 +1166,8 @@ integration("standard database migration runner", () => {
       await expect(migrateDatabase(isolatedPool, resolve("database/migrations"))).resolves.toEqual([
         migrationName,
         "0054_private_filesystem_authority",
-        "0055_private_portable_repository_guards"
+        "0055_private_portable_repository_guards",
+        "0056_private_filesystem_current_clock"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(

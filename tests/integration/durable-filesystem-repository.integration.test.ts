@@ -193,6 +193,30 @@ integration("PostgreSQL durable filesystem repository", () => {
     );
   }
 
+  async function expectBackendBlockedBy(blockedPid: number, blockerPid: number): Promise<void> {
+    await expect.poll(async () => {
+      const blocked = await pool.query<{ blocked: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1
+             FROM pg_stat_activity activity
+            WHERE activity.pid=$1
+              AND $2::integer=ANY(pg_blocking_pids(activity.pid))
+         ) AS blocked`,
+        [blockedPid, blockerPid]
+      );
+      return blocked.rows[0]!.blocked;
+    }, { timeout: 5_000 }).toBe(true);
+  }
+
+  async function waitUntilAfter(client: DatabaseClient, timestamp: string): Promise<void> {
+    await client.query(
+      `SELECT pg_sleep(
+         GREATEST(EXTRACT(EPOCH FROM ($1::timestamptz-clock_timestamp()))+0.1,0)
+       )`,
+      [timestamp]
+    );
+  }
+
   async function attachInTransaction(
     repository: ReturnType<typeof createPostgresDurableFilesystemRepository>,
     published: Awaited<ReturnType<typeof publish>>,
@@ -456,6 +480,58 @@ integration("PostgreSQL durable filesystem repository", () => {
     }
   });
 
+  it("rejects a candidate attachment that expires while waiting for the operation lock", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const assetId = await asset();
+    const delivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "private-candidate-lock-expiry");
+    const persisted = await persistCandidate(repository, scope(assetId), delivery, "asset_original", 2_000);
+    const attaching = await pool.connect();
+    const blocker = await pool.connect();
+    try {
+      await attaching.query("BEGIN");
+      const attachingBackend = await attaching.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      await attaching.query(
+        "UPDATE assets SET filesystem_operation_id=$3 WHERE id=$1 AND owner_user_id=$2",
+        [assetId, ownerUserId, persisted.operation.operationId]
+      );
+
+      await blocker.query("BEGIN");
+      const blockerBackend = await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      await blocker.query(
+        "SELECT id FROM durable_filesystem_operations WHERE id=$1 FOR NO KEY UPDATE",
+        [persisted.operation.operationId]
+      );
+
+      const attachment = repository.attachCandidate(attaching, persisted.attachment);
+      await expectBackendBlockedBy(attachingBackend.rows[0]!.pid, blockerBackend.rows[0]!.pid);
+      await waitUntilAfter(blocker, persisted.claim.leaseExpiresAt);
+      await blocker.query("COMMIT");
+
+      await expect(attachment).resolves.toEqual({ outcome: "stale" });
+      await attaching.query("ROLLBACK");
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await attaching.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+      attaching.release();
+    }
+
+    const lifecycle = await pool.query<{
+      operation_lifecycle: string;
+      candidate_lifecycle: string;
+    }>(
+      `SELECT operation.lifecycle AS operation_lifecycle,candidate.lifecycle AS candidate_lifecycle
+         FROM durable_filesystem_operations operation
+         JOIN durable_filesystem_candidate_authorities candidate ON candidate.operation_id=operation.id
+        WHERE operation.id=$1`,
+      [persisted.operation.operationId]
+    );
+    expect(lifecycle.rows[0]).toEqual({
+      operation_lifecycle: "reserved",
+      candidate_lifecycle: "issued"
+    });
+  });
+
   it("requires an exact derivative filesystem-operation binding before private attachment", async () => {
     const repository = createPostgresDurableFilesystemRepository(pool);
     const sourceAssetId = await asset();
@@ -581,6 +657,121 @@ integration("PostgreSQL durable filesystem repository", () => {
     );
     await pool.query("SELECT pg_sleep(0.3)");
     await expect(restarted.redeemDeliveryGrant(expiringRedemption)).resolves.toBeNull();
+  });
+
+  it("rejects a delivery grant that expires while redemption waits for its row lock", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const assetId = await asset();
+    const delivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "private-grant-lock-expiry");
+    const persisted = await persistCandidate(repository, scope(assetId), delivery, "asset_original", 60_000);
+    const attached = await attachPersistedCandidate(repository, persisted, async (client, operationId) => {
+      await client.query(
+        `UPDATE assets
+            SET storage_path=$3,filesystem_operation_id=$4
+          WHERE id=$1 AND owner_user_id=$2`,
+        [assetId, ownerUserId, delivery.relativePath, operationId]
+      );
+    });
+    if (attached.outcome !== "attached") throw new Error("attachment failed");
+    await expect(repository.journal.finalizeAfterCommit(attached.operation, attached.claim))
+      .resolves.toEqual({ outcome: "finalized" });
+
+    const request = bindPrivateFilesystemDeliveryGrantRequest(
+      attached.operation,
+      "finalized",
+      persisted.authority.candidate,
+      delivery,
+      new Date(Date.now() + 2_000).toISOString(),
+    );
+    const grant = await repository.issueDeliveryGrant(request);
+    const redemption = bindPrivateFilesystemDeliveryGrantRedemption(request, grant);
+    const redemptionPool = createDatabasePool(databaseUrl!, 1);
+    const restarted = createPostgresDurableFilesystemRepository(redemptionPool);
+    const blocker = await pool.connect();
+    try {
+      await blocker.query("BEGIN");
+      const blockerBackend = await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      await blocker.query(
+        `SELECT grant_token_hash
+           FROM private_filesystem_delivery_grants
+          WHERE grant_token_hash=$1
+          FOR UPDATE`,
+        [hash(grant)]
+      );
+
+      const redemptionBackend = await redemptionPool.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const redeemed = restarted.redeemDeliveryGrant(redemption);
+      await expectBackendBlockedBy(redemptionBackend.rows[0]!.pid, blockerBackend.rows[0]!.pid);
+      await waitUntilAfter(blocker, request.expiresAt);
+      await blocker.query("COMMIT");
+
+      await expect(redeemed).resolves.toBeNull();
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+      await redemptionPool.end();
+    }
+
+    const stored = await pool.query<{ lifecycle: string; redeemed_at: string | null }>(
+      `SELECT lifecycle,redeemed_at::text
+         FROM private_filesystem_delivery_grants
+        WHERE grant_token_hash=$1`,
+      [hash(grant)]
+    );
+    expect(stored.rows).toEqual([{ lifecycle: "issued", redeemed_at: null }]);
+  });
+
+  it("enforces delivery-grant expiry against the current clock inside an older transaction", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const assetId = await asset();
+    const delivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "private-grant-trigger-clock");
+    const persisted = await persistCandidate(repository, scope(assetId), delivery, "asset_original", 60_000);
+    const attached = await attachPersistedCandidate(repository, persisted, async (client, operationId) => {
+      await client.query(
+        `UPDATE assets
+            SET storage_path=$3,filesystem_operation_id=$4
+          WHERE id=$1 AND owner_user_id=$2`,
+        [assetId, ownerUserId, delivery.relativePath, operationId]
+      );
+    });
+    if (attached.outcome !== "attached") throw new Error("attachment failed");
+    await expect(repository.journal.finalizeAfterCommit(attached.operation, attached.claim))
+      .resolves.toEqual({ outcome: "finalized" });
+
+    const request = bindPrivateFilesystemDeliveryGrantRequest(
+      attached.operation,
+      "finalized",
+      persisted.authority.candidate,
+      delivery,
+      new Date(Date.now() + 1_500).toISOString(),
+    );
+    const grant = await repository.issueDeliveryGrant(request);
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await waitUntilAfter(client, request.expiresAt);
+      await expect(client.query(
+        `UPDATE private_filesystem_delivery_grants
+            SET lifecycle='redeemed',redeemed_at=clock_timestamp(),updated_at=clock_timestamp()
+          WHERE grant_token_hash=$1`,
+        [hash(grant)]
+      )).rejects.toMatchObject({
+        code: "55000",
+        message: "private filesystem delivery grant is stale"
+      });
+      await client.query("ROLLBACK");
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
+    }
+
+    const stored = await pool.query<{ lifecycle: string; redeemed_at: string | null }>(
+      `SELECT lifecycle,redeemed_at::text
+         FROM private_filesystem_delivery_grants
+        WHERE grant_token_hash=$1`,
+      [hash(grant)]
+    );
+    expect(stored.rows).toEqual([{ lifecycle: "issued", redeemed_at: null }]);
   });
 
   it("accepts only an adoption change-token transition and persists the actual delivery descriptor", async () => {

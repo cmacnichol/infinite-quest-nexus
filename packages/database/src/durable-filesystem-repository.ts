@@ -377,7 +377,7 @@ function claimClassification(row: OperationRow, claim: DurableFilesystemRecovery
 
 async function operationAuthorityIsFresh(client: DatabaseClient, row: OperationRow): Promise<boolean> {
   const selected = await client.query<{ fresh: boolean }>(
-    "SELECT now() < $1::timestamptz AND now() < $2::timestamptz AS fresh",
+    "SELECT clock_timestamp() < $1::timestamptz AND clock_timestamp() < $2::timestamptz AS fresh",
     [row.lease_expires_at, row.expires_at]
   );
   return selected.rows[0]?.fresh === true;
@@ -385,7 +385,7 @@ async function operationAuthorityIsFresh(client: DatabaseClient, row: OperationR
 
 async function candidateIsFresh(client: DatabaseClient, row: CandidateAuthorityRow): Promise<boolean> {
   const selected = await client.query<{ fresh: boolean }>(
-    "SELECT now() < $1::timestamptz AS fresh",
+    "SELECT clock_timestamp() < $1::timestamptz AS fresh",
     [row.expires_at]
   );
   return selected.rows[0]?.fresh === true;
@@ -602,7 +602,7 @@ export function createPostgresDurableFilesystemRepository(
         WHERE id=$1 AND owner_user_id=$2 AND lifecycle='reserved'
           AND work_version=$5 AND lease_id=$6 AND lease_owner=$7
           AND date_trunc('milliseconds',lease_expires_at)=$8::timestamptz
-          AND lease_expires_at > now() AND expires_at > now()
+          AND lease_expires_at > clock_timestamp() AND expires_at > clock_timestamp()
         RETURNING ${operationColumns("durable_filesystem_operations")}`,
       [
         row.id,
@@ -622,7 +622,7 @@ export function createPostgresDurableFilesystemRepository(
           SET lifecycle='attached',updated_at=now()
         WHERE candidate_token_hash=$1 AND operation_id=$2
           AND owner_user_id=$3 AND purpose=$4 AND lifecycle='issued'
-          AND expires_at > now()
+          AND expires_at > clock_timestamp()
         RETURNING candidate_token_hash`,
       [candidate.candidate_token_hash, row.id, row.owner_user_id, row.purpose]
     );
@@ -790,7 +790,7 @@ export function createPostgresDurableFilesystemRepository(
     const redeemed = await client.query(
       `UPDATE private_filesystem_delivery_grants
           SET lifecycle='redeemed',redeemed_at=now(),updated_at=now()
-        WHERE grant_token_hash=$1 AND lifecycle='issued' AND expires_at > now()
+        WHERE grant_token_hash=$1 AND lifecycle='issued' AND expires_at > clock_timestamp()
         RETURNING grant_token_hash`,
       [grant.grant_token_hash]
     );
