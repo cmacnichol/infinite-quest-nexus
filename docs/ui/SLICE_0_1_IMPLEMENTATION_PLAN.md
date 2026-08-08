@@ -8667,8 +8667,7 @@ task-owned diff review. No API route, worker, illustration writer, legacy
 consumer, public barrel, or cross-role allowlist binding changed. Task 14e3e is
 next; route binding remains deferred to 14e3g.
 
-**14e3d post-completion correction (2026-08-08, implementation and full
-verification complete; final review pending).** A completed-work audit found
+**14e3d post-completion correction (2026-08-08, independently approved).** A completed-work audit found
 that the initial composition proof still left restart, rollback, concurrency,
 destination, and boundary-inventory gaps that could make a successful portable
 import irrecoverable or allow an incomplete operation to escape the intended
@@ -8751,11 +8750,12 @@ deterministic concurrent same-command winner/loser replay. Verification is
 1,457 unit tests and 507 integration tests, including 21/21 focused Task 14e3d
 PostgreSQL/temp-filesystem cases and 25/25 combined migration/rollback/runtime-
 wiring cases, plus `pnpm check`, build, `git diff --check`, and `pjm precheck`.
-Independent final review remains required before this correction is approved.
+The implementation commits are `7d150f8`, `215defb`, `f6012ab`, and
+`f3473e3`; the fresh independent final review approved their complete range.
 No route, worker, illustration writer,
 legacy consumer, public barrel, or cross-role allowlist binding changed;
 migration 0062 remains additive and rollback-covered.
-**14e3e remains the next implementation task after final review; route binding
+**14e3d is complete. 14e3e remains the next implementation task; route binding
 remains deferred to 14e3g.**
 
 **14e3e — illustration/import writers and worker composition.** Move real
