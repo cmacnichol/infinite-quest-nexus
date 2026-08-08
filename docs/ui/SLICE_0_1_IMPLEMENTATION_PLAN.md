@@ -8444,6 +8444,60 @@ post-commit failure remains attached for reaping. Cover content-hash sharing,
 original/thumbnail restart delivery, multi-artifact cleanup, idempotency, and
 owner-scoped turn campaign resolution.
 
+**14e3c readiness correction — asset publication must be an additive private
+application capability, not a rewire of legacy writers.** The current
+`createPostgresAssetRepositories` only supplies library, selection, metadata,
+and descriptor ports; `SecureFilesystemAdapter` currently stages portable
+inputs/exports only. Add a named private asset-publication command and adapter
+surface before composing either one. It accepts only a server/worker-derived
+owner and caller-owned transaction, verified bytes/MIME/provenance/context, and
+the immutable original plus every derived artifact. It must return only asset
+IDs and safe metadata—never filesystem paths, candidates, descriptors, or raw
+errors. Give each logical asset a stable UUID before reservation (or allocate it
+inside the same caller transaction before the reserve step); the durable
+`asset_original`/`asset_derivative` operations need that exact asset identity
+before their candidate attachment. A retry must load/reconcile the same
+owner/hash/idempotency identity rather than allocate a second logical asset.
+
+Extend the b5-private filesystem adapter with an asset-publication operation
+that uses the exact b1–b4 lifecycle: validate the precomputed content identity,
+reserve before any filesystem mutation, persist 0058 target/node authority,
+write with anchored `O_EXCL` semantics, publish the candidate, and return the
+exact attachment to the caller transaction. In that transaction the PostgreSQL
+adapter creates or reconciles the owner-scoped asset, library entry,
+provenance/reference/generation-context rows, and each derivative, and binds
+each corresponding `filesystem_operation_id`; only then may it commit and call
+`finalizeAfterCommit`. A rollback must clean every newly created candidate and
+leave no asset/derivative/reference/context row or final path owned solely by
+the rolled-back attempt. A post-commit finalize failure is durable attached work
+for the existing recovery/reaper path—not a legacy-path fallback.
+
+Content-addressing is global physical retention but owner-scoped authorization:
+deterministically lock every original/derivative hash before publication;
+verify an existing physical node's bytes and descriptor before reuse; bind a
+separate owner/resource operation without deleting a path that another
+asset/owner still references; and prove cross-owner hash sharing plus one
+owner's rollback/recovery does not affect the other. Do not reintroduce the
+legacy `writeContentAddressed`, `persist*Image`, `readAsset*`, or path-prefix
+logic as a compatibility path. This checkpoint may add the named composition
+and private port/adapter/repository tests only. It must not bind `server.ts`,
+archive/import services, illustration platform/image-job adapters, `worker.ts`,
+or the cross-role allowlist: generated/imported live writers move in 14e3e and
+the atomic consumer switch remains 14e3g.
+
+The real PostgreSQL/temp-filesystem matrix must exercise the new composition
+only: original + thumbnail happy path; first-byte, candidate, SQL attach,
+commit, and finalize fault/restart variants; exact idempotent replay versus
+same-key mismatch; original/derivative operation-purpose and descriptor
+substitution; owner/campaign/turn/world/version provenance fences; shared-hash
+two-owner retention; explicit asset session delivery after restart; metadata
+backfill and selection remain readable through the composition; and no leaked
+candidate/operation/path/bearer in the application result. Keep direct SQL only
+for uncomposed world/campaign/image-job fixtures, never for the durable
+publication transitions under test. Add AST/import guards preventing new
+production consumers from importing legacy publication helpers or the private
+composition before their named later checkpoint.
+
 **14e3d — portable import/export composition.** Compose all eight preview/
 commit families, real Legacy Story/Infinite Worlds/CYOA/Campaign ZIP/world JSON
 parsers, campaign asset remapping, progress, abort, expiry, replay, and
