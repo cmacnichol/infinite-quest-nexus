@@ -90,7 +90,7 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e1R2/14e2a/14e2aR/14e2b1/14e2b2/14e2b3 complete; 14e2b4 durable reaper matrix is next |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1/14e1R/14e1R2/14e2a/14e2aR/14e2b1/14e2b2/14e2b3/14e2b4 complete; 14e2c test-only adapter matrix is next |
 | Task 14f | Backend completion audit / UI authorization | Not started | — |
 | Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
 
@@ -7946,6 +7946,20 @@ Prove crash points before/after publication, before/after domain commit, and
 cleanup-before-state-finalization, as well as rollback, retry, two-owner
 physical-reference retention, and idempotent already-cleaned finalization.
 Only after this matrix and review pass may 14e2c compose test-only adapters.
+
+**14e2b4 completion (2026-08-08):** `c2b5fbe` and correction `02900fa`
+add the durable filesystem repository, ordered advisory/path locks, fenced
+recovery, owner-local finalization, globally retained shared bytes, and
+cleanup-pending authority that survives through filesystem acknowledgement.
+Portable staging/export recovery distinguishes plaintext and persisted scope
+identity; terminal replay validates the full lease fence. Real-PostgreSQL
+matrices prove crash/rollback points, `SKIP LOCKED` recovery, wrong-fence
+denial, local-domain versus foreign-reference behavior, cleanup retry, and both
+attach/cleanup race orders. Verification passed 12 focused durable PostgreSQL
+tests, 1,349 unit tests, 395 integration tests, `pnpm check`, build, diff, and
+precheck; independent review and correction re-review approved. No migration,
+route, worker, runtime, adapter composition, cross-role, production cutover,
+or #0446 change occurred. **14e2c is next.**
 
 **14e2c — additive adapter contract matrix.** Compose the 14e2a capability and
 14e2b repositories in test-only/additive archive and illustration adapters.
