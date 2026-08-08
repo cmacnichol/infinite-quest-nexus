@@ -8540,6 +8540,71 @@ JSON export overload into named authority or retire it. Prove multipart limits,
 malformed/aborted archives, foreign handles, server-owner binding, export
 stream close/abort cleanup, and restart recovery before route binding.
 
+**14e3d readiness correction — compose durable family runners, not legacy
+service calls.** `ImportApplication` and `PostgresPortableImportRepository`
+already validate owner, opaque staged handles, preview destinations, commit
+claims, idempotency, result retrieval, and export retrieval; they do not parse
+raw input, create domain records, or supply a production composition. Add a
+named, currently unconsumed private `PortableImportExportComposition` that
+combines the b5 storage graph, 14e3c asset publisher, PostgreSQL import
+repository, world/campaign application capabilities, and the existing parser
+implementations behind typed per-family runner ports. The eight concrete
+families are campaign ZIP, Legacy Story, Infinite Worlds, CYOA, world JSON,
+world text, story text, and campaign/world export. No composition may import a
+legacy `*service` as its authority or expose a loose callback: extract pure
+decoder/validator/projector helpers or a named adapter with exact owner,
+destination, provider, and transaction inputs. World-text conversion and
+enrichment must use the already-private provider execution composition—never a
+browser-selected credential or API implementation import.
+
+The archive flow is four durable phases: (1) b5 stages bounded raw bytes under
+an owner/scoped portable operation; (2) preview rehydrates and anchored-reads
+the exact staged descriptor, validates archive limits/paths/links, executes the
+family decoder, and persists only a safe projection plus content/destination
+fingerprints; (3) one caller transaction begins the import claim, applies every
+world/campaign/turn/asset mutation through named application/database ports,
+attaches 14e3c-published assets, completes the portable result, and consumes
+the staged input; (4) after commit, it finalizes or safely reaps the exact
+portable work. A parser, asset publication, domain write, commit, consume, or
+finalize failure must be restart-recoverable and cannot leave partial domain
+records, an accepted result, a consumed preview without a result, or a raw
+archive path/bearer in a view. Replays must compare canonical family input,
+destination, source-installation provenance, selected character, and provider
+configuration identity—not JavaScript object key order—and either return the
+same safe result or reject a mismatch.
+
+Replace process-local `activeProgressMap` with a bounded durable owner-scoped
+progress projection tied to the import claim or an existing imports row: it must
+include only allowlisted phase/percentage/safe diagnostic fields, be lease/work
+version fenced, survive restart, expire/reap with terminal imports, and never
+become a second authority for commit. Abort must atomically record a safe
+terminal/recoverable state and release its current claim; it cannot erase a
+completed result or broaden a preview handle. Add any additive migration and
+rollback inventory assertions required for this projection.
+
+`PortableArchiveDownloadView.content: Uint8Array` cannot be the production
+export path: it buffers unbounded private archives and bypasses the b4 stream
+deadline/cleanup finalizer. Keep it only as a test-compatible projection if
+needed, but add a private bounded export-session capability that carries an
+opaque retrieval, exact owner/campaign/world/version scope, content type and
+stream/finalize lifecycle. It must call the b5 adapter's export session so EOF,
+close, abort, timeout, pre-send failure, read failure, replay, and restart all
+converge on close → identity-safe delete → durable acknowledgement. Route
+binding remains 14e3g; no API handler may gain a raw buffer fallback here.
+
+Campaign ZIP assets must be remapped through the 14e3c publisher in the same
+commit transaction, preserving content hash/MIME/provenance/references and
+owner boundaries. Retire or move the nullable/test-only `exportCampaign`
+JSON-overload into an explicitly named test authority; production composition
+must always use the secure export path. The real PostgreSQL/temp-filesystem
+matrix must run through this composition only, prove all eight family preview /
+commit / replay / expiry / restart branches, owner and destination fencing,
+malformed/truncated/oversized/traversal/link input, abort/progress recovery,
+asset remap transaction rollback, export stream terminal ordering, foreign
+handle denial, and no route/worker/allowlist/legacy-consumer change. Add AST
+guards for raw path, `activeProgressMap`, legacy authority imports, and public
+buffered export use outside test compatibility.
+
 **14e3e — illustration/import writers and worker composition.** Move real
 illustration image persistence, imported asset publication, runtime illustration
 bindings, metadata backfill, and durable filesystem recovery behind these
