@@ -1346,6 +1346,14 @@ The durable record is verified.`;
       [ownerUserId, postCommitAsset.assetId]
     );
     expect(attached.rows[0]).toMatchObject({ lifecycle: "attached", storage_path: expect.stringMatching(/\.asset$/) });
+    const bound = await pool.query<{ filesystem_operation_id: string }>(
+      `UPDATE assets
+          SET filesystem_operation_id=$3
+        WHERE id=$1 AND owner_user_id=$2
+      RETURNING filesystem_operation_id`,
+      [postCommitAsset.assetId, ownerUserId, attached.rows[0]!.id]
+    );
+    expect(bound.rows[0]).toEqual({ filesystem_operation_id: attached.rows[0]!.id });
     await expect(restarted.filesystem.readPublishedAsset({
       scope: { resourceKind: "asset", ownerUserId, assetId: postCommitAsset.assetId },
       locator: postCommitLocator!,

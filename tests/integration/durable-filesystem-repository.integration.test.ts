@@ -1,13 +1,23 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  bindPrivateFilesystemCandidateAttachment,
+  bindPrivateFilesystemDeliveryGrantRedemption
+} from "../../packages/application/src/assets/private-filesystem-repository.js";
 import type {
+  AssetPublicationCandidate,
   AttachedFilesystemOperation,
   DurableFilesystemRecoveryClaim,
   DurableFilesystemPurpose,
   DurableFilesystemScope,
+  PrivateFilesystemDeliveryGrantRequest,
   PrivateStorageDescriptor,
   ReservedFilesystemOperation
+} from "../../packages/application/src/assets/private-storage-lifecycle.js";
+import {
+  bindPrivateFilesystemCandidateAuthority,
+  bindPrivateFilesystemDeliveryGrantRequest
 } from "../../packages/application/src/assets/private-storage-lifecycle.js";
 import { createPostgresDurableFilesystemRepository } from "../../packages/database/src/durable-filesystem-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -94,6 +104,54 @@ integration("PostgreSQL durable filesystem repository", () => {
     return { ...reserved, candidate };
   }
 
+  async function persistCandidate(
+    repository: ReturnType<typeof createPostgresDurableFilesystemRepository>,
+    operationScope: DurableFilesystemScope,
+    delivery: PrivateStorageDescriptor,
+    purpose: DurableFilesystemPurpose = "asset_original",
+    expiresInMs = 60_000,
+  ) {
+    const reserved = await repository.journal.reserve(operationScope, {
+      purpose,
+      leaseOwner: "private-candidate-publisher",
+      expiresAt: new Date(Date.now() + expiresInMs).toISOString()
+    });
+    const candidate = crypto.randomUUID() as AssetPublicationCandidate;
+    const authority = bindPrivateFilesystemCandidateAuthority(
+      reserved.operation,
+      candidate,
+      delivery,
+    );
+    const attachment = bindPrivateFilesystemCandidateAttachment(
+      authority.reservation,
+      authority.candidate,
+      authority.descriptor,
+      reserved.claim,
+    );
+    await repository.persistCandidate(attachment);
+    return { ...reserved, authority, attachment };
+  }
+
+  async function attachPersistedCandidate(
+    repository: ReturnType<typeof createPostgresDurableFilesystemRepository>,
+    persisted: Awaited<ReturnType<typeof persistCandidate>>,
+    bindDomain: (client: DatabaseClient, operationId: string) => Promise<void>,
+  ) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await bindDomain(client, persisted.operation.operationId);
+      const attached = await repository.attachCandidate(client, persisted.attachment);
+      await client.query("COMMIT");
+      return attached;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async function attachAndCommit(
     repository: ReturnType<typeof createPostgresDurableFilesystemRepository>,
     reservation: ReservedFilesystemOperation,
@@ -106,11 +164,14 @@ integration("PostgreSQL durable filesystem repository", () => {
       await client.query("BEGIN");
       const attached = await repository.journal.attach(client, reservation, candidate);
       expect(attached.outcome).toBe("attached");
+      if (attached.outcome !== "attached") throw new Error("attachment failed");
       if (updateDomain) {
         if (reservation.resourceKind !== "asset") throw new Error("asset reservation required");
         await client.query(
-          "UPDATE assets SET storage_path=$3 WHERE id=$1 AND owner_user_id=$2",
-          [reservation.assetId, reservation.ownerUserId, deliveryPath]
+          `UPDATE assets
+              SET storage_path=$3,filesystem_operation_id=$4
+            WHERE id=$1 AND owner_user_id=$2`,
+          [reservation.assetId, reservation.ownerUserId, deliveryPath, attached.operation.operationId]
         );
       }
       await client.query("COMMIT");
@@ -189,6 +250,337 @@ integration("PostgreSQL durable filesystem repository", () => {
       { ...operationScope, ownerUserId: await owner("wrong-owner") },
       attached.locator,
     )).resolves.toBeNull();
+  });
+
+  it("persists only hashed candidate authority and rehydrates its exact descriptor after restart", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const assetId = await asset();
+    const delivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "private-candidate-restart");
+    const persisted = await persistCandidate(repository, scope(assetId), delivery);
+
+    const stored = await pool.query<{
+      candidate_token_hash: string;
+      operation_id: string;
+      lifecycle: string;
+    }>(
+      `SELECT candidate_token_hash,operation_id,lifecycle
+         FROM durable_filesystem_candidate_authorities
+        WHERE operation_id=$1`,
+      [persisted.operation.operationId]
+    );
+    expect(stored.rows).toEqual([{
+      candidate_token_hash: hash(persisted.authority.candidate),
+      operation_id: persisted.operation.operationId,
+      lifecycle: "issued"
+    }]);
+    expect(JSON.stringify(stored.rows)).not.toContain(persisted.authority.candidate);
+
+    const restarted = createPostgresDurableFilesystemRepository(pool);
+    await expect(restarted.redeemCandidate(persisted.attachment)).resolves.toEqual(delivery);
+    for (const substituted of [
+      {
+        ...persisted.attachment,
+        operation: { ...persisted.operation, ownerUserId: await owner("candidate-owner") }
+      },
+      {
+        ...persisted.attachment,
+        operation: { ...persisted.operation, assetId: await asset() }
+      },
+      {
+        ...persisted.attachment,
+        operation: { ...persisted.operation, purpose: "asset_derivative" }
+      },
+      {
+        ...persisted.attachment,
+        descriptor: { ...delivery, contentHash: hash("substituted-candidate-content") }
+      }
+    ]) {
+      await expect(restarted.redeemCandidate(
+        substituted as typeof persisted.attachment,
+      )).resolves.toBeNull();
+    }
+  });
+
+  it("attaches a persisted candidate atomically, keeps rollback retryable, and requires the exact asset binding", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const assetId = await asset();
+    const delivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "private-attach-rollback");
+    const persisted = await persistCandidate(repository, scope(assetId), delivery);
+    const missingBinding = await pool.connect();
+    try {
+      await missingBinding.query("BEGIN");
+      await expect(repository.attachCandidate(missingBinding, persisted.attachment))
+        .resolves.toEqual({ outcome: "candidate_mismatch" });
+      await missingBinding.query("ROLLBACK");
+    } finally {
+      missingBinding.release();
+    }
+
+    const rollingBack = await pool.connect();
+    try {
+      await rollingBack.query("BEGIN");
+      await rollingBack.query(
+        `UPDATE assets
+            SET storage_path=$3,filesystem_operation_id=$4
+          WHERE id=$1 AND owner_user_id=$2`,
+        [assetId, ownerUserId, delivery.relativePath, persisted.operation.operationId]
+      );
+      await expect(repository.attachCandidate(rollingBack, persisted.attachment))
+        .resolves.toMatchObject({ outcome: "attached" });
+      await rollingBack.query("ROLLBACK");
+    } finally {
+      rollingBack.release();
+    }
+
+    const afterRollback = await pool.query<{ operation_lifecycle: string; candidate_lifecycle: string }>(
+      `SELECT operation.lifecycle AS operation_lifecycle,candidate.lifecycle AS candidate_lifecycle
+         FROM durable_filesystem_operations operation
+         JOIN durable_filesystem_candidate_authorities candidate ON candidate.operation_id=operation.id
+        WHERE operation.id=$1`,
+      [persisted.operation.operationId]
+    );
+    expect(afterRollback.rows[0]).toEqual({
+      operation_lifecycle: "reserved",
+      candidate_lifecycle: "issued"
+    });
+
+    const restarted = createPostgresDurableFilesystemRepository(pool);
+    const attached = await attachPersistedCandidate(restarted, persisted, async (client, operationId) => {
+      await client.query(
+        `UPDATE assets
+            SET storage_path=$3,filesystem_operation_id=$4
+          WHERE id=$1 AND owner_user_id=$2`,
+        [assetId, ownerUserId, delivery.relativePath, operationId]
+      );
+    });
+    expect(attached.outcome).toBe("attached");
+  });
+
+  it("accepts the exact serialized lease claim when PostgreSQL retains sub-millisecond precision", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const assetId = await asset();
+    const delivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "private-attach-lease-precision");
+    const persisted = await persistCandidate(repository, scope(assetId), delivery, "asset_original", 60 * 60 * 1000);
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET lease_expires_at=$2::timestamptz+interval '0.321 milliseconds'
+        WHERE id=$1`,
+      [persisted.operation.operationId, persisted.claim.leaseExpiresAt]
+    );
+
+    const attached = await attachPersistedCandidate(repository, persisted, async (client, operationId) => {
+      await client.query(
+        `UPDATE assets
+            SET storage_path=$3,filesystem_operation_id=$4
+          WHERE id=$1 AND owner_user_id=$2`,
+        [assetId, ownerUserId, delivery.relativePath, operationId]
+      );
+    });
+    expect(attached.outcome).toBe("attached");
+  });
+
+  it("rejects stale, foreign, and expired candidate lease claims after a recovery claimant wins", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const assetId = await asset();
+    const delivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "private-candidate-reaper");
+    const persisted = await persistCandidate(repository, scope(assetId), delivery);
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "UPDATE assets SET filesystem_operation_id=$3 WHERE id=$1 AND owner_user_id=$2",
+        [assetId, ownerUserId, persisted.operation.operationId]
+      );
+      for (const claim of [
+        { ...persisted.claim, workVersion: persisted.claim.workVersion + 1 },
+        { ...persisted.claim, leaseId: crypto.randomUUID() },
+        { ...persisted.claim, leaseOwner: "foreign-candidate-worker" },
+        {
+          ...persisted.claim,
+          leaseExpiresAt: new Date(Date.parse(persisted.claim.leaseExpiresAt) + 1_000).toISOString()
+        }
+      ]) {
+        await expect(repository.attachCandidate(client, {
+          ...persisted.attachment,
+          claim
+        } as typeof persisted.attachment)).resolves.toEqual({ outcome: "stale" });
+      }
+      await client.query("ROLLBACK");
+    } finally {
+      client.release();
+    }
+
+    await expire(persisted.operation.operationId);
+    const recovered = await repository.journal.recover({
+      leaseOwner: "candidate-reaper-winner",
+      leaseSeconds: 30,
+      limit: 100
+    });
+    expect(recovered.some((record) => record.operation.operationId === persisted.operation.operationId)).toBe(true);
+    const afterRecovery = await pool.connect();
+    try {
+      await afterRecovery.query("BEGIN");
+      await expect(repository.attachCandidate(afterRecovery, persisted.attachment))
+        .resolves.toEqual({ outcome: "stale" });
+      await afterRecovery.query("ROLLBACK");
+    } finally {
+      afterRecovery.release();
+    }
+  });
+
+  it("lets an in-flight candidate attachment win the operation lock over an expiry reaper", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const assetId = await asset();
+    const delivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "private-candidate-attach-race");
+    const persisted = await persistCandidate(repository, scope(assetId), delivery, "asset_original", 2_000);
+    const attaching = await pool.connect();
+    try {
+      await attaching.query("BEGIN");
+      await attaching.query(
+        "UPDATE assets SET filesystem_operation_id=$3 WHERE id=$1 AND owner_user_id=$2",
+        [assetId, ownerUserId, persisted.operation.operationId]
+      );
+      await expect(repository.attachCandidate(attaching, persisted.attachment))
+        .resolves.toMatchObject({ outcome: "attached" });
+      await attaching.query("SELECT pg_sleep(2.1)");
+      const recovered = await repository.journal.recover({
+        leaseOwner: "candidate-race-reaper",
+        leaseSeconds: 30,
+        limit: 100
+      });
+      expect(recovered.some((record) => record.operation.operationId === persisted.operation.operationId)).toBe(false);
+      await attaching.query("COMMIT");
+    } finally {
+      await attaching.query("ROLLBACK").catch(() => undefined);
+      attaching.release();
+    }
+  });
+
+  it("requires an exact derivative filesystem-operation binding before private attachment", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const sourceAssetId = await asset();
+    const delivery = descriptor(`derivatives/${hash(crypto.randomUUID())}.webp`, "private-derivative-binding");
+    const persisted = await persistCandidate(
+      repository,
+      scope(sourceAssetId),
+      delivery,
+      "asset_derivative",
+    );
+    const unbound = await pool.connect();
+    try {
+      await unbound.query("BEGIN");
+      await unbound.query(
+        `INSERT INTO asset_derivatives (
+           owner_user_id,source_asset_id,derivative_kind,transform_version,pixel_width,pixel_height,
+           storage_driver,storage_path,mime_type,byte_length,content_hash
+         ) VALUES ($1,$2,'thumbnail',1,480,270,'filesystem',$3,'image/webp',$4,$5)`,
+        [ownerUserId, sourceAssetId, delivery.relativePath, delivery.byteLength, delivery.contentHash]
+      );
+      await expect(repository.attachCandidate(unbound, persisted.attachment))
+        .resolves.toEqual({ outcome: "candidate_mismatch" });
+      await unbound.query("ROLLBACK");
+    } finally {
+      unbound.release();
+    }
+
+    const attached = await attachPersistedCandidate(repository, persisted, async (client, operationId) => {
+      await client.query(
+        `INSERT INTO asset_derivatives (
+           owner_user_id,source_asset_id,derivative_kind,transform_version,pixel_width,pixel_height,
+           storage_driver,storage_path,mime_type,byte_length,content_hash,filesystem_operation_id
+         ) VALUES ($1,$2,'thumbnail',1,480,270,'filesystem',$3,'image/webp',$4,$5,$6)`,
+        [ownerUserId, sourceAssetId, delivery.relativePath, delivery.byteLength, delivery.contentHash, operationId]
+      );
+    });
+    expect(attached.outcome).toBe("attached");
+  });
+
+  it("issues hashed restart-safe delivery grants and redeems each bearer exactly once", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const assetId = await asset();
+    const delivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "private-delivery-grant");
+    const persisted = await persistCandidate(repository, scope(assetId), delivery);
+    const attached = await attachPersistedCandidate(repository, persisted, async (client, operationId) => {
+      await client.query(
+        `UPDATE assets
+            SET storage_path=$3,filesystem_operation_id=$4
+          WHERE id=$1 AND owner_user_id=$2`,
+        [assetId, ownerUserId, delivery.relativePath, operationId]
+      );
+    });
+    if (attached.outcome !== "attached") throw new Error("attachment failed");
+    await expect(repository.journal.finalizeAfterCommit(attached.operation, attached.claim))
+      .resolves.toEqual({ outcome: "finalized" });
+
+    const request = bindPrivateFilesystemDeliveryGrantRequest(
+      attached.operation,
+      "finalized",
+      persisted.authority.candidate,
+      delivery,
+      new Date(Date.now() + 10_000).toISOString(),
+    );
+    const grant = await repository.issueDeliveryGrant(request);
+    const stored = await pool.query<{ grant_token_hash: string; lifecycle: string }>(
+      `SELECT grant_token_hash,lifecycle
+         FROM private_filesystem_delivery_grants
+        WHERE operation_id=$1`,
+      [persisted.operation.operationId]
+    );
+    expect(stored.rows).toEqual([{ grant_token_hash: hash(grant), lifecycle: "issued" }]);
+    expect(JSON.stringify(stored.rows)).not.toContain(grant);
+
+    const restarted = createPostgresDurableFilesystemRepository(pool);
+    for (const wrongRequest of [
+      {
+        ...request,
+        operation: { ...request.operation, ownerUserId: await owner("delivery-grant-owner") }
+      },
+      {
+        ...request,
+        operation: { ...request.operation, assetId: await asset() }
+      },
+      {
+        ...request,
+        operation: { ...request.operation, purpose: "asset_derivative" }
+      },
+      {
+        ...request,
+        operation: {
+          resourceKind: "portable",
+          ownerUserId,
+          operationScopeId: "substituted-portable-resource",
+          operationId: request.operation.operationId,
+          purpose: "portable_export"
+        }
+      },
+      {
+        ...request,
+        descriptor: { ...delivery, byteLength: delivery.byteLength + 1 }
+      }
+    ]) {
+      await expect(restarted.redeemDeliveryGrant({
+        request: wrongRequest as PrivateFilesystemDeliveryGrantRequest,
+        grant
+      } as ReturnType<typeof bindPrivateFilesystemDeliveryGrantRedemption>)).resolves.toBeNull();
+    }
+    const redemption = bindPrivateFilesystemDeliveryGrantRedemption(request, grant);
+    await expect(restarted.redeemDeliveryGrant(redemption)).resolves.toEqual(delivery);
+    await expect(restarted.redeemDeliveryGrant(redemption)).resolves.toBeNull();
+
+    const expiringRequest = bindPrivateFilesystemDeliveryGrantRequest(
+      attached.operation,
+      "finalized",
+      persisted.authority.candidate,
+      delivery,
+      new Date(Date.now() + 250).toISOString(),
+    );
+    const expiringGrant = await repository.issueDeliveryGrant(expiringRequest);
+    const expiringRedemption = bindPrivateFilesystemDeliveryGrantRedemption(
+      expiringRequest,
+      expiringGrant,
+    );
+    await pool.query("SELECT pg_sleep(0.3)");
+    await expect(restarted.redeemDeliveryGrant(expiringRedemption)).resolves.toBeNull();
   });
 
   it("accepts only an adoption change-token transition and persists the actual delivery descriptor", async () => {
@@ -557,15 +949,80 @@ integration("PostgreSQL durable filesystem repository", () => {
       await client.query(
         `INSERT INTO asset_derivatives (
            owner_user_id,source_asset_id,derivative_kind,transform_version,pixel_width,pixel_height,
-           storage_driver,storage_path,mime_type,byte_length,content_hash
-         ) VALUES ($1,$2,'thumbnail',1,480,270,'filesystem',$3,'image/webp',$4,$5)`,
-        [ownerUserId, sourceAssetId, delivery.relativePath, delivery.byteLength, delivery.contentHash]
+           storage_driver,storage_path,mime_type,byte_length,content_hash,filesystem_operation_id
+         ) VALUES ($1,$2,'thumbnail',1,480,270,'filesystem',$3,'image/webp',$4,$5,$6)`,
+        [
+          ownerUserId,
+          sourceAssetId,
+          delivery.relativePath,
+          delivery.byteLength,
+          delivery.contentHash,
+          published.operation.operationId
+        ]
       );
     });
     await expire(attached.operation.operationId);
     const recovered = await repository.journal.recover({ leaseOwner: "derivative-reaper", leaseSeconds: 30, limit: 100 });
     const record = recovered.find((item) => item.operation.operationId === attached.operation.operationId);
     expect(record?.action).toBe("finalize");
+  });
+
+  it("does not classify same-owner path heuristics as original or derivative domain bindings", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const originalAssetId = await asset();
+    const originalDelivery = descriptor(
+      `originals/${hash(crypto.randomUUID())}.png`,
+      "unbound-original-heuristic",
+    );
+    const original = await publish(repository, scope(originalAssetId), originalDelivery);
+    const originalAttached = await attachInTransaction(repository, original, async (client) => {
+      await client.query(
+        "UPDATE assets SET storage_path=$3 WHERE id=$1 AND owner_user_id=$2",
+        [originalAssetId, ownerUserId, originalDelivery.relativePath]
+      );
+    });
+
+    const sourceAssetId = await asset();
+    const derivativeDelivery = descriptor(
+      `derivatives/${hash(crypto.randomUUID())}.webp`,
+      "unbound-derivative-heuristic",
+    );
+    const derivative = await publish(
+      repository,
+      scope(sourceAssetId),
+      derivativeDelivery,
+      [derivativeDelivery],
+      "asset_derivative",
+    );
+    const derivativeAttached = await attachInTransaction(repository, derivative, async (client) => {
+      await client.query(
+        `INSERT INTO asset_derivatives (
+           owner_user_id,source_asset_id,derivative_kind,transform_version,pixel_width,pixel_height,
+           storage_driver,storage_path,mime_type,byte_length,content_hash
+         ) VALUES ($1,$2,'thumbnail',1,480,270,'filesystem',$3,'image/webp',$4,$5)`,
+        [
+          ownerUserId,
+          sourceAssetId,
+          derivativeDelivery.relativePath,
+          derivativeDelivery.byteLength,
+          derivativeDelivery.contentHash
+        ]
+      );
+    });
+
+    if (originalAttached.outcome !== "attached" || derivativeAttached.outcome !== "attached") {
+      throw new Error("attachment failed");
+    }
+    await expire(originalAttached.operation.operationId);
+    await expire(derivativeAttached.operation.operationId);
+    const recovered = await repository.journal.recover({
+      leaseOwner: "exact-binding-reaper",
+      leaseSeconds: 30,
+      limit: 100
+    });
+    const actionById = new Map(recovered.map((record) => [record.operation.operationId, record.action]));
+    expect(actionById.get(originalAttached.operation.operationId)).toBe("cleanup");
+    expect(actionById.get(derivativeAttached.operation.operationId)).toBe("cleanup");
   });
 
   it("uses SKIP LOCKED for competing reapers and rejects a stale lease fence", async () => {

@@ -18,11 +18,19 @@ import type {
   DurableFilesystemReserveResult,
   DurableFilesystemScope,
   DurableFilesystemTransactionContext,
+  PrivateFilesystemDeliveryGrant,
+  PrivateFilesystemDeliveryGrantRequest,
   PrivatePublicationCleanupPreparation,
   PrivatePublicationPreparation,
   PrivateStorageDescriptor,
   ReservedFilesystemOperation
 } from "../../application/src/assets/private-storage-lifecycle.js";
+import type {
+  PrivateFilesystemCandidateAttachment,
+  PrivateFilesystemCandidatePersistencePort,
+  PrivateFilesystemDeliveryGrantPersistencePort,
+  PrivateFilesystemDeliveryGrantRedemption
+} from "../../application/src/assets/private-filesystem-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 
@@ -55,12 +63,34 @@ type DescriptorRow = Readonly<{
   byte_length: string;
 }>;
 
-type CandidateAuthority = Readonly<{
-  operationId: string;
-  tokenHash: string;
+type CandidateAuthorityRow = DescriptorRow & Readonly<{
+  candidate_token_hash: string;
+  operation_id: string;
+  owner_user_id: string;
+  purpose: DurableFilesystemPurpose;
+  resource_kind: "asset" | "portable";
+  asset_id: string | null;
+  operation_scope_hash: string | null;
+  lifecycle: "issued" | "attached" | "expired" | "revoked";
+  expires_at: Date;
 }>;
 
-export interface PostgresDurableFilesystemRepository {
+type DeliveryGrantRow = Readonly<{
+  grant_token_hash: string;
+  candidate_token_hash: string;
+  operation_id: string;
+  owner_user_id: string;
+  purpose: DurableFilesystemPurpose;
+  resource_kind: "asset" | "portable";
+  asset_id: string | null;
+  operation_scope_hash: string | null;
+  lifecycle: "issued" | "redeemed" | "expired" | "revoked";
+  expires_at: Date;
+}>;
+
+export interface PostgresDurableFilesystemRepository
+  extends PrivateFilesystemCandidatePersistencePort,
+  PrivateFilesystemDeliveryGrantPersistencePort {
   journal: DurableFilesystemJournalPort;
   issuePublicationCandidate(
     reservation: ReservedFilesystemOperation,
@@ -96,7 +126,10 @@ function operationColumns(alias = "operation"): string {
     ${alias}.lease_owner,${alias}.work_version,${alias}.lease_expires_at,${alias}.expires_at`;
 }
 
-function scopeMatches(row: OperationRow, scope: DurableFilesystemScope): boolean {
+function scopeMatches(
+  row: Pick<OperationRow, "owner_user_id" | "resource_kind" | "asset_id" | "operation_scope_hash">,
+  scope: DurableFilesystemScope,
+): boolean {
   if (row.owner_user_id !== scope.ownerUserId || row.resource_kind !== scope.resourceKind) return false;
   return scope.resourceKind === "asset"
     ? row.asset_id === scope.assetId
@@ -180,6 +213,36 @@ function descriptorValues(value: PrivateStorageDescriptor): readonly unknown[] {
   ];
 }
 
+function descriptorMatches(row: DescriptorRow, value: PrivateStorageDescriptor): boolean {
+  return row.relative_path === value.relativePath
+    && row.device_id === value.identity.deviceId
+    && row.file_id === value.identity.fileId
+    && row.change_token === value.identity.changeToken
+    && row.content_hash === value.contentHash
+    && Number(row.byte_length) === value.byteLength;
+}
+
+function candidateMatchesAttachment(
+  row: CandidateAuthorityRow,
+  attachment: PrivateFilesystemCandidateAttachment,
+): boolean {
+  return row.operation_id === attachment.operation.operationId
+    && row.purpose === attachment.operation.purpose
+    && scopeMatches(row, attachment.operation)
+    && row.expires_at.toISOString() === attachment.operation.expiresAt
+    && descriptorMatches(row, attachment.descriptor);
+}
+
+function candidateMatchesDeliveryRequest(
+  row: CandidateAuthorityRow,
+  request: PrivateFilesystemDeliveryGrantRequest,
+): boolean {
+  return row.operation_id === request.operation.operationId
+    && row.purpose === request.operation.purpose
+    && scopeMatches(row, request.operation)
+    && descriptorMatches(row, request.descriptor);
+}
+
 async function requireCallerTransaction(database: DurableFilesystemTransactionContext): Promise<DatabaseClient> {
   const client = database as Partial<DatabaseClient>;
   if (typeof client.query !== "function") throw new Error("durable_filesystem_transaction_unavailable");
@@ -228,6 +291,38 @@ async function descriptorRows(
     [operationId, role]
   );
   return selected.rows;
+}
+
+async function candidateByHash(
+  client: DatabaseClient,
+  candidate: AssetPublicationCandidate,
+  lock = false,
+): Promise<CandidateAuthorityRow | null> {
+  const selected = await client.query<CandidateAuthorityRow>(
+    `SELECT candidate_token_hash,operation_id,owner_user_id,purpose,resource_kind,
+            asset_id,operation_scope_hash,relative_path,device_id,file_id,change_token,
+            content_hash,byte_length::text,lifecycle,expires_at
+       FROM durable_filesystem_candidate_authorities
+      WHERE candidate_token_hash=$1${lock ? " FOR UPDATE" : ""}`,
+    [sha256(candidate)]
+  );
+  return selected.rows[0] ?? null;
+}
+
+async function candidateByOperation(
+  client: DatabaseClient,
+  operationId: string,
+  lock = false,
+): Promise<CandidateAuthorityRow | null> {
+  const selected = await client.query<CandidateAuthorityRow>(
+    `SELECT candidate_token_hash,operation_id,owner_user_id,purpose,resource_kind,
+            asset_id,operation_scope_hash,relative_path,device_id,file_id,change_token,
+            content_hash,byte_length::text,lifecycle,expires_at
+       FROM durable_filesystem_candidate_authorities
+      WHERE operation_id=$1${lock ? " FOR UPDATE" : ""}`,
+    [operationId]
+  );
+  return selected.rows[0] ?? null;
 }
 
 function cleanupDescriptorsByPath(
@@ -280,6 +375,22 @@ function claimClassification(row: OperationRow, claim: DurableFilesystemRecovery
   return "valid";
 }
 
+async function operationAuthorityIsFresh(client: DatabaseClient, row: OperationRow): Promise<boolean> {
+  const selected = await client.query<{ fresh: boolean }>(
+    "SELECT now() < $1::timestamptz AND now() < $2::timestamptz AS fresh",
+    [row.lease_expires_at, row.expires_at]
+  );
+  return selected.rows[0]?.fresh === true;
+}
+
+async function candidateIsFresh(client: DatabaseClient, row: CandidateAuthorityRow): Promise<boolean> {
+  const selected = await client.query<{ fresh: boolean }>(
+    "SELECT now() < $1::timestamptz AS fresh",
+    [row.expires_at]
+  );
+  return selected.rows[0]?.fresh === true;
+}
+
 async function globallyReferenced(client: DatabaseClient, relativePath: string): Promise<boolean> {
   const selected = await client.query(
     `SELECT 1 FROM assets WHERE storage_driver='filesystem' AND storage_path=$1
@@ -299,8 +410,8 @@ async function operationHasDomainReference(client: DatabaseClient, row: Operatio
     const original = await client.query(
       `SELECT 1 FROM assets
         WHERE id=$1 AND owner_user_id=$2
-          AND storage_driver='filesystem' AND storage_path=$3`,
-      [row.asset_id, row.owner_user_id, deliveryPath]
+          AND filesystem_operation_id=$3`,
+      [row.asset_id, row.owner_user_id, row.id]
     );
     return Boolean(original.rowCount);
   }
@@ -308,9 +419,9 @@ async function operationHasDomainReference(client: DatabaseClient, row: Operatio
     const derivative = await client.query(
       `SELECT 1 FROM asset_derivatives
         WHERE source_asset_id=$1 AND owner_user_id=$2
-          AND storage_driver='filesystem' AND storage_path=$3
+          AND filesystem_operation_id=$3
         LIMIT 1`,
-      [row.asset_id, row.owner_user_id, deliveryPath]
+      [row.asset_id, row.owner_user_id, row.id]
     );
     return Boolean(derivative.rowCount);
   }
@@ -351,8 +462,6 @@ async function cleanupPathFenced(
 export function createPostgresDurableFilesystemRepository(
   pool: DatabasePool,
 ): PostgresDurableFilesystemRepository {
-  const candidateAuthorities = new Map<string, CandidateAuthority>();
-
   const reserve: DurableFilesystemJournalPort["reserve"] = async (scope, request) => {
     const operationToken = randomToken();
     const inserted = await pool.query<OperationRow>(
@@ -374,7 +483,6 @@ export function createPostgresDurableFilesystemRepository(
     );
     const row = inserted.rows[0];
     if (!row) throw new Error("durable_filesystem_reservation_failed");
-    candidateAuthorities.set(row.id, { operationId: row.id, tokenHash: sha256(operationToken) });
     return {
       operation: {
         ...scope,
@@ -386,14 +494,162 @@ export function createPostgresDurableFilesystemRepository(
     } satisfies DurableFilesystemReserveResult;
   };
 
+  const persistCandidateWithClient = async (
+    client: DatabaseClient,
+    attachment: PrivateFilesystemCandidateAttachment,
+  ): Promise<void> => {
+    const row = await operationById(client, attachment.operation.operationId, true);
+    if (!row
+      || !operationMatches(row, attachment.operation)
+      || row.lifecycle !== "reserved"
+      || row.expires_at.toISOString() !== attachment.operation.expiresAt
+      || claimIdentityClassification(row, attachment.claim) !== "valid"
+      || !await operationAuthorityIsFresh(client, row)) {
+      throw new Error("durable_filesystem_candidate_invalid");
+    }
+
+    const deliveries = await descriptorRows(client, row.id, "delivery");
+    if (deliveries.length === 0) {
+      await insertDescriptor(client, row.id, row.owner_user_id, "delivery", 0, attachment.descriptor);
+    } else if (deliveries.length !== 1 || !descriptorMatches(deliveries[0]!, attachment.descriptor)) {
+      throw new Error("durable_filesystem_candidate_mismatch");
+    }
+
+    const existing = await candidateByOperation(client, row.id, true);
+    if (existing) {
+      if (existing.candidate_token_hash === sha256(attachment.candidate)
+        && existing.lifecycle === "issued"
+        && candidateMatchesAttachment(existing, attachment)) return;
+      throw new Error("durable_filesystem_candidate_already_persisted");
+    }
+
+    await client.query(
+      `INSERT INTO durable_filesystem_candidate_authorities (
+         candidate_token_hash,operation_id,owner_user_id,purpose,resource_kind,
+         asset_id,operation_scope_hash,relative_path,device_id,file_id,change_token,
+         content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+      [
+        sha256(attachment.candidate),
+        row.id,
+        row.owner_user_id,
+        row.purpose,
+        row.resource_kind,
+        row.asset_id,
+        row.operation_scope_hash,
+        ...descriptorValues(attachment.descriptor),
+        row.expires_at
+      ]
+    );
+  };
+
+  const persistCandidate: PrivateFilesystemCandidatePersistencePort["persistCandidate"] = async (
+    attachment,
+  ) => withTransaction(pool, (client) => persistCandidateWithClient(client, attachment));
+
+  const redeemCandidate: PrivateFilesystemCandidatePersistencePort["redeemCandidate"] = async (
+    attachment,
+  ) => withTransaction(pool, async (client) => {
+    const row = await operationById(client, attachment.operation.operationId, true);
+    if (!row
+      || !operationMatches(row, attachment.operation)
+      || row.lifecycle !== "reserved"
+      || row.expires_at.toISOString() !== attachment.operation.expiresAt
+      || claimIdentityClassification(row, attachment.claim) !== "valid"
+      || !await operationAuthorityIsFresh(client, row)) return null;
+    const candidate = await candidateByHash(client, attachment.candidate, true);
+    if (!candidate
+      || candidate.lifecycle !== "issued"
+      || !candidateMatchesAttachment(candidate, attachment)
+      || !await candidateIsFresh(client, candidate)) return null;
+    return descriptor(candidate);
+  });
+
+  const attachCandidateWithClient = async (
+    client: DatabaseClient,
+    attachment: PrivateFilesystemCandidateAttachment,
+    requireExactDomainBinding: boolean,
+  ): Promise<DurableFilesystemAttachResult> => {
+    const row = await operationById(client, attachment.operation.operationId, true);
+    if (!row
+      || !operationMatches(row, attachment.operation)
+      || row.lifecycle !== "reserved"
+      || row.expires_at.toISOString() !== attachment.operation.expiresAt
+      || claimIdentityClassification(row, attachment.claim) !== "valid"
+      || !await operationAuthorityIsFresh(client, row)) return { outcome: "stale" };
+    const candidate = await candidateByHash(client, attachment.candidate, true);
+    if (!candidate
+      || candidate.lifecycle !== "issued"
+      || !candidateMatchesAttachment(candidate, attachment)
+      || !await candidateIsFresh(client, candidate)) return { outcome: "candidate_mismatch" };
+
+    const deliveries = await descriptorRows(client, row.id, "delivery");
+    const cleanup = await descriptorRows(client, row.id, "cleanup");
+    if (deliveries.length !== 1
+      || !descriptorMatches(deliveries[0]!, attachment.descriptor)
+      || (requireExactDomainBinding && !await operationHasDomainReference(client, row))) {
+      return { outcome: "candidate_mismatch" };
+    }
+    const paths = [...cleanup, ...deliveries].map((item) => item.relative_path);
+    await lockPhysicalPaths(client, paths);
+    if (await cleanupPathFenced(client, row.id, paths)) return { outcome: "stale" };
+
+    const locator = randomToken();
+    const updated = await client.query<OperationRow>(
+      `UPDATE durable_filesystem_operations
+          SET lifecycle='attached',candidate_token_hash=$3,locator_token_hash=$4,
+              attached_at=now(),updated_at=now()
+        WHERE id=$1 AND owner_user_id=$2 AND lifecycle='reserved'
+          AND work_version=$5 AND lease_id=$6 AND lease_owner=$7
+          AND date_trunc('milliseconds',lease_expires_at)=$8::timestamptz
+          AND lease_expires_at > now() AND expires_at > now()
+        RETURNING ${operationColumns("durable_filesystem_operations")}`,
+      [
+        row.id,
+        row.owner_user_id,
+        candidate.candidate_token_hash,
+        sha256(locator),
+        attachment.claim.workVersion,
+        attachment.claim.leaseId,
+        attachment.claim.leaseOwner,
+        attachment.claim.leaseExpiresAt
+      ]
+    );
+    const attached = updated.rows[0];
+    if (!attached) return { outcome: "stale" };
+    const attachedCandidate = await client.query(
+      `UPDATE durable_filesystem_candidate_authorities
+          SET lifecycle='attached',updated_at=now()
+        WHERE candidate_token_hash=$1 AND operation_id=$2
+          AND owner_user_id=$3 AND purpose=$4 AND lifecycle='issued'
+          AND expires_at > now()
+        RETURNING candidate_token_hash`,
+      [candidate.candidate_token_hash, row.id, row.owner_user_id, row.purpose]
+    );
+    if (attachedCandidate.rowCount !== 1) {
+      throw new Error("durable_filesystem_candidate_attach_failed");
+    }
+    return {
+      outcome: "attached",
+      operation: attachedOperation(attached),
+      locator: locator as DatabaseIssuedStorageLocator,
+      claim: recoveryClaim(attached)
+    } satisfies DurableFilesystemAttachResult;
+  };
+
+  const attachCandidate: PrivateFilesystemCandidatePersistencePort["attachCandidate"] = async (
+    database,
+    attachment,
+  ) => attachCandidateWithClient(await requireCallerTransaction(database), attachment, true);
+
   const issuePublicationCandidate = async (
     reservation: ReservedFilesystemOperation,
     preparation: PrivatePublicationPreparation,
   ): Promise<AssetPublicationCandidate> => withTransaction(pool, async (client) => {
     const row = await operationById(client, reservation.operationId, true);
-    const authority = candidateAuthorities.get(reservation.operationId);
     if (!row || !operationMatches(row, reservation) || row.lifecycle !== "reserved"
-      || !authority || authority.operationId !== row.id || authority.tokenHash !== row.operation_token_hash) {
+      || row.expires_at.toISOString() !== reservation.expiresAt
+      || !await operationAuthorityIsFresh(client, row)) {
       throw new Error("durable_filesystem_reservation_stale");
     }
     if (!preparation.cleanupDescriptors.some(
@@ -406,9 +662,7 @@ export function createPostgresDurableFilesystemRepository(
     for (const [ordinal, value] of preparation.cleanupDescriptors.entries()) {
       await insertDescriptor(client, row.id, row.owner_user_id, "cleanup", ordinal, value);
     }
-    const candidate = randomToken();
-    candidateAuthorities.set(candidate, { operationId: row.id, tokenHash: sha256(candidate) });
-    return candidate as AssetPublicationCandidate;
+    return randomToken() as AssetPublicationCandidate;
   });
 
   const completePublicationCandidate = async (
@@ -417,9 +671,9 @@ export function createPostgresDurableFilesystemRepository(
     value: PrivateStorageDescriptor,
   ): Promise<void> => withTransaction(pool, async (client) => {
     const row = await operationById(client, reservation.operationId, true);
-    const authority = candidateAuthorities.get(candidate);
     if (!row || !operationMatches(row, reservation) || row.lifecycle !== "reserved"
-      || !authority || authority.operationId !== row.id) {
+      || row.expires_at.toISOString() !== reservation.expiresAt
+      || !await operationAuthorityIsFresh(client, row)) {
       throw new Error("durable_filesystem_candidate_invalid");
     }
     const cleanup = await descriptorRows(client, row.id, "cleanup");
@@ -432,40 +686,116 @@ export function createPostgresDurableFilesystemRepository(
       throw new Error("durable_filesystem_candidate_mismatch");
     }
     await insertDescriptor(client, row.id, row.owner_user_id, "delivery", 0, value);
+    await persistCandidateWithClient(client, {
+      operation: reservation,
+      candidate,
+      descriptor: value,
+      claim: recoveryClaim(row)
+    } as PrivateFilesystemCandidateAttachment);
   });
 
   const attach: DurableFilesystemJournalPort["attach"] = async (database, reservation, candidate) => {
     const client = await requireCallerTransaction(database);
-    const authority = candidateAuthorities.get(candidate);
-    if (!authority || authority.operationId !== reservation.operationId) return { outcome: "candidate_mismatch" };
     const row = await operationById(client, reservation.operationId, true);
     if (!row || !operationMatches(row, reservation) || row.lifecycle !== "reserved") return { outcome: "stale" };
-    const deliveries = await descriptorRows(client, row.id, "delivery");
-    const cleanup = await descriptorRows(client, row.id, "cleanup");
-    if (deliveries.length !== 1) return { outcome: "candidate_mismatch" };
-    const paths = [...cleanup, ...deliveries].map((item) => item.relative_path);
-    await lockPhysicalPaths(client, paths);
-    if (await cleanupPathFenced(client, row.id, paths)) return { outcome: "stale" };
-    const locator = randomToken();
-    const updated = await client.query<OperationRow>(
-      `UPDATE durable_filesystem_operations
-          SET lifecycle='attached',candidate_token_hash=$3,locator_token_hash=$4,
-              attached_at=now(),updated_at=now()
-        WHERE id=$1 AND owner_user_id=$2 AND lifecycle='reserved'
-        RETURNING ${operationColumns("durable_filesystem_operations")}`,
-      [row.id, row.owner_user_id, authority.tokenHash, sha256(locator)]
-    );
-    const attached = updated.rows[0];
-    if (!attached) return { outcome: "stale" };
-    candidateAuthorities.delete(candidate);
-    candidateAuthorities.delete(row.id);
-    return {
-      outcome: "attached",
-      operation: attachedOperation(attached),
-      locator: locator as DatabaseIssuedStorageLocator,
-      claim: recoveryClaim(attached)
-    } satisfies DurableFilesystemAttachResult;
+    const persisted = await candidateByHash(client, candidate, true);
+    if (!persisted) return { outcome: "candidate_mismatch" };
+    return attachCandidateWithClient(client, {
+      operation: reservation,
+      candidate,
+      descriptor: descriptor(persisted),
+      claim: recoveryClaim(row)
+    } as PrivateFilesystemCandidateAttachment, false);
   };
+
+  const issueDeliveryGrant: PrivateFilesystemDeliveryGrantPersistencePort["issueDeliveryGrant"] = async (
+    request,
+  ) => withTransaction(pool, async (client) => {
+    const row = await operationById(client, request.operation.operationId, true);
+    if (!row
+      || !operationMatches(row, request.operation)
+      || row.lifecycle !== "finalized") {
+      throw new Error("durable_filesystem_delivery_grant_invalid");
+    }
+    const candidate = await candidateByHash(client, request.candidate, true);
+    if (!candidate
+      || candidate.lifecycle !== "attached"
+      || row.candidate_token_hash !== candidate.candidate_token_hash
+      || !candidateMatchesDeliveryRequest(candidate, request)
+      || !await candidateIsFresh(client, candidate)) {
+      throw new Error("durable_filesystem_delivery_grant_invalid");
+    }
+    const deliveries = await descriptorRows(client, row.id, "delivery");
+    if (deliveries.length !== 1 || !descriptorMatches(deliveries[0]!, request.descriptor)) {
+      throw new Error("durable_filesystem_delivery_grant_invalid");
+    }
+
+    const grant = randomToken() as PrivateFilesystemDeliveryGrant;
+    await client.query(
+      `INSERT INTO private_filesystem_delivery_grants (
+         grant_token_hash,candidate_token_hash,operation_id,owner_user_id,purpose,
+         resource_kind,asset_id,operation_scope_hash,expires_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        sha256(grant),
+        candidate.candidate_token_hash,
+        row.id,
+        row.owner_user_id,
+        row.purpose,
+        row.resource_kind,
+        row.asset_id,
+        row.operation_scope_hash,
+        request.expiresAt
+      ]
+    );
+    return grant;
+  });
+
+  const redeemDeliveryGrant: PrivateFilesystemDeliveryGrantPersistencePort["redeemDeliveryGrant"] = async (
+    redemption: PrivateFilesystemDeliveryGrantRedemption,
+  ) => withTransaction(pool, async (client) => {
+    const { request } = redemption;
+    const row = await operationById(client, request.operation.operationId, true);
+    if (!row
+      || !operationMatches(row, request.operation)
+      || row.lifecycle !== "finalized") return null;
+    const candidate = await candidateByHash(client, request.candidate, true);
+    if (!candidate
+      || candidate.lifecycle !== "attached"
+      || row.candidate_token_hash !== candidate.candidate_token_hash
+      || !candidateMatchesDeliveryRequest(candidate, request)
+      || !await candidateIsFresh(client, candidate)) return null;
+    const selected = await client.query<DeliveryGrantRow>(
+      `SELECT grant_token_hash,candidate_token_hash,operation_id,owner_user_id,purpose,
+              resource_kind,asset_id,operation_scope_hash,lifecycle,expires_at
+         FROM private_filesystem_delivery_grants
+        WHERE grant_token_hash=$1
+        FOR UPDATE`,
+      [sha256(redemption.grant)]
+    );
+    const grant = selected.rows[0];
+    if (!grant
+      || grant.lifecycle !== "issued"
+      || grant.candidate_token_hash !== candidate.candidate_token_hash
+      || grant.operation_id !== row.id
+      || grant.owner_user_id !== row.owner_user_id
+      || grant.purpose !== row.purpose
+      || grant.resource_kind !== row.resource_kind
+      || grant.asset_id !== row.asset_id
+      || grant.operation_scope_hash !== row.operation_scope_hash
+      || grant.expires_at.toISOString() !== request.expiresAt) return null;
+    const deliveries = await descriptorRows(client, row.id, "delivery");
+    if (deliveries.length !== 1 || !descriptorMatches(deliveries[0]!, request.descriptor)) return null;
+
+    const redeemed = await client.query(
+      `UPDATE private_filesystem_delivery_grants
+          SET lifecycle='redeemed',redeemed_at=now(),updated_at=now()
+        WHERE grant_token_hash=$1 AND lifecycle='issued' AND expires_at > now()
+        RETURNING grant_token_hash`,
+      [grant.grant_token_hash]
+    );
+    return redeemed.rowCount === 1 ? descriptor(deliveries[0]!) : null;
+  });
 
   const finalizeAfterCommit: DurableFilesystemJournalPort["finalizeAfterCommit"] = async (operation, claim) => withTransaction(
     pool,
@@ -615,6 +945,11 @@ export function createPostgresDurableFilesystemRepository(
 
   return {
     journal: { reserve, attach, finalizeAfterCommit, markCleanup, completeCleanup, recover },
+    persistCandidate,
+    redeemCandidate,
+    attachCandidate,
+    issueDeliveryGrant,
+    redeemDeliveryGrant,
     issuePublicationCandidate,
     completePublicationCandidate,
     preparePublicationCleanup,
