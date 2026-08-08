@@ -8758,13 +8758,149 @@ migration 0062 remains additive and rollback-covered.
 **14e3d is complete. 14e3e remains the next implementation task; route binding
 remains deferred to 14e3g.**
 
-**14e3e — illustration/import writers and worker composition.** Move real
-illustration image persistence, imported asset publication, runtime illustration
-bindings, metadata backfill, and durable filesystem recovery behind these
-compositions. The worker uses database-derived owner/lease authority and
-schedules both backfill and filesystem recovery with heartbeat, expiry/requeue,
-drain/forced-stop, and lane-fairness evidence. Preserve illustration
-independence; do not import API implementation from the worker.
+**14e3d-R / 14e3e0 — import/export rich-asset parity prerequisite.** This is a
+required corrective checkpoint before writer composition, not a route binding.
+The completed private portable composition deliberately established durable
+staging, replay, and basic Campaign ZIP asset publication; it does not yet
+accept or restore the complete current manifest archive produced by
+`campaign-archive-service.ts`, nor the full Legacy Story image behavior. Do not
+pretend that its reduced campaign/turn/memory projection is a replacement for
+the legacy archive writer.
+
+Inventory and freeze each current behavior before extracting an adapter:
+
+- current manifest archive authority, `world.json`, Chronicle, campaign/player
+  configuration, cost and generation records, `assets/assets.json`, source
+  asset IDs, library rows, covers, turn illustrations, segment variants,
+  generation contexts, and all source-to-published-asset bindings;
+- Legacy Story inline data images, supported bundle images, world cover/turn
+  image publication and URL rewrites, plus already-safe external HTTPS image
+  URLs; malformed optional images retain the legacy source family's omission or
+  failure behavior explicitly rather than silently changing import success;
+- Campaign ZIP, campaign archive, Legacy Story, Infinite Worlds, CYOA, world
+  JSON, world text, and story text source inventories. The command type must
+  carry enough normalized asset/binding metadata to restore the source rather
+  than inferring it after the fact.
+
+Extract typed decoder/projector and caller-client mutation adapters for these
+behaviors. The private composition must validate current manifest authority,
+archive entry/aggregate/image limits, exact source-asset mapping and bindings,
+and use the later normalized publication coordinator for every imported binary.
+It may not import a legacy `*service`, accept raw paths/bearers, reconstruct
+metadata from a public preview, or bind routes/workers/allowlists. Add real
+PostgreSQL/temp-filesystem parity matrices for rich current archives, legacy
+ZIPs, Legacy Story inline/bundle images, safe external URLs, malformed image
+semantics, rollback, restart, replay, ownership, and source-to-published
+binding restoration. This checkpoint is complete before 14e3e1; 14e3f proves
+the production-composed parity and 14e3g remains the only live switch.
+
+**14e3e — illustration/import writers and worker composition.** The original
+one-paragraph checkpoint is split into the following additive, private and
+unconsumed checkpoints. Runtime/worker replacements may be injected only into
+tests here; Task 14e3g performs the single live binding switch. No worker may
+transitively import a `services/api` implementation.
+
+**14e3e1 — normalized publication/request authority.** Add an additive
+migration (expected **0063**) and private contracts for a normalized artifact
+and a request-to-canonical-asset mapping distinct from the existing one-row
+logical asset publication identity. The command carries verified original and
+derivative technical metadata (pixel width/height, format/pages/orientation as
+applicable), source-specific library/reuse/review policy, conditional
+reference policy, and allowlisted rich provenance: image-job/variant, fiction
+prompt identity, provider profile/type/model/parameters, import source and
+source asset ID. Never place credentials, raw responses, paths, claims, or
+bearers in a public result.
+
+The authority must support same-owner same-content reuse for distinct image-job
+or import requests while retaining each request's contexts/references; exact
+same-key replay returns the same request result, mismatch rejects, and
+cross-owner physical sharing remains authorization-safe. It must not solve the
+`UNIQUE(owner_user_id, content_hash)` conflict with generic INSERT retry.
+Migration and real PostgreSQL coverage include legacy seed, same-owner
+reuse/concurrency, cross-owner retention, rich metadata round trip, conditional
+reference omission, populated-down refusal, and empty rollback/up.
+
+**14e3e2 — neutral secure publication seam.** Move or wrap the concrete secure
+filesystem/image-normalization implementation and required safe error/store
+helpers in a neutral runtime/adapter location. API may consume the neutral
+adapter; worker replacement graphs must not reach API implementation through it.
+Expose a generic private caller-transaction publication port: normalize/verify
+and reserve before the parent transaction; attach every exact artifact inside
+the supplied transaction; roll back/discard after parent rollback; return only
+opaque post-commit finalization handles; reconcile/reap committed attached work
+after finalization failure. Preserve the b4/b5 durable prewrite, shared-path,
+target-only quarantine, and exact-operation fences. Add AST/module-graph guards
+for zero transitive worker-to-API implementation imports and no public/private
+barrel leakage.
+
+**14e3e3 — illustration publication coordinator.** Build a named private
+`PrivateIllustrationAssetPublicationCoordinator` and replacement illustration
+ports/composition around `completePortImageJob` semantics. It reserves every
+artifact before the image-job transaction; inside the caller transaction it
+attaches artifacts, completes `image_jobs`, writes segment variant bindings,
+cost, world/turn/segment/resolution state and source-specific contexts; after
+commit it finalizes or leaves durable attached recovery work. It distinguishes
+“job committed, finalization pending” from provider/image failure, so image
+failure never changes accepted narration. Cover turn/world and one/two segment
+variants, conditional references, parent/lease no-op and rollback, commit then
+finalize crash/restart, same-owner reuse, cross-owner retention, and no partial
+asset/job/domain mutation.
+
+**14e3e4 — imported-writer coordinators.** Use the same private normalized
+publication seam for every live image-producing import family identified in
+14e3d-R/e3e0. Preserve rich archive source mappings, covers, turn/segment
+bindings, generation contexts, library policy, and explicitly frozen Legacy
+Story optional-image semantics. No writer calls `writeContentAddressed`,
+`persist*Image`, or legacy service authority. Test each family through its
+caller transaction with rollback, duplicate/replay, restart finalization,
+same-owner reuse, and safe external-image handling.
+
+**14e3e5 — real existing-asset metadata backfill executor.** Retain the durable
+backfill state machine but replace the current metadata-only completion helper
+with a private executor. A claim supplies database-derived owner/asset; it
+opens the original through finalized delivery/bounded secure sessions (never a
+raw `storage_path`), verifies signature/hash/size, decodes safely, reserves and
+publishes the thumbnail derivative under an `asset_derivative` operation, and
+under the exact claim transaction updates allowlisted technical metadata,
+binds the derivative, and completes the job. Add heartbeat, lease-loss abort,
+bounded retry/backoff/terminal policy, enum-only diagnostics, two-worker
+`SKIP LOCKED`, slow decode, stale claim, restart, and poison-record no-hot-loop
+coverage. Clarify and preserve the existing attempts/failed schema rather than
+adding an unbounded immediate-requeue loop.
+
+**14e3e6 — durable filesystem recovery executor.** Build a private recovery
+application that claims one asset or portable unit with database-derived owner,
+work version, and lease; heartbeats during long hash/decode/delete/finalize
+work; performs exact finalize/identity-safe cleanup/portable expiry; reconciles
+an asset publication to `published` only after its exact operation set is
+finalized; and maps only safe diagnostics. Add an exact
+`heartbeatRecovery(operation, claim, leaseSeconds)` fence. It must handle
+target-only quarantine, shared-path retention, pair expiry before delete,
+stale/foreign claim denial, cleanup retry, and lease rotation without accepting
+scheduler-supplied owner/path/bearer.
+
+**14e3e7 — worker maintenance composition and lifecycle.** Keep one
+capacity-one **asset-maintenance** lane (the frozen Task 12 pool budget remains
+`generation + 4` worker / `+8` all). It deterministically round-robins one-unit
+probes among metadata backfill, asset filesystem recovery, and portable expiry
+recovery so a continuous source cannot starve another. Scheduler errors remain
+isolated; owner and lease always originate in claims. Abort stops new claims;
+the existing Task 12 external graceful-stop/process-loss lease-reclaim contract
+remains the forced-stop behavior—do not introduce executor cancellation or a
+new hard shutdown deadline here. Prove rotation/no starvation, one maintenance
+unit at a time, graceful drain, simulated external force-stop/reclaim, and no
+duplicate commit. If a later task chooses separate lanes, it must explicitly
+change pool formulas, defaults, manifests, deployment docs, benchmarks, and
+tests first.
+
+**14e3e8 — additive composition parity and boundaries.** Run real
+PostgreSQL/temp-filesystem and Fastify-independent application matrices for all
+e3e0–e3e7 behaviors. Assert no raw paths/bearers/errors or private contracts
+escape; no live default route/runtime/worker binding changes; zero transitive
+worker-to-API implementation imports; no legacy image writer remains reachable
+from the replacement graph; and the runtime replacement remains unconsumed.
+Only after these matrices pass does Task 14e3f add production-composed parity;
+Task 14e3g performs the atomic server/archive/runtime/worker switch.
 
 **14e3f — production-composed parity before switch.** With legacy bindings
 still active, add real-Fastify, real-worker, and real-PostgreSQL matrices for
