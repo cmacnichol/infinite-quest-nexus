@@ -32,6 +32,18 @@ import type {
   PrivatePortableStagedCleanupPreparation,
   PrivatePortableRepositoryPort
 } from "../../../packages/application/src/imports/private-portable-repository.js";
+import type {
+  PrivateAssetPublicationCommand,
+  PrivateAssetPublicationFilesystemPort,
+  PrivateAssetPublicationIdentity,
+  PrivatePreparedAssetPublication,
+  PrivatePreparedAssetPublicationArtifact
+} from "../../../packages/application/src/assets/private-asset-publication.js";
+import {
+  snapshotPrivateAssetPublicationCommand,
+  validatePrivateAssetPublicationCommand,
+  verifyPrivateAssetPublicationContentHashes
+} from "../../../packages/application/src/assets/private-asset-publication.js";
 import {
   bindPrivateAtomicExportIssuance,
   bindPrivateAtomicStagedIssuance,
@@ -69,6 +81,8 @@ export type SecureFilesystemAdapterOptions = Readonly<{
 }>;
 
 export type SecureFilesystemAdapter = Readonly<{
+  prepareAssetPublication: PrivateAssetPublicationFilesystemPort["prepareAssetPublication"];
+  finalizeAssetPublication: PrivateAssetPublicationFilesystemPort["finalizeAssetPublication"];
   stagePortableInput(input: Readonly<{
     owner: ImportOwnerScope;
     operationScopeId: string;
@@ -292,6 +306,38 @@ async function writeExactContent(
   if (position !== byteLength) throw new Error("filesystem_write_partial");
   await handle.sync();
   return hash.digest("hex");
+}
+
+async function verifyContentAddressedFile(
+  handle: FileHandle,
+  relativePath: string,
+  expectedHash: string,
+  byteLength: number,
+  expiresAt: string,
+): Promise<PrivateStorageDescriptor> {
+  const initial = descriptorFromStat(
+    relativePath,
+    await handle.stat({ bigint: true }) as BigIntStat,
+    expectedHash,
+    byteLength,
+  );
+  const hash = createHash("sha256");
+  const buffer = Buffer.alloc(Math.min(64 * 1024, Math.max(1, byteLength)));
+  let position = 0;
+  while (position < byteLength) {
+    if (Date.now() >= Date.parse(expiresAt)) throw new Error("filesystem_write_expired");
+    const size = Math.min(buffer.byteLength, byteLength - position);
+    const result = await handle.read(buffer, 0, size, position);
+    if (result.bytesRead <= 0) throw new Error("filesystem_read_partial");
+    hash.update(buffer.subarray(0, result.bytesRead));
+    position += result.bytesRead;
+  }
+  if (hash.digest("hex") !== expectedHash) throw new Error("asset_publication_hash_mismatch");
+  requireDescriptorIdentity(
+    await handle.stat({ bigint: true }) as BigIntStat,
+    initial,
+  );
+  return initial;
 }
 
 function requireLimits(limits: PrivateBoundedStreamLimits, byteLength: number): void {
@@ -582,6 +628,7 @@ export async function createSecureFilesystemAdapter(
     const relativePath = `${input.directory}/${operation.operationId}.pending`;
     let handle: FileHandle | undefined;
     let nodeIdentity: Readonly<{ deviceId: string; fileId: string }> | undefined;
+    let nodeAuthorityPersisted = false;
     let rollbackPromise: Promise<void> | undefined;
     const rollback = (): Promise<void> => {
       rollbackPromise ??= (async () => {
@@ -593,7 +640,7 @@ export async function createSecureFilesystemAdapter(
         if (cleanup.outcome !== "cleanup_pending") return;
         // A target-only row has no durable inode identity. Leave it pending for
         // fail-closed quarantine instead of deleting or declaring it cleaned.
-        if (!nodeIdentity) return;
+        if (!nodeIdentity || !nodeAuthorityPersisted) return;
         await identitySafeDeletePrewrite(archiveRoot, relativePath, nodeIdentity);
         const completed = await options.journal!.completeCleanup(operation, reserved.claim);
         if (!["cleaned", "already_cleaned"].includes(completed.outcome)) {
@@ -613,6 +660,7 @@ export async function createSecureFilesystemAdapter(
       await options.prewrite.recordPrewriteNode(
         bindPrivatePrewriteNodeAuthority(operation, relativePath, nodeIdentity),
       );
+      nodeAuthorityPersisted = true;
       const contentHash = await writeExactContent(
         handle,
         input.source,
@@ -647,6 +695,160 @@ export async function createSecureFilesystemAdapter(
       if (handle) await handle.close().catch(() => undefined);
       await rollback().catch(() => undefined);
       throw error;
+    }
+  };
+
+  const prepareAssetPublication: SecureFilesystemAdapter["prepareAssetPublication"] = async (
+    command: PrivateAssetPublicationCommand,
+    publicationIdentity: PrivateAssetPublicationIdentity,
+  ): Promise<PrivatePreparedAssetPublication> => {
+    requireAdapterOpen();
+    const snapshot = snapshotPrivateAssetPublicationCommand(command);
+    validatePrivateAssetPublicationCommand(snapshot);
+    verifyPrivateAssetPublicationContentHashes(
+      snapshot,
+      (bytes) => createHash("sha256").update(bytes).digest("hex"),
+    );
+    const journal = options.journal;
+    const prewrite = options.prewrite;
+    const candidates = options.candidates;
+    if (!journal || !prewrite || !candidates
+      || publicationIdentity.ownerUserId !== snapshot.owner.ownerUserId) {
+      throw new Error("asset_publication_repository_unavailable");
+    }
+    const prepareArtifact = async (
+      artifact: PrivateAssetPublicationCommand["original"],
+      purpose: "asset_original" | "asset_derivative",
+      derivativeIndex: number | null,
+    ): Promise<PrivatePreparedAssetPublicationArtifact> => {
+      const reserved = await journal.reserve(
+        {
+          resourceKind: "asset",
+          ownerUserId: snapshot.owner.ownerUserId,
+          assetId: publicationIdentity.assetId
+        },
+        { purpose, leaseOwner: snapshot.leaseOwner, expiresAt: snapshot.expiresAt },
+      );
+      const operation = reserved.operation;
+      if (operation.resourceKind !== "asset"
+        || operation.ownerUserId !== snapshot.owner.ownerUserId
+        || operation.assetId !== publicationIdentity.assetId
+        || operation.purpose !== purpose
+        || operation.expiresAt !== snapshot.expiresAt
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(operation.operationId)) {
+        throw new Error("asset_publication_reservation_mismatch");
+      }
+      const relativePath = `assets/content/${artifact.contentHash}`;
+      let handle: FileHandle | undefined;
+      let nodeIdentity: Readonly<{ deviceId: string; fileId: string }> | undefined;
+      let nodeAuthorityPersisted = false;
+      let rollbackPromise: Promise<void> | undefined;
+      const rollback = (): Promise<void> => {
+        rollbackPromise ??= (async () => {
+          const cleanup = await journal.markCleanup(
+            operation,
+            reserved.claim,
+            { cause: "rollback" },
+          );
+          if (cleanup.outcome !== "cleanup_pending") return;
+          // A target-only prewrite record is not enough authority to delete
+          // content-addressed bytes or to report cleanup complete. It may be
+          // an EEXIST shared node or a crash before durable inode capture.
+          if (!nodeIdentity || !nodeAuthorityPersisted) return;
+          await identitySafeDeletePrewrite(assetRoot, relativePath, nodeIdentity);
+          const completed = await journal.completeCleanup(operation, reserved.claim);
+          if (!["cleaned", "already_cleaned"].includes(completed.outcome)) {
+            throw new Error(`filesystem_cleanup_${completed.outcome}`);
+          }
+        })();
+        return rollbackPromise;
+      };
+      try {
+        await ensureAnchoredDirectory(assetRoot, "assets/content");
+        await prewrite.recordPrewriteTarget(
+          bindPrivatePrewriteTargetAuthority(operation, relativePath),
+        );
+        let descriptor: PrivateStorageDescriptor;
+        try {
+          handle = await openAnchored(assetRoot, relativePath, CREATE_FLAGS, 0o600);
+          const created = statIdentity(await handle.stat({ bigint: true }) as BigIntStat);
+          nodeIdentity = { deviceId: created.deviceId, fileId: created.fileId };
+          await prewrite.recordPrewriteNode(
+            bindPrivatePrewriteNodeAuthority(operation, relativePath, nodeIdentity),
+          );
+          nodeAuthorityPersisted = true;
+          const contentHash = await writeExactContent(
+            handle,
+            [artifact.bytes],
+            artifact.byteLength,
+            snapshot.expiresAt,
+          );
+          if (contentHash !== artifact.contentHash) throw new Error("asset_publication_hash_mismatch");
+          descriptor = descriptorFromStat(
+            relativePath,
+            await handle.stat({ bigint: true }) as BigIntStat,
+            contentHash,
+            artifact.byteLength,
+          );
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          handle = await openAnchored(assetRoot, relativePath);
+          descriptor = await verifyContentAddressedFile(
+            handle,
+            relativePath,
+            artifact.contentHash,
+            artifact.byteLength,
+            snapshot.expiresAt,
+          );
+        }
+        await handle.close();
+        handle = undefined;
+        const candidate = await candidates.issuePublicationCandidate(operation, {
+          deliveryRelativePath: relativePath,
+          cleanupDescriptors: [descriptor]
+        });
+        await candidates.completePublicationCandidate(operation, candidate, descriptor);
+        return Object.freeze({
+          kind: purpose === "asset_original" ? "original" as const : "derivative" as const,
+          derivativeIndex,
+          attachment: bindPrivateFilesystemCandidateAttachment(
+            operation,
+            candidate,
+            descriptor,
+            reserved.claim,
+          ),
+          rollback
+        });
+      } catch (error) {
+        if (handle) await handle.close().catch(() => undefined);
+        await rollback().catch(() => undefined);
+        throw error;
+      }
+    };
+
+    const original = await prepareArtifact(snapshot.original, "asset_original", null);
+    const derivatives: PrivatePreparedAssetPublicationArtifact[] = [];
+    try {
+      for (const [index, derivative] of snapshot.derivatives.entries()) {
+        derivatives.push(await prepareArtifact(derivative, "asset_derivative", index));
+      }
+      return Object.freeze({ original, derivatives: Object.freeze(derivatives) });
+    } catch (error) {
+      await Promise.allSettled([original.rollback(), ...derivatives.map((derivative) => derivative.rollback())]);
+      throw error;
+    }
+  };
+
+  const finalizeAssetPublication: SecureFilesystemAdapter["finalizeAssetPublication"] = async (finalization) => {
+    if (!options.journal) throw new Error("asset_publication_repository_unavailable");
+    for (const artifact of finalization) {
+      const finalized = await options.journal.finalizeAfterCommit(
+        artifact.operation,
+        artifact.claim,
+      );
+      if (!["finalized", "already_finalized"].includes(finalized.outcome)) {
+        throw new Error(`asset_publication_finalize_${finalized.outcome}`);
+      }
     }
   };
 
@@ -882,6 +1084,8 @@ export async function createSecureFilesystemAdapter(
 
   let closed: Promise<void> | undefined;
   return Object.freeze({
+    prepareAssetPublication,
+    finalizeAssetPublication,
     stagePortableInput,
     publishPortableExport,
     openExportSession,

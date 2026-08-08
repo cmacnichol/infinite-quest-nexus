@@ -39,6 +39,18 @@ export interface PrivateFilesystemCandidatePersistencePort {
   ): Promise<DurableFilesystemAttachResult>;
 }
 
+/**
+ * Private, process-spanning serialization for content-addressed asset bytes.
+ * The callback owns no authority; it merely keeps deterministic hash locks
+ * while a caller reserves, verifies/reuses, and attaches a physical node.
+ */
+export interface PrivateFilesystemPublicationLockPort {
+  withPublicationContentLocks<Result>(
+    contentHashes: readonly string[],
+    work: () => Promise<Result>,
+  ): Promise<Result>;
+}
+
 function nonBlank(value: string): boolean {
   return value.trim().length > 0;
 }

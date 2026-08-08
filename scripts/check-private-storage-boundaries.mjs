@@ -5,8 +5,10 @@ const PRODUCTION_SOURCE = /^(?:apps|packages|services)\//u;
 const JAVASCRIPT_TYPESCRIPT_SOURCE = /\.(?:cjs|js|jsx|mjs|mts|ts|tsx)$/u;
 const STORAGE_COMPOSITION_FILE = "services/runtime/src/asset-import-composition.ts";
 const STORAGE_COMPOSITION_FACTORY = "createAssetImportStorageComposition";
+const ASSET_PUBLICATION_COMPOSITION_FACTORY = "createAssetPublicationComposition";
 const CONCRETE_STORAGE_FACTORIES = new Map([
   ["createPostgresDurableFilesystemRepository", "packages/database/src/durable-filesystem-repository.ts"],
+  ["createPostgresAssetPublicationRepository", "packages/database/src/asset-publication-repository.ts"],
   ["createPostgresSecureStorageRepository", "packages/database/src/secure-storage-repository.ts"],
   ["createPostgresImportRepository", "packages/database/src/import-repository.ts"],
   ["createPostgresFinalizedAssetDeliveryRepository", "packages/database/src/finalized-asset-delivery-repository.ts"],
@@ -194,8 +196,9 @@ export function checkPrivateStorageBoundaries(file, text) {
           && normalized !== CONCRETE_STORAGE_FACTORIES.get(name)) {
           add(specifier, `concrete storage factory ${name} may be consumed only by ${STORAGE_COMPOSITION_FILE}`);
         }
-        if (name === STORAGE_COMPOSITION_FACTORY && normalized !== STORAGE_COMPOSITION_FILE) {
-          add(specifier, "storage composition must remain unconsumed until Task 14e3c");
+        if ([STORAGE_COMPOSITION_FACTORY, ASSET_PUBLICATION_COMPOSITION_FACTORY].includes(name)
+          && normalized !== STORAGE_COMPOSITION_FILE) {
+          add(specifier, "private storage composition must remain unconsumed before its named later checkpoint");
         }
         if (isPrivateContractName(name) && isApplicationPublicBarrel(target)) {
           add(specifier, "private storage contracts must use their defining module, not a public barrel");
@@ -215,8 +218,10 @@ export function checkPrivateStorageBoundaries(file, text) {
         add(node, `concrete storage factory ${targetFactory} must not be re-exported`);
       }
       if (targetsStorageComposition(normalized, target)
-        && (node.type === "ExportAllDeclaration" || namespaceReexport || names.includes(STORAGE_COMPOSITION_FACTORY))) {
-        add(node, "storage composition must remain unconsumed until Task 14e3c");
+        && (node.type === "ExportAllDeclaration" || namespaceReexport
+          || names.includes(STORAGE_COMPOSITION_FACTORY)
+          || names.includes(ASSET_PUBLICATION_COMPOSITION_FACTORY))) {
+        add(node, "private storage composition must remain unconsumed before its named later checkpoint");
       }
       if (isApplicationPublicBarrel(target) && names.some(isPrivateContractName)) {
         add(node, "private storage contracts must use their defining module, not a public barrel");
@@ -232,7 +237,7 @@ export function checkPrivateStorageBoundaries(file, text) {
         add(node, `concrete storage factory ${targetFactory} may not be loaded through require or dynamic import`);
       }
       if (targetsStorageComposition(normalized, target) && normalized !== STORAGE_COMPOSITION_FILE) {
-        add(node, "storage composition must remain unconsumed until Task 14e3c");
+        add(node, "private storage composition must remain unconsumed before its named later checkpoint");
       }
     }
     if (node.type === "Identifier" && RETIRED_IDENTIFIERS.has(node.name)) {
@@ -245,8 +250,9 @@ export function checkPrivateStorageBoundaries(file, text) {
         && normalized !== CONCRETE_STORAGE_FACTORIES.get(member.name)) {
         add(member.node, `concrete storage factory ${member.name} may be consumed only by ${STORAGE_COMPOSITION_FILE}`);
       }
-      if (member.name === STORAGE_COMPOSITION_FACTORY && normalized !== STORAGE_COMPOSITION_FILE) {
-        add(member.node, "storage composition must remain unconsumed until Task 14e3c");
+      if ([STORAGE_COMPOSITION_FACTORY, ASSET_PUBLICATION_COMPOSITION_FACTORY].includes(member.name)
+        && normalized !== STORAGE_COMPOSITION_FILE) {
+        add(member.node, "private storage composition must remain unconsumed before its named later checkpoint");
       }
     }
     if (["MemberExpression", "OptionalMemberExpression", "ObjectMethod", "ObjectProperty", "ClassMethod"].includes(node.type)
@@ -286,7 +292,11 @@ export function checkAssetImportStorageCompositionInventory(sources) {
   const calls = new Map();
   const imports = new Map();
   const unsafeExposures = new Map();
-  for (const name of [...CONCRETE_STORAGE_FACTORIES.keys(), STORAGE_COMPOSITION_FACTORY]) {
+  for (const name of [
+    ...CONCRETE_STORAGE_FACTORIES.keys(),
+    STORAGE_COMPOSITION_FACTORY,
+    ASSET_PUBLICATION_COMPOSITION_FACTORY
+  ]) {
     definitions.set(name, []);
     calls.set(name, []);
     imports.set(name, []);
@@ -457,7 +467,17 @@ export function checkAssetImportStorageCompositionInventory(sources) {
   if (imports.get(STORAGE_COMPOSITION_FACTORY).length !== 0
     || unsafeExposures.get(STORAGE_COMPOSITION_FACTORY).length !== 0
     || calls.get(STORAGE_COMPOSITION_FACTORY).some((file) => file !== STORAGE_COMPOSITION_FILE)) {
-    violations.push(`${STORAGE_COMPOSITION_FACTORY} must remain unconsumed until Task 14e3c`);
+    violations.push(`${STORAGE_COMPOSITION_FACTORY} must remain unconsumed before its named later checkpoint`);
+  }
+  const assetPublicationCompositionDefinitions = definitions.get(ASSET_PUBLICATION_COMPOSITION_FACTORY);
+  if (assetPublicationCompositionDefinitions.length !== 1
+    || assetPublicationCompositionDefinitions[0] !== STORAGE_COMPOSITION_FILE) {
+    violations.push(`${ASSET_PUBLICATION_COMPOSITION_FACTORY} must be defined exactly once in ${STORAGE_COMPOSITION_FILE}`);
+  }
+  if (imports.get(ASSET_PUBLICATION_COMPOSITION_FACTORY).length !== 0
+    || unsafeExposures.get(ASSET_PUBLICATION_COMPOSITION_FACTORY).length !== 0
+    || calls.get(ASSET_PUBLICATION_COMPOSITION_FACTORY).some((file) => file !== STORAGE_COMPOSITION_FILE)) {
+    violations.push(`${ASSET_PUBLICATION_COMPOSITION_FACTORY} must remain unconsumed before its named later checkpoint`);
   }
   return violations;
 }

@@ -157,16 +157,16 @@ integration("Task 14e2c additive adapter contract matrix", () => {
     // This matrix freezes the historical 14e2c split-transaction test helper.
     // Current 0055 split-state rejection, 0056 current-clock fences, and
     // 0057 finalized-delivery authority, 0058 secure storage lifecycle, and
-    // 0059 prewrite target intent are
-    // covered by the 14e3b2 PostgreSQL
-    // suite; 14e3b2c owns the future atomically composed adapter matrix.
+    // 0059 prewrite target intent and subsequent additive migrations are
+    // covered by focused PostgreSQL suites; 14e3b2c owns the future atomically
+    // composed adapter matrix.
     const migrationClient = await pool.connect();
     try {
       const reverted = await runner({
         dbClient: migrationClient,
         dir: resolve("database/migrations"),
         direction: "down",
-        count: 5,
+        count: 6,
         migrationsTable: "schema_migrations",
         checkOrder: true,
         singleTransaction: true,
@@ -174,6 +174,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
       });
       expect(reverted.map((migration) => migration.name)).toEqual([
+        "0060_asset_publication_identities",
         "0059_secure_storage_target_intent",
         "0058_secure_storage_lifecycle",
         "0057_finalized_asset_delivery_authority",
@@ -218,7 +219,8 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         "0056_private_filesystem_current_clock",
         "0057_finalized_asset_delivery_authority",
         "0058_secure_storage_lifecycle",
-        "0059_secure_storage_target_intent"
+        "0059_secure_storage_target_intent",
+        "0060_asset_publication_identities"
       ]);
     } finally {
       await pool.end();

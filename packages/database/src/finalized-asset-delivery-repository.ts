@@ -162,14 +162,18 @@ async function finalizedBinding(
         AND descriptor.owner_user_id=operation.owner_user_id
         AND descriptor.descriptor_role='delivery'
         AND descriptor.ordinal=0
+       JOIN asset_publication_identities publication_identity
+         ON publication_identity.asset_id=operation.asset_id
+        AND publication_identity.owner_user_id=operation.owner_user_id
       WHERE operation.id=$1 AND operation.owner_user_id=$2
         AND operation.resource_kind='asset' AND operation.asset_id=$3
         AND operation.purpose=$4 AND operation.lifecycle='finalized'
+        AND publication_identity.lifecycle IN ('legacy','published')
         AND operation.candidate_token_hash IS NOT NULL
         AND descriptor.relative_path=$5
         AND descriptor.content_hash=$6
         AND descriptor.byte_length=$7
-      FOR SHARE OF operation,descriptor`,
+      FOR SHARE OF operation,descriptor,publication_identity`,
     [
       selection.filesystemOperationId,
       selection.ownerUserId,

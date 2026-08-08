@@ -418,7 +418,7 @@ integration("generation job notification delivery", () => {
           dbClient: client,
           dir: resolve("database/migrations"),
           direction: "down",
-          count: 8,
+          count: 9,
           migrationsTable: "schema_migrations",
           checkOrder: true,
           singleTransaction: true,
@@ -426,6 +426,7 @@ integration("generation job notification delivery", () => {
           logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
         });
         expect(reverted.map((migration) => migration.name)).toEqual([
+          "0060_asset_publication_identities",
           "0059_secure_storage_target_intent",
           "0058_secure_storage_lifecycle",
           "0057_finalized_asset_delivery_authority",
@@ -457,7 +458,8 @@ integration("generation job notification delivery", () => {
           "0056_private_filesystem_current_clock",
           "0057_finalized_asset_delivery_authority",
           "0058_secure_storage_lifecycle",
-          "0059_secure_storage_target_intent"
+          "0059_secure_storage_target_intent",
+          "0060_asset_publication_identities"
         ]);
       await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
          `SELECT (

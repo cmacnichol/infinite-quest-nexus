@@ -128,9 +128,18 @@ function recoveryClaim(row: OperationRow): DurableFilesystemRecoveryClaim {
 }
 
 function reservedOperation(row: OperationRow): ReservedFilesystemOperation {
-  if (row.resource_kind !== "portable" || row.operation_scope_hash === null) {
-    throw new Error("secure_storage_operation_invalid");
+  if (row.resource_kind === "asset") {
+    if (row.asset_id === null) throw new Error("secure_storage_operation_invalid");
+    return {
+      resourceKind: "asset",
+      ownerUserId: row.owner_user_id,
+      assetId: row.asset_id,
+      operationId: row.id as DurableFilesystemOperationId,
+      purpose: row.purpose,
+      expiresAt: row.expires_at.toISOString()
+    } as ReservedFilesystemOperation;
   }
+  if (row.operation_scope_hash === null) throw new Error("secure_storage_operation_invalid");
   return {
     resourceKind: "portable",
     ownerUserId: row.owner_user_id,
@@ -161,9 +170,9 @@ function operationMatchesRecovery(row: OperationRow, recovery: DurableFilesystem
     && row.owner_user_id === operation.ownerUserId
     && row.resource_kind === operation.resourceKind
     && row.purpose === operation.purpose
-    && row.operation_scope_hash !== null
-    && (operation.resourceKind !== "portable"
-      || operation.operationScopeId === row.operation_scope_hash)
+    && (operation.resourceKind === "asset"
+      || (row.operation_scope_hash !== null
+        && operation.operationScopeId === row.operation_scope_hash))
     && row.work_version === recovery.claim.workVersion
     && row.lease_id === recovery.claim.leaseId
     && row.lease_owner === recovery.claim.leaseOwner

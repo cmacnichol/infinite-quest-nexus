@@ -10,6 +10,10 @@ const FACTORY_FIXTURES: readonly Source[] = [
     text: "export function createPostgresDurableFilesystemRepository() { return {}; }"
   },
   {
+    file: "packages/database/src/asset-publication-repository.ts",
+    text: "export function createPostgresAssetPublicationRepository() { return {}; }"
+  },
+  {
     file: "packages/database/src/secure-storage-repository.ts",
     text: "export function createPostgresSecureStorageRepository() { return {}; }"
   },
@@ -29,17 +33,20 @@ const FACTORY_FIXTURES: readonly Source[] = [
     file: "services/runtime/src/asset-import-composition.ts",
     text: `
       import { createPostgresDurableFilesystemRepository } from "../../../packages/database/src/durable-filesystem-repository.js";
+      import { createPostgresAssetPublicationRepository } from "../../../packages/database/src/asset-publication-repository.js";
       import { createPostgresSecureStorageRepository } from "../../../packages/database/src/secure-storage-repository.js";
       import { createPostgresImportRepository } from "../../../packages/database/src/import-repository.js";
       import { createPostgresFinalizedAssetDeliveryRepository } from "../../../packages/database/src/finalized-asset-delivery-repository.js";
       import { createSecureFilesystemAdapter } from "../../api/src/portable-archive-filesystem-adapter.js";
       export function createAssetImportStorageComposition() {
         createPostgresDurableFilesystemRepository();
+        createPostgresAssetPublicationRepository();
         createPostgresSecureStorageRepository();
         createPostgresImportRepository();
         createPostgresFinalizedAssetDeliveryRepository();
         createSecureFilesystemAdapter();
       }
+      export function createAssetPublicationComposition() { return {}; }
     `
   }
 ];

@@ -24,7 +24,8 @@ import type {
 } from "../../application/src/assets/private-storage-lifecycle.js";
 import type {
   PrivateFilesystemCandidateAttachment,
-  PrivateFilesystemCandidatePersistencePort
+  PrivateFilesystemCandidatePersistencePort,
+  PrivateFilesystemPublicationLockPort
 } from "../../application/src/assets/private-filesystem-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
@@ -71,7 +72,7 @@ type CandidateAuthorityRow = DescriptorRow & Readonly<{
 }>;
 
 export interface PostgresDurableFilesystemRepository
-  extends PrivateFilesystemCandidatePersistencePort {
+  extends PrivateFilesystemCandidatePersistencePort, PrivateFilesystemPublicationLockPort {
   journal: DurableFilesystemJournalPort;
   issuePublicationCandidate(
     reservation: ReservedFilesystemOperation,
@@ -429,6 +430,34 @@ async function cleanupPathFenced(
 export function createPostgresDurableFilesystemRepository(
   pool: DatabasePool,
 ): PostgresDurableFilesystemRepository {
+  const withPublicationContentLocks: PrivateFilesystemPublicationLockPort["withPublicationContentLocks"] = async (
+    contentHashes,
+    work,
+  ) => {
+    const hashes = [...new Set(contentHashes)].sort();
+    if (hashes.length === 0 || hashes.some((contentHash) => !/^[0-9a-f]{64}$/u.test(contentHash))) {
+      throw new Error("durable_filesystem_content_hash_invalid");
+    }
+    const client = await pool.connect();
+    try {
+      for (const contentHash of hashes) {
+        await client.query(
+          "SELECT pg_advisory_lock(hashtextextended($1,0))",
+          [`infinite-quest-nexus:asset-content:${contentHash}`],
+        );
+      }
+      return await work();
+    } finally {
+      for (const contentHash of [...hashes].reverse()) {
+        await client.query(
+          "SELECT pg_advisory_unlock(hashtextextended($1,0))",
+          [`infinite-quest-nexus:asset-content:${contentHash}`],
+        ).catch(() => undefined);
+      }
+      client.release();
+    }
+  };
+
   const reserve: DurableFilesystemJournalPort["reserve"] = async (scope, request) => {
     const operationToken = randomToken();
     const inserted = await pool.query<OperationRow>(
@@ -805,6 +834,7 @@ export function createPostgresDurableFilesystemRepository(
     persistCandidate,
     redeemCandidate,
     attachCandidate,
+    withPublicationContentLocks,
     issuePublicationCandidate,
     completePublicationCandidate,
     preparePublicationCleanup
