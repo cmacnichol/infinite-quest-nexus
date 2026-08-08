@@ -1,40 +1,19 @@
 import type { AssetFilesystemDiagnosticCode, AssetOwnerScope, AssetScope } from "./types.js";
-import type {
-  ImportOwnerScope,
-  PortableArchiveExportRetrieval,
-  PortableStagedInput
-} from "../imports/types.js";
 
 declare const durableFilesystemOperationIdBrand: unique symbol;
-declare const databaseIssuedStorageLocatorBrand: unique symbol;
 declare const assetPublicationCandidateBrand: unique symbol;
 declare const reservedFilesystemOperationBrand: unique symbol;
 declare const attachedFilesystemOperationBrand: unique symbol;
 declare const durableFilesystemRecoveryClaimBrand: unique symbol;
 declare const privateFilesystemCandidateAuthorityBrand: unique symbol;
-declare const privateFilesystemDeliveryGrantBrand: unique symbol;
-declare const privateFilesystemDeliveryGrantRequestBrand: unique symbol;
-
-/** Maximum validity of a raw, one-time private filesystem delivery capability. */
-export const PRIVATE_FILESYSTEM_DELIVERY_GRANT_MAX_LIFETIME_MS = 60_000;
 
 export type DurableFilesystemOperationId = string & Readonly<{
   [durableFilesystemOperationIdBrand]: true;
 }>;
 
-/** Database-issued and adapter-private; public asset delivery never receives it. */
-export type DatabaseIssuedStorageLocator = string & Readonly<{
-  [databaseIssuedStorageLocatorBrand]: true;
-}>;
-
 /** Filesystem-issued, immutable-identity-bound candidate for transactional attachment. */
 export type AssetPublicationCandidate = string & Readonly<{
   [assetPublicationCandidateBrand]: true;
-}>;
-
-/** Short-lived raw bearer value; persistence stores only its cryptographic hash. */
-export type PrivateFilesystemDeliveryGrant = string & Readonly<{
-  [privateFilesystemDeliveryGrantBrand]: true;
 }>;
 
 export type PrivateFilesystemIdentity = Readonly<{
@@ -94,16 +73,6 @@ export type PrivateFilesystemCandidateAuthority = Readonly<{
   [privateFilesystemCandidateAuthorityBrand]: true;
 }>;
 
-/** Exact finalized authority required before a private delivery grant is minted. */
-export type PrivateFilesystemDeliveryGrantRequest = Readonly<{
-  operation: AttachedFilesystemOperation;
-  lifecycle: "finalized";
-  candidate: AssetPublicationCandidate;
-  descriptor: PrivateStorageDescriptor;
-  expiresAt: string;
-  [privateFilesystemDeliveryGrantRequestBrand]: true;
-}>;
-
 /** Opaque journal-issued authority fenced to one operation work version and lease. */
 export type DurableFilesystemRecoveryClaim = Readonly<{
   operationId: DurableFilesystemOperationId;
@@ -129,7 +98,6 @@ export type DurableFilesystemAttachResult =
   | Readonly<{
     outcome: "attached";
     operation: AttachedFilesystemOperation;
-    locator: DatabaseIssuedStorageLocator;
     claim: DurableFilesystemRecoveryClaim;
   }>
   | Readonly<{ outcome: "stale" | "candidate_mismatch" }>;
@@ -169,14 +137,6 @@ export type DurableFilesystemRecoveryRecord =
     claim: DurableFilesystemRecoveryClaim;
   }>;
 
-/** Private secure-storage seam for redeeming database authority into immutable file identity. */
-export interface PrivateStorageLocatorRedemptionPort {
-  redeemStorageLocator(
-    scope: DurableFilesystemScope,
-    locator: DatabaseIssuedStorageLocator,
-  ): Promise<PrivateStorageDescriptor | null>;
-}
-
 /**
  * Durable three-phase journal. Callers reserve before filesystem mutation,
  * attach the identity-bound candidate in their transaction, then finalize
@@ -207,65 +167,9 @@ export interface DurableFilesystemJournalPort {
 
 export interface DurableFilesystemLifecycle extends DurableFilesystemJournalPort {}
 
-export type PrivateCapabilityCleanupPreparation =
-  | Readonly<{ outcome: "cleanup_required"; descriptor: PrivateStorageDescriptor }>
-  | Readonly<{ outcome: "already_cleaned" | "stale" }>;
-
 export type PrivatePublicationCleanupPreparation =
   | Readonly<{ outcome: "cleanup_required"; descriptors: readonly PrivateStorageDescriptor[] }>
   | Readonly<{ outcome: "already_cleaned" | "stale" | "lease_lost" }>;
-
-export type PrivateCapabilityCleanupCompletion = Readonly<{
-  outcome: "cleaned" | "already_cleaned" | "stale";
-}>;
-
-/**
- * Adapter-private persistence boundary. A database implementation issues the
- * opaque handles and persists only their hashes together with owner, purpose,
- * lifecycle, immutable identity, content hash, and byte length.
- */
-export interface PrivateFilesystemCapabilityPersistencePort extends PrivateStorageLocatorRedemptionPort {
-  journal: DurableFilesystemJournalPort;
-  issueStagedInput(owner: ImportOwnerScope, descriptor: PrivateStorageDescriptor): Promise<PortableStagedInput>;
-  redeemStagedInput(owner: ImportOwnerScope, stagedInput: PortableStagedInput): Promise<PrivateStorageDescriptor | null>;
-  beginStagedCleanup(
-    owner: ImportOwnerScope,
-    stagedInput: PortableStagedInput,
-  ): Promise<PrivateCapabilityCleanupPreparation>;
-  completeStagedCleanup(
-    owner: ImportOwnerScope,
-    stagedInput: PortableStagedInput,
-  ): Promise<PrivateCapabilityCleanupCompletion>;
-  issueExportRetrieval(
-    owner: ImportOwnerScope,
-    descriptor: PrivateStorageDescriptor,
-  ): Promise<PortableArchiveExportRetrieval>;
-  redeemExportRetrieval(
-    owner: ImportOwnerScope,
-    retrieval: PortableArchiveExportRetrieval,
-  ): Promise<PrivateStorageDescriptor | null>;
-  beginExportCleanup(
-    owner: ImportOwnerScope,
-    retrieval: PortableArchiveExportRetrieval,
-  ): Promise<PrivateCapabilityCleanupPreparation>;
-  completeExportCleanup(
-    owner: ImportOwnerScope,
-    retrieval: PortableArchiveExportRetrieval,
-  ): Promise<PrivateCapabilityCleanupCompletion>;
-  issuePublicationCandidate(
-    reservation: ReservedFilesystemOperation,
-    preparation: PrivatePublicationPreparation,
-  ): Promise<AssetPublicationCandidate>;
-  completePublicationCandidate(
-    reservation: ReservedFilesystemOperation,
-    candidate: AssetPublicationCandidate,
-    descriptor: PrivateStorageDescriptor,
-  ): Promise<void>;
-  preparePublicationCleanup(
-    operation: ReservedFilesystemOperation | AttachedFilesystemOperation,
-    claim: DurableFilesystemRecoveryClaim,
-  ): Promise<PrivatePublicationCleanupPreparation>;
-}
 
 function nonBlank(value: string): boolean {
   return value.trim().length > 0;
@@ -286,17 +190,6 @@ function requireFutureTimestamp(value: string, diagnostic: string): void {
   const timestamp = Date.parse(value);
   if (!nonBlank(value) || !Number.isFinite(timestamp) || timestamp <= Date.now()) {
     throw new Error(diagnostic);
-  }
-}
-
-function requireDeliveryGrantTimestamp(value: string): void {
-  const currentTime = Date.now();
-  const timestamp = Date.parse(value);
-  if (!nonBlank(value) || !Number.isFinite(timestamp) || timestamp <= currentTime) {
-    throw new Error("filesystem_delivery_grant_expired");
-  }
-  if (timestamp - currentTime > PRIVATE_FILESYSTEM_DELIVERY_GRANT_MAX_LIFETIME_MS) {
-    throw new Error("filesystem_delivery_grant_lifetime_invalid");
   }
 }
 
@@ -364,28 +257,6 @@ export function bindPrivateFilesystemCandidateAuthority(
   }) as PrivateFilesystemCandidateAuthority;
 }
 
-/** Pure validation/binding for a short-lived grant backed by finalized evidence. */
-export function bindPrivateFilesystemDeliveryGrantRequest(
-  operation: AttachedFilesystemOperation,
-  lifecycle: "finalized",
-  candidate: AssetPublicationCandidate,
-  descriptor: PrivateStorageDescriptor,
-  expiresAt: string,
-): PrivateFilesystemDeliveryGrantRequest {
-  requireOperation(operation);
-  if (lifecycle !== "finalized") throw new Error("filesystem_lifecycle_invalid");
-  if (!nonBlank(candidate)) throw new Error("filesystem_candidate_invalid");
-  requireDescriptor(descriptor);
-  requireDeliveryGrantTimestamp(expiresAt);
-  return Object.freeze({
-    operation: snapshotScope(operation),
-    lifecycle,
-    candidate,
-    descriptor: snapshotDescriptor(descriptor),
-    expiresAt
-  }) as PrivateFilesystemDeliveryGrantRequest;
-}
-
 function requireClaim(claim: DurableFilesystemRecoveryClaim): void {
   if (!nonBlank(claim.operationId)
     || !nonBlank(claim.leaseId)
@@ -413,7 +284,14 @@ export function createDurableFilesystemLifecycle(journal: DurableFilesystemJourn
     attach: async (database, reservation, candidate) => {
       requireOperation(reservation);
       if (!nonBlank(candidate)) throw new Error("filesystem_candidate_invalid");
-      return journal.attach(database, reservation, candidate);
+      const result = await journal.attach(database, reservation, candidate);
+      return result.outcome === "attached"
+        ? {
+          outcome: result.outcome,
+          operation: result.operation,
+          claim: result.claim
+        }
+        : result;
     },
     finalizeAfterCommit: async (operation, claim) => {
       requireOperation(operation);

@@ -1,27 +1,29 @@
 import type {
   AssetPublicationCandidate,
   AttachedFilesystemOperation,
-  DatabaseIssuedStorageLocator,
-  DurableFilesystemJournalPort,
   DurableFilesystemOperationId,
   DurableFilesystemRecoveryClaim,
   DurableFilesystemRecoveryRecord,
   DurableFilesystemScope,
-  PrivateFilesystemCapabilityPersistencePort,
   PrivatePublicationPreparation,
-  PrivateStorageLocatorRedemptionPort,
   PrivateStorageDescriptor,
   ReservedFilesystemOperation
-} from "./private-storage-lifecycle.js";
+} from "../../packages/application/src/assets/private-storage-lifecycle.js";
+import type {
+  DatabaseIssuedStorageLocator,
+  LegacyDurableFilesystemJournalPort,
+  LegacyPrivateFilesystemCapabilityPersistencePort,
+  LegacyPrivateStorageLocatorRedemptionPort
+} from "./legacy-private-storage-lifecycle-contracts.js";
 import type {
   ImportOwnerScope,
   PortableArchiveExportRetrieval,
   PortableStagedInput
-} from "../imports/types.js";
+} from "../../packages/application/src/imports/types.js";
 import {
   toPortableArchiveExportRetrieval,
   toPortableStagedInput
-} from "../imports/types.js";
+} from "../../packages/application/src/imports/types.js";
 
 export interface FakePublicationCandidateIssuer {
   issuePublicationCandidate(
@@ -31,8 +33,8 @@ export interface FakePublicationCandidateIssuer {
 }
 
 export type FakeDurableFilesystemLifecycle = FakePublicationCandidateIssuer
-  & PrivateStorageLocatorRedemptionPort
-  & PrivateFilesystemCapabilityPersistencePort
+  & LegacyPrivateStorageLocatorRedemptionPort
+  & LegacyPrivateFilesystemCapabilityPersistencePort
   & Readonly<{
   events(): readonly string[];
   persistedTokenHashes(): readonly string[];
@@ -191,7 +193,7 @@ export function createFakeDurableFilesystemLifecycle(): FakeDurableFilesystemLif
     return "valid";
   }
 
-  const journal: DurableFilesystemJournalPort = {
+  const journal: LegacyDurableFilesystemJournalPort = {
     async reserve(scope, request) {
       const reservation = {
         ...scope,

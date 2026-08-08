@@ -34,11 +34,11 @@ import {
   type ArchiveLimits,
   type StagedArchive
 } from "../../services/api/src/archive-io.js";
-import { createFakeDurableFilesystemLifecycle } from "../../packages/application/src/assets/private-storage-lifecycle-fake.js";
+import { createFakeDurableFilesystemLifecycle } from "../helpers/private-storage-lifecycle-fake.js";
 import {
   createPortableArchiveFilesystemAdapter as createPersistedPortableArchiveFilesystemAdapter,
   type PortableArchiveFilesystemOptions
-} from "../../services/api/src/portable-archive-filesystem-adapter.js";
+} from "../helpers/legacy-portable-archive-filesystem-adapter.js";
 import { loadRuntimeConfig } from "../../packages/database/src/config.js";
 import type { ArchiveEntry, ArchiveManifest } from "../../packages/contracts/src/archives.js";
 

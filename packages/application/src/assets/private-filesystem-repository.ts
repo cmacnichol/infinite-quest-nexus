@@ -4,14 +4,12 @@ import type {
   DurableFilesystemAttachResult,
   DurableFilesystemRecoveryClaim,
   DurableFilesystemTransactionContext,
-  PrivateFilesystemDeliveryGrant,
-  PrivateFilesystemDeliveryGrantRequest,
+  PrivatePublicationPreparation,
   PrivateStorageDescriptor,
   ReservedFilesystemOperation
 } from "./private-storage-lifecycle.js";
 
 declare const privateFilesystemCandidateAttachmentBrand: unique symbol;
-declare const privateFilesystemDeliveryGrantRedemptionBrand: unique symbol;
 
 /** Exact database and filesystem evidence consumed by durable candidate attachment. */
 export type PrivateFilesystemCandidateAttachment = Readonly<{
@@ -22,29 +20,23 @@ export type PrivateFilesystemCandidateAttachment = Readonly<{
   [privateFilesystemCandidateAttachmentBrand]: true;
 }>;
 
-/** One-time bearer redemption remains bound to the finalized request that minted it. */
-export type PrivateFilesystemDeliveryGrantRedemption = Readonly<{
-  request: PrivateFilesystemDeliveryGrantRequest;
-  grant: PrivateFilesystemDeliveryGrant;
-  [privateFilesystemDeliveryGrantRedemptionBrand]: true;
-}>;
-
 /** Adapter-private, restart-safe persistence and redemption of candidate authority. */
 export interface PrivateFilesystemCandidatePersistencePort {
+  issuePublicationCandidate(
+    reservation: ReservedFilesystemOperation,
+    preparation: PrivatePublicationPreparation,
+  ): Promise<AssetPublicationCandidate>;
+  completePublicationCandidate(
+    reservation: ReservedFilesystemOperation,
+    candidate: AssetPublicationCandidate,
+    descriptor: PrivateStorageDescriptor,
+  ): Promise<void>;
   persistCandidate(attachment: PrivateFilesystemCandidateAttachment): Promise<void>;
   redeemCandidate(attachment: PrivateFilesystemCandidateAttachment): Promise<PrivateStorageDescriptor | null>;
   attachCandidate(
     database: DurableFilesystemTransactionContext,
     attachment: PrivateFilesystemCandidateAttachment,
   ): Promise<DurableFilesystemAttachResult>;
-}
-
-/** Adapter-private, hashed-at-rest issuance and one-time redemption of delivery grants. */
-export interface PrivateFilesystemDeliveryGrantPersistencePort {
-  issueDeliveryGrant(request: PrivateFilesystemDeliveryGrantRequest): Promise<PrivateFilesystemDeliveryGrant>;
-  redeemDeliveryGrant(
-    redemption: PrivateFilesystemDeliveryGrantRedemption,
-  ): Promise<PrivateStorageDescriptor | null>;
 }
 
 function nonBlank(value: string): boolean {
@@ -159,27 +151,4 @@ export function bindPrivateFilesystemCandidateAttachment(
     descriptor: snapshotDescriptor(descriptor),
     claim: snapshotClaim(claim)
   }) as PrivateFilesystemCandidateAttachment;
-}
-
-export function bindPrivateFilesystemDeliveryGrantRedemption(
-  request: PrivateFilesystemDeliveryGrantRequest,
-  grant: PrivateFilesystemDeliveryGrant,
-): PrivateFilesystemDeliveryGrantRedemption {
-  requireOperation(request.operation);
-  if (request.lifecycle !== "finalized") throw new Error("filesystem_lifecycle_invalid");
-  if (!nonBlank(request.candidate) || !nonBlank(grant)) {
-    throw new Error("filesystem_delivery_grant_invalid");
-  }
-  requireDescriptor(request.descriptor);
-  if (!nonBlank(request.expiresAt) || Date.parse(request.expiresAt) <= Date.now()) {
-    throw new Error("filesystem_delivery_grant_expired");
-  }
-  const requestSnapshot = Object.freeze({
-    operation: snapshotOperation(request.operation),
-    lifecycle: "finalized" as const,
-    candidate: request.candidate,
-    descriptor: snapshotDescriptor(request.descriptor),
-    expiresAt: request.expiresAt
-  }) as PrivateFilesystemDeliveryGrantRequest;
-  return Object.freeze({ request: requestSnapshot, grant }) as PrivateFilesystemDeliveryGrantRedemption;
 }

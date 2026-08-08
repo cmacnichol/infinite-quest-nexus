@@ -20,13 +20,13 @@ import { Readable } from "node:stream";
 import { once } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ArchiveEntry, ArchiveManifest } from "../../packages/contracts/src/archives.js";
-import { createFakeDurableFilesystemLifecycle } from "../../packages/application/src/assets/private-storage-lifecycle-fake.js";
+import { createFakeDurableFilesystemLifecycle } from "../helpers/private-storage-lifecycle-fake.js";
 import type { ArchiveLimits } from "../../services/api/src/archive-io.js";
 import {
   createPortableArchiveFilesystemAdapter as createPersistedPortableArchiveFilesystemAdapter,
   type PortableArchiveFilesystemOptions,
   type SafeFilesystemCapabilityFailure
-} from "../../services/api/src/portable-archive-filesystem-adapter.js";
+} from "../helpers/legacy-portable-archive-filesystem-adapter.js";
 
 const owner = { ownerUserId: "11111111-1111-4111-8111-111111111111" };
 const foreignOwner = { ownerUserId: "22222222-2222-4222-8222-222222222222" };

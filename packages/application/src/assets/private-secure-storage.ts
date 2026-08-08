@@ -8,6 +8,7 @@ import type {
 declare const privatePrewriteNodeAuthorityBrand: unique symbol;
 declare const privatePrewriteCleanupPreparationBrand: unique symbol;
 declare const privateBoundedStreamLimitsBrand: unique symbol;
+declare const legacyPathV1PreviewDescriptorBrand: unique symbol;
 
 export type PrivateFilesystemNodeIdentity = Readonly<{
   deviceId: string;
@@ -77,6 +78,16 @@ export interface PrivateBoundedStreamSession {
   readonly chunks: AsyncIterable<Uint8Array>;
   finalize(reason: PrivateStreamTerminalReason): Promise<void>;
 }
+
+/** Server-derived compatibility descriptor. It is read-only and never reaped. */
+export type LegacyPathV1PreviewDescriptor = Readonly<{
+  kind: "legacy_path_v1";
+  relativePath: string;
+  contentType: "application/zip" | "application/json";
+  contentHash: string;
+  byteLength: number;
+  [legacyPathV1PreviewDescriptorBrand]: true;
+}>;
 
 function nonBlank(value: string): boolean {
   return value.trim().length > 0;
@@ -167,4 +178,26 @@ export function bindPrivateBoundedStreamLimits(input: Readonly<{
     chunkBytes,
     deadlineAt: input.deadlineAt
   }) as PrivateBoundedStreamLimits;
+}
+
+export function bindLegacyPathV1PreviewDescriptor(input: Readonly<{
+  relativePath: string;
+  contentType: "application/zip" | "application/json";
+  contentHash: string;
+  byteLength: number;
+}>): LegacyPathV1PreviewDescriptor {
+  requireRelativePath(input.relativePath);
+  if (!["application/zip", "application/json"].includes(input.contentType)
+    || !/^[0-9a-f]{64}$/u.test(input.contentHash)
+    || !Number.isSafeInteger(input.byteLength)
+    || input.byteLength < 0) {
+    throw new Error("legacy_path_v1_descriptor_invalid");
+  }
+  return Object.freeze({
+    kind: "legacy_path_v1" as const,
+    relativePath: input.relativePath,
+    contentType: input.contentType,
+    contentHash: input.contentHash,
+    byteLength: input.byteLength
+  }) as LegacyPathV1PreviewDescriptor;
 }

@@ -1,0 +1,50 @@
+import { describe, expect, it } from "vitest";
+// @ts-expect-error The executable repository checker is intentionally plain ESM.
+import { checkPrivateStorageBoundaries } from "../../scripts/check-private-storage-boundaries.mjs";
+
+describe("private storage repository boundary guard", () => {
+  it("rejects retired seam symbols and production imports of historical test helpers", () => {
+    expect(checkPrivateStorageBoundaries(
+      "services/api/src/example.ts",
+      `import type { PrivateFilesystemCapabilityPersistencePort, PrivateFilesystemDeliveryGrantPersistencePort, DatabaseIssuedStorageLocator } from "../../../packages/application/src/assets/private-storage-lifecycle.js";
+       export function redeem(value: PrivateFilesystemCapabilityPersistencePort, raw: PrivateFilesystemDeliveryGrantPersistencePort, locator: DatabaseIssuedStorageLocator) {
+         void raw.issueDeliveryGrant;
+         return value.redeemStorageLocator(scope, locator);
+       }`,
+    )).toEqual(expect.arrayContaining([
+      expect.stringContaining("PrivateFilesystemCapabilityPersistencePort"),
+      expect.stringContaining("PrivateFilesystemDeliveryGrantPersistencePort"),
+      expect.stringContaining("DatabaseIssuedStorageLocator"),
+      expect.stringContaining("issueDeliveryGrant"),
+      expect.stringContaining("redeemStorageLocator")
+    ]));
+    expect(checkPrivateStorageBoundaries(
+      "packages/application/src/example.ts",
+      `import { helper } from "../../../tests/helpers/legacy-private-storage-lifecycle-contracts.js";`,
+    )).toEqual([
+      expect.stringContaining("production source must not import historical storage helpers")
+    ]);
+    for (const source of [
+      `export * from "../../../tests/helpers/legacy-private-storage-lifecycle-contracts.js";`,
+      `export { helper } from "../../../tests/helpers/legacy-portable-archive-filesystem-adapter.js";`,
+      `export const helper = import("../../../tests/helpers/private-storage-lifecycle-fake.js");`,
+      `export const helper = require("../../../tests/helpers/private-storage-lifecycle-fake.js");`
+    ]) {
+      expect(checkPrivateStorageBoundaries("services/api/src/example.ts", source)).toEqual([
+        expect.stringContaining("production source must not import historical storage helpers")
+      ]);
+    }
+  });
+
+  it("allows the explicit new private ports and historical helpers inside tests", () => {
+    expect(checkPrivateStorageBoundaries(
+      "services/api/src/example.ts",
+      `import type { PrivateAtomicPortableIssuancePort } from "../../../packages/application/src/imports/private-portable-authority.js";
+       export const value = null as unknown as PrivateAtomicPortableIssuancePort;`,
+    )).toEqual([]);
+    expect(checkPrivateStorageBoundaries(
+      "tests/helpers/example.ts",
+      `export interface PrivateFilesystemCapabilityPersistencePort {}`,
+    )).toEqual([]);
+  });
+});

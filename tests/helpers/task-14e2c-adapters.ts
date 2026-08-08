@@ -8,10 +8,14 @@ import type {
   AttachedFilesystemOperation,
   DurableFilesystemRecoveryClaim,
   DurableFilesystemOperationId,
-  PrivateFilesystemCapabilityPersistencePort,
   PrivateStorageDescriptor,
   ReservedFilesystemOperation
 } from "../../packages/application/src/assets/private-storage-lifecycle.js";
+import type {
+  DatabaseIssuedStorageLocator,
+  LegacyDurableFilesystemJournalPort,
+  LegacyPrivateFilesystemCapabilityPersistencePort
+} from "./legacy-private-storage-lifecycle-contracts.js";
 import type {
   ImportOwnerScope,
   PortableArchiveExportRetrieval,
@@ -40,7 +44,7 @@ import { withTransaction, type DatabaseClient, type DatabasePool } from "../../p
 import {
   createPortableArchiveFilesystemAdapter,
   type PortableArchiveFilesystemAdapter
-} from "../../services/api/src/portable-archive-filesystem-adapter.js";
+} from "./legacy-portable-archive-filesystem-adapter.js";
 import {
   rehydratePersistedAnchoredStagedArchive,
   releaseAnchoredStagedArchive,
@@ -136,11 +140,9 @@ export type Task14e2cAdapters = Readonly<{
       failBeforeDomainCommit?: boolean;
       simulateCrashAfterAttach?: boolean;
       failFinalizedTransitionAfterDomainCommit?: boolean;
-      captureAttachedLocator?: (
-        locator: import("../../packages/application/src/assets/private-storage-lifecycle.js").DatabaseIssuedStorageLocator,
-      ) => void;
+      captureAttachedLocator?: (locator: DatabaseIssuedStorageLocator) => void;
     }>): Promise<Readonly<{
-      locator: import("../../packages/application/src/assets/private-storage-lifecycle.js").DatabaseIssuedStorageLocator;
+      locator: DatabaseIssuedStorageLocator;
       relativePath: string;
       width: number;
       height: number;
@@ -380,8 +382,21 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
     return attached;
   }
 
-  const persistence: PrivateFilesystemCapabilityPersistencePort = {
-    journal: durable.journal,
+  const legacyJournal: LegacyDurableFilesystemJournalPort = {
+    ...durable.journal,
+    async attach(database, reservation, publicationCandidate) {
+      const result = await durable.journal.attach(database, reservation, publicationCandidate);
+      return result.outcome === "attached"
+        ? {
+          ...result,
+          locator: result.operation.operationId as unknown as DatabaseIssuedStorageLocator
+        }
+        : result;
+    }
+  };
+
+  const persistence: LegacyPrivateFilesystemCapabilityPersistencePort = {
+    journal: legacyJournal,
 
     async issueStagedInput(owner, descriptor) {
       const pending = reservationContext.getStore();
@@ -531,8 +546,45 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
       return durable.preparePublicationCleanup(operation, claim);
     },
 
-    redeemStorageLocator(scope, locator) {
-      return durable.redeemStorageLocator(scope, locator);
+    async redeemStorageLocator(scope, locator) {
+      const selected = await options.pool.query<{
+        resource_kind: "asset" | "portable";
+        asset_id: string | null;
+        operation_scope_hash: string | null;
+        relative_path: string;
+        device_id: string;
+        file_id: string;
+        change_token: string;
+        content_hash: string;
+        byte_length: string;
+      }>(
+        `SELECT operation.resource_kind,operation.asset_id,operation.operation_scope_hash,
+                descriptor.relative_path,descriptor.device_id,descriptor.file_id,
+                descriptor.change_token,descriptor.content_hash,descriptor.byte_length::text
+           FROM durable_filesystem_operations operation
+           JOIN durable_filesystem_descriptors descriptor
+             ON descriptor.operation_id=operation.id
+            AND descriptor.owner_user_id=operation.owner_user_id
+            AND descriptor.descriptor_role='delivery'
+          WHERE operation.owner_user_id=$1 AND operation.id=$2
+            AND operation.lifecycle='finalized'`,
+        [scope.ownerUserId, locator]
+      );
+      const row = selected.rows.find((value) => scope.resourceKind === "asset"
+        ? value.resource_kind === "asset" && value.asset_id === scope.assetId
+        : value.resource_kind === "portable"
+          && (value.operation_scope_hash === scope.operationScopeId
+            || value.operation_scope_hash === sha256(scope.operationScopeId)));
+      return row ? {
+        relativePath: row.relative_path,
+        identity: {
+          deviceId: row.device_id,
+          fileId: row.file_id,
+          changeToken: row.change_token
+        },
+        contentHash: row.content_hash,
+        byteLength: Number(row.byte_length)
+      } : null;
     }
   };
 
@@ -600,7 +652,8 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
             throw new Task14e2cSimulatedCrash("task_14e2c_simulated_image_crash");
           }
           domainCommitted = true;
-          input.captureAttachedLocator?.(attached.locator);
+          const legacyLocator = attached.operation.operationId as unknown as DatabaseIssuedStorageLocator;
+          input.captureAttachedLocator?.(legacyLocator);
           if (input.failFinalizedTransitionAfterDomainCommit) {
             throw new Error("task_14e2c_forced_image_finalize_failure");
           }
@@ -610,7 +663,7 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
           }
           const verified = await filesystem.readPublishedAsset({
             scope: { resourceKind: "asset", ownerUserId: input.ownerUserId, assetId: input.assetId },
-            locator: attached.locator,
+            locator: legacyLocator,
             mimeType: input.mimeType,
             maximumBytes: options.limits.maxOriginalImageBytes
           });
@@ -629,7 +682,7 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
           );
           candidateDescriptors.delete(candidate);
           return {
-            locator: attached.locator,
+            locator: legacyLocator,
             relativePath: descriptor.relativePath,
             width: verified.width,
             height: verified.height,

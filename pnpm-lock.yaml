@@ -60,6 +60,9 @@ importers:
         specifier: ^4.0.17
         version: 4.4.3
     devDependencies:
+      '@babel/parser':
+        specifier: 7.29.7
+        version: 7.29.7
       '@infinite-quest/contracts':
         specifier: workspace:*
         version: link:packages/contracts

@@ -277,7 +277,11 @@ integration("Task 14e3b2c private portable repository", () => {
       descriptor: staged.descriptor
     });
     expect(exportRehydration).toMatchObject({
-      identity: { exportScope: exported.scope, retrieval: exported.retrieval },
+      identity: {
+        exportScope: exported.scope,
+        retrieval: exported.retrieval,
+        contentType: "application/zip"
+      },
       operation: { operationId: exported.operation.operationId, purpose: "portable_export" },
       descriptor: exported.descriptor
     });

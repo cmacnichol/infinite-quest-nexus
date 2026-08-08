@@ -3,16 +3,12 @@ import type * as PublicAssetContracts from "../../packages/application/src/asset
 import type * as PublicImportContracts from "../../packages/application/src/imports/index.js";
 import {
   bindPrivateFilesystemCandidateAttachment,
-  bindPrivateFilesystemDeliveryGrantRedemption,
-  type PrivateFilesystemCandidatePersistencePort,
-  type PrivateFilesystemDeliveryGrantPersistencePort
+  type PrivateFilesystemCandidatePersistencePort
 } from "../../packages/application/src/assets/private-filesystem-repository.js";
 import type {
   AssetPublicationCandidate,
   AttachedFilesystemOperation,
   DurableFilesystemRecoveryClaim,
-  PrivateFilesystemDeliveryGrant,
-  PrivateFilesystemDeliveryGrantRequest,
   PrivateStorageDescriptor,
   ReservedFilesystemOperation
 } from "../../packages/application/src/assets/private-storage-lifecycle.js";
@@ -36,8 +32,6 @@ const exportRetrieval = "export-secret" as PortableArchiveExportRetrieval;
 
 // @ts-expect-error Candidate persistence must remain adapter-private.
 type LeakedCandidatePort = PublicAssetContracts.PrivateFilesystemCandidatePersistencePort;
-// @ts-expect-error Delivery-grant persistence must remain adapter-private.
-type LeakedDeliveryPort = PublicAssetContracts.PrivateFilesystemDeliveryGrantPersistencePort;
 // @ts-expect-error Portable cleanup persistence must remain adapter-private.
 type LeakedPortablePort = PublicImportContracts.PrivatePortableRepositoryPort;
 
@@ -134,30 +128,15 @@ describe("Task 14e3b2a private repository contracts", () => {
     }
   });
 
-  it("requires persistence and one-time delivery redemption to consume bound authority", () => {
+  it("requires candidate persistence to consume bound authority", () => {
     const candidates = null as unknown as PrivateFilesystemCandidatePersistencePort;
-    const grants = null as unknown as PrivateFilesystemDeliveryGrantPersistencePort;
-    const request = {
-      operation: attached("portable_export"),
-      lifecycle: "finalized",
-      candidate,
-      descriptor,
-      expiresAt: "2099-01-01T00:00:00.000Z"
-    } as PrivateFilesystemDeliveryGrantRequest;
-    const grant = "delivery-secret" as PrivateFilesystemDeliveryGrant;
 
     if (false) {
       // @ts-expect-error Candidate persistence requires the exact attachment, including a fresh claim.
       void candidates.persistCandidate(reservation("portable_staging"), candidate, descriptor);
       // @ts-expect-error Candidate attachment cannot use a bare reservation and candidate.
       void candidates.attachCandidate({}, reservation("portable_staging"), candidate);
-      // @ts-expect-error Grant redemption consumes a bound request plus the one-time bearer.
-      void grants.redeemDeliveryGrant({ ownerUserId }, grant);
     }
-
-    const redemption = bindPrivateFilesystemDeliveryGrantRedemption(request, grant);
-    expect(redemption).toEqual({ request, grant });
-    expect(Object.isFrozen(redemption)).toBe(true);
   });
 
   it("carries the same fresh claim, exact staged identity, and descriptors through cleanup acknowledgement", () => {
@@ -209,7 +188,7 @@ describe("Task 14e3b2a private repository contracts", () => {
       vi.setSystemTime("2026-08-08T12:00:00.000Z");
       const operation = attached("portable_export");
       const rehydrated = bindPrivatePortableExportRehydration(
-        { exportScope, retrieval: exportRetrieval },
+        { exportScope, retrieval: exportRetrieval, contentType: "application/zip" },
         operation,
         claim(operation.operationId),
         descriptor,
@@ -229,6 +208,7 @@ describe("Task 14e3b2a private repository contracts", () => {
       const port = null as unknown as PrivatePortableRepositoryPort;
 
       expect(rehydrated.identity.exportScope).toEqual(exportScope);
+      expect(rehydrated.identity.contentType).toBe("application/zip");
       expect(preparation.identity).toMatchObject({
         ownerUserId,
         filesystemOperationId: operation.operationId,
@@ -241,18 +221,29 @@ describe("Task 14e3b2a private repository contracts", () => {
       expect(() => bindPrivatePortableExportRehydration(
         {
           exportScope: { ...exportScope, worldVersionId: "" },
-          retrieval: exportRetrieval
+          retrieval: exportRetrieval,
+          contentType: "application/zip"
         },
         operation,
         claim(operation.operationId),
         descriptor,
       )).toThrow("portable_export_scope_invalid");
       expect(() => bindPrivatePortableExportRehydration(
-        { exportScope: { ...exportScope, ownerUserId: "foreign-owner" }, retrieval: exportRetrieval },
+        {
+          exportScope: { ...exportScope, ownerUserId: "foreign-owner" },
+          retrieval: exportRetrieval,
+          contentType: "application/zip"
+        },
         operation,
         claim(operation.operationId),
         descriptor,
       )).toThrow("filesystem_scope_invalid");
+      expect(() => bindPrivatePortableExportRehydration(
+        { exportScope, retrieval: exportRetrieval, contentType: "application/json" },
+        operation,
+        claim(operation.operationId),
+        descriptor,
+      )).toThrow("portable_export_identity_invalid");
 
       if (false) {
         // @ts-expect-error Export retrieval cannot use owner scope in place of PortableExportScope.

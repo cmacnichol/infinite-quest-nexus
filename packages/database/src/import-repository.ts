@@ -140,6 +140,7 @@ type PortableExportAuthorityRow = Readonly<{
   campaign_id: string | null;
   world_id: string;
   world_version_id: string;
+  content_type: "application/zip" | "application/json";
   status: "ready" | "consumed" | "expired" | "failed" | "cleanup_pending" | "cleaned";
   artifact_content_hash: string;
   artifact_byte_length: string;
@@ -1267,7 +1268,7 @@ async function lockedExportAuthority(
   const selected = await client.query<PortableExportAuthorityRow>(
     `SELECT id AS artifact_id,owner_user_id AS artifact_owner_user_id,
             retrieval_token_hash,filesystem_operation_id,export_kind,campaign_id,
-            world_id,world_version_id,status,content_hash AS artifact_content_hash,
+            world_id,world_version_id,content_type,status,content_hash AS artifact_content_hash,
             byte_length::text AS artifact_byte_length,expires_at AS artifact_expires_at
        FROM portable_export_artifacts
       WHERE id=$1 AND owner_user_id=$2 AND filesystem_operation_id=$3
@@ -1287,7 +1288,12 @@ async function lockedExportAuthority(
     ]
   );
   await databaseClock(client);
-  return selected.rows[0] ?? null;
+  const row = selected.rows[0] ?? null;
+  if (!row) return null;
+  const expectedContentType = row.export_kind === "campaign_zip"
+    ? "application/zip"
+    : "application/json";
+  return row.content_type === expectedContentType ? row : null;
 }
 
 async function rehydrateStagedInput(
@@ -1374,7 +1380,7 @@ async function rehydrateExportArtifact(
     if (!claimed) return null;
     const delivery = descriptors[descriptors.length - 1]!;
     return bindPrivatePortableExportRehydration(
-      { exportScope: scope, retrieval },
+      { exportScope: scope, retrieval, contentType: artifact.content_type },
       portableOperation(claimed),
       portableClaim(claimed),
       delivery,

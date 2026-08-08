@@ -15,12 +15,6 @@ import type {
   TurnAssetSelectionScope,
   WorldAssetSelectionScope
 } from "../../application/src/assets/index.js";
-import type {
-  DatabaseIssuedStorageLocator,
-  DurableFilesystemScope,
-  PrivateStorageDescriptor,
-  PrivateStorageLocatorRedemptionPort
-} from "../../application/src/assets/private-storage-lifecycle.js";
 import { stableStringify } from "../../domain/src/text.js";
 import { selectAssetDeliveryRow } from "./asset-delivery-selection.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
@@ -926,53 +920,6 @@ export function createPostgresAssetRepositories(pool: DatabasePool): AssetApplic
       async describeAssetDelivery(scope, request) {
         return safeRepositoryCall(() => deliveryDescriptor(pool, scope.ownerUserId, scope.assetId, request));
       }
-    }
-  };
-}
-
-/** Adapter-private redemption of a database-issued locator into immutable storage identity. */
-export function createPostgresAssetStorageLocatorRedemptionRepository(
-  pool: DatabasePool,
-): PrivateStorageLocatorRedemptionPort {
-  return {
-    async redeemStorageLocator(scope: DurableFilesystemScope, locator: DatabaseIssuedStorageLocator) {
-      return safeRepositoryCall(async (): Promise<PrivateStorageDescriptor | null> => {
-        if (scope.resourceKind !== "asset") return null;
-        const result = await pool.query<{
-          relative_path: string;
-          device_id: string;
-          file_id: string;
-          change_token: string;
-          content_hash: string;
-          byte_length: string;
-        }>(
-          `SELECT descriptor.relative_path, descriptor.device_id, descriptor.file_id,
-                  descriptor.change_token, descriptor.content_hash, descriptor.byte_length::text
-             FROM durable_filesystem_operations operation
-             JOIN durable_filesystem_descriptors descriptor
-               ON descriptor.operation_id=operation.id
-              AND descriptor.owner_user_id=operation.owner_user_id
-              AND descriptor.descriptor_role='delivery'
-            WHERE operation.owner_user_id=$1 AND operation.asset_id=$2
-              AND operation.resource_kind='asset'
-              AND operation.purpose IN ('asset_original','asset_derivative')
-              AND operation.lifecycle='finalized'
-              AND operation.locator_token_hash=$3
-            LIMIT 1`,
-          [scope.ownerUserId, scope.assetId, sha256(locator)]
-        );
-        const row = result.rows[0];
-        return row ? {
-          relativePath: row.relative_path,
-          identity: {
-            deviceId: row.device_id,
-            fileId: row.file_id,
-            changeToken: row.change_token
-          },
-          contentHash: row.content_hash,
-          byteLength: Number(row.byte_length)
-        } : null;
-      });
     }
   };
 }

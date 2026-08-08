@@ -32,6 +32,7 @@ export type PrivatePortableStagedIdentity = Readonly<{
 export type PrivatePortableExportIdentity = Readonly<{
   exportScope: PortableExportScope;
   retrieval: PortableArchiveExportRetrieval;
+  contentType: "application/zip" | "application/json";
 }>;
 
 export type PrivatePortableStagedCleanupIdentity = Readonly<{
@@ -265,13 +266,19 @@ export function bindPrivatePortableExportRehydration(
   descriptor: PrivateStorageDescriptor,
 ): PrivatePortableExportRehydration {
   requireExportScope(identity.exportScope);
-  if (!nonBlank(identity.retrieval)) throw new Error("portable_export_identity_invalid");
+  const expectedContentType = identity.exportScope.exportKind === "campaign_zip"
+    ? "application/zip"
+    : "application/json";
+  if (!nonBlank(identity.retrieval) || identity.contentType !== expectedContentType) {
+    throw new Error("portable_export_identity_invalid");
+  }
   requireOperation(operation, identity.exportScope.ownerUserId, "portable_export");
   requireFreshClaim(operation, claim);
   return Object.freeze({
     identity: Object.freeze({
       exportScope: Object.freeze({ ...identity.exportScope }),
-      retrieval: identity.retrieval
+      retrieval: identity.retrieval,
+      contentType: identity.contentType
     }),
     operation: snapshotOperation(operation),
     claim: snapshotClaim(claim),

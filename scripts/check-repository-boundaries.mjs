@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { checkClientBoundaries } from "./check-client-boundaries.mjs";
+import { checkPrivateStorageBoundaries } from "./check-private-storage-boundaries.mjs";
 
 const output = execFileSync(
   "git",
@@ -112,6 +113,7 @@ for (const file of files) {
   }
 
   if (activeCode.test(normalized)) checkBrowserNetworkCalls(normalized, text);
+  violations.push(...checkPrivateStorageBoundaries(normalized, text));
 }
 
 for (const migrationFile of LEGACY_MIGRATION_ALLOWLIST) {

@@ -22,10 +22,9 @@ import type * as PublicImportContracts from "../../packages/application/src/impo
 import {
   createFakeDurableFilesystemLifecycle,
   type FakePublicationCandidateIssuer
-} from "../../packages/application/src/assets/private-storage-lifecycle-fake.js";
+} from "../helpers/private-storage-lifecycle-fake.js";
 import {
   createDurableFilesystemLifecycle,
-  type DatabaseIssuedStorageLocator,
   type DurableFilesystemRecoveryClaim,
   type DurableFilesystemTransactionContext,
   type PrivateStorageDescriptor
@@ -361,13 +360,12 @@ describe("14e1R2 private durable filesystem lifecycle", () => {
 
     expect(attached.outcome).toBe("attached");
     if (attached.outcome !== "attached") throw new Error("expected attached outcome");
-    const locator: DatabaseIssuedStorageLocator = attached.locator;
     const claim: DurableFilesystemRecoveryClaim = attached.claim;
     // @ts-expect-error Finalization requires the opaque fenced claim issued for this operation version.
     const missingClaim: Parameters<typeof lifecycle.finalizeAfterCommit> = [attached.operation];
     await expect(lifecycle.completeCleanup(attached.operation, claim)).resolves.toEqual({ outcome: "stale" });
     await expect(lifecycle.finalizeAfterCommit(attached.operation, claim)).resolves.toEqual({ outcome: "finalized" });
-    await expect(fake.redeemStorageLocator(scope, locator)).resolves.toEqual(descriptor);
+    expect(attached).not.toHaveProperty("locator");
     expect(fake.events()).toEqual(["reserved", "candidate_issued", "attached", "finalized"]);
     expect(invalidFinalizeInput.operationId).toBe(reservation.operationId);
     void missingClaim;

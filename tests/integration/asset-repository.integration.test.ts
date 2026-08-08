@@ -8,15 +8,8 @@ import {
   type AssetMetadataBackfillClaim,
   type AssetTransactionContext
 } from "../../packages/application/src/assets/index.js";
-import type {
-  DatabaseIssuedStorageLocator,
-  DurableFilesystemScope
-} from "../../packages/application/src/assets/private-storage-lifecycle.js";
 import { assetListQuerySchema } from "../../packages/contracts/src/assets.js";
-import {
-  createPostgresAssetRepositories,
-  createPostgresAssetStorageLocatorRedemptionRepository
-} from "../../packages/database/src/asset-repository.js";
+import { createPostgresAssetRepositories } from "../../packages/database/src/asset-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
@@ -210,47 +203,6 @@ integration("PostgreSQL asset repository", () => {
        VALUES ($1,$2,$3,$4,$5)`,
       [ownerUserId, assetId, fixture.campaignId, fixture.turnId, role]
     );
-  }
-
-  async function durableLocator(
-    target: AssetFixture,
-    purpose: "asset_original" | "asset_derivative",
-    relativePath: string,
-    byteLength: number,
-    contentHash: string,
-    finalized = true,
-  ): Promise<string> {
-    const locator = `locator-${crypto.randomUUID()}`;
-    const candidate = `candidate-${crypto.randomUUID()}`;
-    const inserted = await pool.query<{ id: string }>(
-      `INSERT INTO durable_filesystem_operations (
-         owner_user_id, operation_token_hash, purpose, resource_kind, asset_id,
-         lease_id, lease_owner, lease_expires_at, expires_at
-       ) VALUES ($1,$2,$3,'asset',$4,gen_random_uuid(),'asset-repository-test',now()+interval '5 minutes',now()+interval '1 hour')
-       RETURNING id`,
-      [ownerUserId, hash(`operation-${crypto.randomUUID()}`), purpose, target.assetId]
-    );
-    const operationId = inserted.rows[0]!.id;
-    await pool.query(
-      `UPDATE durable_filesystem_operations
-          SET lifecycle='attached', candidate_token_hash=$2, locator_token_hash=$3, attached_at=now()
-        WHERE id=$1`,
-      [operationId, hash(candidate), hash(locator)]
-    );
-    await pool.query(
-      `INSERT INTO durable_filesystem_descriptors (
-         operation_id, owner_user_id, descriptor_role, ordinal, relative_path,
-         device_id, file_id, change_token, content_hash, byte_length
-       ) VALUES ($1,$2,'delivery',0,$3,'dev-1',$4,'change-1',$5,$6)`,
-      [operationId, ownerUserId, relativePath, `file-${crypto.randomUUID()}`, contentHash, byteLength]
-    );
-    if (finalized) {
-      await pool.query(
-        "UPDATE durable_filesystem_operations SET lifecycle='finalized', finalized_at=now() WHERE id=$1",
-        [operationId]
-      );
-    }
-    return locator;
   }
 
   it("preserves the complete filtered list, facet, sort, cursor, metadata, and context projection", async () => {
@@ -731,50 +683,6 @@ integration("PostgreSQL asset repository", () => {
       byteLength: 128,
       etag: withoutThumbnail.contentHash
     });
-  });
-
-  it("redeems finalized original and derivative locators only for their database-owned asset scope", async () => {
-    const target = await asset();
-    const originalLocator = await durableLocator(
-      target,
-      "asset_original",
-      `originals/${target.contentHash}.png`,
-      128,
-      target.contentHash
-    );
-    const thumbnailHash = hash(`thumbnail-locator-${crypto.randomUUID()}`);
-    const derivativeLocator = await durableLocator(
-      target,
-      "asset_derivative",
-      `derivatives/${thumbnailHash}.webp`,
-      64,
-      thumbnailHash
-    );
-    const attachedLocator = await durableLocator(
-      target,
-      "asset_derivative",
-      `derivatives/attached-${thumbnailHash}.webp`,
-      64,
-      thumbnailHash,
-      false
-    );
-    const redemption = createPostgresAssetStorageLocatorRedemptionRepository(pool);
-    const scope: DurableFilesystemScope = { ownerUserId, resourceKind: "asset", assetId: target.assetId };
-
-    await expect(redemption.redeemStorageLocator(scope, originalLocator as DatabaseIssuedStorageLocator))
-      .resolves.toMatchObject({ relativePath: `originals/${target.contentHash}.png`, contentHash: target.contentHash, byteLength: 128 });
-    await expect(redemption.redeemStorageLocator(scope, derivativeLocator as DatabaseIssuedStorageLocator))
-      .resolves.toMatchObject({ relativePath: `derivatives/${thumbnailHash}.webp`, contentHash: thumbnailHash, byteLength: 64 });
-    await expect(redemption.redeemStorageLocator(
-      { ownerUserId: crypto.randomUUID(), resourceKind: "asset", assetId: target.assetId },
-      originalLocator as DatabaseIssuedStorageLocator
-    )).resolves.toBeNull();
-    await expect(redemption.redeemStorageLocator(
-      { ownerUserId, resourceKind: "asset", assetId: crypto.randomUUID() },
-      originalLocator as DatabaseIssuedStorageLocator
-    )).resolves.toBeNull();
-    await expect(redemption.redeemStorageLocator(scope, attachedLocator as DatabaseIssuedStorageLocator))
-      .resolves.toBeNull();
   });
 
   it("uses SKIP LOCKED to bypass a transaction-locked first job and derives owner from each claimed row", async () => {

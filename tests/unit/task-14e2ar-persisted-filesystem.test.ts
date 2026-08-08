@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createFakeDurableFilesystemLifecycle } from "../../packages/application/src/assets/private-storage-lifecycle-fake.js";
+import { createFakeDurableFilesystemLifecycle } from "../helpers/private-storage-lifecycle-fake.js";
 import type {
   DurableFilesystemJournalPort,
   DurableFilesystemScope,
@@ -25,7 +25,8 @@ import type { ImportOwnerScope } from "../../packages/application/src/imports/ty
 import {
   createPortableArchiveFilesystemAdapter,
   type SafeFilesystemCapabilityFailure
-} from "../../services/api/src/portable-archive-filesystem-adapter.js";
+} from "../helpers/legacy-portable-archive-filesystem-adapter.js";
+import type { LegacyDurableFilesystemJournalPort } from "../helpers/legacy-private-storage-lifecycle-contracts.js";
 import {
   writeArchiveArtifact,
   type ArchiveLimits
@@ -403,7 +404,7 @@ describe("Task 14e2aR persisted filesystem capability", () => {
     const fail = async () => {
       throw new Error(privateFailure);
     };
-    const hostileJournal: DurableFilesystemJournalPort = {
+    const hostileJournal: LegacyDurableFilesystemJournalPort = {
       reserve: fail,
       attach: fail,
       finalizeAfterCommit: fail,

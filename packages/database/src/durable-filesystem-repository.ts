@@ -2,7 +2,6 @@ import { createHash, randomBytes } from "node:crypto";
 import type {
   AssetPublicationCandidate,
   AttachedFilesystemOperation,
-  DatabaseIssuedStorageLocator,
   DurableFilesystemAttachResult,
   DurableFilesystemCleanupCompletionResult,
   DurableFilesystemCleanupRequest,
@@ -18,8 +17,6 @@ import type {
   DurableFilesystemReserveResult,
   DurableFilesystemScope,
   DurableFilesystemTransactionContext,
-  PrivateFilesystemDeliveryGrant,
-  PrivateFilesystemDeliveryGrantRequest,
   PrivatePublicationCleanupPreparation,
   PrivatePublicationPreparation,
   PrivateStorageDescriptor,
@@ -27,9 +24,7 @@ import type {
 } from "../../application/src/assets/private-storage-lifecycle.js";
 import type {
   PrivateFilesystemCandidateAttachment,
-  PrivateFilesystemCandidatePersistencePort,
-  PrivateFilesystemDeliveryGrantPersistencePort,
-  PrivateFilesystemDeliveryGrantRedemption
+  PrivateFilesystemCandidatePersistencePort
 } from "../../application/src/assets/private-filesystem-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
@@ -75,22 +70,8 @@ type CandidateAuthorityRow = DescriptorRow & Readonly<{
   expires_at: Date;
 }>;
 
-type DeliveryGrantRow = Readonly<{
-  grant_token_hash: string;
-  candidate_token_hash: string;
-  operation_id: string;
-  owner_user_id: string;
-  purpose: DurableFilesystemPurpose;
-  resource_kind: "asset" | "portable";
-  asset_id: string | null;
-  operation_scope_hash: string | null;
-  lifecycle: "issued" | "redeemed" | "expired" | "revoked";
-  expires_at: Date;
-}>;
-
 export interface PostgresDurableFilesystemRepository
-  extends PrivateFilesystemCandidatePersistencePort,
-  PrivateFilesystemDeliveryGrantPersistencePort {
+  extends PrivateFilesystemCandidatePersistencePort {
   journal: DurableFilesystemJournalPort;
   issuePublicationCandidate(
     reservation: ReservedFilesystemOperation,
@@ -105,10 +86,6 @@ export interface PostgresDurableFilesystemRepository
     operation: ReservedFilesystemOperation | AttachedFilesystemOperation,
     claim: DurableFilesystemRecoveryClaim,
   ): Promise<PrivatePublicationCleanupPreparation>;
-  redeemStorageLocator(
-    scope: DurableFilesystemScope,
-    locator: DatabaseIssuedStorageLocator,
-  ): Promise<PrivateStorageDescriptor | null>;
 }
 
 function sha256(value: string): string {
@@ -231,16 +208,6 @@ function candidateMatchesAttachment(
     && scopeMatches(row, attachment.operation)
     && row.expires_at.toISOString() === attachment.operation.expiresAt
     && descriptorMatches(row, attachment.descriptor);
-}
-
-function candidateMatchesDeliveryRequest(
-  row: CandidateAuthorityRow,
-  request: PrivateFilesystemDeliveryGrantRequest,
-): boolean {
-  return row.operation_id === request.operation.operationId
-    && row.purpose === request.operation.purpose
-    && scopeMatches(row, request.operation)
-    && descriptorMatches(row, request.descriptor);
 }
 
 async function requireCallerTransaction(database: DurableFilesystemTransactionContext): Promise<DatabaseClient> {
@@ -594,7 +561,6 @@ export function createPostgresDurableFilesystemRepository(
     await lockPhysicalPaths(client, paths);
     if (await cleanupPathFenced(client, row.id, paths)) return { outcome: "stale" };
 
-    const locator = randomToken();
     const updated = await client.query<OperationRow>(
       `UPDATE durable_filesystem_operations
           SET lifecycle='attached',candidate_token_hash=$3,locator_token_hash=$4,
@@ -608,7 +574,7 @@ export function createPostgresDurableFilesystemRepository(
         row.id,
         row.owner_user_id,
         candidate.candidate_token_hash,
-        sha256(locator),
+        sha256(randomToken()),
         attachment.claim.workVersion,
         attachment.claim.leaseId,
         attachment.claim.leaseOwner,
@@ -632,7 +598,6 @@ export function createPostgresDurableFilesystemRepository(
     return {
       outcome: "attached",
       operation: attachedOperation(attached),
-      locator: locator as DatabaseIssuedStorageLocator,
       claim: recoveryClaim(attached)
     } satisfies DurableFilesystemAttachResult;
   };
@@ -707,95 +672,6 @@ export function createPostgresDurableFilesystemRepository(
       claim: recoveryClaim(row)
     } as PrivateFilesystemCandidateAttachment, false);
   };
-
-  const issueDeliveryGrant: PrivateFilesystemDeliveryGrantPersistencePort["issueDeliveryGrant"] = async (
-    request,
-  ) => withTransaction(pool, async (client) => {
-    const row = await operationById(client, request.operation.operationId, true);
-    if (!row
-      || !operationMatches(row, request.operation)
-      || row.lifecycle !== "finalized") {
-      throw new Error("durable_filesystem_delivery_grant_invalid");
-    }
-    const candidate = await candidateByHash(client, request.candidate, true);
-    if (!candidate
-      || candidate.lifecycle !== "attached"
-      || row.candidate_token_hash !== candidate.candidate_token_hash
-      || !candidateMatchesDeliveryRequest(candidate, request)
-      || !await candidateIsFresh(client, candidate)) {
-      throw new Error("durable_filesystem_delivery_grant_invalid");
-    }
-    const deliveries = await descriptorRows(client, row.id, "delivery");
-    if (deliveries.length !== 1 || !descriptorMatches(deliveries[0]!, request.descriptor)) {
-      throw new Error("durable_filesystem_delivery_grant_invalid");
-    }
-
-    const grant = randomToken() as PrivateFilesystemDeliveryGrant;
-    await client.query(
-      `INSERT INTO private_filesystem_delivery_grants (
-         grant_token_hash,candidate_token_hash,operation_id,owner_user_id,purpose,
-         resource_kind,asset_id,operation_scope_hash,expires_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [
-        sha256(grant),
-        candidate.candidate_token_hash,
-        row.id,
-        row.owner_user_id,
-        row.purpose,
-        row.resource_kind,
-        row.asset_id,
-        row.operation_scope_hash,
-        request.expiresAt
-      ]
-    );
-    return grant;
-  });
-
-  const redeemDeliveryGrant: PrivateFilesystemDeliveryGrantPersistencePort["redeemDeliveryGrant"] = async (
-    redemption: PrivateFilesystemDeliveryGrantRedemption,
-  ) => withTransaction(pool, async (client) => {
-    const { request } = redemption;
-    const row = await operationById(client, request.operation.operationId, true);
-    if (!row
-      || !operationMatches(row, request.operation)
-      || row.lifecycle !== "finalized") return null;
-    const candidate = await candidateByHash(client, request.candidate, true);
-    if (!candidate
-      || candidate.lifecycle !== "attached"
-      || row.candidate_token_hash !== candidate.candidate_token_hash
-      || !candidateMatchesDeliveryRequest(candidate, request)
-      || !await candidateIsFresh(client, candidate)) return null;
-    const selected = await client.query<DeliveryGrantRow>(
-      `SELECT grant_token_hash,candidate_token_hash,operation_id,owner_user_id,purpose,
-              resource_kind,asset_id,operation_scope_hash,lifecycle,expires_at
-         FROM private_filesystem_delivery_grants
-        WHERE grant_token_hash=$1
-        FOR UPDATE`,
-      [sha256(redemption.grant)]
-    );
-    const grant = selected.rows[0];
-    if (!grant
-      || grant.lifecycle !== "issued"
-      || grant.candidate_token_hash !== candidate.candidate_token_hash
-      || grant.operation_id !== row.id
-      || grant.owner_user_id !== row.owner_user_id
-      || grant.purpose !== row.purpose
-      || grant.resource_kind !== row.resource_kind
-      || grant.asset_id !== row.asset_id
-      || grant.operation_scope_hash !== row.operation_scope_hash
-      || grant.expires_at.toISOString() !== request.expiresAt) return null;
-    const deliveries = await descriptorRows(client, row.id, "delivery");
-    if (deliveries.length !== 1 || !descriptorMatches(deliveries[0]!, request.descriptor)) return null;
-
-    const redeemed = await client.query(
-      `UPDATE private_filesystem_delivery_grants
-          SET lifecycle='redeemed',redeemed_at=now(),updated_at=now()
-        WHERE grant_token_hash=$1 AND lifecycle='issued' AND expires_at > clock_timestamp()
-        RETURNING grant_token_hash`,
-      [grant.grant_token_hash]
-    );
-    return redeemed.rowCount === 1 ? descriptor(deliveries[0]!) : null;
-  });
 
   const finalizeAfterCommit: DurableFilesystemJournalPort["finalizeAfterCommit"] = async (operation, claim) => withTransaction(
     pool,
@@ -924,35 +800,13 @@ export function createPostgresDurableFilesystemRepository(
     };
   });
 
-  const redeemStorageLocator = async (
-    scope: DurableFilesystemScope,
-    locator: DatabaseIssuedStorageLocator,
-  ): Promise<PrivateStorageDescriptor | null> => {
-    const selected = await pool.query<OperationRow & DescriptorRow>(
-      `SELECT ${operationColumns()},descriptor.relative_path,descriptor.device_id,descriptor.file_id,
-              descriptor.change_token,descriptor.content_hash,descriptor.byte_length::text
-         FROM durable_filesystem_operations operation
-         JOIN durable_filesystem_descriptors descriptor
-           ON descriptor.operation_id=operation.id AND descriptor.owner_user_id=operation.owner_user_id
-          AND descriptor.descriptor_role='delivery'
-        WHERE operation.owner_user_id=$1 AND operation.locator_token_hash=$2
-          AND operation.lifecycle='finalized'`,
-      [scope.ownerUserId, sha256(locator)]
-    );
-    const row = selected.rows[0];
-    return row && scopeMatches(row, scope) ? descriptor(row) : null;
-  };
-
   return {
     journal: { reserve, attach, finalizeAfterCommit, markCleanup, completeCleanup, recover },
     persistCandidate,
     redeemCandidate,
     attachCandidate,
-    issueDeliveryGrant,
-    redeemDeliveryGrant,
     issuePublicationCandidate,
     completePublicationCandidate,
-    preparePublicationCleanup,
-    redeemStorageLocator
+    preparePublicationCleanup
   };
 }

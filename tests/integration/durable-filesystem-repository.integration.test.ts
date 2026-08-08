@@ -1,24 +1,17 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  bindPrivateFilesystemCandidateAttachment,
-  bindPrivateFilesystemDeliveryGrantRedemption
-} from "../../packages/application/src/assets/private-filesystem-repository.js";
+import { bindPrivateFilesystemCandidateAttachment } from "../../packages/application/src/assets/private-filesystem-repository.js";
 import type {
   AssetPublicationCandidate,
   AttachedFilesystemOperation,
   DurableFilesystemRecoveryClaim,
   DurableFilesystemPurpose,
   DurableFilesystemScope,
-  PrivateFilesystemDeliveryGrantRequest,
   PrivateStorageDescriptor,
   ReservedFilesystemOperation
 } from "../../packages/application/src/assets/private-storage-lifecycle.js";
-import {
-  bindPrivateFilesystemCandidateAuthority,
-  bindPrivateFilesystemDeliveryGrantRequest
-} from "../../packages/application/src/assets/private-storage-lifecycle.js";
+import { bindPrivateFilesystemCandidateAuthority } from "../../packages/application/src/assets/private-storage-lifecycle.js";
 import { createPostgresDurableFilesystemRepository } from "../../packages/database/src/durable-filesystem-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import {
@@ -269,11 +262,6 @@ integration("PostgreSQL durable filesystem repository", () => {
       .resolves.toEqual({ outcome: "finalized" });
     await expect(repository.journal.finalizeAfterCommit(attached.operation, attached.claim))
       .resolves.toEqual({ outcome: "already_finalized" });
-    await expect(repository.redeemStorageLocator(operationScope, attached.locator)).resolves.toEqual(delivery);
-    await expect(repository.redeemStorageLocator(
-      { ...operationScope, ownerUserId: await owner("wrong-owner") },
-      attached.locator,
-    )).resolves.toBeNull();
   });
 
   it("persists only hashed candidate authority and rehydrates its exact descriptor after restart", async () => {
@@ -571,209 +559,6 @@ integration("PostgreSQL durable filesystem repository", () => {
     expect(attached.outcome).toBe("attached");
   });
 
-  it("issues hashed restart-safe delivery grants and redeems each bearer exactly once", async () => {
-    const repository = createPostgresDurableFilesystemRepository(pool);
-    const assetId = await asset();
-    const delivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "private-delivery-grant");
-    const persisted = await persistCandidate(repository, scope(assetId), delivery);
-    const attached = await attachPersistedCandidate(repository, persisted, async (client, operationId) => {
-      await client.query(
-        `UPDATE assets
-            SET storage_path=$3,filesystem_operation_id=$4
-          WHERE id=$1 AND owner_user_id=$2`,
-        [assetId, ownerUserId, delivery.relativePath, operationId]
-      );
-    });
-    if (attached.outcome !== "attached") throw new Error("attachment failed");
-    await expect(repository.journal.finalizeAfterCommit(attached.operation, attached.claim))
-      .resolves.toEqual({ outcome: "finalized" });
-
-    const request = bindPrivateFilesystemDeliveryGrantRequest(
-      attached.operation,
-      "finalized",
-      persisted.authority.candidate,
-      delivery,
-      new Date(Date.now() + 10_000).toISOString(),
-    );
-    const grant = await repository.issueDeliveryGrant(request);
-    const stored = await pool.query<{ grant_token_hash: string; lifecycle: string }>(
-      `SELECT grant_token_hash,lifecycle
-         FROM private_filesystem_delivery_grants
-        WHERE operation_id=$1`,
-      [persisted.operation.operationId]
-    );
-    expect(stored.rows).toEqual([{ grant_token_hash: hash(grant), lifecycle: "issued" }]);
-    expect(JSON.stringify(stored.rows)).not.toContain(grant);
-
-    const restarted = createPostgresDurableFilesystemRepository(pool);
-    for (const wrongRequest of [
-      {
-        ...request,
-        operation: { ...request.operation, ownerUserId: await owner("delivery-grant-owner") }
-      },
-      {
-        ...request,
-        operation: { ...request.operation, assetId: await asset() }
-      },
-      {
-        ...request,
-        operation: { ...request.operation, purpose: "asset_derivative" }
-      },
-      {
-        ...request,
-        operation: {
-          resourceKind: "portable",
-          ownerUserId,
-          operationScopeId: "substituted-portable-resource",
-          operationId: request.operation.operationId,
-          purpose: "portable_export"
-        }
-      },
-      {
-        ...request,
-        descriptor: { ...delivery, byteLength: delivery.byteLength + 1 }
-      }
-    ]) {
-      await expect(restarted.redeemDeliveryGrant({
-        request: wrongRequest as PrivateFilesystemDeliveryGrantRequest,
-        grant
-      } as ReturnType<typeof bindPrivateFilesystemDeliveryGrantRedemption>)).resolves.toBeNull();
-    }
-    const redemption = bindPrivateFilesystemDeliveryGrantRedemption(request, grant);
-    await expect(restarted.redeemDeliveryGrant(redemption)).resolves.toEqual(delivery);
-    await expect(restarted.redeemDeliveryGrant(redemption)).resolves.toBeNull();
-
-    const expiringRequest = bindPrivateFilesystemDeliveryGrantRequest(
-      attached.operation,
-      "finalized",
-      persisted.authority.candidate,
-      delivery,
-      new Date(Date.now() + 250).toISOString(),
-    );
-    const expiringGrant = await repository.issueDeliveryGrant(expiringRequest);
-    const expiringRedemption = bindPrivateFilesystemDeliveryGrantRedemption(
-      expiringRequest,
-      expiringGrant,
-    );
-    await pool.query("SELECT pg_sleep(0.3)");
-    await expect(restarted.redeemDeliveryGrant(expiringRedemption)).resolves.toBeNull();
-  });
-
-  it("rejects a delivery grant that expires while redemption waits for its row lock", async () => {
-    const repository = createPostgresDurableFilesystemRepository(pool);
-    const assetId = await asset();
-    const delivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "private-grant-lock-expiry");
-    const persisted = await persistCandidate(repository, scope(assetId), delivery, "asset_original", 60_000);
-    const attached = await attachPersistedCandidate(repository, persisted, async (client, operationId) => {
-      await client.query(
-        `UPDATE assets
-            SET storage_path=$3,filesystem_operation_id=$4
-          WHERE id=$1 AND owner_user_id=$2`,
-        [assetId, ownerUserId, delivery.relativePath, operationId]
-      );
-    });
-    if (attached.outcome !== "attached") throw new Error("attachment failed");
-    await expect(repository.journal.finalizeAfterCommit(attached.operation, attached.claim))
-      .resolves.toEqual({ outcome: "finalized" });
-
-    const request = bindPrivateFilesystemDeliveryGrantRequest(
-      attached.operation,
-      "finalized",
-      persisted.authority.candidate,
-      delivery,
-      new Date(Date.now() + 2_000).toISOString(),
-    );
-    const grant = await repository.issueDeliveryGrant(request);
-    const redemption = bindPrivateFilesystemDeliveryGrantRedemption(request, grant);
-    const redemptionPool = createDatabasePool(databaseUrl!, 1);
-    const restarted = createPostgresDurableFilesystemRepository(redemptionPool);
-    const blocker = await pool.connect();
-    try {
-      await blocker.query("BEGIN");
-      const blockerBackend = await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
-      await blocker.query(
-        `SELECT grant_token_hash
-           FROM private_filesystem_delivery_grants
-          WHERE grant_token_hash=$1
-          FOR UPDATE`,
-        [hash(grant)]
-      );
-
-      const redemptionBackend = await redemptionPool.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
-      const redeemed = restarted.redeemDeliveryGrant(redemption);
-      await expectBackendBlockedBy(redemptionBackend.rows[0]!.pid, blockerBackend.rows[0]!.pid);
-      await waitUntilAfter(blocker, request.expiresAt);
-      await blocker.query("COMMIT");
-
-      await expect(redeemed).resolves.toBeNull();
-    } finally {
-      await blocker.query("ROLLBACK").catch(() => undefined);
-      blocker.release();
-      await redemptionPool.end();
-    }
-
-    const stored = await pool.query<{ lifecycle: string; redeemed_at: string | null }>(
-      `SELECT lifecycle,redeemed_at::text
-         FROM private_filesystem_delivery_grants
-        WHERE grant_token_hash=$1`,
-      [hash(grant)]
-    );
-    expect(stored.rows).toEqual([{ lifecycle: "issued", redeemed_at: null }]);
-  });
-
-  it("enforces delivery-grant expiry against the current clock inside an older transaction", async () => {
-    const repository = createPostgresDurableFilesystemRepository(pool);
-    const assetId = await asset();
-    const delivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "private-grant-trigger-clock");
-    const persisted = await persistCandidate(repository, scope(assetId), delivery, "asset_original", 60_000);
-    const attached = await attachPersistedCandidate(repository, persisted, async (client, operationId) => {
-      await client.query(
-        `UPDATE assets
-            SET storage_path=$3,filesystem_operation_id=$4
-          WHERE id=$1 AND owner_user_id=$2`,
-        [assetId, ownerUserId, delivery.relativePath, operationId]
-      );
-    });
-    if (attached.outcome !== "attached") throw new Error("attachment failed");
-    await expect(repository.journal.finalizeAfterCommit(attached.operation, attached.claim))
-      .resolves.toEqual({ outcome: "finalized" });
-
-    const request = bindPrivateFilesystemDeliveryGrantRequest(
-      attached.operation,
-      "finalized",
-      persisted.authority.candidate,
-      delivery,
-      new Date(Date.now() + 1_500).toISOString(),
-    );
-    const grant = await repository.issueDeliveryGrant(request);
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      await waitUntilAfter(client, request.expiresAt);
-      await expect(client.query(
-        `UPDATE private_filesystem_delivery_grants
-            SET lifecycle='redeemed',redeemed_at=clock_timestamp(),updated_at=clock_timestamp()
-          WHERE grant_token_hash=$1`,
-        [hash(grant)]
-      )).rejects.toMatchObject({
-        code: "55000",
-        message: "private filesystem delivery grant is stale"
-      });
-      await client.query("ROLLBACK");
-    } finally {
-      await client.query("ROLLBACK").catch(() => undefined);
-      client.release();
-    }
-
-    const stored = await pool.query<{ lifecycle: string; redeemed_at: string | null }>(
-      `SELECT lifecycle,redeemed_at::text
-         FROM private_filesystem_delivery_grants
-        WHERE grant_token_hash=$1`,
-      [hash(grant)]
-    );
-    expect(stored.rows).toEqual([{ lifecycle: "issued", redeemed_at: null }]);
-  });
-
   it("accepts only an adoption change-token transition and persists the actual delivery descriptor", async () => {
     const repository = createPostgresDurableFilesystemRepository(pool);
     const assetId = await asset();
@@ -824,9 +609,7 @@ integration("PostgreSQL durable filesystem repository", () => {
     await expect(repository.journal.finalizeAfterCommit(attached.operation, attached.claim))
       .resolves.toEqual({ outcome: "finalized" });
 
-    const restarted = createPostgresDurableFilesystemRepository(pool);
-    await expect(restarted.redeemStorageLocator(operationScope, attached.locator))
-      .resolves.toEqual(delivery);
+    expect(attached.operation).toMatchObject(operationScope);
   });
 
   it.each([
