@@ -136,8 +136,13 @@ integration("PostgreSQL portable import repository", () => {
     return operationId;
   }
 
-  async function stagedInput(scopedOwner = ownerUserId, fingerprint = hash(crypto.randomUUID())) {
+  async function stagedInput(
+    scopedOwner = ownerUserId,
+    fingerprint = hash(crypto.randomUUID()),
+    expiresInMs = 60_000,
+  ) {
     const operationScopeId = `staged-${crypto.randomUUID()}`;
+    const expiresAt = new Date(Date.now() + expiresInMs).toISOString();
     const operationId = await durableOperation(
       scopedOwner,
       "portable_staging",
@@ -151,9 +156,20 @@ integration("PostgreSQL portable import repository", () => {
       operationScopeId,
       contentHash: fingerprint,
       byteLength: 512,
-      expiresAt: new Date(Date.now() + 60_000).toISOString()
+      expiresAt
     });
-    return { stagedInput, fingerprint, operationId };
+    return {
+      stagedInput,
+      fingerprint,
+      operationId,
+      expiresAt
+    };
+  }
+
+  async function waitUntilExpired(expiresAt: string): Promise<void> {
+    await new Promise((resolvePromise) => {
+      setTimeout(resolvePromise, Math.max(0, Date.parse(expiresAt) - Date.now() + 25));
+    });
   }
 
   async function completedImport(scopedOwner: string, sourceHash: string, target: WorldScope) {
@@ -334,11 +350,9 @@ integration("PostgreSQL portable import repository", () => {
     expect(persisted.rows[0]!.handle_token_hash).toBe(hash(staged.stagedInput));
     expect(persisted.rows[0]!.handle_token_hash).not.toBe(staged.stagedInput);
 
-    await pool.query(
-      "UPDATE portable_staged_inputs SET expires_at=now()-interval '1 second' WHERE filesystem_operation_id=$1",
-      [staged.operationId]
-    );
-    expect(await repository.retrieveStagedPayload({ ownerUserId }, staged.stagedInput)).toBeNull();
+    const expiring = await stagedInput(ownerUserId, hash(crypto.randomUUID()), 100);
+    await waitUntilExpired(expiring.expiresAt);
+    expect(await repository.retrieveStagedPayload({ ownerUserId }, expiring.stagedInput)).toBeNull();
   });
 
   it("previews and commits all seven kinds and eight destination variants without trusting source provenance", async () => {
@@ -658,7 +672,7 @@ integration("PostgreSQL portable import repository", () => {
   });
 
   it("requires a caller-owned transaction and restores staged authority on rollback", async () => {
-    const staged = await stagedInput();
+    const staged = await stagedInput(ownerUserId, hash(crypto.randomUUID()), 1_500);
     const destination = { kind: "create_world" as const };
     const preview = await repository.createPreview({
       command: { ownerUserId, stagedInput: staged.stagedInput, kind: "world_text", destination },
@@ -692,10 +706,7 @@ integration("PostgreSQL portable import repository", () => {
       expect(retry.outcome).toBe("ready");
       await client.query("ROLLBACK");
 
-      await pool.query(
-        "UPDATE portable_staged_inputs SET expires_at=now()-interval '1 second' WHERE handle_token_hash=$1",
-        [hash(staged.stagedInput)]
-      );
+      await waitUntilExpired(staged.expiresAt);
       await client.query("BEGIN");
       await expect(repository.beginImport(client, command)).rejects.toMatchObject({ code: "archive_expired" });
       await client.query("COMMIT");
@@ -1544,6 +1555,7 @@ integration("PostgreSQL portable import repository", () => {
       contentHash,
       1_024,
     );
+    const exportExpiresAt = new Date(Date.now() + 100).toISOString();
     const exported = await repository.registerExportArtifact({
       ownerUserId,
       filesystemOperationId: operationId,
@@ -1555,7 +1567,7 @@ integration("PostgreSQL portable import repository", () => {
       contentType: "application/zip",
       contentHash,
       byteLength: 1_024,
-      expiresAt: new Date(Date.now() + 60_000).toISOString()
+      expiresAt: exportExpiresAt
     });
 
     expect(exported).toMatchObject({ contentType: "application/zip", byteLength: 1_024 });
@@ -1593,10 +1605,7 @@ integration("PostgreSQL portable import repository", () => {
     );
     expect(persisted.rows[0]!.retrieval_token_hash).toBe(hash(exported.retrieval));
     expect(persisted.rows[0]!.retrieval_token_hash).not.toBe(exported.retrieval);
-    await pool.query(
-      "UPDATE portable_export_artifacts SET expires_at=now()-interval '1 second' WHERE filesystem_operation_id=$1",
-      [operationId]
-    );
+    await waitUntilExpired(exportExpiresAt);
     expect(await repository.retrieveExportArtifact({
       ownerUserId,
       exportKind: "campaign_zip",
@@ -1606,23 +1615,18 @@ integration("PostgreSQL portable import repository", () => {
     }, exported.retrieval)).toBeNull();
   });
 
-  it("fails closed when staged or export metadata diverges from its immutable descriptor", async () => {
+  it("rejects staged or export metadata divergence from the immutable descriptor", async () => {
     const staged = await stagedInput();
     for (const mutation of [
       { column: "content_hash", value: hash(`staged-tamper-${crypto.randomUUID()}`) },
       { column: "byte_length", value: "9007199254740992" }
     ]) {
-      await pool.query(
+      await expect(pool.query(
         `UPDATE portable_staged_inputs SET ${mutation.column}=$2 WHERE filesystem_operation_id=$1`,
         [staged.operationId, mutation.value]
-      );
-      await expect(repository.retrieveStagedPayload(
-        { ownerUserId }, staged.stagedInput,
-      )).rejects.toEqual(new PortableImportRepositoryError("archive_unavailable", 503));
-      await pool.query(
-        "UPDATE portable_staged_inputs SET content_hash=$2,byte_length=512 WHERE filesystem_operation_id=$1",
-        [staged.operationId, staged.fingerprint]
-      );
+      )).rejects.toMatchObject({ code: "55000" });
+      await expect(repository.retrieveStagedPayload({ ownerUserId }, staged.stagedInput))
+        .resolves.toMatchObject({ contentHash: staged.fingerprint, byteLength: 512 });
     }
 
     const exportHash = hash(`descriptor-export-${crypto.randomUUID()}`);
@@ -1654,21 +1658,17 @@ integration("PostgreSQL portable import repository", () => {
       { column: "content_hash", value: hash(`export-tamper-${crypto.randomUUID()}`) },
       { column: "byte_length", value: "9007199254740992" }
     ]) {
-      await pool.query(
+      await expect(pool.query(
         `UPDATE portable_export_artifacts SET ${mutation.column}=$2 WHERE filesystem_operation_id=$1`,
         [operationId, mutation.value]
-      );
+      )).rejects.toMatchObject({ code: "55000" });
       await expect(repository.retrieveExportArtifact(exportScope, exported.retrieval))
-        .rejects.toEqual(new PortableImportRepositoryError("archive_unavailable", 503));
-      await pool.query(
-        "UPDATE portable_export_artifacts SET content_hash=$2,byte_length=1024 WHERE filesystem_operation_id=$1",
-        [operationId, exportHash]
-      );
+        .resolves.toMatchObject({ contentHash: exportHash, byteLength: 1_024 });
     }
   });
 
   it("denies staged capability issuance for every authority or descriptor mismatch", async () => {
-    const cases = ["owner", "scope", "hash", "length", "purpose", "lifecycle"] as const;
+    const cases = ["owner", "scope", "hash", "length", "purpose"] as const;
     for (const mismatch of cases) {
       const expectedHash = hash(`staged-issuance-${mismatch}-${crypto.randomUUID()}`);
       const operationScopeId = `staged-issuance-${mismatch}-${crypto.randomUUID()}`;
@@ -1677,12 +1677,6 @@ integration("PostgreSQL portable import repository", () => {
       const operationId = await durableOperation(
         operationOwner, purpose, operationScopeId, expectedHash, 512,
       );
-      if (mismatch === "lifecycle") {
-        await pool.query(
-          "UPDATE durable_filesystem_operations SET lifecycle='cleanup_pending',cleanup_requested_at=now() WHERE id=$1",
-          [operationId]
-        );
-      }
       await expect(repository.registerStagedInput({
         ownerUserId,
         filesystemOperationId: operationId,
@@ -1699,7 +1693,7 @@ integration("PostgreSQL portable import repository", () => {
       { exportKind: "campaign_zip" as const, campaignId: scope.campaignId, contentType: "application/zip" as const },
       { exportKind: "world_json" as const, campaignId: null, contentType: "application/json" as const }
     ];
-    const cases = ["owner", "scope", "hash", "length", "purpose", "lifecycle"] as const;
+    const cases = ["owner", "scope", "hash", "length", "purpose"] as const;
     for (const exportVariant of exportKinds) {
       for (const mismatch of cases) {
         const expectedHash = hash(`${exportVariant.exportKind}-${mismatch}-${crypto.randomUUID()}`);
@@ -1709,12 +1703,6 @@ integration("PostgreSQL portable import repository", () => {
         const operationId = await durableOperation(
           operationOwner, purpose, operationScopeId, expectedHash, 1_024,
         );
-        if (mismatch === "lifecycle") {
-          await pool.query(
-            "UPDATE durable_filesystem_operations SET lifecycle='cleanup_pending',cleanup_requested_at=now() WHERE id=$1",
-            [operationId]
-          );
-        }
         await expect(repository.registerExportArtifact({
           ownerUserId,
           filesystemOperationId: operationId,

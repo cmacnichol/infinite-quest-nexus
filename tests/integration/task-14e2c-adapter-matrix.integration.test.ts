@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import JSZip from "jszip";
+import { runner } from "node-pg-migrate";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { toAssetMutationIdempotencyKey } from "../../packages/application/src/assets/index.js";
@@ -153,6 +154,28 @@ integration("Task 14e2c additive adapter contract matrix", () => {
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 8);
     await migrateDatabase(pool, resolve("database/migrations"));
+    // This matrix freezes the historical 14e2c split-transaction test helper.
+    // Current 0055 split-state rejection is covered by the 14e3b2a PostgreSQL
+    // suite; 14e3b2c owns the future atomically composed adapter matrix.
+    const migrationClient = await pool.connect();
+    try {
+      const reverted = await runner({
+        dbClient: migrationClient,
+        dir: resolve("database/migrations"),
+        direction: "down",
+        count: 1,
+        migrationsTable: "schema_migrations",
+        checkOrder: true,
+        singleTransaction: true,
+        verbose: false,
+        logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
+      });
+      expect(reverted.map((migration) => migration.name)).toEqual([
+        "0055_private_portable_repository_guards"
+      ]);
+    } finally {
+      migrationClient.release();
+    }
     ownerUserId = await initialOwnerId(pool);
     const foreign = await pool.query<{ id: string }>(
       "INSERT INTO users (system_key,display_name) VALUES ($1,$2) RETURNING id",
@@ -181,8 +204,14 @@ integration("Task 14e2c additive adapter contract matrix", () => {
   });
 
   afterAll(async () => {
-    await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-    await pool.end();
+    try {
+      await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+      await expect(migrateDatabase(pool, resolve("database/migrations"))).resolves.toEqual([
+        "0055_private_portable_repository_guards"
+      ]);
+    } finally {
+      await pool.end();
+    }
   });
 
   async function root(prefix: string): Promise<string> {
