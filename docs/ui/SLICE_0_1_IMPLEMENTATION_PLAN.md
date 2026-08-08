@@ -8103,6 +8103,55 @@ without inventing legacy cleanup authority. Freeze the legacy
 deletion, and add any required additive schema relation/index. No route or
 worker binding changes here.
 
+**14e3a correction — complete response and re-preview authority.** Freezing
+mutation ingress alone is insufficient: define and test every legacy asset
+selection response mapper, including selected and explicit-clear results, so
+the later `{assetId, selected}` repository result preserves the existing public
+`{assetUrl}` route shape without exposing a raw private path. Never implement a
+route mapper by spreading an adapter result. Each import preview and commit
+mapper must reconstruct or strictly parse its family-specific allowlisted HTTP
+projection; injected retrieval locators, opaque handles, source-installation
+provenance, unknown properties, diagnostics, and internal counters must fail
+closed and have negative leakage tests.
+
+`atomic_repreview` must be an executable, discriminated contract rather than a
+label: carry the exact validated family payload and, where bytes are required,
+an owner-bound staged-input identity; bind the resolved owner, exact
+destination, validated content fingerprint/request identity, and server-stable
+replay key. Define the caller-owned transaction callback that runs re-preview,
+domain mutation, and portable consume/complete together. Reject cross-family,
+cross-owner, destination, staged-input, and replay-key mismatches. CYOA and
+world-text must remain representable through their real validated provider
+inputs rather than an untyped conversion shortcut. This correction remains
+additive; it does not bind a route or worker.
+
+The bound re-preview objects themselves are untrusted mutable input. Factory
+creation must retain a module-private immutable seal (or later durable
+descriptor revalidation) over the exact owner, kind, destination, canonical
+validated payload, fingerprint, opaque staged handle, and replay identity. The
+executor must require that seal before opening a transaction; matching two
+caller-visible branded objects is not sufficient. Add dynamic negative tests
+for cloned bindings and coordinated two-sided staged-handle plus nested-payload
+substitution.
+
+**14e3a completion (2026-08-08):** `a35e1e0`, `7786888`, and `0c6b072`
+freeze the additive compatibility boundary required for production adapters.
+They preserve legacy asset selection `{assetUrl}` responses from safe asset-ID
+mapping, strictly reconstruct every import preview/commit projection, and keep
+all private locators, retrieval handles, source provenance, stable fallback
+issuers, and unknown properties out of public barrels and HTTP views. Campaign
+ZIP retains its exact opaque preview/destination correlation. Each handle-less
+family has an executable atomic re-preview contract carrying a validated
+family payload, owner/destination/content identity, exact staged handle, an
+internally derived replay identity, and an explicit caller-owned transaction
+runner. Module-private WeakMap seals plus frozen canonical snapshots reject
+cloned/forged/mutated bindings and coordinated staged-handle/payload
+substitution before the transaction opens. Final verification passed 44 focused
+contract tests, 137 related tests, 1,393 unit tests, 409 integration tests,
+root typecheck, `pnpm check`, build, diff/boundary/precheck, and independent
+correction re-review. No migration, route, runtime, worker, allowlist, legacy
+service, or production consumer changed. **14e3b is next.**
+
 **14e3b — durable production persistence, delivery, and streaming adapters.**
 Implement named database/runtime adapters and `asset-import-composition` using
 explicit owner/resource/purpose/scope arguments. No `AsyncLocalStorage`, raw
