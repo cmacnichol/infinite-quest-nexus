@@ -8459,6 +8459,21 @@ inside the same caller transaction before the reserve step); the durable
 before their candidate attachment. A retry must load/reconcile the same
 owner/hash/idempotency identity rather than allocate a second logical asset.
 
+The existing 0053 foreign key instead requires a fully persisted `assets` row
+for every asset operation, while that row itself has non-null storage fields.
+That makes the required reserve-before-mutation ordering impossible. Add
+additive migration **0060**: `asset_publication_identities` owns a stable
+`asset_id`, owner, immutable request/idempotency fingerprint, and lifecycle
+metadata independently of the eventual `assets` row. Seed every existing asset
+identity, add the matching owner-scoped key, then retarget the 0053 durable
+operation asset foreign key to this identity table without rewriting existing
+operation IDs or descriptors. The publication transaction creates/reconciles
+the real `assets` row with that same UUID before attaching/finalizing; the 0054
+asset-to-operation foreign key remains the post-attachment fence. A failed
+attempt may retain only its identity plus cleanup/retry state, never a phantom
+asset or a reusable bearer. Migration tests must cover legacy seeding,
+cross-owner/nonexistent identity rejection, rollback, and downgrade safety.
+
 Extend the b5-private filesystem adapter with an asset-publication operation
 that uses the exact b1–b4 lifecycle: validate the precomputed content identity,
 reserve before any filesystem mutation, persist 0058 target/node authority,
