@@ -64,3 +64,21 @@ One earlier verification attempt ran unit, integration, check, and build concurr
 - Migration 0053 deliberately persists only `operation_scope_hash` for portable work. Recovery uses that database value as the opaque recovered `operationScopeId`; it never needs or reconstructs the original caller token.
 - Candidate plaintext is process-local authority until attachment; cleanup and delivery filesystem identity are persisted before publication/attachment so a restart can safely reap the operation without the candidate.
 - Shared-path retention is global, while operation authorization and locator redemption remain owner-scoped.
+
+## Correction round 1
+
+Resolved findings #0491 through #0494 without a schema change:
+
+- Portable reservations now retain the caller's plaintext scope for the live operation while recovered records accept the persisted opaque scope hash without hashing it a second time. Real PostgreSQL tests cover both staged imports and export artifacts through crash recovery, finalize acknowledgement, cleanup, and repeated terminal acknowledgement.
+- Recovery finalization is purpose-local and owner-local: originals require the exact asset, derivatives require the exact source asset, and portable rows require the exact filesystem operation. A foreign owner sharing a physical path cannot finalize another operation; global path references remain relevant only when deciding whether deletion is safe.
+- `cleanup_pending` operations and their immutable cleanup descriptors form a persistent physical-path fence. Attachment checks that fence while holding the same sorted transaction-scoped advisory path locks. Tests exercise both race orders: cleanup prepares first and rejects a later attach, while an attach holding the path lock makes cleanup wait and retain the newly committed reference.
+- Terminal idempotency validates the complete historical claim fence: operation/work version, lease ID, lease owner, and lease expiry. Only the exact completed claim receives `already_finalized` or `already_cleaned`; altered lease identity receives `lease_lost`.
+
+Correction TDD evidence:
+
+- RED: the focused real-PostgreSQL suite produced five failures covering portable scope recovery, foreign-owner finalization, wrong terminal lease identity, and cleanup/attach fencing.
+- GREEN: focused durable repository, 1 file and 12 tests passed; focused asset repository, 1 file and 13 tests passed; focused import repository, 1 file and 21 tests passed.
+- Full `pnpm test`: 116 unit files and 1,349 tests passed; 35 integration files and 395 tests passed.
+- `pnpm check`: passed.
+- `pnpm build`: passed.
+- `git diff --check`: passed.

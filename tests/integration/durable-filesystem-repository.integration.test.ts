@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type {
   AttachedFilesystemOperation,
   DurableFilesystemRecoveryClaim,
+  DurableFilesystemPurpose,
   DurableFilesystemScope,
   PrivateStorageDescriptor,
   ReservedFilesystemOperation
@@ -78,9 +79,10 @@ integration("PostgreSQL durable filesystem repository", () => {
     operationScope: DurableFilesystemScope,
     delivery: PrivateStorageDescriptor,
     cleanup: readonly [PrivateStorageDescriptor, ...PrivateStorageDescriptor[]] = [delivery],
+    purpose: DurableFilesystemPurpose = "asset_original",
   ) {
     const reserved = await repository.journal.reserve(operationScope, {
-      purpose: "asset_original",
+      purpose,
       leaseOwner: "publisher",
       expiresAt: new Date(Date.now() + 60_000).toISOString()
     });
@@ -128,6 +130,28 @@ integration("PostgreSQL durable filesystem repository", () => {
         WHERE id=$1`,
       [operationId]
     );
+  }
+
+  async function attachInTransaction(
+    repository: ReturnType<typeof createPostgresDurableFilesystemRepository>,
+    published: Awaited<ReturnType<typeof publish>>,
+    domainWrite: (client: DatabaseClient, operationId: string) => Promise<void>,
+  ) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const attached = await repository.journal.attach(client, published.operation, published.candidate);
+      expect(attached.outcome).toBe("attached");
+      if (attached.outcome !== "attached") throw new Error("attachment failed");
+      await domainWrite(client, attached.operation.operationId);
+      await client.query("COMMIT");
+      return attached;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   it("persists publication evidence, attaches in the caller transaction, finalizes, and redeems owner-scoped identity", async () => {
@@ -266,6 +290,145 @@ integration("PostgreSQL durable filesystem repository", () => {
     ]));
   });
 
+  it.each([
+    { purpose: "portable_staging" as const, resourceLabel: "staging" },
+    { purpose: "portable_export" as const, resourceLabel: "export" }
+  ])("recovers $resourceLabel operations from persisted portable scope and reaches terminal acknowledgement", async ({ purpose }) => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const operationScope: DurableFilesystemScope = {
+      resourceKind: "portable",
+      ownerUserId,
+      operationScopeId: `${purpose}-${crypto.randomUUID()}`
+    };
+    const delivery = descriptor(`${purpose}/${hash(crypto.randomUUID())}.bin`, purpose);
+    const published = await publish(repository, operationScope, delivery, [delivery], purpose);
+    const attached = await attachInTransaction(repository, published, async (client, operationId) => {
+      if (purpose === "portable_staging") {
+        await client.query(
+          `INSERT INTO portable_staged_inputs (
+             owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+           ) VALUES ($1,$2,$3,$4,$5,now()+interval '1 day')`,
+          [ownerUserId, hash(crypto.randomUUID()), operationId, delivery.contentHash, delivery.byteLength]
+        );
+        return;
+      }
+      const world = await client.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id,title) VALUES ($1,$2) RETURNING id",
+        [ownerUserId, `Durable export ${crypto.randomUUID()}`]
+      );
+      const version = await client.query<{ id: string }>(
+        `INSERT INTO world_versions (world_id,owner_user_id,version_number,content)
+         VALUES ($1,$2,1,'{}'::jsonb) RETURNING id`,
+        [world.rows[0]!.id, ownerUserId]
+      );
+      await client.query(
+        `INSERT INTO portable_export_artifacts (
+           owner_user_id,retrieval_token_hash,filesystem_operation_id,export_kind,
+           world_id,world_version_id,content_type,content_hash,byte_length,expires_at
+         ) VALUES ($1,$2,$3,'world_json',$4,$5,'application/json',$6,$7,now()+interval '1 day')`,
+        [
+          ownerUserId,
+          hash(crypto.randomUUID()),
+          operationId,
+          world.rows[0]!.id,
+          version.rows[0]!.id,
+          delivery.contentHash,
+          delivery.byteLength
+        ]
+      );
+    });
+    await expire(attached.operation.operationId);
+    const recovered = await repository.journal.recover({
+      leaseOwner: `${purpose}-reaper`,
+      leaseSeconds: 30,
+      limit: 100
+    });
+    const record = recovered.find((item) => item.operation.operationId === attached.operation.operationId);
+    expect(record?.action).toBe("finalize");
+    if (!record || record.action !== "finalize") throw new Error("expected portable finalize recovery");
+    await expect(repository.journal.finalizeAfterCommit(record.operation, record.claim))
+      .resolves.toEqual({ outcome: "finalized" });
+    await expect(repository.journal.finalizeAfterCommit(record.operation, record.claim))
+      .resolves.toEqual({ outcome: "already_finalized" });
+
+    const abandonedScope: DurableFilesystemScope = {
+      resourceKind: "portable",
+      ownerUserId,
+      operationScopeId: `${purpose}-abandoned-${crypto.randomUUID()}`
+    };
+    const abandonedDelivery = descriptor(`${purpose}/${hash(crypto.randomUUID())}.tmp`, `${purpose}-abandoned`);
+    const abandoned = await publish(repository, abandonedScope, abandonedDelivery, [abandonedDelivery], purpose);
+    await expire(abandoned.operation.operationId);
+    const cleanupRecovery = await repository.journal.recover({
+      leaseOwner: `${purpose}-cleanup-reaper`,
+      leaseSeconds: 30,
+      limit: 100
+    });
+    const cleanup = cleanupRecovery.find((item) => item.operation.operationId === abandoned.operation.operationId);
+    expect(cleanup?.action).toBe("cleanup");
+    if (!cleanup || cleanup.action !== "cleanup") throw new Error("expected portable cleanup recovery");
+    await expect(repository.journal.markCleanup(cleanup.operation, cleanup.claim, { cause: "recovery" }))
+      .resolves.toEqual({ outcome: "cleanup_pending" });
+    await expect(repository.preparePublicationCleanup(cleanup.operation, cleanup.claim))
+      .resolves.toEqual({ outcome: "cleanup_required", descriptors: [abandonedDelivery] });
+    await expect(repository.journal.completeCleanup(cleanup.operation, cleanup.claim))
+      .resolves.toEqual({ outcome: "cleaned" });
+    await expect(repository.journal.completeCleanup(cleanup.operation, cleanup.claim))
+      .resolves.toEqual({ outcome: "already_cleaned" });
+  });
+
+  it("does not treat another owner's shared path as this operation's domain commit", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const delivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "foreign-finalize");
+    const localAssetId = await asset();
+    const foreignOwner = await owner("foreign-finalize");
+    await asset(foreignOwner, delivery.relativePath);
+    const published = await publish(repository, scope(localAssetId), delivery);
+    const attached = await attachAndCommit(
+      repository,
+      published.operation,
+      published.candidate,
+      false,
+      delivery.relativePath,
+    );
+    if (attached.outcome !== "attached") throw new Error("attachment failed");
+    await expire(attached.operation.operationId);
+    const recovered = await repository.journal.recover({ leaseOwner: "foreign-path-reaper", leaseSeconds: 30, limit: 100 });
+    const record = recovered.find((item) => item.operation.operationId === attached.operation.operationId);
+    expect(record?.action).toBe("cleanup");
+    if (!record || record.action !== "cleanup") throw new Error("expected cleanup recovery");
+    await expect(repository.journal.markCleanup(record.operation, record.claim, { cause: "recovery" }))
+      .resolves.toEqual({ outcome: "cleanup_pending" });
+    await expect(repository.preparePublicationCleanup(record.operation, record.claim))
+      .resolves.toEqual({ outcome: "cleanup_required", descriptors: [] });
+  });
+
+  it("finalizes a derivative only from the exact owner and source asset reference", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const sourceAssetId = await asset();
+    const delivery = descriptor(`derivatives/${hash(crypto.randomUUID())}.webp`, "local-derivative");
+    const published = await publish(
+      repository,
+      scope(sourceAssetId),
+      delivery,
+      [delivery],
+      "asset_derivative",
+    );
+    const attached = await attachInTransaction(repository, published, async (client) => {
+      await client.query(
+        `INSERT INTO asset_derivatives (
+           owner_user_id,source_asset_id,derivative_kind,transform_version,pixel_width,pixel_height,
+           storage_driver,storage_path,mime_type,byte_length,content_hash
+         ) VALUES ($1,$2,'thumbnail',1,480,270,'filesystem',$3,'image/webp',$4,$5)`,
+        [ownerUserId, sourceAssetId, delivery.relativePath, delivery.byteLength, delivery.contentHash]
+      );
+    });
+    await expire(attached.operation.operationId);
+    const recovered = await repository.journal.recover({ leaseOwner: "derivative-reaper", leaseSeconds: 30, limit: 100 });
+    const record = recovered.find((item) => item.operation.operationId === attached.operation.operationId);
+    expect(record?.action).toBe("finalize");
+  });
+
   it("uses SKIP LOCKED for competing reapers and rejects a stale lease fence", async () => {
     const repository = createPostgresDurableFilesystemRepository(pool);
     const first = await repository.journal.reserve(scope(await asset()), {
@@ -383,5 +546,125 @@ integration("PostgreSQL durable filesystem repository", () => {
       .resolves.toEqual({ outcome: "already_cleaned" });
     await expect(repository.preparePublicationCleanup(published.operation, published.claim))
       .resolves.toEqual({ outcome: "already_cleaned" });
+  });
+
+  it("rejects wrong lease identity at finalized and cleaned terminal states", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const finalizedDelivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "terminal-finalized");
+    const finalized = await publish(repository, scope(await asset()), finalizedDelivery);
+    const attached = await attachAndCommit(
+      repository,
+      finalized.operation,
+      finalized.candidate,
+      true,
+      finalizedDelivery.relativePath,
+    );
+    if (attached.outcome !== "attached") throw new Error("attachment failed");
+    await repository.journal.finalizeAfterCommit(attached.operation, attached.claim);
+    const wrongFinalizedClaim = {
+      ...attached.claim,
+      leaseId: crypto.randomUUID()
+    } as DurableFilesystemRecoveryClaim;
+    await expect(repository.journal.finalizeAfterCommit(attached.operation, wrongFinalizedClaim))
+      .resolves.toEqual({ outcome: "lease_lost" });
+    const wrongFinalizedExpiry = {
+      ...attached.claim,
+      leaseExpiresAt: new Date(Date.parse(attached.claim.leaseExpiresAt) + 1_000).toISOString()
+    } as DurableFilesystemRecoveryClaim;
+    await expect(repository.journal.finalizeAfterCommit(attached.operation, wrongFinalizedExpiry))
+      .resolves.toEqual({ outcome: "lease_lost" });
+
+    const cleanedDelivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "terminal-cleaned");
+    const cleaned = await publish(repository, scope(await asset()), cleanedDelivery);
+    await repository.journal.markCleanup(cleaned.operation, cleaned.claim, { cause: "rollback" });
+    await repository.journal.completeCleanup(cleaned.operation, cleaned.claim);
+    const wrongCleanedClaim = {
+      ...cleaned.claim,
+      leaseOwner: "wrong-terminal-owner"
+    } as DurableFilesystemRecoveryClaim;
+    await expect(repository.journal.completeCleanup(cleaned.operation, wrongCleanedClaim))
+      .resolves.toEqual({ outcome: "lease_lost" });
+  });
+
+  it("keeps a persistent cleanup path fence through acknowledgement and closes both attach race orders", async () => {
+    const repository = createPostgresDurableFilesystemRepository(pool);
+    const sharedDelivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "cleanup-fence");
+    const cleanup = await publish(repository, scope(await asset()), sharedDelivery);
+    await repository.journal.markCleanup(cleanup.operation, cleanup.claim, { cause: "rollback" });
+    await expect(repository.preparePublicationCleanup(cleanup.operation, cleanup.claim))
+      .resolves.toEqual({ outcome: "cleanup_required", descriptors: [sharedDelivery] });
+
+    const foreignOwner = await owner("cleanup-fence");
+    const foreignAssetId = await asset(foreignOwner);
+    const foreign = await publish(
+      repository,
+      scope(foreignAssetId, foreignOwner),
+      sharedDelivery,
+    );
+    const rejectedClient = await pool.connect();
+    try {
+      await rejectedClient.query("BEGIN");
+      await expect(repository.journal.attach(rejectedClient, foreign.operation, foreign.candidate))
+        .resolves.toEqual({ outcome: "stale" });
+      await rejectedClient.query("ROLLBACK");
+    } finally {
+      rejectedClient.release();
+    }
+    await expect(repository.journal.completeCleanup(cleanup.operation, cleanup.claim))
+      .resolves.toEqual({ outcome: "cleaned" });
+    const republished = await publish(
+      repository,
+      scope(foreignAssetId, foreignOwner),
+      sharedDelivery,
+    );
+    const afterAcknowledgement = await pool.connect();
+    try {
+      await afterAcknowledgement.query("BEGIN");
+      expect((await repository.journal.attach(
+        afterAcknowledgement,
+        republished.operation,
+        republished.candidate,
+      )).outcome).toBe("attached");
+      await afterAcknowledgement.query("ROLLBACK");
+    } finally {
+      afterAcknowledgement.release();
+    }
+
+    const secondDelivery = descriptor(`originals/${hash(crypto.randomUUID())}.png`, "cleanup-fence-ordered");
+    const secondCleanup = await publish(repository, scope(await asset()), secondDelivery);
+    const secondForeignOwner = await owner("cleanup-fence-ordered");
+    const secondForeignAssetId = await asset(secondForeignOwner);
+    const secondForeign = await publish(
+      repository,
+      scope(secondForeignAssetId, secondForeignOwner),
+      secondDelivery,
+    );
+    const attaching = await pool.connect();
+    try {
+      await attaching.query("BEGIN");
+      const attached = await repository.journal.attach(
+        attaching,
+        secondForeign.operation,
+        secondForeign.candidate,
+      );
+      expect(attached.outcome).toBe("attached");
+      await repository.journal.markCleanup(secondCleanup.operation, secondCleanup.claim, { cause: "rollback" });
+      let prepared = false;
+      const preparing = repository.preparePublicationCleanup(secondCleanup.operation, secondCleanup.claim)
+        .finally(() => { prepared = true; });
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+      expect(prepared).toBe(false);
+      await attaching.query(
+        "UPDATE assets SET storage_path=$3 WHERE id=$1 AND owner_user_id=$2",
+        [secondForeignAssetId, secondForeignOwner, secondDelivery.relativePath]
+      );
+      await attaching.query("COMMIT");
+      await expect(preparing).resolves.toEqual({ outcome: "cleanup_required", descriptors: [] });
+      await expect(repository.journal.completeCleanup(secondCleanup.operation, secondCleanup.claim))
+        .resolves.toEqual({ outcome: "cleaned" });
+    } finally {
+      await attaching.query("ROLLBACK").catch(() => undefined);
+      attaching.release();
+    }
   });
 });

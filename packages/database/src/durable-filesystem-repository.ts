@@ -100,7 +100,8 @@ function scopeMatches(row: OperationRow, scope: DurableFilesystemScope): boolean
   if (row.owner_user_id !== scope.ownerUserId || row.resource_kind !== scope.resourceKind) return false;
   return scope.resourceKind === "asset"
     ? row.asset_id === scope.assetId
-    : row.operation_scope_hash === sha256(scope.operationScopeId);
+    : row.operation_scope_hash === scope.operationScopeId
+      || row.operation_scope_hash === sha256(scope.operationScopeId);
 }
 
 function operationMatches(
@@ -246,9 +247,20 @@ async function insertDescriptor(
   );
 }
 
-function claimClassification(row: OperationRow, claim: DurableFilesystemRecoveryClaim): "valid" | "stale" | "lease_lost" {
+function claimIdentityClassification(
+  row: OperationRow,
+  claim: DurableFilesystemRecoveryClaim,
+): "valid" | "stale" | "lease_lost" {
   if (row.work_version !== claim.workVersion || row.id !== claim.operationId) return "stale";
-  if (row.lease_id !== claim.leaseId || row.lease_owner !== claim.leaseOwner) return "lease_lost";
+  if (row.lease_id !== claim.leaseId
+    || row.lease_owner !== claim.leaseOwner
+    || row.lease_expires_at.toISOString() !== claim.leaseExpiresAt) return "lease_lost";
+  return "valid";
+}
+
+function claimClassification(row: OperationRow, claim: DurableFilesystemRecoveryClaim): "valid" | "stale" | "lease_lost" {
+  const identity = claimIdentityClassification(row, claim);
+  if (identity !== "valid") return identity;
   if (row.lease_expires_at.getTime() <= Date.now()) return "lease_lost";
   return "valid";
 }
@@ -266,15 +278,59 @@ async function globallyReferenced(client: DatabaseClient, relativePath: string):
 
 async function operationHasDomainReference(client: DatabaseClient, row: OperationRow): Promise<boolean> {
   const delivery = await descriptorRows(client, row.id, "delivery");
-  if (delivery[0] && await globallyReferenced(client, delivery[0].relative_path)) return true;
+  const deliveryPath = delivery[0]?.relative_path;
+  if (!deliveryPath) return false;
+  if (row.purpose === "asset_original") {
+    const original = await client.query(
+      `SELECT 1 FROM assets
+        WHERE id=$1 AND owner_user_id=$2
+          AND storage_driver='filesystem' AND storage_path=$3`,
+      [row.asset_id, row.owner_user_id, deliveryPath]
+    );
+    return Boolean(original.rowCount);
+  }
+  if (row.purpose === "asset_derivative") {
+    const derivative = await client.query(
+      `SELECT 1 FROM asset_derivatives
+        WHERE source_asset_id=$1 AND owner_user_id=$2
+          AND storage_driver='filesystem' AND storage_path=$3
+        LIMIT 1`,
+      [row.asset_id, row.owner_user_id, deliveryPath]
+    );
+    return Boolean(derivative.rowCount);
+  }
+  const table = row.purpose === "portable_staging"
+    ? "portable_staged_inputs"
+    : "portable_export_artifacts";
   const portable = await client.query(
-    `SELECT 1 FROM portable_staged_inputs WHERE filesystem_operation_id=$1
-     UNION ALL
-     SELECT 1 FROM portable_export_artifacts WHERE filesystem_operation_id=$1
-     LIMIT 1`,
-    [row.id]
+    `SELECT 1 FROM ${table}
+      WHERE filesystem_operation_id=$1 AND owner_user_id=$2
+      LIMIT 1`,
+    [row.id, row.owner_user_id]
   );
   return Boolean(portable.rowCount);
+}
+
+async function cleanupPathFenced(
+  client: DatabaseClient,
+  operationId: string,
+  relativePaths: readonly string[],
+): Promise<boolean> {
+  if (relativePaths.length === 0) return false;
+  const selected = await client.query(
+    `SELECT 1
+       FROM durable_filesystem_operations cleanup_operation
+       JOIN durable_filesystem_descriptors cleanup_descriptor
+         ON cleanup_descriptor.operation_id=cleanup_operation.id
+        AND cleanup_descriptor.owner_user_id=cleanup_operation.owner_user_id
+        AND cleanup_descriptor.descriptor_role='cleanup'
+      WHERE cleanup_operation.id <> $1
+        AND cleanup_operation.lifecycle='cleanup_pending'
+        AND cleanup_descriptor.relative_path=ANY($2::text[])
+      LIMIT 1`,
+    [operationId, [...new Set(relativePaths)]]
+  );
+  return Boolean(selected.rowCount);
 }
 
 export function createPostgresDurableFilesystemRepository(
@@ -305,7 +361,12 @@ export function createPostgresDurableFilesystemRepository(
     if (!row) throw new Error("durable_filesystem_reservation_failed");
     candidateAuthorities.set(row.id, { operationId: row.id, tokenHash: sha256(operationToken) });
     return {
-      operation: reservedOperation(row),
+      operation: {
+        ...scope,
+        operationId: row.id as DurableFilesystemOperationId,
+        purpose: row.purpose,
+        expiresAt: row.expires_at.toISOString()
+      } as ReservedFilesystemOperation,
       claim: recoveryClaim(row)
     } satisfies DurableFilesystemReserveResult;
   };
@@ -368,7 +429,9 @@ export function createPostgresDurableFilesystemRepository(
     const deliveries = await descriptorRows(client, row.id, "delivery");
     const cleanup = await descriptorRows(client, row.id, "cleanup");
     if (deliveries.length !== 1) return { outcome: "candidate_mismatch" };
-    await lockPhysicalPaths(client, [...cleanup, ...deliveries].map((item) => item.relative_path));
+    const paths = [...cleanup, ...deliveries].map((item) => item.relative_path);
+    await lockPhysicalPaths(client, paths);
+    if (await cleanupPathFenced(client, row.id, paths)) return { outcome: "stale" };
     const locator = randomToken();
     const updated = await client.query<OperationRow>(
       `UPDATE durable_filesystem_operations
@@ -395,9 +458,10 @@ export function createPostgresDurableFilesystemRepository(
     async (client): Promise<DurableFilesystemFinalizeResult> => {
       const row = await operationById(client, operation.operationId, true);
       if (!row || !operationMatches(row, operation) || row.work_version !== claim.workVersion) return { outcome: "stale" };
+      const identity = claimIdentityClassification(row, claim);
+      if (identity !== "valid") return { outcome: identity };
       if (row.lifecycle === "finalized") return { outcome: "already_finalized" };
-      const classification = claimClassification(row, claim);
-      if (classification !== "valid") return { outcome: classification };
+      if (row.lease_expires_at.getTime() <= Date.now()) return { outcome: "lease_lost" };
       if (row.lifecycle !== "attached") return { outcome: "stale" };
       await client.query(
         `UPDATE durable_filesystem_operations
@@ -416,9 +480,10 @@ export function createPostgresDurableFilesystemRepository(
   ): Promise<DurableFilesystemCleanupResult> => withTransaction(pool, async (client) => {
     const row = await operationById(client, operation.operationId, true);
     if (!row || !operationMatches(row, operation) || row.work_version !== claim.workVersion) return { outcome: "stale" };
+    const identity = claimIdentityClassification(row, claim);
+    if (identity !== "valid") return { outcome: identity };
     if (row.lifecycle === "cleaned") return { outcome: "already_cleaned" };
-    const classification = claimClassification(row, claim);
-    if (classification !== "valid") return { outcome: classification };
+    if (row.lease_expires_at.getTime() <= Date.now()) return { outcome: "lease_lost" };
     if (row.lifecycle === "cleanup_pending") return { outcome: "cleanup_pending" };
     if (!(["reserved", "attached", "finalized"] as OperationLifecycle[]).includes(row.lifecycle)) {
       return { outcome: "stale" };
@@ -438,9 +503,10 @@ export function createPostgresDurableFilesystemRepository(
   ): Promise<DurableFilesystemCleanupCompletionResult> => withTransaction(pool, async (client) => {
     const row = await operationById(client, operation.operationId, true);
     if (!row || !operationMatches(row, operation) || row.work_version !== claim.workVersion) return { outcome: "stale" };
+    const identity = claimIdentityClassification(row, claim);
+    if (identity !== "valid") return { outcome: identity };
     if (row.lifecycle === "cleaned") return { outcome: "already_cleaned" };
-    const classification = claimClassification(row, claim);
-    if (classification !== "valid") return { outcome: classification };
+    if (row.lease_expires_at.getTime() <= Date.now()) return { outcome: "lease_lost" };
     if (row.lifecycle !== "cleanup_pending") return { outcome: "stale" };
     await client.query(
       `UPDATE durable_filesystem_operations
@@ -495,9 +561,10 @@ export function createPostgresDurableFilesystemRepository(
   ): Promise<PrivatePublicationCleanupPreparation> => withTransaction(pool, async (client) => {
     const row = await operationById(client, operation.operationId, true);
     if (!row || !operationMatches(row, operation) || row.work_version !== claim.workVersion) return { outcome: "stale" };
+    const identity = claimIdentityClassification(row, claim);
+    if (identity !== "valid") return { outcome: identity };
     if (row.lifecycle === "cleaned") return { outcome: "already_cleaned" };
-    const classification = claimClassification(row, claim);
-    if (classification !== "valid") return { outcome: classification };
+    if (row.lease_expires_at.getTime() <= Date.now()) return { outcome: "lease_lost" };
     if (row.lifecycle !== "cleanup_pending") return { outcome: "stale" };
     const rows = await descriptorRows(client, row.id, "cleanup");
     await lockPhysicalPaths(client, rows.map((item) => item.relative_path));
