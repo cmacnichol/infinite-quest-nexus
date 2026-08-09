@@ -8955,7 +8955,16 @@ Implement and review these internal sub-checkpoints in order:
    request into two logical rows. Legacy assets with null/incomplete technical
    metadata are explicitly represented as incomplete; 0064 must define whether
    reuse waits, verifies/upgrades, or is deferred to e3e5, and test both
-   complete and incomplete seeds.
+   complete and incomplete seeds. **Chosen e1b behavior:** seed incomplete
+   legacy rows as `verification_required`; a new normalized request may not
+   reuse that canonical identity until e3e5 verifies/upgrades it, rather than
+   inventing technical facts or racing the metadata backfill executor. Add a
+   request-owned, immutable pending library-initialization record before the
+   first `assets` insert. The existing default-library trigger must consume
+   that record in the same transaction, create the representative requested
+   metadata exactly once, and mark it applied; ordinary legacy inserts retain
+   their existing default behavior. Later requests and explicit revision-fenced
+   edits may not rewrite the initialized canonical row.
 3. **e1c — repository arbitration/lifecycle:** implement deterministic
    owner+hash locks, same-request replay/mismatch, distinct-request
    same-content convergence, canonical reservation/publication recovery, and
