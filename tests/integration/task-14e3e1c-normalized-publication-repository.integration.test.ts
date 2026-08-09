@@ -352,6 +352,14 @@ integration("Task 14e3e1c normalized publication repository", () => {
           contentCategories: ["fantasy"], favorite: false
         },
         bindingIntentKeys: ["attachment-context", "attachment-reference"]
+      }, {
+        sourceKind: "campaign_zip", sourceAssetId: "attached-cover-mirror", sourceRecordId: "mirror", sourceKey: "same-bytes",
+        requestedLibrary: {
+          title: "Attached archive mirror", caption: "", notes: "", tags: ["moon"], origin: "imported",
+          reviewStatus: "eligible", reuseScope: "owner_library", automaticReuseEnabled: true,
+          contentCategories: ["fantasy"], favorite: false
+        },
+        bindingIntentKeys: ["attachment-context", "attachment-reference"]
       }],
       provenance: { kind: "import", importKind: "campaign_zip", importOperationId: crypto.randomUUID() },
       contextIntents: [{
@@ -462,7 +470,7 @@ integration("Task 14e3e1c normalized publication repository", () => {
       [reservation.requestId, ownerUserId]
     )).resolves.toMatchObject({ rows: [{
       lifecycle: "published",
-      sources: 1,
+      sources: 2,
       contexts: 1,
       references: 1,
       derivative_id: derivative.rows[0]!.id
