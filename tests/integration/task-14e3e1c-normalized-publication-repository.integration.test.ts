@@ -303,6 +303,64 @@ integration("Task 14e3e1c normalized publication repository", () => {
     });
   });
 
+  it("rolls back request children and result when the caller rolls back attachment", async () => {
+    const command = request(ownerUserId, `14e3e1e-attachment-rollback-${crypto.randomUUID()}`, "cover-a", "attachment-rollback");
+    const repository = createPostgresNormalizedAssetPublicationRepository(pool);
+    const reservation = await repository.reserveRequest(command);
+    await pool.query(
+      `INSERT INTO assets (
+         id,owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,
+         pixel_width,pixel_height,technical_metadata
+       ) VALUES ($1,$2,$3,'filesystem',$4,$5,$6,1,1,$7::jsonb)`,
+      [
+        reservation.canonicalAssetId,
+        ownerUserId,
+        command.original.contentHash,
+        `test/14e3e1e/${crypto.randomUUID()}`,
+        command.original.mimeType,
+        command.original.byteLength,
+        JSON.stringify({ format: "png", pages: 1 })
+      ]
+    );
+    await pool.query(
+      `UPDATE asset_publication_identities
+          SET lifecycle='published',result='{}'::jsonb,published_at=clock_timestamp()
+        WHERE asset_id=$1 AND owner_user_id=$2`,
+      [reservation.canonicalAssetId, ownerUserId]
+    );
+    const caller = await pool.connect();
+    try {
+      await caller.query("BEGIN");
+      await repository.attachRequestInTransaction(caller, command, {
+        contexts: [],
+        references: [],
+        result: {
+          assetId: reservation.canonicalAssetId!,
+          mimeType: command.original.mimeType,
+          byteLength: command.original.byteLength,
+          contentHash: command.original.contentHash,
+          pixelWidth: command.original.technicalMetadata.pixelWidth,
+          pixelHeight: command.original.technicalMetadata.pixelHeight,
+          derivatives: []
+        }
+      });
+      await caller.query("ROLLBACK");
+    } finally {
+      await caller.query("ROLLBACK").catch(() => undefined);
+      caller.release();
+    }
+    await expect(pool.query(
+      `SELECT request.lifecycle,request.result,
+              (SELECT count(*)::integer FROM asset_publication_request_sources source
+                WHERE source.request_id=request.id AND source.owner_user_id=request.owner_user_id) AS sources,
+              (SELECT count(*)::integer FROM asset_publication_request_results result
+                WHERE result.request_id=request.id AND result.owner_user_id=request.owner_user_id) AS results
+         FROM asset_publication_requests request
+        WHERE request.id=$1 AND request.owner_user_id=$2`,
+      [reservation.requestId, ownerUserId]
+    )).resolves.toMatchObject({ rows: [{ lifecycle: "prepared", result: null, sources: 0, results: 0 }] });
+  });
+
   it("persists a request-owned source, derivative reconciliation, and safe result in the caller transaction", async () => {
     const bytes = new TextEncoder().encode(`14e3e1d:original:${crypto.randomUUID()}`);
     const derivativeBytes = new TextEncoder().encode(`14e3e1d:thumbnail:${crypto.randomUUID()}`);
