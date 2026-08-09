@@ -9226,16 +9226,50 @@ authority remain unchanged for e3f/e3g. Evidence: e4 real PostgreSQL/temp-FS
 
 **14e3e5 — real existing-asset metadata backfill executor.** Retain the durable
 backfill state machine but replace the current metadata-only completion helper
-with a private executor. A claim supplies database-derived owner/asset; it
-opens the original through finalized delivery/bounded secure sessions (never a
-raw `storage_path`), verifies signature/hash/size, decodes safely, reserves and
-publishes the thumbnail derivative under an `asset_derivative` operation, and
-under the exact claim transaction updates allowlisted technical metadata,
-binds the derivative, and completes the job. Add heartbeat, lease-loss abort,
-bounded retry/backoff/terminal policy, enum-only diagnostics, two-worker
-`SKIP LOCKED`, slow decode, stale claim, restart, and poison-record no-hot-loop
-coverage. Clarify and preserve the existing attempts/failed schema rather than
-adding an unbounded immediate-requeue loop.
+with a private executor. The current application/database port only claims,
+heartbeats, requeues, and marks a job complete after pixels and a thumbnail
+already exist; it must not be reused as evidence that work has been performed.
+Implement and review these checkpoints in order:
+
+1. **e5a — claim and bounded original-read authority:** add a named
+   adapter-private claim projection which supplies owner, asset, immutable
+   expected identity, and lease only from the database. Open the original only
+   via the finalized-delivery resolver and `SecureFilesystemAdapter`
+   `openAssetSession` bounded session; never expose or interpret a
+   `storage_path`, delivery grant, relative path, or raw filesystem error in a
+   worker/application contract. A missing/legacy-retained original, exhausted
+   session, MIME/signature mismatch, byte/hash mismatch, link/race/containment
+   error, or unsupported/decode-limit image must resolve to an allowlisted
+   diagnostic and the exact claim fence.
+2. **e5b — verified metadata and derivative publication:** after a bounded
+   signature/hash/size verification and safe decode, derive normalized technical
+   metadata and a deterministic thumbnail. Add the next additive migration
+   (after 0066) and repository mutation that, under the exact live claim
+   transaction, updates only the allowlisted asset metadata, binds one
+   transform-versioned `thumbnail` derivative through a durable
+   `asset_derivative` operation, and marks the job completed. Reuse e2's
+   private reserve/attach/finalize primitives or a narrowly documented
+   equivalent; do not reopen the legacy 0060 writer. The first verified
+   backfill may promote a matching `verification_required` arbitration only
+   through an explicit revision- and identity-fenced repository operation; it
+   must never overwrite canonical library metadata or another owner's row.
+3. **e5c — lease, retry, and recovery semantics:** heartbeat before and during
+   bounded read/hash/decode/thumbnail work; an expired, stale, foreign, or
+   rotated lease must abort before attachment and must not leave a derivative
+   or technical-metadata mutation. Define a finite attempts/backoff/terminal
+   policy using the existing `queued`/`recoverable`/`failed` schema (no
+   immediate hot loop), with enum-only diagnostics. A post-commit finalization
+   interruption must retain durable pending work and reconcile from a fresh
+   composition without rerunning decode or duplicating a derivative.
+4. **e5d — private composition and proof matrix:** build the executor as a
+   named private runtime composition, unconsumed by the current worker until
+   e3e7. Use real PostgreSQL and temporary filesystem tests for initial
+   backfill, metadata-only versus thumbnail-only repair, already-current replay,
+   two-worker `SKIP LOCKED`, slow decode with heartbeat, stale/foreign claim,
+   lease loss before commit, hash/decode/poison terminal policy, restart
+   finalization, shared-content/cross-owner isolation, canonical-library
+   immutability, and no raw path/bearer/error escape. Add graph guards proving
+   no API legacy asset-service persistence or public-barrel binding is reached.
 
 **14e3e6 — durable filesystem recovery executor.** Build a private recovery
 application that claims one asset or portable unit with database-derived owner,
