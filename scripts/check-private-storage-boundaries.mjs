@@ -10,6 +10,7 @@ const PORTABLE_COMPOSITION_FILE = "services/runtime/src/portable-import-export-c
 const NORMALIZED_PUBLICATION_REPOSITORY_FILE = "packages/database/src/normalized-asset-publication-repository.ts";
 const NORMALIZED_PUBLICATION_COMPOSITION_FILE = "services/runtime/src/normalized-asset-publication-composition.ts";
 const NORMALIZED_PUBLICATION_COMPOSITION_FACTORY = "createPrivateNormalizedAssetPublicationComposition";
+const METADATA_BACKFILL_COMPOSITION_FILE = "services/runtime/src/private-asset-metadata-backfill-composition.ts";
 const NORMALIZED_PUBLICATION_CONTRACT_FILE = "packages/application/src/assets/private-normalized-asset-publication.ts";
 const PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FILE = "packages/database/src/portable-normalized-asset-publication-repository.ts";
 const PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY = "createPostgresPortableNormalizedAssetPublicationRepository";
@@ -395,7 +396,8 @@ export function checkPrivateStorageBoundaries(file, text) {
         }
         if ([STORAGE_COMPOSITION_FACTORY, ASSET_PUBLICATION_COMPOSITION_FACTORY].includes(name)
           && normalized !== STORAGE_COMPOSITION_FILE
-          && !(name === STORAGE_COMPOSITION_FACTORY && normalized === NORMALIZED_PUBLICATION_COMPOSITION_FILE)) {
+          && !(name === STORAGE_COMPOSITION_FACTORY
+            && [NORMALIZED_PUBLICATION_COMPOSITION_FILE, METADATA_BACKFILL_COMPOSITION_FILE].includes(normalized))) {
           add(specifier, "private storage composition must remain unconsumed before its named later checkpoint");
         }
         if (name === PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY
@@ -483,7 +485,8 @@ export function checkPrivateStorageBoundaries(file, text) {
       }
       if ([STORAGE_COMPOSITION_FACTORY, ASSET_PUBLICATION_COMPOSITION_FACTORY].includes(member.name)
         && normalized !== STORAGE_COMPOSITION_FILE
-        && !(member.name === STORAGE_COMPOSITION_FACTORY && normalized === NORMALIZED_PUBLICATION_COMPOSITION_FILE)) {
+        && !(member.name === STORAGE_COMPOSITION_FACTORY
+          && [NORMALIZED_PUBLICATION_COMPOSITION_FILE, METADATA_BACKFILL_COMPOSITION_FILE].includes(normalized))) {
         add(member.node, "private storage composition must remain unconsumed before its named later checkpoint");
       }
       if (member.name === PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY
@@ -820,14 +823,17 @@ export function checkAssetImportStorageCompositionInventory(sources) {
   }
   const compositionImports = imports.get(STORAGE_COMPOSITION_FACTORY);
   const compositionCalls = calls.get(STORAGE_COMPOSITION_FACTORY);
-  if (compositionImports.length !== 1
-    || compositionImports[0].file !== NORMALIZED_PUBLICATION_COMPOSITION_FILE
-    || compositionImports[0].target !== STORAGE_COMPOSITION_FILE
-    || compositionImports[0].local !== STORAGE_COMPOSITION_FACTORY
+  const storageConsumers = [NORMALIZED_PUBLICATION_COMPOSITION_FILE, METADATA_BACKFILL_COMPOSITION_FILE];
+  if (compositionImports.length !== storageConsumers.length
+    || storageConsumers.some((consumer) => !compositionImports.some((entry) => (
+      entry.file === consumer
+      && entry.target === STORAGE_COMPOSITION_FILE
+      && entry.local === STORAGE_COMPOSITION_FACTORY
+    )))
     || unsafeExposures.get(STORAGE_COMPOSITION_FACTORY).length !== 0
-    || compositionCalls.filter((file) => file !== STORAGE_COMPOSITION_FILE).length !== 1
-    || !compositionCalls.includes(NORMALIZED_PUBLICATION_COMPOSITION_FILE)) {
-    violations.push(`${STORAGE_COMPOSITION_FACTORY} must be consumed directly and exactly once by ${NORMALIZED_PUBLICATION_COMPOSITION_FILE}`);
+    || compositionCalls.filter((file) => file !== STORAGE_COMPOSITION_FILE).length !== storageConsumers.length
+    || storageConsumers.some((consumer) => !compositionCalls.includes(consumer))) {
+    violations.push(`${STORAGE_COMPOSITION_FACTORY} must be consumed directly and exactly once by each named private composition`);
   }
   const assetPublicationCompositionDefinitions = definitions.get(ASSET_PUBLICATION_COMPOSITION_FACTORY);
   if (assetPublicationCompositionDefinitions.length !== 1

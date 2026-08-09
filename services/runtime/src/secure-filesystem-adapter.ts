@@ -30,6 +30,10 @@ import {
 import type { FinalizedAssetDeliveryResolverPort } from "../../../packages/application/src/assets/private-finalized-delivery.js";
 import type { AssetDeliveryRequest, AssetScope } from "../../../packages/application/src/assets/types.js";
 import type {
+  PrivateMetadataBackfillThumbnailPreparation,
+  PrivatePreparedMetadataBackfillThumbnail
+} from "../../../packages/application/src/assets/private-metadata-backfill.js";
+import type {
   PrivatePortableExportCleanupPreparation,
   PrivatePortablePreviewRepositoryPort,
   PrivatePortableStagedCleanupPreparation,
@@ -93,6 +97,9 @@ export type SecureFilesystemAdapterOptions = Readonly<{
 
 export type SecureFilesystemAdapter = Readonly<{
   prepareAssetPublication: PrivateAssetPublicationFilesystemPort["prepareAssetPublication"];
+  prepareMetadataBackfillThumbnail(
+    input: PrivateMetadataBackfillThumbnailPreparation,
+  ): Promise<PrivatePreparedMetadataBackfillThumbnail>;
   discardPreparedAssetPublication(prepared: PrivatePreparedAssetPublication): Promise<void>;
   finalizeAssetPublication: PrivateAssetPublicationFilesystemPort["finalizeAssetPublication"];
   stagePortableInput(input: Readonly<{
@@ -864,6 +871,125 @@ export async function createSecureFilesystemAdapter(
     }
   };
 
+  /**
+   * e5's deliberately narrow alternative to the legacy 0060 whole-asset
+   * publisher. The caller supplies an already claimed existing asset and this
+   * routine reserves only its thumbnail derivative.
+   */
+  const prepareMetadataBackfillThumbnail: SecureFilesystemAdapter["prepareMetadataBackfillThumbnail"] = async (
+    input,
+  ) => {
+    requireAdapterOpen();
+    const { claim, thumbnail } = input;
+    if (!/^[0-9a-f]{64}$/u.test(thumbnail.contentHash)
+      || thumbnail.bytes.byteLength !== thumbnail.byteLength
+      || thumbnail.byteLength < 1
+      || thumbnail.mimeType !== "image/webp"
+      || thumbnail.transformVersion !== 1
+      || thumbnail.pixelWidth < 1
+      || thumbnail.pixelHeight < 1
+      || Date.parse(input.expiresAt) <= Date.now()) {
+      throw new Error("asset_metadata_backfill_thumbnail_invalid");
+    }
+    if (createHash("sha256").update(thumbnail.bytes).digest("hex") !== thumbnail.contentHash) {
+      throw new Error("asset_metadata_backfill_thumbnail_hash_mismatch");
+    }
+    const journal = options.journal;
+    const prewrite = options.prewrite;
+    const candidates = options.candidates;
+    const cleanupRepository = options.publicationCleanup;
+    if (!journal || !prewrite || !candidates || !cleanupRepository) {
+      throw new Error("asset_metadata_backfill_repository_unavailable");
+    }
+    const reserved = await journal.reserve(
+      { resourceKind: "asset", ownerUserId: claim.ownerUserId, assetId: claim.assetId },
+      { purpose: "asset_derivative", leaseOwner: claim.leaseOwner, expiresAt: input.expiresAt },
+    );
+    const operation = reserved.operation;
+    if (operation.resourceKind !== "asset"
+      || operation.ownerUserId !== claim.ownerUserId
+      || operation.assetId !== claim.assetId
+      || operation.purpose !== "asset_derivative"
+      || operation.expiresAt !== input.expiresAt) {
+      throw new Error("asset_metadata_backfill_reservation_mismatch");
+    }
+    const relativePath = `assets/content/${thumbnail.contentHash}`;
+    let handle: FileHandle | undefined;
+    let candidateCompleted = false;
+    let rollbackPromise: Promise<void> | undefined;
+    const rollback = (): Promise<void> => {
+      rollbackPromise ??= (async () => {
+        const cleanup = await journal.markCleanup(operation, reserved.claim, { cause: "rollback" });
+        if (cleanup.outcome !== "cleanup_pending") return;
+        // Before a candidate persists a descriptor, target-only evidence is
+        // intentionally left for fail-closed durable recovery. After that
+        // point cleanup must use the global-reference projection: a
+        // content-addressed thumbnail can be retained by another owner.
+        if (!candidateCompleted) return;
+        const preparedCleanup = await cleanupRepository.preparePublicationCleanup(operation, reserved.claim);
+        if (preparedCleanup.outcome === "already_cleaned") return;
+        if (preparedCleanup.outcome !== "cleanup_required") {
+          throw new Error(`asset_metadata_backfill_cleanup_${preparedCleanup.outcome}`);
+        }
+        for (const cleanupDescriptor of preparedCleanup.descriptors) {
+          await identitySafeDelete(assetRoot, cleanupDescriptor);
+        }
+        const completed = await journal.completeCleanup(operation, reserved.claim);
+        if (!['cleaned', 'already_cleaned'].includes(completed.outcome)) {
+          throw new Error(`filesystem_cleanup_${completed.outcome}`);
+        }
+      })();
+      return rollbackPromise;
+    };
+    try {
+      await ensureAnchoredDirectory(assetRoot, "assets/content");
+      await prewrite.recordPrewriteTarget(bindPrivatePrewriteTargetAuthority(operation, relativePath));
+      let descriptor: PrivateStorageDescriptor;
+      try {
+        handle = await openAnchored(assetRoot, relativePath, CREATE_FLAGS, 0o600);
+        const created = statIdentity(await handle.stat({ bigint: true }) as BigIntStat);
+        await prewrite.recordPrewriteNode(bindPrivatePrewriteNodeAuthority(operation, relativePath, {
+          deviceId: created.deviceId,
+          fileId: created.fileId
+        }));
+        const contentHash = await writeExactContent(handle, [thumbnail.bytes], thumbnail.byteLength, input.expiresAt);
+        if (contentHash !== thumbnail.contentHash) throw new Error("asset_metadata_backfill_thumbnail_hash_mismatch");
+        descriptor = descriptorFromStat(
+          relativePath,
+          await handle.stat({ bigint: true }) as BigIntStat,
+          contentHash,
+          thumbnail.byteLength,
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        handle = await openAnchored(assetRoot, relativePath);
+        descriptor = await verifyContentAddressedFile(
+          handle,
+          relativePath,
+          thumbnail.contentHash,
+          thumbnail.byteLength,
+          input.expiresAt,
+        );
+      }
+      await handle.close();
+      handle = undefined;
+      const candidate = await candidates.issuePublicationCandidate(operation, {
+        deliveryRelativePath: relativePath,
+        cleanupDescriptors: [descriptor]
+      });
+      await candidates.completePublicationCandidate(operation, candidate, descriptor);
+      candidateCompleted = true;
+      return Object.freeze({
+        attachment: bindPrivateFilesystemCandidateAttachment(operation, candidate, descriptor, reserved.claim),
+        rollback
+      });
+    } catch (error) {
+      if (handle) await handle.close().catch(() => undefined);
+      await rollback().catch(() => undefined);
+      throw error;
+    }
+  };
+
   const finalizeAssetPublication: SecureFilesystemAdapter["finalizeAssetPublication"] = async (finalization) => {
     if (!options.journal) throw new Error("asset_publication_repository_unavailable");
     for (const artifact of finalization) {
@@ -1204,6 +1330,7 @@ export async function createSecureFilesystemAdapter(
   let closed: Promise<void> | undefined;
   return Object.freeze({
     prepareAssetPublication,
+    prepareMetadataBackfillThumbnail,
     discardPreparedAssetPublication,
     finalizeAssetPublication,
     stagePortableInput,

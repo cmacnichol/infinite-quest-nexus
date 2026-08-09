@@ -72,6 +72,15 @@ const FACTORY_FIXTURES: readonly Source[] = [
     `
   },
   {
+    file: "services/runtime/src/private-asset-metadata-backfill-composition.ts",
+    text: `
+      import { createAssetImportStorageComposition } from "./asset-import-composition.js";
+      export function createPrivateAssetMetadataBackfillComposition() {
+        return createAssetImportStorageComposition(pool, roots);
+      }
+    `
+  },
+  {
     file: "services/runtime/src/portable-normalized-asset-publication-composition.ts",
     text: `
       import { createPostgresPortableNormalizedAssetPublicationRepository } from "../../../packages/database/src/portable-normalized-asset-publication-repository.js";

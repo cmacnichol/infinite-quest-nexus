@@ -81,7 +81,11 @@ export async function createAssetImportStorageComposition(
   const secureStorageRepository = createPostgresSecureStorageRepository(pool, durableRepository);
   const importRepository = createPostgresImportRepository(pool);
   const finalizedDeliveryRepository = createPostgresFinalizedAssetDeliveryRepository(pool);
-  const publicationIdentity = createPostgresAssetPublicationRepository(pool, durableRepository);
+  // Consumers that only need secure storage (for example e5's existing-asset
+  // derivative backfill) must not instantiate the legacy 0060 publisher.
+  const publicationIdentity = capturePublicationIdentity
+    ? createPostgresAssetPublicationRepository(pool, durableRepository)
+    : undefined;
   let adapter: SecureFilesystemAdapter | undefined;
   try {
     adapter = await createSecureFilesystemAdapter({
@@ -117,7 +121,7 @@ export async function createAssetImportStorageComposition(
         return closed;
       }
     });
-    capturePublicationIdentity?.(publicationIdentity);
+    if (publicationIdentity) capturePublicationIdentity?.(publicationIdentity);
     return composition;
   } catch (error) {
     await adapter?.close().catch(() => undefined);
