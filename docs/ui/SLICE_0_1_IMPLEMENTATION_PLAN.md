@@ -8923,19 +8923,36 @@ Implement and review these internal sub-checkpoints in order:
    request-child source/provenance/context/reference, derivative-slot, and
    canonical-library initialization schemas. Define null normalization,
    key-order-independent fingerprints, safe public results, same-key mismatch,
-   and source ordering tests.
+   source ordering, explicit legacy/incomplete technical-metadata state, and
+   deferred same-transaction context/reference attachment tests. A request core
+   may attach to a canonical asset before campaign/turn/segment IDs exist, but
+   its exact contexts/references must bind later in the same caller transaction
+   or the transaction must roll back; do not lose rich bindings because current
+   import publication precedes domain-row creation.
 2. **e1b — migration 0064:** add owner-scoped request, content-arbitration,
    request-child, and exact canonical binding tables/constraints. Backfill
    every retryable 0060 identity 1:1 and explicitly seed legacy assets; cover
    prepared/in-flight identities whose hash is available only through durable
-   prewrite/descriptor records. Populate-down must fail closed for *any* 0064
-   authority, including backfilled rows, before tearing down constraints; empty
-   down/up remains valid.
+   prewrite/descriptor records. Replace the 0062/0063 import-intent
+   owner-plus-asset exclusivity and `prepared`-identity-only guards with exact
+   request-owned intent/mapping authority: a published canonical asset may be
+   reused by many import requests, while an asset ID remains only the canonical
+   result. Empty down must restore the exact 0063 guards/definitions; populated
+   down fails closed for *any* 0064 authority, including backfilled rows.
+   Legacy live writers continue through 14e3g, so their owner/hash inserts must
+   seed or discover canonical arbitration safely and cannot race a normalized
+   request into two logical rows. Legacy assets with null/incomplete technical
+   metadata are explicitly represented as incomplete; 0064 must define whether
+   reuse waits, verifies/upgrades, or is deferred to e3e5, and test both
+   complete and incomplete seeds.
 3. **e1c — repository arbitration/lifecycle:** implement deterministic
    owner+hash locks, same-request replay/mismatch, distinct-request
    same-content convergence, canonical reservation/publication recovery, and
    cross-owner shared physical retention without nested pool transactions or
-   stale-claim success.
+   stale-claim success. A request result is distinct from 0060's canonical
+   publication result: later requests may omit, reuse, or add derivatives and
+   must return their own request-scoped result rather than inheriting the first
+   publication's derivative/result snapshot.
 4. **e1d — request children and results:** attach every source snapshot,
    optional reference, rich context/provenance, and derivative reconciliation
    under the caller transaction. A later same-content request can add its own
