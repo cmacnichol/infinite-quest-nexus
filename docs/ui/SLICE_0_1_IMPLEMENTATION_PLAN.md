@@ -9284,16 +9284,45 @@ legacy 0060 writer or adding a live consumer. Evidence: real PostgreSQL/temp-FS
 10/10, e3b5 boundary unit 8/8, private-storage graph guard, `pnpm check`,
 `pnpm build`, `git diff --check`, and `pjm precheck` passed.
 
-**14e3e6 — durable filesystem recovery executor.** Build a private recovery
-application that claims one asset or portable unit with database-derived owner,
-work version, and lease; heartbeats during long hash/decode/delete/finalize
-work; performs exact finalize/identity-safe cleanup/portable expiry; reconciles
-an asset publication to `published` only after its exact operation set is
-finalized; and maps only safe diagnostics. Add an exact
-`heartbeatRecovery(operation, claim, leaseSeconds)` fence. It must handle
-target-only quarantine, shared-path retention, pair expiry before delete,
-stale/foreign claim denial, cleanup retry, and lease rotation without accepting
-scheduler-supplied owner/path/bearer.
+**14e3e6 — durable filesystem recovery executor.** The existing journal can
+claim expired reserved/attached/cleanup-pending operations but has no heartbeat,
+private physical executor, or publication-specific reconciliation. Build those
+missing pieces as a private application, in this order:
+
+1. **e6a — exact recovery claim and heartbeat authority:** add a database
+   claim/heartbeat fence for one journal operation, carrying only
+   database-derived operation scope, owner, work version, and lease. Recovery
+   must claim only eligible asset/portable lifecycle records with `SKIP LOCKED`;
+   it must reject stale, foreign, rotated, or expired claims without accepting a
+   scheduler-supplied owner, path, descriptor, or bearer. Define and test a
+   single lock order from operation to related publication/work/mapping records
+   and then physical-content locks; never use a broad row scan or an arbitrary
+   path as recovery input.
+2. **e6b — identity-safe physical finalization and cleanup:** create a bounded
+   private adapter action that finalizes an exact attached operation or deletes
+   only descriptors returned by the durable global-reference-aware cleanup
+   projection. Mark `cleanup_pending` before deletion and complete it only after
+   exact identity/containment/link checks; target-only prewrites quarantine
+   rather than delete. Preserve shared paths, paired original/derivative expiry
+   ordering, and cleanup retry evidence. Map filesystem failures to the existing
+   enum-only diagnostics and leave work recoverable when the claim survives.
+3. **e6c — publication and portable reconciliation:** after physical work,
+   reconcile only the exact authority owning the operation: normalized 0064
+   request/result finalization, e4 0066 portable mapping retirement/finalization,
+   e5 0067 metadata-backfill publication, or durable portable expiry. Do not
+   promote any asset/request/result before every exact operation required by
+   that authority is finalized, and do not revoke committed domain/story state
+   because optional cleanup is pending. Fresh recovery must be idempotent and
+   never rerun decode/import mutation merely to finalize an attached operation.
+4. **e6d — private composition and proof matrix:** expose a named private
+   runtime composition only; worker scheduling remains deferred to e3e7. Use
+   real PostgreSQL/temp-filesystem tests for finalize versus cleanup selection,
+   heartbeat during slow delete/finalize, stale/foreign/rotated claim denial,
+   target-only quarantine, shared-path/cross-owner retention, paired expiry,
+   cleanup fault/retry/restart, exact e4/e5 reconciliation, safe diagnostics,
+   and no raw path/bearer/public-barrel/API implementation import. Prove both
+   an attached post-commit operation and a cleanup-pending operation reconcile
+   from a fresh composition without duplicate finalization or deletion.
 
 **14e3e7 — worker maintenance composition and lifecycle.** Keep one
 capacity-one **asset-maintenance** lane (the frozen Task 12 pool budget remains
