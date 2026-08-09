@@ -8980,13 +8980,44 @@ Implement and review these internal sub-checkpoints in order:
    stale-claim success. A request result is distinct from 0060's canonical
    publication result: later requests may omit, reuse, or add derivatives and
    must return their own request-scoped result rather than inheriting the first
-   publication's derivative/result snapshot.
+   publication's derivative/result snapshot. **Complete 2026-08-08 (pending
+   commit):** the private normalized repository now locks both the owner/key
+   and the global content-hash authority, uses caller-owned transactions
+   without opening a nested pool transaction, detects immutable replay
+   mismatches, and returns recoverable rather than stale-success reservations
+   when canonical or request cleanup is pending. The still-live legacy
+   publisher shares the content lock and seeds the same owner-scoped
+   arbitration row; when it encounters a normalized-first canonical identity,
+   it fails closed rather than creating a second 0060 identity. Its
+   request-specific attachment remains deliberately deferred to e1d. Focused
+   PostgreSQL coverage verifies same-key replay/mismatch, normalized and
+   legacy/normalized two-client races, rollback visibility, same-owner
+   convergence, owner-scoped canonical identities, legacy-first convergence,
+   normalized-first legacy rejection, cleanup recovery, and exactly-once
+   first-library initialization. `pnpm check`, `pnpm build`, and the focused
+   16-test compatibility matrix passed. The full integration runner was not
+   recorded as a passing gate because its harness detached before completion;
+   e1e owns the complete authority matrix.
 4. **e1d — request children and results:** attach every source snapshot,
    optional reference, rich context/provenance, and derivative reconciliation
    under the caller transaction. A later same-content request can add its own
    request children but cannot mutate canonical library metadata; derivative
    slot/content mismatch is explicit rather than silently merged. Expose only
-   safe IDs/metadata after durable finalization.
+   safe IDs/metadata after durable finalization. **Complete 2026-08-08
+   (pending commit):** the normalized repository now validates and attaches
+   immutable source, context, reference, derivative, and result rows only in
+   the supplied caller transaction. It locks and validates the exact canonical
+   identity and durable asset; context and reference IDs must match the stored
+   request target/role and owner scope; every derivative ID must resolve to the
+   canonical asset with the requested slot and content hash. Request results
+   are normalized and persisted separately from 0060; an attached request
+   returns only private lifecycle state, and the private completion operation
+   promotes it and exposes its safe result only after the canonical identity is
+   finalized. The focused real PostgreSQL scenario covers all child families,
+   request-owned result storage, caller-transaction commit, and the attached
+   to published completion transition; `pnpm check` and `pnpm build` passed.
+   e1e is next for rollback/retry, cross-owner, downgrade, and broader
+   boundary coverage.
 5. **e1e — real authority matrix and boundaries:** prove legacy/backfill seed,
    two-client same-owner race, rollback/retry/restart, request replay/mismatch,
    grouped source IDs, conditional-reference omission, mutable canonical

@@ -337,6 +337,13 @@ export function createPostgresAssetPublicationRepository(
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
       `infinite-quest-nexus:asset-publication:${command.owner.ownerUserId}:${keyHash}`,
     ]);
+    // Share the exact physical-content lock used by durable filesystem
+    // publication and normalized request reservation.  A legacy prepare must
+    // establish its canonical arbitration before another writer can publish a
+    // second owner-scoped logical asset for the same bytes.
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+      `infinite-quest-nexus:asset-content:${command.original.contentHash}`,
+    ]);
     const existing = await client.query<IdentityRow>(
         `SELECT asset_id,owner_user_id,request_fingerprint,lifecycle,result,pending_finalization
           FROM asset_publication_identities
@@ -372,6 +379,19 @@ export function createPostgresAssetPublicationRepository(
       }
       return identity(row);
     }
+    const arbitration = await client.query<Readonly<{ canonical_asset_id: string }>>(
+      `SELECT canonical_asset_id
+         FROM asset_publication_content_arbitrations
+        WHERE owner_user_id=$1 AND content_hash=$2
+        FOR UPDATE`,
+      [command.owner.ownerUserId, command.original.contentHash],
+    );
+    if (arbitration.rowCount !== 0) {
+      // The legacy identity/result contract cannot safely attach request-owned
+      // data to another canonical asset.  Keep the transition fail-closed; the
+      // normalized coordinator will retain that request context in e1d.
+      throw new Error("asset_publication_canonical_reuse_required");
+    }
     const created = await client.query<IdentityRow>(
         `INSERT INTO asset_publication_identities (
            asset_id,owner_user_id,idempotency_key_hash,request_fingerprint,lifecycle
@@ -379,7 +399,18 @@ export function createPostgresAssetPublicationRepository(
          RETURNING asset_id,owner_user_id,request_fingerprint,lifecycle,result,pending_finalization`,
         [command.owner.ownerUserId, keyHash, requestFingerprint],
       );
-    return identity(created.rows[0]!);
+    const createdIdentity = identity(created.rows[0]!);
+    // The legacy boundary verifies the exact original bytes before reserve.
+    // Match 0064's descriptor-backed prepared-identity backfill so normalized
+    // requests can converge on this stable canonical identity without a
+    // duplicate logical asset.
+    await client.query(
+      `INSERT INTO asset_publication_content_arbitrations (
+         owner_user_id,content_hash,canonical_asset_id,verification_state
+       ) VALUES ($1,$2,$3,'verified')`,
+      [command.owner.ownerUserId, command.original.contentHash, createdIdentity.assetId],
+    );
+    return createdIdentity;
   };
   const prepareIdentity: PrivateAssetPublicationIdentityPort["prepareIdentity"] = (command) => (
     withTransaction(pool, (client) => prepareIdentityWithClient(client, command))

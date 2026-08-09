@@ -251,6 +251,11 @@ export type PrivateNormalizedAssetRequestChildBindingsInput = Readonly<{
   references: readonly Readonly<{ intentKey: string; referenceId: string }>[];
 }>;
 
+/** Private, caller-transaction attachment input; its result is safe but not public until finalization. */
+export type PrivateNormalizedAssetRequestAttachmentInput = PrivateNormalizedAssetRequestChildBindingsInput & Readonly<{
+  result: SafeNormalizedAssetPublicationResult;
+}>;
+
 export type PrivateNormalizedAssetRequestChildBindings = PrivateNormalizedAssetRequestCoreAttachment & Readonly<{
   contexts: readonly Readonly<{ intentKey: string; contextId: string }>[];
   references: readonly Readonly<{ intentKey: string; referenceId: string }>[];
