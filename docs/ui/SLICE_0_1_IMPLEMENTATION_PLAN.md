@@ -8964,7 +8964,15 @@ Implement and review these internal sub-checkpoints in order:
    that record in the same transaction, create the representative requested
    metadata exactly once, and mark it applied; ordinary legacy inserts retain
    their existing default behavior. Later requests and explicit revision-fenced
-   edits may not rewrite the initialized canonical row.
+   edits may not rewrite the initialized canonical row. **Complete 2026-08-08
+   (commit `18ed7be`):** 0064 now owns immutable request/arbitration/result and
+   child records, backfills 0060 state and descriptor-only prepared work,
+   defers incomplete legacy reuse with a database-enforced
+   `verification_required` boundary, and replaces portable reservations and
+   publication mappings with exact request IDs while preserving the live 0063
+   writer through e3g. Focused migration/rollback coverage, migration inventory,
+   24 portable-composition regressions, full unit tests, `pnpm check`, and
+   `pnpm build` passed. e1c is next.
 3. **e1c — repository arbitration/lifecycle:** implement deterministic
    owner+hash locks, same-request replay/mismatch, distinct-request
    same-content convergence, canonical reservation/publication recovery, and
