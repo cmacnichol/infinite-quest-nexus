@@ -52,6 +52,19 @@ describe("Task 14e3d portable composition boundaries", () => {
     }
   });
 
+  it("rejects legacy service imports from the rich caller-client repository through every import form", () => {
+    const repository = "packages/database/src/portable-import-family-repository.ts";
+    for (const text of [
+      `import { importCampaignArchive } from "../../../services/api/src/import-service.js";`,
+      `import * as legacy from "../../../services/api/src/campaign-archive-service.js"; legacy.decode();`,
+      `const legacy = require("../../../services/api/src/import-service.js");`,
+      `const legacy = await import("../../../services/api/src/campaign-archive-service.js");`,
+      `export * from "../../../services/api/src/infinite-worlds-import-service.js";`
+    ]) {
+      expect(checkPortableCompositionBoundaries(repository, text), text).not.toEqual([]);
+    }
+  });
+
   it("rejects raw-path aliases and member forms on the private contract", () => {
     const contract = "packages/application/src/imports/private-portable-composition.ts";
     for (const text of [
@@ -121,6 +134,7 @@ describe("Task 14e3d portable composition boundaries", () => {
   it("keeps the shipped composition private and free of forbidden authority", async () => {
     const files = [
       "services/runtime/src/portable-import-export-composition.ts",
+      "packages/database/src/portable-import-family-repository.ts",
       "packages/application/src/imports/private-portable-composition.ts",
       "packages/application/src/imports/index.ts"
     ] as const;

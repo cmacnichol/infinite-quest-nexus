@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
@@ -8,13 +9,26 @@ import {
   type PortableCanonicalImportAuthority
 } from "../../packages/application/src/imports/private-portable-composition.js";
 import { toPortableStagedInput } from "../../packages/application/src/imports/types.js";
-import { canonicalizeWorldContent } from "../../packages/contracts/src/index.js";
+import { canonicalArchiveJson, canonicalizeWorldContent } from "../../packages/contracts/src/index.js";
+import { calculateContentFingerprint } from "../../packages/contracts/src/archives-node.js";
 import {
   createPortableFamilyPreviewAdapter,
   type PortableProviderWorldConversionPort
 } from "../../services/runtime/src/portable-import-export-composition.js";
 
 const ownerUserId = "00000000-0000-4000-8000-000000000001";
+const sourceCampaignId = "00000000-0000-4000-8000-000000000101";
+const sourceWorldId = "00000000-0000-4000-8000-000000000102";
+const sourceWorldVersionId = "00000000-0000-4000-8000-000000000103";
+const sourceTurnId = "00000000-0000-4000-8000-000000000104";
+const sourceAssetId = "00000000-0000-4000-8000-000000000105";
+const duplicateSourceAssetId = "00000000-0000-4000-8000-000000000106";
+const portableSetId = "00000000-0000-4000-8000-000000000107";
+const transientSetId = "00000000-0000-4000-8000-000000000108";
+const PNG_1X1 = Uint8Array.from(Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+));
 
 async function archive(files: Readonly<Record<string, string | Uint8Array>>, permissions?: number): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -22,6 +36,109 @@ async function archive(files: Readonly<Record<string, string | Uint8Array>>, per
     zip.file(name, value, permissions === undefined ? undefined : { unixPermissions: permissions });
   }
   return zip.generateAsync({ type: "uint8array", platform: "UNIX" });
+}
+
+async function currentCampaignArchive(): Promise<Uint8Array> {
+  const contentHash = createHash("sha256").update(PNG_1X1).digest("hex");
+  const assetPath = `assets/sha256/${contentHash.slice(0, 2)}/${contentHash}.png`;
+  const worldContent = canonicalizeWorldContent({
+    world: { title: "Manifest world" },
+    playableCharacters: [{ id: "hero", name: "Hero" }]
+  });
+  const worldHash = createHash("sha256")
+    .update(canonicalArchiveJson(worldContent))
+    .digest("hex");
+  const campaign = {
+    formatVersion: 3,
+    campaign: { sourceCampaignId, sourceWorldVersionId, title: "Manifest campaign" },
+    world: { canonicalHash: worldHash, sourceWorldId, sourceWorldVersionId },
+    turns: [{ id: sourceTurnId, turnNumber: 1, action: "Look", narration: "A restored hall.", imageUrl: `/api/v1/assets/${sourceAssetId}` }],
+    archiveRecords: {
+      formatVersion: 1,
+      characterProfileEdits: [],
+      stateEdits: [],
+      worldMigrations: [{
+        from_world_version_id: "00000000-0000-4000-8000-000000000199",
+        to_world_version_id: sourceWorldVersionId
+      }],
+      illustrationConfig: null,
+      illustrationSets: [
+        { id: portableSetId, turn_id: sourceTurnId },
+        { id: transientSetId, turn_id: null }
+      ],
+      illustrationSegments: [
+        { id: "00000000-0000-4000-8000-000000000109", illustration_set_id: portableSetId, turn_id: sourceTurnId },
+        { id: "00000000-0000-4000-8000-000000000110", illustration_set_id: transientSetId, turn_id: null }
+      ],
+      costs: []
+    }
+  };
+  const world = {
+    canonicalHash: worldHash,
+    sourceWorldId,
+    sourceWorldVersionId,
+    versionNumber: 1,
+    content: worldContent
+  };
+  const chronicle = {
+    formatVersion: 1,
+    memories: [{ token_estimate: 6, token_count: 7 }],
+    summaries: [{ token_estimate: 8 }]
+  };
+  const library = {
+    title: "Archive hall", caption: "", notes: "", tags: ["hall"], origin: "imported",
+    reviewStatus: "eligible", reuseScope: "campaign", automaticReuseEnabled: false,
+    contentCategories: ["location"], favorite: true, archivedAt: null
+  } as const;
+  const createdAt = "2030-01-01T00:00:00.000Z";
+  const assets = [
+    {
+      sourceAssetId, contentHash, archivePath: assetPath, mimeType: "image/png", byteLength: PNG_1X1.byteLength,
+      pixelWidth: 1, pixelHeight: 1, technicalMetadata: { format: "png" }, library, createdAt,
+      bindings: [{ role: "turn_illustration", campaignId: sourceCampaignId, turnId: sourceTurnId }]
+    },
+    {
+      sourceAssetId: duplicateSourceAssetId, contentHash, archivePath: assetPath, mimeType: "image/png", byteLength: PNG_1X1.byteLength,
+      pixelWidth: 1, pixelHeight: 1, technicalMetadata: { format: "png" }, library, createdAt,
+      bindings: [{ role: "imported_attachment", campaignId: sourceCampaignId, turnId: null }]
+    }
+  ];
+  const jsonEntries = [
+    ["campaign.json", campaign, "campaign"],
+    ["world.json", world, "world"],
+    ["chronicle.json", chronicle, "chronicle"],
+    ["assets/assets.json", { formatVersion: 1, assets }, "assets"]
+  ] as const;
+  const files: Record<string, string | Uint8Array> = { [assetPath]: PNG_1X1 };
+  const entries: Array<{ path: string; logicalType: string; mediaType: string; byteLength: number; sha256: string }> = jsonEntries.map(([path, value, logicalType]) => {
+    const body = canonicalArchiveJson(value);
+    files[path] = body;
+    return {
+      path, logicalType, mediaType: "application/json", byteLength: Buffer.byteLength(body),
+      sha256: createHash("sha256").update(body).digest("hex")
+    };
+  });
+  entries.push({
+    path: assetPath, logicalType: "asset-original", mediaType: "image/png",
+    byteLength: PNG_1X1.byteLength, sha256: contentHash
+  });
+  files["manifest.json"] = canonicalArchiveJson({
+    format: "infinite-quest-archive",
+    formatVersion: 1,
+    archiveType: "campaign",
+    createdAt,
+    contentFingerprint: calculateContentFingerprint({
+      payloadHashes: entries.filter((entry) => entry.mediaType === "application/json").map((entry) => entry.sha256),
+      originalAssetHashes: [contentHash]
+    }),
+    campaignId: sourceCampaignId,
+    worldId: sourceWorldId,
+    worldVersionId: sourceWorldVersionId,
+    entries,
+    payloads: jsonEntries.map(([path, _value, kind]) => ({ kind, path, formatVersion: 1 })),
+    assets
+  });
+  return archive(files);
 }
 
 async function* chunks(bytes: Uint8Array, size: number, counter?: { value: number }): AsyncGenerator<Uint8Array> {
@@ -145,6 +262,76 @@ describe("Task 14e3d private portable composition contract", () => {
     expect(result.projection).toMatchObject({ archiveType: "campaign", valid: true });
   });
 
+  it("decodes the current manifest archive as authoritative rich payload and groups shared originals", async () => {
+    const bytes = await currentCampaignArchive();
+    const contentHash = createHash("sha256").update(PNG_1X1).digest("hex");
+    const result = await previewAdapter.previewCampaignZip(chunks(bytes, 17), campaignCommand());
+
+    expect(result.authority.normalizedPayload).toMatchObject({
+      sourceName: "campaign.zip",
+      archiveFormat: "manifest_v1",
+      campaign: {
+        campaign: { sourceCampaignId },
+        archiveRecords: {
+          formatVersion: 1,
+          illustrationSets: [{ id: portableSetId }],
+          illustrationSegments: [{ illustration_set_id: portableSetId }]
+        }
+      },
+      world: { sourceWorldId, sourceWorldVersionId },
+      chronicle: {
+        formatVersion: 1,
+        memories: [{ lexicalUnitEstimate: 6, lexicalUnitCount: 7 }],
+        summaries: [{ lexicalUnitEstimate: 8 }]
+      },
+      assetRecords: [
+        { sourceAssetId, bindings: [{ role: "turn_illustration", turnId: sourceTurnId }] },
+        { sourceAssetId: duplicateSourceAssetId, bindings: [{ role: "imported_attachment" }] }
+      ]
+    });
+    expect(JSON.stringify(result.authority.normalizedPayload)).not.toMatch(/(?:^|["_])token(?:["_]|$)/iu);
+    expect(result.projection).toMatchObject({
+      campaign: { sourceCampaignId, acceptedTurnCount: 1 },
+      world: { sourceWorldId, sourceWorldVersionId },
+      assets: { originalCount: 1, totalBytes: PNG_1X1.byteLength },
+      warnings: [
+        expect.stringContaining("Migration history references source world versions"),
+        expect.stringContaining("Ignored 1 turnless illustration set and 1 turnless illustration segment")
+      ]
+    });
+
+    const inventory = await previewAdapter.extractCampaignZipAssets(chunks(bytes, 19), result.authority);
+    expect(inventory).toHaveLength(1);
+    expect(inventory[0]).toMatchObject({
+      sourceAssetIds: [sourceAssetId, duplicateSourceAssetId],
+      records: [
+        { sourceAssetId, library: { title: "Archive hall" } },
+        { sourceAssetId: duplicateSourceAssetId }
+      ],
+      artifact: { contentHash, byteLength: PNG_1X1.byteLength, mimeType: "image/png" }
+    });
+  });
+
+  it("adapts a legacy Campaign ZIP with an explicit turn-image binding", async () => {
+    const bytes = await archive({
+      "campaign.json": JSON.stringify({
+        campaign: { title: "Legacy ZIP", sourceCampaignId, sourceWorldVersionId },
+        world: { title: "Legacy ZIP world" },
+        turns: [{ id: sourceTurnId, narration: "Legacy image", imageUrl: `/api/v1/assets/${sourceAssetId}` }]
+      }),
+      [`assets/${sourceAssetId}.png`]: PNG_1X1
+    });
+    const preview = await previewAdapter.previewCampaignZip(chunks(bytes, 23), campaignCommand());
+    const inventory = await previewAdapter.extractCampaignZipAssets(chunks(bytes, 29), preview.authority);
+
+    expect(preview.authority.normalizedPayload).toMatchObject({ archiveFormat: "legacy_zip" });
+    expect(inventory).toHaveLength(1);
+    expect(inventory[0]).toMatchObject({
+      sourceAssetIds: [sourceAssetId],
+      records: [{ bindings: [{ role: "turn_illustration", campaignId: sourceCampaignId, turnId: sourceTurnId }] }]
+    });
+  });
+
   it("maps malformed streaming parser failures to a safe archive diagnostic", async () => {
     await expect(previewAdapter.previewCampaignZip(
       chunks(new TextEncoder().encode("not-a-zip"), 2),
@@ -215,6 +402,68 @@ describe("Task 14e3d private portable composition contract", () => {
     ]);
     expect(results[2]!.authority.providerConfigurationFingerprint).toBe("b".repeat(64));
     expect(results[4]!.authority.providerConfigurationFingerprint).toBe("b".repeat(64));
+  });
+
+  it("extracts valid Legacy Story inline images while preserving external and malformed optional semantics", async () => {
+    const story = {
+      campaign: { sourceCampaignId, title: "Legacy image campaign" },
+      world: { title: "Legacy images" },
+      turns: [
+        { id: sourceTurnId, narration: "Inline", imageUrl: `data:image/png;base64,${Buffer.from(PNG_1X1).toString("base64")}` },
+        { id: crypto.randomUUID(), narration: "External", imageUrl: "https://images.example.test/safe.png" },
+        { id: crypto.randomUUID(), narration: "Malformed", imageUrl: "data:image/png;base64,not-valid!" }
+      ]
+    };
+    const command = {
+      ownerUserId,
+      stagedInput: toPortableStagedInput("legacy-inline"),
+      kind: "legacy_story" as const,
+      destination: {
+        kind: "existing_world_version" as const,
+        worldId: "00000000-0000-4000-8000-000000000030",
+        worldVersionId: "00000000-0000-4000-8000-000000000031"
+      }
+    };
+    const source = JSON.stringify(story);
+    const preview = await previewAdapter.previewLegacyStory(utf8(source), command);
+
+    expect(preview.authority.normalizedPayload).toMatchObject({
+      assetRecords: [{ bindings: [{ role: "turn_illustration", turnId: sourceTurnId }] }]
+    });
+    expect(preview.authority.normalizedPayload.story).toMatchObject({
+      turns: [
+        { imageUrl: expect.stringMatching(/^data:image\/png/u) },
+        { imageUrl: "https://images.example.test/safe.png" },
+        { imageUrl: "data:image/png;base64,not-valid!" }
+      ]
+    });
+    const extracted = await previewAdapter.extractLegacyStoryAssets(utf8(source), preview.authority);
+    expect(extracted).toHaveLength(1);
+    expect(extracted[0]).toMatchObject({
+      sourceAssetIds: [expect.any(String)],
+      records: [{ bindings: [{ role: "turn_illustration", turnId: sourceTurnId }] }],
+      artifact: { mimeType: "image/png", byteLength: PNG_1X1.byteLength }
+    });
+  });
+
+  it("extracts test-injected Legacy Story companion assets without exposing a path or bearer", async () => {
+    const contentHash = createHash("sha256").update(PNG_1X1).digest("hex");
+    const story = {
+      campaign: { sourceCampaignId, title: "Legacy bundle" },
+      world: { title: "Legacy bundle world" },
+      turns: [{ id: sourceTurnId, narration: "Bundled", imageUrl: "images/bundled.png" }]
+    };
+    const inventory = await previewAdapter.extractLegacyStoryCompanionAssets(story, [{
+      sourceKey: "bundled.png",
+      artifact: { mimeType: "image/png", bytes: PNG_1X1, byteLength: PNG_1X1.byteLength, contentHash }
+    }]);
+
+    expect(inventory).toMatchObject([{
+      sourceKeys: expect.arrayContaining(["bundled.png", "bundled"]),
+      records: [{ bindings: [{ role: "turn_illustration", turnId: sourceTurnId }] }],
+      artifact: { contentHash }
+    }]);
+    expect(JSON.stringify(inventory)).not.toMatch(/(?:relativePath|storagePath|bearer)/u);
   });
 
   it("removes forbidden credential-like keys from durable normalized authority", async () => {

@@ -8767,6 +8767,65 @@ accept or restore the complete current manifest archive produced by
 pretend that its reduced campaign/turn/memory projection is a replacement for
 the legacy archive writer.
 
+**Completed 2026-08-08 (private/unconsumed checkpoint).** The private portable
+graph now has the missing rich decoder/projector and caller-client mutation
+authority, without changing routes, workers, public barrels, cross-role
+allowlists, or migration 0062:
+
+- Current Campaign Archives use `manifest.json` as authority. The decoder
+  validates the strict version-one manifest, exact declared entry set,
+  per-entry size/hash, aggregate and entry limits, content fingerprint,
+  `assets/assets.json` equality, image MIME/decode/dimensions, campaign/world/
+  Chronicle references, portable asset pointers, and source binding scope.
+  Canonical authority retains the rich payload and a path-free asset summary;
+  archive paths remain only in the reopened staged-input inventory. Matching
+  the legacy reader, it filters turnless provisional illustration sets and
+  their segments before validation/mutation and emits deterministic safe
+  compatibility warnings for those rows and for migration audit references to
+  world versions not carried by the archive.
+- Originals are grouped deterministically by content hash/path so one binary
+  publication may restore multiple source asset IDs. The typed caller-client
+  command carries all source IDs, path-free technical/library metadata, and
+  source bindings alongside the attached publication result. The mutation
+  remaps source IDs and restores campaign/state/turn records, profile and state
+  edits, Chronicle memories/summaries, illustration configuration/sets/
+  segments, cost rows, asset technical/library rows, world covers, turn URLs
+  and references, segment variants, generation contexts, and the mandatory
+  exact import-attachment association in the caller transaction. Chronicle
+  `token_estimate`/`token_count` fields are canonicalized to path- and
+  credential-safe private aliases before durable authority persistence, then
+  mapped back to their database columns by the caller-client mutation; the
+  migration 0061 forbidden-key guard remains unchanged.
+- Supported legacy Campaign ZIPs retain explicit turn-image bindings when the
+  old `/api/v1/assets/<source-id>` pointer is present and otherwise retain the
+  conservative imported-attachment behavior. Legacy Story inline images are
+  decoded and grouped as typed optional artifacts; successful publications
+  rewrite the turn URL, safe HTTP(S) URLs remain external, and malformed data
+  images or unsafe URL schemes are omitted without failing the story import.
+- A private test-injected Legacy Story companion seam accepts source keys plus
+  verified bytes only—never a path or bearer—resolves the legacy filename,
+  stem, and UUID aliases, and carries cover/turn/attachment metadata into the
+  typed publication mutation. The real PostgreSQL/temp-filesystem matrix covers
+  bundled-turn rewrite through this seam. Live multipart companion ingestion
+  is intentionally still absent: the current transport supplies a separate
+  `LegacyAssetSource`, while b5 stages one input and 0062 remains Campaign-ZIP
+  only. Task 14e3g must bind the normalized companion source during the atomic
+  route switch; this checkpoint does not claim a live route parity switch.
+- The AST boundary checker now applies the legacy-service import prohibition to
+  both the runtime decoder and rich database adapter, including aliased,
+  namespace, CommonJS, dynamic-import, and re-export forms. Neither adapter
+  imports an API `*service` or exposes the private graph to a live consumer.
+
+Focused verification is 23 unit decoder/boundary cases and 23 real
+PostgreSQL/temp-filesystem composition cases. The latter includes current rich
+archive restoration and replay, legacy ZIP/inline/companion behavior, safe
+external and malformed optional image semantics, ownership/destination fences,
+rollback/cleanup, restart/finalization recovery, duplicate replay, and exact
+publication isolation. Repository-wide verification is 1,462 unit cases and
+509 real PostgreSQL integration cases, plus `pnpm check`, `pnpm build`, and
+`git diff --check`. **14e3d-R / 14e3e0 is complete as a private prerequisite;
+14e3e1 is next.**
+
 Inventory and freeze each current behavior before extracting an adapter:
 
 - current manifest archive authority, `world.json`, Chronicle, campaign/player

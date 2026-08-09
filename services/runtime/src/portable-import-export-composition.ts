@@ -1,13 +1,20 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
+import sharp from "sharp";
 import unzipper from "unzipper";
 import {
+  archiveAssetRecordSchema,
+  archiveManifestSchema,
+  canonicalArchiveJson,
   canonicalizeWorldContent,
   legacyStorySchema,
   portableWorldSchema,
   worldImportRequestSchema,
+  type ArchiveAssetRecord,
+  type ArchiveManifest,
   type WorldContent
 } from "../../../packages/contracts/src/index.js";
+import { calculateContentFingerprint } from "../../../packages/contracts/src/archives-node.js";
 import {
   convertInfiniteWorldsWorld,
   infiniteWorldsStoryToLegacyStory,
@@ -50,6 +57,9 @@ const MAX_ASSET_BYTES = 20 * 1024 * 1024;
 const MAX_ZIP_ENTRY_NAME_BYTES = 512;
 const MAX_ZIP_ENTRY_EXTRA_BYTES = 1024;
 const MAX_ZIP_ENTRY_COMMENT_BYTES = 1024;
+const MIGRATION_HISTORY_COMPATIBILITY_WARNING = "Migration history references source world versions not included in this Campaign Archive; those audit rows will not be recreated.";
+const transientIllustrationCompatibilityWarning = (setCount: number, segmentCount: number) =>
+  `Ignored ${setCount} turnless illustration ${setCount === 1 ? "set" : "sets"} and ${segmentCount} turnless illustration ${segmentCount === 1 ? "segment" : "segments"} because provisional illustration work is not portable.`;
 const MAX_CENTRAL_DIRECTORY_BYTES = MAX_ARCHIVE_ENTRIES
   * (46 + MAX_ZIP_ENTRY_NAME_BYTES + MAX_ZIP_ENTRY_EXTRA_BYTES + MAX_ZIP_ENTRY_COMMENT_BYTES);
 
@@ -111,8 +121,13 @@ function asJson(value: unknown): PortableJsonValue {
     if (candidate === null || typeof candidate !== "object") return candidate;
     if (Array.isArray(candidate)) return candidate.map(sanitize);
     return Object.fromEntries(Object.entries(candidate)
-      .filter(([key]) => !/(^|_)(path|bearer|credential|secret|token|provider_response|raw_response)($|_)/iu.test(key))
-      .map(([key, child]) => [key, sanitize(child)]));
+      .filter(([key]) => /^token_(?:estimate|count)$/u.test(key)
+        || !/(^|_)(path|bearer|credential|secret|token|api_token|access_token|refresh_token|auth_token|provider_response|raw_response)($|_)/iu.test(key))
+      .map(([key, child]) => [
+        key === "token_estimate" ? "lexicalUnitEstimate"
+          : key === "token_count" ? "lexicalUnitCount" : key,
+        sanitize(child)
+      ]));
   };
   return sanitize(parsed);
 }
@@ -227,12 +242,24 @@ function safeEntryName(name: string): void {
 }
 
 type CampaignArchiveAsset = Readonly<{
-    sourceAssetId: string;
+    sourceAssetIds: readonly string[];
+    records: readonly ArchiveAssetRecord[];
     entryName: string;
     mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
     byteLength: number;
     contentHash: string;
     bytes?: Uint8Array;
+}>;
+
+type DecodedCampaignZip = Readonly<{
+  archiveFormat: "legacy_zip" | "manifest_v1";
+  story: ReturnType<typeof legacyStorySchema.parse> | null;
+  campaign: Readonly<Record<string, unknown>> | null;
+  world: Readonly<Record<string, unknown>> | null;
+  chronicle: Readonly<Record<string, unknown>> | null;
+  manifest: ArchiveManifest | null;
+  assets: readonly CampaignArchiveAsset[];
+  warnings: readonly string[];
 }>;
 
 type StreamingZipEntry = AsyncIterable<Uint8Array> & Readonly<{
@@ -352,17 +379,160 @@ async function readZipEntry(entry: StreamingZipEntry, maximum: number): Promise<
   return bytes;
 }
 
+function portableAssetAuthorityRecord(record: ArchiveAssetRecord): PortableJsonValue {
+  const { archivePath: _archivePath, ...safe } = record;
+  return asJson(safe);
+}
+
+function exactPortableAssetAuthority(records: readonly ArchiveAssetRecord[]): PortableJsonValue {
+  return asJson(records.map(portableAssetAuthorityRecord));
+}
+
+function recordValue(value: unknown): Readonly<Record<string, unknown>> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("archive_format_invalid");
+  return value as Readonly<Record<string, unknown>>;
+}
+
+function portableAssetPointers(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(portableAssetPointers);
+  if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).flatMap(portableAssetPointers);
+  return typeof value === "string"
+    ? [...value.matchAll(/\/api\/v1\/assets\/([0-9a-f-]{36})/giu)].map((match) => match[1]!)
+    : [];
+}
+
+function validateCurrentCampaignReferences(
+  manifest: ArchiveManifest,
+  campaign: Readonly<Record<string, unknown>>,
+  world: Readonly<Record<string, unknown>>,
+): void {
+  const metadata = recordValue(campaign.campaign);
+  if (metadata.sourceCampaignId !== manifest.campaignId
+    || world.sourceWorldId !== manifest.worldId
+    || world.sourceWorldVersionId !== manifest.worldVersionId
+    || recordValue(campaign.world).canonicalHash !== world.canonicalHash) {
+    throw new Error("archive_format_invalid");
+  }
+  const turns = campaign.turns as readonly unknown[];
+  const turnIds = new Set(turns.map((turn) => recordValue(turn).id).filter((id): id is string => typeof id === "string"));
+  if (turnIds.size !== turns.length) throw new Error("archive_format_invalid");
+  const records = recordValue(campaign.archiveRecords);
+  const segments = new Map<string, Readonly<Record<string, unknown>>>();
+  for (const segment of Array.isArray(records.illustrationSegments) ? records.illustrationSegments : []) {
+    const value = recordValue(segment);
+    if (typeof value.id !== "string" || typeof value.turn_id !== "string" || !turnIds.has(value.turn_id)) {
+      throw new Error("archive_format_invalid");
+    }
+    segments.set(value.id, value);
+  }
+  const assetsBySourceId = new Map(manifest.assets.map((asset) => [asset.sourceAssetId.toLowerCase(), asset]));
+  for (const turnValue of turns) {
+    const turn = recordValue(turnValue);
+    for (const sourceAssetId of portableAssetPointers(turn.imageUrl)) {
+      const record = assetsBySourceId.get(sourceAssetId.toLowerCase());
+      if (!record?.bindings.some((binding) => binding.role === "turn_illustration" && binding.turnId === turn.id)) {
+        throw new Error("archive_format_invalid");
+      }
+    }
+  }
+  for (const sourceAssetId of portableAssetPointers(world.content)) {
+    const record = assetsBySourceId.get(sourceAssetId.toLowerCase());
+    if (!record?.bindings.some((binding) => binding.role === "world_version_asset"
+      && binding.worldId === manifest.worldId && binding.worldVersionId === manifest.worldVersionId)) {
+      throw new Error("archive_format_invalid");
+    }
+  }
+  for (const asset of manifest.assets) {
+    for (const binding of asset.bindings) {
+      if (("turnId" in binding && binding.turnId !== null && !turnIds.has(binding.turnId))
+        || (binding.role === "illustration_segment_variant"
+          && (segments.get(binding.segmentId)?.turn_id !== binding.turnId))) {
+        throw new Error("archive_format_invalid");
+      }
+    }
+  }
+}
+
+function normalizeCurrentCampaign(
+  campaign: Readonly<Record<string, unknown>>,
+  world: Readonly<Record<string, unknown>>,
+): Readonly<{ campaign: Readonly<Record<string, unknown>>; warnings: readonly string[] }> {
+  const records = recordValue(campaign.archiveRecords);
+  const sourceSets = Array.isArray(records.illustrationSets) ? records.illustrationSets : [];
+  const ignoredSetIds = new Set<string>();
+  const illustrationSets = sourceSets.filter((value) => {
+    const set = recordValue(value);
+    if (set.turn_id !== null) return true;
+    if (typeof set.id === "string") ignoredSetIds.add(set.id);
+    return false;
+  });
+  const sourceSegments = Array.isArray(records.illustrationSegments) ? records.illustrationSegments : [];
+  const illustrationSegments = sourceSegments.filter((value) => {
+    const segment = recordValue(value);
+    return segment.turn_id !== null
+      || typeof segment.illustration_set_id !== "string"
+      || !ignoredSetIds.has(segment.illustration_set_id);
+  });
+  const worldMigrations = Array.isArray(records.worldMigrations) ? records.worldMigrations : [];
+  const migrationHistoryIsIncomplete = worldMigrations.some((value) => {
+    const migration = recordValue(value);
+    return [migration.from_world_version_id, migration.to_world_version_id]
+      .some((worldVersionId) => worldVersionId !== world.sourceWorldVersionId);
+  });
+  const ignoredSetCount = sourceSets.length - illustrationSets.length;
+  const ignoredSegmentCount = sourceSegments.length - illustrationSegments.length;
+  return {
+    campaign: {
+      ...campaign,
+      archiveRecords: { ...records, illustrationSets, illustrationSegments }
+    },
+    warnings: [
+      ...(migrationHistoryIsIncomplete ? [MIGRATION_HISTORY_COMPATIBILITY_WARNING] : []),
+      ...(ignoredSetCount || ignoredSegmentCount
+        ? [transientIllustrationCompatibilityWarning(ignoredSetCount, ignoredSegmentCount)] : [])
+    ]
+  };
+}
+
+function currentWorldImportRequest(world: Readonly<Record<string, unknown>>) {
+  const content = canonicalizeWorldContent(recordValue(world.content));
+  const worldMetadata = recordValue(content.world);
+  const title = typeof worldMetadata.title === "string" && worldMetadata.title.trim()
+    ? worldMetadata.title.trim()
+    : "Imported world";
+  return worldImportRequestSchema.parse({
+    sourceName: "campaign.zip",
+    worldExport: { format: "infinite-quest-world", formatVersion: 1, title, content }
+  });
+}
+
+async function verifyCurrentAsset(
+  record: ArchiveAssetRecord,
+  bytes: Uint8Array,
+): Promise<void> {
+  if (bytes.byteLength !== record.byteLength || sha256(bytes) !== record.contentHash) {
+    throw new Error("archive_unavailable");
+  }
+  const metadata = await sharp(bytes, { animated: true }).metadata().catch(() => null);
+  const expectedFormat = record.mimeType === "image/jpeg" ? "jpeg" : record.mimeType.slice("image/".length);
+  if (!metadata?.width || !metadata.height || metadata.width !== record.pixelWidth
+    || metadata.height !== record.pixelHeight || metadata.format !== expectedFormat) {
+    throw new Error("archive_format_invalid");
+  }
+}
+
 async function campaignZip(
   source: AsyncIterable<Uint8Array>,
   includeAssetBytes: boolean,
-) {
+): Promise<DecodedCampaignZip> {
   const inspector = new ZipCentralDirectoryInspector();
   const parser = Readable.from(boundedArchiveSource(source, inspector)).pipe(unzipper.Parse({ forceStream: true }));
   let entryCount = 0;
   let expandedBytes = 0;
   let story: ReturnType<typeof legacyStorySchema.parse> | undefined;
-  const assets: CampaignArchiveAsset[] = [];
+  const legacyAssets: CampaignArchiveAsset[] = [];
   const entryPaths: string[] = [];
+  const files = new Map<string, Uint8Array>();
   try {
     for await (const rawEntry of parser) {
       const entry = rawEntry as StreamingZipEntry;
@@ -384,28 +554,50 @@ async function campaignZip(
         entry.autodrain();
         continue;
       }
-      const isCampaign = entry.path === "campaign.json" || entry.path === "infinite-quest-campaign.json";
+      const isManifestJson = entry.path === "manifest.json";
+      const isPayloadJson = ["campaign.json", "infinite-quest-campaign.json", "world.json", "chronicle.json", "assets/assets.json"]
+        .includes(entry.path);
       const assetMatch = /^assets\/([0-9a-f-]{36})\.(png|jpe?g|webp|gif)$/iu.exec(entry.path);
-      const maximum = isCampaign ? MAX_JSON_BYTES : assetMatch ? MAX_ASSET_BYTES : 1024 * 1024;
+      const currentAssetMatch = /^assets\/sha256\/[0-9a-f]{2}\/[0-9a-f]{64}\.(png|jpe?g|webp|gif)$/u.exec(entry.path);
+      const maximum = isManifestJson || isPayloadJson ? MAX_JSON_BYTES
+        : assetMatch || currentAssetMatch ? MAX_ASSET_BYTES : 1024 * 1024;
       if (declared !== undefined && declared > maximum) throw new Error("archive_size_limit_exceeded");
       const bytes = await readZipEntry(entry, maximum);
       expandedBytes += bytes.byteLength;
       if (expandedBytes > MAX_INPUT_BYTES) throw new Error("archive_size_limit_exceeded");
-      if (isCampaign) {
-        if (story) throw new Error("archive_format_invalid");
-        story = legacyStorySchema.parse(jsonText(bytes));
-        continue;
+      if (files.has(entry.path)) throw new Error("archive_format_invalid");
+      files.set(entry.path, bytes);
+      if (entry.path === "campaign.json" || entry.path === "infinite-quest-campaign.json") {
+        const candidate = legacyStorySchema.safeParse(jsonText(bytes));
+        if (candidate.success) story = candidate.data;
       }
-      if (entry.path === "assets/assets.json") continue;
-      if (/^assets\//u.test(entry.path) && !assetMatch) throw new Error("archive_format_invalid");
       if (!assetMatch) continue;
       const extension = assetMatch[2]!.toLowerCase();
-      assets.push({
-        sourceAssetId: assetMatch[1]!,
-        entryName: entry.path,
+      const sourceAssetId = assetMatch[1]!;
+      const record = archiveAssetRecordSchema.parse({
+        sourceAssetId,
+        contentHash: sha256(bytes),
+        archivePath: entry.path,
         mimeType: extension === "png" ? "image/png"
           : extension === "webp" ? "image/webp"
             : extension === "gif" ? "image/gif" : "image/jpeg",
+        byteLength: bytes.byteLength,
+        pixelWidth: 1,
+        pixelHeight: 1,
+        technicalMetadata: {},
+        library: {
+          title: "", caption: "", notes: "", tags: [], origin: "imported",
+          reviewStatus: "unreviewed", reuseScope: "campaign", automaticReuseEnabled: false,
+          contentCategories: [], favorite: false, archivedAt: null
+        },
+        createdAt: "1970-01-01T00:00:00.000Z",
+        bindings: []
+      });
+      legacyAssets.push({
+        sourceAssetIds: [sourceAssetId],
+        records: [record],
+        entryName: entry.path,
+        mimeType: record.mimeType,
         byteLength: bytes.byteLength,
         contentHash: sha256(bytes),
         ...(includeAssetBytes ? { bytes } : {})
@@ -417,8 +609,256 @@ async function campaignZip(
     if (error instanceof Error && error.message.startsWith("archive_")) throw error;
     throw new Error("archive_truncated");
   }
-  if (!story) throw new Error("archive_format_invalid");
-  return { story, assets };
+  const manifestBytes = files.get("manifest.json");
+  if (!manifestBytes) {
+    if (!story) throw new Error("archive_format_invalid");
+    const sourceCampaignId = typeof story.campaign?.sourceCampaignId === "string"
+      && UUID_PATTERN.test(story.campaign.sourceCampaignId)
+      ? story.campaign.sourceCampaignId
+      : PORTABLE_PLACEHOLDER_CAMPAIGN_ID;
+    const assets = legacyAssets.map((asset) => {
+      const sourceAssetId = asset.sourceAssetIds[0]!;
+      const turn = story.turns.find((candidate) => candidate.imageUrl === `/api/v1/assets/${sourceAssetId}`);
+      const binding = turn && typeof turn.id === "string" && UUID_PATTERN.test(turn.id)
+        ? { role: "turn_illustration" as const, campaignId: sourceCampaignId, turnId: turn.id }
+        : { role: "imported_attachment" as const, campaignId: sourceCampaignId, turnId: null };
+      return {
+        ...asset,
+        records: asset.records.map((record) => archiveAssetRecordSchema.parse({ ...record, bindings: [binding] }))
+      };
+    });
+    return {
+      archiveFormat: "legacy_zip",
+      story,
+      campaign: null,
+      world: null,
+      chronicle: null,
+      manifest: null,
+      assets,
+      warnings: []
+    };
+  }
+  const manifest = archiveManifestSchema.parse(jsonText(manifestBytes));
+  if (manifest.archiveType !== "campaign") throw new Error("archive_format_invalid");
+  const declaredPaths = new Set(manifest.entries.map((entry) => entry.path));
+  const actualPaths = [...files.keys()].filter((path) => path !== "manifest.json");
+  if (actualPaths.length !== declaredPaths.size || actualPaths.some((path) => !declaredPaths.has(path))) {
+    throw new Error("archive_format_invalid");
+  }
+  for (const entry of manifest.entries) {
+    const bytes = files.get(entry.path);
+    if (!bytes || bytes.byteLength !== entry.byteLength || sha256(bytes) !== entry.sha256) {
+      throw new Error("archive_unavailable");
+    }
+  }
+  const payloadHashes = manifest.payloads.map((payload) => {
+    const entry = manifest.entries.find((candidate) => candidate.path === payload.path);
+    if (!entry) throw new Error("archive_format_invalid");
+    return entry.sha256;
+  });
+  if (calculateContentFingerprint({
+    payloadHashes,
+    originalAssetHashes: manifest.assets.map((asset) => asset.contentHash)
+  }) !== manifest.contentFingerprint) {
+    throw new Error("archive_unavailable");
+  }
+  const rawCampaign = recordValue(jsonText(files.get("campaign.json")!));
+  const world = recordValue(jsonText(files.get("world.json")!));
+  const chronicle = recordValue(jsonText(files.get("chronicle.json")!));
+  const assetPayload = recordValue(jsonText(files.get("assets/assets.json")!));
+  if (assetPayload.formatVersion !== 1 || canonicalArchiveJson(assetPayload.assets) !== canonicalArchiveJson(manifest.assets)) {
+    throw new Error("archive_format_invalid");
+  }
+  if (!Array.isArray(rawCampaign.turns) || recordValue(rawCampaign.archiveRecords).formatVersion !== 1
+    || chronicle.formatVersion !== 1 || !Array.isArray(chronicle.memories) || !Array.isArray(chronicle.summaries)) {
+    throw new Error("archive_format_invalid");
+  }
+  const normalized = normalizeCurrentCampaign(rawCampaign, world);
+  const campaign = normalized.campaign;
+  validateCurrentCampaignReferences(manifest, campaign, world);
+  const grouped = new Map<string, ArchiveAssetRecord[]>();
+  for (const record of manifest.assets) {
+    const group = grouped.get(record.contentHash) ?? [];
+    group.push(record);
+    grouped.set(record.contentHash, group);
+  }
+  const assets: CampaignArchiveAsset[] = [];
+  for (const records of [...grouped.values()].sort((left, right) => left[0]!.archivePath.localeCompare(right[0]!.archivePath))) {
+    const representative = records[0]!;
+    if (records.some((record) => record.archivePath !== representative.archivePath
+      || record.mimeType !== representative.mimeType || record.byteLength !== representative.byteLength
+      || record.pixelWidth !== representative.pixelWidth || record.pixelHeight !== representative.pixelHeight)) {
+      throw new Error("archive_format_invalid");
+    }
+    const bytes = files.get(representative.archivePath);
+    if (!bytes) throw new Error("archive_unavailable");
+    await verifyCurrentAsset(representative, bytes);
+    assets.push({
+      sourceAssetIds: records.map((record) => record.sourceAssetId),
+      records,
+      entryName: representative.archivePath,
+      mimeType: representative.mimeType,
+      byteLength: representative.byteLength,
+      contentHash: representative.contentHash,
+      ...(includeAssetBytes ? { bytes } : {})
+    });
+  }
+  return {
+    archiveFormat: "manifest_v1",
+    story: null,
+    campaign,
+    world,
+    chronicle,
+    manifest,
+    assets,
+    warnings: normalized.warnings
+  };
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const PORTABLE_PLACEHOLDER_CAMPAIGN_ID = "00000000-0000-4000-8000-000000000000";
+
+function stablePortableUuid(preimage: string): string {
+  const value = sha256(preimage).slice(0, 32).split("");
+  value[12] = "4";
+  value[16] = ["8", "9", "a", "b"][Number.parseInt(value[16]!, 16) % 4]!;
+  const hex = value.join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function parsePortableDataImage(value: unknown): Readonly<{
+  mimeType: ArchiveAssetRecord["mimeType"];
+  bytes: Uint8Array;
+}> | null {
+  if (typeof value !== "string" || !value.startsWith("data:image/")) return null;
+  const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]*={0,2})$/u.exec(value);
+  if (!match) return null;
+  const bytes = Uint8Array.from(Buffer.from(match[2]!, "base64"));
+  return bytes.byteLength > 0 && bytes.byteLength <= MAX_ASSET_BYTES
+    ? { mimeType: match[1] as ArchiveAssetRecord["mimeType"], bytes }
+    : null;
+}
+
+async function legacyInlineAssetInventory(
+  story: ReturnType<typeof legacyStorySchema.parse>,
+  includeBytes: boolean,
+): Promise<readonly CampaignArchiveAsset[]> {
+  const campaignId = typeof story.campaign?.sourceCampaignId === "string"
+    && UUID_PATTERN.test(story.campaign.sourceCampaignId)
+    ? story.campaign.sourceCampaignId
+    : PORTABLE_PLACEHOLDER_CAMPAIGN_ID;
+  const grouped = new Map<string, CampaignArchiveAsset>();
+  for (const [index, turn] of story.turns.entries()) {
+    const parsed = parsePortableDataImage(turn.imageUrl);
+    if (!parsed) continue;
+    const contentHash = sha256(parsed.bytes);
+    const metadata = await sharp(parsed.bytes, { animated: true }).metadata().catch(() => null);
+    const expectedFormat = parsed.mimeType === "image/jpeg" ? "jpeg" : parsed.mimeType.slice("image/".length);
+    if (!metadata?.width || !metadata.height || metadata.format !== expectedFormat) continue;
+    const sourceAssetId = stablePortableUuid(`legacy-inline:${index}:${contentHash}`);
+    const sourceTurnId = typeof turn.id === "string" && UUID_PATTERN.test(turn.id) ? turn.id : null;
+    const record = archiveAssetRecordSchema.parse({
+      sourceAssetId,
+      contentHash,
+      archivePath: `legacy-inline/${contentHash}`,
+      mimeType: parsed.mimeType,
+      byteLength: parsed.bytes.byteLength,
+      pixelWidth: metadata.width,
+      pixelHeight: metadata.height,
+      technicalMetadata: { format: metadata.format, pages: metadata.pages ?? 1, orientation: metadata.orientation ?? null },
+      library: {
+        title: "", caption: "", notes: "", tags: [], origin: "imported",
+        reviewStatus: "unreviewed", reuseScope: "campaign", automaticReuseEnabled: false,
+        contentCategories: [], favorite: false, archivedAt: null
+      },
+      createdAt: "1970-01-01T00:00:00.000Z",
+      bindings: sourceTurnId
+        ? [{ role: "turn_illustration", campaignId, turnId: sourceTurnId }]
+        : [{ role: "imported_attachment", campaignId, turnId: null }]
+    });
+    const existing = grouped.get(contentHash);
+    if (existing) {
+      grouped.set(contentHash, {
+        ...existing,
+        sourceAssetIds: [...existing.sourceAssetIds, sourceAssetId],
+        records: [...existing.records, record]
+      });
+    } else {
+      grouped.set(contentHash, {
+        sourceAssetIds: [sourceAssetId],
+        records: [record],
+        entryName: record.archivePath,
+        mimeType: record.mimeType,
+        byteLength: record.byteLength,
+        contentHash,
+        ...(includeBytes ? { bytes: parsed.bytes } : {})
+      });
+    }
+  }
+  return [...grouped.values()].sort((left, right) => left.contentHash.localeCompare(right.contentHash));
+}
+
+function legacyCompanionLookupKeys(value: string): readonly string[] {
+  const uuid = value.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu)?.[0];
+  const name = value.split("/").pop()?.split("?")[0];
+  const stem = name?.split(".")[0];
+  return [...new Set([value, uuid, name, stem].filter((key): key is string => Boolean(key)))];
+}
+
+async function legacyCompanionAssetInventory(
+  story: ReturnType<typeof legacyStorySchema.parse>,
+  companions: readonly import("../../../packages/application/src/imports/private-portable-composition.js").PrivateLegacyStoryCompanionAsset[],
+): Promise<readonly import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableAssetInventoryItem[]> {
+  const campaignId = typeof story.campaign?.sourceCampaignId === "string"
+    && UUID_PATTERN.test(story.campaign.sourceCampaignId)
+    ? story.campaign.sourceCampaignId
+    : PORTABLE_PLACEHOLDER_CAMPAIGN_ID;
+  const coverUrl = typeof story.world.coverImageUrl === "string" ? story.world.coverImageUrl : "";
+  const inventory = [];
+  for (const companion of companions) {
+    if (!companion.sourceKey.trim() || companion.sourceKey.length > 512 || companion.sourceKey.includes("\0")) {
+      throw new Error("archive_format_invalid");
+    }
+    const artifact = companion.artifact;
+    if (artifact.byteLength !== artifact.bytes.byteLength || sha256(artifact.bytes) !== artifact.contentHash) {
+      throw new Error("archive_unavailable");
+    }
+    const metadata = await sharp(artifact.bytes, { animated: true }).metadata().catch(() => null);
+    const expectedFormat = artifact.mimeType === "image/jpeg" ? "jpeg" : artifact.mimeType.slice("image/".length);
+    if (!metadata?.width || !metadata.height || metadata.format !== expectedFormat) {
+      throw new Error("archive_format_invalid");
+    }
+    const sourceKeys = legacyCompanionLookupKeys(companion.sourceKey);
+    const matches = (value: unknown) => typeof value === "string"
+      && legacyCompanionLookupKeys(value).some((key) => sourceKeys.includes(key));
+    const turn = story.turns.find((candidate) => matches(candidate.imageUrl));
+    const sourceAssetId = stablePortableUuid(`legacy-companion:${companion.sourceKey}:${artifact.contentHash}`);
+    const sourceTurnId = turn && typeof turn.id === "string" && UUID_PATTERN.test(turn.id) ? turn.id : null;
+    const binding = matches(coverUrl)
+      ? { role: "world_cover" as const, worldId: PORTABLE_PLACEHOLDER_CAMPAIGN_ID }
+      : sourceTurnId
+        ? { role: "turn_illustration" as const, campaignId, turnId: sourceTurnId }
+        : { role: "imported_attachment" as const, campaignId, turnId: null };
+    const record = archiveAssetRecordSchema.parse({
+      sourceAssetId,
+      contentHash: artifact.contentHash,
+      archivePath: `legacy-companion/${artifact.contentHash}`,
+      mimeType: artifact.mimeType,
+      byteLength: artifact.byteLength,
+      pixelWidth: metadata.width,
+      pixelHeight: metadata.height,
+      technicalMetadata: { format: metadata.format, pages: metadata.pages ?? 1, orientation: metadata.orientation ?? null },
+      library: {
+        title: "", caption: "", notes: "", tags: [], origin: "imported",
+        reviewStatus: "unreviewed", reuseScope: "campaign", automaticReuseEnabled: false,
+        contentCategories: [], favorite: false, archivedAt: null
+      },
+      createdAt: "1970-01-01T00:00:00.000Z",
+      bindings: [binding]
+    });
+    inventory.push({ sourceAssetIds: [sourceAssetId], sourceKeys, records: [record], artifact });
+  }
+  return inventory;
 }
 
 export function createPortableFamilyPreviewAdapter(
@@ -429,13 +869,13 @@ export function createPortableFamilyPreviewAdapter(
     async extractCampaignZipAssets(source, expectedAuthority) {
       if (expectedAuthority.kind !== "campaign_zip") throw new Error("portable_import_authority_mismatch");
       const decoded = await campaignZip(source, true);
-      const expected = expectedAuthority.normalizedPayload.assetManifest;
-      const manifest = decoded.assets.map(({ bytes: _bytes, ...asset }) => asset);
+      const expected = expectedAuthority.normalizedPayload.assetRecords;
+      const records = decoded.assets.flatMap((asset) => asset.records);
       const manifestAuthority = (assetManifest: PortableJsonValue) => canonicalPortableImportAuthority({
         ...expectedAuthority,
-        normalizedPayload: { assetManifest }
+        normalizedPayload: { assetRecords: assetManifest }
       });
-      if (manifestAuthority(asJson(manifest)) !== manifestAuthority(expected ?? null)) {
+      if (manifestAuthority(exactPortableAssetAuthority(records)) !== manifestAuthority(expected ?? null)) {
         throw new Error("portable_import_authority_mismatch");
       }
       return decoded.assets.map((asset) => {
@@ -444,7 +884,8 @@ export function createPortableFamilyPreviewAdapter(
           throw new Error("archive_unavailable");
         }
         return {
-          sourceAssetId: asset.sourceAssetId,
+          sourceAssetIds: asset.sourceAssetIds,
+          records: asset.records,
           artifact: {
             mimeType: asset.mimeType,
             byteLength: asset.byteLength,
@@ -454,15 +895,108 @@ export function createPortableFamilyPreviewAdapter(
         };
       });
     },
+    async extractLegacyStoryAssets(source, expectedAuthority) {
+      if (expectedAuthority.kind !== "legacy_story") throw new Error("portable_import_authority_mismatch");
+      const story = legacyStorySchema.parse(jsonText(await boundedBytes(source, MAX_JSON_BYTES)));
+      const decoded = await legacyInlineAssetInventory(story, true);
+      const expected = expectedAuthority.normalizedPayload.assetRecords;
+      if (canonicalPortableImportAuthority({ ...expectedAuthority, normalizedPayload: { assetRecords: exactPortableAssetAuthority(decoded.flatMap((asset) => asset.records)) } })
+        !== canonicalPortableImportAuthority({ ...expectedAuthority, normalizedPayload: { assetRecords: expected ?? null } })) {
+        throw new Error("portable_import_authority_mismatch");
+      }
+      return decoded.map((asset) => {
+        if (!asset.bytes) throw new Error("archive_unavailable");
+        return {
+          sourceAssetIds: asset.sourceAssetIds,
+          records: asset.records,
+          artifact: {
+            mimeType: asset.mimeType,
+            byteLength: asset.byteLength,
+            contentHash: asset.contentHash,
+            bytes: asset.bytes
+          }
+        };
+      });
+    },
+    async extractLegacyStoryCompanionAssets(storyValue, companions) {
+      return legacyCompanionAssetInventory(legacyStorySchema.parse(storyValue), companions);
+    },
     async previewCampaignZip(source, command) {
       const decoded = await campaignZip(source, false);
-      const assetManifest = decoded.assets.map(({ bytes: _bytes, ...asset }) => asset);
+      const assetRecords = decoded.assets.flatMap((asset) => asset.records);
+      if (decoded.archiveFormat === "manifest_v1") {
+        const campaign = decoded.campaign!;
+        const world = decoded.world!;
+        const chronicle = decoded.chronicle!;
+        const campaignMetadata = recordValue(campaign.campaign);
+        const turns = campaign.turns as readonly unknown[];
+        const worldContent = canonicalizeWorldContent(recordValue(world.content));
+        const worldMetadata = recordValue(worldContent.world);
+        const normalized = {
+          sourceName: "campaign.zip",
+          archiveFormat: "manifest_v1",
+          contentFingerprint: decoded.manifest!.contentFingerprint,
+          campaign: asJson(campaign),
+          world: asJson(world),
+          chronicle: asJson(chronicle),
+          warnings: asJson(decoded.warnings),
+          assetRecords: exactPortableAssetAuthority(assetRecords),
+          ...(command.destination.kind === "embedded"
+            ? { embeddedWorldImportRequest: asJson(currentWorldImportRequest(world)) }
+            : {})
+        };
+        const value = authority(command, normalized);
+        return {
+          authority: value,
+          projection: {
+            valid: true,
+            archiveType: "campaign",
+            formatVersion: 1,
+            contentFingerprint: decoded.manifest!.contentFingerprint,
+            campaign: {
+              title: typeof campaignMetadata.title === "string" && campaignMetadata.title.trim()
+                ? campaignMetadata.title : "Imported campaign",
+              sourceCampaignId: decoded.manifest!.campaignId!,
+              acceptedTurnCount: turns.length,
+              activeTurnNumber: Math.max(0, ...turns.map((turn) => Number(recordValue(turn).turnNumber ?? 0))),
+              selectedCharacter: null
+            },
+            world: {
+              title: typeof worldMetadata.title === "string" && worldMetadata.title.trim()
+                ? worldMetadata.title : "Imported world",
+              sourceWorldId: decoded.manifest!.worldId!,
+              sourceWorldVersionId: decoded.manifest!.worldVersionId!,
+              versionNumber: Number(world.versionNumber)
+            },
+            chronicle: {
+              memoryCount: (chronicle.memories as readonly unknown[]).length,
+              summaryCount: (chronicle.summaries as readonly unknown[]).length
+            },
+            assets: {
+              originalCount: decoded.assets.length,
+              totalBytes: decoded.assets.reduce((sum, asset) => sum + asset.byteLength, 0)
+            },
+            destination: command.destination.kind === "embedded"
+              ? { kind: "embedded", operation: "create_world", worldId: null, worldVersionId: null }
+              : {
+                kind: "existing_world_version",
+                operation: "attach_existing_world_version",
+                worldId: command.destination.worldId,
+                worldVersionId: command.destination.worldVersionId
+              },
+            providerDataIncluded: false,
+            warnings: [...decoded.warnings]
+          }
+        };
+      }
+      const story = decoded.story!;
       const normalized = {
         sourceName: "campaign.zip",
-        story: asJson(decoded.story),
-        assetManifest: asJson(assetManifest),
+        archiveFormat: "legacy_zip",
+        story: asJson(story),
+        assetRecords: exactPortableAssetAuthority(assetRecords),
         ...(command.destination.kind === "embedded"
-          ? { embeddedWorldImportRequest: asJson(embeddedWorldRequest(decoded.story)) }
+          ? { embeddedWorldImportRequest: asJson(embeddedWorldRequest(story)) }
           : {})
       };
       const value = authority(command, normalized);
@@ -474,22 +1008,22 @@ export function createPortableFamilyPreviewAdapter(
           formatVersion: 1,
           contentFingerprint: sha256(canonicalPortableImportAuthority(value)),
           campaign: {
-            title: decoded.story.campaign?.title || decoded.story.world.title || "Imported campaign",
-            sourceCampaignId: decoded.story.campaign?.sourceCampaignId ?? "00000000-0000-0000-0000-000000000000",
-            acceptedTurnCount: decoded.story.turns.length,
-            activeTurnNumber: decoded.story.turns.length,
+            title: story.campaign?.title || story.world.title || "Imported campaign",
+            sourceCampaignId: story.campaign?.sourceCampaignId ?? "00000000-0000-0000-0000-000000000000",
+            acceptedTurnCount: story.turns.length,
+            activeTurnNumber: story.turns.length,
             selectedCharacter: null
           },
           world: {
-            title: decoded.story.world.title || "Imported world",
+            title: story.world.title || "Imported world",
             sourceWorldId: "00000000-0000-0000-0000-000000000000",
-            sourceWorldVersionId: decoded.story.campaign?.sourceWorldVersionId ?? "00000000-0000-0000-0000-000000000000",
-            versionNumber: decoded.story.campaign?.sourceWorldVersionNumber ?? 1
+            sourceWorldVersionId: story.campaign?.sourceWorldVersionId ?? "00000000-0000-0000-0000-000000000000",
+            versionNumber: story.campaign?.sourceWorldVersionNumber ?? 1
           },
-          chronicle: { memoryCount: decoded.story.turns.length, summaryCount: 0 },
+          chronicle: { memoryCount: story.turns.length, summaryCount: 0 },
           assets: {
-            originalCount: assetManifest.length,
-            totalBytes: assetManifest.reduce((sum, asset) => sum + asset.byteLength, 0)
+            originalCount: decoded.assets.length,
+            totalBytes: decoded.assets.reduce((sum, asset) => sum + asset.byteLength, 0)
           },
           destination: command.destination.kind === "embedded"
             ? { kind: "embedded", operation: "create_world", worldId: null, worldVersionId: null }
@@ -506,8 +1040,13 @@ export function createPortableFamilyPreviewAdapter(
     },
     async previewLegacyStory(source, command) {
       const story = legacyStorySchema.parse(jsonText(await boundedBytes(source, MAX_JSON_BYTES)));
+      const assets = await legacyInlineAssetInventory(story, false);
       return {
-        authority: authority(command, { sourceName: "legacy.story", story: asJson(story) }),
+        authority: authority(command, {
+          sourceName: "legacy.story",
+          story: asJson(story),
+          assetRecords: exactPortableAssetAuthority(assets.flatMap((asset) => asset.records))
+        }),
         projection: legacyProjection(story)
       };
     },
@@ -770,7 +1309,7 @@ export async function createPortableImportExportComposition(
   ) => artifacts.map((asset, index) => ({
     owner: owner(command.ownerUserId),
     idempotencyKey: toAssetMutationIdempotencyKey(
-      `portable-${sha256(`${command.idempotencyKey}:${index}:${asset.sourceAssetId}:${asset.artifact.contentHash}`)}`,
+      `portable-${sha256(`${command.idempotencyKey}:${index}:${asset.sourceAssetIds.join(",")}:${asset.artifact.contentHash}`)}`,
     ),
     leaseOwner: options.leaseOwner,
     expiresAt: future(exportTtlSeconds),
@@ -947,10 +1486,21 @@ export async function createPortableImportExportComposition(
           duplicate ?? (command.kind === "campaign_zip"
             ? await mutations.commitCampaignZip(database, {
               ...mutationInput,
-              publishedAssets: attachments.map((attachment) => attachment.result)
+              publishedAssets: attachments.map((attachment, index) => ({
+                sourceAssetIds: assetArtifacts[index]!.sourceAssetIds,
+                records: assetArtifacts[index]!.records.map(({ archivePath: _archivePath, ...record }) => record),
+                result: attachment.result
+              }))
             })
             : command.kind === "legacy_story"
-              ? await mutations.commitLegacyStory(database, mutationInput)
+              ? await mutations.commitLegacyStory(database, {
+                ...mutationInput,
+                publishedAssets: attachments.map((attachment, index) => ({
+                  sourceAssetIds: assetArtifacts[index]!.sourceAssetIds,
+                  records: assetArtifacts[index]!.records.map(({ archivePath: _archivePath, ...record }) => record),
+                  result: attachment.result
+                }))
+              })
               : command.kind === "story_text"
                 ? await mutations.commitStoryText(database, mutationInput)
                 : await mutations.commitWorld(database, {

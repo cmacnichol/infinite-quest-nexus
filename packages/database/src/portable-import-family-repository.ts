@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   canonicalPortableImportAuthority,
   safePortableImportProgress,
@@ -856,6 +856,190 @@ function narration(turn: Readonly<Record<string, unknown>>): string {
   return "Imported story turn.";
 }
 
+function safePortableExternalImageUrl(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) return "";
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function portableDataImageHash(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const match = /^data:image\/(?:png|jpeg|webp|gif);base64,([A-Za-z0-9+/]*={0,2})$/u.exec(value);
+  if (!match) return null;
+  const bytes = Buffer.from(match[1]!, "base64");
+  return bytes.byteLength > 0 ? createHash("sha256").update(bytes).digest("hex") : null;
+}
+
+function portableLegacyAssetLookupKeys(value: unknown): readonly string[] {
+  if (typeof value !== "string") return [];
+  const uuid = value.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu)?.[0];
+  const name = value.split("/").pop()?.split("?")[0];
+  const stem = name?.split(".")[0];
+  return [...new Set([value, uuid, name, stem].filter((key): key is string => Boolean(key)))];
+}
+
+function unknownRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function unknownArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function jsonValue(value: unknown, fallback: unknown): string {
+  return JSON.stringify(value === undefined ? fallback : value);
+}
+
+function portableDate(value: unknown): string {
+  const parsed = typeof value === "string" ? new Date(value) : new Date(Number.NaN);
+  return Number.isNaN(parsed.valueOf()) ? new Date().toISOString() : parsed.toISOString();
+}
+
+function rewritePortableAssetPointers(value: unknown, assetIds: ReadonlyMap<string, string>): unknown {
+  if (Array.isArray(value)) return value.map((child) => rewritePortableAssetPointers(child, assetIds));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .map(([key, child]) => [key, rewritePortableAssetPointers(child, assetIds)]));
+  }
+  if (typeof value !== "string") return value;
+  return value.replaceAll(/\/api\/v1\/assets\/([0-9a-f-]{36})/giu, (_whole, sourceAssetId: string) => {
+    const assetId = assetIds.get(sourceAssetId) ?? assetIds.get(sourceAssetId.toLowerCase());
+    if (!assetId) throw new Error("portable_import_asset_mapping_invalid");
+    return `/api/v1/assets/${assetId}`;
+  });
+}
+
+type RichIdMaps = Readonly<{
+  campaign: Map<string, string>;
+  turn: Map<string, string>;
+  illustrationSet: Map<string, string>;
+  illustrationSegment: Map<string, string>;
+  generationContext: Map<string, string>;
+}>;
+
+function mapRichId(map: Map<string, string>, source: unknown): string {
+  if (typeof source !== "string" || !source.trim()) throw new Error("portable_import_reference_invalid");
+  const existing = map.get(source);
+  if (existing) return existing;
+  const id = randomUUID();
+  map.set(source, id);
+  return id;
+}
+
+function requireRichId(map: ReadonlyMap<string, string>, source: unknown): string {
+  if (typeof source !== "string") throw new Error("portable_import_reference_invalid");
+  const id = map.get(source);
+  if (!id) throw new Error("portable_import_reference_invalid");
+  return id;
+}
+
+async function restoreRichPortableAssets(
+  database: DatabaseClient,
+  ownerUserId: string,
+  worldId: string,
+  worldVersionId: string,
+  campaignId: string,
+  maps: RichIdMaps,
+  publishedAssets: readonly import("../../application/src/imports/private-portable-composition.js").PrivatePortablePublishedAsset[],
+): Promise<ReadonlyMap<string, string>> {
+  const assetIds = new Map<string, string>();
+  for (const publication of publishedAssets) {
+    if (publication.sourceAssetIds.length !== publication.records.length
+      || publication.records.some((record) => record.contentHash !== publication.result.contentHash
+        || record.byteLength !== publication.result.byteLength
+        || record.mimeType !== publication.result.mimeType)) {
+      throw new Error("portable_import_asset_mapping_invalid");
+    }
+    for (const sourceAssetId of publication.sourceAssetIds) assetIds.set(sourceAssetId, publication.result.assetId);
+    const representative = publication.records[0];
+    if (!representative) throw new Error("portable_import_asset_mapping_invalid");
+    await database.query(
+      `UPDATE assets
+          SET pixel_width=$3,pixel_height=$4,technical_metadata=$5::jsonb
+        WHERE id=$1 AND owner_user_id=$2`,
+      [publication.result.assetId, ownerUserId, representative.pixelWidth, representative.pixelHeight,
+        JSON.stringify(representative.technicalMetadata)]
+    );
+    await database.query(
+      `UPDATE asset_library_entries
+          SET title=$3,caption=$4,notes=$5,tags=$6,origin=$7,review_status=$8,
+              reuse_scope=$9,automatic_reuse_enabled=$10,content_categories=$11,
+              favorite=$12,archived_at=$13,updated_at=clock_timestamp()
+        WHERE asset_id=$1 AND owner_user_id=$2`,
+      [publication.result.assetId, ownerUserId, representative.library.title, representative.library.caption,
+        representative.library.notes, representative.library.tags, representative.library.origin,
+        representative.library.reviewStatus, representative.library.reuseScope,
+        representative.library.automaticReuseEnabled, representative.library.contentCategories,
+        representative.library.favorite, representative.library.archivedAt]
+    );
+  }
+  for (const publication of publishedAssets) {
+    for (const record of publication.records) {
+      const assetId = assetIds.get(record.sourceAssetId);
+      if (!assetId) throw new Error("portable_import_asset_mapping_invalid");
+      await database.query(
+        `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,asset_role)
+         VALUES ($1,$2,$3,'import_attachment') ON CONFLICT DO NOTHING`,
+        [ownerUserId, assetId, campaignId]
+      );
+      for (const binding of record.bindings) {
+        if (binding.role === "world_cover") {
+          await database.query("UPDATE worlds SET cover_asset_id=$3 WHERE id=$1 AND owner_user_id=$2", [worldId, ownerUserId, assetId]);
+        } else if (binding.role === "turn_illustration") {
+          const turnId = requireRichId(maps.turn, binding.turnId);
+          await database.query(
+            `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
+             VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
+            [ownerUserId, assetId, campaignId, turnId]
+          );
+          await database.query(
+            "UPDATE turns SET image_url=$3 WHERE id=$1 AND owner_user_id=$2 AND campaign_id=$4",
+            [turnId, ownerUserId, `/api/v1/assets/${assetId}`, campaignId]
+          );
+        } else if (binding.role === "campaign_asset") {
+          await database.query(
+            `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,asset_role)
+             VALUES ($1,$2,$3,'world_asset') ON CONFLICT DO NOTHING`,
+            [ownerUserId, assetId, campaignId]
+          );
+        } else if (binding.role === "imported_attachment" && binding.turnId) {
+          const turnId = requireRichId(maps.turn, binding.turnId);
+          await database.query(
+            `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
+             VALUES ($1,$2,$3,$4,'import_attachment') ON CONFLICT DO NOTHING`,
+            [ownerUserId, assetId, campaignId, turnId]
+          );
+        } else if (binding.role === "illustration_segment_variant") {
+          await database.query(
+            `INSERT INTO turn_illustration_segment_assets (segment_id,owner_user_id,asset_id,variant_index)
+             VALUES ($1,$2,$3,$4)
+             ON CONFLICT (segment_id,variant_index) DO UPDATE SET asset_id=EXCLUDED.asset_id`,
+            [requireRichId(maps.illustrationSegment, binding.segmentId), ownerUserId, assetId, binding.variantIndex]
+          );
+        } else if (binding.role === "generation_context") {
+          const contextId = mapRichId(maps.generationContext, binding.sourceContextId);
+          await database.query(
+            `INSERT INTO asset_generation_contexts (
+               id,owner_user_id,asset_id,created_by_user_id,world_id,world_version_id,campaign_id,turn_id,target_type,variant_index
+             ) VALUES ($1,$2,$3,$2,$4,$5,$6,$7,'other',0)
+             ON CONFLICT (id) DO UPDATE SET asset_id=EXCLUDED.asset_id`,
+            [contextId, ownerUserId, assetId,
+              binding.worldId === null ? null : worldId,
+              binding.worldVersionId === null ? null : worldVersionId,
+              binding.campaignId === null ? null : campaignId,
+              binding.turnId === null ? null : requireRichId(maps.turn, binding.turnId)]
+          );
+        }
+      }
+    }
+  }
+  return assetIds;
+}
+
 async function existingImportResult(
   database: DatabaseClient,
   ownerUserId: string,
@@ -876,6 +1060,246 @@ async function existingImportResult(
     [ownerUserId, sourceHash]
   );
   return selected.rows[0] ?? null;
+}
+
+async function commitRichPortableCampaign(
+  database: DatabaseClient,
+  input: Readonly<{
+    owner: ImportOwnerScope;
+    destination: Extract<PortablePreviewDestination, { kind: "existing_world_version" }>;
+    authorityFingerprint: string;
+    payload: Readonly<Record<string, PortableJsonValue>>;
+    publishedAssets: readonly import("../../application/src/imports/private-portable-composition.js").PrivatePortablePublishedAsset[];
+    createdWorld: boolean;
+  }>,
+): Promise<PrivatePortableFamilyMutationResult> {
+  const campaignPayload = unknownRecord(input.payload.campaign);
+  const worldPayload = unknownRecord(input.payload.world);
+  const chronicle = unknownRecord(input.payload.chronicle);
+  const sourceCampaign = unknownRecord(campaignPayload.campaign);
+  const archiveRecords = unknownRecord(campaignPayload.archiveRecords);
+  if (!Array.isArray(campaignPayload.turns) || archiveRecords.formatVersion !== 1
+    || chronicle.formatVersion !== 1 || !Array.isArray(chronicle.memories) || !Array.isArray(chronicle.summaries)) {
+    throw new Error("portable_import_payload_invalid");
+  }
+  const duplicate = await existingImportResult(database, input.owner.ownerUserId, input.authorityFingerprint);
+  if (duplicate) return existingMutationResult(duplicate, "campaign_zip");
+  const imported = await database.query<{ id: string }>(
+    `INSERT INTO imports (owner_user_id,source_type,source_name,source_hash,status)
+     VALUES ($1,'portable_campaign_zip',$2,$3,'processing') RETURNING id`,
+    [input.owner.ownerUserId, portableString(input.payload.sourceName, "campaign.zip"), input.authorityFingerprint]
+  );
+  const importId = imported.rows[0]!.id;
+  const turns = campaignPayload.turns;
+  const settings = unknownRecord(campaignPayload.settings);
+  const activeTurnNumber = Math.max(0, ...turns.map((turn) => Number(unknownRecord(turn).turnNumber ?? 0)));
+  const campaign = await database.query<{ id: string }>(
+    `INSERT INTO campaigns (
+       owner_user_id,world_version_id,title,active_turn_number,legacy_settings,story_length_profile,
+       turn_control_style,selected_character_id,character_snapshot,character_profile,character_profile_revision
+     ) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9::jsonb,$10::jsonb,$11) RETURNING id`,
+    [input.owner.ownerUserId, input.destination.worldVersionId,
+      typeof sourceCampaign.title === "string" && sourceCampaign.title.trim() ? sourceCampaign.title : "Imported campaign",
+      activeTurnNumber, JSON.stringify(settings),
+      typeof settings.storyLength === "string" ? settings.storyLength : "standard",
+      ["action_only", "flexible_auto", "flexible_action", "flexible_scene"].includes(String(settings.turnControlStyle))
+        ? settings.turnControlStyle : "flexible_action",
+      typeof sourceCampaign.selectedCharacterId === "string" ? sourceCampaign.selectedCharacterId : null,
+      sourceCampaign.characterSnapshot == null ? null : JSON.stringify(sourceCampaign.characterSnapshot),
+      sourceCampaign.characterProfile == null ? null : JSON.stringify(sourceCampaign.characterProfile),
+      Number(sourceCampaign.characterProfileRevision ?? 0)]
+  );
+  const campaignId = campaign.rows[0]!.id;
+  const maps: RichIdMaps = {
+    campaign: new Map([[String(sourceCampaign.sourceCampaignId ?? "source-campaign"), campaignId]]),
+    turn: new Map(),
+    illustrationSet: new Map(),
+    illustrationSegment: new Map(),
+    generationContext: new Map()
+  };
+  for (const turn of turns) mapRichId(maps.turn, unknownRecord(turn).id);
+  for (const set of unknownArray(archiveRecords.illustrationSets)) mapRichId(maps.illustrationSet, unknownRecord(set).id);
+  for (const segment of unknownArray(archiveRecords.illustrationSegments)) mapRichId(maps.illustrationSegment, unknownRecord(segment).id);
+  await database.query(
+    `INSERT INTO campaign_state (
+       campaign_id,owner_user_id,scratchpad_private,trackers,default_triggers,event_triggers,
+       pending_event_triggers,rpg_stats,import_provenance,initial_state_snapshot,revision
+     ) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,$11)`,
+    [campaignId, input.owner.ownerUserId, String(campaignPayload.scratchpad ?? ""),
+      jsonValue(campaignPayload.trackers, []), jsonValue(campaignPayload.defaultTriggers, []),
+      jsonValue(campaignPayload.eventTriggers, []), jsonValue(campaignPayload.pendingEventTriggers, []),
+      jsonValue(campaignPayload.rpgStats, []), JSON.stringify({ sourceType: "portable_campaign_zip", importId }),
+      jsonValue({ scratchpad: "", trackers: campaignPayload.baseTrackersAtStart ?? [] }, {}),
+      Number(sourceCampaign.stateRevision ?? 0)]
+  );
+  for (const [index, turnValue] of turns.entries()) {
+    const turn = unknownRecord(turnValue);
+    await database.query(
+      `INSERT INTO turns (
+         id,owner_user_id,campaign_id,turn_number,source_turn_id,action,input_mode,input_mode_source,narration,
+         choices,custom_action_suggestion,image_prompt,image_url,mechanics_private,state_snapshot_private,
+         model_metadata,import_metadata,accepted_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,$18)`,
+      [requireRichId(maps.turn, turn.id), input.owner.ownerUserId, campaignId,
+        Number(turn.turnNumber ?? index + 1), String(turn.id), String(turn.action ?? ""),
+        typeof turn.inputMode === "string" ? turn.inputMode : "action",
+        typeof turn.inputModeSource === "string" ? turn.inputModeSource : "explicit",
+        narration(turn), jsonValue(turn.choices, []), String(turn.customActionSuggestion ?? ""),
+        String(turn.imagePrompt ?? ""), typeof turn.imageUrl === "string" && /^https:\/\//u.test(turn.imageUrl) ? turn.imageUrl : "",
+        jsonValue(turn.roll, null), jsonValue(turn.worldStateSnapshot, {}), jsonValue(turn.llmModelInfo, {}),
+        jsonValue({ importedFrom: "portable_campaign_zip", sourceTurnId: turn.id }, {}), portableDate(turn.createdAt)]
+    );
+  }
+  for (const value of unknownArray(archiveRecords.characterProfileEdits)) {
+    const row = unknownRecord(value);
+    await database.query(
+      `INSERT INTO campaign_character_profile_edits (
+         owner_user_id,campaign_id,revision,previous_profile,next_profile,edit_source,created_at
+       ) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7)`,
+      [input.owner.ownerUserId, campaignId, Number(row.revision ?? 1), jsonValue(row.previous_profile, null),
+        jsonValue(row.next_profile, {}), ["world_version_seed", "manual", "ai_organized", "imported", "branch", "transfer"]
+          .includes(String(row.edit_source)) ? row.edit_source : "imported", portableDate(row.created_at)]
+    );
+  }
+  for (const value of unknownArray(archiveRecords.stateEdits)) {
+    const row = unknownRecord(value);
+    await database.query(
+      `INSERT INTO campaign_state_edits (
+         owner_user_id,campaign_id,effective_turn_number,revision,state_snapshot_private,changed_fields,created_at
+       ) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7)`,
+      [input.owner.ownerUserId, campaignId, Number(row.effective_turn_number ?? 0), Number(row.revision ?? 1),
+        jsonValue(row.state_snapshot_private, {}), jsonValue(row.changed_fields, []), portableDate(row.created_at)]
+    );
+  }
+  for (const memoryValue of chronicle.memories) {
+    const memory = unknownRecord(memoryValue);
+    await database.query(
+      `INSERT INTO chronicle_memories (
+         owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate,
+         importance,entities,entity_ids,metadata,created_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)`,
+      [input.owner.ownerUserId, campaignId, input.destination.worldVersionId,
+        memory.turn_id ? requireRichId(maps.turn, memory.turn_id) : null,
+        String(memory.memory_kind ?? "legacy_summary"), Number(memory.ordinal ?? 0), String(memory.content ?? ""),
+        Number(memory.lexicalUnitEstimate ?? 0), Number(memory.importance ?? 0.5), memory.entities ?? [], memory.entity_ids ?? [],
+        jsonValue(memory.metadata, {}), portableDate(memory.created_at)]
+    );
+  }
+  for (const summaryValue of chronicle.summaries) {
+    const summary = unknownRecord(summaryValue);
+    await database.query(
+      `INSERT INTO summary_checkpoints (
+         owner_user_id,campaign_id,through_turn,summary_kind,content,token_estimate,created_at
+       ) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)`,
+      [input.owner.ownerUserId, campaignId, Number(summary.through_turn ?? 0),
+        String(summary.summary_kind ?? "campaign_summary"), jsonValue(summary.content, {}),
+        Number(summary.lexicalUnitEstimate ?? 0), portableDate(summary.created_at)]
+    );
+  }
+  const config = unknownRecord(archiveRecords.illustrationConfig);
+  if (Object.keys(config).length > 0) {
+    const sourcePolicy = ["off", "library_only", "library_then_generate", "generate_only"].includes(String(config.source_policy))
+      ? String(config.source_policy) : "off";
+    await database.query(
+      `INSERT INTO campaign_illustration_configs (
+         campaign_id,owner_user_id,enabled,source_policy,matching_scope,confidence_profile,repetition_window,
+         model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,images_per_segment,
+         segment_prompt_mode,refinement_prompt
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+      [campaignId, input.owner.ownerUserId, sourcePolicy !== "off", sourcePolicy,
+        ["campaign", "world", "owner_library", "shared"].includes(String(config.matching_scope)) ? config.matching_scope : "world",
+        ["strict", "balanced", "broad"].includes(String(config.confidence_profile)) ? config.confidence_profile : "balanced",
+        Number(config.repetition_window ?? 5), String(config.model ?? ""), String(config.size ?? "1024x1024"),
+        String(config.aspect_ratio ?? "1:1"), ["auto", "low", "medium", "high"].includes(String(config.quality)) ? config.quality : "auto",
+        ["png", "jpeg", "webp"].includes(String(config.output_format)) ? config.output_format : "png",
+        Number(config.max_attempts ?? 3), Number(config.segment_word_count ?? 500), Number(config.images_per_segment ?? 1),
+        ["direct", "ai_refined"].includes(String(config.segment_prompt_mode)) ? config.segment_prompt_mode : "direct",
+        String(config.refinement_prompt ?? "")]
+    );
+  }
+  for (const setValue of unknownArray(archiveRecords.illustrationSets)) {
+    const set = unknownRecord(setValue);
+    await database.query(
+      `INSERT INTO turn_illustration_sets (
+         id,owner_user_id,campaign_id,turn_id,source_text_hash,segment_word_count,images_per_segment,
+         prompt_mode,status,is_active,character_visual_reference,created_at,completed_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [requireRichId(maps.illustrationSet, set.id), input.owner.ownerUserId, campaignId,
+        requireRichId(maps.turn, set.turn_id), String(set.source_text_hash ?? ""), Number(set.segment_word_count ?? 500),
+        Number(set.images_per_segment ?? 1), ["direct", "ai_refined", "legacy"].includes(String(set.prompt_mode)) ? set.prompt_mode : "legacy",
+        ["queued", "refining", "generating", "completed", "partial", "failed", "superseded"].includes(String(set.status)) ? set.status : "failed",
+        Boolean(set.is_active), String(set.character_visual_reference ?? ""), portableDate(set.created_at),
+        set.completed_at ? portableDate(set.completed_at) : null]
+    );
+  }
+  for (const segmentValue of unknownArray(archiveRecords.illustrationSegments)) {
+    const segment = unknownRecord(segmentValue);
+    await database.query(
+      `INSERT INTO turn_illustration_segments (
+         id,owner_user_id,illustration_set_id,campaign_id,turn_id,ordinal,start_offset,end_offset,start_word,end_word,
+         source_text,source_text_hash,direct_prompt,resolved_prompt,prompt_source,status,created_at,updated_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$17)`,
+      [requireRichId(maps.illustrationSegment, segment.id), input.owner.ownerUserId,
+        requireRichId(maps.illustrationSet, segment.illustration_set_id), campaignId,
+        requireRichId(maps.turn, segment.turn_id), Number(segment.ordinal ?? 0), Number(segment.start_offset ?? 0),
+        Number(segment.end_offset ?? 0), Number(segment.start_word ?? 0), Number(segment.end_word ?? 0),
+        String(segment.source_text ?? ""), String(segment.source_text_hash ?? ""), String(segment.direct_prompt ?? ""),
+        String(segment.resolved_prompt ?? ""), ["direct", "ai_refined", "ai_fallback", "legacy"].includes(String(segment.prompt_source)) ? segment.prompt_source : "legacy",
+        ["queued", "refining", "generating", "completed", "recoverable", "failed"].includes(String(segment.status)) ? segment.status : "failed",
+        portableDate(segment.created_at)]
+    );
+  }
+  for (const costValue of unknownArray(archiveRecords.costs)) {
+    const cost = unknownRecord(costValue);
+    await database.query(
+      `INSERT INTO provider_cost_events (
+         owner_user_id,campaign_id,turn_id,local_call_id,provider_type,category,operation,requested_model,
+         resolved_model,amount,currency,usage_metadata,occurred_at,created_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$13)`,
+      [input.owner.ownerUserId, campaignId, cost.turn_id ? requireRichId(maps.turn, cost.turn_id) : null,
+        randomUUID(), String(cost.provider_type ?? "openai_compatible"),
+        ["story", "image", "memory"].includes(String(cost.category)) ? cost.category : "image",
+        String(cost.operation ?? "illustration"), String(cost.requested_model ?? ""), String(cost.resolved_model ?? ""),
+        String(cost.amount ?? "0"), /^[A-Z]{3}$/u.test(String(cost.currency)) ? cost.currency : "USD",
+        jsonValue(cost.usage_metadata, {}), portableDate(cost.occurred_at)]
+    );
+  }
+  const assetIds = await restoreRichPortableAssets(
+    database, input.owner.ownerUserId, input.destination.worldId, input.destination.worldVersionId,
+    campaignId, maps, input.publishedAssets,
+  );
+  if (input.createdWorld) {
+    await database.query(
+      "UPDATE world_versions SET content=$2::jsonb WHERE id=$1 AND owner_user_id=$3",
+      [input.destination.worldVersionId, JSON.stringify(rewritePortableAssetPointers(worldPayload.content, assetIds)), input.owner.ownerUserId]
+    );
+  }
+  const stats = {
+    turnCount: turns.length,
+    memoryCount: chronicle.memories.length,
+    summaryCount: chronicle.summaries.length,
+    assetCount: input.publishedAssets.length,
+    assetBytes: input.publishedAssets.reduce((sum, asset) => sum + asset.result.byteLength, 0)
+  };
+  await database.query(
+    `UPDATE imports SET status='completed',world_id=$2,world_version_id=$3,campaign_id=$4,
+       stats=$5::jsonb,completed_at=clock_timestamp()
+     WHERE id=$1 AND owner_user_id=$6 AND status='processing'`,
+    [importId, input.destination.worldId, input.destination.worldVersionId, campaignId,
+      JSON.stringify(stats), input.owner.ownerUserId]
+  );
+  return {
+    importId,
+    importedRecordId: importId,
+    worldId: input.destination.worldId,
+    worldVersionId: input.destination.worldVersionId,
+    campaignId,
+    duplicate: false,
+    result: {
+      importId, worldId: input.destination.worldId, worldVersionId: input.destination.worldVersionId,
+      campaignId, duplicate: false, stats
+    }
+  };
 }
 
 function existingMutationResult(
@@ -903,9 +1327,12 @@ function existingMutationResult(
 
 async function commitPortableCampaign(
   database: DatabaseClient,
-  input: Parameters<PrivatePortableFamilyMutationPort["commitLegacyStory"]>[1],
+  input: Omit<Parameters<PrivatePortableFamilyMutationPort["commitLegacyStory"]>[1], "publishedAssets">,
   sourceType: "portable_legacy_story" | "portable_story_text" | "portable_campaign_zip",
-  publishedAssets: readonly import("../../application/src/assets/private-asset-publication.js").PrivateAssetPublicationResult[] = [],
+  publishedAssets: readonly (
+    import("../../application/src/assets/private-asset-publication.js").PrivateAssetPublicationResult
+    | import("../../application/src/imports/private-portable-composition.js").PrivatePortablePublishedAsset
+  )[] = [],
 ): Promise<PrivatePortableFamilyMutationResult> {
   if (!/^[0-9a-f]{64}$/u.test(input.authorityFingerprint)
     || input.destination.kind !== "existing_world_version") {
@@ -943,6 +1370,15 @@ async function commitPortableCampaign(
     [input.owner.ownerUserId, input.destination.worldVersionId, title, story.turns.length, JSON.stringify(story.settings ?? {})]
   );
   const campaignId = campaign.rows[0]!.id;
+  const publicationResults = publishedAssets.map((asset) => "result" in asset ? asset.result : asset);
+  const publicationByHash = new Map(publicationResults.map((asset) => [asset.contentHash, asset]));
+  const publicationBySourceKey = new Map<string, (typeof publicationResults)[number]>();
+  for (const publication of publishedAssets) {
+    if (!("result" in publication)) continue;
+    for (const sourceKey of publication.sourceKeys ?? []) {
+      for (const key of portableLegacyAssetLookupKeys(sourceKey)) publicationBySourceKey.set(key, publication.result);
+    }
+  }
   await database.query(
     `INSERT INTO campaign_state (
        campaign_id,owner_user_id,scratchpad_private,trackers,default_triggers,
@@ -961,6 +1397,7 @@ async function commitPortableCampaign(
     ]
   );
   const turnIds: string[] = [];
+  const sourceTurnIds = new Map<string, string>();
   for (const [index, turnValue] of story.turns.entries()) {
     const turn = turnValue as Readonly<Record<string, unknown>>;
     const inserted = await database.query<{ id: string }>(
@@ -980,12 +1417,28 @@ async function commitPortableCampaign(
         JSON.stringify(Array.isArray(turn.choices) ? turn.choices.slice(0, 4) : []),
         typeof turn.customActionSuggestion === "string" ? turn.customActionSuggestion : "",
         typeof turn.imagePrompt === "string" ? turn.imagePrompt : "",
-        typeof turn.imageUrl === "string" ? turn.imageUrl : "",
+        safePortableExternalImageUrl(turn.imageUrl),
         JSON.stringify(turn.worldStateSnapshot ?? {}),
         JSON.stringify({ importedFrom: sourceType, sourceTurnId: turn.id ?? null })
       ]
     );
     turnIds.push(inserted.rows[0]!.id);
+    if (typeof turn.id === "string") sourceTurnIds.set(turn.id, inserted.rows[0]!.id);
+    const inlineAsset = publicationByHash.get(portableDataImageHash(turn.imageUrl) ?? "");
+    const companionAsset = portableLegacyAssetLookupKeys(turn.imageUrl)
+      .map((key) => publicationBySourceKey.get(key)).find(Boolean);
+    const turnAsset = inlineAsset ?? companionAsset;
+    if (turnAsset) {
+      await database.query(
+        `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
+         VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
+        [input.owner.ownerUserId, turnAsset.assetId, campaignId, inserted.rows[0]!.id]
+      );
+      await database.query(
+        "UPDATE turns SET image_url=$2 WHERE id=$1 AND owner_user_id=$3",
+        [inserted.rows[0]!.id, `/api/v1/assets/${turnAsset.assetId}`, input.owner.ownerUserId]
+      );
+    }
     const fiction = narration(turn);
     await database.query(
       `INSERT INTO chronicle_memories (
@@ -1004,12 +1457,33 @@ async function commitPortableCampaign(
       ]
     );
   }
-  for (const asset of publishedAssets) {
+  for (const asset of publicationResults) {
     await database.query(
       `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,asset_role)
        VALUES ($1,$2,$3,'import_attachment') ON CONFLICT DO NOTHING`,
       [input.owner.ownerUserId, asset.assetId, campaignId]
     );
+  }
+  if (sourceType === "portable_campaign_zip") {
+    for (const publication of publishedAssets) {
+      if (!("result" in publication)) continue;
+      for (const record of publication.records) {
+        for (const binding of record.bindings) {
+          if (binding.role !== "turn_illustration") continue;
+          const turnId = sourceTurnIds.get(binding.turnId);
+          if (!turnId) throw new Error("portable_import_reference_invalid");
+          await database.query(
+            `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
+             VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
+            [input.owner.ownerUserId, publication.result.assetId, campaignId, turnId]
+          );
+          await database.query(
+            "UPDATE turns SET image_url=$2 WHERE id=$1 AND owner_user_id=$3",
+            [turnId, `/api/v1/assets/${publication.result.assetId}`, input.owner.ownerUserId]
+          );
+        }
+      }
+    }
   }
   const legacyStats = {
     turnCount: story.turns.length,
@@ -1023,8 +1497,8 @@ async function commitPortableCampaign(
     turnCount: story.turns.length,
     memoryCount: story.turns.length,
     summaryCount: 0,
-    assetCount: publishedAssets.length,
-    assetBytes: publishedAssets.reduce((sum, asset) => sum + asset.byteLength, 0)
+    assetCount: publicationResults.length,
+    assetBytes: publicationResults.reduce((sum, asset) => sum + asset.byteLength, 0)
   };
   const stats = sourceType === "portable_campaign_zip" ? campaignStats : legacyStats;
   await database.query(
@@ -1088,6 +1562,10 @@ export function createPostgresPortableFamilyMutationRepository(
     },
     async commitCampaignZip(database, input) {
       const client = portableDatabaseClient(database);
+      const richArchive = input.payload.archiveFormat === "manifest_v1";
+      const richPublishedAssets = input.publishedAssets.filter(
+        (asset): asset is import("../../application/src/imports/private-portable-composition.js").PrivatePortablePublishedAsset => "result" in asset,
+      );
       if (input.destination.kind === "embedded") {
         const request = worldImportRequestSchema.parse(input.payload.embeddedWorldImportRequest);
         const imported = await runPostgresWorldCampaignCommandWithClient(
@@ -1095,6 +1573,21 @@ export function createPostgresPortableFamilyMutationRepository(
           (transaction) => worlds.importWorld(transaction, input.owner, request),
         );
         if (!imported.ok) throw new Error(`portable_world_import_${imported.failure.reason}`);
+        if (richArchive) {
+          if (richPublishedAssets.length !== input.publishedAssets.length) {
+            throw new Error("portable_import_asset_mapping_invalid");
+          }
+          return commitRichPortableCampaign(client, {
+            ...input,
+            destination: {
+              kind: "existing_world_version",
+              worldId: imported.value.worldId,
+              worldVersionId: imported.value.worldVersionId
+            },
+            publishedAssets: richPublishedAssets,
+            createdWorld: !imported.value.duplicate
+          });
+        }
         return commitPortableCampaign(
           client,
           {
@@ -1109,6 +1602,20 @@ export function createPostgresPortableFamilyMutationRepository(
           input.publishedAssets,
         );
       }
+      if (richArchive) {
+        if (input.destination.kind !== "existing_world_version") {
+          throw new Error("portable_import_destination_invalid");
+        }
+        if (richPublishedAssets.length !== input.publishedAssets.length) {
+          throw new Error("portable_import_asset_mapping_invalid");
+        }
+        return commitRichPortableCampaign(client, {
+          ...input,
+          destination: input.destination,
+          publishedAssets: richPublishedAssets,
+          createdWorld: false
+        });
+      }
       return commitPortableCampaign(
         client,
         input,
@@ -1117,7 +1624,12 @@ export function createPostgresPortableFamilyMutationRepository(
       );
     },
     commitLegacyStory(database, input) {
-      return commitPortableCampaign(portableDatabaseClient(database), input, "portable_legacy_story");
+      return commitPortableCampaign(
+        portableDatabaseClient(database),
+        input,
+        "portable_legacy_story",
+        input.publishedAssets ?? [],
+      );
     },
     async commitWorld(database, input) {
       const client = portableDatabaseClient(database);

@@ -3,6 +3,7 @@ import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import JSZip from "jszip";
+import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   canonicalPortableAssetReservationCommand,
@@ -15,7 +16,8 @@ import {
   type PortableStagedInput
 } from "../../packages/application/src/imports/types.js";
 import { toAssetMutationIdempotencyKey } from "../../packages/application/src/assets/types.js";
-import { canonicalizeWorldContent } from "../../packages/contracts/src/index.js";
+import { canonicalArchiveJson, canonicalizeWorldContent } from "../../packages/contracts/src/index.js";
+import { calculateContentFingerprint } from "../../packages/contracts/src/archives-node.js";
 import { createPostgresImportRepository } from "../../packages/database/src/import-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import {
@@ -37,6 +39,18 @@ const integration = databaseUrl ? describe : describe.skip;
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+async function uniquePng(seed: string): Promise<Buffer> {
+  const color = createHash("sha256").update(seed).digest();
+  return sharp({
+    create: {
+      width: 1,
+      height: 1,
+      channels: 4,
+      background: { r: color[0]!, g: color[1]!, b: color[2]!, alpha: 1 }
+    }
+  }).png().toBuffer();
 }
 
 integration("Task 14e3d durable portable composition authority", () => {
@@ -257,6 +271,110 @@ integration("Task 14e3d durable portable composition authority", () => {
 
   async function campaignArchive(label: string): Promise<Uint8Array> {
     return campaignArchiveWithAssets(label, [crypto.randomUUID()]);
+  }
+
+  async function richCampaignArchive(label: string) {
+    const sourceCampaignId = crypto.randomUUID();
+    const sourceWorldId = crypto.randomUUID();
+    const sourceWorldVersionId = crypto.randomUUID();
+    const sourceTurnId = crypto.randomUUID();
+    const sourceAssetId = crypto.randomUUID();
+    const sourceSetId = crypto.randomUUID();
+    const transientSetId = crypto.randomUUID();
+    const sourceSegmentId = crypto.randomUUID();
+    const sourceContextId = crypto.randomUUID();
+    const image = await uniquePng(`${label}-${sourceAssetId}`);
+    const contentHash = createHash("sha256").update(image).digest("hex");
+    const assetPath = `assets/sha256/${contentHash.slice(0, 2)}/${contentHash}.png`;
+    const content = canonicalizeWorldContent({
+      world: { title: `${label} world` },
+      playableCharacters: [{ id: "hero", name: "Hero" }]
+    });
+    const worldHash = hash(canonicalArchiveJson(content));
+    const campaign = {
+      formatVersion: 3,
+      campaign: {
+        sourceCampaignId, sourceWorldVersionId, title: `${label} campaign`, stateRevision: 1,
+        selectedCharacterId: "hero", characterSnapshot: { id: "hero", name: "Hero" },
+        characterProfile: { name: "Hero" }, characterProfileRevision: 1
+      },
+      settings: { storyLength: "standard", turnControlStyle: "flexible_action" },
+      world: { canonicalHash: worldHash, sourceWorldId, sourceWorldVersionId },
+      turns: [{
+        id: sourceTurnId, turnNumber: 1, action: "Look", narration: "A restored archive hall.",
+        imagePrompt: "A quiet archive hall", imageUrl: `/api/v1/assets/${sourceAssetId}`,
+        worldStateSnapshot: { scratchpad: "", trackers: [] }, createdAt: "2030-01-02T00:00:00.000Z"
+      }],
+      trackers: [], defaultTriggers: [], eventTriggers: [], pendingEventTriggers: [], rpgStats: [],
+      archiveRecords: {
+        formatVersion: 1,
+        characterProfileEdits: [{ id: crypto.randomUUID(), revision: 1, previous_profile: null, next_profile: { name: "Hero" }, edit_source: "imported", created_at: "2030-01-01T00:00:00.000Z" }],
+        stateEdits: [{ id: crypto.randomUUID(), effective_turn_number: 1, revision: 1, state_snapshot_private: { scratchpad: "restored", trackers: [] }, changed_fields: ["scratchpad"], created_at: "2030-01-02T00:00:00.000Z" }],
+        worldMigrations: [{ from_world_version_id: crypto.randomUUID(), to_world_version_id: sourceWorldVersionId }],
+        illustrationConfig: { enabled: false, source_policy: "off", matching_scope: "campaign", confidence_profile: "strict", repetition_window: 3, model: "", size: "1024x1024", aspect_ratio: "1:1", quality: "auto", output_format: "png", max_attempts: 3, segment_word_count: 500, images_per_segment: 1, segment_prompt_mode: "direct", refinement_prompt: "" },
+        illustrationSets: [
+          { id: sourceSetId, turn_id: sourceTurnId, source_text_hash: "source-hash", segment_word_count: 500, images_per_segment: 1, prompt_mode: "direct", status: "completed", is_active: true, character_visual_reference: "Hero", created_at: "2030-01-02T00:00:00.000Z", completed_at: "2030-01-02T00:01:00.000Z" },
+          { id: transientSetId, turn_id: null, source_text_hash: "transient", segment_word_count: 500, images_per_segment: 1, prompt_mode: "direct", status: "generating", is_active: false, character_visual_reference: "", created_at: "2030-01-02T00:00:00.000Z", completed_at: null }
+        ],
+        illustrationSegments: [
+          { id: sourceSegmentId, illustration_set_id: sourceSetId, turn_id: sourceTurnId, ordinal: 0, start_offset: 0, end_offset: 24, start_word: 0, end_word: 4, source_text: "A restored archive hall.", source_text_hash: "segment-hash", direct_prompt: "Archive hall", resolved_prompt: "Archive hall", prompt_source: "direct", status: "completed", created_at: "2030-01-02T00:00:00.000Z" },
+          { id: crypto.randomUUID(), illustration_set_id: transientSetId, turn_id: null, ordinal: 0, start_offset: 0, end_offset: 0, start_word: 0, end_word: 0, source_text: "", source_text_hash: "transient", direct_prompt: "", resolved_prompt: "", prompt_source: "direct", status: "pending", created_at: "2030-01-02T00:00:00.000Z" }
+        ],
+        costs: [{ turn_id: sourceTurnId, provider_type: "openai_compatible", category: "image", operation: "illustration", requested_model: "image-model", resolved_model: "image-model", amount: "0.25", currency: "USD", usage_metadata: { images: 1 }, occurred_at: "2030-01-02T00:00:00.000Z" }]
+      }
+    };
+    const world = { canonicalHash: worldHash, sourceWorldId, sourceWorldVersionId, versionNumber: 1, content };
+    const chronicle = {
+      formatVersion: 1,
+      memories: [{ id: crypto.randomUUID(), world_version_id: sourceWorldVersionId, turn_id: sourceTurnId, memory_kind: "turn_fiction", ordinal: 1, content: "A restored archive hall.", token_estimate: 6, importance: 0.8, entities: [], entity_ids: [], metadata: { imported: true }, created_at: "2030-01-02T00:00:00.000Z" }],
+      summaries: [{ id: crypto.randomUUID(), through_turn: 1, summary_kind: "campaign_summary", content: { text: "The hall was restored." }, token_estimate: 6, created_at: "2030-01-02T00:00:00.000Z" }]
+    };
+    const assetRecord = {
+      sourceAssetId, contentHash, archivePath: assetPath, mimeType: "image/png", byteLength: image.byteLength,
+      pixelWidth: 1, pixelHeight: 1, technicalMetadata: { format: "png", pages: 1 },
+      library: { title: "Restored hall", caption: "A caption", notes: "Imported", tags: ["hall"], origin: "imported", reviewStatus: "eligible", reuseScope: "campaign", automaticReuseEnabled: false, contentCategories: ["location"], favorite: true, archivedAt: null },
+      createdAt: "2030-01-01T00:00:00.000Z",
+      bindings: [
+        { role: "world_cover", worldId: sourceWorldId },
+        { role: "turn_illustration", campaignId: sourceCampaignId, turnId: sourceTurnId },
+        { role: "illustration_segment_variant", campaignId: sourceCampaignId, turnId: sourceTurnId, segmentId: sourceSegmentId, variantIndex: 0 },
+        { role: "generation_context", campaignId: sourceCampaignId, worldId: sourceWorldId, worldVersionId: sourceWorldVersionId, turnId: sourceTurnId, sourceContextId }
+      ]
+    };
+    const payloads = [
+      ["campaign.json", campaign, "campaign"],
+      ["world.json", world, "world"],
+      ["chronicle.json", chronicle, "chronicle"],
+      ["assets/assets.json", { formatVersion: 1, assets: [assetRecord] }, "assets"]
+    ] as const;
+    const entries = payloads.map(([path, value, logicalType]) => {
+      const body = canonicalArchiveJson(value);
+      return { path, logicalType, mediaType: "application/json", byteLength: Buffer.byteLength(body), sha256: hash(body), body };
+    });
+    const manifestEntries = [
+      ...entries.map(({ body: _body, ...entry }) => entry),
+      { path: assetPath, logicalType: "asset-original", mediaType: "image/png", byteLength: image.byteLength, sha256: contentHash }
+    ];
+    const manifest = {
+      format: "infinite-quest-archive", formatVersion: 1, archiveType: "campaign",
+      createdAt: "2030-01-01T00:00:00.000Z",
+      contentFingerprint: calculateContentFingerprint({
+        payloadHashes: entries.map((entry) => entry.sha256), originalAssetHashes: [contentHash]
+      }),
+      campaignId: sourceCampaignId, worldId: sourceWorldId, worldVersionId: sourceWorldVersionId,
+      entries: manifestEntries,
+      payloads: payloads.map(([path, _value, kind]) => ({ kind, path, formatVersion: 1 })),
+      assets: [assetRecord]
+    };
+    const archive = new JSZip();
+    archive.file("manifest.json", canonicalArchiveJson(manifest));
+    for (const entry of entries) archive.file(entry.path, entry.body);
+    archive.file(assetPath, image);
+    return {
+      bytes: await archive.generateAsync({ type: "uint8array", compression: "DEFLATE" }),
+      sourceAssetId,
+      sourceContextId
+    };
   }
 
   async function waitForAdvisoryWaiters(minimum: number): Promise<void> {
@@ -696,6 +814,80 @@ integration("Task 14e3d durable portable composition authority", () => {
           WHERE imported.id=$1 AND reference.owner_user_id=$2`,
         [committed.importedRecordId, ownerUserId]
       )).toMatchObject({ rows: [{ count: 1 }] });
+    } finally {
+      await composition.close();
+    }
+  });
+
+  it("restores current manifest campaign records, rich asset metadata, and source bindings", async () => {
+    const target = await createWorldScope(`14e3d unused rich target ${crypto.randomUUID()}`);
+    const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-rich-archive-`);
+    const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-rich-assets-`);
+    const composition = await createRealComposition({ archiveRoot, assetRoot, target, leaseOwner: "14e3d-rich" });
+    const archive = await richCampaignArchive(`14e3d rich ${crypto.randomUUID()}`);
+    try {
+      const staged = await stagedInput(composition, archive.bytes, "14e3d-rich");
+      const preview = await composition.previewCampaignZip({
+        ownerUserId,
+        stagedInput: staged,
+        kind: "campaign_zip",
+        destination: { kind: "embedded", operation: "create_world" }
+      });
+      expect(preview.projection.warnings).toEqual([
+        expect.stringContaining("Migration history references source world versions"),
+        expect.stringContaining("Ignored 1 turnless illustration set and 1 turnless illustration segment")
+      ]);
+      const command = {
+        ownerUserId,
+        kind: "campaign_zip" as const,
+        destination: preview.destination,
+        previewHandle: preview.previewHandle,
+        idempotencyKey: `14e3d-rich-${crypto.randomUUID()}`
+      };
+      const committed = await composition.commit(command);
+      const result = committed.result as { campaignId: string; worldId: string; stats: { memoryCount: number; summaryCount: number } };
+      expect(result.stats).toMatchObject({ memoryCount: 1, summaryCount: 1 });
+      expect(await composition.commit(command)).toEqual(committed);
+      await expect(pool.query(
+        `SELECT campaign.title,turns.image_url,library.title AS asset_title,library.favorite,
+                assets.pixel_width,world.cover_asset_id,
+                (SELECT token_estimate FROM chronicle_memories memory WHERE memory.campaign_id=campaign.id) AS memory_tokens,
+                (SELECT token_estimate FROM summary_checkpoints summary WHERE summary.campaign_id=campaign.id) AS summary_tokens,
+                (SELECT count(*)::int FROM campaign_illustration_configs config WHERE config.campaign_id=campaign.id) AS illustration_configs,
+                (SELECT count(*)::int FROM turn_illustration_sets illustration_set WHERE illustration_set.campaign_id=campaign.id) AS illustration_sets,
+                (SELECT count(*)::int FROM turn_illustration_segments illustration_segment WHERE illustration_segment.campaign_id=campaign.id) AS illustration_segments,
+                (SELECT count(*)::int FROM campaign_character_profile_edits edit WHERE edit.campaign_id=campaign.id) AS profile_edits,
+                (SELECT count(*)::int FROM campaign_state_edits edit WHERE edit.campaign_id=campaign.id) AS state_edits,
+                (SELECT count(*)::int FROM turn_illustration_segment_assets variant
+                  JOIN turn_illustration_segments segment ON segment.id=variant.segment_id
+                 WHERE segment.campaign_id=campaign.id) AS segment_variants,
+                (SELECT count(*)::int FROM asset_generation_contexts context WHERE context.campaign_id=campaign.id) AS generation_contexts,
+                (SELECT count(*)::int FROM provider_cost_events cost WHERE cost.campaign_id=campaign.id) AS costs
+           FROM campaigns campaign
+           JOIN turns ON turns.campaign_id=campaign.id
+           JOIN worlds world ON world.id=$2 AND world.owner_user_id=campaign.owner_user_id
+           JOIN assets ON turns.image_url=('/api/v1/assets/' || assets.id::text)
+           JOIN asset_library_entries library ON library.asset_id=assets.id
+          WHERE campaign.id=$1 AND campaign.owner_user_id=$3`,
+        [result.campaignId, result.worldId, ownerUserId]
+      )).resolves.toMatchObject({
+        rows: [{
+          asset_title: "Restored hall",
+          favorite: true,
+          pixel_width: 1,
+          cover_asset_id: expect.any(String),
+          memory_tokens: 6,
+          summary_tokens: 6,
+          illustration_configs: 1,
+          illustration_sets: 1,
+          illustration_segments: 1,
+          profile_edits: 1,
+          state_edits: 1,
+          segment_variants: 1,
+          generation_contexts: 1,
+          costs: 1
+        }]
+      });
     } finally {
       await composition.close();
     }
@@ -1631,6 +1823,80 @@ integration("Task 14e3d durable portable composition authority", () => {
       }))).rejects.toThrow("portable_import_destination_invalid");
     } finally {
       await composition.close();
+    }
+  });
+
+  it("preserves Legacy Story inline, safe external, and malformed optional image semantics in caller-client mutation", async () => {
+    const target = await createWorldScope(`14e3d legacy images ${crypto.randomUUID()}`);
+    const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-legacy-image-archive-`);
+    const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-legacy-image-assets-`);
+    const publication = await createAssetPublicationComposition(pool, { archiveRoot, assetRoot });
+    const image = await uniquePng(`14e3d-legacy-inline-${crypto.randomUUID()}`);
+    const contentHash = createHash("sha256").update(image).digest("hex");
+    const sourceCampaignId = crypto.randomUUID();
+    const sourceTurnId = crypto.randomUUID();
+    try {
+      const published = await publication.publisher.publishAsset({
+        owner: { ownerUserId },
+        idempotencyKey: toAssetMutationIdempotencyKey(`14e3d-legacy-inline-${crypto.randomUUID()}`),
+        leaseOwner: "14e3d-legacy-inline",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        original: { mimeType: "image/png", bytes: image, byteLength: image.byteLength, contentHash },
+        derivatives: [],
+        provenance: { origin: "imported" }
+      });
+      const sourceAssetId = crypto.randomUUID();
+      const record = {
+        sourceAssetId,
+        contentHash,
+        mimeType: "image/png" as const,
+        byteLength: image.byteLength,
+        pixelWidth: 1,
+        pixelHeight: 1,
+        technicalMetadata: { format: "png" },
+        library: {
+          title: "", caption: "", notes: "", tags: [], origin: "imported" as const,
+          reviewStatus: "unreviewed" as const, reuseScope: "campaign" as const,
+          automaticReuseEnabled: false, contentCategories: [], favorite: false, archivedAt: null
+        },
+        createdAt: "2030-01-01T00:00:00.000Z",
+        bindings: [{ role: "turn_illustration" as const, campaignId: sourceCampaignId, turnId: sourceTurnId }]
+      };
+      const inlineUrl = `data:image/png;base64,${image.toString("base64")}`;
+      const mutations = createPostgresPortableFamilyMutationRepository(worldRepository());
+      const committed = await withTransaction(pool, (database) => mutations.commitLegacyStory(database, {
+        owner: { ownerUserId },
+        destination: { kind: "existing_world_version", worldId: target.worldId, worldVersionId: target.worldVersionId },
+        authorityFingerprint: hash(`14e3d-legacy-images-${crypto.randomUUID()}`),
+        payload: {
+          sourceName: "legacy-images.story",
+          story: {
+            campaign: { title: "Legacy images", sourceCampaignId },
+            world: { title: "Legacy images" },
+            turns: [
+              { id: sourceTurnId, narration: "Inline", imageUrl: inlineUrl },
+              { id: crypto.randomUUID(), narration: "External", imageUrl: "https://images.example.test/safe.png" },
+              { id: crypto.randomUUID(), narration: "Unsafe", imageUrl: "javascript:alert(1)" },
+              { id: crypto.randomUUID(), narration: "Malformed", imageUrl: "data:image/png;base64,not-valid!" },
+              { id: crypto.randomUUID(), narration: "Bundle", imageUrl: "images/bundled.png" }
+            ]
+          }
+        },
+        publishedAssets: [{ sourceAssetIds: [sourceAssetId], sourceKeys: ["bundled.png"], records: [record], result: published }]
+      }));
+      const turns = await pool.query<{ turn_number: number; image_url: string }>(
+        "SELECT turn_number,image_url FROM turns WHERE campaign_id=$1 ORDER BY turn_number",
+        [committed.campaignId]
+      );
+      expect(turns.rows).toEqual([
+        { turn_number: 1, image_url: `/api/v1/assets/${published.assetId}` },
+        { turn_number: 2, image_url: "https://images.example.test/safe.png" },
+        { turn_number: 3, image_url: "" },
+        { turn_number: 4, image_url: "" },
+        { turn_number: 5, image_url: `/api/v1/assets/${published.assetId}` }
+      ]);
+    } finally {
+      await publication.close();
     }
   });
 

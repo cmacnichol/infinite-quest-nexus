@@ -5,6 +5,8 @@ import {
 } from "./check-private-storage-boundaries.mjs";
 
 const COMPOSITION = "services/runtime/src/portable-import-export-composition.ts";
+const PRIVATE_FAMILY_REPOSITORY = "packages/database/src/portable-import-family-repository.ts";
+const PRIVATE_PORTABLE_AUTHORITIES = new Set([COMPOSITION, PRIVATE_FAMILY_REPOSITORY]);
 const COMPOSITION_FACTORY = "createPortableImportExportComposition";
 const PRIVATE_CONTRACT = "packages/application/src/imports/private-portable-composition.ts";
 const PUBLIC_BARREL = "packages/application/src/imports/index.ts";
@@ -112,7 +114,7 @@ export function checkPortableCompositionBoundaries(file, text) {
 
   walk(parsed.program, (node) => {
     const target = moduleTarget(node);
-    if (normalized === COMPOSITION) {
+    if (PRIVATE_PORTABLE_AUTHORITIES.has(normalized)) {
       const legacy = legacyAuthorityMessage(target);
       if (legacy) add(node, legacy);
       if (node.type === "Identifier" && FORBIDDEN_COMPOSITION_NAMES.has(node.name)) {

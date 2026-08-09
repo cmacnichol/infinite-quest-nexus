@@ -18,6 +18,7 @@ import type {
   PortablePreviewDestination,
   PortableStagedInput
 } from "./types.js";
+import type { ArchiveAssetRecord } from "@infinite-quest/contracts";
 
 export const PORTABLE_IMPORT_FAMILIES = Object.freeze([
   "campaign_zip",
@@ -248,6 +249,27 @@ export type PrivatePortableFamilyMutationResult = Readonly<{
   result: Readonly<Record<string, PortableJsonValue>>;
 }>;
 
+export type PrivatePortableAssetInventoryItem = Readonly<{
+  sourceAssetIds: readonly string[];
+  sourceKeys?: readonly string[];
+  records: readonly ArchiveAssetRecord[];
+  artifact: PrivateAssetPublicationCommand["original"];
+}>;
+
+export type PrivatePortableSourceAssetRecord = Readonly<Omit<ArchiveAssetRecord, "archivePath">>;
+
+export type PrivatePortablePublishedAsset = Readonly<{
+  sourceAssetIds: readonly string[];
+  sourceKeys?: readonly string[];
+  records: readonly PrivatePortableSourceAssetRecord[];
+  result: PrivateAssetPublicationResult;
+}>;
+
+export type PrivateLegacyStoryCompanionAsset = Readonly<{
+  sourceKey: string;
+  artifact: PrivateAssetPublicationCommand["original"];
+}>;
+
 /** Named caller-client authority. No loose callback can substitute for domain persistence. */
 export interface PrivatePortableFamilyMutationPort {
   findCampaignDuplicate(database: PrivatePortableTransactionContext, input: Readonly<{
@@ -260,13 +282,14 @@ export interface PrivatePortableFamilyMutationPort {
     destination: PortablePreviewDestination;
     authorityFingerprint: string;
     payload: Readonly<Record<string, PortableJsonValue>>;
-    publishedAssets: readonly PrivateAssetPublicationResult[];
+    publishedAssets: readonly (PrivatePortablePublishedAsset | PrivateAssetPublicationResult)[];
   }>): Promise<PrivatePortableFamilyMutationResult>;
   commitLegacyStory(database: PrivatePortableTransactionContext, input: Readonly<{
     owner: ImportOwnerScope;
     destination: PortablePreviewDestination;
     authorityFingerprint: string;
     payload: Readonly<Record<string, PortableJsonValue>>;
+    publishedAssets?: readonly PrivatePortablePublishedAsset[];
   }>): Promise<PrivatePortableFamilyMutationResult>;
   commitWorld(database: PrivatePortableTransactionContext, input: Readonly<{
     owner: ImportOwnerScope;
@@ -286,10 +309,15 @@ export interface PrivatePortableFamilyPreviewPort {
   extractCampaignZipAssets(
     bytes: AsyncIterable<Uint8Array>,
     authority: PortableCanonicalImportAuthority,
-  ): Promise<readonly Readonly<{
-    sourceAssetId: string;
-    artifact: PrivateAssetPublicationCommand["original"];
-  }>[] >;
+  ): Promise<readonly PrivatePortableAssetInventoryItem[]>;
+  extractLegacyStoryAssets(
+    bytes: AsyncIterable<Uint8Array>,
+    authority: PortableCanonicalImportAuthority,
+  ): Promise<readonly PrivatePortableAssetInventoryItem[]>;
+  extractLegacyStoryCompanionAssets(
+    story: PortableJsonValue,
+    companions: readonly PrivateLegacyStoryCompanionAsset[],
+  ): Promise<readonly PrivatePortableAssetInventoryItem[]>;
   previewCampaignZip(bytes: AsyncIterable<Uint8Array>, command: Extract<PortableImportPreviewCommand, { kind: "campaign_zip" }>): Promise<Readonly<{ authority: PortableCanonicalImportAuthority; projection: PortableImportPreviewView["projection"] }>>;
   previewLegacyStory(bytes: AsyncIterable<Uint8Array>, command: Extract<PortableImportPreviewCommand, { kind: "legacy_story" }>): Promise<Readonly<{ authority: PortableCanonicalImportAuthority; projection: PortableImportPreviewView["projection"] }>>;
   previewInfiniteWorlds(bytes: AsyncIterable<Uint8Array>, command: Extract<PortableImportPreviewCommand, { kind: "infinite_worlds" }>): Promise<Readonly<{ authority: PortableCanonicalImportAuthority; projection: PortableImportPreviewView["projection"] }>>;
