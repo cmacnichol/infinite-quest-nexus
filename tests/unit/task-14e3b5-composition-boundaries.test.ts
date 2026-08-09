@@ -26,7 +26,7 @@ const FACTORY_FIXTURES: readonly Source[] = [
     text: "export function createPostgresFinalizedAssetDeliveryRepository() { return {}; }"
   },
   {
-    file: "services/api/src/portable-archive-filesystem-adapter.ts",
+    file: "services/runtime/src/secure-filesystem-adapter.ts",
     text: "export function createSecureFilesystemAdapter() { return {}; }"
   },
   {
@@ -37,7 +37,7 @@ const FACTORY_FIXTURES: readonly Source[] = [
       import { createPostgresSecureStorageRepository } from "../../../packages/database/src/secure-storage-repository.js";
       import { createPostgresImportRepository } from "../../../packages/database/src/import-repository.js";
       import { createPostgresFinalizedAssetDeliveryRepository } from "../../../packages/database/src/finalized-asset-delivery-repository.js";
-      import { createSecureFilesystemAdapter } from "../../api/src/portable-archive-filesystem-adapter.js";
+      import { createSecureFilesystemAdapter } from "./secure-filesystem-adapter.js";
       export function createAssetImportStorageComposition() {
         createPostgresDurableFilesystemRepository();
         createPostgresAssetPublicationRepository();
@@ -55,6 +55,15 @@ const FACTORY_FIXTURES: readonly Source[] = [
       import { createAssetPublicationComposition } from "./asset-import-composition.js";
       export function createPortableImportExportComposition() {
         return createAssetPublicationComposition(pool, roots);
+      }
+    `
+  },
+  {
+    file: "services/runtime/src/normalized-asset-publication-composition.ts",
+    text: `
+      import { createAssetImportStorageComposition } from "./asset-import-composition.js";
+      export function createPrivateNormalizedAssetPublicationComposition() {
+        return createAssetImportStorageComposition(pool, roots);
       }
     `
   }
@@ -85,7 +94,7 @@ describe("Task 14e3b5 storage composition inventory", () => {
       "services/runtime/src/main.ts",
       `import { createAssetImportStorageComposition } from "./asset-import-composition.js";`,
     )).toEqual([
-      expect.stringContaining("storage composition must remain unconsumed")
+      expect.stringContaining("private storage composition must remain unconsumed")
     ]);
     expect(privateStorageBoundaries.checkPrivateStorageBoundaries(
       "services/runtime/src/example.ts",
@@ -214,7 +223,7 @@ describe("Task 14e3b5 storage composition inventory", () => {
         ...FACTORY_FIXTURES,
         { file: "services/api/src/inventory-consumer.ts", text }
       ]), text).toEqual(expect.arrayContaining([
-        expect.stringContaining("createAssetImportStorageComposition must remain unconsumed")
+        expect.stringContaining("createAssetImportStorageComposition must be consumed directly")
       ]));
     }
   });

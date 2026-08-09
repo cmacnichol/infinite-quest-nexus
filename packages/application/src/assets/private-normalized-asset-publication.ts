@@ -1,4 +1,5 @@
 import type { AssetMutationIdempotencyKey, AssetOwnerScope } from "./types.js";
+import type { DurableFilesystemTransactionContext } from "./private-storage-lifecycle.js";
 
 export type PrivateNormalizedAssetMimeType = "image/png" | "image/jpeg" | "image/webp" | "image/gif";
 export type PrivateNormalizedAssetFormat = "png" | "jpeg" | "webp" | "gif";
@@ -260,6 +261,58 @@ export type PrivateNormalizedAssetRequestChildBindings = PrivateNormalizedAssetR
   contexts: readonly Readonly<{ intentKey: string; contextId: string }>[];
   references: readonly Readonly<{ intentKey: string; referenceId: string }>[];
 }>;
+
+declare const privateNormalizedAssetReservationHandleBrand: unique symbol;
+declare const privateNormalizedAssetFinalizationHandleBrand: unique symbol;
+
+/** Opaque pre-transaction authority. Runtime adapters retain all identifiers and filesystem evidence. */
+export type PrivateNormalizedAssetReservationHandle = Readonly<{
+  [privateNormalizedAssetReservationHandleBrand]: true;
+}>;
+
+/** Opaque post-commit locator. It grants no owner, path, bearer, or mutable library authority. */
+export type PrivateNormalizedAssetFinalizationHandle = Readonly<{
+  [privateNormalizedAssetFinalizationHandleBrand]: true;
+}>;
+
+export type PrivateNormalizedAssetReservationCommand = Readonly<{
+  request: PrivateNormalizedAssetPublicationRequest;
+  leaseOwner: string;
+  expiresAt: string;
+}>;
+
+export type PrivateNormalizedAssetFinalizationOutcome =
+  | Readonly<{
+    outcome: "published";
+    result: SafeNormalizedAssetPublicationResult;
+  }>
+  | Readonly<{
+    outcome: "recoverable";
+    diagnostic: "asset_publication_finalization_recoverable";
+  }>;
+
+/**
+ * Private normalized publication seam. The caller owns the parent transaction;
+ * the port never exposes its concrete database context or filesystem authority.
+ */
+export interface PrivateNormalizedAssetPublicationPort {
+  reserve(command: PrivateNormalizedAssetReservationCommand): Promise<PrivateNormalizedAssetReservationHandle>;
+  attachInTransaction(
+    database: DurableFilesystemTransactionContext,
+    reservation: PrivateNormalizedAssetReservationHandle,
+    attachChildren: (
+      result: SafeNormalizedAssetPublicationResult,
+    ) => Promise<PrivateNormalizedAssetRequestChildBindingsInput>,
+  ): Promise<Readonly<{
+    result: SafeNormalizedAssetPublicationResult;
+    finalization: PrivateNormalizedAssetFinalizationHandle;
+  }>>;
+  discardAfterRollback(reservation: PrivateNormalizedAssetReservationHandle): Promise<void>;
+  finalize(
+    finalization: PrivateNormalizedAssetFinalizationHandle,
+    recovery?: Readonly<{ leaseOwner: string; leaseSeconds: number }>,
+  ): Promise<PrivateNormalizedAssetFinalizationOutcome>;
+}
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HASH_PATTERN = /^[0-9a-f]{64}$/u;

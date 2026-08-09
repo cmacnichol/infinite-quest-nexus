@@ -172,7 +172,7 @@ function hasRuntimeImport(source: string, apiFilePath: string): boolean {
 }
 
 describe("createApiIllustrationApplication", () => {
-  it("14a3: keeps every production API TypeScript module free of runtime imports", async () => {
+  it("14a3: keeps production API TypeScript free of runtime imports except the audited compatibility re-export", async () => {
     const apiRoot = dirname(new URL("../../services/api/src/illustration-application-adapter.ts", import.meta.url).pathname);
     const productionFiles = await productionTypeScriptFiles(apiRoot);
 
@@ -185,7 +185,16 @@ describe("createApiIllustrationApplication", () => {
       source: await readFile(file, "utf8")
     })));
 
-    expect(sources.filter(({ path, source }) => hasRuntimeImport(source, path)))
+    const compatibilityAdapter = sources.find(({ file }) => (
+      file === "portable-archive-filesystem-adapter.ts"
+    ));
+    expect(compatibilityAdapter?.source).toBe(
+      'export * from "../../runtime/src/secure-filesystem-adapter.js";\n',
+    );
+    expect(sources.filter(({ file, path, source }) => (
+      file !== "portable-archive-filesystem-adapter.ts"
+      && hasRuntimeImport(source, path)
+    )))
       .toEqual([]);
   });
 

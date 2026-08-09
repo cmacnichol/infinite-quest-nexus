@@ -7,6 +7,14 @@ import {
   type PrivateNormalizedAssetPublicationRequest,
   type SafeNormalizedAssetPublicationResult
 } from "../../application/src/assets/private-normalized-asset-publication.js";
+import type {
+  PrivateAssetPublicationFinalization,
+  PrivateAssetPublicationIdentity,
+  PrivateAssetPublicationResult,
+  PrivatePreparedAssetPublication,
+  PrivatePreparedAssetPublicationArtifact
+} from "../../application/src/assets/private-asset-publication.js";
+import type { PrivateFilesystemCandidatePersistencePort } from "../../application/src/assets/private-filesystem-repository.js";
 import type { DurableFilesystemTransactionContext } from "../../application/src/assets/private-storage-lifecycle.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
@@ -17,8 +25,37 @@ export type PrivateNormalizedAssetPublicationReservation = Readonly<{
   canonicalAssetId: string | null;
   canonicalContentHash: string | null;
   lifecycle: "prepared" | "attached" | "published" | "cleanup_pending" | "failed";
+  canonicalIdentityLifecycle: "legacy" | "prepared" | "attached" | "published" | "cleanup_pending" | null;
   outcome: "reserved" | "recoverable";
 }>;
+
+export type PrivateNormalizedAssetMaterializationAttachment = Readonly<{
+  identity: PrivateAssetPublicationIdentity;
+  result: SafeNormalizedAssetPublicationResult;
+}>;
+
+export type PrivateNormalizedAssetFinalizationTarget = Readonly<{
+  requestId: string;
+  ownerUserId: string;
+  canonicalAssetId: string;
+  requestLifecycle: "attached" | "published";
+}>;
+
+export interface PrivateNormalizedAssetMaterializationRepository {
+  attachInTransaction(
+    database: DurableFilesystemTransactionContext,
+    reservation: PrivateNormalizedAssetPublicationReservation,
+    request: PrivateNormalizedAssetPublicationRequest,
+    prepared: PrivatePreparedAssetPublication,
+  ): Promise<PrivateNormalizedAssetMaterializationAttachment>;
+  readPublishedInTransaction(
+    database: DurableFilesystemTransactionContext,
+    reservation: PrivateNormalizedAssetPublicationReservation,
+    request: PrivateNormalizedAssetPublicationRequest,
+  ): Promise<SafeNormalizedAssetPublicationResult>;
+  readFinalizationTarget(requestId: string): Promise<PrivateNormalizedAssetFinalizationTarget>;
+  completeRequestById(requestId: string): Promise<SafeNormalizedAssetPublicationResult>;
+}
 
 export interface PrivateNormalizedAssetPublicationRepository {
   reserveRequest(
@@ -143,6 +180,7 @@ function reservation(row: RequestRow): PrivateNormalizedAssetPublicationReservat
     canonicalAssetId: row.canonical_asset_id,
     canonicalContentHash: row.canonical_content_hash,
     lifecycle: row.lifecycle,
+    canonicalIdentityLifecycle: row.identity_lifecycle,
     outcome: recoverable ? "recoverable" : "reserved"
   });
 }
@@ -551,6 +589,367 @@ async function completeWithClient(
   );
   if (updated.rowCount !== 1) throw new Error("asset_publication_request_completion_unavailable");
   return result;
+}
+
+function requirePreparedArtifact(
+  value: PrivatePreparedAssetPublicationArtifact,
+  kind: "original" | "derivative",
+  index: number | null,
+): void {
+  if (value.kind !== kind
+    || value.derivativeIndex !== index
+    || value.attachment.operation.resourceKind !== "asset"
+    || value.attachment.operation.purpose !== (kind === "original" ? "asset_original" : "asset_derivative")) {
+    throw new Error("normalized_asset_publication_attachment_invalid");
+  }
+}
+
+function preparedAssetOperation(value: PrivatePreparedAssetPublicationArtifact) {
+  const operation = value.attachment.operation;
+  if (operation.resourceKind !== "asset") {
+    throw new Error("normalized_asset_publication_attachment_invalid");
+  }
+  return operation;
+}
+
+function serializeFinalization(finalization: readonly PrivateAssetPublicationFinalization[]): string {
+  return JSON.stringify(finalization.map(({ operation, claim }) => ({ operation, claim })));
+}
+
+function legacyPublicationResult(result: SafeNormalizedAssetPublicationResult): PrivateAssetPublicationResult {
+  return Object.freeze({
+    assetId: result.assetId,
+    mimeType: result.mimeType,
+    byteLength: result.byteLength,
+    contentHash: result.contentHash,
+    derivativeIds: Object.freeze(result.derivatives.map((derivative) => Object.freeze({
+      derivativeId: derivative.derivativeId,
+      derivativeKind: derivative.derivativeKind
+    })))
+  });
+}
+
+function attachedIdentity(
+  reservationValue: PrivateNormalizedAssetPublicationReservation,
+  result: SafeNormalizedAssetPublicationResult,
+  finalization: readonly PrivateAssetPublicationFinalization[],
+): PrivateAssetPublicationIdentity {
+  return Object.freeze({
+    assetId: reservationValue.canonicalAssetId,
+    ownerUserId: reservationValue.ownerUserId,
+    lifecycle: "attached",
+    result: legacyPublicationResult(result),
+    finalization
+  }) as PrivateAssetPublicationIdentity;
+}
+
+/**
+ * Normalized-only materialization adapter. It attaches the already-reserved
+ * 0064 canonical identity and never invokes legacy 0060 preparation.
+ */
+export function createPostgresNormalizedAssetMaterializationRepository(
+  pool: DatabasePool,
+  candidates: PrivateFilesystemCandidatePersistencePort,
+): PrivateNormalizedAssetMaterializationRepository {
+  const loadPublishedResult = async (
+    client: DatabaseClient,
+    reservationValue: PrivateNormalizedAssetPublicationReservation,
+    request: PrivateNormalizedAssetPublicationRequest,
+  ): Promise<SafeNormalizedAssetPublicationResult> => {
+    if (!reservationValue.canonicalAssetId) {
+      throw new Error("normalized_asset_publication_identity_unavailable");
+    }
+    const asset = await client.query<Readonly<{
+      id: string;
+      mime_type: string;
+      byte_length: number | string;
+      content_hash: string;
+      pixel_width: number | null;
+      pixel_height: number | null;
+    }>>(
+      `SELECT id,mime_type,byte_length,content_hash,pixel_width,pixel_height
+         FROM assets
+        WHERE id=$1 AND owner_user_id=$2
+        FOR KEY SHARE`,
+      [reservationValue.canonicalAssetId, reservationValue.ownerUserId],
+    );
+    const row = asset.rows[0];
+    const byteLength = row ? Number(row.byte_length) : Number.NaN;
+    if (!row
+      || row.mime_type !== request.original.mimeType
+      || !Number.isSafeInteger(byteLength)
+      || byteLength !== request.original.byteLength
+      || row.content_hash !== request.original.contentHash
+      || row.pixel_width !== request.original.technicalMetadata.pixelWidth
+      || row.pixel_height !== request.original.technicalMetadata.pixelHeight) {
+      throw new Error("normalized_asset_publication_result_mismatch");
+    }
+    const derivatives = await client.query<Readonly<{
+      id: string;
+      derivative_kind: string;
+      transform_version: number;
+      pixel_width: number;
+      pixel_height: number;
+      content_hash: string;
+    }>>(
+      `SELECT id,derivative_kind,transform_version,pixel_width,pixel_height,content_hash
+         FROM asset_derivatives
+        WHERE owner_user_id=$1 AND source_asset_id=$2
+        ORDER BY derivative_kind,transform_version,pixel_width,pixel_height`,
+      [reservationValue.ownerUserId, reservationValue.canonicalAssetId],
+    );
+    if (derivatives.rows.length !== request.derivatives.length) {
+      throw new Error("normalized_asset_publication_derivative_mismatch");
+    }
+    const projectedDerivatives = request.derivatives.map((expected) => {
+      const actual = derivatives.rows.find((value) => (
+        value.derivative_kind === expected.slot.derivativeKind
+        && value.transform_version === expected.slot.transformVersion
+        && value.pixel_width === expected.slot.pixelWidth
+        && value.pixel_height === expected.slot.pixelHeight
+        && value.content_hash === expected.artifact.contentHash
+      ));
+      if (!actual) throw new Error("normalized_asset_publication_derivative_mismatch");
+      return Object.freeze({
+        derivativeId: actual.id,
+        derivativeKind: "thumbnail" as const,
+        transformVersion: actual.transform_version,
+        pixelWidth: actual.pixel_width,
+        pixelHeight: actual.pixel_height
+      });
+    });
+    return Object.freeze({
+      assetId: row.id,
+      mimeType: request.original.mimeType,
+      byteLength,
+      contentHash: row.content_hash,
+      pixelWidth: row.pixel_width,
+      pixelHeight: row.pixel_height,
+      derivatives: Object.freeze(projectedDerivatives)
+    });
+  };
+
+  const attachInTransaction: PrivateNormalizedAssetMaterializationRepository["attachInTransaction"] = async (
+    database,
+    reservationValue,
+    request,
+    prepared,
+  ) => {
+    if (!reservationValue.canonicalAssetId
+      || reservationValue.ownerUserId !== request.owner.ownerUserId
+      || reservationValue.canonicalContentHash !== request.original.contentHash) {
+      throw new Error("normalized_asset_publication_reservation_mismatch");
+    }
+    requirePreparedArtifact(prepared.original, "original", null);
+    if (prepared.derivatives.length !== request.derivatives.length) {
+      throw new Error("normalized_asset_publication_derivative_mismatch");
+    }
+    prepared.derivatives.forEach((value, index) => requirePreparedArtifact(value, "derivative", index));
+    const client = await callerTransaction(database);
+    const stored = await client.query<AttachmentRequestRow>(
+      `SELECT request.id,request.owner_user_id,request.request_fingerprint,request.canonical_asset_id,
+              request.lifecycle,request.result,identity.lifecycle AS identity_lifecycle
+         FROM asset_publication_requests request
+         JOIN asset_publication_identities identity
+           ON identity.asset_id=request.canonical_asset_id
+          AND identity.owner_user_id=request.owner_user_id
+        WHERE request.id=$1 AND request.owner_user_id=$2
+        FOR UPDATE OF request,identity`,
+      [reservationValue.requestId, reservationValue.ownerUserId],
+    );
+    const row = stored.rows[0];
+    if (!row
+      || row.request_fingerprint !== requestFingerprint(request)
+      || row.canonical_asset_id !== reservationValue.canonicalAssetId) {
+      throw new Error("normalized_asset_publication_reservation_mismatch");
+    }
+    if (row.identity_lifecycle === "published") {
+      const result = await loadPublishedResult(client, reservationValue, request);
+      return Object.freeze({
+        identity: Object.freeze({
+          assetId: row.canonical_asset_id,
+          ownerUserId: row.owner_user_id,
+          lifecycle: "published",
+          result: legacyPublicationResult(result)
+        }) as PrivateAssetPublicationIdentity,
+        result
+      });
+    }
+    if (row.lifecycle !== "prepared" || row.identity_lifecycle !== "prepared") {
+      throw new Error("normalized_asset_publication_finalization_recoverable");
+    }
+
+    const originalAttachment = prepared.original.attachment;
+    const originalOperation = preparedAssetOperation(prepared.original);
+    if (originalOperation.assetId !== reservationValue.canonicalAssetId
+      || originalOperation.ownerUserId !== reservationValue.ownerUserId
+      || originalAttachment.descriptor.contentHash !== request.original.contentHash
+      || originalAttachment.descriptor.byteLength !== request.original.byteLength) {
+      throw new Error("normalized_asset_publication_original_mismatch");
+    }
+    await client.query(
+      `INSERT INTO assets (
+         id,owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,
+         pixel_width,pixel_height,technical_metadata,filesystem_operation_id
+       ) VALUES ($1,$2,$3,'filesystem',$4,$5,$6,$7,$8,$9::jsonb,$10)`,
+      [
+        reservationValue.canonicalAssetId,
+        reservationValue.ownerUserId,
+        request.original.contentHash,
+        originalAttachment.descriptor.relativePath,
+        request.original.mimeType,
+        request.original.byteLength,
+        request.original.technicalMetadata.pixelWidth,
+        request.original.technicalMetadata.pixelHeight,
+        JSON.stringify(request.original.technicalMetadata),
+        originalOperation.operationId
+      ],
+    );
+
+    const resultDerivatives: SafeNormalizedAssetPublicationResult["derivatives"][number][] = [];
+    for (const [index, derivative] of request.derivatives.entries()) {
+      const preparedDerivative = prepared.derivatives[index]!;
+      const attachment = preparedDerivative.attachment;
+      const operation = preparedAssetOperation(preparedDerivative);
+      if (operation.assetId !== reservationValue.canonicalAssetId
+        || operation.ownerUserId !== reservationValue.ownerUserId
+        || attachment.descriptor.contentHash !== derivative.artifact.contentHash
+        || attachment.descriptor.byteLength !== derivative.artifact.byteLength) {
+        throw new Error("normalized_asset_publication_derivative_mismatch");
+      }
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO asset_derivatives (
+           owner_user_id,source_asset_id,derivative_kind,transform_version,pixel_width,pixel_height,
+           storage_driver,storage_path,mime_type,byte_length,content_hash,filesystem_operation_id
+         ) VALUES ($1,$2,$3,$4,$5,$6,'filesystem',$7,$8,$9,$10,$11)
+         RETURNING id`,
+        [
+          reservationValue.ownerUserId,
+          reservationValue.canonicalAssetId,
+          derivative.slot.derivativeKind,
+          derivative.slot.transformVersion,
+          derivative.slot.pixelWidth,
+          derivative.slot.pixelHeight,
+          attachment.descriptor.relativePath,
+          derivative.artifact.mimeType,
+          derivative.artifact.byteLength,
+          derivative.artifact.contentHash,
+          operation.operationId
+        ],
+      );
+      resultDerivatives.push(Object.freeze({
+        derivativeId: inserted.rows[0]!.id,
+        derivativeKind: derivative.slot.derivativeKind,
+        transformVersion: derivative.slot.transformVersion,
+        pixelWidth: derivative.slot.pixelWidth,
+        pixelHeight: derivative.slot.pixelHeight
+      }));
+    }
+
+    const finalization: PrivateAssetPublicationFinalization[] = [];
+    for (const artifact of [prepared.original, ...prepared.derivatives]) {
+      const attached = await candidates.attachCandidate(database, artifact.attachment);
+      if (attached.outcome !== "attached") {
+        throw new Error(`normalized_asset_publication_attach_${attached.outcome}`);
+      }
+      finalization.push(Object.freeze({ operation: attached.operation, claim: attached.claim }));
+    }
+    const result: SafeNormalizedAssetPublicationResult = Object.freeze({
+      assetId: reservationValue.canonicalAssetId,
+      mimeType: request.original.mimeType,
+      byteLength: request.original.byteLength,
+      contentHash: request.original.contentHash,
+      pixelWidth: request.original.technicalMetadata.pixelWidth,
+      pixelHeight: request.original.technicalMetadata.pixelHeight,
+      derivatives: Object.freeze(resultDerivatives)
+    });
+    const updated = await client.query(
+      `UPDATE asset_publication_identities
+          SET lifecycle='attached',result=$3::jsonb,pending_finalization=$4::jsonb,updated_at=clock_timestamp()
+        WHERE asset_id=$1 AND owner_user_id=$2 AND lifecycle='prepared'`,
+      [
+        reservationValue.canonicalAssetId,
+        reservationValue.ownerUserId,
+        JSON.stringify(legacyPublicationResult(result)),
+        serializeFinalization(finalization)
+      ],
+    );
+    if (updated.rowCount !== 1) throw new Error("normalized_asset_publication_identity_unavailable");
+    return Object.freeze({
+      identity: attachedIdentity(reservationValue, result, Object.freeze(finalization)),
+      result
+    });
+  };
+
+  const readPublishedInTransaction: PrivateNormalizedAssetMaterializationRepository["readPublishedInTransaction"] = async (
+    database,
+    reservationValue,
+    request,
+  ) => loadPublishedResult(await callerTransaction(database), reservationValue, request);
+
+  const readFinalizationTarget: PrivateNormalizedAssetMaterializationRepository["readFinalizationTarget"] = async (
+    requestId,
+  ) => {
+    const selected = await pool.query<Readonly<{
+      id: string;
+      owner_user_id: string;
+      canonical_asset_id: string | null;
+      lifecycle: "prepared" | "attached" | "published" | "cleanup_pending" | "failed";
+    }>>(
+      `SELECT id,owner_user_id,canonical_asset_id,lifecycle
+         FROM asset_publication_requests
+        WHERE id=$1`,
+      [requestId],
+    );
+    const row = selected.rows[0];
+    if (!row?.canonical_asset_id || !["attached", "published"].includes(row.lifecycle)) {
+      throw new Error("normalized_asset_publication_finalization_unavailable");
+    }
+    return Object.freeze({
+      requestId: row.id,
+      ownerUserId: row.owner_user_id,
+      canonicalAssetId: row.canonical_asset_id,
+      requestLifecycle: row.lifecycle as "attached" | "published"
+    });
+  };
+
+  const completeRequestById: PrivateNormalizedAssetMaterializationRepository["completeRequestById"] = (
+    requestId,
+  ) => withTransaction(pool, async (client) => {
+    const selected = await client.query<AttachmentRequestRow>(
+      `SELECT request.id,request.owner_user_id,request.request_fingerprint,request.canonical_asset_id,
+              request.lifecycle,request.result,identity.lifecycle AS identity_lifecycle
+         FROM asset_publication_requests request
+         JOIN asset_publication_identities identity
+           ON identity.asset_id=request.canonical_asset_id
+          AND identity.owner_user_id=request.owner_user_id
+        WHERE request.id=$1
+        FOR UPDATE OF request,identity`,
+      [requestId],
+    );
+    const row = selected.rows[0];
+    if (!row?.result) throw new Error("normalized_asset_publication_completion_unavailable");
+    const result = projectSafeNormalizedAssetPublicationResult(row.result);
+    if (row.lifecycle === "published") return result;
+    if (row.lifecycle !== "attached" || row.identity_lifecycle !== "published") {
+      throw new Error("normalized_asset_publication_finalization_pending");
+    }
+    const updated = await client.query(
+      `UPDATE asset_publication_requests
+          SET lifecycle='published',published_at=clock_timestamp(),updated_at=clock_timestamp()
+        WHERE id=$1 AND owner_user_id=$2 AND lifecycle='attached'`,
+      [row.id, row.owner_user_id],
+    );
+    if (updated.rowCount !== 1) throw new Error("normalized_asset_publication_completion_unavailable");
+    return result;
+  });
+
+  return Object.freeze({
+    attachInTransaction,
+    readPublishedInTransaction,
+    readFinalizationTarget,
+    completeRequestById
+  });
 }
 
 /**

@@ -43,7 +43,7 @@ import { createPostgresSecureStorageRepository } from "../../../packages/databas
 import {
   createSecureFilesystemAdapter,
   type SecureFilesystemAdapter
-} from "../../api/src/portable-archive-filesystem-adapter.js";
+} from "./secure-filesystem-adapter.js";
 
 export type AssetImportStorageComposition = Readonly<{
   adapter: SecureFilesystemAdapter;
@@ -74,12 +74,14 @@ export type AssetPublicationComposition = Readonly<{
 export async function createAssetImportStorageComposition(
   pool: DatabasePool,
   roots: Readonly<{ archiveRoot: string; assetRoot: string }>,
+  capturePublicationIdentity?: (publication: PrivateAssetPublicationIdentityPort) => void,
 ): Promise<AssetImportStorageComposition> {
   const durableRepository = createPostgresDurableFilesystemRepository(pool);
   const journal = createDurableFilesystemLifecycle(durableRepository.journal);
   const secureStorageRepository = createPostgresSecureStorageRepository(pool, durableRepository);
   const importRepository = createPostgresImportRepository(pool);
   const finalizedDeliveryRepository = createPostgresFinalizedAssetDeliveryRepository(pool);
+  const publicationIdentity = createPostgresAssetPublicationRepository(pool, durableRepository);
   let adapter: SecureFilesystemAdapter | undefined;
   try {
     adapter = await createSecureFilesystemAdapter({
@@ -114,6 +116,7 @@ export async function createAssetImportStorageComposition(
         return closed;
       }
     });
+    capturePublicationIdentity?.(publicationIdentity);
     return composition;
   } catch (error) {
     await adapter?.close().catch(() => undefined);
@@ -125,12 +128,18 @@ export async function createAssetPublicationComposition(
   pool: DatabasePool,
   roots: Readonly<{ archiveRoot: string; assetRoot: string }>,
 ): Promise<AssetPublicationComposition> {
-  const storage = await createAssetImportStorageComposition(pool, roots);
-  const dependencies = createPostgresAssetRepositories(pool);
-  const publication: PrivateAssetPublicationIdentityPort = createPostgresAssetPublicationRepository(
+  let capturedPublication: PrivateAssetPublicationIdentityPort | undefined;
+  const storage = await createAssetImportStorageComposition(
     pool,
-    storage.candidate,
+    roots,
+    (captured) => { capturedPublication = captured; },
   );
+  if (!capturedPublication) {
+    await storage.close();
+    throw new Error("asset_publication_composition_unavailable");
+  }
+  const publication = capturedPublication;
+  const dependencies = createPostgresAssetRepositories(pool);
   const assets: AssetApplication = Object.freeze({
     ...dependencies.library,
     ...dependencies.selection,
