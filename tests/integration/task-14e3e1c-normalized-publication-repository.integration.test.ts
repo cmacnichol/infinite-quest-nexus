@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createAssetApplication } from "../../packages/application/src/assets/index.js";
 import { toAssetMutationIdempotencyKey } from "../../packages/application/src/assets/types.js";
 import {
   bindPrivateNormalizedAssetPublicationRequest,
@@ -8,20 +9,33 @@ import {
 } from "../../packages/application/src/assets/private-normalized-asset-publication.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresAssetPublicationRepository } from "../../packages/database/src/asset-publication-repository.js";
+import { createPostgresAssetRepositories } from "../../packages/database/src/asset-repository.js";
 import { createPostgresNormalizedAssetPublicationRepository } from "../../packages/database/src/normalized-asset-publication-repository.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 
+type RequestOptions = Readonly<{
+  libraryTitle?: string;
+  contextIntentKey?: string;
+}>;
+
 function request(
   ownerUserId: string,
   idempotencyKey: string,
   sourceAssetId: string,
   contentLabel = "default",
+  options: RequestOptions = {},
 ): PrivateNormalizedAssetPublicationRequest {
   const bytes = new TextEncoder().encode(`14e3e1c:${contentLabel}`);
   const contentHash = createHash("sha256").update(bytes).digest("hex");
+  const libraryTitle = options.libraryTitle ?? "Moonlit archive";
+  const contextIntents = options.contextIntentKey === undefined ? [] : [{
+    intentKey: options.contextIntentKey,
+    targetType: "other" as const,
+    variantIndex: 0,
+  }];
   return bindPrivateNormalizedAssetPublicationRequest({
     owner: { ownerUserId },
     idempotencyKey: toAssetMutationIdempotencyKey(idempotencyKey),
@@ -34,21 +48,21 @@ function request(
     },
     derivatives: [],
     requestedLibrary: {
-      title: "Moonlit archive", caption: "", notes: "", tags: ["moon"], origin: "imported",
+      title: libraryTitle, caption: "", notes: "", tags: ["moon"], origin: "imported",
       reviewStatus: "eligible", reuseScope: "owner_library", automaticReuseEnabled: true,
       contentCategories: ["fantasy"], favorite: false
     },
     sourceRecords: [{
       sourceKind: "campaign_zip", sourceAssetId, sourceRecordId: null, sourceKey: null,
       requestedLibrary: {
-        title: "Moonlit archive", caption: "", notes: "", tags: ["moon"], origin: "imported",
+        title: libraryTitle, caption: "", notes: "", tags: ["moon"], origin: "imported",
         reviewStatus: "eligible", reuseScope: "owner_library", automaticReuseEnabled: true,
         contentCategories: ["fantasy"], favorite: false
       },
-      bindingIntentKeys: []
+      bindingIntentKeys: options.contextIntentKey === undefined ? [] : [options.contextIntentKey]
     }],
     provenance: { kind: "import", importKind: "campaign_zip", importOperationId: crypto.randomUUID() },
-    contextIntents: [],
+    contextIntents,
     referencePolicy: { mode: "omit" }
   });
 }
@@ -148,6 +162,69 @@ integration("Task 14e3e1c normalized publication repository", () => {
     )).resolves.toMatchObject({ rows: [{ initializations: 1 }] });
   });
 
+  it("preserves an explicit canonical-library revision when a later request reuses its content", async () => {
+    const repository = createPostgresNormalizedAssetPublicationRepository(pool);
+    const contentLabel = `library-authority-${crypto.randomUUID()}`;
+    const first = request(
+      ownerUserId,
+      `14e3e1e-library-first-${crypto.randomUUID()}`,
+      "first-cover",
+      contentLabel,
+      { libraryTitle: "First request title" },
+    );
+    const firstReservation = await repository.reserveRequest(first);
+    await pool.query(
+      `INSERT INTO assets (
+         id,owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,
+         pixel_width,pixel_height,technical_metadata
+       ) VALUES ($1,$2,$3,'filesystem',$4,$5,$6,1,1,$7::jsonb)`,
+      [
+        firstReservation.canonicalAssetId,
+        ownerUserId,
+        first.original.contentHash,
+        `test/14e3e1e/library/${crypto.randomUUID()}`,
+        first.original.mimeType,
+        first.original.byteLength,
+        JSON.stringify({ format: "png", pages: 1 }),
+      ],
+    );
+    await pool.query(
+      `UPDATE asset_publication_identities
+          SET lifecycle='published',result='{}'::jsonb,published_at=clock_timestamp()
+        WHERE asset_id=$1 AND owner_user_id=$2`,
+      [firstReservation.canonicalAssetId, ownerUserId],
+    );
+    await expect(createAssetApplication(createPostgresAssetRepositories(pool)).updateAssetMetadata(
+      { ownerUserId, assetId: firstReservation.canonicalAssetId! },
+      {
+        expectedRevision: 1,
+        title: "Authoritative edited title",
+        idempotencyKey: toAssetMutationIdempotencyKey(`14e3e1e-library-edit-${crypto.randomUUID()}`),
+      },
+    )).resolves.toEqual({ assetId: firstReservation.canonicalAssetId, metadataRevision: 2 });
+
+    const later = await repository.reserveRequest(request(
+      ownerUserId,
+      `14e3e1e-library-later-${crypto.randomUUID()}`,
+      "later-cover",
+      contentLabel,
+      { libraryTitle: "Later request title" },
+    ));
+
+    expect(later.canonicalAssetId).toBe(firstReservation.canonicalAssetId);
+    await expect(pool.query(
+      `SELECT title,metadata_revision FROM asset_library_entries
+        WHERE asset_id=$1 AND owner_user_id=$2`,
+      [firstReservation.canonicalAssetId, ownerUserId],
+    )).resolves.toMatchObject({ rows: [{ title: "Authoritative edited title", metadata_revision: 2 }] });
+    await expect(pool.query(
+      `SELECT count(*)::integer AS initializations
+         FROM asset_publication_library_initializations
+        WHERE owner_user_id=$1 AND canonical_asset_id=$2`,
+      [ownerUserId, firstReservation.canonicalAssetId],
+    )).resolves.toMatchObject({ rows: [{ initializations: 1 }] });
+  });
+
   it("reports a later request as recoverable when its canonical identity is pending cleanup", async () => {
     const repository = createPostgresNormalizedAssetPublicationRepository(pool);
     const first = await repository.reserveRequest(request(ownerUserId, `14e3e1c-cleanup-first-${crypto.randomUUID()}`, "cover-a", "cleanup"));
@@ -168,7 +245,7 @@ integration("Task 14e3e1c normalized publication repository", () => {
     });
   });
 
-  it("converges a normalized request on the legacy publisher's prepared canonical identity", async () => {
+  it("defers normalized reuse of a legacy prepared identity until technical metadata is verified", async () => {
     const legacy = createPostgresAssetPublicationRepository(pool, {} as never);
     const legacyIdentity = await legacy.prepareIdentity(legacyCommand(
       ownerUserId,
@@ -176,26 +253,26 @@ integration("Task 14e3e1c normalized publication repository", () => {
       "legacy-prepared"
     ));
 
-    const normalized = await createPostgresNormalizedAssetPublicationRepository(pool).reserveRequest(
-      request(ownerUserId, `14e3e1c-normalized-after-legacy-${crypto.randomUUID()}`, "cover-a", "legacy-prepared")
+    const normalizedRequest = request(
+      ownerUserId,
+      `14e3e1c-normalized-after-legacy-${crypto.randomUUID()}`,
+      "cover-a",
+      "legacy-prepared",
     );
-
-    expect(normalized).toMatchObject({
-      canonicalAssetId: legacyIdentity.assetId,
-      outcome: "reserved"
-    });
+    await expect(createPostgresNormalizedAssetPublicationRepository(pool).reserveRequest(normalizedRequest))
+      .rejects.toThrow("asset_publication_verification_required");
     await expect(pool.query(
       `SELECT canonical_asset_id,verification_state
          FROM asset_publication_content_arbitrations
         WHERE owner_user_id=$1 AND content_hash=$2`,
-      [ownerUserId, normalized.canonicalContentHash]
+      [ownerUserId, normalizedRequest.original.contentHash]
     )).resolves.toMatchObject({ rows: [{
       canonical_asset_id: legacyIdentity.assetId,
-      verification_state: "verified"
+      verification_state: "verification_required"
     }] });
   });
 
-  it("serializes an in-flight legacy reservation before a normalized request can arbitrate the same content", async () => {
+  it("serializes an in-flight legacy reservation before normalized reuse is deferred", async () => {
     const legacy = createPostgresAssetPublicationRepository(pool, {} as never);
     const normalizedRepository = createPostgresNormalizedAssetPublicationRepository(pool);
     const contentLabel = `legacy-race-${crypto.randomUUID()}`;
@@ -215,10 +292,7 @@ integration("Task 14e3e1c normalized publication repository", () => {
         new Promise<string>((resolveBlocked) => setTimeout(() => resolveBlocked("blocked"), 100))
       ])).resolves.toBe("blocked");
       await caller.query("COMMIT");
-      await expect(normalized).resolves.toMatchObject({
-        canonicalAssetId: legacyIdentity.assetId,
-        outcome: "reserved"
-      });
+      await expect(normalized).rejects.toThrow("asset_publication_verification_required");
     } finally {
       await caller.query("ROLLBACK").catch(() => undefined);
       caller.release();
@@ -390,7 +464,7 @@ integration("Task 14e3e1c normalized publication repository", () => {
     )).resolves.toMatchObject({ rows: [{ lifecycle: "published", references: 0 }] });
   });
 
-  it("persists a request-owned source, derivative reconciliation, and safe result in the caller transaction", async () => {
+  it("persists request children and recovers its safe result through a fresh repository after finalization", async () => {
     const bytes = new TextEncoder().encode(`14e3e1d:original:${crypto.randomUUID()}`);
     const derivativeBytes = new TextEncoder().encode(`14e3e1d:thumbnail:${crypto.randomUUID()}`);
     const world = await pool.query<{ id: string }>(
@@ -538,7 +612,8 @@ integration("Task 14e3e1c normalized publication repository", () => {
         WHERE asset_id=$1 AND owner_user_id=$2`,
       [reservation.canonicalAssetId, ownerUserId]
     );
-    await expect(repository.completeRequest(command)).resolves.toMatchObject({
+    const restartedRepository = createPostgresNormalizedAssetPublicationRepository(pool);
+    await expect(restartedRepository.completeRequest(command)).resolves.toMatchObject({
       assetId: reservation.canonicalAssetId,
       contentHash: command.original.contentHash
     });
@@ -591,6 +666,103 @@ integration("Task 14e3e1c normalized publication repository", () => {
         WHERE content_hash=$1`,
       [local.canonicalContentHash]
     )).resolves.toMatchObject({ rows: [{ canonical_assets: 2 }] });
+  });
+
+  it("rejects a foreign owner's generation-context child without persisting request children", async () => {
+    const repository = createPostgresNormalizedAssetPublicationRepository(pool);
+    const localCommand = request(
+      ownerUserId,
+      `14e3e1e-local-context-${crypto.randomUUID()}`,
+      "local-cover",
+      `local-context-${crypto.randomUUID()}`,
+    );
+    const local = await repository.reserveRequest(localCommand);
+    await pool.query(
+      `INSERT INTO assets (
+         id,owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,
+         pixel_width,pixel_height,technical_metadata
+       ) VALUES ($1,$2,$3,'filesystem',$4,$5,$6,1,1,$7::jsonb)`,
+      [
+        local.canonicalAssetId,
+        ownerUserId,
+        localCommand.original.contentHash,
+        `test/14e3e1e/local-context/${crypto.randomUUID()}`,
+        localCommand.original.mimeType,
+        localCommand.original.byteLength,
+        JSON.stringify({ format: "png", pages: 1 }),
+      ],
+    );
+    const foreignContext = await pool.query<{ id: string }>(
+      `INSERT INTO asset_generation_contexts (
+         owner_user_id,asset_id,created_by_user_id,target_type,fiction_prompt,model
+       ) VALUES ($1,$2,$1,'other','Foreign context fence','test') RETURNING id`,
+      [ownerUserId, local.canonicalAssetId],
+    );
+    const foreignOwner = (await pool.query<{ id: string }>(
+      `INSERT INTO users (system_key,display_name,status)
+       VALUES ($1,$2,'active') RETURNING id`,
+      [`14e3e1e-foreign-context:${crypto.randomUUID()}`, "14e3e1e foreign context"],
+    )).rows[0]!.id;
+    const foreignCommand = request(
+      foreignOwner,
+      `14e3e1e-foreign-context-${crypto.randomUUID()}`,
+      "foreign-cover",
+      `foreign-context-${crypto.randomUUID()}`,
+      { contextIntentKey: "foreign-context" },
+    );
+    const foreign = await repository.reserveRequest(foreignCommand);
+    await pool.query(
+      `INSERT INTO assets (
+         id,owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,
+         pixel_width,pixel_height,technical_metadata
+       ) VALUES ($1,$2,$3,'filesystem',$4,$5,$6,1,1,$7::jsonb)`,
+      [
+        foreign.canonicalAssetId,
+        foreignOwner,
+        foreignCommand.original.contentHash,
+        `test/14e3e1e/foreign-context/${crypto.randomUUID()}`,
+        foreignCommand.original.mimeType,
+        foreignCommand.original.byteLength,
+        JSON.stringify({ format: "png", pages: 1 }),
+      ],
+    );
+    await pool.query(
+      `UPDATE asset_publication_identities
+          SET lifecycle='published',result='{}'::jsonb,published_at=clock_timestamp()
+        WHERE asset_id=$1 AND owner_user_id=$2`,
+      [foreign.canonicalAssetId, foreignOwner],
+    );
+
+    const caller = await pool.connect();
+    try {
+      await caller.query("BEGIN");
+      await expect(repository.attachRequestInTransaction(caller, foreignCommand, {
+        contexts: [{ intentKey: "foreign-context", contextId: foreignContext.rows[0]!.id }],
+        references: [],
+        result: {
+          assetId: foreign.canonicalAssetId!,
+          mimeType: foreignCommand.original.mimeType,
+          byteLength: foreignCommand.original.byteLength,
+          contentHash: foreignCommand.original.contentHash,
+          pixelWidth: foreignCommand.original.technicalMetadata.pixelWidth,
+          pixelHeight: foreignCommand.original.technicalMetadata.pixelHeight,
+          derivatives: [],
+        },
+      })).rejects.toThrow("asset_publication_request_children_mismatch");
+    } finally {
+      await caller.query("ROLLBACK").catch(() => undefined);
+      caller.release();
+    }
+    await expect(pool.query(
+      `SELECT
+          (SELECT count(*)::integer FROM asset_publication_request_sources source
+            WHERE source.request_id=request.id AND source.owner_user_id=request.owner_user_id) AS sources,
+          (SELECT count(*)::integer FROM asset_publication_request_contexts context
+            WHERE context.request_id=request.id AND context.owner_user_id=request.owner_user_id) AS contexts
+         FROM asset_publication_requests request
+        WHERE request.id=$1 AND request.owner_user_id=$2`,
+      [foreign.requestId, foreignOwner],
+    )).resolves.toMatchObject({ rows: [{ sources: 0, contexts: 0 }] });
   });
 
   it("rejects an idempotency-key replay whose immutable request fingerprint differs", async () => {

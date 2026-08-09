@@ -8980,8 +8980,8 @@ Implement and review these internal sub-checkpoints in order:
    stale-claim success. A request result is distinct from 0060's canonical
    publication result: later requests may omit, reuse, or add derivatives and
    must return their own request-scoped result rather than inheriting the first
-   publication's derivative/result snapshot. **Complete 2026-08-08 (pending
-   commit):** the private normalized repository now locks both the owner/key
+   publication's derivative/result snapshot. **Complete 2026-08-08 (commit
+   `f75ee19`):** the private normalized repository now locks both the owner/key
    and the global content-hash authority, uses caller-owned transactions
    without opening a nested pool transaction, detects immutable replay
    mismatches, and returns recoverable rather than stale-success reservations
@@ -8992,7 +8992,8 @@ Implement and review these internal sub-checkpoints in order:
    request-specific attachment remains deliberately deferred to e1d. Focused
    PostgreSQL coverage verifies same-key replay/mismatch, normalized and
    legacy/normalized two-client races, rollback visibility, same-owner
-   convergence, owner-scoped canonical identities, legacy-first convergence,
+   convergence, owner-scoped canonical identities, legacy-first serialization
+   with normalized reuse deferred until verified technical metadata exists,
    normalized-first legacy rejection, cleanup recovery, and exactly-once
    first-library initialization. `pnpm check`, `pnpm build`, and the focused
    16-test compatibility matrix passed. The full integration runner was not
@@ -9004,7 +9005,7 @@ Implement and review these internal sub-checkpoints in order:
    request children but cannot mutate canonical library metadata; derivative
    slot/content mismatch is explicit rather than silently merged. Expose only
    safe IDs/metadata after durable finalization. **Complete 2026-08-08
-   (pending commit):** the normalized repository now validates and attaches
+   (commit `f75ee19`):** the normalized repository now validates and attaches
    immutable source, context, reference, derivative, and result rows only in
    the supplied caller transaction. It locks and validates the exact canonical
    identity and durable asset; context and reference IDs must match the stored
@@ -9022,7 +9023,23 @@ Implement and review these internal sub-checkpoints in order:
    two-client same-owner race, rollback/retry/restart, request replay/mismatch,
    grouped source IDs, conditional-reference omission, mutable canonical
    library edit after publication, cross-owner retention, populated downgrade
-   refusal, and private/public import boundaries.
+   refusal, and private/public import boundaries. **Complete 2026-08-09:** the
+   focused PostgreSQL matrix proves both normalized/legacy content-lock races,
+   owner-scoped canonical retention, rollback then retry, request replay and
+   mismatch, grouped sources, reference omission, a fresh repository recovering
+   an attached request after canonical finalization, a revision-fenced library
+   edit surviving later same-content publication, and rejection of a foreign
+   generation-context child without any request-child persistence. It also
+   corrects the legacy prepared-identity arbitration state to
+   `verification_required`: legacy commands do not carry verified decoder
+   metadata, so normalized reuse waits for the e3e5 verifier instead of
+   inventing technical facts. The migration suite proves populated downgrade
+   refusal. The private-storage AST guard now rejects static, re-export,
+   CommonJS, and dynamic-import consumers of the normalized repository, while
+   its real source inventory remains unconsumed. Focused verification is 14
+   PostgreSQL request-authority cases and 4 boundary cases; e1a's 13 unit cases,
+   e1b's migration authority suite, and e1c identity suite remain the companion
+   contract/migration evidence. e2 is next.
 
 **14e3e2 — neutral secure publication seam.** Move or wrap the concrete secure
 filesystem/image-normalization implementation and required safe error/store

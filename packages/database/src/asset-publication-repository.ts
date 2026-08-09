@@ -400,14 +400,14 @@ export function createPostgresAssetPublicationRepository(
         [command.owner.ownerUserId, keyHash, requestFingerprint],
       );
     const createdIdentity = identity(created.rows[0]!);
-    // The legacy boundary verifies the exact original bytes before reserve.
-    // Match 0064's descriptor-backed prepared-identity backfill so normalized
-    // requests can converge on this stable canonical identity without a
-    // duplicate logical asset.
+    // This legacy command has verified bytes but no verified decoder metadata.
+    // Keep the durable canonical reservation, but make normalized reuse wait
+    // for e3e5 to supply the missing technical evidence rather than inventing
+    // it while a legacy publication is still active.
     await client.query(
       `INSERT INTO asset_publication_content_arbitrations (
          owner_user_id,content_hash,canonical_asset_id,verification_state
-       ) VALUES ($1,$2,$3,'verified')`,
+       ) VALUES ($1,$2,$3,'verification_required')`,
       [command.owner.ownerUserId, command.original.contentHash, createdIdentity.assetId],
     );
     return createdIdentity;

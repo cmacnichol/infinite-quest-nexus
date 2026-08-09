@@ -7,6 +7,7 @@ const STORAGE_COMPOSITION_FILE = "services/runtime/src/asset-import-composition.
 const STORAGE_COMPOSITION_FACTORY = "createAssetImportStorageComposition";
 const ASSET_PUBLICATION_COMPOSITION_FACTORY = "createAssetPublicationComposition";
 const PORTABLE_COMPOSITION_FILE = "services/runtime/src/portable-import-export-composition.ts";
+const NORMALIZED_PUBLICATION_REPOSITORY_FILE = "packages/database/src/normalized-asset-publication-repository.ts";
 const CONCRETE_STORAGE_FACTORIES = new Map([
   ["createPostgresDurableFilesystemRepository", "packages/database/src/durable-filesystem-repository.ts"],
   ["createPostgresAssetPublicationRepository", "packages/database/src/asset-publication-repository.ts"],
@@ -73,6 +74,10 @@ function concreteFactoryForTarget(file, target) {
 
 function targetsStorageComposition(file, target) {
   return resolvedModule(file, target) === STORAGE_COMPOSITION_FILE;
+}
+
+function targetsNormalizedPublicationRepository(file, target) {
+  return resolvedModule(file, target) === NORMALIZED_PUBLICATION_REPOSITORY_FILE;
 }
 
 function trackedSymbolForTarget(file, target) {
@@ -168,6 +173,10 @@ export function checkPrivateStorageBoundaries(file, text) {
     if (!node || typeof node !== "object") return;
     if (isHistoricalStorageHelper(moduleTarget(node))) {
       add(node, "production source must not import historical storage helpers");
+    }
+    if (targetsNormalizedPublicationRepository(normalized, moduleTarget(node))
+      && normalized !== NORMALIZED_PUBLICATION_REPOSITORY_FILE) {
+      add(node, "private normalized publication repository must remain unconsumed until Task 14e3e2");
     }
     if (node.type === "ImportDeclaration") {
       const target = node.source.value;

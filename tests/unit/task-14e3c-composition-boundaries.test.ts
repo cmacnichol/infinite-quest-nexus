@@ -34,6 +34,17 @@ describe("Task 14e3c asset-publication composition boundary", () => {
     ]);
   });
 
+  it("keeps the normalized request repository private until its neutral seam exists", () => {
+    expect(privateStorageBoundaries.checkPrivateStorageBoundaries(
+      "services/worker/src/worker.ts",
+      `import { createPostgresNormalizedAssetPublicationRepository }
+         from "../../../packages/database/src/normalized-asset-publication-repository.js";
+       createPostgresNormalizedAssetPublicationRepository(pool);`,
+    )).toEqual([
+      expect.stringContaining("private normalized publication repository must remain unconsumed")
+    ]);
+  });
+
   it("snapshots verified artifact bytes before asynchronous publication work", () => {
     const original = new Uint8Array([1, 2, 3]);
     const snapshot = (
