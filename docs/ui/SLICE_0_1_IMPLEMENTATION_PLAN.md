@@ -9041,18 +9041,64 @@ Implement and review these internal sub-checkpoints in order:
    e1b's migration authority suite, and e1c identity suite remain the companion
    contract/migration evidence. e2 is next.
 
-**14e3e2 — neutral secure publication seam.** Move or wrap the concrete secure
-filesystem/image-normalization implementation and required safe error/store
-helpers in a neutral runtime/adapter location. API may consume the neutral
-adapter; worker replacement graphs must not reach API implementation through it.
-Expose a generic private caller-transaction publication port: normalize/verify
-and reserve before the parent transaction; attach every exact artifact inside
-the supplied transaction; roll back/discard after parent rollback; return only
-opaque post-commit finalization handles; reconcile/reap committed attached work
-after finalization failure. Preserve the b4/b5 durable prewrite, shared-path,
-target-only quarantine, and exact-operation fences. Add AST/module-graph guards
-for zero transitive worker-to-API implementation imports and no public/private
-barrel leakage.
+**14e3e2 — neutral secure publication seam.** This is an additive seam only:
+it must not bind a route, worker, import family, illustration writer, or public
+barrel before e3–e3g. Implement and review these sub-checkpoints in order:
+
+1. **e2a — neutral secure adapter extraction:** relocate the concrete
+   descriptor-anchored secure filesystem adapter (and only its private
+   filesystem publication/staged-input helpers) to `services/runtime/src/` or
+   an equally role-neutral private adapter location. The API compatibility file
+   may temporarily re-export the neutral implementation for legacy tests and
+   callers, but it may not retain a second implementation. Existing
+   `archive-io.ts` transport/archive behavior remains API-owned until e3g.
+   `asset-import-composition.ts` must import the neutral adapter directly, so a
+   future worker replacement graph has no transitive API implementation edge.
+   Preserve descriptor anchoring, b4/b5 durable prewrite, shared-path
+   retention, target-only quarantine, exact-operation fences, and safe error
+   projection byte-for-byte in behavior.
+2. **e2b — generic normalized caller-transaction port:** define a private,
+   unexported-from-public-barrels port and opaque handle types around the 0064
+   request repository. A caller supplies a fully normalized/verified request;
+   the port reserves it before the caller's parent transaction, attaches every
+   exact original/derivative/context/reference/result child only through the
+   supplied transaction, and exposes no path, descriptor, bearer, raw error,
+   database client, or canonical mutable-library authority. A parent rollback
+   must discard only its prepared request/operation work; a retry of the same
+   immutable request must recover deterministically rather than create a new
+   canonical identity. The port must remain deliberately unconsumed by e2;
+   e3/e4 own their first real writer compositions.
+3. **e2c — opaque post-commit finalization and recovery:** after an attachment
+   commits, return only an opaque finalization handle. A private runtime
+   operation may reconcile/finalize it or report durable recoverability after a
+   finalization fault; it must never roll back committed domain data, invent a
+   successful result, or recover a caller-supplied owner/path/bearer. Use the
+   existing b4/b5 and 0060/0064 claim/fence authority rather than a parallel
+   journal. The later e3e6 scheduler/reaper owns durable background claiming;
+   this checkpoint provides its exact per-handle primitive.
+4. **e2d — boundary and parity matrix:** add AST/module-graph coverage for
+   static imports, re-exports, CommonJS, and dynamic imports proving zero
+   runtime-to-API implementation edge and no public/private barrel leakage.
+   Add focused real PostgreSQL/temp-filesystem cases for verified reserve,
+   parent rollback/discard, committed attach followed by restart finalization,
+   same-owner reuse, cross-owner physical retention, and finalization failure
+   recovery. Re-run the existing e1 authority matrix and b4/b5 security suite.
+   **Complete 2026-08-09 (commits `996c9ba`, `4d5049b`):** the descriptor-
+   anchored adapter now has one role-neutral runtime implementation and an
+   API-only compatibility re-export; `archive-io.ts` remains API transport.
+   The private normalized composition provides verified reserve, exact
+   caller-transaction attachment, durable prepared-only discard, and opaque
+   restart-safe finalization/recovery handles without binding a real writer.
+   The initial independent review found a shared-path rollback race,
+   committed-discard hole, API-graph guard gap, and process-restart test gap;
+   the correction holds/reacquires global content locks, filters globally
+   referenced descriptors before deletion, fences discard to durable
+   `prepared`, traverses all static/re-export/CommonJS/dynamic runtime graph
+   edges into `services/api/src`, and proves module-reset finalization. The
+   scoped re-review approved all four corrections. Focused evidence: 60 unit,
+   43 real PostgreSQL/temp-filesystem integration, 1,481 full unit, `pnpm
+   check`, `pnpm build`, diff, and precheck. The known detached full-integration
+   harness remains excluded as a passing gate. e3 is next.
 
 **14e3e3 — illustration publication coordinator.** Build a named private
 `PrivateIllustrationAssetPublicationCoordinator` and replacement illustration
