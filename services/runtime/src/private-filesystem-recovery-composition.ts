@@ -27,18 +27,22 @@ function withClaim(
 
 export type PrivateFilesystemRecoveryComposition = Readonly<{
   executor: Readonly<{
-    processOne(request: PrivateFilesystemRecoveryExecutionRequest): Promise<Readonly<{
-      claimed: number;
-      finalized: number;
-      cleaned: number;
-      quarantined: number;
-      recoverable: number;
-      leaseLost: number;
-      portableClaimed: number;
-      portablePending: number;
-    }>>;
+    processOne(request: PrivateFilesystemRecoveryExecutionRequest): Promise<PrivateFilesystemRecoveryProgress>;
+    processAssetOne(request: PrivateFilesystemRecoveryExecutionRequest): Promise<PrivateFilesystemRecoveryProgress>;
+    processPortableOne(request: PrivateFilesystemRecoveryExecutionRequest): Promise<PrivateFilesystemRecoveryProgress>;
   }>;
   close(): Promise<void>;
+}>;
+
+export type PrivateFilesystemRecoveryProgress = Readonly<{
+  claimed: number;
+  finalized: number;
+  cleaned: number;
+  quarantined: number;
+  recoverable: number;
+  leaseLost: number;
+  portableClaimed: number;
+  portablePending: number;
 }>;
 
 /**
@@ -66,14 +70,17 @@ export async function createPrivateFilesystemRecoveryComposition(
   }
   const reconciliation = createPostgresFilesystemRecoveryReconciliationRepository(pool);
   const metadataBackfill = createPostgresAssetMetadataBackfillExecutorRepository(pool, storage.journal);
-  const processOne = async (request: PrivateFilesystemRecoveryExecutionRequest) => {
+  const processOne = async (
+    request: PrivateFilesystemRecoveryExecutionRequest,
+    scope: "asset" | "portable" | "all" = "all",
+  ): Promise<PrivateFilesystemRecoveryProgress> => {
     requireRequest(request);
-    const portableRecoveries = await storage.adapter.claimExpiredPortableRecoveries({
+    const portableRecoveries = scope === "asset" ? [] : await storage.adapter.claimExpiredPortableRecoveries({
       leaseOwner: request.workerId,
       leaseSeconds: request.leaseSeconds,
       limit: request.limit,
     });
-    const assetRecoveries = await storage.journal.recover({
+    const assetRecoveries = scope === "portable" ? [] : await storage.journal.recover({
       leaseOwner: request.workerId,
       leaseSeconds: request.leaseSeconds,
       limit: request.limit,
@@ -192,7 +199,11 @@ export async function createPrivateFilesystemRecoveryComposition(
     });
   };
   return Object.freeze({
-    executor: Object.freeze({ processOne }),
+    executor: Object.freeze({
+      processOne,
+      processAssetOne: (request: PrivateFilesystemRecoveryExecutionRequest) => processOne(request, "asset"),
+      processPortableOne: (request: PrivateFilesystemRecoveryExecutionRequest) => processOne(request, "portable"),
+    }),
     close: async () => {
       await Promise.allSettled([storage.close(), normalized!.close(), portable!.close()]);
     },

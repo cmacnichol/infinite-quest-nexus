@@ -6,6 +6,7 @@ import {
   checkPrivateStorageBoundaries,
   isPrivateStorageInventorySource
 } from "./check-private-storage-boundaries.mjs";
+import { checkPrivateAssetMaintenanceBoundaries } from "./check-private-asset-maintenance-boundaries.mjs";
 import {
   checkPortableCompositionBoundaries,
   checkPortableCompositionInventory
@@ -132,6 +133,7 @@ for (const file of files) {
 }
 
 violations.push(...checkAssetImportStorageCompositionInventory(sourceInventory));
+violations.push(...checkPrivateAssetMaintenanceBoundaries(sourceInventory));
 violations.push(...checkPortableCompositionInventory(sourceInventory));
 
 for (const migrationFile of LEGACY_MIGRATION_ALLOWLIST) {
