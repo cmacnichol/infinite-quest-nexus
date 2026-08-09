@@ -8929,6 +8929,17 @@ Implement and review these internal sub-checkpoints in order:
    its exact contexts/references must bind later in the same caller transaction
    or the transaction must roll back; do not lose rich bindings because current
    import publication precedes domain-row creation.
+
+   **Complete (2026-08-08):** Commit `73fb2e4` adds the private normalized
+   request contracts and 13 focused unit cases for immutable snapshots,
+   ordinal/key-order-independent fingerprints, grouped source selection,
+   bounded allowlisted provenance, safe public result projection, replay
+   mismatch, and exact deferred-child binding. The completion correction
+   rejects malformed stored canonical/derivative IDs and avoids host-locale
+   normalization, so identical commands do not fingerprint differently across
+   process locales. `pnpm check`, full unit and integration suites, `pnpm
+   build`, whitespace check, and pre-commit block-level `pjm precheck` passed.
+   The private module remains unexported and unconsumed; e1b is next.
 2. **e1b — migration 0064:** add owner-scoped request, content-arbitration,
    request-child, and exact canonical binding tables/constraints. Backfill
    every retryable 0060 identity 1:1 and explicitly seed legacy assets; cover
