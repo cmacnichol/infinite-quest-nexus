@@ -9336,19 +9336,42 @@ serial real PostgreSQL/temp-FS e6 runs 11/11; adjacent serial b5/e4/e5/e6
 matrix 67/67; `pnpm check`, `pnpm build`, private-storage boundary guard, and
 diff/precheck passed. The composition remains unbound from worker scheduling.
 
-**14e3e7 — worker maintenance composition and lifecycle.** Keep one
-capacity-one **asset-maintenance** lane (the frozen Task 12 pool budget remains
-`generation + 4` worker / `+8` all). It deterministically round-robins one-unit
-probes among metadata backfill, asset filesystem recovery, and portable expiry
-recovery so a continuous source cannot starve another. Scheduler errors remain
-isolated; owner and lease always originate in claims. Abort stops new claims;
-the existing Task 12 external graceful-stop/process-loss lease-reclaim contract
-remains the forced-stop behavior—do not introduce executor cancellation or a
-new hard shutdown deadline here. Prove rotation/no starvation, one maintenance
-unit at a time, graceful drain, simulated external force-stop/reclaim, and no
-duplicate commit. If a later task chooses separate lanes, it must explicitly
-change pool formulas, defaults, manifests, deployment docs, benchmarks, and
-tests first.
+**14e3e7 — worker maintenance composition and lifecycle.** The current worker
+still calls legacy API backfill and must remain untouched until e3g. Build a
+named private scheduler around e5/e6 first, retaining one capacity-one
+**asset-maintenance** lane (the frozen Task 12 pool budget remains `generation
++ 4` worker / `+8` all). Implement and review these checkpoints:
+
+1. **e7a — deterministic private probe scheduler:** model exactly three
+   database-authoritative probes—metadata backfill, asset filesystem recovery,
+   and portable expiry recovery. Start each tick at the next round-robin probe,
+   attempt at most one unit total, and advance the cursor even when a probe has
+   no work or safely fails. The scheduler supplies only a worker/lease label;
+   each executor obtains owner, record, and lease from its own claim. Expose
+   bounded safe outcome counters/diagnostic codes, never paths, grants, or raw
+   errors.
+2. **e7b — capacity and lifecycle contract:** enforce one active maintenance
+   unit across all probes, with no hidden parallel continuation after a promise
+   settles. Abort stops new claims immediately and permits the current exact
+   unit to reach its existing claim-fenced safe boundary; do not invent
+   cancellation, a hard deadline, or a second pool. An external forced process
+   stop is represented solely by normal lease expiry/reclaim. Keep worker pool
+   formulas, config defaults, manifests, benchmarks, and deployment docs
+   unchanged; any later separate lane requires an explicit plan change.
+3. **e7c — composition isolation and recovery behavior:** compose only the
+   private e5/e6 executors with private storage/repositories. Do not import
+   `services/api` implementations, mutate the current worker lane registry, or
+   select legacy `runAssetMetadataBackfill`. A scheduler fault must be isolated
+   from the next tick and must not poison the other probes. Fresh-composition
+   restart after abort/force-stop must reclaim only expired unfinished work and
+   never duplicate a completed publication or cleanup.
+4. **e7d — proof matrix:** add deterministic fake-clock/unit coverage for
+   cursor rotation, empty/failing probes, one-active-unit capacity, abort/drain,
+   and safe outcomes; add real PostgreSQL/temp-filesystem coverage for
+   no-starvation under continuous work, claim ownership/lease reclaim after
+   simulated force-stop, e5/e6 finalization/cleanup idempotency, and no extra
+   database-pool usage. Add graph/budget guards proving no live worker binding,
+   no API implementation import, and unchanged `generation + 4`/`+8` budget.
 
 **14e3e8 — additive composition parity and boundaries.** Run real
 PostgreSQL/temp-filesystem and Fastify-independent application matrices for all
