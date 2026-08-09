@@ -190,7 +190,7 @@ export function createPostgresIllustrationAssetPublicationRepository(
            FROM image_jobs job
            ${JOB_OWNER_JOINS}
           WHERE job.id=$1 AND job.lease_owner=$2
-            AND job.lease_expires_at>now()
+            AND job.lease_expires_at>clock_timestamp()
             AND job.status IN ('generating','provider_pending','downloading')
             AND (
               job.generation_job_id IS NULL

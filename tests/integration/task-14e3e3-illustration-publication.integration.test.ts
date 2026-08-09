@@ -64,7 +64,21 @@ integration("Task 14e3e3 illustration publication", () => {
       [ownerUserId, provider.rows[0]!.id, requestFingerprint, world.rows[0]!.id],
     );
     const assetId = crypto.randomUUID();
-    const safeResult = { assetId, contentHash };
+    const safeResult = {
+      assetId,
+      mimeType: "image/png",
+      byteLength: 1234,
+      contentHash,
+      pixelWidth: 24,
+      pixelHeight: 12,
+      derivatives: [{
+        derivativeId: crypto.randomUUID(),
+        derivativeKind: "thumbnail",
+        transformVersion: 1,
+        pixelWidth: 24,
+        pixelHeight: 12
+      }]
+    };
     await pool.query(
       `INSERT INTO asset_publication_identities (
          asset_id,owner_user_id,idempotency_key_hash,request_fingerprint,lifecycle,result,pending_finalization
@@ -134,9 +148,10 @@ integration("Task 14e3e3 illustration publication", () => {
         WHERE table_schema='public' AND table_name='image_job_asset_publications'
         ORDER BY column_name`,
     );
-    expect(columns.rows.map((row) => row.column_name)).not.toEqual(
-      expect.arrayContaining(["path", "storage_path", "descriptor", "bearer", "provider_response_url"]),
-    );
+    const columnNames = columns.rows.map((row) => row.column_name);
+    for (const forbiddenColumn of ["path", "storage_path", "descriptor", "bearer", "provider_response_url"]) {
+      expect(columnNames).not.toContain(forbiddenColumn);
+    }
     await expect(pool.query(
       `INSERT INTO image_job_asset_publications (
          image_job_id,owner_user_id,request_id,variant_index,finalization_locator,safe_result
@@ -186,6 +201,114 @@ integration("Task 14e3e3 illustration publication", () => {
         WHERE image_job_id=$1 AND owner_user_id=$2 AND variant_index=0`,
       [imageJob.rows[0]!.id, ownerUserId, `narp1.${"d".repeat(64)}.${idempotencyKeyHash}`],
     )).rejects.toMatchObject({ code: "23514" });
+
+    const insertAttachedRequest = async (
+      provenance: Record<string, unknown>,
+      result: Record<string, unknown>,
+    ): Promise<Readonly<{ requestId: string; finalizationLocator: string }>> => {
+      const nextFingerprint = randomHash();
+      const nextIdempotencyKeyHash = randomHash();
+      const nextContentHash = randomHash();
+      const nextAssetId = crypto.randomUUID();
+      await pool.query(
+        `INSERT INTO asset_publication_identities (
+           asset_id,owner_user_id,idempotency_key_hash,request_fingerprint,lifecycle,result,pending_finalization
+         ) VALUES ($1,$2,$3,$4,'attached',$5::jsonb,'{}'::jsonb)`,
+        [nextAssetId, ownerUserId, nextIdempotencyKeyHash, nextFingerprint, JSON.stringify(result)],
+      );
+      await pool.query(
+        `INSERT INTO asset_publication_content_arbitrations (
+           owner_user_id,content_hash,canonical_asset_id,verification_state
+         ) VALUES ($1,$2,$3,'verified')`,
+        [ownerUserId, nextContentHash, nextAssetId],
+      );
+      const inserted = await pool.query<{ id: string }>(
+        `INSERT INTO asset_publication_requests (
+           owner_user_id,idempotency_key_hash,request_fingerprint,canonical_content_hash,
+           canonical_asset_id,lifecycle,provenance_snapshot,result
+         ) VALUES ($1,$2,$3,$4,$5,'attached',$6::jsonb,$7::jsonb)
+         RETURNING id`,
+        [
+          ownerUserId,
+          nextIdempotencyKeyHash,
+          nextFingerprint,
+          nextContentHash,
+          nextAssetId,
+          JSON.stringify(provenance),
+          JSON.stringify(result)
+        ],
+      );
+      await pool.query(
+        `INSERT INTO asset_publication_request_results (request_id,owner_user_id,result)
+         VALUES ($1,$2,$3::jsonb)`,
+        [inserted.rows[0]!.id, ownerUserId, JSON.stringify(result)],
+      );
+      return {
+        requestId: inserted.rows[0]!.id,
+        finalizationLocator: `narp1.${nextFingerprint}.${nextIdempotencyKeyHash}`
+      };
+    };
+    const validProvenance = {
+      kind: "illustration",
+      imageJobId: imageJob.rows[0]!.id,
+      variantIndex: 1
+    };
+    const validSafeResult = {
+      ...safeResult,
+      assetId: crypto.randomUUID(),
+      contentHash: randomHash(),
+      derivatives: [{
+        derivativeId: crypto.randomUUID(),
+        derivativeKind: "thumbnail",
+        transformVersion: 1,
+        pixelWidth: 24,
+        pixelHeight: 12
+      }]
+    };
+    for (const malformedProvenance of [
+      { imageJobId: imageJob.rows[0]!.id, variantIndex: 1 },
+      { ...validProvenance, kind: null },
+      { kind: "illustration", variantIndex: 1 },
+      { ...validProvenance, imageJobId: null },
+      { ...validProvenance, variantIndex: null },
+      { ...validProvenance, variantIndex: "1" }
+    ]) {
+      const malformedRequest = await insertAttachedRequest(malformedProvenance, validSafeResult);
+      await expect(pool.query(
+        `INSERT INTO image_job_asset_publications (
+           image_job_id,owner_user_id,request_id,variant_index,finalization_locator,safe_result
+         ) VALUES ($1,$2,$3,1,$4,$5::jsonb)`,
+        [
+          imageJob.rows[0]!.id,
+          ownerUserId,
+          malformedRequest.requestId,
+          malformedRequest.finalizationLocator,
+          JSON.stringify(validSafeResult)
+        ],
+      )).rejects.toMatchObject({ code: "23514" });
+    }
+    for (const unsafeField of [
+      { path: "assets/private.png" },
+      { descriptor: "private-descriptor" },
+      { bearer: "private-bearer" },
+      { artifactUrl: "https://private.invalid/artifact" },
+      { ownerUserId }
+    ]) {
+      const unsafeResult = { ...validSafeResult, ...unsafeField };
+      const unsafeRequest = await insertAttachedRequest(validProvenance, unsafeResult);
+      await expect(pool.query(
+        `INSERT INTO image_job_asset_publications (
+           image_job_id,owner_user_id,request_id,variant_index,finalization_locator,safe_result
+         ) VALUES ($1,$2,$3,1,$4,$5::jsonb)`,
+        [
+          imageJob.rows[0]!.id,
+          ownerUserId,
+          unsafeRequest.requestId,
+          unsafeRequest.finalizationLocator,
+          JSON.stringify(unsafeResult)
+        ],
+      )).rejects.toMatchObject({ code: "23514" });
+    }
   });
 
   it("publishes a claimed world-cover artifact through the normalized private composition", async () => {

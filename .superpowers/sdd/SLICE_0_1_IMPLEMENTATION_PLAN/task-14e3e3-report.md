@@ -84,3 +84,30 @@ Critical or Important concerns.
 The known-unreliable broad integration harness was not used or claimed as a
 passing gate. Verification used only the focused real-PostgreSQL suites named
 above.
+
+## Correction round 1/5
+
+- 0065 now treats illustration provenance as a closed typed JSON shape: missing,
+  JSON-null, or mistyped `kind`, `imageJobId`, and `variantIndex` fail closed
+  using explicit JSON type checks and `IS DISTINCT FROM` comparisons.
+- Mapping `safe_result` is now a closed schema, including closed derivative
+  objects. Generic 0064 JSONB cannot introduce a path, descriptor, bearer,
+  URL, owner, or any other non-safe field into the image-job mapping.
+- Finalization recovery returns `noop` when no durable mapping exists, while
+  any post-commit read/mark/finalization repository fault returns only the
+  existing recoverable pending outcome. Recovery remains download-free.
+- Claimed-job ingress now uses PostgreSQL `clock_timestamp()` so a query that
+  waits on a lock cannot begin download work after lease expiry.
+- A released batch reservation no longer borrows its shared lock during
+  rollback: it reacquires its own exact content-hash lock before projecting
+  cleanup and deleting prepared artifacts.
+
+### Correction verification
+
+- Direct real-PostgreSQL red/green tests prove malformed provenance and each
+  raw safe-result field are accepted pre-fix and rejected after the 0065
+  hardening. Forbidden storage/bearer columns are now asserted individually.
+- Real PostgreSQL matrix: 11 tests passed, including a post-commit mapping
+  promotion fault with durable recovery, an uncommitted recovery no-op, and an
+  ACCESS EXCLUSIVE lock-wait expiry that confirms zero downloader calls.
+- `pnpm check` passed.

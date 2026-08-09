@@ -43,6 +43,7 @@ export type PrivateIllustrationCompletionOutcome =
   | PrivateIllustrationFinalizationPendingOutcome;
 
 export type PrivateIllustrationFinalizationRecoveryOutcome =
+  | Readonly<{ outcome: "noop" }>
   | PrivateIllustrationPublishedOutcome
   | PrivateIllustrationFinalizationPendingOutcome;
 

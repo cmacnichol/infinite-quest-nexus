@@ -854,6 +854,131 @@ integration("Task 14e3e3 illustration publication matrix", () => {
     expect(downloads).toBe(1);
   });
 
+  it("returns a safe no-op when finalization recovery finds no committed mapping", async () => {
+    const composition = await compose(async () => {
+      throw new Error("recovery_must_not_download");
+    });
+    await expect(composition.coordinator.recoverFinalization({
+      imageJobId: crypto.randomUUID(),
+      workerId: `e3-uncommitted-recovery-${crypto.randomUUID()}`,
+      leaseSeconds: 30
+    })).resolves.toEqual({ outcome: "noop" });
+  });
+
+  it("keeps post-commit mapping-finalization repository faults recoverable without a provider retry", async () => {
+    const scope = await createCampaignScope();
+    const workerId = `e3-postcommit-fault-${crypto.randomUUID()}`;
+    const imageJobId = await insertWorldImageJob(
+      scope.ownerUserId,
+      scope.providerProfileId,
+      scope.worldId,
+      workerId,
+    );
+    const image = await png(180, 25, 90);
+    let downloads = 0;
+    const composition = await compose(async () => {
+      downloads += 1;
+      return { bytes: image, mimeType: "image/png" };
+    });
+    await pool.query(
+      `CREATE FUNCTION task_14e3e3_mapping_postcommit_fault() RETURNS trigger
+       LANGUAGE plpgsql AS $fault$
+       BEGIN
+         RAISE EXCEPTION 'task_14e3e3_mapping_postcommit_fault';
+       END;
+       $fault$`,
+    );
+    await pool.query(
+      `CREATE TRIGGER task_14e3e3_mapping_postcommit_fault_trigger
+       BEFORE UPDATE ON image_job_asset_publications
+       FOR EACH ROW WHEN (NEW.publication_state='published')
+       EXECUTE FUNCTION task_14e3e3_mapping_postcommit_fault()`,
+    );
+    try {
+      await expect(composition.coordinator.completeClaimedImageJob({
+        imageJobId,
+        workerId,
+        result: completedResult(scope.providerProfileId, 1)
+      })).resolves.toEqual({
+        outcome: "committed_finalization_pending",
+        diagnostic: "asset_publication_finalization_recoverable"
+      });
+    } finally {
+      await pool.query(
+        "DROP TRIGGER IF EXISTS task_14e3e3_mapping_postcommit_fault_trigger ON image_job_asset_publications",
+      );
+      await pool.query("DROP FUNCTION IF EXISTS task_14e3e3_mapping_postcommit_fault()");
+    }
+    expect(downloads).toBe(1);
+    await expect(composition.coordinator.recoverFinalization({
+      imageJobId,
+      workerId: `e3-postcommit-recovery-${crypto.randomUUID()}`,
+      leaseSeconds: 30
+    })).resolves.toMatchObject({ outcome: "published", assets: [{ variantIndex: 0 }] });
+    expect(downloads).toBe(1);
+  });
+
+  it("does not begin downloads after ingress waits beyond the claimed lease", async () => {
+    const scope = await createCampaignScope();
+    const workerId = `e3-ingress-lease-${crypto.randomUUID()}`;
+    const imageJobId = await insertTurnImageJob(scope, workerId);
+    const expiry = await pool.query<{ lease_expires_at: Date }>(
+      `UPDATE image_jobs
+          SET lease_expires_at=clock_timestamp()+interval '2 seconds'
+        WHERE id=$1
+        RETURNING lease_expires_at`,
+      [imageJobId],
+    );
+    const blocker = await pool.connect();
+    let blockerOpen = false;
+    let downloads = 0;
+    try {
+      await blocker.query("BEGIN");
+      blockerOpen = true;
+      const blockerBackend = await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      await blocker.query("LOCK TABLE image_jobs IN ACCESS EXCLUSIVE MODE");
+      const image = await png(44, 55, 66);
+      const composition = await compose(async () => {
+        downloads += 1;
+        return { bytes: image, mimeType: "image/png" };
+      });
+      const completion = composition.coordinator.completeClaimedImageJob({
+        imageJobId,
+        workerId,
+        result: completedResult(scope.providerProfileId, 1)
+      });
+      let blocked = false;
+      for (let attempt = 0; attempt < 500 && !blocked; attempt += 1) {
+        const activity = await pool.query<{ blocked: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+              WHERE datname=current_database()
+                AND $1::int=ANY(pg_blocking_pids(pid))
+                AND state='active'
+                AND wait_event_type='Lock'
+           ) AS blocked`,
+          [blockerBackend.rows[0]!.pid],
+        );
+        blocked = activity.rows[0]!.blocked;
+        if (!blocked) await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
+      }
+      expect(blocked).toBe(true);
+      await blocker.query(
+        `SELECT pg_sleep(
+           GREATEST(0,EXTRACT(EPOCH FROM ($1::timestamptz-clock_timestamp())))+0.05
+         )`,
+        [expiry.rows[0]!.lease_expires_at],
+      );
+      await blocker.query("COMMIT");
+      blockerOpen = false;
+      await expect(completion).resolves.toEqual({ outcome: "noop" });
+      expect(downloads).toBe(0);
+    } finally {
+      if (blockerOpen) await blocker.query("ROLLBACK");
+      blocker.release();
+    }
+  });
+
   it("isolates provider-result, identity, download, signature, decode, and MIME failures from accepted narration", async () => {
     const cases = [
       {

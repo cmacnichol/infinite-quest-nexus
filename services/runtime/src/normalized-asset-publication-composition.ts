@@ -355,7 +355,12 @@ export async function createPrivateNormalizedAssetPublicationComposition(
       state.discarded = true;
     };
     try {
-      if (!state.lockGroup.released) {
+      // An attached reservation releases its share of the batch lock in
+      // attachInTransaction.  A sibling can therefore release the batch lock
+      // while this rollback is projecting references and deleting files.
+      // Only an unreleased state still owns a batch-lock share; every other
+      // rollback must acquire its exact content hashes independently.
+      if (!state.lockReleased && !state.lockGroup.released) {
         await discard();
       } else {
         await storage.candidate.withPublicationContentLocks(state.contentHashes, discard);

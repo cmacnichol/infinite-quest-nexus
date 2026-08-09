@@ -121,6 +121,68 @@ BEGIN
      AND request.owner_user_id = NEW.owner_user_id
    FOR KEY SHARE;
 
+  -- This projection is deliberately a closed safe-result schema.  The 0064
+  -- request result is generic JSONB, but a durable image-job mapping must
+  -- never become another channel for descriptors, paths, bearers, URLs, or
+  -- ownership data.
+  IF jsonb_typeof(NEW.safe_result) IS DISTINCT FROM 'object'
+    OR NOT (NEW.safe_result ?& ARRAY[
+      'assetId', 'mimeType', 'byteLength', 'contentHash', 'pixelWidth', 'pixelHeight', 'derivatives'
+    ])
+    OR (SELECT count(*) FROM jsonb_object_keys(NEW.safe_result)) <> 7
+    OR EXISTS (
+      SELECT 1 FROM jsonb_object_keys(NEW.safe_result) AS key
+       WHERE key <> ALL (ARRAY[
+         'assetId', 'mimeType', 'byteLength', 'contentHash', 'pixelWidth', 'pixelHeight', 'derivatives'
+       ])
+    )
+    OR jsonb_typeof(NEW.safe_result->'assetId') IS DISTINCT FROM 'string'
+    OR NEW.safe_result->>'assetId' !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    OR jsonb_typeof(NEW.safe_result->'mimeType') IS DISTINCT FROM 'string'
+    OR NEW.safe_result->>'mimeType' NOT IN ('image/png', 'image/jpeg', 'image/webp', 'image/gif')
+    OR jsonb_typeof(NEW.safe_result->'byteLength') IS DISTINCT FROM 'number'
+    OR jsonb_typeof(NEW.safe_result->'contentHash') IS DISTINCT FROM 'string'
+    OR NEW.safe_result->>'contentHash' !~ '^[0-9a-f]{64}$'
+    OR jsonb_typeof(NEW.safe_result->'pixelWidth') IS DISTINCT FROM 'number'
+    OR jsonb_typeof(NEW.safe_result->'pixelHeight') IS DISTINCT FROM 'number'
+    OR jsonb_typeof(NEW.safe_result->'derivatives') IS DISTINCT FROM 'array'
+    OR EXISTS (
+      SELECT 1
+        FROM jsonb_array_elements(NEW.safe_result->'derivatives') AS derivative(value)
+       WHERE jsonb_typeof(derivative.value) IS DISTINCT FROM 'object'
+          OR NOT (derivative.value ?& ARRAY[
+            'derivativeId', 'derivativeKind', 'transformVersion', 'pixelWidth', 'pixelHeight'
+          ])
+          OR (SELECT count(*) FROM jsonb_object_keys(derivative.value)) <> 5
+          OR EXISTS (
+            SELECT 1 FROM jsonb_object_keys(derivative.value) AS key
+             WHERE key <> ALL (ARRAY[
+               'derivativeId', 'derivativeKind', 'transformVersion', 'pixelWidth', 'pixelHeight'
+             ])
+          )
+          OR jsonb_typeof(derivative.value->'derivativeId') IS DISTINCT FROM 'string'
+          OR derivative.value->>'derivativeId' !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          OR derivative.value->>'derivativeKind' IS DISTINCT FROM 'thumbnail'
+          OR jsonb_typeof(derivative.value->'transformVersion') IS DISTINCT FROM 'number'
+          OR jsonb_typeof(derivative.value->'pixelWidth') IS DISTINCT FROM 'number'
+          OR jsonb_typeof(derivative.value->'pixelHeight') IS DISTINCT FROM 'number'
+    ) THEN
+    RAISE EXCEPTION 'image-job publication mapping safe result is invalid'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF jsonb_typeof(request_provenance) IS DISTINCT FROM 'object'
+    OR jsonb_typeof(request_provenance->'kind') IS DISTINCT FROM 'string'
+    OR request_provenance->>'kind' IS DISTINCT FROM 'illustration'
+    OR jsonb_typeof(request_provenance->'imageJobId') IS DISTINCT FROM 'string'
+    OR request_provenance->>'imageJobId' IS DISTINCT FROM NEW.image_job_id::text
+    OR jsonb_typeof(request_provenance->'variantIndex') IS DISTINCT FROM 'number'
+    OR request_provenance->>'variantIndex' !~ '^-?[0-9]+$'
+    OR (request_provenance->>'variantIndex')::integer IS DISTINCT FROM NEW.variant_index THEN
+    RAISE EXCEPTION 'image-job publication mapping provenance is invalid'
+      USING ERRCODE = '23514';
+  END IF;
+
   IF request_owner IS NULL
     OR request_lifecycle NOT IN ('attached', 'published')
     OR (NEW.publication_state = 'published' AND request_lifecycle <> 'published')
@@ -129,10 +191,6 @@ BEGIN
       'narp1.', request_fingerprint_value, '.', request_idempotency_hash
     )
     OR NEW.safe_result IS DISTINCT FROM request_result
-    OR request_provenance->>'kind' <> 'illustration'
-    OR request_provenance->>'imageJobId' <> NEW.image_job_id::text
-    OR NOT (request_provenance ? 'variantIndex')
-    OR (request_provenance->>'variantIndex')::integer <> NEW.variant_index
     OR NOT EXISTS (
       SELECT 1
         FROM image_jobs job

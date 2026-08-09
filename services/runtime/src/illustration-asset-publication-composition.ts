@@ -369,32 +369,39 @@ export async function createPrivateIllustrationAssetPublicationComposition(
     workerId: string,
     leaseSeconds: number,
   ): Promise<PrivateIllustrationFinalizationRecoveryOutcome> => {
-    const publications = await repository.loadFinalizations(imageJobId);
-    if (publications.length === 0) {
+    try {
+      const publications = await repository.loadFinalizations(imageJobId);
+      if (publications.length === 0) {
+        return Object.freeze({ outcome: "noop" as const });
+      }
+      for (const publication of publications) {
+        if (publication.publicationState === "published") continue;
+        const result = await normalized.publication.finalize(publication.finalization, {
+          leaseOwner: `illustration-finalization:${workerId}`.slice(0, 200),
+          leaseSeconds
+        });
+        if (result.outcome === "published") {
+          await repository.markFinalizationPublished(publication);
+        } else {
+          await repository.recordFinalizationRecoverable(publication);
+        }
+      }
+      const assets = await repository.readPublishedAssets(imageJobId);
+      return assets
+        ? Object.freeze({ outcome: "published" as const, assets })
+        : Object.freeze({
+          outcome: "committed_finalization_pending" as const,
+          diagnostic: "asset_publication_finalization_recoverable" as const
+        });
+    } catch {
+      // This runs only after the caller transaction committed.  Surface a
+      // stable durable-recovery result instead of reclassifying its provider
+      // execution as failed or inviting another download.
       return Object.freeze({
         outcome: "committed_finalization_pending" as const,
         diagnostic: "asset_publication_finalization_recoverable" as const
       });
     }
-    for (const publication of publications) {
-      if (publication.publicationState === "published") continue;
-      const result = await normalized.publication.finalize(publication.finalization, {
-        leaseOwner: `illustration-finalization:${workerId}`.slice(0, 200),
-        leaseSeconds
-      });
-      if (result.outcome === "published") {
-        await repository.markFinalizationPublished(publication);
-      } else {
-        await repository.recordFinalizationRecoverable(publication);
-      }
-    }
-    const assets = await repository.readPublishedAssets(imageJobId);
-    return assets
-      ? Object.freeze({ outcome: "published" as const, assets })
-      : Object.freeze({
-        outcome: "committed_finalization_pending" as const,
-        diagnostic: "asset_publication_finalization_recoverable" as const
-      });
   };
 
   const completeClaimedImageJob: PrivateIllustrationAssetPublicationCoordinator["completeClaimedImageJob"] = async (
