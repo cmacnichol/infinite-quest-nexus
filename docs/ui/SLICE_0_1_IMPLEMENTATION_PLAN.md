@@ -9271,6 +9271,19 @@ Implement and review these checkpoints in order:
    immutability, and no raw path/bearer/error escape. Add graph guards proving
    no API legacy asset-service persistence or public-barrel binding is reached.
 
+**Completed (commit `bc447844`, independently reviewed with no findings):** e5
+now provides a named private metadata-backfill composition and additive 0067
+publication-finalization authority. A database-derived claim opens an original
+only through bounded finalized/legacy anchored delivery, verifies and decodes it
+within limits, derives a deterministic WebP thumbnail, and atomically attaches
+allowlisted verified metadata plus the versioned derivative under an exact lease
+fence. Retry, heartbeat, lease rotation, poison terminal policy, post-commit
+attached finalization recovery, global-reference-aware rollback, same-owner
+library immutability, and cross-owner retention are proven without using the
+legacy 0060 writer or adding a live consumer. Evidence: real PostgreSQL/temp-FS
+10/10, e3b5 boundary unit 8/8, private-storage graph guard, `pnpm check`,
+`pnpm build`, `git diff --check`, and `pjm precheck` passed.
+
 **14e3e6 — durable filesystem recovery executor.** Build a private recovery
 application that claims one asset or portable unit with database-derived owner,
 work version, and lease; heartbeats during long hash/decode/delete/finalize
