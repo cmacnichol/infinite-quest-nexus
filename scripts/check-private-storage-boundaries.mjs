@@ -345,11 +345,31 @@ export function checkAssetImportStorageCompositionInventory(sources) {
       violations.push(`${source.file}: storage composition inventory AST parse failed: ${error.message}`);
     }
   }
+  const resolveInventoryModule = (file, target) => {
+    const resolved = resolvedModule(file, target);
+    if (parsed.has(resolved) || typeof target !== "string" || !target.startsWith(".")) {
+      return resolved;
+    }
+    for (const candidate of [
+      `${resolved}.ts`,
+      `${resolved}.tsx`,
+      `${resolved}.mts`,
+      `${resolved}.cts`,
+      `${resolved}/index.ts`,
+      `${resolved}/index.tsx`,
+      `${resolved}/index.mts`,
+      `${resolved}/index.cts`
+    ]) {
+      if (parsed.has(candidate)) return candidate;
+    }
+    return resolved;
+  };
 
   const definitions = new Map();
   const calls = new Map();
   const imports = new Map();
   const unsafeExposures = new Map();
+  const moduleEdges = new Map();
   for (const name of [
     ...CONCRETE_STORAGE_FACTORIES.keys(),
     STORAGE_COMPOSITION_FACTORY,
@@ -382,8 +402,14 @@ export function checkAssetImportStorageCompositionInventory(sources) {
     const bindings = new Map();
     const moduleBindings = new Map();
     const moduleLoads = new Map();
+    const targets = new Set();
+    moduleEdges.set(file, targets);
 
     walk(program, (node) => {
+      const target = moduleTarget(node);
+      if (typeof target === "string") {
+        targets.add(resolveInventoryModule(file, target));
+      }
       if (node.type === "FunctionDeclaration" && node.id && definitions.has(node.id.name)) {
         definitions.get(node.id.name).push(file);
       }
@@ -500,6 +526,23 @@ export function checkAssetImportStorageCompositionInventory(sources) {
         if (name) addUnsafeExposure(file, name, specifier, "local re-export");
       }
     });
+  }
+
+  const replacementQueue = [NORMALIZED_PUBLICATION_COMPOSITION_FILE];
+  const replacementGraph = new Set();
+  while (replacementQueue.length > 0) {
+    const file = replacementQueue.shift();
+    if (!file || replacementGraph.has(file)) continue;
+    replacementGraph.add(file);
+    for (const target of moduleEdges.get(file) ?? []) {
+      if (target.startsWith("services/api/src/")) {
+        violations.push(`${file}: normalized publication replacement graph must not reach services/api/src via ${target}`);
+        continue;
+      }
+      if (parsed.has(target) && !replacementGraph.has(target)) {
+        replacementQueue.push(target);
+      }
+    }
   }
 
   for (const [name, definitionFile] of CONCRETE_STORAGE_FACTORIES) {

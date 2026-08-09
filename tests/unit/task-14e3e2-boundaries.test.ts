@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 // @ts-expect-error The executable repository checker is intentionally plain ESM.
 import { checkPrivateStorageBoundaries } from "../../scripts/check-private-storage-boundaries.mjs";
 
+type Source = Readonly<{ file: string; text: string }>;
+
+// @ts-expect-error The executable repository checker is intentionally plain ESM.
+import { checkAssetImportStorageCompositionInventory } from "../../scripts/check-private-storage-boundaries.mjs";
+
 describe("Task 14e3e2 neutral publication boundaries", () => {
   it("rejects every production import form that reaches the API filesystem compatibility module", () => {
     const prohibited = [
@@ -19,6 +24,34 @@ describe("Task 14e3e2 neutral publication boundaries", () => {
       ), source).toEqual(expect.arrayContaining([
         expect.stringContaining("API filesystem compatibility module")
       ]));
+    }
+  });
+
+  it("rejects transitive replacement-graph edges to every API implementation import form", () => {
+    const apiEdges = [
+      `import { inspectArchive } from "../../api/src/archive-io.js";`,
+      `export { inspectArchive } from "../../api/src/archive-io.js";`,
+      `export * from "../../api/src/archive-io.js";`,
+      `const archive = require("../../api/src/archive-io.js");`,
+      `const archive = await import("../../api/src/archive-io.js");`
+    ];
+
+    for (const edge of apiEdges) {
+      const sources: readonly Source[] = [{
+        file: "services/runtime/src/normalized-asset-publication-composition.ts",
+        text: `import "./normalized-publication-helper";`
+      }, {
+        file: "services/runtime/src/normalized-publication-helper.ts",
+        text: edge
+      }, {
+        file: "services/api/src/archive-io.ts",
+        text: "export const inspectArchive = () => undefined;"
+      }];
+      expect(checkAssetImportStorageCompositionInventory(sources), edge).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("normalized publication replacement graph must not reach services/api/src")
+        ]),
+      );
     }
   });
 

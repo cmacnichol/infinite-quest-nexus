@@ -24,7 +24,8 @@ import {
 } from "../../../packages/application/src/assets/private-secure-storage.js";
 import {
   bindPrivateFilesystemCandidateAttachment,
-  type PrivateFilesystemCandidatePersistencePort
+  type PrivateFilesystemCandidatePersistencePort,
+  type PrivateFilesystemPublicationCleanupPort
 } from "../../../packages/application/src/assets/private-filesystem-repository.js";
 import type { FinalizedAssetDeliveryResolverPort } from "../../../packages/application/src/assets/private-finalized-delivery.js";
 import type { AssetDeliveryRequest, AssetScope } from "../../../packages/application/src/assets/types.js";
@@ -83,6 +84,7 @@ export type SecureFilesystemAdapterOptions = Readonly<{
   delivery?: FinalizedAssetDeliveryResolverPort;
   journal?: DurableFilesystemJournalPort;
   candidates?: PrivateFilesystemCandidatePersistencePort;
+  publicationCleanup?: PrivateFilesystemPublicationCleanupPort;
   atomicPortable?: PrivateAtomicPortableIssuancePort;
   prewrite?: PrivatePrewriteNodeRepositoryPort;
   expiry?: PrivatePortableExpiryRecoveryPort;
@@ -91,6 +93,7 @@ export type SecureFilesystemAdapterOptions = Readonly<{
 
 export type SecureFilesystemAdapter = Readonly<{
   prepareAssetPublication: PrivateAssetPublicationFilesystemPort["prepareAssetPublication"];
+  discardPreparedAssetPublication(prepared: PrivatePreparedAssetPublication): Promise<void>;
   finalizeAssetPublication: PrivateAssetPublicationFilesystemPort["finalizeAssetPublication"];
   stagePortableInput(input: Readonly<{
     owner: ImportOwnerScope;
@@ -874,6 +877,37 @@ export async function createSecureFilesystemAdapter(
     }
   };
 
+  const discardPreparedAssetPublication: SecureFilesystemAdapter["discardPreparedAssetPublication"] = async (
+    prepared,
+  ) => {
+    const journal = options.journal;
+    const cleanupRepository = options.publicationCleanup;
+    if (!journal || !cleanupRepository) {
+      throw new Error("asset_publication_cleanup_repository_unavailable");
+    }
+    for (const artifact of [prepared.original, ...prepared.derivatives]) {
+      const operation = artifact.attachment.operation;
+      const claim = artifact.attachment.claim;
+      const marked = await journal.markCleanup(operation, claim, { cause: "rollback" });
+      if (marked.outcome === "already_cleaned") continue;
+      if (marked.outcome !== "cleanup_pending") {
+        throw new Error(`asset_publication_cleanup_${marked.outcome}`);
+      }
+      const cleanup = await cleanupRepository.preparePublicationCleanup(operation, claim);
+      if (cleanup.outcome === "already_cleaned") continue;
+      if (cleanup.outcome !== "cleanup_required") {
+        throw new Error(`asset_publication_cleanup_${cleanup.outcome}`);
+      }
+      for (const descriptor of cleanup.descriptors) {
+        await identitySafeDelete(assetRoot, descriptor);
+      }
+      const completed = await journal.completeCleanup(operation, claim);
+      if (!["cleaned", "already_cleaned"].includes(completed.outcome)) {
+        throw new Error(`asset_publication_cleanup_${completed.outcome}`);
+      }
+    }
+  };
+
   const stagePortableInput: SecureFilesystemAdapter["stagePortableInput"] = async (input) => {
     if (!options.atomicPortable || !options.journal) {
       throw new Error("portable_publication_repository_unavailable");
@@ -1170,6 +1204,7 @@ export async function createSecureFilesystemAdapter(
   let closed: Promise<void> | undefined;
   return Object.freeze({
     prepareAssetPublication,
+    discardPreparedAssetPublication,
     finalizeAssetPublication,
     stagePortableInput,
     publishPortableExport,

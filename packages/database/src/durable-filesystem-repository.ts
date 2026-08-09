@@ -25,6 +25,7 @@ import type {
 import type {
   PrivateFilesystemCandidateAttachment,
   PrivateFilesystemCandidatePersistencePort,
+  PrivateFilesystemPublicationCleanupPort,
   PrivateFilesystemPublicationLockPort
 } from "../../application/src/assets/private-filesystem-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
@@ -72,7 +73,9 @@ type CandidateAuthorityRow = DescriptorRow & Readonly<{
 }>;
 
 export interface PostgresDurableFilesystemRepository
-  extends PrivateFilesystemCandidatePersistencePort, PrivateFilesystemPublicationLockPort {
+  extends PrivateFilesystemCandidatePersistencePort,
+    PrivateFilesystemPublicationLockPort,
+    PrivateFilesystemPublicationCleanupPort {
   journal: DurableFilesystemJournalPort;
   issuePublicationCandidate(
     reservation: ReservedFilesystemOperation,

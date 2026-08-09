@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   bindPrivateNormalizedAssetPublicationRequest,
   type PrivateNormalizedAssetPublicationRequest,
@@ -22,6 +22,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 
 type OpaqueHandle = Readonly<Record<never, never>>;
+type OpaqueFinalizationHandle = string;
 type TestComposition = Readonly<{
   publication: Readonly<{
     reserve(input: Readonly<{
@@ -37,11 +38,11 @@ type TestComposition = Readonly<{
       ) => Promise<PrivateNormalizedAssetRequestChildBindingsInput>,
     ): Promise<Readonly<{
       result: SafeNormalizedAssetPublicationResult;
-      finalization: OpaqueHandle;
+      finalization: OpaqueFinalizationHandle;
     }>>;
     discardAfterRollback(reservation: OpaqueHandle): Promise<void>;
     finalize(
-      finalization: OpaqueHandle,
+      finalization: OpaqueFinalizationHandle,
       recovery?: Readonly<{ leaseOwner: string; leaseSeconds: number }>,
     ): Promise<Readonly<{
       outcome: "published";
@@ -259,10 +260,13 @@ integration("Task 14e3e2 normalized publication composition", () => {
       caller.release();
     }
 
-    expect(Object.keys(attached.finalization)).toEqual([]);
-    expect(Object.isFrozen(attached.finalization)).toBe(true);
+    expect(typeof attached.finalization).toBe("string");
+    expect(attached.finalization).not.toContain(attached.result.assetId);
+    expect(attached.finalization).not.toContain(command.owner.ownerUserId);
+    expect(attached.finalization).not.toContain(command.idempotencyKey);
     await first.close();
     compositions.delete(first);
+    vi.resetModules();
     const restarted = await compose();
     const finalized = await restarted.publication.finalize(attached.finalization);
 
@@ -387,6 +391,111 @@ integration("Task 14e3e2 normalized publication composition", () => {
     await expect(readFile(join(assetRoot, stored.rows[0]!.storage_path))).resolves.toEqual(
       Buffer.from(firstRequest.original.bytes),
     );
+  });
+
+  it("retains another owner's committed shared bytes when the creating reservation later rolls back", async () => {
+    const composition = await compose();
+    const secondOwner = await pool.query<{ id: string }>(
+      `INSERT INTO users (display_name) VALUES ('14e3e2 interleaving owner') RETURNING id`,
+    );
+    const secondOwnerId = secondOwner.rows[0]!.id;
+    const contentLabel = `cross-owner-interleaving-${crypto.randomUUID()}`;
+    const creatingRequest = request(ownerUserId, `interleaving-first-${crypto.randomUUID()}`, contentLabel);
+    const retainedRequest = request(secondOwnerId, `interleaving-second-${crypto.randomUUID()}`, contentLabel);
+    const creatingReservation = await composition.publication.reserve({
+      request: creatingRequest,
+      leaseOwner: "14e3e2-interleaving-first",
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    });
+
+    const retainedPublication = attachAndCommit(
+      composition,
+      retainedRequest,
+      "14e3e2-interleaving-second",
+    );
+
+    const caller = await pool.connect();
+    try {
+      await caller.query("BEGIN");
+      await composition.publication.attachInTransaction(
+        caller,
+        creatingReservation,
+        async () => ({ contexts: [], references: [] }),
+      );
+      await caller.query("ROLLBACK");
+    } finally {
+      await caller.query("ROLLBACK").catch(() => undefined);
+      caller.release();
+    }
+    const retained = await retainedPublication;
+    await composition.publication.finalize(retained.finalization);
+    await composition.publication.discardAfterRollback(creatingReservation);
+
+    const stored = await pool.query<Readonly<{
+      storage_path: string;
+      request_lifecycle: string;
+      identity_lifecycle: string;
+    }>>(
+      `SELECT asset.storage_path,request.lifecycle AS request_lifecycle,
+              identity.lifecycle AS identity_lifecycle
+         FROM asset_publication_requests request
+         JOIN asset_publication_identities identity
+           ON identity.asset_id=request.canonical_asset_id AND identity.owner_user_id=request.owner_user_id
+         JOIN assets asset
+           ON asset.id=request.canonical_asset_id AND asset.owner_user_id=request.owner_user_id
+        WHERE request.owner_user_id=$1 AND request.idempotency_key_hash=$2`,
+      [secondOwnerId, sha256(new TextEncoder().encode(retainedRequest.idempotencyKey))],
+    );
+    expect(stored.rows).toEqual([expect.objectContaining({
+      request_lifecycle: "published",
+      identity_lifecycle: "published"
+    })]);
+    await expect(readFile(join(assetRoot, stored.rows[0]!.storage_path))).resolves.toEqual(
+      Buffer.from(retainedRequest.original.bytes),
+    );
+  });
+
+  it("rejects discard after the caller commits the attachment and preserves its bytes", async () => {
+    const composition = await compose();
+    const command = request(ownerUserId, `committed-discard-${crypto.randomUUID()}`);
+    const reservation = await composition.publication.reserve({
+      request: command,
+      leaseOwner: "14e3e2-committed-discard",
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    });
+    const caller = await pool.connect();
+    let attached: Awaited<ReturnType<TestComposition["publication"]["attachInTransaction"]>>;
+    try {
+      await caller.query("BEGIN");
+      attached = await composition.publication.attachInTransaction(
+        caller,
+        reservation,
+        async () => ({ contexts: [], references: [] }),
+      );
+      await caller.query("COMMIT");
+    } finally {
+      await caller.query("ROLLBACK").catch(() => undefined);
+      caller.release();
+    }
+
+    await expect(composition.publication.discardAfterRollback(reservation))
+      .rejects.toThrow("normalized_asset_publication_discard_unavailable");
+    const stored = await pool.query<Readonly<{ storage_path: string; lifecycle: string }>>(
+      `SELECT asset.storage_path,request.lifecycle
+         FROM asset_publication_requests request
+         JOIN assets asset
+           ON asset.id=request.canonical_asset_id AND asset.owner_user_id=request.owner_user_id
+        WHERE request.owner_user_id=$1 AND request.idempotency_key_hash=$2`,
+      [ownerUserId, sha256(new TextEncoder().encode(command.idempotencyKey))],
+    );
+    expect(stored.rows).toEqual([expect.objectContaining({ lifecycle: "attached" })]);
+    await expect(readFile(join(assetRoot, stored.rows[0]!.storage_path))).resolves.toEqual(
+      Buffer.from(command.original.bytes),
+    );
+    await expect(composition.publication.finalize(attached.finalization)).resolves.toEqual({
+      outcome: "published",
+      result: attached.result
+    });
   });
 
   it("keeps a post-commit finalization fault durable and recovers only through the exact handle", async () => {

@@ -7,16 +7,19 @@ import {
   type PrivateAssetPublicationIdentityPort,
   type PrivatePreparedAssetPublication
 } from "../../../packages/application/src/assets/private-asset-publication.js";
-import type {
-  PrivateNormalizedAssetFinalizationHandle,
-  PrivateNormalizedAssetPublicationPort,
-  PrivateNormalizedAssetPublicationRequest,
-  PrivateNormalizedAssetReservationHandle,
-  SafeNormalizedAssetPublicationResult
+import type { PrivateFilesystemPublicationLockPort } from "../../../packages/application/src/assets/private-filesystem-repository.js";
+import {
+  fingerprintPrivateNormalizedAssetPublicationRequest,
+  type PrivateNormalizedAssetFinalizationHandle,
+  type PrivateNormalizedAssetPublicationPort,
+  type PrivateNormalizedAssetPublicationRequest,
+  type PrivateNormalizedAssetReservationHandle,
+  type SafeNormalizedAssetPublicationResult
 } from "../../../packages/application/src/assets/private-normalized-asset-publication.js";
 import {
   createPostgresNormalizedAssetMaterializationRepository,
   createPostgresNormalizedAssetPublicationRepository,
+  type PrivateNormalizedAssetFinalizationLocator,
   type PrivateNormalizedAssetPublicationReservation
 } from "../../../packages/database/src/normalized-asset-publication-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
@@ -26,24 +29,75 @@ type ReservationState = {
   request: PrivateNormalizedAssetPublicationRequest;
   reservation: PrivateNormalizedAssetPublicationReservation;
   prepared: PrivatePreparedAssetPublication | null;
+  contentHashes: readonly string[];
+  contentLock: HeldPublicationContentLock | null;
   discarded: boolean;
 };
 
+type HeldPublicationContentLock = Readonly<{
+  release(): Promise<void>;
+}>;
+
 const reservations = new WeakMap<object, ReservationState>();
-const finalizations = new WeakMap<object, string>();
+const FINALIZATION_HANDLE_PATTERN = /^narp1\.([0-9a-f]{64})\.([0-9a-f]{64})$/u;
 
 function opaqueReservationHandle(): PrivateNormalizedAssetReservationHandle {
   return Object.freeze({}) as PrivateNormalizedAssetReservationHandle;
 }
 
-function opaqueFinalizationHandle(requestId: string): PrivateNormalizedAssetFinalizationHandle {
-  const handle = Object.freeze({}) as PrivateNormalizedAssetFinalizationHandle;
-  finalizations.set(handle, requestId);
-  return handle;
+function opaqueFinalizationHandle(
+  request: PrivateNormalizedAssetPublicationRequest,
+): PrivateNormalizedAssetFinalizationHandle {
+  const fingerprint = fingerprintPrivateNormalizedAssetPublicationRequest(
+    request,
+    (canonicalRequest) => createHash("sha256").update(canonicalRequest).digest("hex"),
+  );
+  const idempotencyHash = createHash("sha256").update(request.idempotencyKey).digest("hex");
+  return `narp1.${fingerprint}.${idempotencyHash}` as PrivateNormalizedAssetFinalizationHandle;
+}
+
+function finalizationLocator(
+  handle: PrivateNormalizedAssetFinalizationHandle,
+): PrivateNormalizedAssetFinalizationLocator {
+  const match = FINALIZATION_HANDLE_PATTERN.exec(handle);
+  if (!match?.[1] || !match[2]) {
+    throw stableError("normalized_asset_publication_finalization_unavailable");
+  }
+  return Object.freeze({ requestFingerprint: match[1], idempotencyKeyHash: match[2] });
 }
 
 function stableError(code: string): Error {
   return new Error(code);
+}
+
+async function holdPublicationContentLocks(
+  publicationLocks: PrivateFilesystemPublicationLockPort,
+  contentHashes: readonly string[],
+): Promise<HeldPublicationContentLock> {
+  let releaseWork!: () => void;
+  let resolveAcquired!: () => void;
+  let rejectAcquired!: (error: unknown) => void;
+  const held = new Promise<void>((resolve) => { releaseWork = resolve; });
+  const acquired = new Promise<void>((resolve, reject) => {
+    resolveAcquired = resolve;
+    rejectAcquired = reject;
+  });
+  const completion = publicationLocks.withPublicationContentLocks(contentHashes, async () => {
+    resolveAcquired();
+    await held;
+  });
+  void completion.catch(rejectAcquired);
+  await acquired;
+  let released = false;
+  return Object.freeze({
+    async release() {
+      if (!released) {
+        released = true;
+        releaseWork();
+      }
+      await completion;
+    }
+  });
 }
 
 function physicalProvenance(
@@ -140,12 +194,34 @@ export async function createPrivateNormalizedAssetPublicationComposition(
   const publicationIdentity = capturedPublicationIdentity;
   const requestRepository = createPostgresNormalizedAssetPublicationRepository(pool);
   const materialization = createPostgresNormalizedAssetMaterializationRepository(pool, storage.candidate);
+  const heldReservations = new Set<ReservationState>();
+  const releaseReservationLock = async (state: ReservationState): Promise<void> => {
+    const contentLock = state.contentLock;
+    if (!contentLock) return;
+    state.contentLock = null;
+    heldReservations.delete(state);
+    await contentLock.release();
+  };
 
   const reserve: PrivateNormalizedAssetPublicationPort["reserve"] = async ({ request, leaseOwner, expiresAt }) => {
+    let contentLock: HeldPublicationContentLock | null = null;
     try {
       const command = physicalCommand(request, leaseOwner, expiresAt);
-      const reservation = await requestRepository.reserveRequest(request);
-      if (reservation.outcome !== "reserved") {
+      const initialReservation = await requestRepository.reserveRequest(request);
+      if (initialReservation.outcome !== "reserved") {
+        throw stableError("normalized_asset_publication_reservation_recoverable");
+      }
+      const contentHashes = Object.freeze([
+        request.original.contentHash,
+        ...request.derivatives.map((derivative) => derivative.artifact.contentHash)
+      ]);
+      contentLock = await holdPublicationContentLocks(storage.candidate, contentHashes);
+      const reservation = await requestRepository.refreshReservedRequest(request);
+      if (reservation.outcome !== "reserved"
+        || reservation.requestId !== initialReservation.requestId
+        || reservation.ownerUserId !== initialReservation.ownerUserId
+        || reservation.canonicalAssetId !== initialReservation.canonicalAssetId
+        || reservation.canonicalContentHash !== initialReservation.canonicalContentHash) {
         throw stableError("normalized_asset_publication_reservation_recoverable");
       }
       let prepared: PrivatePreparedAssetPublication | null = null;
@@ -155,9 +231,19 @@ export async function createPrivateNormalizedAssetPublicationComposition(
         throw stableError("normalized_asset_publication_reservation_recoverable");
       }
       const handle = opaqueReservationHandle();
-      reservations.set(handle, { request, reservation, prepared, discarded: false });
+      const state: ReservationState = {
+        request,
+        reservation,
+        prepared,
+        contentHashes,
+        contentLock,
+        discarded: false
+      };
+      reservations.set(handle, state);
+      heldReservations.add(state);
       return handle;
     } catch {
+      await contentLock?.release().catch(() => undefined);
       throw stableError("normalized_asset_publication_reservation_failed");
     }
   };
@@ -188,79 +274,97 @@ export async function createPrivateNormalizedAssetPublicationComposition(
       });
       return Object.freeze({
         result,
-        finalization: opaqueFinalizationHandle(state.reservation.requestId)
+        finalization: opaqueFinalizationHandle(state.request)
       });
     } catch {
       throw stableError("normalized_asset_publication_attachment_failed");
+    } finally {
+      await releaseReservationLock(state).catch(() => undefined);
     }
   };
 
   const discardAfterRollback: PrivateNormalizedAssetPublicationPort["discardAfterRollback"] = async (
     reservationHandle,
   ) => {
-      const state = reservations.get(reservationHandle);
-      if (!state || state.discarded) {
-        throw stableError("normalized_asset_publication_reservation_unavailable");
+    const state = reservations.get(reservationHandle);
+    if (!state || state.discarded) {
+      throw stableError("normalized_asset_publication_reservation_unavailable");
+    }
+    const discard = async (): Promise<void> => {
+      const eligibility = await requestRepository.prepareRequestDiscard(state.reservation);
+      if (eligibility.outcome !== "discardable") {
+        throw stableError("normalized_asset_publication_discard_unavailable");
+      }
+      if (state.prepared) {
+        await storage.adapter.discardPreparedAssetPublication(state.prepared);
       }
       state.discarded = true;
-      if (!state.prepared) return;
-      const outcomes = await Promise.allSettled([
-        state.prepared.original.rollback(),
-        ...state.prepared.derivatives.map((derivative) => derivative.rollback())
-      ]);
-      if (outcomes.some((outcome) => outcome.status === "rejected")) {
-        throw stableError("normalized_asset_publication_discard_recoverable");
-      }
     };
+    try {
+      if (state.contentLock) {
+        await discard();
+      } else {
+        await storage.candidate.withPublicationContentLocks(state.contentHashes, discard);
+      }
+    } catch (error) {
+      if (error instanceof Error
+        && error.message === "normalized_asset_publication_discard_unavailable") {
+        throw stableError("normalized_asset_publication_discard_unavailable");
+      }
+      throw stableError("normalized_asset_publication_discard_recoverable");
+    } finally {
+      await releaseReservationLock(state).catch(() => undefined);
+    }
+  };
 
   const finalize: PrivateNormalizedAssetPublicationPort["finalize"] = async (
     finalizationHandle,
     recovery,
   ) => {
-      const requestId = finalizations.get(finalizationHandle);
-      if (!requestId) throw stableError("normalized_asset_publication_finalization_unavailable");
-      try {
-        const target = await materialization.readFinalizationTarget(requestId);
-        if (target.requestLifecycle === "published") {
-          return Object.freeze({
-            outcome: "published" as const,
-            result: await materialization.completeRequestById(requestId)
-          });
-        }
-        const identities = await publicationIdentity.readPublicationIdentities(
-          target.ownerUserId,
-          [target.canonicalAssetId],
-        );
-        const identity = identities[0];
-        if (!identity) throw stableError("normalized_asset_publication_finalization_unavailable");
-        if (identity.lifecycle === "published") {
-          return Object.freeze({
-            outcome: "published" as const,
-            result: await materialization.completeRequestById(requestId)
-          });
-        }
-        const reconciliation = await publicationIdentity.reconcileAttachedPublication(identity, recovery);
-        if (reconciliation.outcome === "recoverable") {
-          return Object.freeze({
-            outcome: "recoverable" as const,
-            diagnostic: "asset_publication_finalization_recoverable" as const
-          });
-        }
-        if (reconciliation.outcome === "ready_to_finalize") {
-          await storage.adapter.finalizeAssetPublication(reconciliation.identity.finalization!);
-          await publicationIdentity.completePublication(reconciliation.identity);
-        }
+    const locator = finalizationLocator(finalizationHandle);
+    try {
+      const target = await materialization.readFinalizationTarget(locator);
+      const requestId = target.requestId;
+      if (target.requestLifecycle === "published") {
         return Object.freeze({
           outcome: "published" as const,
           result: await materialization.completeRequestById(requestId)
         });
-      } catch {
+      }
+      const identities = await publicationIdentity.readPublicationIdentities(
+        target.ownerUserId,
+        [target.canonicalAssetId],
+      );
+      const identity = identities[0];
+      if (!identity) throw stableError("normalized_asset_publication_finalization_unavailable");
+      if (identity.lifecycle === "published") {
+        return Object.freeze({
+          outcome: "published" as const,
+          result: await materialization.completeRequestById(requestId)
+        });
+      }
+      const reconciliation = await publicationIdentity.reconcileAttachedPublication(identity, recovery);
+      if (reconciliation.outcome === "recoverable") {
         return Object.freeze({
           outcome: "recoverable" as const,
           diagnostic: "asset_publication_finalization_recoverable" as const
         });
       }
-    };
+      if (reconciliation.outcome === "ready_to_finalize") {
+        await storage.adapter.finalizeAssetPublication(reconciliation.identity.finalization!);
+        await publicationIdentity.completePublication(reconciliation.identity);
+      }
+      return Object.freeze({
+        outcome: "published" as const,
+        result: await materialization.completeRequestById(requestId)
+      });
+    } catch {
+      return Object.freeze({
+        outcome: "recoverable" as const,
+        diagnostic: "asset_publication_finalization_recoverable" as const
+      });
+    }
+  };
 
   const publication: PrivateNormalizedAssetPublicationPort = Object.freeze({
     reserve,
@@ -269,5 +373,15 @@ export async function createPrivateNormalizedAssetPublicationComposition(
     finalize
   });
 
-  return Object.freeze({ publication, close: storage.close });
+  let closed: Promise<void> | undefined;
+  return Object.freeze({
+    publication,
+    close() {
+      closed ??= (async () => {
+        await Promise.allSettled([...heldReservations].map(releaseReservationLock));
+        await storage.close();
+      })();
+      return closed;
+    }
+  });
 }

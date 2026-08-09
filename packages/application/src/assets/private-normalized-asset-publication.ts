@@ -270,8 +270,8 @@ export type PrivateNormalizedAssetReservationHandle = Readonly<{
   [privateNormalizedAssetReservationHandleBrand]: true;
 }>;
 
-/** Opaque post-commit locator. It grants no owner, path, bearer, or mutable library authority. */
-export type PrivateNormalizedAssetFinalizationHandle = Readonly<{
+/** Opaque post-commit locator. It exposes no owner, path, storage bearer, or mutable library authority. */
+export type PrivateNormalizedAssetFinalizationHandle = string & Readonly<{
   [privateNormalizedAssetFinalizationHandleBrand]: true;
 }>;
 

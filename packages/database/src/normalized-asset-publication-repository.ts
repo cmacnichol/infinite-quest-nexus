@@ -41,6 +41,11 @@ export type PrivateNormalizedAssetFinalizationTarget = Readonly<{
   requestLifecycle: "attached" | "published";
 }>;
 
+export type PrivateNormalizedAssetFinalizationLocator = Readonly<{
+  requestFingerprint: string;
+  idempotencyKeyHash: string;
+}>;
+
 export interface PrivateNormalizedAssetMaterializationRepository {
   attachInTransaction(
     database: DurableFilesystemTransactionContext,
@@ -53,7 +58,9 @@ export interface PrivateNormalizedAssetMaterializationRepository {
     reservation: PrivateNormalizedAssetPublicationReservation,
     request: PrivateNormalizedAssetPublicationRequest,
   ): Promise<SafeNormalizedAssetPublicationResult>;
-  readFinalizationTarget(requestId: string): Promise<PrivateNormalizedAssetFinalizationTarget>;
+  readFinalizationTarget(
+    locator: PrivateNormalizedAssetFinalizationLocator,
+  ): Promise<PrivateNormalizedAssetFinalizationTarget>;
   completeRequestById(requestId: string): Promise<SafeNormalizedAssetPublicationResult>;
 }
 
@@ -65,6 +72,12 @@ export interface PrivateNormalizedAssetPublicationRepository {
     database: DurableFilesystemTransactionContext,
     request: PrivateNormalizedAssetPublicationRequest,
   ): Promise<PrivateNormalizedAssetPublicationReservation>;
+  refreshReservedRequest(
+    request: PrivateNormalizedAssetPublicationRequest,
+  ): Promise<PrivateNormalizedAssetPublicationReservation>;
+  prepareRequestDiscard(
+    reservation: PrivateNormalizedAssetPublicationReservation,
+  ): Promise<Readonly<{ outcome: "discardable" | "unavailable" }>>;
   attachRequestInTransaction(
     database: DurableFilesystemTransactionContext,
     request: PrivateNormalizedAssetPublicationRequest,
@@ -888,7 +901,7 @@ export function createPostgresNormalizedAssetMaterializationRepository(
   ) => loadPublishedResult(await callerTransaction(database), reservationValue, request);
 
   const readFinalizationTarget: PrivateNormalizedAssetMaterializationRepository["readFinalizationTarget"] = async (
-    requestId,
+    locator,
   ) => {
     const selected = await pool.query<Readonly<{
       id: string;
@@ -898,10 +911,10 @@ export function createPostgresNormalizedAssetMaterializationRepository(
     }>>(
       `SELECT id,owner_user_id,canonical_asset_id,lifecycle
          FROM asset_publication_requests
-        WHERE id=$1`,
-      [requestId],
+        WHERE request_fingerprint=$1 AND idempotency_key_hash=$2`,
+      [locator.requestFingerprint, locator.idempotencyKeyHash],
     );
-    const row = selected.rows[0];
+    const row = selected.rows.length === 1 ? selected.rows[0] : undefined;
     if (!row?.canonical_asset_id || !["attached", "published"].includes(row.lifecycle)) {
       throw new Error("normalized_asset_publication_finalization_unavailable");
     }
@@ -969,6 +982,48 @@ export function createPostgresNormalizedAssetPublicationRepository(
       request: PrivateNormalizedAssetPublicationRequest,
     ) => (
       reserveWithClient(await callerTransaction(database), request)
+    ),
+    refreshReservedRequest: (request: PrivateNormalizedAssetPublicationRequest) => withTransaction(
+      pool,
+      async (client) => {
+        const row = await selectRequest(
+          client,
+          request.owner.ownerUserId,
+          idempotencyKeyHash(request),
+        );
+        if (!row) throw new Error("normalized_asset_publication_request_unavailable");
+        const stored = await client.query<{ request_fingerprint: string }>(
+          "SELECT request_fingerprint FROM asset_publication_requests WHERE id=$1 FOR KEY SHARE",
+          [row.id],
+        );
+        if (stored.rows[0]?.request_fingerprint !== requestFingerprint(request)) {
+          throw new Error("asset_publication_idempotency_mismatch");
+        }
+        return reservation(row);
+      },
+    ),
+    prepareRequestDiscard: (reservationValue: PrivateNormalizedAssetPublicationReservation) => withTransaction(
+      pool,
+      async (client) => {
+        const selected = await client.query<Readonly<{
+          canonical_asset_id: string | null;
+          canonical_content_hash: string | null;
+          lifecycle: PrivateNormalizedAssetPublicationReservation["lifecycle"];
+        }>>(
+          `SELECT canonical_asset_id,canonical_content_hash,lifecycle
+             FROM asset_publication_requests
+            WHERE id=$1 AND owner_user_id=$2
+            FOR UPDATE`,
+          [reservationValue.requestId, reservationValue.ownerUserId],
+        );
+        const row = selected.rows[0];
+        const matches = row
+          && row.canonical_asset_id === reservationValue.canonicalAssetId
+          && row.canonical_content_hash === reservationValue.canonicalContentHash;
+        return Object.freeze({
+          outcome: matches && row.lifecycle === "prepared" ? "discardable" as const : "unavailable" as const
+        });
+      },
     ),
     attachRequestInTransaction: async (
       database: DurableFilesystemTransactionContext,

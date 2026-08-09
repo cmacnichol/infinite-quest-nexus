@@ -89,6 +89,7 @@ export async function createAssetImportStorageComposition(
       assetRoot: roots.assetRoot,
       journal,
       candidates: durableRepository,
+      publicationCleanup: durableRepository,
       atomicPortable: secureStorageRepository,
       portable: importRepository,
       portablePreview: importRepository,

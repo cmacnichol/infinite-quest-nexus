@@ -4,6 +4,7 @@ import type {
   DurableFilesystemAttachResult,
   DurableFilesystemRecoveryClaim,
   DurableFilesystemTransactionContext,
+  PrivatePublicationCleanupPreparation,
   PrivatePublicationPreparation,
   PrivateStorageDescriptor,
   ReservedFilesystemOperation
@@ -53,6 +54,14 @@ export interface PrivateFilesystemPublicationLockPort {
     contentHashes: readonly string[],
     work: () => Promise<Result>,
   ): Promise<Result>;
+}
+
+/** Durable, globally retained cleanup projection consumed only by the filesystem adapter. */
+export interface PrivateFilesystemPublicationCleanupPort {
+  preparePublicationCleanup(
+    operation: ReservedFilesystemOperation | AttachedFilesystemOperation,
+    claim: DurableFilesystemRecoveryClaim,
+  ): Promise<PrivatePublicationCleanupPreparation>;
 }
 
 function nonBlank(value: string): boolean {
