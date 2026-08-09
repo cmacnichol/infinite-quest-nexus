@@ -26,7 +26,9 @@ async function migrateNormalizedAuthorityDown(pool: DatabasePool): Promise<void>
       dbClient: client,
       dir: resolve("database/migrations"),
       direction: "down",
-      count: 2,
+      // 0065–0067 now follow 0064; reach the normalized-authority down guard
+      // rather than stopping at the later additive private seam migrations.
+      count: 4,
       migrationsTable: "schema_migrations",
       checkOrder: true,
       singleTransaction: true,
@@ -81,6 +83,29 @@ integration("Task 14e3e1b normalized publication migration", () => {
          ) VALUES ($1,$2,'filesystem','legacy/incomplete.png','image/png',1,'{}'::jsonb)
          RETURNING id`,
         [ownerUserId, "b".repeat(64)],
+      );
+      const invalidLegacy = await isolated.query<{ id: string }>(
+        `INSERT INTO assets (
+           owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,
+           pixel_width,pixel_height,technical_metadata
+         ) VALUES ($1,$2,'filesystem','legacy/unverified.bin','application/octet-stream',1,10,20,
+                   '{"format":"bin"}'::jsonb)
+         RETURNING id`,
+        [ownerUserId, "legacy-content-hash-that-is-not-sha256"],
+      );
+      const secondOwnerUserId = crypto.randomUUID();
+      await isolated.query(
+        "INSERT INTO users (id,display_name) VALUES ($1,'Second Legacy Owner')",
+        [secondOwnerUserId],
+      );
+      const sameLabelSecondOwner = await isolated.query<{ id: string }>(
+        `INSERT INTO assets (
+           owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,
+           pixel_width,pixel_height,technical_metadata
+         ) VALUES ($1,$2,'filesystem','legacy/unverified-second-owner.bin','application/octet-stream',1,10,20,
+                   '{"format":"bin"}'::jsonb)
+         RETURNING id`,
+        [secondOwnerUserId, "legacy-content-hash-that-is-not-sha256"],
       );
       const preparedAssetId = crypto.randomUUID();
       const preparedHash = "c".repeat(64);
@@ -142,12 +167,94 @@ integration("Task 14e3e1b normalized publication migration", () => {
           ORDER BY content_hash`,
         [ownerUserId],
       )).resolves.toMatchObject({
-        rows: [
+        rows: expect.arrayContaining([
           { content_hash: "a".repeat(64), canonical_asset_id: complete.rows[0]!.id, verification_state: "verified" },
           { content_hash: "b".repeat(64), canonical_asset_id: incomplete.rows[0]!.id, verification_state: "verification_required" },
           { content_hash: preparedHash, canonical_asset_id: preparedAssetId, verification_state: "verified" }
-        ]
+        ])
       });
+      const invalidArbitration = await isolated.query<{
+        content_hash: string;
+        verification_state: string;
+      }>(
+        `SELECT content_hash,verification_state
+           FROM asset_publication_content_arbitrations
+          WHERE owner_user_id=$1 AND canonical_asset_id=$2`,
+        [ownerUserId, invalidLegacy.rows[0]!.id],
+      );
+      expect(invalidArbitration.rows).toEqual([{
+        content_hash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        verification_state: "verification_required"
+      }]);
+      expect(invalidArbitration.rows[0]!.content_hash).not.toBe("legacy-content-hash-that-is-not-sha256");
+      const secondOwnerArbitration = await isolated.query<{
+        content_hash: string;
+        verification_state: string;
+      }>(
+        `SELECT content_hash,verification_state
+           FROM asset_publication_content_arbitrations
+          WHERE owner_user_id=$1 AND canonical_asset_id=$2`,
+        [secondOwnerUserId, sameLabelSecondOwner.rows[0]!.id],
+      );
+      expect(secondOwnerArbitration.rows).toEqual([{
+        content_hash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        verification_state: "verification_required"
+      }]);
+      expect(invalidArbitration.rows[0]!.content_hash).toBe(sha256(
+        `legacy-unverified-content:${ownerUserId}:${invalidLegacy.rows[0]!.id}`,
+      ));
+      expect(secondOwnerArbitration.rows[0]!.content_hash).toBe(sha256(
+        `legacy-unverified-content:${secondOwnerUserId}:${sameLabelSecondOwner.rows[0]!.id}`,
+      ));
+      expect(secondOwnerArbitration.rows[0]!.content_hash).not.toBe("legacy-content-hash-that-is-not-sha256");
+      expect(secondOwnerArbitration.rows[0]!.content_hash).not.toBe(invalidArbitration.rows[0]!.content_hash);
+      const postMigrationInvalid = await isolated.query<{ id: string }>(
+        `INSERT INTO assets (
+           owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,
+           pixel_width,pixel_height,technical_metadata
+         ) VALUES ($1,$2,'filesystem','legacy/post-migration-unverified.bin','application/octet-stream',1,10,20,
+                   '{"format":"bin"}'::jsonb)
+         RETURNING id`,
+        [ownerUserId, "another-legacy-label-that-is-not-a-sha256"],
+      );
+      await expect(isolated.query<{
+        content_hash: string;
+        verification_state: string;
+      }>(
+        `SELECT content_hash,verification_state
+           FROM asset_publication_content_arbitrations
+          WHERE owner_user_id=$1 AND canonical_asset_id=$2`,
+        [ownerUserId, postMigrationInvalid.rows[0]!.id],
+      )).resolves.toMatchObject({
+        rows: [{
+          content_hash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+          verification_state: "verification_required"
+        }]
+      });
+      await expect(isolated.query(
+        `INSERT INTO asset_publication_requests (
+           owner_user_id,idempotency_key_hash,request_fingerprint,canonical_content_hash,canonical_asset_id
+         ) VALUES ($1,$2,$3,$4,$5)`,
+        [
+          ownerUserId,
+          sha256("invalid-legacy-reuse-idempotency"),
+          sha256("invalid-legacy-reuse-request"),
+          invalidArbitration.rows[0]!.content_hash,
+          invalidLegacy.rows[0]!.id
+        ],
+      )).rejects.toThrow(/verification_required/i);
+      await expect(isolated.query(
+        `INSERT INTO asset_publication_requests (
+           owner_user_id,idempotency_key_hash,request_fingerprint,canonical_content_hash,canonical_asset_id
+         ) VALUES ($1,$2,$3,$4,$5)`,
+        [
+          secondOwnerUserId,
+          sha256("invalid-legacy-other-owner-reuse-idempotency"),
+          sha256("invalid-legacy-other-owner-reuse-request"),
+          secondOwnerArbitration.rows[0]!.content_hash,
+          sameLabelSecondOwner.rows[0]!.id
+        ],
+      )).rejects.toThrow(/verification_required/i);
       await expect(isolated.query<{
         canonical_asset_id: string;
         lifecycle: string;

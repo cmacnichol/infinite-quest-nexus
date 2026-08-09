@@ -132,13 +132,25 @@ CREATE TABLE asset_publication_library_initializations (
 );
 
 -- Backfill every physical legacy asset into the owner/hash arbitration table.
+-- Historical assets predate the normalized SHA-256 contract and can carry an
+-- arbitrary legacy content label.  Preserve such an asset's identity without
+-- laundering that label into the normalized namespace: a deterministic,
+-- owner-and-asset-scoped SHA-256 sentinel is always verification_required.
+-- It cannot authorize reuse, and the original legacy label never leaves the
+-- existing assets row or enter normalized request/arbitration snapshots.
 INSERT INTO asset_publication_content_arbitrations (
   owner_user_id,content_hash,canonical_asset_id,verification_state
 )
 SELECT asset.owner_user_id,
-       asset.content_hash,
+       CASE WHEN asset.content_hash ~ '^[0-9a-f]{64}$' THEN asset.content_hash
+            ELSE encode(sha256(convert_to(
+              'legacy-unverified-content:' || asset.owner_user_id::text || ':' || asset.id::text,
+              'UTF8'
+            )), 'hex')
+       END,
        asset.id,
-       CASE WHEN asset.pixel_width IS NOT NULL
+       CASE WHEN asset.content_hash ~ '^[0-9a-f]{64}$'
+                   AND asset.pixel_width IS NOT NULL
                    AND asset.pixel_height IS NOT NULL
                    AND asset.technical_metadata ? 'format'
             THEN 'verified' ELSE 'verification_required' END
@@ -665,9 +677,15 @@ BEGIN
     owner_user_id,content_hash,canonical_asset_id,verification_state
   ) VALUES (
     NEW.owner_user_id,
-    NEW.content_hash,
+    CASE WHEN NEW.content_hash ~ '^[0-9a-f]{64}$' THEN NEW.content_hash
+         ELSE encode(sha256(convert_to(
+           'legacy-unverified-content:' || NEW.owner_user_id::text || ':' || NEW.id::text,
+           'UTF8'
+         )), 'hex')
+    END,
     NEW.id,
-    CASE WHEN NEW.pixel_width IS NOT NULL
+    CASE WHEN NEW.content_hash ~ '^[0-9a-f]{64}$'
+                AND NEW.pixel_width IS NOT NULL
                 AND NEW.pixel_height IS NOT NULL
                 AND NEW.technical_metadata ? 'format'
          THEN 'verified' ELSE 'verification_required' END

@@ -9384,14 +9384,114 @@ manifests remain unchanged. Evidence: real PostgreSQL/temp-FS e5/e6/e7 25/25;
 focused unit/boundary 19/19; `pnpm check`, `pnpm build`, `git diff --check`, and
 `pjm precheck` passed.
 
-**14e3e8 — additive composition parity and boundaries.** Run real
-PostgreSQL/temp-filesystem and Fastify-independent application matrices for all
-e3e0–e3e7 behaviors. Assert no raw paths/bearers/errors or private contracts
-escape; no live default route/runtime/worker binding changes; zero transitive
-worker-to-API implementation imports; no legacy image writer remains reachable
-from the replacement graph; and the runtime replacement remains unconsumed.
-Only after these matrices pass does Task 14e3f add production-composed parity;
-Task 14e3g performs the atomic server/archive/runtime/worker switch.
+**14e3e8 — additive composition parity and boundaries.** This is a test- and
+guard-only integration checkpoint: it may add private test fixtures, executable
+graph/budget guards, and narrowly-scoped safe projections required by those
+tests, but it must not bind a Fastify route, runtime default, worker loop,
+public barrel, deployment/config default, or legacy writer. Its purpose is to
+prove the complete private replacement graph before e3f adds production-composed
+parity and e3g performs the one atomic server/archive/runtime/worker switch.
+Implement and review these four sub-checkpoints in order:
+
+1. **e8a — frozen composition and consumer inventory:** name every e3e0–e3e7
+   private entry point and the only permitted inbound edges: secure storage
+   composition; normalized publication; illustration publication; portable
+   import and its normalized-publication coordinator; metadata backfill;
+   filesystem recovery; and the asset-maintenance scheduler/composition. Add one
+   exact inventory assertion that finds static imports, re-exports, CommonJS,
+   and literal dynamic imports, resolves aliases plus extensionless relative
+   module and directory-index candidates from the scanned source inventory, and
+   rejects both missing and
+   extra definitions/consumers. It must prove that every replacement remains
+   unconsumed by live API routes, runtime main/default composition, worker loop,
+   public barrels, and deployment/config surfaces; an allowed private-to-private
+   edge must be asserted by exact source, target, symbol, and cardinality rather
+   than permitted by a broad directory exception. The inventory must also prove
+   that no private application contract escapes through any application,
+   contracts, domain, or runtime public barrel.
+2. **e8b — transitive authority and safe-boundary matrix:** traverse each
+   replacement graph transitively, including aliases, namespace/member access,
+   re-exports, CommonJS, and literal dynamic imports. Reject any reachable
+   `services/api/src` implementation from the private worker/recovery/maintenance
+   graph, any worker implementation or runtime-main/live-role edge, and every
+   legacy image/import authority (`asset-service`, legacy archive/import service,
+   0060 publisher, `writeContentAddressed`, `persist*Image`, and retained
+   illustration writer) from its replacement graph; the secure-storage root is
+   included in this scan and may not receive a compatibility skip. Exercise each public-safe
+   private result/outcome boundary with hostile path, descriptor, bearer,
+   credential, URL, raw-error, and private-handle values; only allowlisted IDs,
+   lifecycle/outcome values, bounded metadata, and enum-only diagnostics may
+   survive. Tests must demonstrate that the checker rejects each prohibited
+   graph and value form, so a passing current inventory is not the only proof.
+3. **e8c — Fastify-independent real composition parity:** run a real
+   PostgreSQL/temporary-filesystem matrix directly through the named private
+   application compositions—not a Fastify route, public service, or synthetic
+   repository-only substitute. Cover normalized illustration publication and
+   same-key replay; Campaign ZIP and Legacy Story inline/companion normalized
+   imports, safe optional-image omission, rollback/replay, and same-/cross-owner
+   isolation; e5 thumbnail publication and restart finalization; e6 attached
+   finalization plus cleanup-pending reconciliation; and e7 scheduler rotation,
+   abort/drain, and fresh-composition reclaim. Link those cases through actual
+   claim/operation/request/mapping identities so stale, foreign, expired, or
+   rotated claims cannot finalize, delete, or mutate another owner’s request,
+   import mapping, derivative, or canonical-library record. Assert completed
+   authority is idempotent and fresh recovery never reruns image decode or
+   import domain mutation merely to finalize/clean up. Add an e8-owned hostile
+   result matrix that injects path, descriptor, bearer, credential, URL, raw
+   error, and private-handle-shaped values at these composition boundaries and
+   proves only the safe projection survives. This must be executable alongside
+   the direct e3e0–e7 claim/recovery/cross-owner/no-redecode/no-domain-mutation
+   suites, not a report-only cross-reference.
+4. **e8d — capacity, release, and drift proof:** measure composition-created
+   resources with an injected/observed pool boundary. A private composition and
+   e7 tick may borrow/release clients from the supplied pool only; they must not
+   create a pool, alter worker pool formulas, add a maintenance lane, retain an
+   unchecked client after success/fault/abort, or consume an extra unit while a
+   prior unit drains. Freeze the existing `generation + 4` worker and `+8` all
+   process budget with adversarial source fixtures: parse the executable
+   `requiredWorkerConnections` conditional in `config.ts` and require the exact
+   `workerGenerationConcurrency + 4` and `+ 8` branches, rather than accepting
+   a comment or unrelated expression containing that text. For Compose and
+   Swarm, strip YAML comments before locating the named role's environment
+   values and prove its executable connection default is at least the configured
+   generation default plus the applicable 4/8 increment. Include a hostile
+   fixture that leaves `+ 4`/`+ 8` in comments while changing the executable
+   branches to `+ 5`/`+ 9`; it must fail both budget checks. The graph fixture
+   matrix must cover extensionless static imports and re-exports in addition to
+   CommonJS and literal dynamic imports. Assert the private graph has no importer from the live worker/default runtime.
+   Measure real supplied-pool borrow/release state across private scheduler
+   success, fault, abort, and drain: no checked-out client may survive, no
+   second pool may be constructed, and capacity remains one. Re-run each existing e3e0–e7
+   focused matrix alongside the new cross-composition cases, `pnpm check`,
+   `pnpm build`, `git diff --check`, and `pjm precheck`. The real PostgreSQL
+   matrices must receive one isolated database (or schema) per Vitest file, or
+   run serially with equivalent fixture isolation: their intentionally shared
+   initial-owner/lease fixtures may collide when independent files execute
+   concurrently against one database. Encode that rule in a checked-in runner
+   that starts one Vitest/config invocation per named file and fails the whole
+   matrix on any child failure; documentation alone is not acceptance evidence.
+   Record such harness interference separately rather than treating it as
+   evidence for or against the private parity checkpoint.
+
+**Historical migration correction required by e8 verification.** A 0064 failure
+on an existing legacy `assets.content_hash` label must be corrected in 0064,
+not deferred to a later migration: the normalized arbitration table and its
+strict 64-lowercase-hex check are created and backfilled by 0064, so no later
+migration can run if its input is rejected. Preserve that strict check and the
+meaning of `verified` for every valid SHA-256 identity. Only a legacy value
+that is not a 64-lowercase-hex digest may be replaced, in the 0064 backfill and
+the retained legacy assets trigger, by a deterministic SHA-256 sentinel derived
+from the owner UUID and asset UUID (never the raw legacy label). Mark that
+arbitration `verification_required`; normalized requests must remain unable to
+reuse it until an explicit verified path exists. The migration regression must
+cover both a pre-0064 invalid legacy row and a post-0064 legacy insert, assert
+the stored sentinel is valid/non-raw and owner/asset-scoped. Insert the same
+invalid label for distinct owner/asset rows and assert the exact owner+asset-
+derived sentinels are each valid, distinct, verification-required, and
+individually blocked from normalized reuse.
+
+Only after every e8a–e8d matrix passes may Task 14e3f add production-composed
+parity; Task 14e3g remains the sole atomic live switch.
 
 **14e3f — production-composed parity before switch.** With legacy bindings
 still active, add real-Fastify, real-worker, and real-PostgreSQL matrices for
