@@ -270,6 +270,18 @@ export function createFakeDurableFilesystemLifecycle(): FakeDurableFilesystemLif
       observedEvents.push("cleaned");
       return { outcome: "cleaned" };
     },
+    async heartbeatRecoveryClaim(claim, leaseSeconds) {
+      const operation = operationById.get(claim.operationId);
+      if (!operation || !Number.isInteger(leaseSeconds) || leaseSeconds < 1) return null;
+      const claimStatus = claimOutcome(operation, operation.reservation, claim);
+      if (claimStatus !== "valid") return null;
+      operation.activeClaim = {
+        ...claim,
+        leaseExpiresAt: new Date(Date.now() + leaseSeconds * 1_000).toISOString()
+      } as DurableFilesystemRecoveryClaim;
+      observedEvents.push("heartbeat");
+      return operation.activeClaim;
+    },
     async recover(request) {
       const records: DurableFilesystemRecoveryRecord[] = [];
       for (const operation of operationById.values()) {

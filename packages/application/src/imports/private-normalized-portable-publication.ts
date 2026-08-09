@@ -114,6 +114,11 @@ export interface PrivatePortableNormalizedAssetPublicationCoordinator {
     leaseOwner: string;
     leaseSeconds: number;
   }>): Promise<PrivatePortableNormalizedFinalizationOutcome>;
+  /** Private durable-recovery reconciliation; accepts only database-derived IDs. */
+  reconcileRetirements(input: Readonly<{
+    ownerUserId: string;
+    operationId: string;
+  }>): Promise<Readonly<{ retired: number; pending: number }>>;
   recoverCommitted(input: Readonly<{
     ownerUserId: string;
     previewToken: string;

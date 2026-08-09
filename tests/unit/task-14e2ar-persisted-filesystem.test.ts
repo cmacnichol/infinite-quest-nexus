@@ -410,6 +410,7 @@ describe("Task 14e2aR persisted filesystem capability", () => {
       finalizeAfterCommit: fail,
       markCleanup: fail,
       completeCleanup: fail,
+      heartbeatRecoveryClaim: fail,
       recover: fail
     };
     const adapter = createPortableArchiveFilesystemAdapter({

@@ -81,6 +81,19 @@ const FACTORY_FIXTURES: readonly Source[] = [
     `
   },
   {
+    file: "services/runtime/src/private-filesystem-recovery-composition.ts",
+    text: `
+      import { createAssetImportStorageComposition } from "./asset-import-composition.js";
+      import { createPrivateNormalizedAssetPublicationComposition } from "./normalized-asset-publication-composition.js";
+      import { createPrivatePortableNormalizedAssetPublicationComposition } from "./portable-normalized-asset-publication-composition.js";
+      export function createPrivateFilesystemRecoveryComposition() {
+        createAssetImportStorageComposition(pool, roots);
+        createPrivateNormalizedAssetPublicationComposition(pool, roots);
+        createPrivatePortableNormalizedAssetPublicationComposition(pool, roots);
+      }
+    `
+  },
+  {
     file: "services/runtime/src/portable-normalized-asset-publication-composition.ts",
     text: `
       import { createPostgresPortableNormalizedAssetPublicationRepository } from "../../../packages/database/src/portable-normalized-asset-publication-repository.js";

@@ -208,6 +208,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
       attach: unsupported,
       markCleanup: unsupported,
       completeCleanup: unsupported,
+      heartbeatRecoveryClaim: unsupported,
       recover: unsupported
     };
     const prewrite = {
@@ -319,6 +320,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
         completeCleanup,
         finalizeAfterCommit: unsupported,
         attach: unsupported,
+        heartbeatRecoveryClaim: async (value) => value,
         recover: unsupported
       },
       prewrite: {
@@ -385,6 +387,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
         attach: unsupported,
         markCleanup,
         completeCleanup,
+        heartbeatRecoveryClaim: async (value) => value,
         recover: unsupported
       },
       prewrite: {
@@ -953,6 +956,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
         attach: unsupported,
         finalizeAfterCommit: unsupported,
         markCleanup: unsupported,
+        heartbeatRecoveryClaim: async (value) => value,
         recover: unsupported
       },
       transactions: { async run(work) { return work({}); } }
@@ -1022,7 +1026,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
       },
       portable: {
         async prepareRecoveryCleanup(_database, value) {
-          expect(value).toBe(recovery);
+          expect(value).toMatchObject({ operation, claim: recoveryClaim });
           expect(value).not.toHaveProperty("retrieval");
           return preparation;
         },
@@ -1044,6 +1048,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
         attach: unsupported,
         finalizeAfterCommit: unsupported,
         markCleanup: unsupported,
+        heartbeatRecoveryClaim: async (value) => value,
         recover: unsupported
       },
       transactions: { async run(work) { return work({}); } }

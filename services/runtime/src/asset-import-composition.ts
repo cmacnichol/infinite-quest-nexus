@@ -42,8 +42,11 @@ import { withTransaction, type DatabaseClient, type DatabasePool } from "../../.
 import { createPostgresSecureStorageRepository } from "../../../packages/database/src/secure-storage-repository.js";
 import {
   createSecureFilesystemAdapter,
-  type SecureFilesystemAdapter
+  type SecureFilesystemAdapter,
+  type SecureFilesystemAdapterOptions
 } from "./secure-filesystem-adapter.js";
+
+export type AssetImportStorageRecoveryHooks = Pick<SecureFilesystemAdapterOptions, "recoveryHooks">;
 
 export type AssetImportStorageComposition = Readonly<{
   adapter: SecureFilesystemAdapter;
@@ -75,6 +78,7 @@ export async function createAssetImportStorageComposition(
   pool: DatabasePool,
   roots: Readonly<{ archiveRoot: string; assetRoot: string }>,
   capturePublicationIdentity?: (publication: PrivateAssetPublicationIdentityPort) => void,
+  recoveryHooks?: AssetImportStorageRecoveryHooks,
 ): Promise<AssetImportStorageComposition> {
   const durableRepository = createPostgresDurableFilesystemRepository(pool);
   const journal = createDurableFilesystemLifecycle(durableRepository.journal);
@@ -100,6 +104,7 @@ export async function createAssetImportStorageComposition(
       prewrite: secureStorageRepository,
       expiry: secureStorageRepository,
       delivery: finalizedDeliveryRepository,
+      ...recoveryHooks,
       transactions: Object.freeze({
         run<Result>(work: (database: object) => Promise<Result>): Promise<Result> {
           return withTransaction(pool, (client) => work(client));

@@ -347,6 +347,11 @@ export async function createPrivatePortableNormalizedAssetPublicationComposition
         leaseSeconds: input.leaseSeconds
       });
     },
+    reconcileRetirements(
+      input: Parameters<PrivatePortableNormalizedAssetPublicationCoordinator["reconcileRetirements"]>[0],
+    ) {
+      return repository.reconcileRetirements(input.ownerUserId, input.operationId);
+    },
     async recoverCommitted(
       input: Parameters<PrivatePortableNormalizedAssetPublicationCoordinator["recoverCommitted"]>[0],
     ) {

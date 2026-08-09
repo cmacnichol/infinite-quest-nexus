@@ -752,7 +752,20 @@ export function createPostgresDurableFilesystemRepository(
     if (identity !== "valid") return { outcome: identity };
     if (row.lifecycle === "cleaned") return { outcome: "already_cleaned" };
     if (row.lease_expires_at.getTime() <= Date.now()) return { outcome: "lease_lost" };
-    if (row.lifecycle === "cleanup_pending") return { outcome: "cleanup_pending" };
+    if (row.lifecycle === "cleanup_pending") {
+      // A recovery action can discover a safe diagnostic only after this
+      // durable intent exists. Preserve the same fenced operation while
+      // recording that enum-only evidence for the retry owner.
+      if (request.diagnosticCode !== undefined) {
+        await client.query(
+          `UPDATE durable_filesystem_operations
+              SET diagnostic_code=$3,updated_at=now()
+            WHERE id=$1 AND owner_user_id=$2 AND lifecycle='cleanup_pending'`,
+          [row.id, row.owner_user_id, request.diagnosticCode],
+        );
+      }
+      return { outcome: "cleanup_pending" };
+    }
     if (!(["reserved", "attached", "finalized"] as OperationLifecycle[]).includes(row.lifecycle)) {
       return { outcome: "stale" };
     }
@@ -785,13 +798,52 @@ export function createPostgresDurableFilesystemRepository(
     return { outcome: "cleaned" };
   });
 
+  const heartbeatRecoveryClaim: DurableFilesystemJournalPort["heartbeatRecoveryClaim"] = async (
+    claim,
+    leaseSeconds,
+  ) => {
+    if (!Number.isInteger(leaseSeconds) || leaseSeconds < 1 || leaseSeconds > 300) {
+      throw new Error("durable_filesystem_recovery_lease_invalid");
+    }
+    const renewed = await pool.query<OperationRow>(
+      `UPDATE durable_filesystem_operations operation
+          SET lease_expires_at=clock_timestamp()+($6::text || ' seconds')::interval,
+              updated_at=clock_timestamp()
+        WHERE operation.id=$1 AND operation.work_version=$2
+          AND operation.lease_id=$3 AND operation.lease_owner=$4
+          AND date_trunc('milliseconds',operation.lease_expires_at)=$5::timestamptz
+          AND operation.lifecycle IN ('reserved','attached','cleanup_pending')
+          AND operation.lease_expires_at>clock_timestamp()
+        RETURNING ${operationColumns("operation")}`,
+      [
+        claim.operationId,
+        claim.workVersion,
+        claim.leaseId,
+        claim.leaseOwner,
+        claim.leaseExpiresAt,
+        leaseSeconds,
+      ],
+    );
+    return renewed.rows[0] ? recoveryClaim(renewed.rows[0]) : null;
+  };
+
   const recover = async (
     request: DurableFilesystemRecoveryRequest,
   ): Promise<readonly DurableFilesystemRecoveryRecord[]> => withTransaction(pool, async (client) => {
+    const resourceKinds = request.resourceKinds === undefined
+      ? ["asset", "portable"]
+      : [...new Set(request.resourceKinds)];
+    if (!request.leaseOwner.trim()
+      || !Number.isInteger(request.leaseSeconds) || request.leaseSeconds < 1 || request.leaseSeconds > 300
+      || !Number.isInteger(request.limit) || request.limit < 1 || request.limit > 256
+      || resourceKinds.length === 0 || resourceKinds.some((kind) => kind !== "asset" && kind !== "portable")) {
+      throw new Error("durable_filesystem_recovery_request_invalid");
+    }
     const claimed = await client.query<OperationRow>(
       `WITH candidates AS (
          SELECT id FROM durable_filesystem_operations
           WHERE lifecycle IN ('reserved','attached','cleanup_pending')
+            AND resource_kind=ANY($4::text[])
             AND (lease_expires_at <= now() OR expires_at <= now())
           ORDER BY created_at,id
           FOR UPDATE SKIP LOCKED
@@ -803,7 +855,7 @@ export function createPostgresDurableFilesystemRepository(
          FROM candidates
         WHERE operation.id=candidates.id
        RETURNING ${operationColumns("operation")}`,
-      [request.limit, request.leaseOwner, request.leaseSeconds]
+      [request.limit, request.leaseOwner, request.leaseSeconds, resourceKinds]
     );
     const records: DurableFilesystemRecoveryRecord[] = [];
     for (const row of claimed.rows) {
@@ -849,7 +901,7 @@ export function createPostgresDurableFilesystemRepository(
   });
 
   return {
-    journal: { reserve, attach, finalizeAfterCommit, markCleanup, completeCleanup, recover },
+    journal: { reserve, attach, finalizeAfterCommit, markCleanup, completeCleanup, heartbeatRecoveryClaim, recover },
     persistCandidate,
     redeemCandidate,
     attachCandidate,

@@ -123,6 +123,8 @@ export type DurableFilesystemRecoveryRequest = Readonly<{
   leaseOwner: string;
   leaseSeconds: number;
   limit: number;
+  /** Private maintenance lanes can narrow work without supplying row authority. */
+  resourceKinds?: readonly ("asset" | "portable")[];
 }>;
 
 export type DurableFilesystemRecoveryRecord =
@@ -162,6 +164,11 @@ export interface DurableFilesystemJournalPort {
     operation: ReservedFilesystemOperation | AttachedFilesystemOperation,
     claim: DurableFilesystemRecoveryClaim,
   ): Promise<DurableFilesystemCleanupCompletionResult>;
+  /** Renew exactly one database-derived recovery lease; no caller scope is accepted. */
+  heartbeatRecoveryClaim(
+    claim: DurableFilesystemRecoveryClaim,
+    leaseSeconds: number,
+  ): Promise<DurableFilesystemRecoveryClaim | null>;
   recover(request: DurableFilesystemRecoveryRequest): Promise<readonly DurableFilesystemRecoveryRecord[]>;
 }
 
@@ -308,12 +315,23 @@ export function createDurableFilesystemLifecycle(journal: DurableFilesystemJourn
       requireClaim(claim);
       return journal.completeCleanup(operation, claim);
     },
+    heartbeatRecoveryClaim: async (claim, leaseSeconds) => {
+      requireClaim(claim);
+      if (!Number.isInteger(leaseSeconds) || leaseSeconds < 1 || leaseSeconds > 300) {
+        throw new Error("filesystem_recovery_scope_invalid");
+      }
+      return journal.heartbeatRecoveryClaim(claim, leaseSeconds);
+    },
     recover: async (request) => {
       if (!nonBlank(request.leaseOwner)
         || !Number.isInteger(request.leaseSeconds)
         || request.leaseSeconds <= 0
         || !Number.isInteger(request.limit)
-        || request.limit <= 0) {
+        || request.limit <= 0
+        || (request.resourceKinds !== undefined && (
+          request.resourceKinds.length === 0
+          || request.resourceKinds.some((kind) => kind !== "asset" && kind !== "portable")
+        ))) {
         throw new Error("filesystem_recovery_scope_invalid");
       }
       return journal.recover(request);

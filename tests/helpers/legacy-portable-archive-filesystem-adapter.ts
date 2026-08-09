@@ -600,6 +600,9 @@ function createSafeDurableFilesystemLifecycle(
     completeCleanup: (operation, claim) => guarded(
       () => lifecycle.completeCleanup(operation, claim),
     ),
+    heartbeatRecoveryClaim: (claim, leaseSeconds) => guarded(
+      () => lifecycle.heartbeatRecoveryClaim(claim, leaseSeconds),
+    ),
     recover: (request) => guarded(() => lifecycle.recover(request))
   };
 }

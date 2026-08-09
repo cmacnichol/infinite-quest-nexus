@@ -61,6 +61,7 @@ export type PrivateAssetMetadataBackfillExecutorRepository = Readonly<{
     technicalMetadata: Readonly<{ format: "png" | "jpeg" | "webp" | "gif"; pages: 1; orientation: number | null }>,
   ): Promise<PrivateAssetMetadataBackfillFinalization | null>;
   completeFinalization(claim: PrivateAssetMetadataBackfillClaim, operationId: string): Promise<"completed" | "stale" | "lease_lost">;
+  reconcileFinalizedOperation(input: Readonly<{ operationId: string; ownerUserId: string }>): Promise<"completed" | "pending" | "noop">;
   fail(claim: PrivateAssetMetadataBackfillClaim, diagnosticCode: AssetFilesystemDiagnosticCode): Promise<"recoverable" | "failed" | "stale" | "lease_lost">;
 }>;
 
@@ -391,6 +392,45 @@ export function createPostgresAssetMetadataBackfillExecutorRepository(
     return completed.rowCount ? "completed" as const : "stale" as const;
   });
 
+  const reconcileFinalizedOperation: PrivateAssetMetadataBackfillExecutorRepository["reconcileFinalizedOperation"] = async (input) => withTransaction(pool, async (database) => {
+    const publication = await database.query<Readonly<{ asset_id: string; job_id: string; job_status: string; lease_expires_at: Date | null }>>(
+      `SELECT publication.asset_id,job.id AS job_id,job.status AS job_status,job.lease_expires_at
+         FROM asset_metadata_backfill_publications publication
+         JOIN asset_metadata_backfill_jobs job
+           ON job.owner_user_id=publication.owner_user_id AND job.asset_id=publication.asset_id
+         JOIN durable_filesystem_operations operation
+           ON operation.id=publication.filesystem_operation_id
+          AND operation.owner_user_id=publication.owner_user_id
+        WHERE publication.filesystem_operation_id=$1 AND publication.owner_user_id=$2
+          AND publication.lifecycle='attached' AND operation.lifecycle='finalized'
+        FOR UPDATE OF publication,job,operation`,
+      [input.operationId, input.ownerUserId],
+    );
+    const row = publication.rows[0];
+    if (!row) return "noop" as const;
+    if (row.job_status === "running" && row.lease_expires_at !== null && row.lease_expires_at.getTime() > Date.now()) {
+      return "pending" as const;
+    }
+    if (!["running", "recoverable", "queued"].includes(row.job_status)) {
+      return "pending" as const;
+    }
+    const published = await database.query(
+      `UPDATE asset_metadata_backfill_publications
+          SET lifecycle='published',published_at=clock_timestamp(),updated_at=clock_timestamp()
+        WHERE owner_user_id=$1 AND asset_id=$2 AND filesystem_operation_id=$3 AND lifecycle='attached'`,
+      [input.ownerUserId, row.asset_id, input.operationId],
+    );
+    if (published.rowCount !== 1) return "pending" as const;
+    await database.query(
+      `UPDATE asset_metadata_backfill_jobs
+          SET status='completed',diagnostic_code=NULL,lease_id=NULL,lease_owner=NULL,lease_expires_at=NULL,
+              completed_at=clock_timestamp(),updated_at=clock_timestamp()
+        WHERE id=$1 AND status IN ('running','recoverable','queued')`,
+      [row.job_id],
+    );
+    return "completed" as const;
+  });
+
   const fail: PrivateAssetMetadataBackfillExecutorRepository["fail"] = async (claimValue, diagnosticCode) => {
     if (!DIAGNOSTICS.has(diagnosticCode)) throw new Error("asset_metadata_backfill_diagnostic_invalid");
     const updated = await pool.query<Readonly<{ status: "recoverable" | "failed" }>>(
@@ -415,6 +455,7 @@ export function createPostgresAssetMetadataBackfillExecutorRepository(
     completeWithExistingThumbnail,
     attachThumbnail,
     completeFinalization,
+    reconcileFinalizedOperation,
     fail
   });
 }

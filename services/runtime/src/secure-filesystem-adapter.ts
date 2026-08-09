@@ -14,10 +14,12 @@ import type {
 export { bindLegacyPathV1PreviewDescriptor } from "../../../packages/application/src/assets/private-secure-storage.js";
 import type {
   DurableFilesystemJournalPort,
+  DurableFilesystemRecoveryRecord,
   DurableFilesystemTransactionContext,
   PrivateStorageDescriptor,
   ReservedFilesystemOperation
 } from "../../../packages/application/src/assets/private-storage-lifecycle.js";
+import type { PrivateFilesystemRecoveryOutcome } from "../../../packages/application/src/assets/private-filesystem-recovery.js";
 import {
   bindPrivatePrewriteNodeAuthority,
   bindPrivatePrewriteTargetAuthority
@@ -28,7 +30,7 @@ import {
   type PrivateFilesystemPublicationCleanupPort
 } from "../../../packages/application/src/assets/private-filesystem-repository.js";
 import type { FinalizedAssetDeliveryResolverPort } from "../../../packages/application/src/assets/private-finalized-delivery.js";
-import type { AssetDeliveryRequest, AssetScope } from "../../../packages/application/src/assets/types.js";
+import type { AssetDeliveryRequest, AssetFilesystemDiagnosticCode, AssetScope } from "../../../packages/application/src/assets/types.js";
 import type {
   PrivateMetadataBackfillThumbnailPreparation,
   PrivatePreparedMetadataBackfillThumbnail
@@ -92,6 +94,13 @@ export type SecureFilesystemAdapterOptions = Readonly<{
   atomicPortable?: PrivateAtomicPortableIssuancePort;
   prewrite?: PrivatePrewriteNodeRepositoryPort;
   expiry?: PrivatePortableExpiryRecoveryPort;
+  /** Private recovery seam used to coordinate an in-process filesystem drain. */
+  recoveryHooks?: Readonly<{
+    beforePhysicalDelete?(input: Readonly<{
+      recovery: DurableFilesystemRecoveryRecord;
+      descriptor: PrivateStorageDescriptor;
+    }>): Promise<void> | void;
+  }>;
   transactions: SecureFilesystemTransactionRunner;
 }>;
 
@@ -160,6 +169,17 @@ export type SecureFilesystemAdapter = Readonly<{
     leaseSeconds: number;
     limit: number;
   }>): Promise<Readonly<{ claimed: number; cleaned: number; pending: number }>>;
+  /** e6 obtains portable recovery evidence here, then owns its renewable claim loop. */
+  claimExpiredPortableRecoveries(input: Readonly<{
+    leaseOwner: string;
+    leaseSeconds: number;
+    limit: number;
+  }>): Promise<readonly DurableFilesystemRecoveryRecord[]>;
+  /** e6-only execution of database-derived recovery evidence. */
+  recoverFilesystemOperation(
+    recovery: DurableFilesystemRecoveryRecord,
+    currentRecovery?: () => DurableFilesystemRecoveryRecord | null,
+  ): Promise<PrivateFilesystemRecoveryOutcome>;
   close(): Promise<void>;
 }>;
 
@@ -196,6 +216,16 @@ function procPath(handle: FileHandle, segment?: string): string {
 
 function isMissingNode(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+function recoveryDiagnostic(error: unknown): AssetFilesystemDiagnosticCode {
+  const message = error instanceof Error ? error.message : "";
+  if (/hash|content_hash|stream_hash/u.test(message)) return "asset_hash_mismatch";
+  if (/size|byte|too_large|limit/u.test(message)) return "asset_too_large";
+  if (/signature|mime|decode|dimensions|unsupported/u.test(message)) return "asset_unsupported_media";
+  if (/containment|link|path|identity|race/u.test(message)) return "filesystem_containment_denied";
+  if (/delivery|storage|stream|filesystem/u.test(message)) return "asset_storage_unavailable";
+  return "asset_metadata_unavailable";
 }
 
 async function openRoot(rootPath: string): Promise<RootHandle> {
@@ -1270,61 +1300,201 @@ export async function createSecureFilesystemAdapter(
     }
   });
 
-  const reapExpiredPortable: SecureFilesystemAdapter["reapExpiredPortable"] = async (input) => {
+  const claimExpiredPortableRecoveries: SecureFilesystemAdapter["claimExpiredPortableRecoveries"] = async (input) => {
     requireAdapterOpen();
-    if (!options.expiry || !options.portable || !options.prewrite || !options.journal) {
+    if (!options.expiry) {
       throw new Error("portable_reaper_repository_unavailable");
     }
-    const recoveries = await options.expiry.claimExpiredPortableWork(input);
+    return options.expiry.claimExpiredPortableWork(input);
+  };
+
+  const reapExpiredPortable: SecureFilesystemAdapter["reapExpiredPortable"] = async (input) => {
+    requireAdapterOpen();
+    if (!options.journal) throw new Error("portable_reaper_repository_unavailable");
+    const recoveries = await claimExpiredPortableRecoveries(input);
     let cleaned = 0;
     let pending = 0;
-    for (const recovery of recoveries) {
+    for (const initialRecovery of recoveries) {
+      const renewed = await options.journal.heartbeatRecoveryClaim(initialRecovery.claim, input.leaseSeconds);
+      if (!renewed) {
+        pending += 1;
+        continue;
+      }
+      let recovery = Object.freeze({ ...initialRecovery, claim: renewed }) as DurableFilesystemRecoveryRecord;
+      let heartbeatLost = false;
+      let terminal = false;
+      let activeHeartbeat: Promise<void> | undefined;
+      const pulse = (): Promise<void> => {
+        activeHeartbeat ??= options.journal!.heartbeatRecoveryClaim(recovery.claim, input.leaseSeconds)
+          .then((next) => {
+            if (!next) {
+              if (!terminal) heartbeatLost = true;
+              return;
+            }
+            recovery = Object.freeze({ ...recovery, claim: next }) as DurableFilesystemRecoveryRecord;
+          })
+          .catch(() => { if (!terminal) heartbeatLost = true; })
+          .finally(() => { activeHeartbeat = undefined; });
+        return activeHeartbeat;
+      };
+      const interval = setInterval(() => { void pulse(); }, Math.max(50, Math.floor(input.leaseSeconds * 333)));
       try {
-        await closePortableHandles(recovery.operation.operationId);
-        const portable = await options.transactions.run(
-          (database) => options.portable!.prepareRecoveryCleanup(database, recovery),
+        const outcome = await recoverFilesystemOperation(
+          recovery,
+          () => heartbeatLost ? null : recovery,
         );
-        if (portable.outcome === "cleanup_required") {
-          for (const value of portable.descriptors) {
-            await identitySafeDelete(archiveRoot, value);
-          }
-          const acknowledged = portable.identity.portableKind === "staged_input"
-            ? await options.transactions.run((database) => options.portable!.acknowledgeStagedCleanup(
-              database,
-              portable as PrivatePortableStagedCleanupPreparation,
-            ))
-            : await options.transactions.run((database) => options.portable!.acknowledgeExportCleanup(
-              database,
-              portable as PrivatePortableExportCleanupPreparation,
-            ));
-          if (!["cleaned", "already_cleaned"].includes(acknowledged.outcome)) {
-            throw new Error(`portable_reaper_ack_${acknowledged.outcome}`);
-          }
+        terminal = ["cleaned", "quarantined", "finalized"].includes(outcome.outcome);
+        if (outcome.outcome === "cleaned") {
           cleaned += 1;
-          continue;
-        }
-        const prewrite = await options.transactions.run(
-          (database) => options.prewrite!.preparePrewriteCleanup(database, recovery),
-        );
-        if (prewrite.outcome !== "cleanup_required") {
+        } else {
           pending += 1;
-          continue;
         }
-        await identitySafeDeletePrewrite(
-          archiveRoot,
-          prewrite.relativePath,
-          prewrite.identity,
-        );
-        const completed = await options.journal.completeCleanup(prewrite.operation, prewrite.claim);
-        if (!["cleaned", "already_cleaned"].includes(completed.outcome)) {
-          throw new Error(`portable_reaper_complete_${completed.outcome}`);
-        }
-        cleaned += 1;
       } catch {
         pending += 1;
+      } finally {
+        clearInterval(interval);
+        await activeHeartbeat;
       }
     }
     return Object.freeze({ claimed: recoveries.length, cleaned, pending });
+  };
+
+  const recoverFilesystemOperation: SecureFilesystemAdapter["recoverFilesystemOperation"] = async (
+    recovery,
+    currentRecovery = () => recovery,
+  ) => {
+    requireAdapterOpen();
+    const journal = options.journal;
+    if (!journal || !options.prewrite) {
+      throw new Error("filesystem_recovery_repository_unavailable");
+    }
+    const latest = (): DurableFilesystemRecoveryRecord | null => {
+      const current = currentRecovery();
+      if (!current) return null;
+      // Portable recovery makes a second record authoritative during expiry
+      // claim preparation. Never let a stale worker borrow a rotated claim.
+      if (recovery.operation.resourceKind !== "portable") return current;
+      if (current.action !== recovery.action
+        || current.operation.operationId !== recovery.operation.operationId
+        || current.operation.resourceKind !== recovery.operation.resourceKind
+        || current.claim.leaseId !== recovery.claim.leaseId
+        || current.claim.leaseOwner !== recovery.claim.leaseOwner
+        || current.claim.workVersion !== recovery.claim.workVersion) return null;
+      return current;
+    };
+    const cleanupDiagnostic = async (code: NonNullable<PrivateFilesystemRecoveryOutcome["diagnosticCode"]>): Promise<void> => {
+      const current = latest();
+      if (!current) return;
+      await journal.markCleanup(current.operation, current.claim, { cause: "recovery", diagnosticCode: code }).catch(() => undefined);
+    };
+    try {
+      const initial = latest();
+      if (!initial) return Object.freeze({ outcome: "lease_lost" });
+      if (initial.action === "finalize") {
+        const finalized = await journal.finalizeAfterCommit(initial.operation, initial.claim);
+        return Object.freeze({ outcome: finalized.outcome === "already_finalized" ? "finalized" : finalized.outcome });
+      }
+      if (initial.operation.resourceKind === "portable") {
+        await closePortableHandles(initial.operation.operationId);
+        const preparedRecovery = latest();
+        if (!preparedRecovery) return Object.freeze({ outcome: "lease_lost" });
+        if (Object.hasOwn(preparedRecovery.operation, "expiresAt")) {
+          const prewrite = await options.transactions.run(
+            (database) => options.prewrite!.preparePrewriteCleanup(database, preparedRecovery),
+          );
+          if (prewrite.outcome === "quarantined") return Object.freeze({ outcome: "quarantined" });
+          if (prewrite.outcome !== "cleanup_required") {
+            return Object.freeze({ outcome: prewrite.outcome === "already_cleaned" ? "cleaned" : prewrite.outcome });
+          }
+          if (!latest()) return Object.freeze({ outcome: "lease_lost" });
+          await identitySafeDeletePrewrite(archiveRoot, prewrite.relativePath, prewrite.identity);
+          const completionRecovery = latest();
+          if (!completionRecovery) return Object.freeze({ outcome: "lease_lost" });
+          const completed = await journal.completeCleanup(prewrite.operation, completionRecovery.claim);
+          return Object.freeze({ outcome: completed.outcome === "already_cleaned" ? "cleaned" : completed.outcome });
+        }
+        if (!options.portable) throw new Error("portable_reaper_repository_unavailable");
+        const portable = await options.transactions.run(
+          (database) => options.portable!.prepareRecoveryCleanup(database, preparedRecovery),
+        );
+        if (portable.outcome !== "cleanup_required") {
+          return Object.freeze({ outcome: portable.outcome === "already_cleaned" ? "cleaned" : portable.outcome });
+        }
+        for (const descriptor of portable.descriptors) {
+          const current = latest();
+          if (!current) return Object.freeze({ outcome: "lease_lost" });
+          await options.recoveryHooks?.beforePhysicalDelete?.({ recovery: current, descriptor });
+          if (!latest()) return Object.freeze({ outcome: "lease_lost" });
+          await identitySafeDelete(archiveRoot, descriptor);
+          if (!latest()) return Object.freeze({ outcome: "lease_lost" });
+        }
+        const acknowledgementRecovery = latest();
+        if (!acknowledgementRecovery) return Object.freeze({ outcome: "lease_lost" });
+        // A heartbeat changes the exact expiry-bearing claim. Re-prepare using
+        // that latest claim, then fence the acknowledgement with it as well.
+        const acknowledgementPreparation = await options.transactions.run(
+          (database) => options.portable!.prepareRecoveryCleanup(database, acknowledgementRecovery),
+        );
+        if (acknowledgementPreparation.outcome !== "cleanup_required") {
+          return Object.freeze({ outcome: acknowledgementPreparation.outcome === "already_cleaned"
+            ? "cleaned"
+            : acknowledgementPreparation.outcome });
+        }
+        if (!latest()) return Object.freeze({ outcome: "lease_lost" });
+        const acknowledged = acknowledgementPreparation.identity.portableKind === "staged_input"
+          ? await options.transactions.run((database) => options.portable!.acknowledgeStagedCleanup(
+            database,
+            acknowledgementPreparation as PrivatePortableStagedCleanupPreparation,
+          ))
+          : await options.transactions.run((database) => options.portable!.acknowledgeExportCleanup(
+            database,
+            acknowledgementPreparation as PrivatePortableExportCleanupPreparation,
+          ));
+        return Object.freeze({ outcome: acknowledged.outcome === "already_cleaned" ? "cleaned" : acknowledged.outcome });
+      }
+      if (initial.operation.resourceKind !== "asset") {
+        return Object.freeze({ outcome: "recoverable", diagnosticCode: "asset_storage_unavailable" });
+      }
+      if (!options.publicationCleanup) throw new Error("filesystem_recovery_repository_unavailable");
+      const marked = await journal.markCleanup(initial.operation, initial.claim, { cause: "recovery" });
+      if (marked.outcome === "already_cleaned") return Object.freeze({ outcome: "cleaned" });
+      if (marked.outcome !== "cleanup_pending") return Object.freeze({ outcome: marked.outcome });
+
+      const preparedRecovery = latest();
+      if (!preparedRecovery) return Object.freeze({ outcome: "lease_lost" });
+      if (Object.hasOwn(preparedRecovery.operation, "expiresAt")) {
+        const prewrite = await options.transactions.run(
+          (database) => options.prewrite!.preparePrewriteCleanup(database, preparedRecovery),
+        );
+        if (prewrite.outcome === "quarantined") return Object.freeze({ outcome: "quarantined" });
+        if (prewrite.outcome === "cleanup_required") {
+          if (!latest()) return Object.freeze({ outcome: "lease_lost" });
+          await identitySafeDeletePrewrite(assetRoot, prewrite.relativePath, prewrite.identity);
+          const completionRecovery = latest();
+          if (!completionRecovery) return Object.freeze({ outcome: "lease_lost" });
+          const completed = await journal.completeCleanup(prewrite.operation, completionRecovery.claim);
+          return Object.freeze({ outcome: completed.outcome === "already_cleaned" ? "cleaned" : completed.outcome });
+        }
+        return Object.freeze({ outcome: prewrite.outcome === "already_cleaned" ? "cleaned" : prewrite.outcome });
+      }
+
+      const cleanup = await options.publicationCleanup.preparePublicationCleanup(preparedRecovery.operation, preparedRecovery.claim);
+      if (cleanup.outcome === "cleanup_required") {
+        if (!latest()) return Object.freeze({ outcome: "lease_lost" });
+        for (const descriptor of cleanup.descriptors) {
+          await identitySafeDelete(assetRoot, descriptor);
+        }
+        const completionRecovery = latest();
+        if (!completionRecovery) return Object.freeze({ outcome: "lease_lost" });
+        const completed = await journal.completeCleanup(preparedRecovery.operation, completionRecovery.claim);
+        return Object.freeze({ outcome: completed.outcome === "already_cleaned" ? "cleaned" : completed.outcome });
+      }
+      return Object.freeze({ outcome: cleanup.outcome === "already_cleaned" ? "cleaned" : cleanup.outcome });
+    } catch (error) {
+      const diagnosticCode: AssetFilesystemDiagnosticCode = recoveryDiagnostic(error);
+      await cleanupDiagnostic(diagnosticCode);
+      return Object.freeze({ outcome: "recoverable", diagnosticCode });
+    }
   };
 
   let closed: Promise<void> | undefined;
@@ -1341,6 +1511,8 @@ export async function createSecureFilesystemAdapter(
     openAssetSession,
     openLegacyPathV1Preview,
     reapExpiredPortable,
+    claimExpiredPortableRecoveries,
+    recoverFilesystemOperation,
     close() {
       closing = true;
       const streamHandles = [...activeStreamHandles];

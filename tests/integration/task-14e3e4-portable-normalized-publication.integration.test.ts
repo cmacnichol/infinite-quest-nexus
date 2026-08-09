@@ -26,6 +26,7 @@ import {
 import { createPostgresPortableNormalizedAssetPublicationRepository } from "../../packages/database/src/portable-normalized-asset-publication-repository.js";
 import { createPostgresWorldRepositoryAdapters } from "../../packages/database/src/world-repository.js";
 import { createPortableImportExportComposition } from "../../services/runtime/src/portable-import-export-composition.js";
+import { createPrivateFilesystemRecoveryComposition } from "../../services/runtime/src/private-filesystem-recovery-composition.js";
 import { createPrivatePortableNormalizedAssetPublicationComposition } from "../../services/runtime/src/portable-normalized-asset-publication-composition.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -780,6 +781,91 @@ integration("Task 14e3e4 portable normalized publication", () => {
       request_lifecycle: "failed",
       identity_lifecycle: "cleanup_pending",
       active_operations: 0
+    }] });
+  }, 30_000);
+
+  it("lets a fresh e6 filesystem recovery reconcile an e4 abandonment only after its exact cleanup", async () => {
+    const { scope, previewToken } = await previewOperation();
+    const { bytes, request } = await normalizedImportRequest(scope, "14e3e6-e4-retirement-bridge");
+    const first = await compose();
+    await first.coordinator.reserve({
+      scope,
+      leaseOwner: "14e3e6-e4-retirement-bridge",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      assets: [{
+        idempotencyKey: request.idempotencyKey,
+        artifact: {
+          bytes,
+          declaredMimeType: request.original.mimeType,
+          byteLength: bytes.byteLength,
+          contentHash: hash(bytes),
+        },
+        requestedLibrary: request.requestedLibrary,
+        sourceRecords: request.sourceRecords,
+        sourceInstallationId: null,
+        contextIntents: [],
+        referencePolicy: { mode: "omit" },
+      }],
+    });
+    await first.close();
+    compositions.delete(first);
+    const normalized = await compose();
+    const authority = createPostgresPortableImportAuthorityRepository(
+      pool,
+      createPostgresImportRepository(pool),
+      normalized.coordinator,
+    );
+    await expect(authority.abort({ ownerUserId }, previewToken)).resolves.toMatchObject({ status: "aborted" });
+    const pending = await pool.query<{
+      canonical_asset_id: string;
+      operation_id: string;
+      lifecycle: string;
+    }>(
+      `SELECT request.canonical_asset_id,filesystem.id AS operation_id,filesystem.lifecycle
+         FROM portable_import_normalized_asset_publications mapping
+         JOIN asset_publication_requests request
+           ON request.id=mapping.request_id AND request.owner_user_id=mapping.owner_user_id
+         JOIN durable_filesystem_operations filesystem
+           ON filesystem.asset_id=request.canonical_asset_id AND filesystem.owner_user_id=request.owner_user_id
+        WHERE mapping.operation_id=$1 AND mapping.publication_state='retirement_pending'
+          AND filesystem.lifecycle='reserved'`,
+      [scope.operationId],
+    );
+    expect(pending.rows).toHaveLength(2);
+    expect(pending.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ lifecycle: "reserved" }),
+      expect.objectContaining({ lifecycle: "reserved" }),
+    ]));
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET lease_expires_at=clock_timestamp()-interval '1 second'
+        WHERE id=ANY($1::uuid[])`,
+      [pending.rows.map((row) => row.operation_id)],
+    );
+    const recovery = await createPrivateFilesystemRecoveryComposition(pool, { archiveRoot, assetRoot });
+    try {
+      await expect(recovery.executor.processOne({
+        workerId: "14e3e6-e4-retirement-recovery",
+        leaseSeconds: 10,
+        limit: 2,
+      })).resolves.toMatchObject({ claimed: 2, cleaned: 2, recoverable: 1 });
+    } finally {
+      await recovery.close();
+    }
+    await expect(pool.query(
+      `SELECT mapping.publication_state,request.lifecycle AS request_lifecycle,
+              identity.lifecycle AS identity_lifecycle
+         FROM portable_import_normalized_asset_publications mapping
+         JOIN asset_publication_requests request
+           ON request.id=mapping.request_id AND request.owner_user_id=mapping.owner_user_id
+         JOIN asset_publication_identities identity
+           ON identity.asset_id=request.canonical_asset_id AND identity.owner_user_id=request.owner_user_id
+        WHERE mapping.operation_id=$1`,
+      [scope.operationId],
+    )).resolves.toMatchObject({ rows: [{
+      publication_state: "retired",
+      request_lifecycle: "failed",
+      identity_lifecycle: "cleanup_pending",
     }] });
   }, 30_000);
 
