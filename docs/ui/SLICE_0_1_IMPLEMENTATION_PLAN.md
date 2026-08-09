@@ -9100,18 +9100,66 @@ barrel before e3–e3g. Implement and review these sub-checkpoints in order:
    check`, `pnpm build`, diff, and precheck. The known detached full-integration
    harness remains excluded as a passing gate. e3 is next.
 
-**14e3e3 — illustration publication coordinator.** Build a named private
-`PrivateIllustrationAssetPublicationCoordinator` and replacement illustration
-ports/composition around `completePortImageJob` semantics. It reserves every
-artifact before the image-job transaction; inside the caller transaction it
-attaches artifacts, completes `image_jobs`, writes segment variant bindings,
-cost, world/turn/segment/resolution state and source-specific contexts; after
-commit it finalizes or leaves durable attached recovery work. It distinguishes
-“job committed, finalization pending” from provider/image failure, so image
-failure never changes accepted narration. Cover turn/world and one/two segment
-variants, conditional references, parent/lease no-op and rollback, commit then
-finalize crash/restart, same-owner reuse, cross-owner retention, and no partial
-asset/job/domain mutation.
+**14e3e3 — illustration publication coordinator.** This is additive: it must
+not change `completePortImageJob`, the live worker composition, image routes,
+or provider/legacy API bindings before e3g. The existing runtime illustration
+adapters still import API asset authority, so the replacement graph must not
+reuse them. Implement and review these sub-checkpoints in order:
+
+1. **e3a — durable illustration-publication authority:** add the smallest
+   additive migration and private contracts needed to map each image job and
+   variant ordinal to its immutable 0064 request ID and safe finalization
+   locator. Enforce owner/job/request/variant uniqueness and prevent a mapping
+   from changing after attachment. Model `committed_finalization_pending` as a
+   durable operational state or exact state projection distinct from provider
+   failure/retry; it must neither imply narration failure nor claim public
+   illustration success before every associated publication finalizes. Do not
+   store raw paths, delivery bearers, provider response URLs, or browser owner
+   values in this authority.
+2. **e3b — private coordinator and image normalization:** add a named private
+   `PrivateIllustrationAssetPublicationCoordinator` with replacement ports and
+   runtime composition. It reloads the database-derived claimed image job under
+   owner/lease/status fences, validates every downloaded artifact before
+   reservation (declared MIME/signature/hash, bounded Sharp decode, deterministic
+   technical metadata, and thumbnail derivative), constructs a normalized
+   request per artifact/variant, and reserves every request before the parent
+   image-job transaction. It must not call `persistTurnImage`,
+   `persistWorldCover`, `lockOriginalImages`, `asset-service`, or an API
+   implementation from its replacement graph.
+3. **e3c — atomic domain attachment and post-commit recovery:** under the one
+   caller transaction, attach every exact artifact; write immutable image-job
+   publication mappings; complete the image job; write source-specific
+   generation contexts, segment bindings, one cost event, world/turn/segment/
+   resolution state, and safe result projections. Recheck parent generation and
+   job lease/no-op conditions before any mutation. On parent rollback, discard
+   only exact prepared requests. After commit, finalize every opaque handle; a
+   fault leaves durable finalization-pending work that can be retried/recovered
+   without rerunning the provider or undoing narration/domain data. Provider or
+   image validation/download failure remains a normal image-job retry/failure
+   path and never changes an accepted narration.
+4. **e3d — authority and failure matrix:** use real PostgreSQL and temporary
+   filesystem coverage for turn, world cover, and one/two segment variants;
+   omitted/conditional references; parent and lease no-op; caller rollback;
+   same-owner reuse and cross-owner physical retention; commit then crash/
+   module-reset restart finalization; finalization failure recovery; provider,
+   invalid-image, and artifact-download failures; and no partial asset/job/
+   domain mutation. Add AST/public-barrel checks proving the replacement graph
+   cannot reach API asset implementation or legacy image-writer authority.
+   **Complete 2026-08-09 (commits `04b5614`, `0d89cab`, `f5d3f96`):** 0065
+   now stores immutable owner/job/request/variant mappings with closed,
+   fail-closed provenance and safe-result schemas. The private coordinator
+   reloads a current-time lease-fenced claim, normalizes bounded artifacts,
+   batch-reserves them, atomically writes contexts/references/cost/domain state,
+   and exposes only opaque post-commit recovery. It remains unbound: legacy
+   worker/API completion and the legacy writer are unchanged. Independent review
+   corrections added SQL-null/malformed provenance rejection, safe-result raw
+   field rejection, truthful no-mapping `noop`, post-commit durable-pending
+   projection, current-clock ingress fencing, idempotent finalization, and a
+   paused real filesystem partial-attach cross-owner rollback race proof. The
+   scoped re-review approved all seven findings. Focused evidence includes 23
+   e1/e2/e3 PostgreSQL cases, 14 migration cases, 11 e3 PG/filesystem cases,
+   1,492 unit tests, `pnpm check`, `pnpm build`, diff, and precheck; the known
+   detached full-integration harness remains excluded. e4 is next.
 
 **14e3e4 — imported-writer coordinators.** Use the same private normalized
 publication seam for every live image-producing import family identified in
