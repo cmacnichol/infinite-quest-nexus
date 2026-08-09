@@ -486,6 +486,58 @@ describe("Task 14e3d private portable composition contract", () => {
     expect(JSON.stringify(inventory)).not.toMatch(/(?:relativePath|storagePath|bearer)/u);
   });
 
+  it("rejects Legacy Story companion count and byte limits before image decoding", async () => {
+    const command = {
+      ownerUserId,
+      stagedInput: toPortableStagedInput("legacy-companion-limits"),
+      kind: "legacy_story" as const,
+      destination: {
+        kind: "existing_world_version" as const,
+        worldId: "00000000-0000-4000-8000-000000000030",
+        worldVersionId: "00000000-0000-4000-8000-000000000031"
+      }
+    };
+    const source = JSON.stringify({ world: { title: "Legacy limits" }, turns: [] });
+    const smallHash = createHash("sha256").update(PNG_1X1).digest("hex");
+    const largeBytes = new Uint8Array(17 * 1024 * 1024);
+    const largeHash = createHash("sha256").update(largeBytes).digest("hex");
+    const overLimitBytes = new Uint8Array((20 * 1024 * 1024) + 1);
+    const overLimitHash = createHash("sha256").update(overLimitBytes).digest("hex");
+    const capture = async (companions: Parameters<typeof previewAdapter.previewLegacyStory>[2]) => (
+      previewAdapter.previewLegacyStory(utf8(source), command, companions)
+        .then(() => "resolved", (error: unknown) => error instanceof Error ? error.message : String(error))
+    );
+
+    await expect(Promise.all([
+      capture(Array.from({ length: 257 }, (_, index) => ({
+        sourceKey: `count-${index}.png`,
+        artifact: { mimeType: "image/png" as const, bytes: PNG_1X1, byteLength: 0, contentHash: smallHash }
+      }))),
+      capture([{
+        sourceKey: "nonpositive.png",
+        artifact: { mimeType: "image/png" as const, bytes: new Uint8Array(), byteLength: 0, contentHash: smallHash }
+      }]),
+      capture([{
+        sourceKey: "mismatch.png",
+        artifact: { mimeType: "image/png" as const, bytes: PNG_1X1, byteLength: PNG_1X1.byteLength + 1, contentHash: smallHash }
+      }]),
+      capture([{
+        sourceKey: "oversized.png",
+        artifact: { mimeType: "image/png" as const, bytes: overLimitBytes, byteLength: overLimitBytes.byteLength, contentHash: overLimitHash }
+      }]),
+      capture(Array.from({ length: 4 }, (_, index) => ({
+        sourceKey: `aggregate-${index}.png`,
+        artifact: { mimeType: "image/png" as const, bytes: largeBytes, byteLength: largeBytes.byteLength, contentHash: largeHash }
+      })))
+    ])).resolves.toEqual([
+      "archive_entry_limit_exceeded",
+      "archive_size_limit_exceeded",
+      "archive_size_limit_exceeded",
+      "archive_size_limit_exceeded",
+      "archive_size_limit_exceeded"
+    ]);
+  });
+
   it("removes forbidden credential-like keys from durable normalized authority", async () => {
     const result = await previewAdapter.previewLegacyStory(utf8(JSON.stringify({
       world: { title: "Safe" },

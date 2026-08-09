@@ -8824,17 +8824,25 @@ allowlists, or migration 0062:
   transport supplies a separate `LegacyAssetSource`, while b5 stages one input.
   Task 14e3g must normalize and bind that companion source during the atomic
   route switch; this correction does not claim a live route parity switch.
+- Companion inventory is resource-bounded before hashing or image decode: the
+  input count may not exceed the archive-entry limit, every declared and actual
+  byte length must be a matching positive safe integer no larger than the
+  per-asset limit, and their aggregate may not exceed the portable-input limit.
+  Count overflow uses `archive_entry_limit_exceeded`; invalid, nonpositive,
+  mismatched, per-asset-overflow, and aggregate-overflow lengths use the safe
+  `archive_size_limit_exceeded` diagnostic. A correctly sized artifact whose
+  bytes do not match its declared content hash remains `archive_unavailable`.
 - The AST boundary checker now applies the legacy-service import prohibition to
   both the runtime decoder and rich database adapter, including aliased,
   namespace, CommonJS, dynamic-import, and re-export forms. Neither adapter
   imports an API `*service` or exposes the private graph to a live consumer.
 
-Focused verification is 23 unit decoder/boundary cases and 24 real
+Focused verification is 24 unit decoder/boundary cases and 24 real
 PostgreSQL/temp-filesystem composition cases. The latter includes current rich
 archive restoration and replay, legacy ZIP/inline/companion behavior, safe
 external and malformed optional image semantics, ownership/destination fences,
 rollback/cleanup, restart/finalization recovery, duplicate replay, and exact
-publication isolation. Repository-wide verification is 1,462 unit cases and
+publication isolation. Repository-wide verification is 1,463 unit cases and
 510 real PostgreSQL integration cases, plus `pnpm check`, `pnpm build`, and
 `git diff --check`. **14e3d-R / 14e3e0 is complete as a private prerequisite;
 14e3e1 is next.**

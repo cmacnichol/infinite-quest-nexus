@@ -809,6 +809,22 @@ async function legacyCompanionAssetInventory(
   story: ReturnType<typeof legacyStorySchema.parse>,
   companions: readonly import("../../../packages/application/src/imports/private-portable-composition.js").PrivateLegacyStoryCompanionAsset[],
 ): Promise<readonly import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableAssetInventoryItem[]> {
+  if (companions.length > MAX_ARCHIVE_ENTRIES) {
+    throw new Error("archive_entry_limit_exceeded");
+  }
+  let aggregateBytes = 0;
+  for (const companion of companions) {
+    const artifact = companion.artifact;
+    if (!(artifact.bytes instanceof Uint8Array)
+      || !Number.isSafeInteger(artifact.byteLength)
+      || artifact.byteLength <= 0
+      || artifact.byteLength > MAX_ASSET_BYTES
+      || artifact.bytes.byteLength !== artifact.byteLength) {
+      throw new Error("archive_size_limit_exceeded");
+    }
+    aggregateBytes += artifact.byteLength;
+    if (aggregateBytes > MAX_INPUT_BYTES) throw new Error("archive_size_limit_exceeded");
+  }
   const campaignId = typeof story.campaign?.sourceCampaignId === "string"
     && UUID_PATTERN.test(story.campaign.sourceCampaignId)
     ? story.campaign.sourceCampaignId
@@ -820,7 +836,7 @@ async function legacyCompanionAssetInventory(
       throw new Error("archive_format_invalid");
     }
     const artifact = companion.artifact;
-    if (artifact.byteLength !== artifact.bytes.byteLength || sha256(artifact.bytes) !== artifact.contentHash) {
+    if (sha256(artifact.bytes) !== artifact.contentHash) {
       throw new Error("archive_unavailable");
     }
     const metadata = await sharp(artifact.bytes, { animated: true }).metadata().catch(() => null);
