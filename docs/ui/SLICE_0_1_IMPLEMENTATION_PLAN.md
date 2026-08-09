@@ -8844,8 +8844,10 @@ external and malformed optional image semantics, ownership/destination fences,
 rollback/cleanup, restart/finalization recovery, duplicate replay, and exact
 publication isolation. Repository-wide verification is 1,463 unit cases and
 510 real PostgreSQL integration cases, plus `pnpm check`, `pnpm build`, and
-`git diff --check`. **14e3d-R / 14e3e0 is complete as a private prerequisite;
-14e3e1 is next.**
+`git diff --check`. Commits `646a0bb`, `86189f1`, and `f74637b` implement the
+private parity and hardening series; its fresh independent final review
+approved the complete range. **14e3d-R / 14e3e0 is complete as a private
+prerequisite; 14e3e1 is next.**
 
 Inventory and freeze each current behavior before extracting an adapter:
 
