@@ -52,11 +52,15 @@ const FACTORY_FIXTURES: readonly Source[] = [
   {
     file: "services/runtime/src/portable-import-export-composition.ts",
     text: `
-      import { createAssetPublicationComposition } from "./asset-import-composition.js";
+      import { createPrivatePortableNormalizedAssetPublicationComposition } from "./portable-normalized-asset-publication-composition.js";
       export function createPortableImportExportComposition() {
-        return createAssetPublicationComposition(pool, roots);
+        return createPrivatePortableNormalizedAssetPublicationComposition(pool, roots);
       }
     `
+  },
+  {
+    file: "packages/database/src/portable-normalized-asset-publication-repository.ts",
+    text: "export function createPostgresPortableNormalizedAssetPublicationRepository() { return {}; }"
   },
   {
     file: "services/runtime/src/normalized-asset-publication-composition.ts",
@@ -64,6 +68,17 @@ const FACTORY_FIXTURES: readonly Source[] = [
       import { createAssetImportStorageComposition } from "./asset-import-composition.js";
       export function createPrivateNormalizedAssetPublicationComposition() {
         return createAssetImportStorageComposition(pool, roots);
+      }
+    `
+  },
+  {
+    file: "services/runtime/src/portable-normalized-asset-publication-composition.ts",
+    text: `
+      import { createPostgresPortableNormalizedAssetPublicationRepository } from "../../../packages/database/src/portable-normalized-asset-publication-repository.js";
+      import { createPrivateNormalizedAssetPublicationComposition } from "./normalized-asset-publication-composition.js";
+      export function createPrivatePortableNormalizedAssetPublicationComposition() {
+        createPostgresPortableNormalizedAssetPublicationRepository(pool);
+        return createPrivateNormalizedAssetPublicationComposition(pool, roots);
       }
     `
   },

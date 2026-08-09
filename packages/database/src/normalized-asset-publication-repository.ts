@@ -78,6 +78,9 @@ export interface PrivateNormalizedAssetPublicationRepository {
   prepareRequestDiscard(
     reservation: PrivateNormalizedAssetPublicationReservation,
   ): Promise<Readonly<{ outcome: "discardable" | "unavailable" }>>;
+  retireDiscardedRequest(
+    reservation: PrivateNormalizedAssetPublicationReservation,
+  ): Promise<void>;
   attachRequestInTransaction(
     database: DurableFilesystemTransactionContext,
     request: PrivateNormalizedAssetPublicationRequest,
@@ -496,12 +499,15 @@ async function attachWithClient(
   }
   const referenceIds = bindings.references.map((reference) => reference.referenceId);
   if (referenceIds.length > 0) {
+    const uniqueReferenceIds = [...new Set(referenceIds)];
     const references = await client.query<ReferenceRow>(
       `SELECT id,asset_role,campaign_id,turn_id FROM asset_references
         WHERE owner_user_id=$1 AND asset_id=$2 AND id=ANY($3::uuid[]) FOR KEY SHARE`,
-      [row.owner_user_id, row.canonical_asset_id, referenceIds]
+      [row.owner_user_id, row.canonical_asset_id, uniqueReferenceIds]
     );
-    if (references.rows.length !== referenceIds.length) throw new Error("asset_publication_request_children_mismatch");
+    if (references.rows.length !== uniqueReferenceIds.length) {
+      throw new Error("asset_publication_request_children_mismatch");
+    }
     const storedReferences = new Map(references.rows.map((reference) => [reference.id, reference]));
     for (const intent of request.referencePolicy.intents) {
       const binding = bindings.references.find((value) => value.intentKey === intent.intentKey);
@@ -1023,6 +1029,74 @@ export function createPostgresNormalizedAssetPublicationRepository(
         return Object.freeze({
           outcome: matches && row.lifecycle === "prepared" ? "discardable" as const : "unavailable" as const
         });
+      },
+    ),
+    retireDiscardedRequest: (reservationValue: PrivateNormalizedAssetPublicationReservation) => withTransaction(
+      pool,
+      async (client) => {
+        const selected = await client.query<Readonly<{
+          canonical_asset_id: string | null;
+          canonical_content_hash: string | null;
+          lifecycle: PrivateNormalizedAssetPublicationReservation["lifecycle"];
+        }>>(
+          `SELECT request.canonical_asset_id,request.canonical_content_hash,request.lifecycle
+             FROM asset_publication_requests request
+            WHERE request.id=$1 AND request.owner_user_id=$2
+            FOR UPDATE`,
+          [reservationValue.requestId, reservationValue.ownerUserId],
+        );
+        const row = selected.rows[0];
+        if (!row
+          || row.canonical_asset_id !== reservationValue.canonicalAssetId
+          || row.canonical_content_hash !== reservationValue.canonicalContentHash) {
+          throw new Error("normalized_asset_publication_retirement_unavailable");
+        }
+        if (row.lifecycle === "failed") return;
+        if (row.lifecycle !== "prepared") {
+          throw new Error("normalized_asset_publication_retirement_unavailable");
+        }
+        const selectedIdentity = await client.query<Readonly<{
+          lifecycle: PrivateNormalizedAssetPublicationReservation["canonicalIdentityLifecycle"];
+        }>>(
+          `SELECT lifecycle
+             FROM asset_publication_identities
+            WHERE asset_id=$1 AND owner_user_id=$2
+            FOR UPDATE`,
+          [reservationValue.canonicalAssetId, reservationValue.ownerUserId],
+        );
+        const identityLifecycle = selectedIdentity.rows[0]?.lifecycle;
+        if (identityLifecycle === "prepared") {
+          const operations = await client.query<{ lifecycle: string }>(
+            `SELECT lifecycle FROM durable_filesystem_operations
+              WHERE asset_id=$1 AND owner_user_id=$2
+              ORDER BY id
+              FOR UPDATE`,
+            [reservationValue.canonicalAssetId, reservationValue.ownerUserId],
+          );
+          if (operations.rows.some((operation) => operation.lifecycle !== "cleaned")) {
+            throw new Error("normalized_asset_publication_retirement_incomplete");
+          }
+          const retired = await client.query(
+            `UPDATE asset_publication_identities
+                SET lifecycle='cleanup_pending',updated_at=clock_timestamp()
+              WHERE asset_id=$1 AND owner_user_id=$2 AND lifecycle='prepared'`,
+            [reservationValue.canonicalAssetId, reservationValue.ownerUserId],
+          );
+          if (retired.rowCount !== 1) {
+            throw new Error("normalized_asset_publication_retirement_unavailable");
+          }
+        } else if (!["published", "cleanup_pending"].includes(identityLifecycle ?? "")) {
+          throw new Error("normalized_asset_publication_retirement_unavailable");
+        }
+        const retiredRequest = await client.query(
+          `UPDATE asset_publication_requests
+              SET lifecycle='failed',updated_at=clock_timestamp()
+            WHERE id=$1 AND owner_user_id=$2 AND lifecycle='prepared'`,
+          [reservationValue.requestId, reservationValue.ownerUserId],
+        );
+        if (retiredRequest.rowCount !== 1) {
+          throw new Error("normalized_asset_publication_retirement_unavailable");
+        }
       },
     ),
     attachRequestInTransaction: async (

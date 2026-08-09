@@ -525,6 +525,10 @@ describe("Task 14e3d private portable composition contract", () => {
         sourceKey: "oversized.png",
         artifact: { mimeType: "image/png" as const, bytes: overLimitBytes, byteLength: overLimitBytes.byteLength, contentHash: overLimitHash }
       }]),
+      capture([{
+        sourceKey: "wrong-hash.png",
+        artifact: { mimeType: "image/png" as const, bytes: PNG_1X1, byteLength: PNG_1X1.byteLength, contentHash: "f".repeat(64) }
+      }]),
       capture(Array.from({ length: 4 }, (_, index) => ({
         sourceKey: `aggregate-${index}.png`,
         artifact: { mimeType: "image/png" as const, bytes: largeBytes, byteLength: largeBytes.byteLength, contentHash: largeHash }
@@ -534,6 +538,7 @@ describe("Task 14e3d private portable composition contract", () => {
       "archive_size_limit_exceeded",
       "archive_size_limit_exceeded",
       "archive_size_limit_exceeded",
+      "archive_unavailable",
       "archive_size_limit_exceeded"
     ]);
   });

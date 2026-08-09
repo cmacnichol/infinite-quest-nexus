@@ -144,13 +144,13 @@ describe("Task 14e3d portable composition boundaries", () => {
     }
   });
 
-  it("allows the asset publisher only in the named portable composition consumer", () => {
+  it("keeps the retired asset publisher unconsumed after the portable cutover", () => {
     const source = `import { createAssetPublicationComposition } from "./asset-import-composition.js";\n
       export async function factory(pool, roots) { return createAssetPublicationComposition(pool, roots); }`;
     expect(checkPrivateStorageBoundaries(
       "services/runtime/src/portable-import-export-composition.ts",
       source,
-    )).toEqual([]);
+    )).toEqual(expect.arrayContaining([expect.stringContaining("must remain unconsumed")]));
     expect(checkPrivateStorageBoundaries("services/api/src/server.ts", source))
       .toEqual(expect.arrayContaining([expect.stringContaining("must remain unconsumed")]));
   });

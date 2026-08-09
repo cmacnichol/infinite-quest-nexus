@@ -34,6 +34,7 @@ import {
 } from "./import-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
+import { importPrivatePortableWorldAtExactTarget } from "./world-repository.js";
 import { runPostgresWorldCampaignCommandWithClient } from "./world-campaign-transaction.js";
 
 type WorkRow = Readonly<{
@@ -49,6 +50,10 @@ type WorkRow = Readonly<{
   lease_expires_at: Date | null;
   expires_at: Date;
   updated_at: Date;
+}>;
+
+type ProgressRow = WorkRow & Readonly<{
+  operation_status: "previewed" | "consuming" | "committed" | "expired" | "failed";
 }>;
 
 type AuthorityRow = Readonly<{
@@ -189,14 +194,14 @@ async function progressByPreview(
   owner: ImportOwnerScope,
   previewToken: string,
   lock: boolean,
-): Promise<WorkRow | null> {
-  const selected = await client.query<WorkRow>(
-    `SELECT ${JOINED_WORK_COLUMNS}
-       FROM portable_import_work work
-       JOIN portable_import_operations operation
-         ON operation.id=work.operation_id AND operation.owner_user_id=work.owner_user_id
-      WHERE work.owner_user_id=$1 AND operation.preview_token_hash=$2
-      ${lock ? "FOR UPDATE OF work,operation" : ""}`,
+): Promise<ProgressRow | null> {
+  const selected = await client.query<ProgressRow>(
+    `SELECT ${JOINED_WORK_COLUMNS},operation.status AS operation_status
+       FROM portable_import_operations operation
+       JOIN portable_import_work work
+         ON work.operation_id=operation.id AND work.owner_user_id=operation.owner_user_id
+      WHERE operation.owner_user_id=$1 AND operation.preview_token_hash=$2
+      ${lock ? "FOR UPDATE OF operation,work" : ""}`,
     [owner.ownerUserId, sha256(previewToken)]
   );
   return selected.rows[0] ?? null;
@@ -205,6 +210,12 @@ async function progressByPreview(
 export function createPostgresPortableImportAuthorityRepository(
   pool: DatabasePool,
   portable: PostgresPortableImportRepository,
+  normalizedRetirement?: Readonly<{
+    retireAbandonedOperationInTransaction(
+      database: object,
+      input: Readonly<{ operationId: string; ownerUserId: string }>,
+    ): Promise<void>;
+  }>,
 ): PostgresPortableImportAuthorityRepository {
   const readPreviewAuthority = async (input: Readonly<{
     command: PortableImportCommitCommand;
@@ -664,8 +675,20 @@ export function createPostgresPortableImportAuthorityRepository(
     withTransaction(pool, async (database) => {
       let row = await progressByPreview(database, owner, previewToken, true);
       if (!row) return null;
-      if (["running", "recoverable"].includes(row.status) && row.expires_at.getTime() <= Date.now()) {
-        await discardAbandonedReservationIntents(database, row.operation_id, row.owner_user_id);
+      if (row.operation_status === "previewed"
+        && ["running", "recoverable"].includes(row.status)
+        && row.expires_at.getTime() <= Date.now()) {
+        await discardAbandonedReservationIntents(
+          database,
+          row.operation_id,
+          row.owner_user_id,
+        );
+        const expiredOperation = await database.query(
+          `UPDATE portable_import_operations
+              SET status='expired',updated_at=clock_timestamp()
+            WHERE id=$1 AND owner_user_id=$2 AND status='previewed'`,
+          [row.operation_id, row.owner_user_id],
+        );
         const expired = await database.query<WorkRow>(
           `UPDATE portable_import_work
               SET status='expired',diagnostic_code='archive_expired',
@@ -675,7 +698,22 @@ export function createPostgresPortableImportAuthorityRepository(
           RETURNING ${WORK_COLUMNS}`,
           [row.operation_id, row.owner_user_id]
         );
-        row = expired.rows[0] ?? row;
+        if (expiredOperation.rowCount !== 1 || expired.rowCount !== 1) {
+          throw new Error("portable_import_reap_conflict");
+        }
+        await normalizedRetirement?.retireAbandonedOperationInTransaction(database, {
+          operationId: row.operation_id,
+          ownerUserId: row.owner_user_id
+        });
+        row = expired.rows[0]
+          ? Object.freeze({ ...expired.rows[0], operation_status: "expired" as const })
+          : row;
+      } else if ((row.operation_status === "failed" && row.status === "aborted")
+        || (row.operation_status === "expired" && row.status === "expired")) {
+        await normalizedRetirement?.retireAbandonedOperationInTransaction(database, {
+          operationId: row.operation_id,
+          ownerUserId: row.owner_user_id
+        });
       }
       return safePortableImportProgress(workRecord(row));
     })
@@ -686,6 +724,13 @@ export function createPostgresPortableImportAuthorityRepository(
       const row = await progressByPreview(database, owner, previewToken, true);
       if (!row) return null;
       if (["aborted", "completed", "expired"].includes(row.status)) {
+        if ((row.operation_status === "failed" && row.status === "aborted")
+          || (row.operation_status === "expired" && row.status === "expired")) {
+          await normalizedRetirement?.retireAbandonedOperationInTransaction(database, {
+            operationId: row.operation_id,
+            ownerUserId: row.owner_user_id
+          });
+        }
         return safePortableImportProgress(workRecord(row));
       }
       const operation = await database.query<{ status: string; staged_input_id: string }>(
@@ -697,7 +742,11 @@ export function createPostgresPortableImportAuthorityRepository(
       if (!current) return null;
       if (current.status === "committed") return safePortableImportProgress(workRecord(row));
       if (current.status !== "previewed") throw new Error("portable_import_abort_conflict");
-      await discardAbandonedReservationIntents(database, row.operation_id, row.owner_user_id);
+      await discardAbandonedReservationIntents(
+        database,
+        row.operation_id,
+        row.owner_user_id,
+      );
       await database.query(
         `UPDATE portable_import_operations SET status='failed',updated_at=clock_timestamp()
           WHERE id=$1 AND owner_user_id=$2 AND status='previewed'`,
@@ -717,6 +766,11 @@ export function createPostgresPortableImportAuthorityRepository(
         RETURNING ${WORK_COLUMNS}`,
         [row.operation_id, row.owner_user_id]
       );
+      if (aborted.rowCount !== 1) throw new Error("portable_import_abort_conflict");
+      await normalizedRetirement?.retireAbandonedOperationInTransaction(database, {
+        operationId: row.operation_id,
+        ownerUserId: row.owner_user_id
+      });
       return aborted.rows[0] ? safePortableImportProgress(workRecord(aborted.rows[0])) : null;
     })
   );
@@ -745,11 +799,11 @@ export function createPostgresPortableImportAuthorityRepository(
   ): Promise<void> => withTransaction(pool, async (database) => {
     const selected = await database.query<WorkRow & { operation_status: string }>(
       `SELECT ${JOINED_WORK_COLUMNS},operation.status AS operation_status
-         FROM portable_import_work work
-         JOIN portable_import_operations operation
-           ON operation.id=work.operation_id AND operation.owner_user_id=work.owner_user_id
-        WHERE work.owner_user_id=$1 AND operation.preview_token_hash=$2
-        FOR UPDATE OF work,operation`,
+         FROM portable_import_operations operation
+         JOIN portable_import_work work
+           ON work.operation_id=operation.id AND work.owner_user_id=operation.owner_user_id
+        WHERE operation.owner_user_id=$1 AND operation.preview_token_hash=$2
+        FOR UPDATE OF operation,work`,
       [owner.ownerUserId, sha256(previewToken)],
     );
     const row = selected.rows[0];
@@ -775,19 +829,23 @@ export function createPostgresPortableImportAuthorityRepository(
     return withTransaction(pool, async (database) => {
       const due = await database.query<Pick<WorkRow, "operation_id" | "owner_user_id">>(
         `SELECT work.operation_id,work.owner_user_id
-           FROM portable_import_work work
-           JOIN portable_import_operations operation
-             ON operation.id=work.operation_id AND operation.owner_user_id=work.owner_user_id
+           FROM portable_import_operations operation
+           JOIN portable_import_work work
+             ON work.operation_id=operation.id AND work.owner_user_id=operation.owner_user_id
           WHERE work.status IN ('running','recoverable')
             AND work.expires_at <= clock_timestamp()
             AND operation.status='previewed'
           ORDER BY work.expires_at,work.operation_id
-          FOR UPDATE OF work,operation SKIP LOCKED
+          FOR UPDATE OF operation,work SKIP LOCKED
           LIMIT $1`,
         [limit],
       );
       for (const row of due.rows) {
-        await discardAbandonedReservationIntents(database, row.operation_id, row.owner_user_id);
+        await discardAbandonedReservationIntents(
+          database,
+          row.operation_id,
+          row.owner_user_id,
+        );
         const expiredOperation = await database.query(
           `UPDATE portable_import_operations
               SET status='expired',updated_at=clock_timestamp()
@@ -805,6 +863,10 @@ export function createPostgresPortableImportAuthorityRepository(
         if (expiredOperation.rowCount !== 1 || expiredWork.rowCount !== 1) {
           throw new Error("portable_import_reap_conflict");
         }
+        await normalizedRetirement?.retireAbandonedOperationInTransaction(database, {
+          operationId: row.operation_id,
+          ownerUserId: row.owner_user_id
+        });
       }
       return due.rows.length;
     });
@@ -868,6 +930,21 @@ function safePortableExternalImageUrl(value: unknown): string {
     return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.toString() : "";
   } catch {
     return "";
+  }
+}
+
+function isPortableAbsoluteImageValue(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  const segments = trimmed.split("/");
+  if (trimmed.startsWith("/") || trimmed.startsWith("\\") || trimmed.includes("\\")
+    || segments.some((segment) => segment === "." || segment === "..")) {
+    return true;
+  }
+  try {
+    return /^[a-z][a-z0-9+.-]*:/iu.test(trimmed) && Boolean(new URL(trimmed).protocol);
+  } catch {
+    return false;
   }
 }
 
@@ -942,6 +1019,77 @@ function requireRichId(map: ReadonlyMap<string, string>, source: unknown): strin
   return id;
 }
 
+function plannedIdMap(
+  values: readonly Readonly<{ sourceId: string; targetId: string }>[] | undefined,
+): Map<string, string> {
+  return new Map((values ?? []).map(({ sourceId, targetId }) => [sourceId, targetId]));
+}
+
+async function attachNormalizedPortableChildren(
+  database: DatabaseClient,
+  ownerUserId: string,
+  publication: import("../../application/src/imports/private-portable-composition.js").PrivatePortablePublishedAsset,
+): Promise<import("../../application/src/assets/private-normalized-asset-publication.js").PrivateNormalizedAssetRequestChildBindingsInput> {
+  const plan = publication.normalizedChildren;
+  if (!plan) return Object.freeze({ contexts: Object.freeze([]), references: Object.freeze([]) });
+  const contexts = [];
+  for (const child of plan.contexts) {
+    await database.query(
+      `INSERT INTO asset_generation_contexts (
+         id,owner_user_id,asset_id,created_by_user_id,world_id,world_version_id,
+         campaign_id,turn_id,target_type,variant_index
+       ) VALUES ($1,$2,$3,$2,$4,$5,$6,$7,$8,$9)`,
+      [
+        child.contextId,
+        ownerUserId,
+        publication.result.assetId,
+        child.intent.worldId ?? null,
+        child.intent.worldVersionId ?? null,
+        child.intent.campaignId ?? null,
+        child.intent.turnId ?? null,
+        child.intent.targetType,
+        child.intent.variantIndex
+      ],
+    );
+    contexts.push(Object.freeze({ intentKey: child.intent.intentKey, contextId: child.contextId }));
+  }
+  const references = [];
+  for (const child of plan.references) {
+    const inserted = await database.query<{ id: string }>(
+      `INSERT INTO asset_references (
+         id,owner_user_id,asset_id,campaign_id,turn_id,asset_role
+       ) VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT DO NOTHING
+       RETURNING id`,
+      [
+        child.referenceId,
+        ownerUserId,
+        publication.result.assetId,
+        child.intent.campaignId,
+        child.intent.turnId ?? null,
+        child.intent.assetRole
+      ],
+    );
+    const referenceId = inserted.rows[0]?.id ?? (await database.query<{ id: string }>(
+      `SELECT id
+         FROM asset_references
+        WHERE owner_user_id=$1 AND asset_id=$2 AND campaign_id=$3
+          AND turn_id IS NOT DISTINCT FROM $4::uuid AND asset_role=$5
+        FOR KEY SHARE`,
+      [
+        ownerUserId,
+        publication.result.assetId,
+        child.intent.campaignId,
+        child.intent.turnId ?? null,
+        child.intent.assetRole
+      ],
+    )).rows[0]?.id;
+    if (!referenceId) throw new Error("portable_import_asset_mapping_invalid");
+    references.push(Object.freeze({ intentKey: child.intent.intentKey, referenceId }));
+  }
+  return Object.freeze({ contexts: Object.freeze(contexts), references: Object.freeze(references) });
+}
+
 async function restoreRichPortableAssets(
   database: DatabaseClient,
   ownerUserId: string,
@@ -950,7 +1098,10 @@ async function restoreRichPortableAssets(
   campaignId: string,
   maps: RichIdMaps,
   publishedAssets: readonly import("../../application/src/imports/private-portable-composition.js").PrivatePortablePublishedAsset[],
-): Promise<ReadonlyMap<string, string>> {
+): Promise<Readonly<{
+  assetIds: ReadonlyMap<string, string>;
+  childBindings: readonly import("../../application/src/assets/private-normalized-asset-publication.js").PrivateNormalizedAssetRequestChildBindingsInput[];
+}>> {
   const assetIds = new Map<string, string>();
   for (const publication of publishedAssets) {
     if (publication.sourceAssetIds.length !== publication.records.length
@@ -960,64 +1111,76 @@ async function restoreRichPortableAssets(
       throw new Error("portable_import_asset_mapping_invalid");
     }
     for (const sourceAssetId of publication.sourceAssetIds) assetIds.set(sourceAssetId, publication.result.assetId);
-    const representative = publication.records[0];
-    if (!representative) throw new Error("portable_import_asset_mapping_invalid");
-    await database.query(
-      `UPDATE assets
-          SET pixel_width=$3,pixel_height=$4,technical_metadata=$5::jsonb
-        WHERE id=$1 AND owner_user_id=$2`,
-      [publication.result.assetId, ownerUserId, representative.pixelWidth, representative.pixelHeight,
-        JSON.stringify(representative.technicalMetadata)]
-    );
-    await database.query(
-      `UPDATE asset_library_entries
-          SET title=$3,caption=$4,notes=$5,tags=$6,origin=$7,review_status=$8,
-              reuse_scope=$9,automatic_reuse_enabled=$10,content_categories=$11,
-              favorite=$12,archived_at=$13,updated_at=clock_timestamp()
-        WHERE asset_id=$1 AND owner_user_id=$2`,
-      [publication.result.assetId, ownerUserId, representative.library.title, representative.library.caption,
-        representative.library.notes, representative.library.tags, representative.library.origin,
-        representative.library.reviewStatus, representative.library.reuseScope,
-        representative.library.automaticReuseEnabled, representative.library.contentCategories,
-        representative.library.favorite, representative.library.archivedAt]
-    );
+    if (!publication.normalizedChildren) {
+      const representative = publication.records[0];
+      if (!representative) throw new Error("portable_import_asset_mapping_invalid");
+      await database.query(
+        `UPDATE assets
+            SET pixel_width=$3,pixel_height=$4,technical_metadata=$5::jsonb
+          WHERE id=$1 AND owner_user_id=$2`,
+        [publication.result.assetId, ownerUserId, representative.pixelWidth, representative.pixelHeight,
+          JSON.stringify(representative.technicalMetadata)]
+      );
+      await database.query(
+        `UPDATE asset_library_entries
+            SET title=$3,caption=$4,notes=$5,tags=$6,origin=$7,review_status=$8,
+                reuse_scope=$9,automatic_reuse_enabled=$10,content_categories=$11,
+                favorite=$12,archived_at=$13,updated_at=clock_timestamp()
+          WHERE asset_id=$1 AND owner_user_id=$2`,
+        [publication.result.assetId, ownerUserId, representative.library.title, representative.library.caption,
+          representative.library.notes, representative.library.tags, representative.library.origin,
+          representative.library.reviewStatus, representative.library.reuseScope,
+          representative.library.automaticReuseEnabled, representative.library.contentCategories,
+          representative.library.favorite, representative.library.archivedAt]
+      );
+    }
   }
+  const childBindings = [];
   for (const publication of publishedAssets) {
+    childBindings.push(await attachNormalizedPortableChildren(database, ownerUserId, publication));
     for (const record of publication.records) {
       const assetId = assetIds.get(record.sourceAssetId);
       if (!assetId) throw new Error("portable_import_asset_mapping_invalid");
-      await database.query(
-        `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,asset_role)
-         VALUES ($1,$2,$3,'import_attachment') ON CONFLICT DO NOTHING`,
-        [ownerUserId, assetId, campaignId]
-      );
+      if (!publication.normalizedChildren) {
+        await database.query(
+          `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,asset_role)
+           VALUES ($1,$2,$3,'import_attachment') ON CONFLICT DO NOTHING`,
+          [ownerUserId, assetId, campaignId]
+        );
+      }
       for (const binding of record.bindings) {
         if (binding.role === "world_cover") {
           await database.query("UPDATE worlds SET cover_asset_id=$3 WHERE id=$1 AND owner_user_id=$2", [worldId, ownerUserId, assetId]);
         } else if (binding.role === "turn_illustration") {
           const turnId = requireRichId(maps.turn, binding.turnId);
-          await database.query(
-            `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
-             VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
-            [ownerUserId, assetId, campaignId, turnId]
-          );
+          if (!publication.normalizedChildren) {
+            await database.query(
+              `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
+               VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
+              [ownerUserId, assetId, campaignId, turnId]
+            );
+          }
           await database.query(
             "UPDATE turns SET image_url=$3 WHERE id=$1 AND owner_user_id=$2 AND campaign_id=$4",
             [turnId, ownerUserId, `/api/v1/assets/${assetId}`, campaignId]
           );
         } else if (binding.role === "campaign_asset") {
-          await database.query(
-            `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,asset_role)
-             VALUES ($1,$2,$3,'world_asset') ON CONFLICT DO NOTHING`,
-            [ownerUserId, assetId, campaignId]
-          );
+          if (!publication.normalizedChildren) {
+            await database.query(
+              `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,asset_role)
+               VALUES ($1,$2,$3,'world_asset') ON CONFLICT DO NOTHING`,
+              [ownerUserId, assetId, campaignId]
+            );
+          }
         } else if (binding.role === "imported_attachment" && binding.turnId) {
           const turnId = requireRichId(maps.turn, binding.turnId);
-          await database.query(
-            `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
-             VALUES ($1,$2,$3,$4,'import_attachment') ON CONFLICT DO NOTHING`,
-            [ownerUserId, assetId, campaignId, turnId]
-          );
+          if (!publication.normalizedChildren) {
+            await database.query(
+              `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
+               VALUES ($1,$2,$3,$4,'import_attachment') ON CONFLICT DO NOTHING`,
+              [ownerUserId, assetId, campaignId, turnId]
+            );
+          }
         } else if (binding.role === "illustration_segment_variant") {
           await database.query(
             `INSERT INTO turn_illustration_segment_assets (segment_id,owner_user_id,asset_id,variant_index)
@@ -1026,23 +1189,25 @@ async function restoreRichPortableAssets(
             [requireRichId(maps.illustrationSegment, binding.segmentId), ownerUserId, assetId, binding.variantIndex]
           );
         } else if (binding.role === "generation_context") {
-          const contextId = mapRichId(maps.generationContext, binding.sourceContextId);
-          await database.query(
-            `INSERT INTO asset_generation_contexts (
-               id,owner_user_id,asset_id,created_by_user_id,world_id,world_version_id,campaign_id,turn_id,target_type,variant_index
-             ) VALUES ($1,$2,$3,$2,$4,$5,$6,$7,'other',0)
-             ON CONFLICT (id) DO UPDATE SET asset_id=EXCLUDED.asset_id`,
-            [contextId, ownerUserId, assetId,
-              binding.worldId === null ? null : worldId,
-              binding.worldVersionId === null ? null : worldVersionId,
-              binding.campaignId === null ? null : campaignId,
-              binding.turnId === null ? null : requireRichId(maps.turn, binding.turnId)]
-          );
+          if (!publication.normalizedChildren) {
+            const contextId = mapRichId(maps.generationContext, binding.sourceContextId);
+            await database.query(
+              `INSERT INTO asset_generation_contexts (
+                 id,owner_user_id,asset_id,created_by_user_id,world_id,world_version_id,campaign_id,turn_id,target_type,variant_index
+               ) VALUES ($1,$2,$3,$2,$4,$5,$6,$7,'other',0)
+               ON CONFLICT (id) DO UPDATE SET asset_id=EXCLUDED.asset_id`,
+              [contextId, ownerUserId, assetId,
+                binding.worldId === null ? null : worldId,
+                binding.worldVersionId === null ? null : worldVersionId,
+                binding.campaignId === null ? null : campaignId,
+                binding.turnId === null ? null : requireRichId(maps.turn, binding.turnId)]
+            );
+          }
         }
       }
     }
   }
-  return assetIds;
+  return Object.freeze({ assetIds, childBindings: Object.freeze(childBindings) });
 }
 
 async function existingImportResult(
@@ -1074,6 +1239,7 @@ async function commitRichPortableCampaign(
     destination: Extract<PortablePreviewDestination, { kind: "existing_world_version" }>;
     authorityFingerprint: string;
     payload: Readonly<Record<string, PortableJsonValue>>;
+    targetPlan?: import("../../application/src/imports/private-portable-composition.js").PrivatePortableFamilyTargetPlan;
     publishedAssets: readonly import("../../application/src/imports/private-portable-composition.js").PrivatePortablePublishedAsset[];
     createdWorld: boolean;
   }>,
@@ -1098,12 +1264,13 @@ async function commitRichPortableCampaign(
   const turns = campaignPayload.turns;
   const settings = unknownRecord(campaignPayload.settings);
   const activeTurnNumber = Math.max(0, ...turns.map((turn) => Number(unknownRecord(turn).turnNumber ?? 0)));
-  const campaign = await database.query<{ id: string }>(
+  const campaignId = input.targetPlan?.campaignId ?? randomUUID();
+  await database.query(
     `INSERT INTO campaigns (
-       owner_user_id,world_version_id,title,active_turn_number,legacy_settings,story_length_profile,
+       id,owner_user_id,world_version_id,title,active_turn_number,legacy_settings,story_length_profile,
        turn_control_style,selected_character_id,character_snapshot,character_profile,character_profile_revision
-     ) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9::jsonb,$10::jsonb,$11) RETURNING id`,
-    [input.owner.ownerUserId, input.destination.worldVersionId,
+     ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11::jsonb,$12)`,
+    [campaignId, input.owner.ownerUserId, input.destination.worldVersionId,
       typeof sourceCampaign.title === "string" && sourceCampaign.title.trim() ? sourceCampaign.title : "Imported campaign",
       activeTurnNumber, JSON.stringify(settings),
       typeof settings.storyLength === "string" ? settings.storyLength : "standard",
@@ -1114,15 +1281,28 @@ async function commitRichPortableCampaign(
       sourceCampaign.characterProfile == null ? null : JSON.stringify(sourceCampaign.characterProfile),
       Number(sourceCampaign.characterProfileRevision ?? 0)]
   );
-  const campaignId = campaign.rows[0]!.id;
   const maps: RichIdMaps = {
     campaign: new Map([[String(sourceCampaign.sourceCampaignId ?? "source-campaign"), campaignId]]),
-    turn: new Map(),
-    illustrationSet: new Map(),
-    illustrationSegment: new Map(),
-    generationContext: new Map()
+    turn: new Map((input.targetPlan?.turns ?? []).map((turn) => [turn.sourceTurnId ?? `ordinal:${turn.ordinal}`, turn.targetTurnId])),
+    illustrationSet: plannedIdMap(input.targetPlan?.illustrationSets),
+    illustrationSegment: plannedIdMap(input.targetPlan?.illustrationSegments),
+    generationContext: plannedIdMap(input.targetPlan?.generationContexts)
   };
-  for (const turn of turns) mapRichId(maps.turn, unknownRecord(turn).id);
+  if (input.targetPlan && input.targetPlan.turns.length !== turns.length) {
+    throw new Error("portable_import_reference_invalid");
+  }
+  for (const [ordinal, turn] of turns.entries()) {
+    const sourceTurnId = unknownRecord(turn).id;
+    if (input.targetPlan) {
+      const planned = input.targetPlan.turns[ordinal];
+      if (!planned || planned.ordinal !== ordinal || planned.sourceTurnId !== sourceTurnId) {
+        throw new Error("portable_import_reference_invalid");
+      }
+      maps.turn.set(String(sourceTurnId), planned.targetTurnId);
+    } else {
+      mapRichId(maps.turn, sourceTurnId);
+    }
+  }
   for (const set of unknownArray(archiveRecords.illustrationSets)) mapRichId(maps.illustrationSet, unknownRecord(set).id);
   for (const segment of unknownArray(archiveRecords.illustrationSegments)) mapRichId(maps.illustrationSegment, unknownRecord(segment).id);
   await database.query(
@@ -1269,14 +1449,14 @@ async function commitRichPortableCampaign(
         jsonValue(cost.usage_metadata, {}), portableDate(cost.occurred_at)]
     );
   }
-  const assetIds = await restoreRichPortableAssets(
+  const restoredAssets = await restoreRichPortableAssets(
     database, input.owner.ownerUserId, input.destination.worldId, input.destination.worldVersionId,
     campaignId, maps, input.publishedAssets,
   );
   if (input.createdWorld) {
     await database.query(
       "UPDATE world_versions SET content=$2::jsonb WHERE id=$1 AND owner_user_id=$3",
-      [input.destination.worldVersionId, JSON.stringify(rewritePortableAssetPointers(worldPayload.content, assetIds)), input.owner.ownerUserId]
+      [input.destination.worldVersionId, JSON.stringify(rewritePortableAssetPointers(worldPayload.content, restoredAssets.assetIds)), input.owner.ownerUserId]
     );
   }
   const stats = {
@@ -1300,6 +1480,7 @@ async function commitRichPortableCampaign(
     worldVersionId: input.destination.worldVersionId,
     campaignId,
     duplicate: false,
+    normalizedChildBindings: restoredAssets.childBindings,
     result: {
       importId, worldId: input.destination.worldId, worldVersionId: input.destination.worldVersionId,
       campaignId, duplicate: false, stats
@@ -1369,12 +1550,15 @@ async function commitPortableCampaign(
     [input.owner.ownerUserId, sourceType, portableString(input.payload.sourceName, "portable-import"), input.authorityFingerprint]
   );
   const importId = imported.rows[0]!.id;
-  const campaign = await database.query<{ id: string }>(
-    `INSERT INTO campaigns (owner_user_id,world_version_id,title,active_turn_number,legacy_settings)
-     VALUES ($1,$2,$3,$4,$5::jsonb) RETURNING id`,
-    [input.owner.ownerUserId, input.destination.worldVersionId, title, story.turns.length, JSON.stringify(story.settings ?? {})]
+  const campaignId = input.targetPlan?.campaignId ?? randomUUID();
+  await database.query(
+    `INSERT INTO campaigns (id,owner_user_id,world_version_id,title,active_turn_number,legacy_settings)
+     VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
+    [campaignId, input.owner.ownerUserId, input.destination.worldVersionId, title, story.turns.length, JSON.stringify(story.settings ?? {})]
   );
-  const campaignId = campaign.rows[0]!.id;
+  if (input.targetPlan && input.targetPlan.turns.length !== story.turns.length) {
+    throw new Error("portable_import_reference_invalid");
+  }
   const publicationResults = publishedAssets.map((asset) => "result" in asset ? asset.result : asset);
   const publicationByHash = new Map(publicationResults.map((asset) => [asset.contentHash, asset]));
   const publicationBySourceKey = new Map<string, (typeof publicationResults)[number]>();
@@ -1405,43 +1589,65 @@ async function commitPortableCampaign(
   const sourceTurnIds = new Map<string, string>();
   for (const [index, turnValue] of story.turns.entries()) {
     const turn = turnValue as Readonly<Record<string, unknown>>;
-    const inserted = await database.query<{ id: string }>(
+    const sourceTurnId = typeof turn.id === "string" ? turn.id : null;
+    const externalImageUrl = safePortableExternalImageUrl(turn.imageUrl);
+    const plannedTurn = input.targetPlan?.turns[index];
+    if (plannedTurn && (plannedTurn.ordinal !== index || plannedTurn.sourceTurnId !== sourceTurnId)) {
+      throw new Error("portable_import_reference_invalid");
+    }
+    const turnId = plannedTurn?.targetTurnId ?? randomUUID();
+    await database.query(
       `INSERT INTO turns (
-         owner_user_id,campaign_id,turn_number,source_turn_id,action,narration,choices,
+         id,owner_user_id,campaign_id,turn_number,source_turn_id,action,narration,choices,
          custom_action_suggestion,image_prompt,image_url,mechanics_private,
          state_snapshot_private,model_metadata,import_metadata
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,NULL,$11::jsonb,'{}'::jsonb,$12::jsonb)
-       RETURNING id`,
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,NULL,$12::jsonb,'{}'::jsonb,$13::jsonb)`,
       [
+        turnId,
         input.owner.ownerUserId,
         campaignId,
         index + 1,
-        typeof turn.id === "string" ? turn.id : null,
+        sourceTurnId,
         typeof turn.action === "string" ? turn.action : "",
         narration(turn),
         JSON.stringify(Array.isArray(turn.choices) ? turn.choices.slice(0, 4) : []),
         typeof turn.customActionSuggestion === "string" ? turn.customActionSuggestion : "",
         typeof turn.imagePrompt === "string" ? turn.imagePrompt : "",
-        safePortableExternalImageUrl(turn.imageUrl),
+        externalImageUrl,
         JSON.stringify(turn.worldStateSnapshot ?? {}),
         JSON.stringify({ importedFrom: sourceType, sourceTurnId: turn.id ?? null })
       ]
     );
-    turnIds.push(inserted.rows[0]!.id);
-    if (typeof turn.id === "string") sourceTurnIds.set(turn.id, inserted.rows[0]!.id);
+    turnIds.push(turnId);
+    if (typeof turn.id === "string") sourceTurnIds.set(turn.id, turnId);
+    const ordinalAsset = publishedAssets.find((publication) => (
+      "result" in publication
+      && publication.legacyTurnBindings?.some((binding) => binding.turnOrdinal === index)
+    ));
     const inlineAsset = publicationByHash.get(portableDataImageHash(turn.imageUrl) ?? "");
-    const companionAsset = portableLegacyAssetLookupKeys(turn.imageUrl)
-      .map((key) => publicationBySourceKey.get(key)).find(Boolean);
-    const turnAsset = inlineAsset ?? companionAsset;
+    const companionAsset = externalImageUrl || isPortableAbsoluteImageValue(turn.imageUrl)
+      ? undefined
+      : portableLegacyAssetLookupKeys(turn.imageUrl)
+        .map((key) => publicationBySourceKey.get(key)).find(Boolean);
+    const turnAsset = ordinalAsset && "result" in ordinalAsset
+      ? ordinalAsset.result
+      : inlineAsset ?? companionAsset;
     if (turnAsset) {
-      await database.query(
-        `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
-         VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
-        [input.owner.ownerUserId, turnAsset.assetId, campaignId, inserted.rows[0]!.id]
-      );
+      const normalizedPublication = publishedAssets.find((publication) => (
+        "result" in publication
+        && publication.result.assetId === turnAsset.assetId
+        && publication.normalizedChildren
+      ));
+      if (!normalizedPublication) {
+        await database.query(
+          `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
+           VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
+          [input.owner.ownerUserId, turnAsset.assetId, campaignId, turnId]
+        );
+      }
       await database.query(
         "UPDATE turns SET image_url=$2 WHERE id=$1 AND owner_user_id=$3",
-        [inserted.rows[0]!.id, `/api/v1/assets/${turnAsset.assetId}`, input.owner.ownerUserId]
+        [turnId, `/api/v1/assets/${turnAsset.assetId}`, input.owner.ownerUserId]
       );
     }
     const fiction = narration(turn);
@@ -1454,7 +1660,7 @@ async function commitPortableCampaign(
         input.owner.ownerUserId,
         campaignId,
         input.destination.worldVersionId,
-        inserted.rows[0]!.id,
+        turnId,
         index + 1,
         fiction,
         Math.ceil(fiction.length / 4),
@@ -1462,26 +1668,56 @@ async function commitPortableCampaign(
       ]
     );
   }
-  for (const asset of publicationResults) {
-    await database.query(
-      `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,asset_role)
-       VALUES ($1,$2,$3,'import_attachment') ON CONFLICT DO NOTHING`,
-      [input.owner.ownerUserId, asset.assetId, campaignId]
+  const normalizedChildBindings = [];
+  for (const publication of publishedAssets) {
+    if ("result" in publication && publication.normalizedChildren) {
+      normalizedChildBindings.push(await attachNormalizedPortableChildren(
+        database,
+        input.owner.ownerUserId,
+        publication,
+      ));
+    } else {
+      const asset = "result" in publication ? publication.result : publication;
+      await database.query(
+        `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,asset_role)
+         VALUES ($1,$2,$3,'import_attachment') ON CONFLICT DO NOTHING`,
+        [input.owner.ownerUserId, asset.assetId, campaignId]
+      );
+      normalizedChildBindings.push(Object.freeze({ contexts: Object.freeze([]), references: Object.freeze([]) }));
+    }
+  }
+  const worldCoverAssetIds = new Set(publishedAssets.flatMap((publication) => (
+    "result" in publication
+      && publication.records.some((record) => record.bindings.some((binding) => binding.role === "world_cover"))
+      ? [publication.result.assetId]
+      : []
+  )));
+  if (worldCoverAssetIds.size > 1) throw new Error("portable_import_reference_invalid");
+  const worldCoverAssetId = [...worldCoverAssetIds][0];
+  if (worldCoverAssetId) {
+    const updatedCover = await database.query(
+      `UPDATE worlds
+          SET cover_asset_id=$3,updated_at=clock_timestamp()
+        WHERE id=$1 AND owner_user_id=$2`,
+      [input.destination.worldId, input.owner.ownerUserId, worldCoverAssetId],
     );
+    if (updatedCover.rowCount !== 1) throw new Error("portable_import_destination_invalid");
   }
   if (sourceType === "portable_campaign_zip") {
     for (const publication of publishedAssets) {
-      if (!("result" in publication)) continue;
+      if (!("result" in publication) || publication.normalizedChildren) continue;
       for (const record of publication.records) {
         for (const binding of record.bindings) {
           if (binding.role !== "turn_illustration") continue;
           const turnId = sourceTurnIds.get(binding.turnId);
           if (!turnId) throw new Error("portable_import_reference_invalid");
-          await database.query(
-            `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
-             VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
-            [input.owner.ownerUserId, publication.result.assetId, campaignId, turnId]
-          );
+          if (!publication.normalizedChildren) {
+            await database.query(
+              `INSERT INTO asset_references (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
+               VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
+              [input.owner.ownerUserId, publication.result.assetId, campaignId, turnId]
+            );
+          }
           await database.query(
             "UPDATE turns SET image_url=$2 WHERE id=$1 AND owner_user_id=$3",
             [turnId, `/api/v1/assets/${publication.result.assetId}`, input.owner.ownerUserId]
@@ -1538,6 +1774,7 @@ async function commitPortableCampaign(
     worldVersionId: input.destination.worldVersionId,
     campaignId,
     duplicate: false,
+    normalizedChildBindings: Object.freeze(normalizedChildBindings),
     result: result as Readonly<Record<string, PortableJsonValue>>
   };
 }
@@ -1575,9 +1812,19 @@ export function createPostgresPortableFamilyMutationRepository(
         const request = worldImportRequestSchema.parse(input.payload.embeddedWorldImportRequest);
         const imported = await runPostgresWorldCampaignCommandWithClient(
           client,
-          (transaction) => worlds.importWorld(transaction, input.owner, request),
+          (transaction) => input.targetPlan
+            ? importPrivatePortableWorldAtExactTarget(transaction, input.owner, request, {
+              worldId: input.targetPlan.worldId,
+              worldVersionId: input.targetPlan.worldVersionId,
+              sourceHash: `portable-campaign-world:${input.authorityFingerprint}`
+            })
+            : worlds.importWorld(transaction, input.owner, request),
         );
         if (!imported.ok) throw new Error(`portable_world_import_${imported.failure.reason}`);
+        if (input.targetPlan && (imported.value.worldId !== input.targetPlan.worldId
+          || imported.value.worldVersionId !== input.targetPlan.worldVersionId)) {
+          throw new Error("portable_import_target_plan_invalid");
+        }
         if (richArchive) {
           if (richPublishedAssets.length !== input.publishedAssets.length) {
             throw new Error("portable_import_asset_mapping_invalid");

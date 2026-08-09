@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import sharp from "sharp";
 import unzipper from "unzipper";
 import {
   archiveAssetRecordSchema,
@@ -25,16 +24,22 @@ import {
   bindPrivateBoundedStreamLimits,
 } from "../../../packages/application/src/assets/private-secure-storage.js";
 import { toAssetMutationIdempotencyKey } from "../../../packages/application/src/assets/types.js";
+import type {
+  PrivateAssetPublicationContextIntentInput,
+  PrivateAssetPublicationReferenceIntentInput
+} from "../../../packages/application/src/assets/private-normalized-asset-publication.js";
 import {
-  canonicalPortableAssetReservationCommand,
   canonicalPortableImportAuthority,
   type PortableImportExportComposition,
   type PortableCanonicalImportAuthority,
   type PrivatePortableExportBuilderPort,
   type PortableJsonValue,
+  type PrivatePortableAssetChildPlan,
   type PrivatePortableFamilyMutationPort,
-  type PrivatePortableFamilyPreviewPort
+  type PrivatePortableFamilyPreviewPort,
+  type PrivatePortableFamilyTargetPlan
 } from "../../../packages/application/src/imports/private-portable-composition.js";
+import type { PrivatePortableNormalizedAssetInput } from "../../../packages/application/src/imports/private-normalized-portable-publication.js";
 import {
   toPortableImportedRecordId,
   type ImportOwnerScope,
@@ -48,7 +53,8 @@ import { createPostgresPortableImportAuthorityRepository } from "../../../packag
 import { withTransaction, type DatabaseClient, type DatabasePool } from "../../../packages/database/src/pool.js";
 import type { WorldRepositoryPort } from "../../../packages/application/src/world-campaign/ports.js";
 import { createPostgresPortableFamilyMutationRepository } from "../../../packages/database/src/portable-import-family-repository.js";
-import { createAssetPublicationComposition } from "./asset-import-composition.js";
+import { createPrivatePortableNormalizedAssetPublicationComposition } from "./portable-normalized-asset-publication-composition.js";
+import { inspectPrivateImageArtifact } from "./private-image-normalization.js";
 
 const MAX_INPUT_BYTES = 64 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 256;
@@ -243,6 +249,7 @@ function safeEntryName(name: string): void {
 
 type CampaignArchiveAsset = Readonly<{
     sourceAssetIds: readonly string[];
+    legacyTurnBindings?: import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableAssetInventoryItem["legacyTurnBindings"];
     records: readonly ArchiveAssetRecord[];
     entryName: string;
     mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
@@ -509,16 +516,22 @@ function currentWorldImportRequest(world: Readonly<Record<string, unknown>>) {
 async function verifyCurrentAsset(
   record: ArchiveAssetRecord,
   bytes: Uint8Array,
-): Promise<void> {
+): Promise<number> {
   if (bytes.byteLength !== record.byteLength || sha256(bytes) !== record.contentHash) {
     throw new Error("archive_unavailable");
   }
-  const metadata = await sharp(bytes, { animated: true }).metadata().catch(() => null);
-  const expectedFormat = record.mimeType === "image/jpeg" ? "jpeg" : record.mimeType.slice("image/".length);
-  if (!metadata?.width || !metadata.height || metadata.width !== record.pixelWidth
-    || metadata.height !== record.pixelHeight || metadata.format !== expectedFormat) {
+  const inspected = await inspectPrivateImageArtifact({
+    bytes,
+    declaredMimeType: record.mimeType,
+    maximumBytes: MAX_ASSET_BYTES,
+    maximumPixels: MAXIMUM_NORMALIZED_IMPORT_IMAGE_PIXELS,
+    diagnosticPrefix: "portable_import_image"
+  }).catch(() => null);
+  if (!inspected || inspected.technicalMetadata.pixelWidth !== record.pixelWidth
+    || inspected.technicalMetadata.pixelHeight !== record.pixelHeight) {
     throw new Error("archive_format_invalid");
   }
+  return inspected.pixelCount;
 }
 
 async function campaignZip(
@@ -529,6 +542,8 @@ async function campaignZip(
   const parser = Readable.from(boundedArchiveSource(source, inspector)).pipe(unzipper.Parse({ forceStream: true }));
   let entryCount = 0;
   let expandedBytes = 0;
+  let decodedPixelCount = 0;
+  let deferredArchiveError: Error | null = null;
   let story: ReturnType<typeof legacyStorySchema.parse> | undefined;
   const legacyAssets: CampaignArchiveAsset[] = [];
   const entryPaths: string[] = [];
@@ -574,17 +589,33 @@ async function campaignZip(
       if (!assetMatch) continue;
       const extension = assetMatch[2]!.toLowerCase();
       const sourceAssetId = assetMatch[1]!;
+      const mimeType = extension === "png" ? "image/png" as const
+        : extension === "webp" ? "image/webp" as const
+          : extension === "gif" ? "image/gif" as const : "image/jpeg" as const;
+      const inspected = await inspectPrivateImageArtifact({
+        bytes,
+        declaredMimeType: mimeType,
+        maximumBytes: MAX_ASSET_BYTES,
+        maximumPixels: MAXIMUM_NORMALIZED_IMPORT_IMAGE_PIXELS,
+        diagnosticPrefix: "portable_import_image"
+      }).catch(() => null);
+      if (!inspected) {
+        deferredArchiveError ??= new Error("archive_format_invalid");
+        continue;
+      }
+      decodedPixelCount += inspected.pixelCount;
+      if (decodedPixelCount > MAXIMUM_NORMALIZED_IMPORT_AGGREGATE_PIXELS) {
+        throw new Error("archive_size_limit_exceeded");
+      }
       const record = archiveAssetRecordSchema.parse({
         sourceAssetId,
         contentHash: sha256(bytes),
         archivePath: entry.path,
-        mimeType: extension === "png" ? "image/png"
-          : extension === "webp" ? "image/webp"
-            : extension === "gif" ? "image/gif" : "image/jpeg",
+        mimeType,
         byteLength: bytes.byteLength,
-        pixelWidth: 1,
-        pixelHeight: 1,
-        technicalMetadata: {},
+        pixelWidth: inspected.technicalMetadata.pixelWidth,
+        pixelHeight: inspected.technicalMetadata.pixelHeight,
+        technicalMetadata: inspected.technicalMetadata,
         library: {
           title: "", caption: "", notes: "", tags: [], origin: "imported",
           reviewStatus: "unreviewed", reuseScope: "campaign", automaticReuseEnabled: false,
@@ -604,6 +635,7 @@ async function campaignZip(
       });
     }
     inspector.verify(entryPaths);
+    if (deferredArchiveError) throw deferredArchiveError;
   } catch (error) {
     parser.destroy();
     if (error instanceof Error && error.message.startsWith("archive_")) throw error;
@@ -615,16 +647,40 @@ async function campaignZip(
     const sourceCampaignId = typeof story.campaign?.sourceCampaignId === "string"
       && UUID_PATTERN.test(story.campaign.sourceCampaignId)
       ? story.campaign.sourceCampaignId
-      : PORTABLE_PLACEHOLDER_CAMPAIGN_ID;
+      : null;
+    const bindingCampaignId = sourceCampaignId ?? PORTABLE_PLACEHOLDER_CAMPAIGN_ID;
     const assets = legacyAssets.map((asset) => {
       const sourceAssetId = asset.sourceAssetIds[0]!;
-      const turn = story.turns.find((candidate) => candidate.imageUrl === `/api/v1/assets/${sourceAssetId}`);
-      const binding = turn && typeof turn.id === "string" && UUID_PATTERN.test(turn.id)
-        ? { role: "turn_illustration" as const, campaignId: sourceCampaignId, turnId: turn.id }
-        : { role: "imported_attachment" as const, campaignId: sourceCampaignId, turnId: null };
+      const matchingTurns = story.turns.flatMap((turn, turnOrdinal) => (
+        turn.imageUrl === `/api/v1/assets/${sourceAssetId}`
+          ? [{ turn, turnOrdinal }]
+          : []
+      ));
+      const sourceBindings = matchingTurns.flatMap(({ turn }) => {
+        const sourceTurnId = typeof turn.id === "string" ? turn.id : null;
+        return sourceTurnId && UUID_PATTERN.test(sourceTurnId)
+          ? [{ role: "turn_illustration" as const, campaignId: bindingCampaignId, turnId: sourceTurnId }]
+          : [];
+      });
+      const bindings = matchingTurns.length === 0
+        ? [{ role: "imported_attachment" as const, campaignId: bindingCampaignId, turnId: null }]
+        : sourceBindings.filter((binding, index) => sourceBindings.findIndex((candidate) => (
+          candidate.campaignId === binding.campaignId && candidate.turnId === binding.turnId
+        )) === index);
       return {
         ...asset,
-        records: asset.records.map((record) => archiveAssetRecordSchema.parse({ ...record, bindings: [binding] }))
+        ...(matchingTurns.length > 0 ? {
+          legacyTurnBindings: matchingTurns.map(({ turn, turnOrdinal }) => ({
+            sourceAssetId,
+            sourceCampaignId,
+            sourceTurnId: typeof turn.id === "string" ? turn.id : null,
+            turnOrdinal
+          }))
+        } : {}),
+        records: asset.records.map((record) => archiveAssetRecordSchema.parse({
+          ...record,
+          bindings
+        }))
       };
     });
     return {
@@ -692,7 +748,10 @@ async function campaignZip(
     }
     const bytes = files.get(representative.archivePath);
     if (!bytes) throw new Error("archive_unavailable");
-    await verifyCurrentAsset(representative, bytes);
+    decodedPixelCount += await verifyCurrentAsset(representative, bytes);
+    if (decodedPixelCount > MAXIMUM_NORMALIZED_IMPORT_AGGREGATE_PIXELS) {
+      throw new Error("archive_size_limit_exceeded");
+    }
     assets.push({
       sourceAssetIds: records.map((record) => record.sourceAssetId),
       records,
@@ -717,6 +776,8 @@ async function campaignZip(
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const PORTABLE_PLACEHOLDER_CAMPAIGN_ID = "00000000-0000-4000-8000-000000000000";
+const MAXIMUM_NORMALIZED_IMPORT_IMAGE_PIXELS = 40_000_000;
+const MAXIMUM_NORMALIZED_IMPORT_AGGREGATE_PIXELS = 40_000_000;
 
 function stablePortableUuid(preimage: string): string {
   const value = sha256(preimage).slice(0, 32).split("");
@@ -739,54 +800,105 @@ function parsePortableDataImage(value: unknown): Readonly<{
     : null;
 }
 
+async function inspectedLegacyOptionalImage(
+  bytes: Uint8Array,
+  mimeType: ArchiveAssetRecord["mimeType"],
+) {
+  try {
+    return await inspectPrivateImageArtifact({
+      bytes,
+      declaredMimeType: mimeType,
+      maximumBytes: MAX_ASSET_BYTES,
+      maximumPixels: MAXIMUM_NORMALIZED_IMPORT_IMAGE_PIXELS,
+      diagnosticPrefix: "portable_import_image"
+    });
+  } catch {
+    return null;
+  }
+}
+
 async function legacyInlineAssetInventory(
   story: ReturnType<typeof legacyStorySchema.parse>,
   includeBytes: boolean,
 ): Promise<readonly CampaignArchiveAsset[]> {
-  const campaignId = typeof story.campaign?.sourceCampaignId === "string"
+  const sourceCampaignId = typeof story.campaign?.sourceCampaignId === "string"
     && UUID_PATTERN.test(story.campaign.sourceCampaignId)
     ? story.campaign.sourceCampaignId
-    : PORTABLE_PLACEHOLDER_CAMPAIGN_ID;
+    : null;
+  const campaignId = sourceCampaignId ?? PORTABLE_PLACEHOLDER_CAMPAIGN_ID;
+  const candidates = [
+    ...(typeof story.world.coverImageUrl === "string"
+      && story.world.coverImageUrl.startsWith("data:image/")
+      ? [Object.freeze({
+        role: "world_cover" as const,
+        value: story.world.coverImageUrl
+      })]
+      : []),
+    ...story.turns.flatMap((turn, turnOrdinal) => (
+      typeof turn.imageUrl === "string" && turn.imageUrl.startsWith("data:image/")
+        ? [Object.freeze({ role: "turn_illustration" as const, value: turn.imageUrl, turn, turnOrdinal })]
+        : []
+    ))
+  ];
+  if (candidates.length > MAX_ARCHIVE_ENTRIES) return [];
   const grouped = new Map<string, CampaignArchiveAsset>();
-  for (const [index, turn] of story.turns.entries()) {
-    const parsed = parsePortableDataImage(turn.imageUrl);
+  for (const candidate of candidates) {
+    const parsed = parsePortableDataImage(candidate.value);
     if (!parsed) continue;
     const contentHash = sha256(parsed.bytes);
-    const metadata = await sharp(parsed.bytes, { animated: true }).metadata().catch(() => null);
-    const expectedFormat = parsed.mimeType === "image/jpeg" ? "jpeg" : parsed.mimeType.slice("image/".length);
-    if (!metadata?.width || !metadata.height || metadata.format !== expectedFormat) continue;
-    const sourceAssetId = stablePortableUuid(`legacy-inline:${index}:${contentHash}`);
-    const sourceTurnId = typeof turn.id === "string" && UUID_PATTERN.test(turn.id) ? turn.id : null;
+    const inspected = await inspectedLegacyOptionalImage(parsed.bytes, parsed.mimeType);
+    if (!inspected) continue;
+    const metadata = inspected.technicalMetadata;
+    const sourceAssetId = candidate.role === "world_cover"
+      ? stablePortableUuid(`legacy-inline-cover:${contentHash}`)
+      : stablePortableUuid(`legacy-inline:${candidate.turnOrdinal}:${contentHash}`);
+    const sourceTurnId = candidate.role === "turn_illustration"
+      && typeof candidate.turn.id === "string"
+      ? candidate.turn.id
+      : null;
+    const bindings: ArchiveAssetRecord["bindings"] = candidate.role === "world_cover"
+      ? [{ role: "world_cover", worldId: PORTABLE_PLACEHOLDER_CAMPAIGN_ID }]
+      : sourceTurnId && UUID_PATTERN.test(sourceTurnId)
+        ? [{ role: "turn_illustration", campaignId, turnId: sourceTurnId }]
+        : [];
     const record = archiveAssetRecordSchema.parse({
       sourceAssetId,
       contentHash,
       archivePath: `legacy-inline/${contentHash}`,
       mimeType: parsed.mimeType,
       byteLength: parsed.bytes.byteLength,
-      pixelWidth: metadata.width,
-      pixelHeight: metadata.height,
-      technicalMetadata: { format: metadata.format, pages: metadata.pages ?? 1, orientation: metadata.orientation ?? null },
+      pixelWidth: metadata.pixelWidth,
+      pixelHeight: metadata.pixelHeight,
+      technicalMetadata: { format: metadata.format, pages: metadata.pages, orientation: metadata.orientation },
       library: {
         title: "", caption: "", notes: "", tags: [], origin: "imported",
         reviewStatus: "unreviewed", reuseScope: "campaign", automaticReuseEnabled: false,
         contentCategories: [], favorite: false, archivedAt: null
       },
       createdAt: "1970-01-01T00:00:00.000Z",
-      bindings: sourceTurnId
-        ? [{ role: "turn_illustration", campaignId, turnId: sourceTurnId }]
-        : [{ role: "imported_attachment", campaignId, turnId: null }]
+      bindings
     });
+    const legacyTurnBindings = candidate.role === "turn_illustration"
+      ? [Object.freeze({
+        sourceAssetId,
+        sourceCampaignId,
+        sourceTurnId,
+        turnOrdinal: candidate.turnOrdinal
+      })]
+      : [];
     const existing = grouped.get(contentHash);
     if (existing) {
       grouped.set(contentHash, {
         ...existing,
         sourceAssetIds: [...existing.sourceAssetIds, sourceAssetId],
-        records: [...existing.records, record]
+        records: [...existing.records, record],
+        legacyTurnBindings: [...(existing.legacyTurnBindings ?? []), ...legacyTurnBindings]
       });
     } else {
       grouped.set(contentHash, {
         sourceAssetIds: [sourceAssetId],
         records: [record],
+        legacyTurnBindings,
         entryName: record.archivePath,
         mimeType: record.mimeType,
         byteLength: record.byteLength,
@@ -805,13 +917,57 @@ function legacyCompanionLookupKeys(value: string): readonly string[] {
   return [...new Set([value, uuid, name, stem].filter((key): key is string => Boolean(key)))];
 }
 
+function isLegacyExternalImageUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value.trim());
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isLegacyAbsoluteCompanionKey(value: string): boolean {
+  const trimmed = value.trim();
+  const segments = trimmed.split("/");
+  if (trimmed.startsWith("/") || trimmed.startsWith("\\") || trimmed.includes("\\")
+    || segments.some((segment) => segment === "." || segment === "..")) {
+    return true;
+  }
+  try {
+    return /^[a-z][a-z0-9+.-]*:/iu.test(trimmed) && Boolean(new URL(trimmed).protocol);
+  } catch {
+    return false;
+  }
+}
+
+function optionalLegacyCompanions(
+  companions: readonly import("../../../packages/application/src/imports/private-portable-composition.js").PrivateLegacyStoryCompanionAsset[],
+): readonly import("../../../packages/application/src/imports/private-portable-composition.js").PrivateLegacyStoryCompanionAsset[] {
+  if (companions.length > MAX_ARCHIVE_ENTRIES) return Object.freeze([]);
+  let aggregateBytes = 0;
+  for (const companion of companions) {
+    const artifact = companion.artifact;
+    if (!(artifact.bytes instanceof Uint8Array)
+      || !Number.isSafeInteger(artifact.byteLength)
+      || artifact.byteLength <= 0
+      || artifact.byteLength > MAX_ASSET_BYTES
+      || artifact.bytes.byteLength !== artifact.byteLength
+      || sha256(artifact.bytes) !== artifact.contentHash) {
+      return Object.freeze([]);
+    }
+    aggregateBytes += artifact.byteLength;
+    if (aggregateBytes > MAX_INPUT_BYTES) return Object.freeze([]);
+  }
+  return companions;
+}
+
 async function legacyCompanionAssetInventory(
   story: ReturnType<typeof legacyStorySchema.parse>,
   companions: readonly import("../../../packages/application/src/imports/private-portable-composition.js").PrivateLegacyStoryCompanionAsset[],
 ): Promise<readonly import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableAssetInventoryItem[]> {
-  if (companions.length > MAX_ARCHIVE_ENTRIES) {
-    throw new Error("archive_entry_limit_exceeded");
-  }
+  if (companions.length > MAX_ARCHIVE_ENTRIES) throw new Error("archive_entry_limit_exceeded");
+  type LegacyCompanion = (typeof companions)[number];
+  const boundedCompanions: LegacyCompanion[] = [];
   let aggregateBytes = 0;
   for (const companion of companions) {
     const artifact = companion.artifact;
@@ -824,55 +980,102 @@ async function legacyCompanionAssetInventory(
     }
     aggregateBytes += artifact.byteLength;
     if (aggregateBytes > MAX_INPUT_BYTES) throw new Error("archive_size_limit_exceeded");
+    boundedCompanions.push(companion);
   }
-  const campaignId = typeof story.campaign?.sourceCampaignId === "string"
+  const sourceCampaignId = typeof story.campaign?.sourceCampaignId === "string"
     && UUID_PATTERN.test(story.campaign.sourceCampaignId)
     ? story.campaign.sourceCampaignId
-    : PORTABLE_PLACEHOLDER_CAMPAIGN_ID;
+    : null;
+  const campaignId = sourceCampaignId ?? PORTABLE_PLACEHOLDER_CAMPAIGN_ID;
   const coverUrl = typeof story.world.coverImageUrl === "string" ? story.world.coverImageUrl : "";
-  const inventory = [];
-  for (const companion of companions) {
-    if (!companion.sourceKey.trim() || companion.sourceKey.length > 512 || companion.sourceKey.includes("\0")) {
-      throw new Error("archive_format_invalid");
+  const normalizedCompanions: {
+    companion: LegacyCompanion;
+    metadata: NonNullable<Awaited<ReturnType<typeof inspectedLegacyOptionalImage>>>[
+      "technicalMetadata"
+    ];
+  }[] = [];
+  for (const companion of boundedCompanions) {
+    if (!companion.sourceKey.trim()
+      || companion.sourceKey.length > 512
+      || companion.sourceKey.includes("\0")
+      || isLegacyAbsoluteCompanionKey(companion.sourceKey)) {
+      continue;
     }
     const artifact = companion.artifact;
-    if (sha256(artifact.bytes) !== artifact.contentHash) {
-      throw new Error("archive_unavailable");
-    }
-    const metadata = await sharp(artifact.bytes, { animated: true }).metadata().catch(() => null);
-    const expectedFormat = artifact.mimeType === "image/jpeg" ? "jpeg" : artifact.mimeType.slice("image/".length);
-    if (!metadata?.width || !metadata.height || metadata.format !== expectedFormat) {
-      throw new Error("archive_format_invalid");
-    }
+    if (sha256(artifact.bytes) !== artifact.contentHash) throw new Error("archive_unavailable");
+    const inspected = await inspectedLegacyOptionalImage(artifact.bytes, artifact.mimeType);
+    if (!inspected) continue;
+    normalizedCompanions.push(Object.freeze({ companion, metadata: inspected.technicalMetadata }));
+  }
+  const aliasesOverlap = (sourceKey: string, value: unknown) => typeof value === "string"
+    && legacyCompanionLookupKeys(value).some((key) => legacyCompanionLookupKeys(sourceKey).includes(key));
+  const aliasesMatch = (sourceKey: string, value: unknown) => typeof value === "string"
+    && !isLegacyAbsoluteCompanionKey(value)
+    && aliasesOverlap(sourceKey, value);
+  const resolveCompanion = (value: unknown) => {
+    if (typeof value !== "string" || !value || isLegacyAbsoluteCompanionKey(value)) return null;
+    const exact = normalizedCompanions.filter(({ companion }) => companion.sourceKey === value);
+    if (exact.length === 1) return exact[0];
+    if (exact.length > 1) return null;
+    const aliased = normalizedCompanions.filter(({ companion }) => aliasesMatch(companion.sourceKey, value));
+    return aliased.length === 1 ? aliased[0] : null;
+  };
+  const inventory = [];
+  for (const normalizedCompanion of normalizedCompanions) {
+    const { companion, metadata } = normalizedCompanion;
+    const artifact = companion.artifact;
     const sourceKeys = legacyCompanionLookupKeys(companion.sourceKey);
-    const matches = (value: unknown) => typeof value === "string"
-      && legacyCompanionLookupKeys(value).some((key) => sourceKeys.includes(key));
-    const turn = story.turns.find((candidate) => matches(candidate.imageUrl));
+    const matchingTurns = story.turns.flatMap((candidate, turnOrdinal) => (
+      resolveCompanion(candidate.imageUrl) === normalizedCompanion ? [{ candidate, turnOrdinal }] : []
+    ));
+    const assignedCover = resolveCompanion(coverUrl) === normalizedCompanion;
+    const mentionedBySource = aliasesOverlap(companion.sourceKey, coverUrl)
+      || story.turns.some((candidate) => aliasesOverlap(companion.sourceKey, candidate.imageUrl));
+    if (!assignedCover && matchingTurns.length === 0 && mentionedBySource) continue;
     const sourceAssetId = stablePortableUuid(`legacy-companion:${companion.sourceKey}:${artifact.contentHash}`);
-    const sourceTurnId = turn && typeof turn.id === "string" && UUID_PATTERN.test(turn.id) ? turn.id : null;
-    const binding = matches(coverUrl)
-      ? { role: "world_cover" as const, worldId: PORTABLE_PLACEHOLDER_CAMPAIGN_ID }
-      : sourceTurnId
-        ? { role: "turn_illustration" as const, campaignId, turnId: sourceTurnId }
-        : { role: "imported_attachment" as const, campaignId, turnId: null };
+    const turnBindings = matchingTurns.flatMap(({ candidate }) => (
+      typeof candidate.id === "string" && UUID_PATTERN.test(candidate.id)
+        ? [{ role: "turn_illustration" as const, campaignId, turnId: candidate.id }]
+        : []
+    ));
+    const bindings: ArchiveAssetRecord["bindings"] = [
+      ...(assignedCover
+        ? [{ role: "world_cover" as const, worldId: PORTABLE_PLACEHOLDER_CAMPAIGN_ID }]
+        : []),
+      ...turnBindings
+    ];
+    if (bindings.length === 0 && matchingTurns.length === 0) {
+      bindings.push({ role: "imported_attachment", campaignId, turnId: null });
+    }
     const record = archiveAssetRecordSchema.parse({
       sourceAssetId,
       contentHash: artifact.contentHash,
       archivePath: `legacy-companion/${artifact.contentHash}`,
       mimeType: artifact.mimeType,
       byteLength: artifact.byteLength,
-      pixelWidth: metadata.width,
-      pixelHeight: metadata.height,
-      technicalMetadata: { format: metadata.format, pages: metadata.pages ?? 1, orientation: metadata.orientation ?? null },
+      pixelWidth: metadata.pixelWidth,
+      pixelHeight: metadata.pixelHeight,
+      technicalMetadata: { format: metadata.format, pages: metadata.pages, orientation: metadata.orientation },
       library: {
         title: "", caption: "", notes: "", tags: [], origin: "imported",
         reviewStatus: "unreviewed", reuseScope: "campaign", automaticReuseEnabled: false,
         contentCategories: [], favorite: false, archivedAt: null
       },
       createdAt: "1970-01-01T00:00:00.000Z",
-      bindings: [binding]
+      bindings
     });
-    inventory.push({ sourceAssetIds: [sourceAssetId], sourceKeys, records: [record], artifact });
+    inventory.push({
+      sourceAssetIds: [sourceAssetId],
+      sourceKeys,
+      legacyTurnBindings: matchingTurns.map(({ candidate, turnOrdinal }) => ({
+        sourceAssetId,
+        sourceCampaignId,
+        sourceTurnId: typeof candidate.id === "string" ? candidate.id : null,
+        turnOrdinal
+      })),
+      records: [record],
+      artifact
+    });
   }
   return inventory;
 }
@@ -895,6 +1098,7 @@ function mergeLegacyStoryAssetInventory(
     grouped.set(asset.artifact.contentHash, {
       sourceAssetIds: [...existing.sourceAssetIds, ...asset.sourceAssetIds],
       sourceKeys: [...new Set([...(existing.sourceKeys ?? []), ...(asset.sourceKeys ?? [])])],
+      legacyTurnBindings: [...(existing.legacyTurnBindings ?? []), ...(asset.legacyTurnBindings ?? [])],
       records: [...existing.records, ...asset.records],
       artifact: existing.artifact
     });
@@ -902,6 +1106,18 @@ function mergeLegacyStoryAssetInventory(
   return [...grouped.values()].sort((left, right) => (
     left.artifact.contentHash.localeCompare(right.artifact.contentHash)
   ));
+}
+
+function portableAggregatePixels(records: readonly ArchiveAssetRecord[]): number {
+  const dimensions = new Map<string, Readonly<{ width: number; height: number }>>();
+  for (const record of records) {
+    const existing = dimensions.get(record.contentHash);
+    if (existing && (existing.width !== record.pixelWidth || existing.height !== record.pixelHeight)) {
+      throw new Error("archive_format_invalid");
+    }
+    dimensions.set(record.contentHash, { width: record.pixelWidth, height: record.pixelHeight });
+  }
+  return [...dimensions.values()].reduce((total, value) => total + (value.width * value.height), 0);
 }
 
 export function createPortableFamilyPreviewAdapter(
@@ -928,6 +1144,9 @@ export function createPortableFamilyPreviewAdapter(
         }
         return {
           sourceAssetIds: asset.sourceAssetIds,
+          ...(asset.legacyTurnBindings
+            ? { legacyTurnBindings: asset.legacyTurnBindings }
+            : {}),
           records: asset.records,
           artifact: {
             mimeType: asset.mimeType,
@@ -943,11 +1162,14 @@ export function createPortableFamilyPreviewAdapter(
       const story = legacyStorySchema.parse(jsonText(await boundedBytes(source, MAX_JSON_BYTES)));
       const inline = await legacyInlineAssetInventory(story, true);
       const companion = await legacyCompanionAssetInventory(story, companions);
-      const decoded = mergeLegacyStoryAssetInventory([
+      const merged = mergeLegacyStoryAssetInventory([
         ...inline.map((asset) => {
           if (!asset.bytes) throw new Error("archive_unavailable");
           return {
             sourceAssetIds: asset.sourceAssetIds,
+            ...(asset.legacyTurnBindings
+              ? { legacyTurnBindings: asset.legacyTurnBindings }
+              : {}),
             records: asset.records,
             artifact: {
               mimeType: asset.mimeType,
@@ -959,6 +1181,10 @@ export function createPortableFamilyPreviewAdapter(
         }),
         ...companion
       ]);
+      const decoded = portableAggregatePixels(merged.flatMap((asset) => asset.records))
+          > MAXIMUM_NORMALIZED_IMPORT_AGGREGATE_PIXELS
+        ? []
+        : merged.slice(0, MAX_ARCHIVE_ENTRIES);
       const expected = expectedAuthority.normalizedPayload.assetRecords;
       if (canonicalPortableImportAuthority({ ...expectedAuthority, normalizedPayload: { assetRecords: exactPortableAssetAuthority(decoded.flatMap((asset) => asset.records)) } })
         !== canonicalPortableImportAuthority({ ...expectedAuthority, normalizedPayload: { assetRecords: expected ?? null } })) {
@@ -1087,11 +1313,27 @@ export function createPortableFamilyPreviewAdapter(
       const story = legacyStorySchema.parse(jsonText(await boundedBytes(source, MAX_JSON_BYTES)));
       const inlineAssets = await legacyInlineAssetInventory(story, false);
       const companionAssets = await legacyCompanionAssetInventory(story, companions);
-      const assetRecords = [
-        ...inlineAssets.map((asset) => ({ contentHash: asset.contentHash, records: asset.records })),
-        ...companionAssets.map((asset) => ({ contentHash: asset.artifact.contentHash, records: asset.records }))
-      ].sort((left, right) => left.contentHash.localeCompare(right.contentHash))
-        .flatMap((asset) => asset.records);
+      const groupedRecords = new Map<string, ArchiveAssetRecord[]>();
+      for (const asset of inlineAssets) {
+        groupedRecords.set(asset.contentHash, [
+          ...(groupedRecords.get(asset.contentHash) ?? []),
+          ...asset.records
+        ]);
+      }
+      for (const asset of companionAssets) {
+        groupedRecords.set(asset.artifact.contentHash, [
+          ...(groupedRecords.get(asset.artifact.contentHash) ?? []),
+          ...asset.records
+        ]);
+      }
+      const candidateRecords = [...groupedRecords.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .slice(0, MAX_ARCHIVE_ENTRIES)
+        .flatMap(([, records]) => records);
+      const assetRecords = portableAggregatePixels(candidateRecords)
+          > MAXIMUM_NORMALIZED_IMPORT_AGGREGATE_PIXELS
+        ? []
+        : candidateRecords;
       return {
         authority: authority(command, {
           sourceName: "legacy.story",
@@ -1295,6 +1537,332 @@ function safeDiagnostic(error: unknown): import("../../../packages/application/s
   return (allowed.has(message) ? message : "archive_unavailable") as import("../../../packages/application/src/imports/types.js").PortableArchiveDiagnosticCode;
 }
 
+function portableTargetPlan(
+  operationId: string,
+  value: PortableCanonicalImportAuthority,
+  artifacts: readonly import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableAssetInventoryItem[],
+): PrivatePortableFamilyTargetPlan {
+  const richCampaign = value.normalizedPayload.archiveFormat === "manifest_v1"
+    ? portableRecord(value.normalizedPayload.campaign!)
+    : null;
+  const richArchiveRecords = richCampaign
+    ? portableRecord(richCampaign.archiveRecords as PortableJsonValue)
+    : null;
+  const turnValues = richCampaign
+    ? (Array.isArray(richCampaign.turns) ? richCampaign.turns : [])
+    : legacyStorySchema.parse(value.normalizedPayload.story ?? value.normalizedPayload.campaign).turns;
+  const turns = turnValues.map((turnValue, ordinal) => {
+    const turn = recordValue(turnValue);
+    const sourceTurnId = typeof turn.id === "string" ? turn.id : null;
+    return Object.freeze({
+      ordinal,
+      sourceTurnId,
+      targetTurnId: stablePortableUuid(`portable-target:${operationId}:turn:${ordinal}:${sourceTurnId ?? "none"}`)
+    });
+  });
+  const mapRecords = (values: unknown, role: string) => (
+    (Array.isArray(values) ? values : []).map((entry, ordinal) => {
+      const sourceId = recordValue(entry).id;
+      if (typeof sourceId !== "string" || !UUID_PATTERN.test(sourceId)) {
+        throw new Error("portable_import_reference_invalid");
+      }
+      return Object.freeze({
+        sourceId,
+        targetId: stablePortableUuid(`portable-target:${operationId}:${role}:${ordinal}:${sourceId}`)
+      });
+    })
+  );
+  const generationContextIds = [...new Set(artifacts.flatMap((artifact) => (
+    artifact.records.flatMap((record) => record.bindings
+      .filter((binding) => binding.role === "generation_context")
+      .map((binding) => binding.sourceContextId))
+  )))];
+  const worldId = value.destination.kind === "existing_world_version"
+    ? value.destination.worldId
+    : stablePortableUuid(`portable-target:${operationId}:world`);
+  const worldVersionId = value.destination.kind === "existing_world_version"
+    ? value.destination.worldVersionId
+    : stablePortableUuid(`portable-target:${operationId}:world-version`);
+  return Object.freeze({
+    worldId,
+    worldVersionId,
+    campaignId: stablePortableUuid(`portable-target:${operationId}:campaign`),
+    turns: Object.freeze(turns),
+    illustrationSets: Object.freeze(mapRecords(richArchiveRecords?.illustrationSets, "illustration-set")),
+    illustrationSegments: Object.freeze(mapRecords(richArchiveRecords?.illustrationSegments, "illustration-segment")),
+    generationContexts: Object.freeze(generationContextIds.map((sourceId, ordinal) => Object.freeze({
+      sourceId,
+      targetId: stablePortableUuid(`portable-target:${operationId}:generation-context:${ordinal}:${sourceId}`)
+    })))
+  });
+}
+
+type PlannedPortableNormalizedAsset = Readonly<{
+  input: PrivatePortableNormalizedAssetInput;
+  children: PrivatePortableAssetChildPlan;
+}>;
+
+function planPortableNormalizedAssets(input: Readonly<{
+  command: PortableImportCommitCommand;
+  operationId: string;
+  authority: PortableCanonicalImportAuthority;
+  artifacts: readonly import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableAssetInventoryItem[];
+  targetPlan: PrivatePortableFamilyTargetPlan;
+}>): readonly PlannedPortableNormalizedAsset[] {
+  const turnIds = new Map(input.targetPlan.turns
+    .filter((turn) => turn.sourceTurnId !== null)
+    .map((turn) => [turn.sourceTurnId!, turn.targetTurnId]));
+  const targetWorldId = input.targetPlan.worldId;
+  const targetWorldVersionId = input.targetPlan.worldVersionId;
+  const safeSourceKey = (sourceKey: string) => `source-key-sha256:${sha256(sourceKey)}`;
+  const sourceRecordIdentity = (record: ArchiveAssetRecord) => sha256(canonicalArchiveJson(
+    portableAssetAuthorityRecord(record),
+  ));
+
+  return Object.freeze(input.artifacts.map((artifact, assetOrdinal) => {
+    const contexts = new Map<string, PrivatePortableAssetChildPlan["contexts"][number]>();
+    const references = new Map<string, PrivatePortableAssetChildPlan["references"][number]>();
+    const recordIntentKeys = artifact.records.map(() => new Set<string>());
+    const addContext = (
+      recordOrdinal: number,
+      semantic: Readonly<Record<string, unknown>>,
+      intent: Omit<PrivateAssetPublicationContextIntentInput, "intentKey">,
+    ) => {
+      const key = `portable-context-${sha256(canonicalArchiveJson(semantic))}`;
+      recordIntentKeys[recordOrdinal]!.add(key);
+      if (!contexts.has(key)) {
+        contexts.set(key, Object.freeze({
+          contextId: stablePortableUuid(`${input.operationId}:${assetOrdinal}:context:${key}`),
+          intent: Object.freeze({ intentKey: key, ...intent })
+        }));
+      }
+    };
+    const addReference = (
+      recordOrdinals: readonly number[],
+      semantic: Readonly<Record<string, unknown>>,
+      intent: Omit<PrivateAssetPublicationReferenceIntentInput, "intentKey">,
+    ) => {
+      const key = `portable-reference-${sha256(canonicalArchiveJson({
+        source: semantic,
+        assetRole: intent.assetRole,
+        campaignId: intent.campaignId ?? null,
+        turnId: intent.turnId ?? null
+      }))}`;
+      for (const recordOrdinal of recordOrdinals) recordIntentKeys[recordOrdinal]!.add(key);
+      if (!references.has(key)) {
+        references.set(key, Object.freeze({
+          referenceId: stablePortableUuid(`${input.operationId}:${assetOrdinal}:reference:${key}`),
+          intent: Object.freeze({ intentKey: key, ...intent })
+        }));
+      }
+    };
+    const recordOrdinals = new Map(artifact.records.map((record, ordinal) => [record.sourceAssetId, ordinal]));
+    const legacyOrdinalSourceAssetIds = new Set(
+      (artifact.legacyTurnBindings ?? []).map((binding) => binding.sourceAssetId),
+    );
+    for (const binding of artifact.legacyTurnBindings ?? []) {
+      const plannedTurn = input.targetPlan.turns[binding.turnOrdinal];
+      const recordOrdinal = recordOrdinals.get(binding.sourceAssetId);
+      if (!plannedTurn
+        || recordOrdinal === undefined
+        || plannedTurn.ordinal !== binding.turnOrdinal
+        || plannedTurn.sourceTurnId !== binding.sourceTurnId) {
+        throw new Error("portable_import_reference_invalid");
+      }
+      addReference([recordOrdinal], {
+        role: "turn_illustration",
+        sourceAssetId: binding.sourceAssetId,
+        sourceCampaignId: binding.sourceCampaignId,
+        sourceTurnId: binding.sourceTurnId,
+        campaignId: input.targetPlan.campaignId,
+        turnId: plannedTurn.targetTurnId
+      }, {
+        assetRole: "turn_illustration",
+        sourceCampaignId: binding.sourceCampaignId,
+        sourceTurnId: binding.sourceTurnId && UUID_PATTERN.test(binding.sourceTurnId)
+          ? binding.sourceTurnId
+          : null,
+        campaignId: input.targetPlan.campaignId,
+        turnId: plannedTurn.targetTurnId
+      });
+    }
+    for (const [recordOrdinal, record] of artifact.records.entries()) {
+      for (const binding of record.bindings) {
+        if (binding.role === "turn_illustration"
+          && legacyOrdinalSourceAssetIds.has(record.sourceAssetId)) {
+          continue;
+        }
+        if (binding.role === "world_cover") {
+          addContext(recordOrdinal, {
+            role: binding.role,
+            sourceAssetId: record.sourceAssetId,
+            sourceWorldId: binding.worldId,
+            targetWorldId,
+            targetWorldVersionId
+          }, {
+            sourceContextId: null,
+            targetType: "world_cover",
+            variantIndex: 0,
+            worldId: targetWorldId,
+            worldVersionId: targetWorldVersionId,
+            campaignId: null,
+            turnId: null,
+            fictionPromptIdentity: null
+          });
+        } else if (binding.role === "turn_illustration"
+          || binding.role === "illustration_segment_variant") {
+          const targetTurnId = turnIds.get(binding.turnId);
+          if (!targetTurnId) throw new Error("portable_import_reference_invalid");
+          addReference([recordOrdinal], {
+            role: "turn_illustration",
+            sourceAssetId: record.sourceAssetId,
+            sourceCampaignId: binding.campaignId,
+            sourceTurnId: binding.turnId,
+            campaignId: input.targetPlan.campaignId,
+            turnId: targetTurnId
+          }, {
+            assetRole: "turn_illustration",
+            sourceCampaignId: binding.campaignId,
+            sourceTurnId: binding.turnId,
+            campaignId: input.targetPlan.campaignId,
+            turnId: targetTurnId
+          });
+          if (binding.role === "illustration_segment_variant") {
+            addContext(recordOrdinal, {
+              role: binding.role,
+              sourceAssetId: record.sourceAssetId,
+              segmentId: binding.segmentId,
+              variantIndex: binding.variantIndex,
+              turnId: targetTurnId
+            }, {
+              sourceContextId: null,
+              targetType: "turn_illustration",
+              variantIndex: binding.variantIndex,
+              worldId: targetWorldId,
+              worldVersionId: targetWorldVersionId,
+              campaignId: input.targetPlan.campaignId,
+              turnId: targetTurnId,
+              fictionPromptIdentity: null
+            });
+          }
+        } else if (binding.role === "campaign_asset" || binding.role === "world_version_asset") {
+          addReference([recordOrdinal], {
+            role: "world_asset",
+            sourceAssetId: record.sourceAssetId,
+            sourceRole: binding.role,
+            campaignId: input.targetPlan.campaignId
+          }, {
+            assetRole: "world_asset",
+            sourceCampaignId: "campaignId" in binding ? binding.campaignId : null,
+            sourceTurnId: null,
+            campaignId: input.targetPlan.campaignId,
+            turnId: null
+          });
+        } else if (binding.role === "imported_attachment") {
+          const targetTurnId = binding.turnId === null ? null : turnIds.get(binding.turnId);
+          if (binding.turnId !== null && !targetTurnId) throw new Error("portable_import_reference_invalid");
+          addReference([recordOrdinal], {
+            role: binding.role,
+            sourceAssetId: record.sourceAssetId,
+            sourceCampaignId: binding.campaignId,
+            sourceTurnId: binding.turnId,
+            campaignId: input.targetPlan.campaignId,
+            turnId: targetTurnId ?? null
+          }, {
+            assetRole: "import_attachment",
+            sourceCampaignId: binding.campaignId === PORTABLE_PLACEHOLDER_CAMPAIGN_ID
+              ? null
+              : binding.campaignId,
+            sourceTurnId: binding.turnId,
+            campaignId: input.targetPlan.campaignId,
+            turnId: targetTurnId ?? null
+          });
+        } else if (binding.role === "generation_context") {
+          let targetTurnId: string | null = null;
+          if (binding.turnId !== null) {
+            targetTurnId = turnIds.get(binding.turnId) ?? null;
+            if (!targetTurnId) throw new Error("portable_import_reference_invalid");
+          }
+          addContext(recordOrdinal, {
+            role: binding.role,
+            sourceAssetId: record.sourceAssetId,
+            sourceContextId: binding.sourceContextId,
+            worldId: binding.worldId === null ? null : targetWorldId,
+            worldVersionId: binding.worldVersionId === null ? null : targetWorldVersionId,
+            campaignId: binding.campaignId === null ? null : input.targetPlan.campaignId,
+            turnId: targetTurnId
+          }, {
+            sourceContextId: binding.sourceContextId,
+            targetType: "other",
+            variantIndex: 0,
+            worldId: binding.worldId === null ? null : targetWorldId,
+            worldVersionId: binding.worldVersionId === null ? null : targetWorldVersionId,
+            campaignId: binding.campaignId === null ? null : input.targetPlan.campaignId,
+            turnId: targetTurnId,
+            fictionPromptIdentity: null
+          });
+        }
+      }
+    }
+    const contextPlans = Object.freeze([...contexts.values()].sort((left, right) => (
+      left.intent.intentKey.localeCompare(right.intent.intentKey)
+    )));
+    const referencePlans = Object.freeze([...references.values()].sort((left, right) => (
+      left.intent.intentKey.localeCompare(right.intent.intentKey)
+    )));
+    const children = Object.freeze({ contexts: contextPlans, references: referencePlans });
+    const sourceRecords = artifact.records.flatMap((record, recordOrdinal) => {
+      const originalCompanionKey = (artifact.sourceKeys ?? []).find((sourceKey) => (
+        stablePortableUuid(`legacy-companion:${sourceKey}:${artifact.artifact.contentHash}`) === record.sourceAssetId
+      ));
+      const companionKeys = originalCompanionKey
+        ? legacyCompanionLookupKeys(originalCompanionKey)
+        : [];
+      const keys: readonly (string | null)[] = input.command.kind === "campaign_zip"
+        ? [safeSourceKey(record.archivePath)]
+        : companionKeys.length > 0
+          ? companionKeys.map(safeSourceKey)
+          : [null];
+      return keys.map((sourceKey) => Object.freeze({
+        sourceKind: input.command.kind as "campaign_zip" | "legacy_story",
+        sourceAssetId: record.sourceAssetId,
+        sourceRecordId: sourceRecordIdentity(record),
+        sourceKey,
+        requestedLibrary: record.library,
+        bindingIntentKeys: Object.freeze([...recordIntentKeys[recordOrdinal]!].sort())
+      }));
+    });
+    const representative = artifact.records[0];
+    if (!representative) throw new Error("portable_import_asset_mapping_invalid");
+    return Object.freeze({
+      input: Object.freeze({
+        idempotencyKey: toAssetMutationIdempotencyKey(
+          `portable-${sha256(`${input.command.idempotencyKey}:${assetOrdinal}:${artifact.sourceAssetIds.join(",")}:${artifact.artifact.contentHash}`)}`,
+        ),
+        artifact: Object.freeze({
+          bytes: artifact.artifact.bytes,
+          declaredMimeType: artifact.artifact.mimeType,
+          byteLength: artifact.artifact.byteLength,
+          contentHash: artifact.artifact.contentHash
+        }),
+        requestedLibrary: representative.library,
+        sourceRecords: Object.freeze(sourceRecords),
+        sourceInstallationId: input.authority.sourceInstallationId === null
+          ? null
+          : `source-installation-sha256:${sha256(input.authority.sourceInstallationId)}`,
+        contextIntents: Object.freeze(contextPlans.map(({ intent }) => intent)),
+        referencePolicy: referencePlans.length === 0
+          ? Object.freeze({ mode: "omit" as const })
+          : Object.freeze({
+            mode: "attach" as const,
+            intents: Object.freeze(referencePlans.map(({ intent }) => intent))
+          })
+      }),
+      children
+    });
+  }));
+}
+
 /**
  * Private, unconsumed 14e3d graph. Route and worker binding remains 14e3g.
  */
@@ -1312,8 +1880,13 @@ export async function createPortableImportExportComposition(
   future(previewTtlSeconds);
   future(exportTtlSeconds);
   future(streamDeadlineSeconds);
-  const assets = await createAssetPublicationComposition(options.pool, options.roots);
-  const authority = createPostgresPortableImportAuthorityRepository(options.pool, assets.storage.portable);
+  const assets = await createPrivatePortableNormalizedAssetPublicationComposition(options.pool, options.roots);
+  const storage = assets.portableStorage;
+  const authority = createPostgresPortableImportAuthorityRepository(
+    options.pool,
+    storage.repository,
+    assets.coordinator,
+  );
   const families = createPortableFamilyPreviewAdapter(options.provider, options.targets);
   const mutations = createPostgresPortableFamilyMutationRepository(options.worlds);
   const inputLimits = () => bindPrivateBoundedStreamLimits({
@@ -1326,7 +1899,7 @@ export async function createPortableImportExportComposition(
     command: Command,
     decode: (source: AsyncIterable<Uint8Array>, value: Command) => Promise<PortableFamilyPreviewResult>,
   ): Promise<PortableImportPreviewView<Command>> => {
-    const session = await assets.storage.adapter.openStagedInputSession({
+    const session = await storage.adapter.openStagedInputSession({
       owner: owner(command.ownerUserId),
       stagedInput: command.stagedInput,
       claim: { leaseOwner: options.leaseOwner, leaseSeconds },
@@ -1354,35 +1927,27 @@ export async function createPortableImportExportComposition(
     }
   };
 
-  const buildAssetCommands = (
-    command: PortableImportCommitCommand,
-    artifacts: Awaited<ReturnType<PrivatePortableFamilyPreviewPort["extractCampaignZipAssets"]>>,
-  ) => artifacts.map((asset, index) => ({
-    owner: owner(command.ownerUserId),
-    idempotencyKey: toAssetMutationIdempotencyKey(
-      `portable-${sha256(`${command.idempotencyKey}:${index}:${asset.sourceAssetIds.join(",")}:${asset.artifact.contentHash}`)}`,
-    ),
-    leaseOwner: options.leaseOwner,
-    expiresAt: future(exportTtlSeconds),
-    original: asset.artifact,
-    derivatives: [],
-    provenance: { origin: "imported" as const }
-  }));
-
   const completeCommittedReplay = async (
     command: PortableImportCommitCommand,
     view: import("../../../packages/application/src/imports/types.js").PortableImportCommitView,
   ) => {
     if (command.kind === "campaign_zip" || command.kind === "legacy_story") {
-      const publicationAssetIds = await authority.readCommittedAssetPublicationIds(
-        owner(command.ownerUserId),
-        command.previewHandle.token,
-      );
-      await assets.transactionalPublisher.recoverImportedAssets(
-        owner(command.ownerUserId),
-        publicationAssetIds,
-        { leaseOwner: options.leaseOwner, leaseSeconds },
-      );
+      try {
+        const recovered = await assets.coordinator.recoverCommitted({
+          ownerUserId: command.ownerUserId,
+          previewToken: command.previewHandle.token,
+          leaseOwner: options.leaseOwner,
+          leaseSeconds
+        });
+        if (recovered.outcome === "committed_finalization_pending"
+          && command.kind === "campaign_zip") {
+          throw new Error(recovered.diagnostic);
+        }
+      } catch (error) {
+        // Legacy images are optional. The exact mapping remains durable and a
+        // later replay can reconcile it without revoking committed story data.
+        if (command.kind === "campaign_zip") throw error;
+      }
     }
     await authority.completeCommittedReplay(
       owner(command.ownerUserId),
@@ -1395,10 +1960,13 @@ export async function createPortableImportExportComposition(
     command: PortableImportCommitCommand,
     artifacts: import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableImportArtifacts = {},
   ) => {
-    const legacyStoryCompanions = artifacts.legacyStoryCompanions ?? [];
-    if (command.kind !== "legacy_story" && legacyStoryCompanions.length > 0) {
+    const suppliedLegacyStoryCompanions = artifacts.legacyStoryCompanions ?? [];
+    if (command.kind !== "legacy_story" && suppliedLegacyStoryCompanions.length > 0) {
       throw new Error("portable_import_artifacts_invalid");
     }
+    const legacyStoryCompanions = command.kind === "legacy_story"
+      ? optionalLegacyCompanions(suppliedLegacyStoryCompanions)
+      : Object.freeze([]);
     const assetBackedImport = command.kind === "campaign_zip" || command.kind === "legacy_story";
     // Binary-bearing imports must open and validate staged input before contending on
     // the operation lock used by reservation intents. Otherwise a replay probe
@@ -1437,7 +2005,7 @@ export async function createPortableImportExportComposition(
       : null;
     let assetArtifacts: Awaited<ReturnType<PrivatePortableFamilyPreviewPort["extractCampaignZipAssets"]>> = [];
     if (assetBackedImport && !duplicateBeforeReservation) {
-      const session = await assets.storage.adapter.openPreviewInputSession<PortablePreviewDestination>({
+      const session = await storage.adapter.openPreviewInputSession<PortablePreviewDestination>({
         owner: owner(command.ownerUserId),
         kind: command.kind,
         previewHandle: command.previewHandle as PortablePreviewHandle<PortablePreviewDestination>,
@@ -1458,41 +2026,55 @@ export async function createPortableImportExportComposition(
         throw error;
       }
     }
-    const assetCommands = buildAssetCommands(command, assetArtifacts);
     const commitIdempotencyKeyHash = sha256(command.idempotencyKey);
-    const reservationCommandFingerprint = sha256(canonicalPortableAssetReservationCommand({
-      operationId: previewAuthority.operationId,
-      ownerUserId: command.ownerUserId,
-      kind: command.kind === "legacy_story" ? "legacy_story" : "campaign_zip",
-      authorityFingerprint: previewAuthority.authorityFingerprint,
-      commitIdempotencyKeyHash
-    }));
-    let reservedAssets: Awaited<ReturnType<typeof assets.transactionalPublisher.reserveImportedAssets>> = [];
+    const targetPlan = assetBackedImport && !duplicateBeforeReservation
+      ? portableTargetPlan(previewAuthority.operationId, previewAuthority.authority, assetArtifacts)
+      : undefined;
+    const plannedAssets = targetPlan
+      ? planPortableNormalizedAssets({
+        command,
+        operationId: previewAuthority.operationId,
+        authority: previewAuthority.authority,
+        artifacts: assetArtifacts,
+        targetPlan
+      })
+      : Object.freeze([]);
+    let reservation: Awaited<ReturnType<typeof assets.coordinator.reserve>> | undefined;
     if (assetBackedImport && !duplicateBeforeReservation) {
-      reservedAssets = await withTransaction(options.pool, async (database) => {
-        await authority.lockAssetReservationIntentAuthority(database, {
-          operationId: previewAuthority.operationId,
-          owner: owner(command.ownerUserId),
-          authorityFingerprint: previewAuthority.authorityFingerprint
+      try {
+        reservation = await assets.coordinator.reserve({
+          scope: {
+            operationId: previewAuthority.operationId,
+            ownerUserId: command.ownerUserId,
+            importKind: command.kind as "campaign_zip" | "legacy_story",
+            authorityFingerprint: previewAuthority.authorityFingerprint,
+            commitIdempotencyKeyHash
+          },
+          assets: plannedAssets.map(({ input }) => input),
+          leaseOwner: options.leaseOwner,
+          expiresAt: future(exportTtlSeconds)
         });
-        const reservations = await assets.transactionalPublisher.reserveImportedAssetsInTransaction(
-          database,
-          assetCommands,
-        );
-        await authority.recordAssetReservationIntents(database, {
-          operationId: previewAuthority.operationId,
-          owner: owner(command.ownerUserId),
-          authorityFingerprint: previewAuthority.authorityFingerprint,
-          commitIdempotencyKeyHash,
-          commandFingerprint: reservationCommandFingerprint,
-          assetIds: reservations.map(({ identity }) => identity.assetId)
-        });
-        return reservations;
-      });
+      } catch (reservationError) {
+        try {
+          const replay = await withTransaction(options.pool, async (database) => {
+            const begun = await authority.claimPreviewAuthority(database, {
+              command,
+              leaseOwner: options.leaseOwner,
+              leaseSeconds
+            });
+            if (begun.outcome === "replay") return begun.view;
+            throw preparationOnly;
+          });
+          return completeCommittedReplay(command, replay);
+        } catch (probeError) {
+          if (probeError !== preparationOnly) throw probeError;
+          throw reservationError;
+        }
+      }
     }
-    let attachments: Awaited<ReturnType<typeof assets.transactionalPublisher.attachImportedAssets>> = [];
     let finalClaim: import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableImportWorkClaim | undefined;
     let committed: import("../../../packages/application/src/imports/types.js").PortableImportCommitView | undefined;
+    let reservationUnused = false;
     try {
       committed = await withTransaction(options.pool, async (database: DatabaseClient) => {
         const begun = await authority.claimPreviewAuthority(database, {
@@ -1501,6 +2083,14 @@ export async function createPortableImportExportComposition(
           leaseSeconds
         });
         if (begun.outcome === "replay") {
+          reservationUnused = reservation !== undefined;
+          if (reservation) {
+            await assets.coordinator.beginRetirementInTransaction(
+              database,
+              reservation,
+              "duplicate",
+            );
+          }
           return begun.view;
         }
         if (authorityHash(begun.authority) !== previewAuthority.authorityFingerprint
@@ -1521,19 +2111,8 @@ export async function createPortableImportExportComposition(
             authorityFingerprint: previewAuthority.authorityFingerprint
           })
           : null;
-        if (duplicate && reservedAssets.length > 0) {
-          await authority.releaseAssetReservationIntents(database, {
-            operationId: previewAuthority.operationId,
-            owner: owner(command.ownerUserId),
-            assetIds: reservedAssets.map(({ identity }) => identity.assetId)
-          });
-          await assets.transactionalPublisher.discardPreparedImportedAssets(database, reservedAssets);
-        }
-        if (assetBackedImport && !duplicate) {
-          attachments = await assets.transactionalPublisher.attachImportedAssets(
-            database,
-            reservedAssets,
-          );
+        if (duplicate && reservation) reservationUnused = true;
+        if (assetBackedImport && !duplicate && reservation) {
           claim = await authority.updateProgress(database, claim, {
             phase: "mutating",
             percentage: 65,
@@ -1546,46 +2125,54 @@ export async function createPortableImportExportComposition(
           authorityFingerprint: previewAuthority.authorityFingerprint,
           payload: begun.authority.normalizedPayload
         };
-        const mutation: import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableFamilyMutationResult =
-          duplicate ?? (command.kind === "campaign_zip"
-            ? await mutations.commitCampaignZip(database, {
-              ...mutationInput,
-              publishedAssets: attachments.map((attachment, index) => ({
+        let mutation: import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableFamilyMutationResult;
+        if (duplicate) {
+          mutation = duplicate;
+        } else if (assetBackedImport && reservation && targetPlan) {
+          const attached = await assets.coordinator.attachInTransaction(
+            database,
+            reservation,
+            async (results) => {
+              const publishedAssets = results.map((result, index) => ({
                 sourceAssetIds: assetArtifacts[index]!.sourceAssetIds,
                 ...(assetArtifacts[index]!.sourceKeys
                   ? { sourceKeys: assetArtifacts[index]!.sourceKeys }
                   : {}),
+                ...(assetArtifacts[index]!.legacyTurnBindings
+                  ? { legacyTurnBindings: assetArtifacts[index]!.legacyTurnBindings }
+                  : {}),
                 records: assetArtifacts[index]!.records.map(({ archivePath: _archivePath, ...record }) => record),
-                result: attachment.result
-              }))
-            })
-            : command.kind === "legacy_story"
-              ? await mutations.commitLegacyStory(database, {
-                ...mutationInput,
-                publishedAssets: attachments.map((attachment, index) => ({
-                  sourceAssetIds: assetArtifacts[index]!.sourceAssetIds,
-                  ...(assetArtifacts[index]!.sourceKeys
-                    ? { sourceKeys: assetArtifacts[index]!.sourceKeys }
-                    : {}),
-                  records: assetArtifacts[index]!.records.map(({ archivePath: _archivePath, ...record }) => record),
-                  result: attachment.result
-                }))
-              })
-              : command.kind === "story_text"
-                ? await mutations.commitStoryText(database, mutationInput)
-                : await mutations.commitWorld(database, {
-                  owner: mutationInput.owner,
-                  kind: command.kind,
-                  authorityFingerprint: mutationInput.authorityFingerprint,
-                  payload: mutationInput.payload
-                }));
-        if (assetBackedImport && !duplicate) {
-          await authority.recordAssetPublications(
-            database,
-            claim,
-            mutation.importId,
-            attachments.map((attachment) => attachment.identity.assetId),
+                result,
+                normalizedChildren: plannedAssets[index]!.children
+              }));
+              const value = command.kind === "campaign_zip"
+                ? await mutations.commitCampaignZip(database, {
+                  ...mutationInput,
+                  targetPlan,
+                  publishedAssets
+                })
+                : await mutations.commitLegacyStory(database, {
+                  ...mutationInput,
+                  targetPlan,
+                  publishedAssets
+                });
+              const childBindings = value.normalizedChildBindings ?? [];
+              if (childBindings.length !== results.length) {
+                throw new Error("portable_import_asset_mapping_invalid");
+              }
+              return Object.freeze({ importId: value.importId, childBindings, value });
+            },
           );
+          mutation = attached.value;
+        } else {
+          mutation = command.kind === "story_text"
+            ? await mutations.commitStoryText(database, mutationInput)
+            : await mutations.commitWorld(database, {
+              owner: mutationInput.owner,
+              kind: command.kind as "infinite_worlds" | "cyoa" | "world_json" | "world_text",
+              authorityFingerprint: mutationInput.authorityFingerprint,
+              payload: mutationInput.payload
+            });
         }
         claim = await authority.updateProgress(database, claim, {
           phase: "committing",
@@ -1600,6 +2187,13 @@ export async function createPortableImportExportComposition(
           result: mutation.result as never,
           resultExpiresAt: future(previewTtlSeconds)
         });
+        if (reservationUnused && reservation) {
+          await assets.coordinator.beginRetirementInTransaction(
+            database,
+            reservation,
+            "duplicate",
+          );
+        }
         finalClaim = await authority.updateProgress(database, claim, {
           phase: "finalizing",
           percentage: 95,
@@ -1608,18 +2202,9 @@ export async function createPortableImportExportComposition(
         return view;
       });
     } catch (error) {
-      await Promise.allSettled(attachments.map((attachment) => attachment.rollback()));
-      const preparedReservations = reservedAssets.filter(({ identity }) => identity.lifecycle === "prepared");
-      if (preparedReservations.length > 0) {
+      if (reservation) {
         try {
-          await withTransaction(options.pool, async (database) => {
-            await authority.releaseAssetReservationIntents(database, {
-              operationId: previewAuthority.operationId,
-              owner: owner(command.ownerUserId),
-              assetIds: preparedReservations.map(({ identity }) => identity.assetId)
-            });
-            await assets.transactionalPublisher.discardPreparedImportedAssets(database, preparedReservations);
-          });
+          await assets.coordinator.discardAfterRollback(reservation);
         } catch (cleanupError) {
           throw new AggregateError(
             [error, cleanupError],
@@ -1630,16 +2215,41 @@ export async function createPortableImportExportComposition(
       throw error;
     }
     if (!committed) throw new Error("portable_import_result_unavailable");
-    if (!finalClaim) return completeCommittedReplay(command, committed);
     try {
+      if (reservationUnused && reservation) {
+        try {
+          await assets.coordinator.completeRetirement(reservation);
+        } catch (error) {
+          if (command.kind !== "legacy_story") throw error;
+        }
+      }
+      if (!finalClaim) return await completeCommittedReplay(command, committed);
       if (assetBackedImport && committed.duplicate) {
         return await completeCommittedReplay(command, committed);
       }
-      await assets.transactionalPublisher.finalizeImportedAssets(attachments);
+      if (assetBackedImport) {
+        const finalized = await assets.coordinator.finalizeOperation({
+          ownerUserId: command.ownerUserId,
+          operationId: previewAuthority.operationId,
+          leaseOwner: options.leaseOwner,
+          leaseSeconds
+        });
+        if (finalized.outcome === "committed_finalization_pending"
+          && command.kind === "campaign_zip") {
+          throw new Error(finalized.diagnostic);
+        }
+      }
+      if (command.kind === "legacy_story") {
+        await authority.completeCommittedReplay(
+          owner(command.ownerUserId),
+          command.previewHandle.token,
+        );
+        return committed;
+      }
       await withTransaction(options.pool, (database) => authority.completeProgress(database, finalClaim!));
       return committed;
     } catch (error) {
-      await authority.markRecoverable(finalClaim, safeDiagnostic(error));
+      if (finalClaim) await authority.markRecoverable(finalClaim, safeDiagnostic(error));
       throw error;
     }
   };
@@ -1650,7 +2260,7 @@ export async function createPortableImportExportComposition(
     if (!Number.isSafeInteger(artifact.byteLength) || artifact.byteLength < 0 || artifact.byteLength > MAX_INPUT_BYTES) {
       throw new Error("archive_size_limit_exceeded");
     }
-    const issued = await assets.storage.adapter.publishPortableExport({
+    const issued = await storage.adapter.publishPortableExport({
       exportScope: artifact.exportScope,
       operationScopeId: randomUUID(),
       leaseOwner: options.leaseOwner,
@@ -1668,7 +2278,7 @@ export async function createPortableImportExportComposition(
 
   const composition: PortableImportExportComposition = {
     async stageInput(input) {
-      const staged = await assets.storage.adapter.stagePortableInput(input);
+      const staged = await storage.adapter.stagePortableInput(input);
       return Object.freeze({ stagedInput: staged.stagedInput });
     },
     previewCampaignZip: (command) => preview(command, families.previewCampaignZip.bind(families)),
@@ -1677,7 +2287,7 @@ export async function createPortableImportExportComposition(
       (source, value) => families.previewLegacyStory(
         source,
         value,
-        artifacts.legacyStoryCompanions ?? [],
+        optionalLegacyCompanions(artifacts.legacyStoryCompanions ?? []),
       ),
     ),
     previewInfiniteWorlds: (command) => preview(command, families.previewInfiniteWorlds.bind(families)),
@@ -1706,7 +2316,7 @@ export async function createPortableImportExportComposition(
       return publishExport(artifact);
     },
     openExportSession(command) {
-      return assets.storage.adapter.openExportSession({
+      return storage.adapter.openExportSession({
         scope: {
           ownerUserId: command.owner.ownerUserId,
           exportKind: command.exportKind,
@@ -1723,7 +2333,7 @@ export async function createPortableImportExportComposition(
     abort: (value, previewToken) => authority.abort(value, previewToken),
     async reap(input) {
       await authority.expireDueWork(input.limit);
-      return assets.storage.adapter.reapExpiredPortable(input);
+      return storage.adapter.reapExpiredPortable(input);
     },
     close: () => assets.close()
   };

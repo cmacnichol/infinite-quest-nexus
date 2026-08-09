@@ -11,6 +11,11 @@ const NORMALIZED_PUBLICATION_REPOSITORY_FILE = "packages/database/src/normalized
 const NORMALIZED_PUBLICATION_COMPOSITION_FILE = "services/runtime/src/normalized-asset-publication-composition.ts";
 const NORMALIZED_PUBLICATION_COMPOSITION_FACTORY = "createPrivateNormalizedAssetPublicationComposition";
 const NORMALIZED_PUBLICATION_CONTRACT_FILE = "packages/application/src/assets/private-normalized-asset-publication.ts";
+const PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FILE = "packages/database/src/portable-normalized-asset-publication-repository.ts";
+const PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY = "createPostgresPortableNormalizedAssetPublicationRepository";
+const PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE = "services/runtime/src/portable-normalized-asset-publication-composition.ts";
+const PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY = "createPrivatePortableNormalizedAssetPublicationComposition";
+const PORTABLE_NORMALIZED_PUBLICATION_CONTRACT_FILE = "packages/application/src/imports/private-normalized-portable-publication.ts";
 const ILLUSTRATION_PUBLICATION_REPOSITORY_FILE = "packages/database/src/illustration-asset-publication-repository.ts";
 const ILLUSTRATION_PUBLICATION_COMPOSITION_FILE = "services/runtime/src/illustration-asset-publication-composition.ts";
 const ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY = "createPrivateIllustrationAssetPublicationComposition";
@@ -26,6 +31,24 @@ const ILLUSTRATION_LEGACY_WRITER_IDENTIFIERS = new Set([
   "persistWorldCover",
   "lockOriginalImages",
   "completePortImageJob"
+]);
+const PORTABLE_NORMALIZED_LEGACY_AUTHORITY_FILES = new Set([
+  STORAGE_COMPOSITION_FILE,
+  "packages/application/src/imports/private-portable-composition.ts"
+]);
+const PORTABLE_NORMALIZED_LEGACY_WRITER_IDENTIFIERS = new Set([
+  ASSET_PUBLICATION_COMPOSITION_FACTORY,
+  "PrivateCallerTransactionAssetPublisher",
+  "PrivateImportedAssetAttachment",
+  "PrivateReservedImportedAsset",
+  "transactionalPublisher",
+  "writeContentAddressed",
+  "reserveImportedAssets",
+  "reserveImportedAssetsInTransaction",
+  "attachImportedAssets",
+  "discardPreparedImportedAssets",
+  "recoverImportedAssets",
+  "finalizeImportedAssets"
 ]);
 const API_FILESYSTEM_COMPATIBILITY_FILE = "services/api/src/portable-archive-filesystem-adapter.ts";
 const NEUTRAL_FILESYSTEM_ADAPTER_FILE = "services/runtime/src/secure-filesystem-adapter.ts";
@@ -109,6 +132,18 @@ function targetsNormalizedPublicationContract(file, target) {
   return resolvedModule(file, target) === NORMALIZED_PUBLICATION_CONTRACT_FILE;
 }
 
+function targetsPortableNormalizedPublicationRepository(file, target) {
+  return resolvedModule(file, target) === PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FILE;
+}
+
+function targetsPortableNormalizedPublicationComposition(file, target) {
+  return resolvedModule(file, target) === PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE;
+}
+
+function targetsPortableNormalizedPublicationContract(file, target) {
+  return resolvedModule(file, target) === PORTABLE_NORMALIZED_PUBLICATION_CONTRACT_FILE;
+}
+
 function targetsIllustrationPublicationComposition(file, target) {
   return resolvedModule(file, target) === ILLUSTRATION_PUBLICATION_COMPOSITION_FILE;
 }
@@ -131,6 +166,12 @@ function trackedSymbolForTarget(file, target) {
   if (targetsStorageComposition(file, target)) return STORAGE_COMPOSITION_FACTORY;
   if (targetsNormalizedPublicationComposition(file, target)) {
     return NORMALIZED_PUBLICATION_COMPOSITION_FACTORY;
+  }
+  if (targetsPortableNormalizedPublicationRepository(file, target)) {
+    return PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY;
+  }
+  if (targetsPortableNormalizedPublicationComposition(file, target)) {
+    return PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY;
   }
   if (targetsIllustrationPublicationComposition(file, target)) {
     return ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY;
@@ -155,12 +196,33 @@ function isApplicationPublicBarrelFile(file) {
 }
 
 function isCanonicalNormalizedCompositionImport(file, node) {
-  return file === ILLUSTRATION_PUBLICATION_COMPOSITION_FILE
+  if (![
+    ILLUSTRATION_PUBLICATION_COMPOSITION_FILE,
+    PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE
+  ].includes(file) || node.type !== "ImportDeclaration") return false;
+  const factoryImports = node.specifiers.filter((specifier) => (
+    specifier.type === "ImportSpecifier"
+    && importedName(specifier) === NORMALIZED_PUBLICATION_COMPOSITION_FACTORY
+    && specifier.local.name === NORMALIZED_PUBLICATION_COMPOSITION_FACTORY
+    && specifier.importKind !== "type"
+  ));
+  return factoryImports.length === 1
+    && node.specifiers.every((specifier) => factoryImports.includes(specifier)
+      || (specifier.type === "ImportSpecifier" && specifier.importKind === "type"));
+}
+
+function isCanonicalPortableNormalizedCompositionImport(file, node) {
+  return file === PORTABLE_COMPOSITION_FILE
     && node.type === "ImportDeclaration"
     && node.specifiers.length === 1
     && node.specifiers[0]?.type === "ImportSpecifier"
-    && importedName(node.specifiers[0]) === NORMALIZED_PUBLICATION_COMPOSITION_FACTORY
-    && node.specifiers[0].local.name === NORMALIZED_PUBLICATION_COMPOSITION_FACTORY;
+    && importedName(node.specifiers[0]) === PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY
+    && node.specifiers[0].local.name === PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY;
+}
+
+function isPortableNormalizedLegacyWriterIdentifier(name) {
+  return PORTABLE_NORMALIZED_LEGACY_WRITER_IDENTIFIERS.has(name)
+    || /^persist[A-Za-z0-9_]*Image$/u.test(name);
 }
 
 function moduleTarget(node) {
@@ -255,10 +317,20 @@ export function checkPrivateStorageBoundaries(file, text) {
       && normalized !== NORMALIZED_PUBLICATION_COMPOSITION_FILE) {
       add(node, `private normalized publication repository may be consumed only by ${NORMALIZED_PUBLICATION_COMPOSITION_FILE}`);
     }
+    if (targetsPortableNormalizedPublicationRepository(normalized, moduleTarget(node))
+      && normalized !== PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FILE
+      && normalized !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE) {
+      add(node, `private portable normalized publication repository may be consumed only by ${PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE}`);
+    }
     if (targetsNormalizedPublicationComposition(normalized, moduleTarget(node))
       && normalized !== NORMALIZED_PUBLICATION_COMPOSITION_FILE
       && !isCanonicalNormalizedCompositionImport(normalized, node)) {
-      add(node, `normalized publication seam may be consumed only by ${ILLUSTRATION_PUBLICATION_COMPOSITION_FILE}`);
+      add(node, `normalized publication seam may be consumed only by ${ILLUSTRATION_PUBLICATION_COMPOSITION_FILE} and ${PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE}`);
+    }
+    if (targetsPortableNormalizedPublicationComposition(normalized, moduleTarget(node))
+      && normalized !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE
+      && !isCanonicalPortableNormalizedCompositionImport(normalized, node)) {
+      add(node, `portable normalized publication composition may be consumed only by ${PORTABLE_COMPOSITION_FILE}`);
     }
     if (targetsIllustrationPublicationRepository(normalized, moduleTarget(node))
       && normalized !== ILLUSTRATION_PUBLICATION_REPOSITORY_FILE
@@ -271,8 +343,27 @@ export function checkPrivateStorageBoundaries(file, text) {
     }
     if (isApplicationPublicBarrelFile(normalized)
       && (targetsNormalizedPublicationContract(normalized, moduleTarget(node))
+        || targetsPortableNormalizedPublicationContract(normalized, moduleTarget(node))
         || targetsIllustrationPublicationContract(normalized, moduleTarget(node)))) {
       add(node, "private publication contracts must not leak through an application public barrel");
+    }
+    if (normalized === PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE) {
+      const target = moduleTarget(node);
+      const resolvedTarget = resolvedModule(normalized, target);
+      if (typeof resolvedTarget === "string"
+        && (resolvedTarget.startsWith("services/api/src/")
+          || PORTABLE_NORMALIZED_LEGACY_AUTHORITY_FILES.has(resolvedTarget))) {
+        add(node, `portable normalized publication replacement must not reach legacy authority ${resolvedTarget}`);
+      }
+      if (node.type === "Identifier" && isPortableNormalizedLegacyWriterIdentifier(node.name)) {
+        add(node, `portable normalized publication replacement prohibits legacy writer identifier ${node.name}`);
+      }
+      const portableMember = staticMember(node);
+      if (["MemberExpression", "OptionalMemberExpression"].includes(node.type)
+        && portableMember
+        && isPortableNormalizedLegacyWriterIdentifier(portableMember.name)) {
+        add(portableMember.node, `portable normalized publication replacement prohibits legacy writer member ${portableMember.name}`);
+      }
     }
     if (node.type === "ImportDeclaration") {
       const target = node.source.value;
@@ -304,9 +395,18 @@ export function checkPrivateStorageBoundaries(file, text) {
         }
         if ([STORAGE_COMPOSITION_FACTORY, ASSET_PUBLICATION_COMPOSITION_FACTORY].includes(name)
           && normalized !== STORAGE_COMPOSITION_FILE
-          && !(name === STORAGE_COMPOSITION_FACTORY && normalized === NORMALIZED_PUBLICATION_COMPOSITION_FILE)
-          && !(name === ASSET_PUBLICATION_COMPOSITION_FACTORY && normalized === PORTABLE_COMPOSITION_FILE)) {
+          && !(name === STORAGE_COMPOSITION_FACTORY && normalized === NORMALIZED_PUBLICATION_COMPOSITION_FILE)) {
           add(specifier, "private storage composition must remain unconsumed before its named later checkpoint");
+        }
+        if (name === PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY
+          && normalized !== PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FILE
+          && normalized !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE) {
+          add(specifier, `private portable normalized publication repository may be consumed only by ${PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE}`);
+        }
+        if (name === PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY
+          && normalized !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE
+          && !isCanonicalPortableNormalizedCompositionImport(normalized, node)) {
+          add(specifier, `portable normalized publication composition may be consumed only by ${PORTABLE_COMPOSITION_FILE}`);
         }
         if (isPrivateContractName(name) && isApplicationPublicBarrel(target)) {
           add(specifier, "private storage contracts must use their defining module, not a public barrel");
@@ -335,6 +435,11 @@ export function checkPrivateStorageBoundaries(file, text) {
           || names.includes(ASSET_PUBLICATION_COMPOSITION_FACTORY))) {
         add(node, "private storage composition must remain unconsumed before its named later checkpoint");
       }
+      if (targetsPortableNormalizedPublicationComposition(normalized, target)
+        && (node.type === "ExportAllDeclaration" || namespaceReexport
+          || names.includes(PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY))) {
+        add(node, `portable normalized publication composition may be consumed only by ${PORTABLE_COMPOSITION_FILE}`);
+      }
       if (isApplicationPublicBarrel(target) && names.some(isPrivateContractName)) {
         add(node, "private storage contracts must use their defining module, not a public barrel");
       }
@@ -353,8 +458,13 @@ export function checkPrivateStorageBoundaries(file, text) {
       }
       if (targetsNormalizedPublicationComposition(normalized, target)
         && normalized !== NORMALIZED_PUBLICATION_COMPOSITION_FILE
-        && normalized !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE) {
-        add(node, `normalized publication seam may be consumed only by ${ILLUSTRATION_PUBLICATION_COMPOSITION_FILE}`);
+        && normalized !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE
+        && normalized !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE) {
+        add(node, `normalized publication seam may be consumed only by ${ILLUSTRATION_PUBLICATION_COMPOSITION_FILE} and ${PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE}`);
+      }
+      if (targetsPortableNormalizedPublicationComposition(normalized, target)
+        && normalized !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE) {
+        add(node, `portable normalized publication composition may be consumed only by ${PORTABLE_COMPOSITION_FILE}`);
       }
       if (targetsIllustrationPublicationComposition(normalized, target)
         && normalized !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE) {
@@ -373,9 +483,18 @@ export function checkPrivateStorageBoundaries(file, text) {
       }
       if ([STORAGE_COMPOSITION_FACTORY, ASSET_PUBLICATION_COMPOSITION_FACTORY].includes(member.name)
         && normalized !== STORAGE_COMPOSITION_FILE
-        && !(member.name === STORAGE_COMPOSITION_FACTORY && normalized === NORMALIZED_PUBLICATION_COMPOSITION_FILE)
-        && !(member.name === ASSET_PUBLICATION_COMPOSITION_FACTORY && normalized === PORTABLE_COMPOSITION_FILE)) {
+        && !(member.name === STORAGE_COMPOSITION_FACTORY && normalized === NORMALIZED_PUBLICATION_COMPOSITION_FILE)) {
         add(member.node, "private storage composition must remain unconsumed before its named later checkpoint");
+      }
+      if (member.name === PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY
+        && normalized !== PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FILE
+        && normalized !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE) {
+        add(member.node, `private portable normalized publication repository may be consumed only by ${PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE}`);
+      }
+      if (member.name === PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY
+        && normalized !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE
+        && normalized !== PORTABLE_COMPOSITION_FILE) {
+        add(member.node, `portable normalized publication composition may be consumed only by ${PORTABLE_COMPOSITION_FILE}`);
       }
     }
     if (["MemberExpression", "OptionalMemberExpression", "ObjectMethod", "ObjectProperty", "ClassMethod"].includes(node.type)
@@ -440,6 +559,8 @@ export function checkAssetImportStorageCompositionInventory(sources) {
     STORAGE_COMPOSITION_FACTORY,
     ASSET_PUBLICATION_COMPOSITION_FACTORY,
     NORMALIZED_PUBLICATION_COMPOSITION_FACTORY,
+    PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY,
+    PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY,
     ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY
   ]) {
     definitions.set(name, []);
@@ -595,12 +716,12 @@ export function checkAssetImportStorageCompositionInventory(sources) {
     });
   }
 
-  const replacementQueue = [ILLUSTRATION_PUBLICATION_COMPOSITION_FILE];
-  const replacementGraph = new Set();
-  while (replacementQueue.length > 0) {
-    const file = replacementQueue.shift();
-    if (!file || replacementGraph.has(file)) continue;
-    replacementGraph.add(file);
+  const illustrationReplacementQueue = [ILLUSTRATION_PUBLICATION_COMPOSITION_FILE];
+  const illustrationReplacementGraph = new Set();
+  while (illustrationReplacementQueue.length > 0) {
+    const file = illustrationReplacementQueue.shift();
+    if (!file || illustrationReplacementGraph.has(file)) continue;
+    illustrationReplacementGraph.add(file);
     for (const target of moduleEdges.get(file) ?? []) {
       if (target.startsWith("services/api/src/")) {
         violations.push(`${file}: illustration publication replacement graph must not reach services/api/src via ${target}`);
@@ -610,13 +731,13 @@ export function checkAssetImportStorageCompositionInventory(sources) {
         violations.push(`${file}: illustration publication replacement graph must not reach legacy runtime module ${target}`);
         continue;
       }
-      if (parsed.has(target) && !replacementGraph.has(target)) {
-        replacementQueue.push(target);
+      if (parsed.has(target) && !illustrationReplacementGraph.has(target)) {
+        illustrationReplacementQueue.push(target);
       }
     }
   }
 
-  for (const file of replacementGraph) {
+  for (const file of illustrationReplacementGraph) {
     const program = parsed.get(file);
     if (!program) continue;
     walk(program, (node) => {
@@ -628,6 +749,47 @@ export function checkAssetImportStorageCompositionInventory(sources) {
         && member
         && ILLUSTRATION_LEGACY_WRITER_IDENTIFIERS.has(member.name)) {
         violations.push(`${file}:${lineNumber(member.node)}: illustration publication replacement graph prohibits legacy writer member ${member.name}`);
+      }
+    });
+  }
+
+  // Treat the already-reviewed e2 normalized publication seam as a terminal
+  // authority. The e4 graph may depend on that seam, but it must not gain a
+  // parallel route to the retired 0060/API/legacy import writers.
+  const portableReplacementQueue = [PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE];
+  const portableReplacementGraph = new Set();
+  while (portableReplacementQueue.length > 0) {
+    const file = portableReplacementQueue.shift();
+    if (!file || portableReplacementGraph.has(file)) continue;
+    portableReplacementGraph.add(file);
+    for (const target of moduleEdges.get(file) ?? []) {
+      if (target.startsWith("services/api/src/")) {
+        violations.push(`${file}: portable normalized publication replacement graph must not reach services/api/src via ${target}`);
+        continue;
+      }
+      if (PORTABLE_NORMALIZED_LEGACY_AUTHORITY_FILES.has(target)) {
+        violations.push(`${file}: portable normalized publication replacement graph must not reach legacy authority ${target}`);
+        continue;
+      }
+      if (target === NORMALIZED_PUBLICATION_COMPOSITION_FILE) continue;
+      if (parsed.has(target) && !portableReplacementGraph.has(target)) {
+        portableReplacementQueue.push(target);
+      }
+    }
+  }
+
+  for (const file of portableReplacementGraph) {
+    const program = parsed.get(file);
+    if (!program) continue;
+    walk(program, (node) => {
+      if (node.type === "Identifier" && isPortableNormalizedLegacyWriterIdentifier(node.name)) {
+        violations.push(`${file}:${lineNumber(node)}: portable normalized publication replacement graph prohibits legacy writer identifier ${node.name}`);
+      }
+      const member = staticMember(node);
+      if (["MemberExpression", "OptionalMemberExpression"].includes(node.type)
+        && member
+        && isPortableNormalizedLegacyWriterIdentifier(member.name)) {
+        violations.push(`${file}:${lineNumber(member.node)}: portable normalized publication replacement graph prohibits legacy writer member ${member.name}`);
       }
     });
   }
@@ -674,13 +836,10 @@ export function checkAssetImportStorageCompositionInventory(sources) {
   }
   const publicationImports = imports.get(ASSET_PUBLICATION_COMPOSITION_FACTORY);
   const publicationCalls = calls.get(ASSET_PUBLICATION_COMPOSITION_FACTORY);
-  if (publicationImports.length !== 1
-    || publicationImports[0].file !== PORTABLE_COMPOSITION_FILE
-    || publicationCalls.length !== 1
-    || publicationCalls[0] !== PORTABLE_COMPOSITION_FILE
-    || unsafeExposures.get(ASSET_PUBLICATION_COMPOSITION_FACTORY).length !== 0
-    || publicationCalls.some((file) => file !== PORTABLE_COMPOSITION_FILE)) {
-    violations.push(`${ASSET_PUBLICATION_COMPOSITION_FACTORY} must be consumed exactly once by ${PORTABLE_COMPOSITION_FILE}`);
+  if (publicationImports.length !== 0
+    || publicationCalls.length !== 0
+    || unsafeExposures.get(ASSET_PUBLICATION_COMPOSITION_FACTORY).length !== 0) {
+    violations.push(`${ASSET_PUBLICATION_COMPOSITION_FACTORY} must remain unconsumed by production replacement code`);
   }
   const normalizedDefinitions = definitions.get(NORMALIZED_PUBLICATION_COMPOSITION_FACTORY);
   const normalizedImports = imports.get(NORMALIZED_PUBLICATION_COMPOSITION_FACTORY);
@@ -689,14 +848,58 @@ export function checkAssetImportStorageCompositionInventory(sources) {
     || normalizedDefinitions[0] !== NORMALIZED_PUBLICATION_COMPOSITION_FILE) {
     violations.push(`${NORMALIZED_PUBLICATION_COMPOSITION_FACTORY} must be defined exactly once in ${NORMALIZED_PUBLICATION_COMPOSITION_FILE}`);
   }
-  if (normalizedImports.length !== 1
-    || normalizedImports[0].file !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE
-    || normalizedImports[0].target !== NORMALIZED_PUBLICATION_COMPOSITION_FILE
-    || normalizedImports[0].local !== NORMALIZED_PUBLICATION_COMPOSITION_FACTORY
-    || normalizedCalls.length !== 1
-    || normalizedCalls[0] !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE
+  const normalizedConsumers = [
+    ILLUSTRATION_PUBLICATION_COMPOSITION_FILE,
+    PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE
+  ];
+  if (normalizedImports.length !== normalizedConsumers.length
+    || normalizedConsumers.some((consumer) => !normalizedImports.some((entry) => (
+      entry.file === consumer
+      && entry.target === NORMALIZED_PUBLICATION_COMPOSITION_FILE
+      && entry.local === NORMALIZED_PUBLICATION_COMPOSITION_FACTORY
+    )))
+    || normalizedCalls.length !== normalizedConsumers.length
+    || normalizedConsumers.some((consumer) => !normalizedCalls.includes(consumer))
     || unsafeExposures.get(NORMALIZED_PUBLICATION_COMPOSITION_FACTORY).length !== 0) {
-    violations.push(`${NORMALIZED_PUBLICATION_COMPOSITION_FACTORY} must be consumed directly and exactly once by ${ILLUSTRATION_PUBLICATION_COMPOSITION_FILE}`);
+    violations.push(`${NORMALIZED_PUBLICATION_COMPOSITION_FACTORY} must be consumed directly and exactly once by each named private publication composition`);
+  }
+  const portableRepositoryDefinitions = definitions.get(PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY);
+  const portableRepositoryImports = imports.get(PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY);
+  const portableRepositoryCalls = calls.get(PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY);
+  if (portableRepositoryDefinitions.length !== 1
+    || portableRepositoryDefinitions[0] !== PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FILE) {
+    violations.push(`${PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY} must be defined exactly once in ${PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FILE}`);
+  }
+  if (portableRepositoryImports.length !== 1
+    || portableRepositoryImports[0].file !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE
+    || portableRepositoryImports[0].target !== PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FILE
+    || portableRepositoryImports[0].local !== PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY
+    || portableRepositoryCalls.length !== 1
+    || portableRepositoryCalls[0] !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE
+    || unsafeExposures.get(PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY).length !== 0) {
+    violations.push(`${PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY} must be consumed directly and exactly once by ${PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE}`);
+  }
+  const portableCompositionDefinitions = definitions.get(PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY);
+  const portableCompositionImports = imports.get(PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY);
+  const portableCompositionCalls = calls.get(PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY);
+  const portableCompositionInboundEdges = [...moduleEdges.entries()]
+    .filter(([file, targets]) => file !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE
+      && targets.has(PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE))
+    .map(([file]) => file);
+  if (portableCompositionDefinitions.length !== 1
+    || portableCompositionDefinitions[0] !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE) {
+    violations.push(`${PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY} must be defined exactly once in ${PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE}`);
+  }
+  if (portableCompositionImports.length !== 1
+    || portableCompositionImports[0].file !== PORTABLE_COMPOSITION_FILE
+    || portableCompositionImports[0].target !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FILE
+    || portableCompositionImports[0].local !== PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY
+    || portableCompositionCalls.length !== 1
+    || portableCompositionCalls[0] !== PORTABLE_COMPOSITION_FILE
+    || portableCompositionInboundEdges.length !== 1
+    || portableCompositionInboundEdges[0] !== PORTABLE_COMPOSITION_FILE
+    || unsafeExposures.get(PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY).length !== 0) {
+    violations.push(`${PORTABLE_NORMALIZED_PUBLICATION_COMPOSITION_FACTORY} must be consumed directly and exactly once by ${PORTABLE_COMPOSITION_FILE}`);
   }
   const illustrationDefinitions = definitions.get(ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY);
   const illustrationImports = imports.get(ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY);

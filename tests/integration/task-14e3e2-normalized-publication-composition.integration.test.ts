@@ -35,6 +35,11 @@ type TestComposition = Readonly<{
       leaseOwner: string;
       expiresAt: string;
     }>[]): Promise<readonly OpaqueHandle[]>;
+    reserveAggregate(inputBatches: readonly (readonly Readonly<{
+      request: PrivateNormalizedAssetPublicationRequest;
+      leaseOwner: string;
+      expiresAt: string;
+    }>[])[]): Promise<readonly (readonly OpaqueHandle[])[]>;
     attachInTransaction(
       database: DatabaseClient,
       reservation: OpaqueHandle,
@@ -45,6 +50,26 @@ type TestComposition = Readonly<{
       result: SafeNormalizedAssetPublicationResult;
       finalization: OpaqueFinalizationHandle;
     }>>;
+    attachBatchInTransaction(
+      database: DatabaseClient,
+      reservations: readonly OpaqueHandle[],
+      attachChildren: (
+        results: readonly SafeNormalizedAssetPublicationResult[],
+      ) => Promise<readonly PrivateNormalizedAssetRequestChildBindingsInput[]>,
+    ): Promise<readonly Readonly<{
+      result: SafeNormalizedAssetPublicationResult;
+      finalization: OpaqueFinalizationHandle;
+    }>[] >;
+    attachAggregateInTransaction(
+      database: DatabaseClient,
+      reservationBatches: readonly (readonly OpaqueHandle[])[],
+      attachChildren: (
+        results: readonly SafeNormalizedAssetPublicationResult[],
+      ) => Promise<readonly PrivateNormalizedAssetRequestChildBindingsInput[]>,
+    ): Promise<readonly Readonly<{
+      result: SafeNormalizedAssetPublicationResult;
+      finalization: OpaqueFinalizationHandle;
+    }>[] >;
     discardAfterRollback(reservation: OpaqueHandle): Promise<void>;
     finalize(
       finalization: OpaqueFinalizationHandle,
@@ -305,6 +330,97 @@ integration("Task 14e3e2 normalized publication composition", () => {
     ]);
     expect(attached[0]!.result.assetId).not.toBe(attached[1]!.result.assetId);
   });
+
+  it("materializes a complete batch before one callback binds its request children", async () => {
+    const composition = await compose();
+    const commands = [0, 1].map((index) => (
+      request(ownerUserId, `batch-attach-${index}-${crypto.randomUUID()}`)
+    ));
+    const reservations = await composition.publication.reserveBatch(commands.map((command) => ({
+      request: command,
+      leaseOwner: "14e3e2-batch-attach",
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    })));
+    const caller = await pool.connect();
+    let attached: readonly Readonly<{
+      result: SafeNormalizedAssetPublicationResult;
+      finalization: OpaqueFinalizationHandle;
+    }>[] = [];
+    try {
+      await caller.query("BEGIN");
+      attached = await composition.publication.attachBatchInTransaction(
+        caller,
+        reservations,
+        async (results) => {
+          const materialized = await caller.query<{ count: number }>(
+            "SELECT count(*)::int AS count FROM assets WHERE id=ANY($1::uuid[])",
+            [results.map((result) => result.assetId)],
+          );
+          expect(materialized.rows[0]?.count).toBe(2);
+          return results.map(() => ({ contexts: [], references: [] }));
+        },
+      );
+      await caller.query("COMMIT");
+    } finally {
+      await caller.query("ROLLBACK").catch(() => undefined);
+      caller.release();
+    }
+    expect(attached).toHaveLength(2);
+    await expect(Promise.all(attached.map(({ finalization }) => (
+      composition.publication.finalize(finalization)
+    )))).resolves.toEqual(attached.map(({ result }) => ({ outcome: "published", result })));
+  });
+
+  it("materializes a 100+1 aggregate under one callback and caller transaction", async () => {
+    const composition = await compose();
+    const commands = Array.from({ length: 101 }, (_, index) => (
+      request(ownerUserId, `aggregate-${index}-${crypto.randomUUID()}`)
+    ));
+    const reservationBatches = await composition.publication.reserveAggregate([
+      commands.slice(0, 100).map((command) => ({
+        request: command,
+        leaseOwner: "14e3e2-aggregate",
+        expiresAt: new Date(Date.now() + 60_000).toISOString()
+      })),
+      commands.slice(100).map((command) => ({
+        request: command,
+        leaseOwner: "14e3e2-aggregate",
+        expiresAt: new Date(Date.now() + 60_000).toISOString()
+      }))
+    ]);
+    expect(reservationBatches.map((batch) => batch.length)).toEqual([100, 1]);
+
+    const caller = await pool.connect();
+    const callback = vi.fn(async (results: readonly SafeNormalizedAssetPublicationResult[]) => {
+      const materialized = await caller.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM assets WHERE id=ANY($1::uuid[])",
+        [results.map((result) => result.assetId)],
+      );
+      expect(materialized.rows[0]?.count).toBe(101);
+      return results.map(() => ({ contexts: [], references: [] }));
+    });
+    let attached: readonly Readonly<{
+      result: SafeNormalizedAssetPublicationResult;
+      finalization: OpaqueFinalizationHandle;
+    }>[] = [];
+    try {
+      await caller.query("BEGIN");
+      attached = await composition.publication.attachAggregateInTransaction(
+        caller,
+        reservationBatches,
+        callback,
+      );
+      await caller.query("COMMIT");
+    } finally {
+      await caller.query("ROLLBACK").catch(() => undefined);
+      caller.release();
+    }
+    expect(callback).toHaveBeenCalledOnce();
+    expect(attached).toHaveLength(101);
+    await expect(Promise.all(attached.map(({ finalization }) => (
+      composition.publication.finalize(finalization)
+    )))).resolves.toEqual(attached.map(({ result }) => ({ outcome: "published", result })));
+  }, 60_000);
 
   it("finalizes an exact opaque post-commit handle after recreating the composition", async () => {
     const first = await compose();

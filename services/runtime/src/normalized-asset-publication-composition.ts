@@ -13,6 +13,7 @@ import {
   type PrivateNormalizedAssetFinalizationHandle,
   type PrivateNormalizedAssetPublicationPort,
   type PrivateNormalizedAssetPublicationRequest,
+  type PrivateNormalizedAssetReservationCommand,
   type PrivateNormalizedAssetReservationHandle,
   type SafeNormalizedAssetPublicationResult
 } from "../../../packages/application/src/assets/private-normalized-asset-publication.js";
@@ -23,7 +24,10 @@ import {
   type PrivateNormalizedAssetPublicationReservation
 } from "../../../packages/database/src/normalized-asset-publication-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import { createAssetImportStorageComposition } from "./asset-import-composition.js";
+import {
+  createAssetImportStorageComposition,
+  type AssetImportStorageComposition
+} from "./asset-import-composition.js";
 
 type ReservationState = {
   request: PrivateNormalizedAssetPublicationRequest;
@@ -47,6 +51,8 @@ type ReservationLockGroup = {
 
 const reservations = new WeakMap<object, ReservationState>();
 const FINALIZATION_HANDLE_PATTERN = /^narp1\.([0-9a-f]{64})\.([0-9a-f]{64})$/u;
+const MAXIMUM_NORMALIZED_PUBLICATION_BATCH = 100;
+const MAXIMUM_NORMALIZED_PUBLICATION_AGGREGATE = 256;
 
 function opaqueReservationHandle(): PrivateNormalizedAssetReservationHandle {
   return Object.freeze({}) as PrivateNormalizedAssetReservationHandle;
@@ -177,6 +183,17 @@ function preparedIdentity(
 
 export type PrivateNormalizedAssetPublicationComposition = Readonly<{
   publication: PrivateNormalizedAssetPublicationPort;
+  portableStorage: Readonly<{
+    adapter: Pick<AssetImportStorageComposition["adapter"],
+      | "stagePortableInput"
+      | "openStagedInputSession"
+      | "openPreviewInputSession"
+      | "publishPortableExport"
+      | "openExportSession"
+      | "reapExpiredPortable"
+    >;
+    repository: AssetImportStorageComposition["portable"];
+  }>;
   close(): Promise<void>;
 }>;
 
@@ -213,10 +230,9 @@ export async function createPrivateNormalizedAssetPublicationComposition(
     }
   };
 
-  const reserveBatch: PrivateNormalizedAssetPublicationPort["reserveBatch"] = async (commands) => {
-    if (commands.length === 0 || commands.length > 100) {
-      throw stableError("normalized_asset_publication_reservation_failed");
-    }
+  const reserveCommands = async (
+    commands: readonly PrivateNormalizedAssetReservationCommand[],
+  ): Promise<readonly PrivateNormalizedAssetReservationHandle[]> => {
     let contentLock: HeldPublicationContentLock | null = null;
     const preparedPublications: PrivatePreparedAssetPublication[] = [];
     const createdStates: ReservationState[] = [];
@@ -297,9 +313,138 @@ export async function createPrivateNormalizedAssetPublicationComposition(
     }
   };
 
+  const reserveBatch: PrivateNormalizedAssetPublicationPort["reserveBatch"] = async (commands) => {
+    if (commands.length === 0 || commands.length > MAXIMUM_NORMALIZED_PUBLICATION_BATCH) {
+      throw stableError("normalized_asset_publication_reservation_failed");
+    }
+    return reserveCommands(commands);
+  };
+
+  const reserveRequestsInTransaction:
+  PrivateNormalizedAssetPublicationPort["reserveRequestsInTransaction"] = async (
+    database,
+    requests,
+  ) => {
+    if (requests.length === 0 || requests.length > MAXIMUM_NORMALIZED_PUBLICATION_AGGREGATE) {
+      throw stableError("normalized_asset_publication_reservation_failed");
+    }
+    for (const request of requests) {
+      const reservation = await requestRepository.reserveRequestInTransaction(database, request);
+      if (reservation.outcome !== "reserved") {
+        throw stableError("normalized_asset_publication_reservation_recoverable");
+      }
+    }
+  };
+
+  const reserveAggregate: PrivateNormalizedAssetPublicationPort["reserveAggregate"] = async (
+    commandBatches,
+  ) => {
+    const commandCount = commandBatches.reduce((total, batch) => total + batch.length, 0);
+    if (commandBatches.length === 0
+      || commandCount === 0
+      || commandCount > MAXIMUM_NORMALIZED_PUBLICATION_AGGREGATE
+      || commandBatches.some((batch) => (
+        batch.length === 0 || batch.length > MAXIMUM_NORMALIZED_PUBLICATION_BATCH
+      ))) {
+      throw stableError("normalized_asset_publication_reservation_failed");
+    }
+    const handles = await reserveCommands(commandBatches.flat());
+    let offset = 0;
+    return Object.freeze(commandBatches.map((batch) => {
+      const group = Object.freeze(handles.slice(offset, offset + batch.length));
+      offset += batch.length;
+      return group;
+    }));
+  };
+
   const reserve: PrivateNormalizedAssetPublicationPort["reserve"] = async (command) => {
     const handles = await reserveBatch([command]);
     return handles[0]!;
+  };
+
+  const attachReservationsInTransaction = async (
+    database: Parameters<PrivateNormalizedAssetPublicationPort["attachBatchInTransaction"]>[0],
+    reservationHandles: readonly PrivateNormalizedAssetReservationHandle[],
+    attachChildren: Parameters<PrivateNormalizedAssetPublicationPort["attachBatchInTransaction"]>[2],
+  ): Promise<Awaited<ReturnType<PrivateNormalizedAssetPublicationPort["attachBatchInTransaction"]>>> => {
+    if (reservationHandles.length === 0
+      || new Set(reservationHandles).size !== reservationHandles.length) {
+      throw stableError("normalized_asset_publication_reservation_unavailable");
+    }
+    const states = reservationHandles.map((handle) => reservations.get(handle));
+    if (states.some((state) => !state || state.discarded)) {
+      throw stableError("normalized_asset_publication_reservation_unavailable");
+    }
+    const exactStates = states as ReservationState[];
+    try {
+      const results: SafeNormalizedAssetPublicationResult[] = [];
+      for (const state of exactStates) {
+        results.push(state.prepared
+          ? (await materialization.attachInTransaction(
+            database,
+            state.reservation,
+            state.request,
+            state.prepared,
+          )).result
+          : await materialization.readPublishedInTransaction(
+            database,
+            state.reservation,
+            state.request,
+          ));
+      }
+      const children = await attachChildren(Object.freeze(results));
+      if (children.length !== exactStates.length) {
+        throw stableError("normalized_asset_publication_attachment_failed");
+      }
+      const attached = [];
+      for (const [index, state] of exactStates.entries()) {
+        const result = results[index]!;
+        const requestChildren = children[index]!;
+        await requestRepository.attachRequestInTransaction(database, state.request, {
+          result,
+          contexts: requestChildren.contexts,
+          references: requestChildren.references
+        });
+        attached.push(Object.freeze({
+          result,
+          finalization: opaqueFinalizationHandle(state.request)
+        }));
+      }
+      return Object.freeze(attached);
+    } catch {
+      throw stableError("normalized_asset_publication_attachment_failed");
+    } finally {
+      await Promise.allSettled(exactStates.map(releaseReservationLock));
+    }
+  };
+
+  const attachBatchInTransaction: PrivateNormalizedAssetPublicationPort["attachBatchInTransaction"] = async (
+    database,
+    reservationHandles,
+    attachChildren,
+  ) => {
+    if (reservationHandles.length > MAXIMUM_NORMALIZED_PUBLICATION_BATCH) {
+      throw stableError("normalized_asset_publication_reservation_unavailable");
+    }
+    return attachReservationsInTransaction(database, reservationHandles, attachChildren);
+  };
+
+  const attachAggregateInTransaction:
+  PrivateNormalizedAssetPublicationPort["attachAggregateInTransaction"] = async (
+    database,
+    reservationBatches,
+    attachChildren,
+  ) => {
+    const reservationCount = reservationBatches.reduce((total, batch) => total + batch.length, 0);
+    if (reservationBatches.length === 0
+      || reservationCount === 0
+      || reservationCount > MAXIMUM_NORMALIZED_PUBLICATION_AGGREGATE
+      || reservationBatches.some((batch) => (
+        batch.length === 0 || batch.length > MAXIMUM_NORMALIZED_PUBLICATION_BATCH
+      ))) {
+      throw stableError("normalized_asset_publication_reservation_unavailable");
+    }
+    return attachReservationsInTransaction(database, reservationBatches.flat(), attachChildren);
   };
 
   const attachInTransaction: PrivateNormalizedAssetPublicationPort["attachInTransaction"] = async (
@@ -307,34 +452,15 @@ export async function createPrivateNormalizedAssetPublicationComposition(
     reservationHandle,
     attachChildren,
   ) => {
-    const state = reservations.get(reservationHandle);
-    if (!state || state.discarded) {
-      throw stableError("normalized_asset_publication_reservation_unavailable");
-    }
-    try {
-      const result = state.prepared
-        ? (await materialization.attachInTransaction(
-          database,
-          state.reservation,
-          state.request,
-          state.prepared,
-        )).result
-        : await materialization.readPublishedInTransaction(database, state.reservation, state.request);
-      const children = await attachChildren(result);
-      await requestRepository.attachRequestInTransaction(database, state.request, {
-        result,
-        contexts: children.contexts,
-        references: children.references
-      });
-      return Object.freeze({
-        result,
-        finalization: opaqueFinalizationHandle(state.request)
-      });
-    } catch {
-      throw stableError("normalized_asset_publication_attachment_failed");
-    } finally {
-      await releaseReservationLock(state).catch(() => undefined);
-    }
+    const attached = await attachBatchInTransaction(
+      database,
+      [reservationHandle],
+      async ([result]) => {
+        if (!result) throw stableError("normalized_asset_publication_attachment_failed");
+        return Object.freeze([await attachChildren(result)]);
+      },
+    );
+    return attached[0]!;
   };
 
   const discardAfterRollback: PrivateNormalizedAssetPublicationPort["discardAfterRollback"] = async (
@@ -373,6 +499,21 @@ export async function createPrivateNormalizedAssetPublicationComposition(
       throw stableError("normalized_asset_publication_discard_recoverable");
     } finally {
       await releaseReservationLock(state).catch(() => undefined);
+    }
+  };
+
+  const retireAfterTerminal: PrivateNormalizedAssetPublicationPort["retireAfterTerminal"] = async (
+    reservationHandle,
+  ) => {
+    const state = reservations.get(reservationHandle);
+    if (!state) {
+      throw stableError("normalized_asset_publication_reservation_unavailable");
+    }
+    if (!state.discarded) await discardAfterRollback(reservationHandle);
+    try {
+      await requestRepository.retireDiscardedRequest(state.reservation);
+    } catch {
+      throw stableError("normalized_asset_publication_retirement_recoverable");
     }
   };
 
@@ -426,16 +567,32 @@ export async function createPrivateNormalizedAssetPublicationComposition(
   };
 
   const publication: PrivateNormalizedAssetPublicationPort = Object.freeze({
+    reserveRequestsInTransaction,
     reserve,
     reserveBatch,
+    reserveAggregate,
     attachInTransaction,
+    attachBatchInTransaction,
+    attachAggregateInTransaction,
     discardAfterRollback,
+    retireAfterTerminal,
     finalize
   });
 
   let closed: Promise<void> | undefined;
   return Object.freeze({
     publication,
+    portableStorage: Object.freeze({
+      adapter: Object.freeze({
+        stagePortableInput: storage.adapter.stagePortableInput,
+        openStagedInputSession: storage.adapter.openStagedInputSession,
+        openPreviewInputSession: storage.adapter.openPreviewInputSession,
+        publishPortableExport: storage.adapter.publishPortableExport,
+        openExportSession: storage.adapter.openExportSession,
+        reapExpiredPortable: storage.adapter.reapExpiredPortable
+      }),
+      repository: storage.portable
+    }),
     close() {
       closed ??= (async () => {
         await Promise.allSettled([...heldReservations].map(releaseReservationLock));

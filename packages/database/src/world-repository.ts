@@ -168,6 +168,102 @@ function blockerNames(counts: Record<string, number>): string[] {
     .map(([name, count]) => `${name}:${count}`);
 }
 
+const PRIVATE_EXACT_WORLD_TARGET_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+/** Private portable-import execution seam; target IDs are server-planned, never caller input. */
+export async function importPrivatePortableWorldAtExactTarget(
+  transaction: Parameters<WorldRepositoryPort["importWorld"]>[0],
+  scope: Parameters<WorldRepositoryPort["importWorld"]>[1],
+  input: Parameters<WorldRepositoryPort["importWorld"]>[2],
+  target: Readonly<{
+    worldId: string;
+    worldVersionId: string;
+    sourceHash: string;
+  }>,
+): Promise<WorldCampaignRepositoryResult<WorldImportResultView>> {
+  const client = worldCampaignDatabaseClient(transaction);
+  const request = worldImportRequestSchema.parse(input);
+  if (!validPortableWorldContent(request.worldExport.content)
+    || !PRIVATE_EXACT_WORLD_TARGET_PATTERN.test(target.worldId)
+    || !PRIVATE_EXACT_WORLD_TARGET_PATTERN.test(target.worldVersionId)
+    || !target.sourceHash.startsWith("portable-campaign-world:")
+    || target.sourceHash.length > 200) {
+    return failure("invalid_transition");
+  }
+  const content = portableWorldContent(request.worldExport.content, request.worldExport.title);
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+    `${scope.ownerUserId}:${target.sourceHash}`
+  ]);
+  const prior = await client.query<{
+    id: string;
+    world_id: string | null;
+    world_version_id: string | null;
+  }>(
+    `SELECT id,world_id,world_version_id
+       FROM imports
+      WHERE owner_user_id=$1 AND source_hash=$2 AND status='completed'`,
+    [scope.ownerUserId, target.sourceHash],
+  );
+  const existing = prior.rows[0];
+  if (existing) {
+    return existing.world_id === target.worldId && existing.world_version_id === target.worldVersionId
+      ? success({
+        importId: existing.id,
+        worldId: target.worldId,
+        worldVersionId: target.worldVersionId,
+        duplicate: true
+      })
+      : failure("invalid_transition");
+  }
+  await client.query(
+    "INSERT INTO worlds (id,owner_user_id,title,status) VALUES ($1,$2,$3,'active')",
+    [target.worldId, scope.ownerUserId, request.worldExport.title],
+  );
+  await client.query(
+    `INSERT INTO world_versions (
+       id,world_id,owner_user_id,version_number,content,source_hash,
+       release_notes,created_from_revision
+     ) VALUES ($1,$2,$3,1,$4,$5,'Imported portable world.',1)`,
+    [
+      target.worldVersionId,
+      target.worldId,
+      scope.ownerUserId,
+      json(content),
+      sha256(stableStringify(content))
+    ],
+  );
+  await client.query(
+    `INSERT INTO world_drafts (
+       world_id,owner_user_id,based_on_world_version_id,revision,content
+     ) VALUES ($1,$2,$3,1,$4)`,
+    [target.worldId, scope.ownerUserId, target.worldVersionId, json(content)],
+  );
+  const imported = await client.query<{ id: string }>(
+    `INSERT INTO imports (
+       owner_user_id,source_type,source_name,source_hash,status,
+       world_id,world_version_id,stats,completed_at
+     ) VALUES ($1,'world_json',$2,$3,'completed',$4,$5,$6,now())
+     RETURNING id`,
+    [
+      scope.ownerUserId,
+      request.sourceName,
+      target.sourceHash,
+      target.worldId,
+      target.worldVersionId,
+      json({ versionNumber: 1 })
+    ],
+  );
+  const importId = imported.rows[0]?.id;
+  return importId
+    ? success({
+      importId,
+      worldId: target.worldId,
+      worldVersionId: target.worldVersionId,
+      duplicate: false
+    })
+    : failure("invalid_transition");
+}
+
 function createPostgresWorldRepository(): PostgresWorldRepository {
   return {
     async listWorlds(transaction, scope): Promise<WorldListSource> {

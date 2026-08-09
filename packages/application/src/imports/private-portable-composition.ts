@@ -6,6 +6,12 @@ import type {
   PrivateAssetPublicationResult
 } from "../assets/private-asset-publication.js";
 import type {
+  PrivateAssetPublicationContextIntentInput,
+  PrivateAssetPublicationReferenceIntentInput,
+  PrivateNormalizedAssetRequestChildBindingsInput,
+  SafeNormalizedAssetPublicationResult
+} from "../assets/private-normalized-asset-publication.js";
+import type {
   ImportOwnerScope,
   PortableArchiveDiagnosticCode,
   PortableArchiveExportRetrieval,
@@ -247,11 +253,44 @@ export type PrivatePortableFamilyMutationResult = Readonly<{
   campaignId: string | null;
   duplicate: boolean;
   result: Readonly<Record<string, PortableJsonValue>>;
+  normalizedChildBindings?: readonly PrivateNormalizedAssetRequestChildBindingsInput[];
+}>;
+
+export type PrivatePortableFamilyTargetPlan = Readonly<{
+  worldId: string;
+  worldVersionId: string;
+  campaignId: string;
+  turns: readonly Readonly<{
+    ordinal: number;
+    sourceTurnId: string | null;
+    targetTurnId: string;
+  }>[];
+  illustrationSets: readonly Readonly<{ sourceId: string; targetId: string }>[];
+  illustrationSegments: readonly Readonly<{ sourceId: string; targetId: string }>[];
+  generationContexts: readonly Readonly<{ sourceId: string; targetId: string }>[];
+}>;
+
+export type PrivatePortableAssetChildPlan = Readonly<{
+  contexts: readonly Readonly<{
+    contextId: string;
+    intent: PrivateAssetPublicationContextIntentInput;
+  }>[];
+  references: readonly Readonly<{
+    referenceId: string;
+    intent: PrivateAssetPublicationReferenceIntentInput;
+  }>[];
 }>;
 
 export type PrivatePortableAssetInventoryItem = Readonly<{
   sourceAssetIds: readonly string[];
   sourceKeys?: readonly string[];
+  /** Legacy-only exact turn targets that cannot always be represented by source UUID bindings. */
+  legacyTurnBindings?: readonly Readonly<{
+    sourceAssetId: string;
+    sourceCampaignId: string | null;
+    sourceTurnId: string | null;
+    turnOrdinal: number;
+  }>[];
   records: readonly ArchiveAssetRecord[];
   artifact: PrivateAssetPublicationCommand["original"];
 }>;
@@ -261,8 +300,17 @@ export type PrivatePortableSourceAssetRecord = Readonly<Omit<ArchiveAssetRecord,
 export type PrivatePortablePublishedAsset = Readonly<{
   sourceAssetIds: readonly string[];
   sourceKeys?: readonly string[];
+  legacyTurnBindings?: readonly Readonly<{
+    sourceAssetId: string;
+    sourceCampaignId: string | null;
+    sourceTurnId: string | null;
+    turnOrdinal: number;
+  }>[];
   records: readonly PrivatePortableSourceAssetRecord[];
-  result: PrivateAssetPublicationResult;
+  result: Pick<SafeNormalizedAssetPublicationResult,
+    "assetId" | "mimeType" | "byteLength" | "contentHash"
+  >;
+  normalizedChildren?: PrivatePortableAssetChildPlan;
 }>;
 
 export type PrivateLegacyStoryCompanionAsset = Readonly<{
@@ -287,6 +335,7 @@ export interface PrivatePortableFamilyMutationPort {
     destination: PortablePreviewDestination;
     authorityFingerprint: string;
     payload: Readonly<Record<string, PortableJsonValue>>;
+    targetPlan?: PrivatePortableFamilyTargetPlan;
     publishedAssets: readonly (PrivatePortablePublishedAsset | PrivateAssetPublicationResult)[];
   }>): Promise<PrivatePortableFamilyMutationResult>;
   commitLegacyStory(database: PrivatePortableTransactionContext, input: Readonly<{
@@ -294,6 +343,7 @@ export interface PrivatePortableFamilyMutationPort {
     destination: PortablePreviewDestination;
     authorityFingerprint: string;
     payload: Readonly<Record<string, PortableJsonValue>>;
+    targetPlan?: PrivatePortableFamilyTargetPlan;
     publishedAssets?: readonly PrivatePortablePublishedAsset[];
   }>): Promise<PrivatePortableFamilyMutationResult>;
   commitWorld(database: PrivatePortableTransactionContext, input: Readonly<{

@@ -296,10 +296,17 @@ export type PrivateNormalizedAssetFinalizationOutcome =
  * the port never exposes its concrete database context or filesystem authority.
  */
 export interface PrivateNormalizedAssetPublicationPort {
+  reserveRequestsInTransaction(
+    database: DurableFilesystemTransactionContext,
+    requests: readonly PrivateNormalizedAssetPublicationRequest[],
+  ): Promise<void>;
   reserve(command: PrivateNormalizedAssetReservationCommand): Promise<PrivateNormalizedAssetReservationHandle>;
   reserveBatch(
     commands: readonly PrivateNormalizedAssetReservationCommand[],
   ): Promise<readonly PrivateNormalizedAssetReservationHandle[]>;
+  reserveAggregate(
+    commandBatches: readonly (readonly PrivateNormalizedAssetReservationCommand[])[],
+  ): Promise<readonly (readonly PrivateNormalizedAssetReservationHandle[])[]>;
   attachInTransaction(
     database: DurableFilesystemTransactionContext,
     reservation: PrivateNormalizedAssetReservationHandle,
@@ -310,7 +317,28 @@ export interface PrivateNormalizedAssetPublicationPort {
     result: SafeNormalizedAssetPublicationResult;
     finalization: PrivateNormalizedAssetFinalizationHandle;
   }>>;
+  attachBatchInTransaction(
+    database: DurableFilesystemTransactionContext,
+    reservations: readonly PrivateNormalizedAssetReservationHandle[],
+    attachChildren: (
+      results: readonly SafeNormalizedAssetPublicationResult[],
+    ) => Promise<readonly PrivateNormalizedAssetRequestChildBindingsInput[]>,
+  ): Promise<readonly Readonly<{
+    result: SafeNormalizedAssetPublicationResult;
+    finalization: PrivateNormalizedAssetFinalizationHandle;
+  }>[] >;
+  attachAggregateInTransaction(
+    database: DurableFilesystemTransactionContext,
+    reservationBatches: readonly (readonly PrivateNormalizedAssetReservationHandle[])[],
+    attachChildren: (
+      results: readonly SafeNormalizedAssetPublicationResult[],
+    ) => Promise<readonly PrivateNormalizedAssetRequestChildBindingsInput[]>,
+  ): Promise<readonly Readonly<{
+    result: SafeNormalizedAssetPublicationResult;
+    finalization: PrivateNormalizedAssetFinalizationHandle;
+  }>[] >;
   discardAfterRollback(reservation: PrivateNormalizedAssetReservationHandle): Promise<void>;
+  retireAfterTerminal(reservation: PrivateNormalizedAssetReservationHandle): Promise<void>;
   finalize(
     finalization: PrivateNormalizedAssetFinalizationHandle,
     recovery?: Readonly<{ leaseOwner: string; leaseSeconds: number }>,

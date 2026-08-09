@@ -66,7 +66,7 @@ describe("Task 14e3e2 neutral publication boundaries", () => {
     }
   });
 
-  it("allows only the neutral seam to consume normalized request authority and only e3 to consume that seam", () => {
+  it("allows only the neutral seam to consume normalized request authority and only named private coordinators to consume that seam", () => {
     expect(checkPrivateStorageBoundaries(
       "services/runtime/src/normalized-asset-publication-composition.ts",
       `import { createPostgresNormalizedAssetPublicationRepository } from "../../../packages/database/src/normalized-asset-publication-repository.js";`,
@@ -89,6 +89,10 @@ describe("Task 14e3e2 neutral publication boundaries", () => {
 
     expect(checkPrivateStorageBoundaries(
       "services/runtime/src/illustration-asset-publication-composition.ts",
+      `import { createPrivateNormalizedAssetPublicationComposition } from "./normalized-asset-publication-composition.js";`,
+    )).toEqual([]);
+    expect(checkPrivateStorageBoundaries(
+      "services/runtime/src/portable-normalized-asset-publication-composition.ts",
       `import { createPrivateNormalizedAssetPublicationComposition } from "./normalized-asset-publication-composition.js";`,
     )).toEqual([]);
   });
