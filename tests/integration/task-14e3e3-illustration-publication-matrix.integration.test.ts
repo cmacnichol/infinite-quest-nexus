@@ -979,6 +979,101 @@ integration("Task 14e3e3 illustration publication matrix", () => {
     }
   });
 
+  it("holds a released variant's exact content lock through paused rollback deletion", async () => {
+    let releaseDelete!: () => void;
+    let signalDelete!: () => void;
+    const deletePaused = new Promise<void>((resolve) => { signalDelete = resolve; });
+    const allowDelete = new Promise<void>((resolve) => { releaseDelete = resolve; });
+    let pauseDelete = false;
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => {
+      const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+      return {
+        ...actual,
+        async unlink(path: Parameters<typeof actual.unlink>[0]) {
+          // The descriptor-anchored adapter deletes through /proc/self/fd,
+          // so the concrete syscall path is not rooted at assetRoot.
+          if (pauseDelete) {
+            pauseDelete = false;
+            signalDelete();
+            await allowDelete;
+          }
+          return actual.unlink(path);
+        }
+      };
+    });
+    const firstScope = await createCampaignScope();
+    const firstWorker = `e3-paused-rollback-a-${crypto.randomUUID()}`;
+    const firstJobId = await insertTurnImageJob(firstScope, firstWorker, { imageCount: 2 });
+    const sharedBytes = await png(90, 40, 20);
+    const uniqueBytes = await png(20, 40, 90);
+    const firstDownloads = [sharedBytes, uniqueBytes];
+    const firstWithSequence = await compose(async () => ({
+      bytes: firstDownloads.shift()!,
+      mimeType: "image/png"
+    }));
+    await pool.query(
+      `CREATE FUNCTION task_14e3e3_partial_attach_fault() RETURNS trigger
+       LANGUAGE plpgsql AS $fault$
+       BEGIN
+         IF NEW.image_job_id::text=TG_ARGV[0] AND NEW.variant_index=0 THEN
+           RAISE EXCEPTION 'task_14e3e3_partial_attach_fault';
+         END IF;
+         RETURN NEW;
+       END;
+       $fault$`,
+    );
+    await pool.query(
+      `CREATE TRIGGER task_14e3e3_partial_attach_fault_trigger
+       BEFORE INSERT ON image_job_asset_publications
+       FOR EACH ROW EXECUTE FUNCTION task_14e3e3_partial_attach_fault('${firstJobId}')`,
+    );
+    pauseDelete = true;
+    const firstCompletion = firstWithSequence.coordinator.completeClaimedImageJob({
+      imageJobId: firstJobId,
+      workerId: firstWorker,
+      result: completedResult(firstScope.providerProfileId, 2)
+    });
+    try {
+      await deletePaused;
+      await pool.query("DROP TRIGGER task_14e3e3_partial_attach_fault_trigger ON image_job_asset_publications");
+      await pool.query("DROP FUNCTION task_14e3e3_partial_attach_fault()");
+      const otherOwner = await pool.query<{ id: string }>(
+        "INSERT INTO users (display_name,status) VALUES ($1,'active') RETURNING id",
+        [`e3-paused-rollback-owner-${crypto.randomUUID()}`],
+      );
+      const secondScope = await createCampaignScope(otherOwner.rows[0]!.id);
+      const secondWorker = `e3-paused-rollback-b-${crypto.randomUUID()}`;
+      const secondJobId = await insertTurnImageJob(secondScope, secondWorker);
+      const second = await compose(async () => ({ bytes: sharedBytes, mimeType: "image/png" }));
+      const secondCompletion = second.coordinator.completeClaimedImageJob({
+        imageJobId: secondJobId,
+        workerId: secondWorker,
+        result: completedResult(secondScope.providerProfileId, 1)
+      });
+      await expect(Promise.race([
+        secondCompletion.then(() => "completed"),
+        new Promise<string>((resolveWait) => setTimeout(() => resolveWait("blocked"), 250))
+      ])).resolves.toBe("blocked");
+      releaseDelete();
+      await expect(firstCompletion).rejects.toThrow("task_14e3e3_partial_attach_fault");
+      const published = await secondCompletion;
+      expect(published).toMatchObject({ outcome: "published" });
+      if (published.outcome !== "published") return;
+      const stored = await pool.query<{ storage_path: string }>(
+        "SELECT storage_path FROM assets WHERE id=$1 AND owner_user_id=$2",
+        [published.assets[0]!.assetId, secondScope.ownerUserId],
+      );
+      await expect(readFile(join(assetRoot, stored.rows[0]!.storage_path))).resolves.toEqual(sharedBytes);
+    } finally {
+      releaseDelete();
+      await pool.query("DROP TRIGGER IF EXISTS task_14e3e3_partial_attach_fault_trigger ON image_job_asset_publications");
+      await pool.query("DROP FUNCTION IF EXISTS task_14e3e3_partial_attach_fault()");
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
   it("isolates provider-result, identity, download, signature, decode, and MIME failures from accepted narration", async () => {
     const cases = [
       {

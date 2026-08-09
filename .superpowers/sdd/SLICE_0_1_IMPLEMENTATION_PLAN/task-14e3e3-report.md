@@ -111,3 +111,13 @@ above.
   promotion fault with durable recovery, an uncommitted recovery no-op, and an
   ACCESS EXCLUSIVE lock-wait expiry that confirms zero downloader calls.
 - `pnpm check` passed.
+
+### Batch-lock interleaving proof
+
+A deterministic real PostgreSQL/temp-filesystem regression pauses A's
+descriptor-anchored unlink after cleanup reference projection, while A's
+variant 0 has released its batch participation and variant 1 releases the
+remaining shared group lock. A cross-owner B publication of the same content
+cannot finish before A resumes because A reacquires its exact content lock;
+afterward B publishes and its bytes remain readable. Restoring the previous
+group-only predicate makes this regression fail before B's bytes are protected.
