@@ -415,6 +415,41 @@ integration("generation job notification delivery", () => {
       const client = await migrationPool.connect();
       try {
         await client.query("SET session_replication_role = 'replica'");
+        const legacyOperationId = crypto.randomUUID();
+        const legacyOwnerId = crypto.randomUUID();
+        await client.query(
+          `INSERT INTO portable_import_operations (
+             id,owner_user_id,staged_input_id,import_kind,preview_token_hash,
+             content_fingerprint,destination_fingerprint,destination_kind,
+             destination_world_id,destination_world_version_id,preview_projection,expires_at
+           ) VALUES (
+             $1,$2,gen_random_uuid(),'legacy_story',repeat('a',64),repeat('b',64),
+             repeat('c',64),'existing_world_version',gen_random_uuid(),gen_random_uuid(),
+             '{}'::jsonb,clock_timestamp()+interval '1 hour'
+           )`,
+          [legacyOperationId, legacyOwnerId],
+        );
+        await client.query(
+          `INSERT INTO portable_import_asset_publications (
+             operation_id,owner_user_id,import_id,asset_id
+           ) VALUES ($1,$2,gen_random_uuid(),gen_random_uuid())`,
+          [legacyOperationId, legacyOwnerId],
+        );
+        await client.query("SET session_replication_role = 'origin'");
+        await expect(runner({
+          dbClient: client,
+          dir: resolve("database/migrations"),
+          direction: "down",
+          count: 1,
+          migrationsTable: "schema_migrations",
+          checkOrder: true,
+          singleTransaction: true,
+          verbose: false,
+          logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
+        })).rejects.toThrow("cannot downgrade portable Legacy Story asset publications while retained mappings exist");
+        await client.query("SET session_replication_role = 'replica'");
+        await client.query("DELETE FROM portable_import_asset_publications WHERE operation_id=$1", [legacyOperationId]);
+        await client.query("DELETE FROM portable_import_operations WHERE id=$1", [legacyOperationId]);
         await client.query(
           `INSERT INTO portable_import_asset_publications (
              operation_id,owner_user_id,import_id,asset_id
@@ -425,7 +460,7 @@ integration("generation job notification delivery", () => {
           dbClient: client,
           dir: resolve("database/migrations"),
           direction: "down",
-          count: 1,
+          count: 2,
           migrationsTable: "schema_migrations",
           checkOrder: true,
           singleTransaction: true,
@@ -451,7 +486,7 @@ integration("generation job notification delivery", () => {
           dbClient: client,
           dir: resolve("database/migrations"),
           direction: "down",
-          count: 1,
+          count: 2,
           migrationsTable: "schema_migrations",
           checkOrder: true,
           singleTransaction: true,
@@ -469,7 +504,7 @@ integration("generation job notification delivery", () => {
           dbClient: client,
           dir: resolve("database/migrations"),
           direction: "down",
-          count: 11,
+          count: 12,
           migrationsTable: "schema_migrations",
           checkOrder: true,
           singleTransaction: true,
@@ -477,6 +512,7 @@ integration("generation job notification delivery", () => {
           logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
         });
         expect(reverted.map((migration) => migration.name)).toEqual([
+          "0063_portable_legacy_story_asset_publications",
           "0062_portable_import_asset_publications",
           "0061_portable_import_composition",
           "0060_asset_publication_identities",
@@ -514,7 +550,8 @@ integration("generation job notification delivery", () => {
           "0059_secure_storage_target_intent",
           "0060_asset_publication_identities",
           "0061_portable_import_composition",
-          "0062_portable_import_asset_publications"
+          "0062_portable_import_asset_publications",
+          "0063_portable_legacy_story_asset_publications"
         ]);
       await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
          `SELECT (

@@ -8802,27 +8802,40 @@ allowlists, or migration 0062:
   decoded and grouped as typed optional artifacts; successful publications
   rewrite the turn URL, safe HTTP(S) URLs remain external, and malformed data
   images or unsafe URL schemes are omitted without failing the story import.
-- A private test-injected Legacy Story companion seam accepts source keys plus
-  verified bytes only—never a path or bearer—resolves the legacy filename,
-  stem, and UUID aliases, and carries cover/turn/attachment metadata into the
-  typed publication mutation. The real PostgreSQL/temp-filesystem matrix covers
-  bundled-turn rewrite through this seam. Live multipart companion ingestion
-  is intentionally still absent: the current transport supplies a separate
-  `LegacyAssetSource`, while b5 stages one input and 0062 remains Campaign-ZIP
-  only. Task 14e3g must bind the normalized companion source during the atomic
-  route switch; this checkpoint does not claim a live route parity switch.
+- The private Legacy Story composition now accepts normalized companion
+  artifacts at preview and first commit, then reopens the staged Story source,
+  extracts its inline images, resolves companion filename/stem/UUID aliases,
+  and merges both inventories in canonical content-hash order. Preview persists
+  the exact path-free record authority; commit revalidates that authority,
+  reserves and attaches every binary, passes source keys/IDs and binding
+  metadata to `commitLegacyStory`, records the exact import-to-asset mappings,
+  and finalizes through the same durable lifecycle as Campaign ZIP. Committed
+  replay recovers those mappings after restart and does not require companion
+  bytes to be submitted again.
+- Migration 0063 narrowly extends the 0062 reservation/publication guards to
+  the exact `legacy_story` / `portable_legacy_story` pair while retaining the
+  Campaign ZIP pair and all owner, authority, lease, reference, and publication
+  fences. Migration 0062 remains unchanged as the historical Campaign-ZIP-only
+  checkpoint. The 0063 downgrade refuses while any Legacy Story mapping or
+  reservation intent remains and otherwise restores the exact 0062 guards.
+- The normalized companion input is still a private, test-injected seam:
+  source keys plus verified bytes only—never a path or bearer. Live multipart
+  companion ingestion remains intentionally absent because the current
+  transport supplies a separate `LegacyAssetSource`, while b5 stages one input.
+  Task 14e3g must normalize and bind that companion source during the atomic
+  route switch; this correction does not claim a live route parity switch.
 - The AST boundary checker now applies the legacy-service import prohibition to
   both the runtime decoder and rich database adapter, including aliased,
   namespace, CommonJS, dynamic-import, and re-export forms. Neither adapter
   imports an API `*service` or exposes the private graph to a live consumer.
 
-Focused verification is 23 unit decoder/boundary cases and 23 real
+Focused verification is 23 unit decoder/boundary cases and 24 real
 PostgreSQL/temp-filesystem composition cases. The latter includes current rich
 archive restoration and replay, legacy ZIP/inline/companion behavior, safe
 external and malformed optional image semantics, ownership/destination fences,
 rollback/cleanup, restart/finalization recovery, duplicate replay, and exact
 publication isolation. Repository-wide verification is 1,462 unit cases and
-509 real PostgreSQL integration cases, plus `pnpm check`, `pnpm build`, and
+510 real PostgreSQL integration cases, plus `pnpm check`, `pnpm build`, and
 `git diff --check`. **14e3d-R / 14e3e0 is complete as a private prerequisite;
 14e3e1 is next.**
 
@@ -8860,7 +8873,7 @@ tests here; Task 14e3g performs the single live binding switch. No worker may
 transitively import a `services/api` implementation.
 
 **14e3e1 — normalized publication/request authority.** Add an additive
-migration (expected **0063**) and private contracts for a normalized artifact
+migration (expected **0064**) and private contracts for a normalized artifact
 and a request-to-canonical-asset mapping distinct from the existing one-row
 logical asset publication identity. The command carries verified original and
 derivative technical metadata (pixel width/height, format/pages/orientation as

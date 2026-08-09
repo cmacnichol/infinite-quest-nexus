@@ -453,16 +453,36 @@ describe("Task 14e3d private portable composition contract", () => {
       world: { title: "Legacy bundle world" },
       turns: [{ id: sourceTurnId, narration: "Bundled", imageUrl: "images/bundled.png" }]
     };
-    const inventory = await previewAdapter.extractLegacyStoryCompanionAssets(story, [{
+    const companions = [{
       sourceKey: "bundled.png",
-      artifact: { mimeType: "image/png", bytes: PNG_1X1, byteLength: PNG_1X1.byteLength, contentHash }
-    }]);
+      artifact: { mimeType: "image/png" as const, bytes: PNG_1X1, byteLength: PNG_1X1.byteLength, contentHash }
+    }];
+    const command = {
+      ownerUserId,
+      stagedInput: toPortableStagedInput("legacy-companion"),
+      kind: "legacy_story" as const,
+      destination: {
+        kind: "existing_world_version" as const,
+        worldId: "00000000-0000-4000-8000-000000000030",
+        worldVersionId: "00000000-0000-4000-8000-000000000031"
+      }
+    };
+    const source = JSON.stringify(story);
+    const preview = await previewAdapter.previewLegacyStory(utf8(source), command, companions);
+    const inventory = await previewAdapter.extractLegacyStoryAssets(
+      utf8(source),
+      preview.authority,
+      companions,
+    );
 
     expect(inventory).toMatchObject([{
       sourceKeys: expect.arrayContaining(["bundled.png", "bundled"]),
       records: [{ bindings: [{ role: "turn_illustration", turnId: sourceTurnId }] }],
       artifact: { contentHash }
     }]);
+    expect(preview.authority.normalizedPayload).toMatchObject({
+      assetRecords: [{ bindings: [{ role: "turn_illustration", turnId: sourceTurnId }] }]
+    });
     expect(JSON.stringify(inventory)).not.toMatch(/(?:relativePath|storagePath|bearer)/u);
   });
 

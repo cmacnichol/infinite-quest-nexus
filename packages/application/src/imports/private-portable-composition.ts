@@ -67,7 +67,7 @@ export function canonicalPortableImportAuthority(value: PortableCanonicalImportA
 export function canonicalPortableAssetReservationCommand(value: Readonly<{
   operationId: string;
   ownerUserId: string;
-  kind: "campaign_zip";
+  kind: "campaign_zip" | "legacy_story";
   authorityFingerprint: string;
   commitIdempotencyKeyHash: string;
 }>): string {
@@ -270,6 +270,11 @@ export type PrivateLegacyStoryCompanionAsset = Readonly<{
   artifact: PrivateAssetPublicationCommand["original"];
 }>;
 
+/** Private binary inputs already validated by the unbound transport/test seam. */
+export type PrivatePortableImportArtifacts = Readonly<{
+  legacyStoryCompanions?: readonly PrivateLegacyStoryCompanionAsset[];
+}>;
+
 /** Named caller-client authority. No loose callback can substitute for domain persistence. */
 export interface PrivatePortableFamilyMutationPort {
   findCampaignDuplicate(database: PrivatePortableTransactionContext, input: Readonly<{
@@ -313,13 +318,10 @@ export interface PrivatePortableFamilyPreviewPort {
   extractLegacyStoryAssets(
     bytes: AsyncIterable<Uint8Array>,
     authority: PortableCanonicalImportAuthority,
-  ): Promise<readonly PrivatePortableAssetInventoryItem[]>;
-  extractLegacyStoryCompanionAssets(
-    story: PortableJsonValue,
-    companions: readonly PrivateLegacyStoryCompanionAsset[],
+    companions?: readonly PrivateLegacyStoryCompanionAsset[],
   ): Promise<readonly PrivatePortableAssetInventoryItem[]>;
   previewCampaignZip(bytes: AsyncIterable<Uint8Array>, command: Extract<PortableImportPreviewCommand, { kind: "campaign_zip" }>): Promise<Readonly<{ authority: PortableCanonicalImportAuthority; projection: PortableImportPreviewView["projection"] }>>;
-  previewLegacyStory(bytes: AsyncIterable<Uint8Array>, command: Extract<PortableImportPreviewCommand, { kind: "legacy_story" }>): Promise<Readonly<{ authority: PortableCanonicalImportAuthority; projection: PortableImportPreviewView["projection"] }>>;
+  previewLegacyStory(bytes: AsyncIterable<Uint8Array>, command: Extract<PortableImportPreviewCommand, { kind: "legacy_story" }>, companions?: readonly PrivateLegacyStoryCompanionAsset[]): Promise<Readonly<{ authority: PortableCanonicalImportAuthority; projection: PortableImportPreviewView["projection"] }>>;
   previewInfiniteWorlds(bytes: AsyncIterable<Uint8Array>, command: Extract<PortableImportPreviewCommand, { kind: "infinite_worlds" }>): Promise<Readonly<{ authority: PortableCanonicalImportAuthority; projection: PortableImportPreviewView["projection"] }>>;
   previewCyoa(bytes: AsyncIterable<Uint8Array>, command: Extract<PortableImportPreviewCommand, { kind: "cyoa" }>): Promise<Readonly<{ authority: PortableCanonicalImportAuthority; projection: PortableImportPreviewView["projection"] }>>;
   previewWorldJson(bytes: AsyncIterable<Uint8Array>, command: Extract<PortableImportPreviewCommand, { kind: "world_json" }>): Promise<Readonly<{ authority: PortableCanonicalImportAuthority; projection: PortableImportPreviewView["projection"] }>>;
@@ -375,13 +377,13 @@ export interface PortableImportExportComposition {
   previewCampaignZip<Command extends Extract<PortableImportPreviewCommand, { kind: "campaign_zip" }>>(
     command: Command,
   ): Promise<PortableImportPreviewView<Command>>;
-  previewLegacyStory(command: Extract<PortableImportPreviewCommand, { kind: "legacy_story" }>): Promise<PortableImportPreviewView<Extract<PortableImportPreviewCommand, { kind: "legacy_story" }>>>;
+  previewLegacyStory(command: Extract<PortableImportPreviewCommand, { kind: "legacy_story" }>, artifacts?: PrivatePortableImportArtifacts): Promise<PortableImportPreviewView<Extract<PortableImportPreviewCommand, { kind: "legacy_story" }>>>;
   previewInfiniteWorlds(command: Extract<PortableImportPreviewCommand, { kind: "infinite_worlds" }>): Promise<PortableImportPreviewView<Extract<PortableImportPreviewCommand, { kind: "infinite_worlds" }>>>;
   previewCyoa(command: Extract<PortableImportPreviewCommand, { kind: "cyoa" }>): Promise<PortableImportPreviewView<Extract<PortableImportPreviewCommand, { kind: "cyoa" }>>>;
   previewWorldJson(command: Extract<PortableImportPreviewCommand, { kind: "world_json" }>): Promise<PortableImportPreviewView<Extract<PortableImportPreviewCommand, { kind: "world_json" }>>>;
   previewWorldText(command: Extract<PortableImportPreviewCommand, { kind: "world_text" }>): Promise<PortableImportPreviewView<Extract<PortableImportPreviewCommand, { kind: "world_text" }>>>;
   previewStoryText(command: Extract<PortableImportPreviewCommand, { kind: "story_text" }>): Promise<PortableImportPreviewView<Extract<PortableImportPreviewCommand, { kind: "story_text" }>>>;
-  commit(command: PortableImportCommitCommand): Promise<PortableImportCommitView>;
+  commit(command: PortableImportCommitCommand, artifacts?: PrivatePortableImportArtifacts): Promise<PortableImportCommitView>;
   createCampaignExport(input: Readonly<{ owner: ImportOwnerScope; campaignId: string }>): Promise<PortableArchiveExportView>;
   createWorldExport(input: Readonly<{ owner: ImportOwnerScope; worldId: string; worldVersionId: string }>): Promise<PortableArchiveExportView>;
   openExportSession(command: PortableExportSessionCommand): Promise<PrivateBoundedStreamSession>;

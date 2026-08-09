@@ -416,7 +416,8 @@ export function createPostgresPortableImportAuthorityRepository(
         JOIN portable_import_work work
           ON work.operation_id=operation.id AND work.owner_user_id=operation.owner_user_id
        WHERE operation.id=$1 AND operation.owner_user_id=$2
-         AND operation.import_kind='campaign_zip' AND operation.status='previewed'
+         AND operation.import_kind IN ('campaign_zip','legacy_story')
+         AND operation.status='previewed'
          AND operation.authority_fingerprint=$3
          AND operation.expires_at > clock_timestamp()
          AND work.status IN ('running','recoverable') AND work.expires_at > clock_timestamp()
@@ -571,7 +572,10 @@ export function createPostgresPortableImportAuthorityRepository(
            ON imported.id=replay.import_id
           AND imported.owner_user_id=replay.owner_user_id
           AND imported.source_hash=replay.authority_fingerprint
-          AND imported.source_type='portable_campaign_zip'
+          AND imported.source_type=CASE replay.import_kind
+            WHEN 'campaign_zip' THEN 'portable_campaign_zip'
+            WHEN 'legacy_story' THEN 'portable_legacy_story'
+          END
           AND imported.status='completed'
          LEFT JOIN LATERAL (
            SELECT mapped.asset_id
@@ -580,14 +584,15 @@ export function createPostgresPortableImportAuthorityRepository(
                ON canonical.id=mapped.operation_id
               AND canonical.owner_user_id=mapped.owner_user_id
               AND canonical.import_id=mapped.import_id
-              AND canonical.import_kind='campaign_zip'
+              AND canonical.import_kind=replay.import_kind
               AND canonical.status='committed'
               AND canonical.authority_fingerprint=replay.authority_fingerprint
             WHERE mapped.owner_user_id=replay.owner_user_id
               AND mapped.import_id=replay.import_id
          ) publication ON true
         WHERE replay.owner_user_id=$1 AND replay.preview_token_hash=$2
-          AND replay.import_kind='campaign_zip' AND replay.status='committed'
+          AND replay.import_kind IN ('campaign_zip','legacy_story')
+          AND replay.status='committed'
         GROUP BY replay.id`,
       [owner.ownerUserId, sha256(previewToken)],
     );

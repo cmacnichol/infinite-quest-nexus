@@ -861,6 +861,33 @@ async function legacyCompanionAssetInventory(
   return inventory;
 }
 
+function mergeLegacyStoryAssetInventory(
+  assets: readonly import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableAssetInventoryItem[],
+): readonly import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableAssetInventoryItem[] {
+  const grouped = new Map<string, import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableAssetInventoryItem>();
+  for (const asset of assets) {
+    const existing = grouped.get(asset.artifact.contentHash);
+    if (!existing) {
+      grouped.set(asset.artifact.contentHash, asset);
+      continue;
+    }
+    if (existing.artifact.mimeType !== asset.artifact.mimeType
+      || existing.artifact.byteLength !== asset.artifact.byteLength
+      || sha256(existing.artifact.bytes) !== sha256(asset.artifact.bytes)) {
+      throw new Error("archive_format_invalid");
+    }
+    grouped.set(asset.artifact.contentHash, {
+      sourceAssetIds: [...existing.sourceAssetIds, ...asset.sourceAssetIds],
+      sourceKeys: [...new Set([...(existing.sourceKeys ?? []), ...(asset.sourceKeys ?? [])])],
+      records: [...existing.records, ...asset.records],
+      artifact: existing.artifact
+    });
+  }
+  return [...grouped.values()].sort((left, right) => (
+    left.artifact.contentHash.localeCompare(right.artifact.contentHash)
+  ));
+}
+
 export function createPortableFamilyPreviewAdapter(
   provider: PortableProviderWorldConversionPort,
   targets: PortableTargetWorldReaderPort,
@@ -895,31 +922,33 @@ export function createPortableFamilyPreviewAdapter(
         };
       });
     },
-    async extractLegacyStoryAssets(source, expectedAuthority) {
+    async extractLegacyStoryAssets(source, expectedAuthority, companions = []) {
       if (expectedAuthority.kind !== "legacy_story") throw new Error("portable_import_authority_mismatch");
       const story = legacyStorySchema.parse(jsonText(await boundedBytes(source, MAX_JSON_BYTES)));
-      const decoded = await legacyInlineAssetInventory(story, true);
+      const inline = await legacyInlineAssetInventory(story, true);
+      const companion = await legacyCompanionAssetInventory(story, companions);
+      const decoded = mergeLegacyStoryAssetInventory([
+        ...inline.map((asset) => {
+          if (!asset.bytes) throw new Error("archive_unavailable");
+          return {
+            sourceAssetIds: asset.sourceAssetIds,
+            records: asset.records,
+            artifact: {
+              mimeType: asset.mimeType,
+              byteLength: asset.byteLength,
+              contentHash: asset.contentHash,
+              bytes: asset.bytes
+            }
+          };
+        }),
+        ...companion
+      ]);
       const expected = expectedAuthority.normalizedPayload.assetRecords;
       if (canonicalPortableImportAuthority({ ...expectedAuthority, normalizedPayload: { assetRecords: exactPortableAssetAuthority(decoded.flatMap((asset) => asset.records)) } })
         !== canonicalPortableImportAuthority({ ...expectedAuthority, normalizedPayload: { assetRecords: expected ?? null } })) {
         throw new Error("portable_import_authority_mismatch");
       }
-      return decoded.map((asset) => {
-        if (!asset.bytes) throw new Error("archive_unavailable");
-        return {
-          sourceAssetIds: asset.sourceAssetIds,
-          records: asset.records,
-          artifact: {
-            mimeType: asset.mimeType,
-            byteLength: asset.byteLength,
-            contentHash: asset.contentHash,
-            bytes: asset.bytes
-          }
-        };
-      });
-    },
-    async extractLegacyStoryCompanionAssets(storyValue, companions) {
-      return legacyCompanionAssetInventory(legacyStorySchema.parse(storyValue), companions);
+      return decoded;
     },
     async previewCampaignZip(source, command) {
       const decoded = await campaignZip(source, false);
@@ -1038,14 +1067,20 @@ export function createPortableFamilyPreviewAdapter(
         }
       };
     },
-    async previewLegacyStory(source, command) {
+    async previewLegacyStory(source, command, companions = []) {
       const story = legacyStorySchema.parse(jsonText(await boundedBytes(source, MAX_JSON_BYTES)));
-      const assets = await legacyInlineAssetInventory(story, false);
+      const inlineAssets = await legacyInlineAssetInventory(story, false);
+      const companionAssets = await legacyCompanionAssetInventory(story, companions);
+      const assetRecords = [
+        ...inlineAssets.map((asset) => ({ contentHash: asset.contentHash, records: asset.records })),
+        ...companionAssets.map((asset) => ({ contentHash: asset.artifact.contentHash, records: asset.records }))
+      ].sort((left, right) => left.contentHash.localeCompare(right.contentHash))
+        .flatMap((asset) => asset.records);
       return {
         authority: authority(command, {
           sourceName: "legacy.story",
           story: asJson(story),
-          assetRecords: exactPortableAssetAuthority(assets.flatMap((asset) => asset.records))
+          assetRecords: exactPortableAssetAuthority(assetRecords)
         }),
         projection: legacyProjection(story)
       };
@@ -1322,7 +1357,7 @@ export async function createPortableImportExportComposition(
     command: PortableImportCommitCommand,
     view: import("../../../packages/application/src/imports/types.js").PortableImportCommitView,
   ) => {
-    if (command.kind === "campaign_zip") {
+    if (command.kind === "campaign_zip" || command.kind === "legacy_story") {
       const publicationAssetIds = await authority.readCommittedAssetPublicationIds(
         owner(command.ownerUserId),
         command.previewHandle.token,
@@ -1340,12 +1375,20 @@ export async function createPortableImportExportComposition(
     return view;
   };
 
-  const commit = async (command: PortableImportCommitCommand) => {
-    // Campaign ZIP must open and validate its staged input before contending on
+  const commit = async (
+    command: PortableImportCommitCommand,
+    artifacts: import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableImportArtifacts = {},
+  ) => {
+    const legacyStoryCompanions = artifacts.legacyStoryCompanions ?? [];
+    if (command.kind !== "legacy_story" && legacyStoryCompanions.length > 0) {
+      throw new Error("portable_import_artifacts_invalid");
+    }
+    const assetBackedImport = command.kind === "campaign_zip" || command.kind === "legacy_story";
+    // Binary-bearing imports must open and validate staged input before contending on
     // the operation lock used by reservation intents. Otherwise a replay probe
     // can briefly win that lock, roll back, and let another caller consume the
     // staged input before the first caller opens it.
-    let previewAuthority = command.kind === "campaign_zip"
+    let previewAuthority = assetBackedImport
       ? await authority.readPreviewAuthority({ command })
       : null;
     const preparationOnly = Symbol("portable-import-preparation-only");
@@ -1377,17 +1420,22 @@ export async function createPortableImportExportComposition(
       }))
       : null;
     let assetArtifacts: Awaited<ReturnType<PrivatePortableFamilyPreviewPort["extractCampaignZipAssets"]>> = [];
-    if (command.kind === "campaign_zip" && !duplicateBeforeReservation) {
-      const campaignCommand = command as Extract<PortableImportCommitCommand, { kind: "campaign_zip" }>;
+    if (assetBackedImport && !duplicateBeforeReservation) {
       const session = await assets.storage.adapter.openPreviewInputSession<PortablePreviewDestination>({
         owner: owner(command.ownerUserId),
         kind: command.kind,
-        previewHandle: campaignCommand.previewHandle as PortablePreviewHandle<PortablePreviewDestination>,
+        previewHandle: command.previewHandle as PortablePreviewHandle<PortablePreviewDestination>,
         claim: { leaseOwner: options.leaseOwner, leaseSeconds },
         limits: inputLimits()
       });
       try {
-        assetArtifacts = await families.extractCampaignZipAssets(session.chunks, previewAuthority.authority);
+        assetArtifacts = command.kind === "campaign_zip"
+          ? await families.extractCampaignZipAssets(session.chunks, previewAuthority.authority)
+          : await families.extractLegacyStoryAssets(
+            session.chunks,
+            previewAuthority.authority,
+            legacyStoryCompanions,
+          );
         await session.finalize("eof");
       } catch (error) {
         await session.finalize("read_failure").catch(() => undefined);
@@ -1399,12 +1447,12 @@ export async function createPortableImportExportComposition(
     const reservationCommandFingerprint = sha256(canonicalPortableAssetReservationCommand({
       operationId: previewAuthority.operationId,
       ownerUserId: command.ownerUserId,
-      kind: "campaign_zip",
+      kind: command.kind === "legacy_story" ? "legacy_story" : "campaign_zip",
       authorityFingerprint: previewAuthority.authorityFingerprint,
       commitIdempotencyKeyHash
     }));
     let reservedAssets: Awaited<ReturnType<typeof assets.transactionalPublisher.reserveImportedAssets>> = [];
-    if (command.kind === "campaign_zip" && !duplicateBeforeReservation) {
+    if (assetBackedImport && !duplicateBeforeReservation) {
       reservedAssets = await withTransaction(options.pool, async (database) => {
         await authority.lockAssetReservationIntentAuthority(database, {
           operationId: previewAuthority.operationId,
@@ -1444,8 +1492,8 @@ export async function createPortableImportExportComposition(
           throw new Error("portable_import_authority_mismatch");
         }
         let claim = await authority.updateProgress(database, begun.claim, {
-          phase: command.kind === "campaign_zip" ? "publishing_assets" : "mutating",
-          percentage: command.kind === "campaign_zip" ? 45 : 55,
+          phase: assetBackedImport ? "publishing_assets" : "mutating",
+          percentage: assetBackedImport ? 45 : 55,
           diagnosticCode: null
         });
         const duplicate = command.kind === "campaign_zip"
@@ -1465,7 +1513,7 @@ export async function createPortableImportExportComposition(
           });
           await assets.transactionalPublisher.discardPreparedImportedAssets(database, reservedAssets);
         }
-        if (command.kind === "campaign_zip" && !duplicate) {
+        if (assetBackedImport && !duplicate) {
           attachments = await assets.transactionalPublisher.attachImportedAssets(
             database,
             reservedAssets,
@@ -1488,6 +1536,9 @@ export async function createPortableImportExportComposition(
               ...mutationInput,
               publishedAssets: attachments.map((attachment, index) => ({
                 sourceAssetIds: assetArtifacts[index]!.sourceAssetIds,
+                ...(assetArtifacts[index]!.sourceKeys
+                  ? { sourceKeys: assetArtifacts[index]!.sourceKeys }
+                  : {}),
                 records: assetArtifacts[index]!.records.map(({ archivePath: _archivePath, ...record }) => record),
                 result: attachment.result
               }))
@@ -1497,6 +1548,9 @@ export async function createPortableImportExportComposition(
                 ...mutationInput,
                 publishedAssets: attachments.map((attachment, index) => ({
                   sourceAssetIds: assetArtifacts[index]!.sourceAssetIds,
+                  ...(assetArtifacts[index]!.sourceKeys
+                    ? { sourceKeys: assetArtifacts[index]!.sourceKeys }
+                    : {}),
                   records: assetArtifacts[index]!.records.map(({ archivePath: _archivePath, ...record }) => record),
                   result: attachment.result
                 }))
@@ -1509,7 +1563,7 @@ export async function createPortableImportExportComposition(
                   authorityFingerprint: mutationInput.authorityFingerprint,
                   payload: mutationInput.payload
                 }));
-        if (command.kind === "campaign_zip" && !duplicate) {
+        if (assetBackedImport && !duplicate) {
           await authority.recordAssetPublications(
             database,
             claim,
@@ -1562,7 +1616,7 @@ export async function createPortableImportExportComposition(
     if (!committed) throw new Error("portable_import_result_unavailable");
     if (!finalClaim) return completeCommittedReplay(command, committed);
     try {
-      if (command.kind === "campaign_zip" && committed.duplicate) {
+      if (assetBackedImport && committed.duplicate) {
         return await completeCommittedReplay(command, committed);
       }
       await assets.transactionalPublisher.finalizeImportedAssets(attachments);
@@ -1602,7 +1656,14 @@ export async function createPortableImportExportComposition(
       return Object.freeze({ stagedInput: staged.stagedInput });
     },
     previewCampaignZip: (command) => preview(command, families.previewCampaignZip.bind(families)),
-    previewLegacyStory: (command) => preview(command, families.previewLegacyStory.bind(families)),
+    previewLegacyStory: (command, artifacts = {}) => preview(
+      command,
+      (source, value) => families.previewLegacyStory(
+        source,
+        value,
+        artifacts.legacyStoryCompanions ?? [],
+      ),
+    ),
     previewInfiniteWorlds: (command) => preview(command, families.previewInfiniteWorlds.bind(families)),
     previewCyoa: (command) => preview(command, families.previewCyoa.bind(families)),
     previewWorldJson: (command) => preview(command, families.previewWorldJson.bind(families)),

@@ -1900,6 +1900,148 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
+  it("publishes staged Legacy Story inline and validated companion images through the real composition", async () => {
+    const target = await createWorldScope(`14e3d composed legacy assets ${crypto.randomUUID()}`);
+    const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-composed-legacy-archive-`);
+    const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-composed-legacy-assets-`);
+    let composition = await createRealComposition({
+      archiveRoot,
+      assetRoot,
+      target,
+      leaseOwner: "14e3d-composed-legacy-assets"
+    });
+    const imageHash = (image: Uint8Array) => createHash("sha256").update(image).digest("hex");
+    const orderedImages = await Promise.all([
+      uniquePng(`14e3d-composed-order-a-${crypto.randomUUID()}`),
+      uniquePng(`14e3d-composed-order-b-${crypto.randomUUID()}`)
+    ]).then((images) => images.sort((left, right) => imageHash(left).localeCompare(imageHash(right))));
+    const companionImage = orderedImages[0]!;
+    const inlineImage = orderedImages[1]!;
+    expect(imageHash(inlineImage).localeCompare(imageHash(companionImage))).toBeGreaterThan(0);
+    const sourceCampaignId = crypto.randomUUID();
+    const inlineTurnId = crypto.randomUUID();
+    const companionTurnId = crypto.randomUUID();
+    const companions = [{
+      sourceKey: "bundled.png",
+      artifact: {
+        mimeType: "image/png" as const,
+        bytes: companionImage,
+        byteLength: companionImage.byteLength,
+        contentHash: imageHash(companionImage)
+      }
+    }];
+    const bytes = new TextEncoder().encode(JSON.stringify({
+      campaign: { sourceCampaignId, title: "Composed Legacy assets" },
+      world: { title: "Composed Legacy assets" },
+      turns: [
+        {
+          id: inlineTurnId,
+          narration: "Inline image",
+          imageUrl: `data:image/png;base64,${inlineImage.toString("base64")}`
+        },
+        {
+          id: companionTurnId,
+          narration: "Companion image",
+          imageUrl: "images/bundled.png"
+        }
+      ]
+    }));
+    try {
+      const staged = await stagedInput(composition, bytes, "14e3d-composed-legacy-assets");
+      const destination = {
+        kind: "existing_world_version" as const,
+        worldId: target.worldId,
+        worldVersionId: target.worldVersionId
+      };
+      const portableAssets = { legacyStoryCompanions: companions };
+      const preview = await composition.previewLegacyStory({
+        ownerUserId,
+        stagedInput: staged,
+        kind: "legacy_story",
+        destination
+      }, portableAssets);
+      const command = {
+        ownerUserId,
+        kind: "legacy_story" as const,
+        destination,
+        previewHandle: preview.previewHandle,
+        idempotencyKey: `14e3d-composed-legacy-assets-${crypto.randomUUID()}`
+      };
+
+      const committed = await composition.commit(command, portableAssets);
+      await composition.close();
+      composition = await createRealComposition({
+        archiveRoot,
+        assetRoot,
+        target,
+        leaseOwner: "14e3d-composed-legacy-assets-restart"
+      });
+      await expect(composition.commit(command)).resolves.toEqual(committed);
+      const result = committed.result as Readonly<{ campaignId: string; importId: string }>;
+
+      const turns = await pool.query<{ source_turn_id: string; id: string; image_url: string }>(
+        `SELECT source_turn_id,id,image_url
+           FROM turns
+          WHERE campaign_id=$1
+          ORDER BY turn_number`,
+        [result.campaignId]
+      );
+      expect(turns.rows).toHaveLength(2);
+      expect(turns.rows.map((turn) => turn.source_turn_id)).toEqual([inlineTurnId, companionTurnId]);
+      expect(turns.rows.map((turn) => turn.image_url)).toEqual([
+        expect.stringMatching(/^\/api\/v1\/assets\/[0-9a-f-]{36}$/u),
+        expect.stringMatching(/^\/api\/v1\/assets\/[0-9a-f-]{36}$/u)
+      ]);
+      const assetIds = turns.rows.map((turn) => turn.image_url.split("/").at(-1)!);
+      expect(new Set(assetIds).size).toBe(2);
+
+      const mappings = await pool.query<{
+        asset_id: string;
+        identity_lifecycle: string;
+        operation_lifecycle: string;
+      }>(
+        `SELECT publication.asset_id,
+                identity.lifecycle AS identity_lifecycle,
+                operation.lifecycle AS operation_lifecycle
+           FROM portable_import_asset_publications publication
+           JOIN asset_publication_identities identity
+             ON identity.asset_id=publication.asset_id
+            AND identity.owner_user_id=publication.owner_user_id
+           JOIN durable_filesystem_operations operation
+             ON operation.asset_id=publication.asset_id
+            AND operation.owner_user_id=publication.owner_user_id
+          WHERE publication.owner_user_id=$1 AND publication.import_id=$2
+          ORDER BY publication.asset_id`,
+        [ownerUserId, result.importId]
+      );
+      expect(mappings.rows.map((row) => row.asset_id).sort()).toEqual([...assetIds].sort());
+      expect(mappings.rows.every((row) => (
+        row.identity_lifecycle === "published" && row.operation_lifecycle === "finalized"
+      ))).toBe(true);
+
+      const references = await pool.query<{ asset_id: string; asset_role: string; turn_id: string | null }>(
+        `SELECT asset_id,asset_role,turn_id
+           FROM asset_references
+          WHERE owner_user_id=$1 AND campaign_id=$2 AND asset_id=ANY($3::uuid[])
+          ORDER BY asset_id,asset_role`,
+        [ownerUserId, result.campaignId, assetIds]
+      );
+      expect(references.rows).toHaveLength(4);
+      for (const assetId of assetIds) {
+        expect(references.rows.filter((reference) => reference.asset_id === assetId)).toEqual([
+          { asset_id: assetId, asset_role: "import_attachment", turn_id: null },
+          {
+            asset_id: assetId,
+            asset_role: "turn_illustration",
+            turn_id: turns.rows.find((turn) => turn.image_url.endsWith(assetId))!.id
+          }
+        ]);
+      }
+    } finally {
+      await composition.close();
+    }
+  });
+
   it("resumes a persisted preview after composition restart and preserves replay", async () => {
     const target = await createWorldScope(`14e3d restart target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-restart-archive-`);
