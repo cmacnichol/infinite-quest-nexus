@@ -9373,6 +9373,17 @@ named private scheduler around e5/e6 first, retaining one capacity-one
    database-pool usage. Add graph/budget guards proving no live worker binding,
    no API implementation import, and unchanged `generation + 4`/`+8` budget.
 
+**Completed (commit `2d329ec`, independently reviewed with no findings):** e7
+now provides an unbound, capacity-one private maintenance scheduler that
+round-robins metadata backfill, asset recovery, and portable expiry. It advances
+on empty/faulted probes, drains the exact active unit on abort, derives all
+authority from e5/e6 claims, and reclaims only expired unfinished work from a
+fresh composition. Direct scheduler imports are forbidden outside the named
+private composition; live worker, API, runtime defaults, pool formulas, and
+manifests remain unchanged. Evidence: real PostgreSQL/temp-FS e5/e6/e7 25/25;
+focused unit/boundary 19/19; `pnpm check`, `pnpm build`, `git diff --check`, and
+`pjm precheck` passed.
+
 **14e3e8 — additive composition parity and boundaries.** Run real
 PostgreSQL/temp-filesystem and Fastify-independent application matrices for all
 e3e0–e3e7 behaviors. Assert no raw paths/bearers/errors or private contracts
