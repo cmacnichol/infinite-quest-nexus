@@ -9324,6 +9324,18 @@ missing pieces as a private application, in this order:
    an attached post-commit operation and a cleanup-pending operation reconcile
    from a fresh composition without duplicate finalization or deletion.
 
+**Completed (commit `cf69d995`, independently reviewed with no findings):** e6
+now supplies a named private recovery composition with exact renewable recovery
+claims for asset and portable work. It performs identity-safe finalization and
+global-reference-aware cleanup, quarantines target-only prewrites, reconciles
+e4 0066 retirement only after every required operation cleans, and finalizes
+e5 0067 only when its job remains completable. Asset and portable physical work
+re-read the current claim before terminal acknowledgement; stale/foreign/
+rotated workers cannot delete or acknowledge. Evidence: e6 units 22/22; three
+serial real PostgreSQL/temp-FS e6 runs 11/11; adjacent serial b5/e4/e5/e6
+matrix 67/67; `pnpm check`, `pnpm build`, private-storage boundary guard, and
+diff/precheck passed. The composition remains unbound from worker scheduling.
+
 **14e3e7 — worker maintenance composition and lifecycle.** Keep one
 capacity-one **asset-maintenance** lane (the frozen Task 12 pool budget remains
 `generation + 4` worker / `+8` all). It deterministically round-robins one-unit
