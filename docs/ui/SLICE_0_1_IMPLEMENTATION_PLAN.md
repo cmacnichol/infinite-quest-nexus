@@ -8885,7 +8885,18 @@ transitively import a `services/api` implementation.
 **14e3e1 — normalized publication/request authority.** Add an additive
 migration (expected **0064**) and private contracts for a normalized artifact
 and a request-to-canonical-asset mapping distinct from the existing one-row
-logical asset publication identity. The command carries verified original and
+logical asset publication identity. Preserve the 0060 canonical publication
+lifecycle; do not repurpose its `asset_id` as a second request identity. The
+0064 request authority is owner-scoped by request/idempotency key and contains
+an immutable command fingerprint, canonical original content hash, lifecycle
+and safe result, plus a nullable-then-bound canonical `(asset_id,
+owner_user_id)` foreign key. Add a deterministic owner-plus-content-hash
+arbitration/reservation row (or equivalent explicit constrained authority) so
+an in-flight canonical asset is discoverable before `assets` exists. Lock that
+authority consistently—never resolve same-owner uniqueness with generic INSERT
+retry.
+
+The command carries verified original and
 derivative technical metadata (pixel width/height, format/pages/orientation as
 applicable), source-specific library/reuse/review policy, conditional
 reference policy, and allowlisted rich provenance: image-job/variant, fiction
@@ -8896,11 +8907,46 @@ bearers in a public result.
 The authority must support same-owner same-content reuse for distinct image-job
 or import requests while retaining each request's contexts/references; exact
 same-key replay returns the same request result, mismatch rejects, and
-cross-owner physical sharing remains authorization-safe. It must not solve the
-`UNIQUE(owner_user_id, content_hash)` conflict with generic INSERT retry.
-Migration and real PostgreSQL coverage include legacy seed, same-owner
-reuse/concurrency, cross-owner retention, rich metadata round trip, conditional
-reference omission, populated-down refusal, and empty rollback/up.
+cross-owner physical sharing remains authorization-safe. First successful
+attach initializes the canonical `asset_library_entries` row; later publication
+requests must never silently merge or overwrite it, while normal explicit
+revision-fenced library edits remain authoritative. Every request instead
+stores an immutable requested-library snapshot, rich provenance/context, and
+all source-record snapshots. One request may contain multiple source IDs for
+grouped same-content bytes. Freeze a deterministic representative source record
+for first canonical-library initialization (the current first-record behavior
+or a declared stable sort); never choose it by incidental object iteration.
+
+Implement and review these internal sub-checkpoints in order:
+
+1. **e1a — contracts and fingerprints:** freeze normalized artifact/request,
+   request-child source/provenance/context/reference, derivative-slot, and
+   canonical-library initialization schemas. Define null normalization,
+   key-order-independent fingerprints, safe public results, same-key mismatch,
+   and source ordering tests.
+2. **e1b — migration 0064:** add owner-scoped request, content-arbitration,
+   request-child, and exact canonical binding tables/constraints. Backfill
+   every retryable 0060 identity 1:1 and explicitly seed legacy assets; cover
+   prepared/in-flight identities whose hash is available only through durable
+   prewrite/descriptor records. Populate-down must fail closed for *any* 0064
+   authority, including backfilled rows, before tearing down constraints; empty
+   down/up remains valid.
+3. **e1c — repository arbitration/lifecycle:** implement deterministic
+   owner+hash locks, same-request replay/mismatch, distinct-request
+   same-content convergence, canonical reservation/publication recovery, and
+   cross-owner shared physical retention without nested pool transactions or
+   stale-claim success.
+4. **e1d — request children and results:** attach every source snapshot,
+   optional reference, rich context/provenance, and derivative reconciliation
+   under the caller transaction. A later same-content request can add its own
+   request children but cannot mutate canonical library metadata; derivative
+   slot/content mismatch is explicit rather than silently merged. Expose only
+   safe IDs/metadata after durable finalization.
+5. **e1e — real authority matrix and boundaries:** prove legacy/backfill seed,
+   two-client same-owner race, rollback/retry/restart, request replay/mismatch,
+   grouped source IDs, conditional-reference omission, mutable canonical
+   library edit after publication, cross-owner retention, populated downgrade
+   refusal, and private/public import boundaries.
 
 **14e3e2 — neutral secure publication seam.** Move or wrap the concrete secure
 filesystem/image-normalization implementation and required safe error/store
