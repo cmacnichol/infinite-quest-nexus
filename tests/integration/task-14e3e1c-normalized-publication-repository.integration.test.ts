@@ -359,6 +359,35 @@ integration("Task 14e3e1c normalized publication repository", () => {
         WHERE request.id=$1 AND request.owner_user_id=$2`,
       [reservation.requestId, ownerUserId]
     )).resolves.toMatchObject({ rows: [{ lifecycle: "prepared", result: null, sources: 0, results: 0 }] });
+    const retry = await pool.connect();
+    try {
+      await retry.query("BEGIN");
+      await repository.attachRequestInTransaction(retry, command, {
+        contexts: [],
+        references: [],
+        result: {
+          assetId: reservation.canonicalAssetId!,
+          mimeType: command.original.mimeType,
+          byteLength: command.original.byteLength,
+          contentHash: command.original.contentHash,
+          pixelWidth: command.original.technicalMetadata.pixelWidth,
+          pixelHeight: command.original.technicalMetadata.pixelHeight,
+          derivatives: []
+        }
+      });
+      await retry.query("COMMIT");
+    } finally {
+      await retry.query("ROLLBACK").catch(() => undefined);
+      retry.release();
+    }
+    await expect(pool.query(
+      `SELECT request.lifecycle,
+              (SELECT count(*)::integer FROM asset_publication_request_references reference
+                WHERE reference.request_id=request.id AND reference.owner_user_id=request.owner_user_id) AS references
+         FROM asset_publication_requests request
+        WHERE request.id=$1 AND request.owner_user_id=$2`,
+      [reservation.requestId, ownerUserId]
+    )).resolves.toMatchObject({ rows: [{ lifecycle: "published", references: 0 }] });
   });
 
   it("persists a request-owned source, derivative reconciliation, and safe result in the caller transaction", async () => {
