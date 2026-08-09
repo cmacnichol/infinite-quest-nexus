@@ -38,8 +38,19 @@ describe("Task 14e3e2 neutral publication boundaries", () => {
 
     for (const edge of apiEdges) {
       const sources: readonly Source[] = [{
+        file: "services/runtime/src/illustration-asset-publication-composition.ts",
+        text: `
+          import { createPrivateNormalizedAssetPublicationComposition } from "./normalized-asset-publication-composition.js";
+          export function createPrivateIllustrationAssetPublicationComposition() {
+            return createPrivateNormalizedAssetPublicationComposition(pool, roots);
+          }
+        `
+      }, {
         file: "services/runtime/src/normalized-asset-publication-composition.ts",
-        text: `import "./normalized-publication-helper";`
+        text: `
+          import "./normalized-publication-helper";
+          export function createPrivateNormalizedAssetPublicationComposition() { return {}; }
+        `
       }, {
         file: "services/runtime/src/normalized-publication-helper.ts",
         text: edge
@@ -49,13 +60,13 @@ describe("Task 14e3e2 neutral publication boundaries", () => {
       }];
       expect(checkAssetImportStorageCompositionInventory(sources), edge).toEqual(
         expect.arrayContaining([
-          expect.stringContaining("normalized publication replacement graph must not reach services/api/src")
+          expect.stringContaining("illustration publication replacement graph must not reach services/api/src")
         ]),
       );
     }
   });
 
-  it("allows only the neutral seam to consume normalized request authority and keeps the seam unconsumed", () => {
+  it("allows only the neutral seam to consume normalized request authority and only e3 to consume that seam", () => {
     expect(checkPrivateStorageBoundaries(
       "services/runtime/src/normalized-asset-publication-composition.ts",
       `import { createPostgresNormalizedAssetPublicationRepository } from "../../../packages/database/src/normalized-asset-publication-repository.js";`,
@@ -72,9 +83,14 @@ describe("Task 14e3e2 neutral publication boundaries", () => {
         "services/worker/src/replacement-publication.ts",
         source,
       ), source).toEqual([
-        expect.stringContaining("normalized publication seam must remain unconsumed")
+        expect.stringContaining("normalized publication seam may be consumed only by")
       ]);
     }
+
+    expect(checkPrivateStorageBoundaries(
+      "services/runtime/src/illustration-asset-publication-composition.ts",
+      `import { createPrivateNormalizedAssetPublicationComposition } from "./normalized-asset-publication-composition.js";`,
+    )).toEqual([]);
   });
 
   it("keeps the API adapter as an exact compatibility re-export and blocks private contract barrel leaks", () => {

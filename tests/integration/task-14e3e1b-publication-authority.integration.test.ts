@@ -19,14 +19,14 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function migrateLatestDown(pool: DatabasePool): Promise<void> {
+async function migrateNormalizedAuthorityDown(pool: DatabasePool): Promise<void> {
   const client = await pool.connect();
   try {
     await runner({
       dbClient: client,
       dir: resolve("database/migrations"),
       direction: "down",
-      count: 1,
+      count: 2,
       migrationsTable: "schema_migrations",
       checkOrder: true,
       singleTransaction: true,
@@ -318,7 +318,7 @@ integration("Task 14e3e1b normalized publication migration", () => {
           state: "applied"
         }]
       });
-      await expect(migrateLatestDown(isolated)).rejects.toThrow(/cannot downgrade normalized asset publication authority/i);
+      await expect(migrateNormalizedAuthorityDown(isolated)).rejects.toThrow(/cannot downgrade normalized asset publication authority/i);
     } finally {
       if (isolated) await isolated.end();
       await dropTestDatabaseWhenIdle(pool, databaseName);
@@ -335,7 +335,7 @@ integration("Task 14e3e1b normalized publication migration", () => {
       await pool.query(`CREATE DATABASE ${databaseName}`);
       isolated = createDatabasePool(databaseUrlValue.toString(), 4);
       await migrateDatabase(isolated, resolve("database/migrations"));
-      await migrateLatestDown(isolated);
+      await migrateNormalizedAuthorityDown(isolated);
       const requestColumn = await isolated.query<{ column_name: string }>(
         `SELECT column_name
            FROM information_schema.columns

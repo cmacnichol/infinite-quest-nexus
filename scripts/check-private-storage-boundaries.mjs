@@ -9,7 +9,24 @@ const ASSET_PUBLICATION_COMPOSITION_FACTORY = "createAssetPublicationComposition
 const PORTABLE_COMPOSITION_FILE = "services/runtime/src/portable-import-export-composition.ts";
 const NORMALIZED_PUBLICATION_REPOSITORY_FILE = "packages/database/src/normalized-asset-publication-repository.ts";
 const NORMALIZED_PUBLICATION_COMPOSITION_FILE = "services/runtime/src/normalized-asset-publication-composition.ts";
+const NORMALIZED_PUBLICATION_COMPOSITION_FACTORY = "createPrivateNormalizedAssetPublicationComposition";
 const NORMALIZED_PUBLICATION_CONTRACT_FILE = "packages/application/src/assets/private-normalized-asset-publication.ts";
+const ILLUSTRATION_PUBLICATION_REPOSITORY_FILE = "packages/database/src/illustration-asset-publication-repository.ts";
+const ILLUSTRATION_PUBLICATION_COMPOSITION_FILE = "services/runtime/src/illustration-asset-publication-composition.ts";
+const ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY = "createPrivateIllustrationAssetPublicationComposition";
+const ILLUSTRATION_PUBLICATION_CONTRACT_FILE = "packages/application/src/illustration/private-illustration-asset-publication.ts";
+const ILLUSTRATION_LEGACY_RUNTIME_FILES = new Set([
+  "services/runtime/src/illustration-image-job-adapter.ts",
+  "services/runtime/src/illustration-platform-adapter.ts",
+  "services/runtime/src/illustration-platform-bindings.ts",
+  "services/runtime/src/illustration-composition.ts"
+]);
+const ILLUSTRATION_LEGACY_WRITER_IDENTIFIERS = new Set([
+  "persistTurnImage",
+  "persistWorldCover",
+  "lockOriginalImages",
+  "completePortImageJob"
+]);
 const API_FILESYSTEM_COMPATIBILITY_FILE = "services/api/src/portable-archive-filesystem-adapter.ts";
 const NEUTRAL_FILESYSTEM_ADAPTER_FILE = "services/runtime/src/secure-filesystem-adapter.ts";
 const CONCRETE_STORAGE_FACTORIES = new Map([
@@ -92,6 +109,18 @@ function targetsNormalizedPublicationContract(file, target) {
   return resolvedModule(file, target) === NORMALIZED_PUBLICATION_CONTRACT_FILE;
 }
 
+function targetsIllustrationPublicationComposition(file, target) {
+  return resolvedModule(file, target) === ILLUSTRATION_PUBLICATION_COMPOSITION_FILE;
+}
+
+function targetsIllustrationPublicationRepository(file, target) {
+  return resolvedModule(file, target) === ILLUSTRATION_PUBLICATION_REPOSITORY_FILE;
+}
+
+function targetsIllustrationPublicationContract(file, target) {
+  return resolvedModule(file, target) === ILLUSTRATION_PUBLICATION_CONTRACT_FILE;
+}
+
 function targetsApiFilesystemCompatibility(file, target) {
   return resolvedModule(file, target) === API_FILESYSTEM_COMPATIBILITY_FILE;
 }
@@ -99,7 +128,14 @@ function targetsApiFilesystemCompatibility(file, target) {
 function trackedSymbolForTarget(file, target) {
   const factory = concreteFactoryForTarget(file, target);
   if (factory) return factory;
-  return targetsStorageComposition(file, target) ? STORAGE_COMPOSITION_FACTORY : null;
+  if (targetsStorageComposition(file, target)) return STORAGE_COMPOSITION_FACTORY;
+  if (targetsNormalizedPublicationComposition(file, target)) {
+    return NORMALIZED_PUBLICATION_COMPOSITION_FACTORY;
+  }
+  if (targetsIllustrationPublicationComposition(file, target)) {
+    return ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY;
+  }
+  return null;
 }
 
 function isPrivateContractName(name) {
@@ -110,12 +146,21 @@ function isApplicationPublicBarrel(target) {
   if (typeof target !== "string") return false;
   const normalized = target.replaceAll("\\", "/");
   return normalized === "@infinite-quest/application"
-    || /packages\/application\/src\/(?:assets|imports)\/index\.(?:c?js|mjs|ts)$/u.test(normalized)
-    || /application\/src\/(?:assets|imports)\/index\.(?:c?js|mjs|ts)$/u.test(normalized);
+    || /packages\/application\/src\/(?:assets|illustration|imports)\/index\.(?:c?js|mjs|ts)$/u.test(normalized)
+    || /application\/src\/(?:assets|illustration|imports)\/index\.(?:c?js|mjs|ts)$/u.test(normalized);
 }
 
 function isApplicationPublicBarrelFile(file) {
-  return /^packages\/application\/src\/(?:index|(?:assets|imports)\/index)\.ts$/u.test(file);
+  return /^packages\/application\/src\/(?:index|(?:assets|illustration|imports)\/index)\.ts$/u.test(file);
+}
+
+function isCanonicalNormalizedCompositionImport(file, node) {
+  return file === ILLUSTRATION_PUBLICATION_COMPOSITION_FILE
+    && node.type === "ImportDeclaration"
+    && node.specifiers.length === 1
+    && node.specifiers[0]?.type === "ImportSpecifier"
+    && importedName(node.specifiers[0]) === NORMALIZED_PUBLICATION_COMPOSITION_FACTORY
+    && node.specifiers[0].local.name === NORMALIZED_PUBLICATION_COMPOSITION_FACTORY;
 }
 
 function moduleTarget(node) {
@@ -211,12 +256,23 @@ export function checkPrivateStorageBoundaries(file, text) {
       add(node, `private normalized publication repository may be consumed only by ${NORMALIZED_PUBLICATION_COMPOSITION_FILE}`);
     }
     if (targetsNormalizedPublicationComposition(normalized, moduleTarget(node))
-      && normalized !== NORMALIZED_PUBLICATION_COMPOSITION_FILE) {
-      add(node, "normalized publication seam must remain unconsumed until Task 14e3e3");
+      && normalized !== NORMALIZED_PUBLICATION_COMPOSITION_FILE
+      && !isCanonicalNormalizedCompositionImport(normalized, node)) {
+      add(node, `normalized publication seam may be consumed only by ${ILLUSTRATION_PUBLICATION_COMPOSITION_FILE}`);
+    }
+    if (targetsIllustrationPublicationRepository(normalized, moduleTarget(node))
+      && normalized !== ILLUSTRATION_PUBLICATION_REPOSITORY_FILE
+      && normalized !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE) {
+      add(node, `private illustration publication repository may be consumed only by ${ILLUSTRATION_PUBLICATION_COMPOSITION_FILE}`);
+    }
+    if (targetsIllustrationPublicationComposition(normalized, moduleTarget(node))
+      && normalized !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE) {
+      add(node, "illustration publication composition must remain unbound from production consumers");
     }
     if (isApplicationPublicBarrelFile(normalized)
-      && targetsNormalizedPublicationContract(normalized, moduleTarget(node))) {
-      add(node, "private normalized publication contracts must not leak through an application public barrel");
+      && (targetsNormalizedPublicationContract(normalized, moduleTarget(node))
+        || targetsIllustrationPublicationContract(normalized, moduleTarget(node)))) {
+      add(node, "private publication contracts must not leak through an application public barrel");
     }
     if (node.type === "ImportDeclaration") {
       const target = node.source.value;
@@ -294,6 +350,15 @@ export function checkPrivateStorageBoundaries(file, text) {
       }
       if (targetsStorageComposition(normalized, target) && normalized !== STORAGE_COMPOSITION_FILE) {
         add(node, "private storage composition must remain unconsumed before its named later checkpoint");
+      }
+      if (targetsNormalizedPublicationComposition(normalized, target)
+        && normalized !== NORMALIZED_PUBLICATION_COMPOSITION_FILE
+        && normalized !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE) {
+        add(node, `normalized publication seam may be consumed only by ${ILLUSTRATION_PUBLICATION_COMPOSITION_FILE}`);
+      }
+      if (targetsIllustrationPublicationComposition(normalized, target)
+        && normalized !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE) {
+        add(node, "illustration publication composition must remain unbound from production consumers");
       }
     }
     if (node.type === "Identifier" && RETIRED_IDENTIFIERS.has(node.name)) {
@@ -373,7 +438,9 @@ export function checkAssetImportStorageCompositionInventory(sources) {
   for (const name of [
     ...CONCRETE_STORAGE_FACTORIES.keys(),
     STORAGE_COMPOSITION_FACTORY,
-    ASSET_PUBLICATION_COMPOSITION_FACTORY
+    ASSET_PUBLICATION_COMPOSITION_FACTORY,
+    NORMALIZED_PUBLICATION_COMPOSITION_FACTORY,
+    ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY
   ]) {
     definitions.set(name, []);
     calls.set(name, []);
@@ -528,7 +595,7 @@ export function checkAssetImportStorageCompositionInventory(sources) {
     });
   }
 
-  const replacementQueue = [NORMALIZED_PUBLICATION_COMPOSITION_FILE];
+  const replacementQueue = [ILLUSTRATION_PUBLICATION_COMPOSITION_FILE];
   const replacementGraph = new Set();
   while (replacementQueue.length > 0) {
     const file = replacementQueue.shift();
@@ -536,13 +603,33 @@ export function checkAssetImportStorageCompositionInventory(sources) {
     replacementGraph.add(file);
     for (const target of moduleEdges.get(file) ?? []) {
       if (target.startsWith("services/api/src/")) {
-        violations.push(`${file}: normalized publication replacement graph must not reach services/api/src via ${target}`);
+        violations.push(`${file}: illustration publication replacement graph must not reach services/api/src via ${target}`);
+        continue;
+      }
+      if (ILLUSTRATION_LEGACY_RUNTIME_FILES.has(target)) {
+        violations.push(`${file}: illustration publication replacement graph must not reach legacy runtime module ${target}`);
         continue;
       }
       if (parsed.has(target) && !replacementGraph.has(target)) {
         replacementQueue.push(target);
       }
     }
+  }
+
+  for (const file of replacementGraph) {
+    const program = parsed.get(file);
+    if (!program) continue;
+    walk(program, (node) => {
+      if (node.type === "Identifier" && ILLUSTRATION_LEGACY_WRITER_IDENTIFIERS.has(node.name)) {
+        violations.push(`${file}:${lineNumber(node)}: illustration publication replacement graph prohibits legacy writer identifier ${node.name}`);
+      }
+      const member = staticMember(node);
+      if (["MemberExpression", "OptionalMemberExpression"].includes(node.type)
+        && member
+        && ILLUSTRATION_LEGACY_WRITER_IDENTIFIERS.has(member.name)) {
+        violations.push(`${file}:${lineNumber(member.node)}: illustration publication replacement graph prohibits legacy writer member ${member.name}`);
+      }
+    });
   }
 
   for (const [name, definitionFile] of CONCRETE_STORAGE_FACTORIES) {
@@ -594,6 +681,39 @@ export function checkAssetImportStorageCompositionInventory(sources) {
     || unsafeExposures.get(ASSET_PUBLICATION_COMPOSITION_FACTORY).length !== 0
     || publicationCalls.some((file) => file !== PORTABLE_COMPOSITION_FILE)) {
     violations.push(`${ASSET_PUBLICATION_COMPOSITION_FACTORY} must be consumed exactly once by ${PORTABLE_COMPOSITION_FILE}`);
+  }
+  const normalizedDefinitions = definitions.get(NORMALIZED_PUBLICATION_COMPOSITION_FACTORY);
+  const normalizedImports = imports.get(NORMALIZED_PUBLICATION_COMPOSITION_FACTORY);
+  const normalizedCalls = calls.get(NORMALIZED_PUBLICATION_COMPOSITION_FACTORY);
+  if (normalizedDefinitions.length !== 1
+    || normalizedDefinitions[0] !== NORMALIZED_PUBLICATION_COMPOSITION_FILE) {
+    violations.push(`${NORMALIZED_PUBLICATION_COMPOSITION_FACTORY} must be defined exactly once in ${NORMALIZED_PUBLICATION_COMPOSITION_FILE}`);
+  }
+  if (normalizedImports.length !== 1
+    || normalizedImports[0].file !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE
+    || normalizedImports[0].target !== NORMALIZED_PUBLICATION_COMPOSITION_FILE
+    || normalizedImports[0].local !== NORMALIZED_PUBLICATION_COMPOSITION_FACTORY
+    || normalizedCalls.length !== 1
+    || normalizedCalls[0] !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE
+    || unsafeExposures.get(NORMALIZED_PUBLICATION_COMPOSITION_FACTORY).length !== 0) {
+    violations.push(`${NORMALIZED_PUBLICATION_COMPOSITION_FACTORY} must be consumed directly and exactly once by ${ILLUSTRATION_PUBLICATION_COMPOSITION_FILE}`);
+  }
+  const illustrationDefinitions = definitions.get(ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY);
+  const illustrationImports = imports.get(ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY);
+  const illustrationCalls = calls.get(ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY);
+  const illustrationInboundEdges = [...moduleEdges.entries()]
+    .filter(([file, targets]) => file !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE
+      && targets.has(ILLUSTRATION_PUBLICATION_COMPOSITION_FILE))
+    .map(([file]) => file);
+  if (illustrationDefinitions.length !== 1
+    || illustrationDefinitions[0] !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE) {
+    violations.push(`${ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY} must be defined exactly once in ${ILLUSTRATION_PUBLICATION_COMPOSITION_FILE}`);
+  }
+  if (illustrationImports.length !== 0
+    || illustrationCalls.length !== 0
+    || illustrationInboundEdges.length !== 0
+    || unsafeExposures.get(ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY).length !== 0) {
+    violations.push(`${ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY} must remain unbound from production consumers`);
   }
   return violations;
 }

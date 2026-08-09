@@ -30,6 +30,11 @@ type TestComposition = Readonly<{
       leaseOwner: string;
       expiresAt: string;
     }>): Promise<OpaqueHandle>;
+    reserveBatch(inputs: readonly Readonly<{
+      request: PrivateNormalizedAssetPublicationRequest;
+      leaseOwner: string;
+      expiresAt: string;
+    }>[]): Promise<readonly OpaqueHandle[]>;
     attachInTransaction(
       database: DatabaseClient,
       reservation: OpaqueHandle,
@@ -235,6 +240,70 @@ integration("Task 14e3e2 normalized publication composition", () => {
       assets: 0,
       unfinished_operations: 0
     }] });
+  });
+
+  it("reserves a batch with overlapping derivative content before one caller transaction", async () => {
+    const composition = await compose();
+    const sharedDerivativeBytes = new TextEncoder().encode(
+      `14e3e2:shared-thumbnail:${crypto.randomUUID()}`,
+    );
+    const commands = [0, 1].map((variantIndex) => {
+      const base = request(ownerUserId, `batch-${variantIndex}-${crypto.randomUUID()}`);
+      return bindPrivateNormalizedAssetPublicationRequest({
+        ...base,
+        derivatives: [{
+          slot: {
+            derivativeKind: "thumbnail",
+            transformVersion: 1,
+            pixelWidth: 1,
+            pixelHeight: 1
+          },
+          artifact: {
+            bytes: sharedDerivativeBytes,
+            mimeType: "image/png",
+            byteLength: sharedDerivativeBytes.byteLength,
+            contentHash: sha256(sharedDerivativeBytes),
+            technicalMetadata: {
+              state: "verified",
+              pixelWidth: 1,
+              pixelHeight: 1,
+              format: "png",
+              pages: 1
+            }
+          }
+        }]
+      });
+    });
+    const reservations = await composition.publication.reserveBatch(commands.map((command) => ({
+      request: command,
+      leaseOwner: "14e3e2-batch",
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    })));
+    expect(reservations).toHaveLength(2);
+
+    const caller = await pool.connect();
+    const attached = [] as Awaited<ReturnType<TestComposition["publication"]["attachInTransaction"]>>[];
+    try {
+      await caller.query("BEGIN");
+      for (const reservation of reservations) {
+        attached.push(await composition.publication.attachInTransaction(
+          caller,
+          reservation,
+          async () => ({ contexts: [], references: [] }),
+        ));
+      }
+      await caller.query("COMMIT");
+    } finally {
+      await caller.query("ROLLBACK").catch(() => undefined);
+      caller.release();
+    }
+    await expect(Promise.all(
+      attached.map(({ finalization }) => composition.publication.finalize(finalization)),
+    )).resolves.toEqual([
+      { outcome: "published", result: attached[0]!.result },
+      { outcome: "published", result: attached[1]!.result }
+    ]);
+    expect(attached[0]!.result.assetId).not.toBe(attached[1]!.result.assetId);
   });
 
   it("finalizes an exact opaque post-commit handle after recreating the composition", async () => {

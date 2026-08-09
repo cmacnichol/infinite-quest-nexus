@@ -1178,7 +1178,8 @@ integration("standard database migration runner", () => {
         "0061_portable_import_composition",
         "0062_portable_import_asset_publications",
         "0063_portable_legacy_story_asset_publications",
-        "0064_normalized_asset_publication_requests"
+        "0064_normalized_asset_publication_requests",
+        "0065_illustration_asset_publications"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(

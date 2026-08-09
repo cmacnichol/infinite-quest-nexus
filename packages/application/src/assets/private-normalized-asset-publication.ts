@@ -297,6 +297,9 @@ export type PrivateNormalizedAssetFinalizationOutcome =
  */
 export interface PrivateNormalizedAssetPublicationPort {
   reserve(command: PrivateNormalizedAssetReservationCommand): Promise<PrivateNormalizedAssetReservationHandle>;
+  reserveBatch(
+    commands: readonly PrivateNormalizedAssetReservationCommand[],
+  ): Promise<readonly PrivateNormalizedAssetReservationHandle[]>;
   attachInTransaction(
     database: DurableFilesystemTransactionContext,
     reservation: PrivateNormalizedAssetReservationHandle,

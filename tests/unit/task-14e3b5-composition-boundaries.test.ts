@@ -66,6 +66,15 @@ const FACTORY_FIXTURES: readonly Source[] = [
         return createAssetImportStorageComposition(pool, roots);
       }
     `
+  },
+  {
+    file: "services/runtime/src/illustration-asset-publication-composition.ts",
+    text: `
+      import { createPrivateNormalizedAssetPublicationComposition } from "./normalized-asset-publication-composition.js";
+      export function createPrivateIllustrationAssetPublicationComposition() {
+        return createPrivateNormalizedAssetPublicationComposition(pool, roots);
+      }
+    `
   }
 ];
 
