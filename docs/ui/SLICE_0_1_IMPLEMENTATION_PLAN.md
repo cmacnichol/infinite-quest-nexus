@@ -9161,14 +9161,68 @@ reuse them. Implement and review these sub-checkpoints in order:
    1,492 unit tests, `pnpm check`, `pnpm build`, diff, and precheck; the known
    detached full-integration harness remains excluded. e4 is next.
 
-**14e3e4 — imported-writer coordinators.** Use the same private normalized
-publication seam for every live image-producing import family identified in
-14e3d-R/e3e0. Preserve rich archive source mappings, covers, turn/segment
-bindings, generation contexts, library policy, and explicitly frozen Legacy
-Story optional-image semantics. No writer calls `writeContentAddressed`,
-`persist*Image`, or legacy service authority. Test each family through its
-caller transaction with rollback, duplicate/replay, restart finalization,
-same-owner reuse, and safe external-image handling.
+**14e3e4 — imported-writer coordinators.** This is additive and must not bind a
+route, default runtime composition, worker, public barrel, or legacy import
+service before e3g. The current private portable composition still uses 0060
+asset publication; e4 replaces that private graph, not the live legacy path.
+Implement and review these sub-checkpoints in order:
+
+1. **e4a — normalized import request authority:** introduce the smallest
+   private adapter/migration needed to associate each durable portable import
+   operation and every grouped asset source with its immutable 0064 request
+   IDs/results. Preserve operation-owned reservation authority across crashes;
+   do not regress the existing preclaim durable-intent rule. Exact import
+   source records, source keys, archive asset IDs, requested library snapshot,
+   import provenance, and conditional context/reference intent must be frozen
+   before request reservation. Any operation/request mapping must be
+   owner-scoped, immutable after attachment, unique across replay, and free of
+   raw path, descriptor, bearer, external URL, or cross-install owner data.
+2. **e4b — Campaign ZIP private coordinator:** replace the private Campaign ZIP
+   writer's 0060 `PrivateCallerTransactionAssetPublisher` calls with e2's
+   normalized batch reserve/attach/finalize seam. It must normalize/verify every
+   archive image and thumbnail before reservation, retain all grouped source IDs
+   as distinct request children, create the exact import generation contexts and
+   conditional campaign/turn/world references inside the caller transaction,
+   and keep canonical library metadata immutable on same-owner reuse. A
+   rollback/discard, replay, cross-owner retention, and post-commit recovery
+   must remain operation-scoped and must not reopen archive input or rerun
+   import domain mutation unnecessarily.
+3. **e4c — Legacy Story inline/companion coordinator:** route both decoded
+   inline data images and injected companion images through the same normalized
+   private seam while preserving the explicitly frozen optional-image behavior:
+   absent, malformed, excessive, or external image inputs are ignored/reported
+   through existing safe compatibility semantics and never create partial
+   request/domain state. Preserve cover versus turn versus imported-attachment
+   source mapping, grouped companion keys, optional reference omission, and
+   safe URL rewriting. Do not make a legacy optional-image import fail merely
+   because illustration work is unavailable.
+4. **e4d — family parity and boundary matrix:** cover every image-producing
+   import family (Campaign ZIP; Legacy Story inline and companions), plus
+   explicitly image-free families proving no accidental image writer call.
+   Use real PostgreSQL/temp-filesystem tests for caller rollback, duplicate/
+   replay, fresh-composition/module-reset finalization, same-owner reuse,
+   cross-owner shared physical retention, safe external/malformed inputs, and
+   no partial domain or request state. Add graph guards proving the replacement
+   imports only e2/private normalized authority and no 0060 publisher,
+   `writeContentAddressed`, `persist*Image`, API asset service, or legacy import
+   authority. Keep e4 unconsumed until e3f/e3g.
+
+**Completed (commit `bc597668`, independently reviewed with no findings):** e4
+now replaces only the private portable-import publication graph with the e2
+normalized seam. Additive migration 0066 freezes owner- and operation-scoped
+source, context, reference, provenance, library, and result intent before
+filesystem work; it also supports replay, retirement, and restart-safe
+reconciliation without raw paths, URLs, descriptors, or bearer values. Campaign
+ZIP and Legacy Story inline/companion assets use bounded normalization and one
+atomic attach/domain-mutation path. Campaign capacity, exact target IDs,
+duplicate/ordinal source roles, cover updates, no-image no-ops, strict Campaign
+versus non-fatal optional Legacy image handling, same-owner immutability,
+cross-owner isolation, malformed/external input, decode-pixel limits, rollback,
+late duplicates, expiry, and crash recovery are covered. The live
+route/default-runtime/worker/public-barrel bindings and legacy production
+authority remain unchanged for e3f/e3g. Evidence: e4 real PostgreSQL/temp-FS
+38/38; adjacent e2 11/11; focused units 44/44; controlled full unit 1,500/1,500;
+`pnpm check`, `pnpm build`, `git diff --check`, and `pjm precheck` all passed.
 
 **14e3e5 — real existing-asset metadata backfill executor.** Retain the durable
 backfill state machine but replace the current metadata-only completion helper
