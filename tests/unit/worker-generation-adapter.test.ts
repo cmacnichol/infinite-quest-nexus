@@ -19,9 +19,6 @@ const log = vi.hoisted(() => ({
   info: vi.fn()
 }));
 
-vi.mock("../../services/api/src/asset-service.js", () => ({
-  runAssetMetadataBackfill: lane.asset
-}));
 vi.mock("../../services/runtime/src/illustration-segment-job-adapter.js", () => ({
   runIllustrationPromptJob: lane.illustrationPrompt
 }));

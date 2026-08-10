@@ -26,9 +26,9 @@ async function migrateNormalizedAuthorityDown(pool: DatabasePool): Promise<void>
       dbClient: client,
       dir: resolve("database/migrations"),
       direction: "down",
-      // 0065–0067 now follow 0064; reach the normalized-authority down guard
+      // 0065–0069 now follow 0064; reach the normalized-authority down guard
       // rather than stopping at the later additive private seam migrations.
-      count: 4,
+      count: 6,
       migrationsTable: "schema_migrations",
       checkOrder: true,
       singleTransaction: true,

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { mkdir } from "node:fs/promises";
@@ -97,19 +98,23 @@ import {
   campaignTransferCommitRequestSchema,
   campaignTransferPreviewRequestSchema
 } from "../../../packages/contracts/src/campaign-transfer.js";
-import { previewLegacyStoryImport } from "./import-service.js";
-import {
-  getImportProgress,
-  importInfiniteWorlds,
-  previewInfiniteWorldsImport,
-  type InfiniteWorldsApiProviders
-} from "./infinite-worlds-import-service.js";
+import { previewPortableLegacyStory } from "./portable-legacy-story-import-route.js";
+import type { InfiniteWorldsImportProviderCollaborators } from "../../runtime/src/infinite-worlds-provider-collaborators.js";
 import { createMemoryApplicationAdapter } from "./memory-application-adapter.js";
+import {
+  bindAssetMetadataHttpIngress,
+  bindTurnAssetSelectionHttpIngress,
+  bindWorldAssetSelectionHttpIngress,
+  mapLegacyTurnAssetSelectionHttpResult,
+  mapLegacyWorldAssetSelectionHttpResult
+} from "../../../packages/application/src/assets/index.js";
+import { toAssetServerStableReplayKey } from "../../../packages/application/src/assets/http-compatibility.js";
+import { bindPrivateBoundedStreamLimits } from "../../../packages/application/src/assets/private-secure-storage.js";
 import {
   createOwnerBoundPortableWorldApplicationPort,
   createWorldCampaignApplicationAdapter
 } from "./world-campaign-application-adapter.js";
-import { queryAssets, readAsset, readAssetDerivative, selectTurnIllustration, selectWorldCover, updateAssetMetadata, type FilesystemAssetStore } from "./asset-service.js";
+import type { FilesystemAssetStore } from "../../runtime/src/filesystem-asset-store.js";
 import type { ProviderApiTransportAdapter } from "./provider-application-adapter.js";
 import { createGenerationApplicationAdapter } from "./generation-application-adapter.js";
 import { createGenerationRouteLifecycle, type GenerationLifecycleLogContext } from "./generation-route-lifecycle.js";
@@ -117,6 +122,21 @@ import { safeTurnInput } from "./turn-input-safety.js";
 import { applicationMetadata } from "./app-metadata.js";
 import { installRequestSecurity } from "./request-security.js";
 import { registerArchiveRoutes } from "./archive-routes.js";
+import { createApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
+import {
+  createApiCampaignArchiveAssetReader,
+  createApiPortableImportExportComposition,
+} from "../../runtime/src/api-portable-import-export-composition.js";
+import { createAssetDeliveryStream } from "./asset-route-stream.js";
+import { importPortableWorldJson, previewPortableWorldJson } from "./portable-world-import-route.js";
+import {
+  importPortableInfiniteWorlds,
+  previewPortableInfiniteWorlds,
+} from "./portable-infinite-worlds-import-route.js";
+import {
+  bindImportProgressLookup,
+  mapImportProgressHttpResult,
+} from "../../../packages/application/src/imports/index.js";
 
 export type BuildServerOptions = {
   config: RuntimeConfig;
@@ -127,7 +147,7 @@ export type BuildServerOptions = {
   generationEvents: GenerationEventSource;
   worldCampaign: import("../../../packages/application/src/world-campaign/index.js").WorldCampaignApplication;
   providers: ProviderApiTransportAdapter;
-  infiniteWorldsProviders: InfiniteWorldsApiProviders;
+  infiniteWorldsProviders: InfiniteWorldsImportProviderCollaborators;
 };
 
 const uuidSchema = z.uuid();
@@ -142,6 +162,36 @@ function setStaticCacheHeader(reply: { header(name: string, value: string): unkn
       ? "public, max-age=31536000, immutable"
       : "no-cache"
   );
+}
+
+function assetStableReplayKey(route: string, value: unknown): ReturnType<typeof toAssetServerStableReplayKey> {
+  const digest = createHash("sha256").update(JSON.stringify({ route, value })).digest("hex");
+  return toAssetServerStableReplayKey(`asset-http:${route}:${digest}`);
+}
+
+function assetIdempotencyHeader(headers: Record<string, string | string[] | undefined>): string | undefined {
+  const header = headers["idempotency-key"];
+  if (Array.isArray(header)) throw Object.assign(new Error("idempotency_header_invalid"), { statusCode: 400 });
+  return header;
+}
+
+function assetHttpIdempotency(
+  headers: Record<string, string | string[] | undefined>,
+  route: string,
+  value: unknown,
+) {
+  const idempotencyHeader = assetIdempotencyHeader(headers);
+  return {
+    serverStableReplayKey: assetStableReplayKey(route, value),
+    ...(idempotencyHeader === undefined ? {} : { idempotencyHeader })
+  };
+}
+
+function assetDeliveryLimits(maximumBytes: number) {
+  return bindPrivateBoundedStreamLimits({
+    maximumBytes,
+    deadlineAt: new Date(Date.now() + 60_000).toISOString()
+  });
 }
 
 function isSafeAppNavigation(url: string): boolean {
@@ -386,13 +436,35 @@ export async function buildServer({
   await mkdir(config.assetStorageRoot, { recursive: true });
   await mkdir(config.archiveStorageRoot, { recursive: true });
   const assetStore: FilesystemAssetStore = { root: config.assetStorageRoot };
+  const apiAssets = await createApiAssetComposition(pool, {
+    archiveRoot: config.archiveStorageRoot,
+    assetRoot: config.assetStorageRoot
+  });
+  const apiPortable = await createApiPortableImportExportComposition({
+    pool,
+    config,
+    memory: memory.generation,
+    providers: infiniteWorldsProviders,
+    leaseOwner: `api-portable-${crypto.randomUUID()}`,
+    assetReader: createApiCampaignArchiveAssetReader(apiAssets),
+  });
+  app.addHook("onClose", async () => {
+    await Promise.all([apiAssets.close(), apiPortable.close()]);
+  });
   await app.register(fastifyMultipart, {
     limits: {
       fileSize: config.security.apiImportBodyLimitBytes,
       fieldSize: config.security.apiImportBodyLimitBytes
     }
   });
-  await app.register(registerArchiveRoutes, { pool, config, assetStore, memory: memory.generation });
+  await app.register(registerArchiveRoutes, {
+    pool,
+    config,
+    assetStore,
+    memory: memory.generation,
+    portable: apiPortable.portable,
+    resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) }),
+  });
   await app.register(fastifyStatic, {
     root: config.legacyWebRoot,
     prefix: "/nexus/",
@@ -584,51 +656,64 @@ export async function buildServer({
     providers.delete(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId))
   ));
 
-  app.post("/api/v1/imports/legacy-story/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => (
-    previewLegacyStoryImport(pool, storyImportPreviewRequestSchema.parse(request.body))
-  ));
+  app.post("/api/v1/imports/legacy-story/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => {
+    const preview = await previewPortableLegacyStory({
+      portable: apiPortable.portable,
+      pool,
+      owner: { ownerUserId: (await resolveWorldCampaignOwnerScope()).ownerUserId },
+      request: storyImportPreviewRequestSchema.parse(request.body),
+      leaseOwner: `api-legacy-story-preview-${crypto.randomUUID()}`,
+    });
+    return preview.projection;
+  });
 
   app.post("/api/v1/imports/world/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => (
-    worldCampaignAdapter.run(async () => worldCampaignAdapter.application.previewWorldImport(
-      await resolveWorldCampaignOwnerScope(),
-      worldImportRequestSchema.parse(request.body)
-    ))
+    previewPortableWorldJson({
+      portable: apiPortable.portable,
+      owner: { ownerUserId: (await resolveWorldCampaignOwnerScope()).ownerUserId },
+      request: worldImportRequestSchema.parse(request.body),
+      leaseOwner: `api-world-preview-${crypto.randomUUID()}`,
+    }).then((preview) => ({ ...preview.projection, kind: "world" as const }))
   ));
 
   app.post("/api/v1/imports/world", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request, reply) => {
-    const ownerScope = await resolveWorldCampaignOwnerScope();
-    const result = await worldCampaignAdapter.run(() => worldCampaignAdapter.application.importWorld(
-      ownerScope,
-      worldImportRequestSchema.parse(request.body)
-    ));
-    return reply.code(result.duplicate ? 200 : 201).send(result);
+    const result = await importPortableWorldJson({
+      portable: apiPortable.portable,
+      owner: { ownerUserId: (await resolveWorldCampaignOwnerScope()).ownerUserId },
+      request: worldImportRequestSchema.parse(request.body),
+      leaseOwner: `api-world-import-${crypto.randomUUID()}`,
+    });
+    return reply.code(result.duplicate ? 200 : 201).send(result.result);
   });
 
   app.post("/api/v1/imports/infinite-worlds/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => (
-    previewInfiniteWorldsImport(
+    previewPortableInfiniteWorlds({
+      portable: apiPortable.portable,
       pool,
-      infiniteWorldsImportRequestSchema.parse(request.body),
-      portableWorldApplication
-    )
+      owner: { ownerUserId: (await resolveWorldCampaignOwnerScope()).ownerUserId },
+      request: infiniteWorldsImportRequestSchema.parse(request.body),
+      leaseOwner: `api-infinite-worlds-preview-${crypto.randomUUID()}`,
+    })
   ));
 
   app.post("/api/v1/imports/infinite-worlds", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request, reply) => {
-    const result = await importInfiniteWorlds(
+    const result = await importPortableInfiniteWorlds({
+      portable: apiPortable.portable,
+      progress: apiPortable.progress,
       pool,
-      infiniteWorldsImportRequestSchema.parse(request.body),
-      infiniteWorldsProviders,
-      memory.generation,
-      portableWorldApplication,
-      assetStore
-    );
+      owner: { ownerUserId: (await resolveWorldCampaignOwnerScope()).ownerUserId },
+      request: infiniteWorldsImportRequestSchema.parse(request.body),
+      leaseOwner: `api-infinite-worlds-import-${crypto.randomUUID()}`,
+      diagnoseWorldGenerationFailure: infiniteWorldsProviders.diagnoseWorldGenerationFailure,
+    });
     return reply.code(result.duplicate ? 200 : 201).send(result);
   });
 
   app.get<{ Querystring: { key?: string } }>("/api/v1/imports/progress", async (request, reply) => {
-    const key = String(request.query.key || "").trim();
-    const progress = getImportProgress(key);
-    if (!progress) return reply.code(404).send({ error: "No active import found for the provided key." });
-    return progress;
+    const owner = { ownerUserId: (await resolveWorldCampaignOwnerScope()).ownerUserId };
+    const lookup = bindImportProgressLookup(owner, String(request.query.key || ""));
+    const result = mapImportProgressHttpResult(await apiPortable.progress.read(lookup));
+    return reply.code(result.statusCode).send(result.body);
   });
 
   app.get("/api/v1/worlds", async () => {
@@ -1129,8 +1214,17 @@ export async function buildServer({
 
   app.put<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/cover-asset", async (request) => {
     const ownerUserId = await initialOwnerId(pool);
+    const worldId = uuidSchema.parse(request.params.worldId);
     const body = assetSelectionSchema.parse(request.body);
-    return selectWorldCover(pool, ownerUserId, uuidSchema.parse(request.params.worldId), body.assetId);
+    const ingress = bindWorldAssetSelectionHttpIngress(
+      { ownerUserId },
+      { worldId },
+      body,
+      assetHttpIdempotency(request.headers, "world-cover", { ownerUserId, worldId, body })
+    );
+    return mapLegacyWorldAssetSelectionHttpResult(
+      await apiAssets.assets.selectWorldCover(ingress.scope, ingress.command)
+    );
   });
 
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/illustration-config", async (request) => (
@@ -1206,9 +1300,17 @@ export async function buildServer({
   });
 
   app.put<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustration-asset", async (request) => {
-    const ownerUserId = await initialOwnerId(pool);
+    const scope = await illustrationTurnScope(uuidSchema.parse(request.params.turnId));
     const body = assetSelectionSchema.parse(request.body);
-    return selectTurnIllustration(pool, ownerUserId, uuidSchema.parse(request.params.turnId), body.assetId);
+    const ingress = bindTurnAssetSelectionHttpIngress(
+      scope,
+      scope,
+      body,
+      assetHttpIdempotency(request.headers, "turn-illustration", { ...scope, body })
+    );
+    return mapLegacyTurnAssetSelectionHttpResult(
+      await apiAssets.assets.selectTurnIllustration(ingress.scope, ingress.command)
+    );
   });
 
   app.get<{ Params: { turnId: string } }>("/api/v1/turns/:turnId/illustration-resolution", async (request, reply) => {
@@ -1241,43 +1343,66 @@ export async function buildServer({
 
   app.get<{ Params: { assetId: string } }>("/api/v1/assets/:assetId", async (request, reply) => {
     const ownerUserId = await initialOwnerId(pool);
-    const asset = await readAsset(pool, assetStore, ownerUserId, uuidSchema.parse(request.params.assetId));
+    const scope = { ownerUserId, assetId: uuidSchema.parse(request.params.assetId) };
+    const delivery = await apiAssets.assets.describeAssetDelivery(scope, { kind: "original" });
+    const session = await apiAssets.storage.adapter.openAssetSession({
+      scope,
+      request: { kind: "original" },
+      limits: assetDeliveryLimits(config.security.apiAssetBodyLimitBytes)
+    });
+    if (!session) return reply.code(404).send({ error: "Not found" });
     return reply
-      .type(asset.mimeType)
+      .type(delivery.mimeType)
       .header("cache-control", "private, max-age=31536000, immutable")
-      .header("etag", `\"${asset.contentHash}\"`)
-      .send(asset.bytes);
+      .header("etag", `\"${delivery.etag}\"`)
+      .send(createAssetDeliveryStream(session, reply.raw));
   });
 
   app.get<{ Params: { assetId: string } }>("/api/v1/assets/:assetId/thumbnail", async (request, reply) => {
     const ownerUserId = await initialOwnerId(pool);
-    const asset = await readAssetDerivative(pool, assetStore, ownerUserId, uuidSchema.parse(request.params.assetId), "thumbnail");
+    const scope = { ownerUserId, assetId: uuidSchema.parse(request.params.assetId) };
+    const delivery = await apiAssets.assets.describeAssetDelivery(scope, { kind: "derivative", derivativeKind: "thumbnail" });
+    const session = await apiAssets.storage.adapter.openAssetSession({
+      scope,
+      request: { kind: "derivative", derivativeKind: "thumbnail" },
+      limits: assetDeliveryLimits(config.security.apiAssetBodyLimitBytes)
+    });
+    if (!session) return reply.code(404).send({ error: "Not found" });
     return reply
-      .type(asset.mimeType)
+      .type(delivery.mimeType)
       .header("cache-control", "private, max-age=31536000, immutable")
-      .header("etag", `\"${asset.contentHash}\"`)
-      .send(asset.bytes);
+      .header("etag", `\"${delivery.etag}\"`)
+      .send(createAssetDeliveryStream(session, reply.raw));
   });
 
   app.get<{ Querystring: Record<string, unknown> }>("/api/v1/assets", async (request) => {
     const ownerUserId = await initialOwnerId(pool);
-    return queryAssets(pool, ownerUserId, assetListQuerySchema.parse(request.query));
+    return apiAssets.assets.listAssets({ ownerUserId }, assetListQuerySchema.parse(request.query));
   });
 
   app.get<{ Querystring: Record<string, unknown> }>("/api/v1/assets/facets", async (request) => {
     const ownerUserId = await initialOwnerId(pool);
-    const result = await queryAssets(pool, ownerUserId, assetListQuerySchema.parse({ ...request.query, cursor: undefined, limit: 1 }));
+    const result = await apiAssets.assets.listAssets(
+      { ownerUserId },
+      assetListQuerySchema.parse({ ...request.query, cursor: undefined, limit: 1 })
+    );
     return { total: result.total, facets: result.facets };
   });
 
   app.patch<{ Params: { assetId: string } }>("/api/v1/assets/:assetId/library-metadata", async (request) => {
     const ownerUserId = await initialOwnerId(pool);
-    return updateAssetMetadata(
-      pool,
-      ownerUserId,
-      uuidSchema.parse(request.params.assetId),
-      assetMetadataUpdateSchema.parse(request.body)
+    const assetId = uuidSchema.parse(request.params.assetId);
+    const parsed = assetMetadataUpdateSchema.parse(request.body);
+    const body = Object.fromEntries(
+      Object.entries(parsed).filter(([, value]) => value !== undefined)
+    ) as unknown as Parameters<typeof bindAssetMetadataHttpIngress>[2];
+    const ingress = bindAssetMetadataHttpIngress(
+      { ownerUserId },
+      assetId,
+      body,
+      assetHttpIdempotency(request.headers, "asset-library-metadata", { ownerUserId, assetId, body })
     );
+    return apiAssets.assets.updateAssetMetadata(ingress.scope, ingress.command);
   });
 
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/metrics", async (request) => {

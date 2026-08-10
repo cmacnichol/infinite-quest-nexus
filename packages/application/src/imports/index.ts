@@ -13,6 +13,13 @@ export {
   toPortableImportIdempotencyKey
 } from "./http-compatibility.js";
 export type {
+  ImportProgressCompletion,
+  ImportProgressFailure,
+  ImportProgressProcessingUpdate,
+  ImportProgressScope,
+  ImportProgressStorePort
+} from "./progress.js";
+export type {
   AtomicPortableImportCore,
   AtomicPortableImportCoreCommand,
   AtomicPortableImportKind,

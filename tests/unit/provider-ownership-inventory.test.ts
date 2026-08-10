@@ -43,7 +43,6 @@ const frozenConsumerFiles = [
   "services/runtime/src/world-campaign-composition.ts",
   "services/runtime/src/provider-character-organization-adapter.ts",
   "services/runtime/src/provider-world-generation-adapter.ts",
-  "services/api/src/infinite-worlds-import-service.ts",
 ] as const;
 
 const forbiddenRawAuthority = [

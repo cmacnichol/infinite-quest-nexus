@@ -45,6 +45,7 @@ type PendingRow = Readonly<{
 }>;
 
 export type PrivateAssetMetadataBackfillExecutorRepository = Readonly<{
+  enqueueMissing(limit: number): Promise<number>;
   claimNext(input: Readonly<{ workerId: string; leaseSeconds: number }>): Promise<PrivateAssetMetadataBackfillClaim | null>;
   heartbeat(claim: PrivateAssetMetadataBackfillClaim, leaseSeconds: number): Promise<PrivateAssetMetadataBackfillClaim | null>;
   pendingFinalization(claim: PrivateAssetMetadataBackfillClaim, leaseSeconds: number): Promise<PrivateAssetMetadataBackfillFinalization | null>;
@@ -131,6 +132,39 @@ export function createPostgresAssetMetadataBackfillExecutorRepository(
   pool: DatabasePool,
   journal: DurableFilesystemJournalPort,
 ): PrivateAssetMetadataBackfillExecutorRepository {
+  const enqueueMissing: PrivateAssetMetadataBackfillExecutorRepository["enqueueMissing"] = async (limit) => {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+      throw new Error("asset_metadata_backfill_discovery_limit_invalid");
+    }
+    const result = await pool.query(
+      `WITH candidates AS (
+         SELECT asset.owner_user_id,asset.id
+           FROM assets asset
+          WHERE NOT EXISTS (
+                  SELECT 1 FROM asset_metadata_backfill_jobs job
+                   WHERE job.owner_user_id=asset.owner_user_id AND job.asset_id=asset.id
+                )
+            AND (asset.pixel_width IS NULL OR asset.pixel_height IS NULL OR NOT EXISTS (
+                  SELECT 1 FROM asset_derivatives derivative
+                   WHERE derivative.owner_user_id=asset.owner_user_id
+                     AND derivative.source_asset_id=asset.id
+                     AND derivative.derivative_kind='thumbnail'
+                     AND derivative.transform_version=1
+                ))
+          ORDER BY asset.id
+          LIMIT $1
+        )
+        INSERT INTO asset_metadata_backfill_jobs (
+          owner_user_id,asset_id,status,next_attempt_at
+        )
+        SELECT owner_user_id,id,'queued',clock_timestamp() FROM candidates
+        ON CONFLICT (asset_id,owner_user_id) DO NOTHING
+        RETURNING id`,
+      [limit],
+    );
+    return result.rowCount ?? 0;
+  };
+
   const claimNext: PrivateAssetMetadataBackfillExecutorRepository["claimNext"] = async (input) => {
     if (!input.workerId.trim() || !validLeaseSeconds(input.leaseSeconds)) {
       throw new Error("asset_metadata_backfill_claim_invalid");
@@ -268,7 +302,7 @@ export function createPostgresAssetMetadataBackfillExecutorRepository(
     await client.query(
       `UPDATE assets
           SET pixel_width=$3,pixel_height=$4,
-              technical_metadata=technical_metadata || $5::jsonb
+              technical_metadata=(technical_metadata - 'backfillError') || $5::jsonb
         WHERE owner_user_id=$1 AND id=$2 AND content_hash=$6 AND mime_type=$7 AND byte_length=$8`,
       [
         claimValue.ownerUserId, claimValue.assetId, thumbnail.pixelWidth, thumbnail.pixelHeight,
@@ -332,7 +366,8 @@ export function createPostgresAssetMetadataBackfillExecutorRepository(
     if (!locked.rows[0]) return "stale" as const;
     await database.query(
       `UPDATE assets
-          SET pixel_width=$3,pixel_height=$4,technical_metadata=technical_metadata || $5::jsonb
+          SET pixel_width=$3,pixel_height=$4,
+              technical_metadata=(technical_metadata - 'backfillError') || $5::jsonb
         WHERE owner_user_id=$1 AND id=$2 AND content_hash=$6 AND mime_type=$7 AND byte_length=$8`,
       [
         claimValue.ownerUserId, claimValue.assetId, thumbnail.pixelWidth, thumbnail.pixelHeight,
@@ -351,6 +386,29 @@ export function createPostgresAssetMetadataBackfillExecutorRepository(
                AND identity.lifecycle IN ('prepared','attached','published')
           )`,
       [claimValue.ownerUserId, claimValue.expectedContentHash, claimValue.assetId],
+    );
+    // A concurrent recovery worker may have physically finalized the attached
+    // operation while this claim was decoding. Reusing that finalized
+    // derivative is valid only if its durable publication projection is
+    // completed in the same transaction as the backfill job.
+    await database.query(
+      `UPDATE asset_metadata_backfill_publications publication
+          SET lifecycle='published',published_at=clock_timestamp(),updated_at=clock_timestamp()
+        WHERE publication.owner_user_id=$1 AND publication.asset_id=$2
+          AND publication.lifecycle='attached'
+          AND publication.filesystem_operation_id=(
+            SELECT derivative.filesystem_operation_id
+              FROM asset_derivatives derivative
+             WHERE derivative.owner_user_id=$1 AND derivative.source_asset_id=$2
+               AND derivative.derivative_kind='thumbnail' AND derivative.transform_version=$3
+               AND derivative.pixel_width=$4 AND derivative.pixel_height=$5
+               AND derivative.mime_type=$6 AND derivative.byte_length=$7 AND derivative.content_hash=$8
+          )`,
+      [
+        claimValue.ownerUserId, claimValue.assetId, thumbnail.transformVersion,
+        thumbnail.pixelWidth, thumbnail.pixelHeight, thumbnail.mimeType,
+        thumbnail.byteLength, thumbnail.contentHash
+      ],
     );
     const completed = await database.query(
       `UPDATE asset_metadata_backfill_jobs
@@ -434,21 +492,31 @@ export function createPostgresAssetMetadataBackfillExecutorRepository(
   const fail: PrivateAssetMetadataBackfillExecutorRepository["fail"] = async (claimValue, diagnosticCode) => {
     if (!DIAGNOSTICS.has(diagnosticCode)) throw new Error("asset_metadata_backfill_diagnostic_invalid");
     const updated = await pool.query<Readonly<{ status: "recoverable" | "failed" }>>(
-      `UPDATE asset_metadata_backfill_jobs
-          SET status=CASE WHEN attempts >= 3 THEN 'failed' ELSE 'recoverable' END,
-              diagnostic_code=$6,lease_id=NULL,lease_owner=NULL,lease_expires_at=NULL,
-              next_attempt_at=clock_timestamp()+CASE attempts
-                WHEN 1 THEN interval '2 seconds' WHEN 2 THEN interval '8 seconds' ELSE interval '30 seconds' END,
-              updated_at=clock_timestamp()
-        WHERE owner_user_id=$1 AND asset_id=$2 AND lease_id=$3 AND lease_owner=$4 AND work_version=$5
-          AND status='running' AND lease_expires_at > clock_timestamp()
-        RETURNING status`,
+      `WITH updated_job AS (
+         UPDATE asset_metadata_backfill_jobs
+            SET status=CASE WHEN attempts >= 3 THEN 'failed' ELSE 'recoverable' END,
+                diagnostic_code=$6,lease_id=NULL,lease_owner=NULL,lease_expires_at=NULL,
+                next_attempt_at=clock_timestamp()+CASE attempts
+                  WHEN 1 THEN interval '2 seconds' WHEN 2 THEN interval '8 seconds' ELSE interval '30 seconds' END,
+                updated_at=clock_timestamp()
+          WHERE owner_user_id=$1 AND asset_id=$2 AND lease_id=$3 AND lease_owner=$4 AND work_version=$5
+            AND status='running' AND lease_expires_at > clock_timestamp()
+          RETURNING owner_user_id,asset_id,status
+       ), updated_asset AS (
+         UPDATE assets asset
+            SET technical_metadata=asset.technical_metadata || jsonb_build_object('backfillError',$6::text)
+           FROM updated_job job
+          WHERE asset.owner_user_id=job.owner_user_id AND asset.id=job.asset_id
+          RETURNING asset.id
+       )
+       SELECT status FROM updated_job`,
       [...leaseWhere(claimValue), diagnosticCode],
     );
     return updated.rows[0]?.status ?? "lease_lost";
   };
 
   return Object.freeze({
+    enqueueMissing,
     claimNext,
     heartbeat,
     pendingFinalization,

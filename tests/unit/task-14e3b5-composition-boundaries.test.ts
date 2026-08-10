@@ -112,6 +112,22 @@ const FACTORY_FIXTURES: readonly Source[] = [
         return createPrivateNormalizedAssetPublicationComposition(pool, roots);
       }
     `
+  },
+  {
+    file: "services/runtime/src/api-asset-composition.ts",
+    text: `
+      import { createAssetImportStorageComposition } from "./asset-import-composition.js";
+      export const apiAssetCompositionFactories = { createStorage: createAssetImportStorageComposition };
+    `
+  },
+  {
+    file: "services/worker/src/worker.ts",
+    text: `
+      import { createPrivateIllustrationAssetPublicationComposition } from "../../runtime/src/illustration-asset-publication-composition.js";
+      export async function worker() {
+        return createPrivateIllustrationAssetPublicationComposition(pool, roots);
+      }
+    `
   }
 ];
 

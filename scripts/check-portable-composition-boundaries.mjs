@@ -5,6 +5,7 @@ import {
 } from "./check-private-storage-boundaries.mjs";
 
 const COMPOSITION = "services/runtime/src/portable-import-export-composition.ts";
+const API_COMPOSITION = "services/runtime/src/api-portable-import-export-composition.ts";
 const PRIVATE_FAMILY_REPOSITORY = "packages/database/src/portable-import-family-repository.ts";
 const PRIVATE_PORTABLE_AUTHORITIES = new Set([COMPOSITION, PRIVATE_FAMILY_REPOSITORY]);
 const COMPOSITION_FACTORY = "createPortableImportExportComposition";
@@ -77,6 +78,16 @@ function targets(file, target, expected) {
   return resolvedModule(file, target) === expected;
 }
 
+function isExactApiCompositionImport(node, file, target) {
+  if (file !== API_COMPOSITION || node?.type !== "ImportDeclaration" || !targets(file, target, COMPOSITION)) return false;
+  const values = node.specifiers.filter((specifier) => specifier.importKind !== "type");
+  return values.length === 1
+    && values[0]?.type === "ImportSpecifier"
+    && values[0].imported.type === "Identifier"
+    && values[0].imported.name === COMPOSITION_FACTORY
+    && values[0].local.name === COMPOSITION_FACTORY;
+}
+
 function legacyAuthorityMessage(target) {
   if (typeof target !== "string") return null;
   const basename = posix.basename(target.replaceAll("\\", "/")).replace(/\.(?:cjs|cts|js|mjs|mts|ts)$/u, "");
@@ -125,8 +136,9 @@ export function checkPortableCompositionBoundaries(file, text) {
         add(node, FORBIDDEN_COMPOSITION_NAMES.get(memberName));
       }
     }
-    if (normalized !== COMPOSITION && targets(normalized, target, COMPOSITION)) {
-      add(node, "Task 14e3d composition must remain unconsumed until the binding checkpoint");
+    if (normalized !== COMPOSITION && targets(normalized, target, COMPOSITION)
+      && !isExactApiCompositionImport(node, normalized, target)) {
+      add(node, "createPortableImportExportComposition must not bypass the named e3g API composition");
     }
     if (normalized === PUBLIC_BARREL && targets(normalized, target, PRIVATE_CONTRACT)) {
       add(node, "private portable composition must not enter the public imports barrel");
@@ -163,8 +175,9 @@ export function checkPortableCompositionInventory(sources) {
         definitions.push(`${file}:${lineNumber(node)}`);
       }
       const target = moduleTarget(node);
-      if (file !== COMPOSITION && targets(file, target, COMPOSITION)) {
-        violations.push(`${file}:${lineNumber(node)}: ${COMPOSITION_FACTORY} must remain unconsumed until the binding checkpoint`);
+      if (file !== COMPOSITION && targets(file, target, COMPOSITION)
+        && !isExactApiCompositionImport(node, file, target)) {
+        violations.push(`${file}:${lineNumber(node)}: ${COMPOSITION_FACTORY} must not bypass the named e3g API composition`);
       }
       const memberName = staticName(node);
       if (file !== COMPOSITION

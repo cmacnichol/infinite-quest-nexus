@@ -1,4 +1,4 @@
-type QueryRows<T> = { rows: readonly T[] };
+type QueryRows<T> = Readonly<{ rows: readonly T[] }>;
 
 export function loadOrNotFound<T>(result: QueryRows<T>, resource: string): T {
   const row = result.rows[0];

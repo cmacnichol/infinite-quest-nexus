@@ -228,10 +228,10 @@ See `OPEN_QUESTIONS.md` for the full write-up of each. Summarized here for
 implementers who only need the API angle:
 - **Q1 is resolved**: progressive narration is retained through typed
   `GenerationEvent.narration`; raw transport fields are not app inputs.
-- **Q2**: whether the legacy single-image illustration endpoints
+- **Q2 is resolved**: the legacy single-image illustration endpoints
   (`POST /turns/:turnId/illustrations`, `PUT .../illustration-asset`) are
-  still frontend-reachable, or vestigial — resolve before deciding whether
-  the replacement UI needs to support two illustration interaction models.
+  backend-only vestigial surface. The replacement UI supports the segmented
+  illustration model only.
 - **Q3**: no server-side search/filter endpoint exists for worlds,
   campaigns, turns, or providers beyond asset-library facets — confirm
   whether current catalog sizes make client-side substring filtering

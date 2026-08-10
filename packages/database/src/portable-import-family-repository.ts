@@ -1875,13 +1875,36 @@ export function createPostgresPortableFamilyMutationRepository(
         input.publishedAssets,
       );
     },
-    commitLegacyStory(database, input) {
-      return commitPortableCampaign(
-        portableDatabaseClient(database),
-        input,
-        "portable_legacy_story",
-        input.publishedAssets ?? [],
-      );
+    async commitLegacyStory(database, input) {
+      const client = portableDatabaseClient(database);
+      if (input.destination.kind === "create_world") {
+        const request = worldImportRequestSchema.parse(input.payload.embeddedWorldImportRequest);
+        const imported = await runPostgresWorldCampaignCommandWithClient(
+          client,
+          (transaction) => input.targetPlan
+            ? importPrivatePortableWorldAtExactTarget(transaction, input.owner, request, {
+              worldId: input.targetPlan.worldId,
+              worldVersionId: input.targetPlan.worldVersionId,
+              sourceHash: `portable-legacy-story-world:${input.authorityFingerprint}`
+            })
+            : worlds.importWorld(transaction, input.owner, request),
+        );
+        if (!imported.ok) throw new Error(`portable_world_import_${imported.failure.reason}`);
+        return commitPortableCampaign(
+          client,
+          {
+            ...input,
+            destination: {
+              kind: "existing_world_version",
+              worldId: imported.value.worldId,
+              worldVersionId: imported.value.worldVersionId
+            }
+          },
+          "portable_legacy_story",
+          input.publishedAssets ?? [],
+        );
+      }
+      return commitPortableCampaign(client, input, "portable_legacy_story", input.publishedAssets ?? []);
     },
     async commitWorld(database, input) {
       const client = portableDatabaseClient(database);

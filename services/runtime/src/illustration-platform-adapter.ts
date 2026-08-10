@@ -1,19 +1,15 @@
-// Concrete provider, artifact, and asset adapters belong to the runtime
+// Concrete provider and artifact adapters belong to the runtime
 // composition layer. Their dependencies are supplied as typed ports so API
 // routes and application use cases remain platform-free.
 import type {
   IllustrationArtifactDownloadPort,
-  IllustrationAssetPort,
   IllustrationImageArtifact,
   IllustrationImageExecutionResult,
   IllustrationImageProviderPort,
   IllustrationPromptRefinementPort,
   IllustrationTransactionContext
 } from "../../../packages/application/src/index.js";
-import {
-  type DatabaseClient,
-  type DatabasePool
-} from "../../../packages/database/src/pool.js";
+import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import {
   type ImageProviderArtifact
 } from "../../../packages/story-engine/src/index.js";
@@ -54,45 +50,6 @@ export type ArtifactDownloadAdapterDependencies = Readonly<{
     timeoutMs: number,
     allowPrivateHosts: boolean,
   ): Promise<Readonly<{ bytes: Uint8Array; mimeType: string }>>;
-}>;
-
-export type IllustrationAssetStore = Readonly<{ root: string }>;
-
-type PersistedIllustrationAsset = Readonly<{ id: string }>;
-
-type IllustrationAssetGenerationContext = Readonly<{
-  imageJobId: string;
-  targetType: "turn_illustration" | "world_cover" | "streaming_illustration";
-  variantIndex: number;
-  prompt: string;
-  providerProfileId: string;
-  providerType: string;
-  model: string;
-  generationParameters: Readonly<Record<string, unknown>>;
-}>;
-
-export type AssetAdapterDependencies = Readonly<{
-  persistTurnImage(
-    client: DatabaseClient,
-    store: IllustrationAssetStore,
-    ownerUserId: string,
-    campaignId: string,
-    turnId: string | null,
-    bytes: Buffer,
-    mimeType: string,
-    options: Readonly<{
-      generationContext: IllustrationAssetGenerationContext;
-      attachReference: boolean;
-    }>,
-  ): Promise<PersistedIllustrationAsset>;
-  persistWorldCover(
-    client: DatabaseClient,
-    store: IllustrationAssetStore,
-    ownerUserId: string,
-    bytes: Buffer,
-    mimeType: string,
-    options: Readonly<{ generationContext: IllustrationAssetGenerationContext }>,
-  ): Promise<PersistedIllustrationAsset>;
 }>;
 
 function sanitizedProviderMetadata(
@@ -322,145 +279,6 @@ export function createIllustrationArtifactDownloadAdapter(
         });
       }
       return { bytes: new Uint8Array(result.bytes), mimeType: result.mimeType };
-    }
-  };
-}
-
-type AssetGenerationContextRow = Readonly<{
-  campaign_id: string | null;
-  turn_id: string | null;
-  world_id: string | null;
-  target_type: "turn_illustration" | "world_cover" | "streaming_illustration";
-  prompt: string;
-  provider_profile_id: string;
-  provider_type: string;
-  requested_model: string;
-  size: string;
-  aspect_ratio: string;
-  quality: string;
-  output_format: string;
-  segment_id: string | null;
-}>;
-
-async function loadAssetGenerationContext(
-  client: DatabaseClient,
-  ownerUserId: string,
-  imageJobId: string,
-  scope: Readonly<{ campaignId: string; turnId: string | null }> | Readonly<{ worldId: string }>,
-) {
-  const result = await client.query<AssetGenerationContextRow>(
-    `SELECT campaign_id, turn_id, world_id, target_type, prompt,
-            provider_profile_id, provider_type, requested_model,
-            size, aspect_ratio, quality, output_format, segment_id
-       FROM image_jobs WHERE id = $1 AND owner_user_id = $2 FOR SHARE`,
-    [imageJobId, ownerUserId],
-  );
-  const job = result.rows[0];
-  if (!job) throw notFound("Image job");
-  if ("worldId" in scope) {
-    if (job.world_id !== scope.worldId || job.target_type !== "world_cover") {
-      throw notFound("Image job");
-    }
-  } else if (job.campaign_id !== scope.campaignId || job.turn_id !== scope.turnId
-    || job.target_type === "world_cover") {
-    throw notFound("Image job");
-  }
-  return {
-    imageJobId,
-    targetType: job.target_type,
-    segmentId: job.segment_id,
-    prompt: job.prompt,
-    providerProfileId: job.provider_profile_id,
-    providerType: job.provider_type,
-    model: job.requested_model,
-    generationParameters: {
-      size: job.size,
-      aspectRatio: job.aspect_ratio,
-      quality: job.quality,
-      outputFormat: job.output_format
-    }
-  };
-}
-
-export function createIllustrationAssetAdapter(
-  _pool: DatabasePool,
-  store: IllustrationAssetStore,
-  dependencies: AssetAdapterDependencies,
-): IllustrationAssetPort {
-  return {
-    persistTurnIllustration: async (input) => {
-      const client = input.database as DatabaseClient;
-      const generationContext = await loadAssetGenerationContext(
-        client,
-        input.ownerUserId,
-        input.imageJobId,
-        { campaignId: input.campaignId, turnId: input.turnId },
-      );
-      const asset = await dependencies.persistTurnImage(
-        client,
-        store,
-        input.ownerUserId,
-        input.campaignId,
-        input.turnId,
-        Buffer.from(input.bytes),
-        input.mimeType,
-        {
-          generationContext: { ...generationContext, variantIndex: input.variantIndex },
-          attachReference: generationContext.segmentId === null && input.variantIndex === 0
-        },
-      );
-      return { assetId: asset.id };
-    },
-    persistWorldCover: async (input) => {
-      const client = input.database as DatabaseClient;
-      const generationContext = await loadAssetGenerationContext(
-        client,
-        input.ownerUserId,
-        input.imageJobId,
-        { worldId: input.worldId },
-      );
-      const asset = await dependencies.persistWorldCover(
-        client,
-        store,
-        input.ownerUserId,
-        Buffer.from(input.bytes),
-        input.mimeType,
-        { generationContext: { ...generationContext, variantIndex: input.variantIndex } },
-      );
-      return { assetId: asset.id };
-    },
-    bindSegmentAsset: async (input) => {
-      const client = input.database as DatabaseClient;
-      const result = await client.query<{ bound: boolean }>(
-        `INSERT INTO turn_illustration_segment_assets (
-           segment_id, owner_user_id, asset_id, image_job_id, variant_index
-         )
-         SELECT segments.id, segments.owner_user_id, assets.id, jobs.id, $7
-           FROM turn_illustration_segments segments
-           JOIN assets ON assets.id = $5 AND assets.owner_user_id = segments.owner_user_id
-           JOIN image_jobs jobs ON jobs.id = $6 AND jobs.owner_user_id = segments.owner_user_id
-          WHERE segments.id = $1 AND segments.owner_user_id = $2
-            AND segments.campaign_id = $3
-            AND segments.turn_id IS NOT DISTINCT FROM $4::uuid
-            AND jobs.segment_id = segments.id
-            AND jobs.campaign_id = segments.campaign_id
-            AND jobs.turn_id IS NOT DISTINCT FROM segments.turn_id
-         ON CONFLICT (segment_id, variant_index) DO UPDATE
-           SET asset_id = EXCLUDED.asset_id,
-               image_job_id = EXCLUDED.image_job_id,
-               created_at = now()
-         RETURNING true AS bound`,
-        [
-          input.segmentId,
-          input.ownerUserId,
-          input.campaignId,
-          input.turnId,
-          input.assetId,
-          input.imageJobId,
-          input.variantIndex
-        ],
-      );
-      return result.rows[0]?.bound === true;
     }
   };
 }

@@ -102,6 +102,14 @@ export type PrivateAssetPublicationRecoveryRequest = Readonly<{
 
 export interface PrivateAssetPublicationIdentityPort {
   prepareIdentity(command: PrivateAssetPublicationCommand): Promise<PrivateAssetPublicationIdentity>;
+  /**
+   * Revalidate after the runtime has acquired every artifact's process-spanning
+   * publication-content lock. The caller must not invoke this capability
+   * outside PrivateFilesystemPublicationLockPort.withPublicationContentLocks.
+   */
+  prepareIdentityUnderContentLock(
+    command: PrivateAssetPublicationCommand,
+  ): Promise<PrivateAssetPublicationIdentity>;
   prepareIdentityInTransaction(
     database: DurableFilesystemTransactionContext,
     command: PrivateAssetPublicationCommand,

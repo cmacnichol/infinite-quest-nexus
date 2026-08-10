@@ -57,6 +57,18 @@ function sources(overrides: Readonly<Record<string, string>> = {}): readonly Sou
         return createPrivatePortableNormalizedAssetPublicationComposition();
       }
     `,
+    "services/runtime/src/api-asset-composition.ts": `
+      import { createAssetImportStorageComposition } from "./asset-import-composition.js";
+      export async function createApiAssetComposition() {
+        return createAssetImportStorageComposition();
+      }
+    `,
+    "services/runtime/src/api-portable-import-export-composition.ts": `
+      import { createPortableImportExportComposition } from "./portable-import-export-composition.js";
+      export async function createApiPortableImportExportComposition() {
+        return createPortableImportExportComposition();
+      }
+    `,
     "services/runtime/src/private-asset-metadata-backfill-composition.ts": `
       import { createAssetImportStorageComposition } from "./asset-import-composition.js";
       export async function createPrivateAssetMetadataBackfillComposition() {
@@ -87,7 +99,14 @@ function sources(overrides: Readonly<Record<string, string>> = {}): readonly Sou
       }
     `,
     "services/api/src/server.ts": "export function server() {}",
-    "services/worker/src/worker.ts": "export function worker() {}",
+    "services/worker/src/worker.ts": `
+      import { createPrivateIllustrationAssetPublicationComposition } from "../../runtime/src/illustration-asset-publication-composition.js";
+      import { createPrivateAssetMaintenanceComposition } from "../../runtime/src/private-asset-maintenance-composition.js";
+      export async function worker() {
+        await createPrivateIllustrationAssetPublicationComposition();
+        return createPrivateAssetMaintenanceComposition();
+      }
+    `,
     "services/runtime/src/main.ts": "export function main() {}",
     "services/runtime/src/index.ts": "export const runtime = {};",
     "packages/application/src/index.ts": "export const application = {};",
@@ -119,7 +138,7 @@ describe("Task 14e3e8 private composition parity boundaries", () => {
 
     for (const [file, text] of cases) {
       expect(check(sources({ [file]: text })), text).toEqual(expect.arrayContaining([
-        expect.stringContaining("must remain unconsumed")
+        expect.stringContaining("must not bypass its named e3g composition consumer")
       ]));
     }
   });
@@ -189,11 +208,11 @@ describe("Task 14e3e8 private composition parity boundaries", () => {
     ]));
   });
 
-  it("passes the real production-source inventory without granting live consumption", () => {
+  it("allows only the named e3g API composition to consume portable authority", () => {
     expect(check(readPrivateCompositionParitySources(process.cwd()))).toEqual([]);
   });
 
-  it("freezes generation + 4/+8 capacity and excludes private maintenance from the worker and manifests", () => {
+  it("freezes generation + 4/+8 capacity and excludes private maintenance from manifests", () => {
     const capacitySources: readonly Source[] = [
       { file: "packages/database/src/config.ts", text: "const requiredWorkerConnections = roleValue === 'worker' ? workerGenerationConcurrency + 4 : roleValue === 'all' ? workerGenerationConcurrency + 8 : 0;" },
       { file: "services/worker/src/worker.ts", text: "export function runWorker() {}" },

@@ -1,11 +1,6 @@
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import type { IllustrationCostPort } from "../../../packages/application/src/index.js";
 import type { ProviderCostRecordCommand } from "../../../packages/application/src/providers/index.js";
-import {
-  persistTurnImage,
-  persistWorldCover,
-  type FilesystemAssetStore
-} from "../../api/src/asset-service.js";
 import { downloadArtifact } from "./illustration-image-job-adapter.js";
 import {
   buildIllustrationRefinementInput,
@@ -14,7 +9,6 @@ import {
 import type { IllustrationProviderCollaborators } from "./provider-application-composition.js";
 import type {
   ArtifactDownloadAdapterDependencies,
-  AssetAdapterDependencies,
   ImageProviderAdapterDependencies,
   PromptRefinementAdapterDependencies
 } from "./illustration-platform-adapter.js";
@@ -23,8 +17,7 @@ export type IllustrationPlatformBindings = Readonly<{
   imageProvider: ImageProviderAdapterDependencies;
   promptRefinement: PromptRefinementAdapterDependencies;
   artifactDownload: ArtifactDownloadAdapterDependencies;
-  assets: AssetAdapterDependencies;
-  /** Task 14d owns replacement of this temporary provider-cost binding. */
+  /** Named provider cost collaborator; no API-service or compatibility binding remains. */
   costs: IllustrationCostPort;
 }>;
 
@@ -34,7 +27,6 @@ export type IllustrationPlatformBindings = Readonly<{
  */
 export function createIllustrationPlatformBindings(
   _pool: DatabasePool,
-  _store: FilesystemAssetStore,
   providers: IllustrationProviderCollaborators,
 ): IllustrationPlatformBindings {
   return {
@@ -89,10 +81,6 @@ export function createIllustrationPlatformBindings(
           } : {})
         });
       }
-    },
-    assets: {
-      persistTurnImage,
-      persistWorldCover
     }
   };
 }

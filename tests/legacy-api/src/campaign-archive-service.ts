@@ -1,3 +1,4 @@
+/** Frozen pre-14e3g Campaign Archive regression oracle; never production authority. */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { resolve } from "node:path";
@@ -12,7 +13,7 @@ import { archiveAssetRecordSchema, canonicalArchiveJson, campaignArchiveDestinat
 import { calculateContentFingerprint } from "../../../packages/contracts/src/archives-node.js";
 import { removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { collectCampaignArchiveAssets, validateArchiveAssets, verifyAndWriteArchiveAssets, type CampaignAssetInventory, type ValidatedArchiveAssetSet } from "./asset-archive-service.js";
-import { ArchiveError, createArchiveStagingDirectory, inspectArchive, inspectArchiveContainer, readVerifiedContainerEntry, readVerifiedEntry, removeArchivePath, writeArchiveArtifact, type ArchiveLimits, type CompletedArchiveArtifact, type InspectedArchive, type StagedArchive } from "./archive-io.js";
+import { ArchiveError, createArchiveStagingDirectory, inspectArchive, inspectArchiveContainer, readVerifiedContainerEntry, readVerifiedEntry, removeArchivePath, writeArchiveArtifact, type ArchiveLimits, type CompletedArchiveArtifact, type InspectedArchive, type StagedArchive } from "../../../services/api/src/archive-io.js";
 import { imageExtensionForMimeType, readAsset, verifyOriginalImage, type FilesystemAssetStore } from "./asset-service.js";
 
 export type PortableWorldPayload = { canonicalHash: string; sourceWorldId: string; sourceWorldVersionId: string; versionNumber: number; content: unknown };

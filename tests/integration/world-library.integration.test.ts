@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { exportCampaign } from "../../services/api/src/campaign-archive-service.js";
+import { exportCampaign } from "../legacy-api/src/campaign-archive-service.js";
 import {
   campaignCreateSchema,
   campaignCharacterProfileUpdateSchema,

@@ -12,22 +12,28 @@ const productionCallerDisposition = [
   ["services/runtime/src/illustration-platform-bindings.ts", "named_application_composition"],
   ["services/runtime/src/runtime-role.ts", "named_application_composition"],
   ["services/runtime/src/illustration-image-job-adapter.ts", "named_application_composition"],
-  ["services/api/src/asset-service.ts", "delete_in_14e3"],
-  ["services/api/src/asset-archive-service.ts", "delete_in_14e3"],
-  ["services/api/src/campaign-archive-service.ts", "delete_in_14e3"],
-  ["services/api/src/import-service.ts", "delete_in_14e3"],
-  ["services/api/src/infinite-worlds-import-service.ts", "delete_in_14e3"],
   ["services/api/src/archive-io.ts", "named_application_composition"],
-  ["services/api/src/service-helpers.ts", "delete_in_14e3"]
+] as const;
+
+const removedAuthorityFiles = [
+  "services/api/src/asset-service.ts",
+  "services/api/src/asset-archive-service.ts",
+  "services/api/src/campaign-archive-service.ts",
+  "services/api/src/import-service.ts",
+  "services/api/src/infinite-worlds-import-service.ts",
+  "services/api/src/service-helpers.ts",
 ] as const;
 
 describe("Task 14e asset/import ownership inventory", () => {
   it("freezes every current production caller and its 14e disposition", () => {
-    expect(productionCallerDisposition).toHaveLength(14);
+    expect(productionCallerDisposition).toHaveLength(8);
     for (const [path, disposition] of productionCallerDisposition) {
       expect(readFileSync(join(repositoryRoot, path), "utf8"), path).not.toBe("");
-      expect(["api_transport", "worker_scheduling", "named_application_composition", "delete_in_14e3"])
+      expect(["api_transport", "worker_scheduling", "named_application_composition"])
         .toContain(disposition);
+    }
+    for (const path of removedAuthorityFiles) {
+      expect(() => readFileSync(join(repositoryRoot, path), "utf8"), path).toThrow();
     }
   });
 

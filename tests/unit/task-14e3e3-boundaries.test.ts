@@ -32,7 +32,7 @@ function replacementSources(helperText: string): readonly Source[] {
 }
 
 describe("Task 14e3e3 illustration replacement boundaries", () => {
-  it("keeps the additive illustration composition unbound for every module-loading form", () => {
+  it("allows the illustration composition only in the named worker consumer for every module-loading form", () => {
     const prohibited = [
       `import { createPrivateIllustrationAssetPublicationComposition } from "../../runtime/src/illustration-asset-publication-composition.js";`,
       `export { createPrivateIllustrationAssetPublicationComposition } from "../../runtime/src/illustration-asset-publication-composition.js";`,
@@ -46,7 +46,7 @@ describe("Task 14e3e3 illustration replacement boundaries", () => {
         "services/worker/src/replacement-publication.ts",
         source,
       ), source).toEqual(expect.arrayContaining([
-        expect.stringContaining("illustration publication composition must remain unbound")
+        expect.stringContaining("illustration publication composition may be consumed only by services/worker/src/worker.ts")
       ]));
     }
   });

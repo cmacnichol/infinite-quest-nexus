@@ -854,6 +854,78 @@ integration("Task 14e3e3 illustration publication matrix", () => {
     expect(downloads).toBe(1);
   });
 
+  it("discovers and recovers a completed job's pending finalization after restart", async () => {
+    const scope = await createCampaignScope();
+    const workerId = `e3-sweep-finalization-${crypto.randomUUID()}`;
+    const imageJobId = await insertWorldImageJob(
+      scope.ownerUserId,
+      scope.providerProfileId,
+      scope.worldId,
+      workerId,
+    );
+    const image = await png(25, 95, 145);
+    let downloads = 0;
+    const first = await compose(async () => {
+      downloads += 1;
+      return { bytes: image, mimeType: "image/png" };
+    });
+    await pool.query(
+      `CREATE FUNCTION task_14e3e3_sweep_finalize_fault() RETURNS trigger
+       LANGUAGE plpgsql AS $fault$
+       BEGIN
+         RAISE EXCEPTION 'task_14e3e3_sweep_finalize_fault';
+       END;
+       $fault$`,
+    );
+    await pool.query(
+      `CREATE TRIGGER task_14e3e3_sweep_finalize_fault_trigger
+       BEFORE UPDATE ON durable_filesystem_operations
+       FOR EACH ROW WHEN (NEW.lifecycle='finalized')
+       EXECUTE FUNCTION task_14e3e3_sweep_finalize_fault()`,
+    );
+    try {
+      await expect(first.coordinator.completeClaimedImageJob({
+        imageJobId,
+        workerId,
+        result: completedResult(scope.providerProfileId, 1)
+      })).resolves.toEqual({
+        outcome: "committed_finalization_pending",
+        diagnostic: "asset_publication_finalization_recoverable"
+      });
+    } finally {
+      await pool.query(
+        "DROP TRIGGER IF EXISTS task_14e3e3_sweep_finalize_fault_trigger ON durable_filesystem_operations",
+      );
+      await pool.query("DROP FUNCTION IF EXISTS task_14e3e3_sweep_finalize_fault()");
+    }
+    await first.close();
+    compositions.delete(first);
+    vi.resetModules();
+
+    const restarted = await compose(async () => {
+      throw new Error("provider_must_not_rerun");
+    });
+    await expect(restarted.coordinator.recoverNextFinalization({
+      workerId: `e3-sweep-recovery-${crypto.randomUUID()}`,
+      leaseSeconds: 30
+    })).resolves.toMatchObject({
+      outcome: "published",
+      assets: [{ variantIndex: 0 }]
+    });
+    expect(downloads).toBe(1);
+    await expect(pool.query(
+      `SELECT mapping.publication_state,request.lifecycle
+         FROM image_job_asset_publications mapping
+         JOIN asset_publication_requests request
+           ON request.id=mapping.request_id AND request.owner_user_id=mapping.owner_user_id
+        WHERE mapping.image_job_id=$1`,
+      [imageJobId],
+    )).resolves.toMatchObject({ rows: [{
+      publication_state: "published",
+      lifecycle: "published"
+    }] });
+  });
+
   it("returns a safe no-op when finalization recovery finds no committed mapping", async () => {
     const composition = await compose(async () => {
       throw new Error("recovery_must_not_download");

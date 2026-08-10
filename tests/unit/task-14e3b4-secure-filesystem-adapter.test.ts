@@ -31,6 +31,10 @@ function sha256(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function legacySha256(value: Uint8Array): string {
+  return createHash("sha256").update(Buffer.from(value).toString("base64")).digest("hex");
+}
+
 async function descriptor(root: string, relativePath: string, content: Uint8Array): Promise<PrivateStorageDescriptor> {
   const value = await stat(join(root, relativePath), { bigint: true });
   return {
@@ -698,6 +702,57 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     await expect(collect(activePreview.chunks)).rejects.toBeTruthy();
     await expect(stat(join(assetRoot, assetPath))).resolves.toBeTruthy();
     await expect(stat(join(archiveRoot, previewPath))).resolves.toBeTruthy();
+  });
+
+  it("verifies legacy asset hashes across non-base64-aligned stream chunks", async () => {
+    const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-preview-"));
+    const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
+    await mkdir(join(assetRoot, "legacy"));
+    const bytes = Buffer.from("legacy asset bytes with an uneven length");
+    const relativePath = "legacy/original.png";
+    await writeFile(join(assetRoot, relativePath), bytes);
+    const scope: AssetScope = { ownerUserId: "owner-1", assetId: "legacy-asset-1" };
+    const adapter = await createSecureFilesystemAdapter({
+      archiveRoot,
+      assetRoot,
+      platform: "linux",
+      delivery: {
+        async resolveFinalizedAssetDelivery() {
+          return {
+            kind: "legacy_retained" as const,
+            scope,
+            request: { kind: "original" as const },
+            descriptor: {
+              assetId: scope.assetId,
+              kind: "original" as const,
+              derivativeKind: null,
+              mimeType: "image/png" as const,
+              byteLength: bytes.byteLength,
+              etag: legacySha256(bytes)
+            },
+            anchoredRead: "legacy-read" as never,
+            cleanupAuthority: "none" as const
+          };
+        },
+        redeemFinalizedDeliveryGrant: unsupported,
+        async redeemLegacyAnchoredRead() {
+          return { relativePath, contentHash: legacySha256(bytes), byteLength: bytes.byteLength };
+        }
+      },
+      transactions: { async run(work) { return work({}); } }
+    });
+    const session = await adapter.openAssetSession({
+      scope,
+      request: { kind: "original" },
+      limits: bindPrivateBoundedStreamLimits({
+        maximumBytes: 1024,
+        chunkBytes: 5,
+        deadlineAt: FUTURE
+      })
+    });
+    expect(session).not.toBeNull();
+    await expect(collect(session!.chunks)).resolves.toEqual(bytes);
+    await adapter.close();
   });
 
   it("anchors reads to the opened root and rejects symlinked intermediate segments", async () => {

@@ -17,8 +17,12 @@ import type {
 } from "../../packages/client-core/src/index.js";
 import type { GenerationApiPort } from "../../packages/client-core/src/generation/types.js";
 import type { GenerationRequest } from "../../packages/contracts/src/generation.js";
-// @ts-expect-error JavaScript check scripts intentionally have no declaration files.
-import { checkClientBoundaries, collectClientBoundaryViolations, isBoundarySourceFile } from "../../scripts/check-client-boundaries.mjs";
+import {
+  checkClientBoundaries,
+  collectClientBoundaryViolations,
+  crossRoleImportAllowlistCount,
+  isBoundarySourceFile
+} from "../../scripts/check-client-boundaries.mjs";
 // @ts-expect-error JavaScript check scripts intentionally have no declaration files.
 import { formatWebBundleBudgetReport, inspectWebBundleBudget } from "../../scripts/check-web-bundle-budget.mjs";
 
@@ -42,6 +46,10 @@ function typecheckFixture(tsconfigPath: string): { succeeded: boolean; output: s
 }
 
 describe("client boundary checks", () => {
+  test("has no cross-role implementation import exceptions", () => {
+    expect(crossRoleImportAllowlistCount()).toBe(0);
+  });
+
   test("continues scanning live sources when Git also lists a deleted tracked source", () => {
     const root = mkdtempSync(path.join(tmpdir(), "infinitequest-client-boundary-git-"));
     const deletedSource = path.join(root, "packages/client-core/src/deleted.ts");
@@ -579,6 +587,7 @@ describe("client boundary checks", () => {
     expect(violations).toEqual([
       "services/api/src/route.ts: cross-role import ../../worker/src/worker.js from api to worker is prohibited",
       "services/worker/src/new-worker.ts: cross-role import ../../api/src/server.js from worker to api is prohibited",
+      "services/worker/src/worker.ts: cross-role import ../../api/src/asset-service.js from worker to api is prohibited",
       "services/worker/src/worker.ts: cross-role import ../../api/src/generation-service.js from worker to api is prohibited",
       "services/worker/src/worker.ts: cross-role import ../../api/src/illustration-image-job-adapter.js from worker to api is prohibited",
       "services/worker/src/worker.ts: cross-role import ../../api/src/illustration-resolution-job-adapter.js from worker to api is prohibited",

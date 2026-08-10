@@ -65,7 +65,7 @@ integration("Task 14e3c asset-publication identities", () => {
     });
   });
 
-  it("allows storage reservation under caller revalidation while retaining the publication fence", async () => {
+  it("reserves storage before caller revalidation while retaining the publication fence", async () => {
     const bytes = new Uint8Array([14, 3, 7]);
     const contentHash = createHash("sha256").update(bytes).digest("hex");
     const command = {
@@ -84,6 +84,14 @@ integration("Task 14e3c asset-publication identities", () => {
     };
     const repository = createPostgresAssetPublicationRepository(pool, {} as never);
     const identity = await repository.prepareIdentity(command);
+    await expect(pool.query(
+      `INSERT INTO durable_filesystem_operations (
+         owner_user_id,operation_token_hash,purpose,resource_kind,asset_id,
+         lease_id,lease_owner,lease_expires_at,expires_at
+       ) VALUES ($1,$2,'asset_original','asset',$3,gen_random_uuid(),'14e3c-storage',
+                 clock_timestamp()+interval '1 minute',clock_timestamp()+interval '1 minute')`,
+      [ownerUserId, createHash("sha256").update(crypto.randomUUID()).digest("hex"), identity.assetId],
+    )).resolves.toMatchObject({ rowCount: 1 });
     const caller = await pool.connect();
     try {
       await caller.query("BEGIN");
@@ -91,14 +99,6 @@ integration("Task 14e3c asset-publication identities", () => {
         assetId: identity.assetId,
         lifecycle: "prepared",
       });
-      await expect(pool.query(
-        `INSERT INTO durable_filesystem_operations (
-           owner_user_id,operation_token_hash,purpose,resource_kind,asset_id,
-           lease_id,lease_owner,lease_expires_at,expires_at
-         ) VALUES ($1,$2,'asset_original','asset',$3,gen_random_uuid(),'14e3c-storage',
-                   clock_timestamp()+interval '1 minute',clock_timestamp()+interval '1 minute')`,
-        [ownerUserId, createHash("sha256").update(crypto.randomUUID()).digest("hex"), identity.assetId],
-      )).resolves.toMatchObject({ rowCount: 1 });
 
       const competingPublication = repository.prepareIdentity(command);
       await expect(Promise.race([

@@ -17,7 +17,6 @@ import type {
   ApiProviderApplicationComposition,
   WorkerProviderApplicationComposition
 } from "./provider-application-composition.js";
-import type { FilesystemAssetStore } from "../../api/src/asset-service.js";
 import { logger } from "../../../packages/logger/src/index.js";
 
 type RuntimeServer = {
@@ -67,7 +66,6 @@ export type RuntimeRoleDependencies = Readonly<{
   ): WorldCampaignApplication;
   createWorkerIllustration(
     pool: DatabasePool,
-    store: FilesystemAssetStore,
     providers: WorkerProviderApplicationComposition["illustration"],
   ): IllustrationWorkerApplication;
   createWorkerMemory(
@@ -170,7 +168,6 @@ export async function dispatchRuntimeRole(
     const generation = dependencies.createWorkerGeneration(pool, illustration, memory, providerGraph.generation);
     const workerIllustration = dependencies.createWorkerIllustration(
       pool,
-      { root: config.assetStorageRoot },
       providerGraph.illustration,
     );
     await dependencies.runWorker(pool, config, signal, {
@@ -200,7 +197,6 @@ export async function dispatchRuntimeRole(
   );
   const workerIllustration = dependencies.createWorkerIllustration(
     pool,
-    { root: config.assetStorageRoot },
     workerProviderGraph.illustration,
   );
   const server = await dependencies.buildServer({

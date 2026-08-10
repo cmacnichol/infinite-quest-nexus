@@ -29,12 +29,12 @@ import {
   persistArchiveAssets,
   restoreAssetBindings,
   type ArchiveIdMap
-} from "../../services/api/src/asset-archive-service.js";
-import { previewLegacyStoryImport } from "../../services/api/src/import-service.js";
+} from "../legacy-api/src/asset-archive-service.js";
+import { previewLegacyStoryImport } from "../legacy-api/src/import-service.js";
 import {
   previewInfiniteWorldsImport,
   type InfiniteWorldsApiProviders
-} from "../../services/api/src/infinite-worlds-import-service.js";
+} from "../legacy-api/src/infinite-worlds-import-service.js";
 import { createTask14e2cAdapters } from "../helpers/task-14e2c-adapters.js";
 import {
   importInfiniteWorldsWithClient,
@@ -168,7 +168,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         dbClient: migrationClient,
         dir: resolve("database/migrations"),
         direction: "down",
-        count: 9,
+        count: 15,
         migrationsTable: "schema_migrations",
         checkOrder: true,
         singleTransaction: true,
@@ -176,6 +176,12 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
       });
       expect(reverted.map((migration) => migration.name)).toEqual([
+        "0069_import_progress_status",
+        "0068_portable_legacy_story_create_world",
+        "0067_asset_metadata_backfill_executor",
+        "0066_portable_normalized_asset_publications",
+        "0065_illustration_asset_publications",
+        "0064_normalized_asset_publication_requests",
         "0063_portable_legacy_story_asset_publications",
         "0062_portable_import_asset_publications",
         "0061_portable_import_composition",
@@ -228,7 +234,13 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         "0060_asset_publication_identities",
         "0061_portable_import_composition",
         "0062_portable_import_asset_publications",
-        "0063_portable_legacy_story_asset_publications"
+        "0063_portable_legacy_story_asset_publications",
+        "0064_normalized_asset_publication_requests",
+        "0065_illustration_asset_publications",
+        "0066_portable_normalized_asset_publications",
+        "0067_asset_metadata_backfill_executor",
+        "0068_portable_legacy_story_create_world",
+        "0069_import_progress_status"
       ]);
     } finally {
       await pool.end();
@@ -437,6 +449,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
       [ownerUserId]
     );
     expect(operation.rows.at(-1)).toEqual({ lifecycle: "finalized", purpose: "portable_staging" });
+    await adapters.filesystem.close();
     const restarted = createTask14e2cAdapters({
       pool,
       archiveRoot: storageRoot,

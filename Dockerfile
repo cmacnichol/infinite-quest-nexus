@@ -30,15 +30,19 @@ ENV NODE_ENV=production \
     LEGACY_WEB_ROOT=/app/apps/web/dist \
     NEXT_WEB_ROOT=/app/apps/web-next/dist \
     MIGRATION_DIRECTORY=/app/database/migrations \
-    ASSET_STORAGE_ROOT=/var/lib/infinitequest/assets
+    ASSET_STORAGE_ROOT=/var/lib/infinitequest/assets \
+    ARCHIVE_STORAGE_ROOT=/var/lib/infinitequest/archives
 WORKDIR /app
 RUN groupadd --system --gid 10001 infinitequest \
     && useradd --system --uid 10001 --gid infinitequest --home-dir /app infinitequest \
-    && mkdir -p /var/lib/infinitequest/assets \
+    && mkdir -p /var/lib/infinitequest/assets /var/lib/infinitequest/archives /var/lib/infinitequest/secrets \
     && chown -R infinitequest:infinitequest /var/lib/infinitequest /app
 COPY --from=production-dependencies --chown=infinitequest:infinitequest /app/node_modules ./node_modules
 COPY --from=build --chown=infinitequest:infinitequest /app/dist ./dist
+COPY --from=build --chown=infinitequest:infinitequest /app/packages/contracts/package.json ./packages/contracts/package.json
+COPY --from=build --chown=infinitequest:infinitequest /app/dist/packages/contracts/src ./packages/contracts/src
 COPY --from=build --chown=infinitequest:infinitequest /app/database/migrations ./database/migrations
+COPY --from=build --chown=infinitequest:infinitequest /app/scripts ./scripts
 COPY --from=build --chown=infinitequest:infinitequest /app/apps/web/dist ./apps/web/dist
 COPY --from=build --chown=infinitequest:infinitequest /app/apps/web-next/dist ./apps/web-next/dist
 USER infinitequest

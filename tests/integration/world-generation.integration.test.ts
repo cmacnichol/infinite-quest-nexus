@@ -18,7 +18,7 @@ import { logger } from "../../packages/logger/src/index.js";
 import {
   activeProgressMap,
   getImportProgress
-} from "../../services/api/src/infinite-worlds-import-service.js";
+} from "../legacy-api/src/infinite-worlds-import-service.js";
 import { generateWorldPreview, getWorldGenerationProgress, importInfiniteWorlds } from "../helpers/memory-aware-services.js";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 import type { WorldGenerationProgressView as WorldGenerationProgress } from "../../packages/application/src/world-campaign/index.js";

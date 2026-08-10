@@ -5,13 +5,11 @@ import {
   type WorldCoverRequest
 } from "../../../packages/contracts/src/generation.js";
 import type {
-  IllustrationArtifactDownloadPort,
-  IllustrationAssetPort,
-  IllustrationCostPort,
   IllustrationImageExecutionResult,
   IllustrationImageProviderPort,
   IllustrationWorkerPorts
 } from "../../../packages/application/src/index.js";
+import type { PrivateIllustrationAssetPublicationCoordinator } from "../../../packages/application/src/illustration/private-illustration-asset-publication.js";
 import { Agent } from "undici";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
@@ -30,8 +28,7 @@ import {
   type ImageProviderArtifact
 } from "../../../packages/story-engine/src/index.js";
 import { pinnedConnectOptions } from "../../../packages/story-engine/src/provider-transport.js";
-import { lockOriginalImages, persistTurnImage, persistWorldCover, type FilesystemAssetStore } from "../../api/src/asset-service.js";
-import { loadOrNotFound } from "../../api/src/service-helpers.js";
+import { loadOrNotFound } from "./database-result.js";
 import type { IllustrationProviderCollaborators } from "./provider-application-composition.js";
 
 type IllustrationConfigRow = {
@@ -704,9 +701,10 @@ export async function runImageJob(
   pool: DatabasePool,
   workerId: string,
   leaseSeconds: number,
-  ports: IllustrationWorkerPorts
+  ports: IllustrationWorkerPorts,
+  publication: PrivateIllustrationAssetPublicationCoordinator,
 ): Promise<boolean> {
-  return runImageJobThroughPorts(pool, workerId, leaseSeconds, ports);
+  return runImageJobThroughPorts(pool, workerId, leaseSeconds, ports, publication);
 }
 
 /** Executes the image lane only through the injected illustration/provider ports. */
@@ -715,6 +713,7 @@ async function runImageJobThroughPorts(
   workerId: string,
   leaseSeconds: number,
   ports: IllustrationWorkerPorts,
+  publication: PrivateIllustrationAssetPublicationCoordinator,
 ): Promise<boolean> {
   const job = await claimImageJob(pool, workerId, leaseSeconds);
   if (!job) return false;
@@ -757,7 +756,19 @@ async function runImageJobThroughPorts(
       await persistPendingPortImageJob(pool, job, workerId, result);
       return true;
     }
-    await completePortImageJob(pool, job, workerId, result, ports.artifactDownload, ports.assets, ports.costs);
+    const completion = await publication.completeClaimedImageJob({
+      imageJobId: job.id,
+      workerId,
+      result
+    });
+    if (completion.outcome === "committed_finalization_pending") {
+      logger.warn({
+        event: "image_asset_publication_finalization_pending",
+        imageJobId: job.id,
+        workerId,
+        diagnostic: completion.diagnostic
+      }, "illustration image publication committed; finalization recovery is pending");
+    }
   } catch (error) {
     logProviderTransportError(error, {
       imageJobId: job.id,
@@ -856,172 +867,6 @@ async function persistPendingPortImageJob(
     progress: result.progress,
     queuePosition: result.queuePosition,
     etaSeconds: result.etaSeconds
-  });
-}
-
-async function completePortImageJob(
-  pool: DatabasePool,
-  job: ImageJobRow,
-  workerId: string,
-  result: Extract<IllustrationImageExecutionResult, { status: "completed" }>,
-  artifactDownload: IllustrationArtifactDownloadPort,
-  assets: IllustrationAssetPort,
-  costs: IllustrationCostPort,
-): Promise<void> {
-  if (result.artifacts.length !== job.image_count) {
-    throw Object.assign(new Error("Image provider returned an unsupported artifact count."), { code: "invalid_artifact_count", permanent: true });
-  }
-  const downloading = await pool.query<{ id: string }>(
-    `UPDATE image_jobs SET status = 'downloading', provider_status = 'completed', updated_at = now()
-      WHERE id = $1 AND lease_owner = $2 AND status IN ('generating','provider_pending','downloading')
-      RETURNING id`,
-    [job.id, workerId]
-  );
-  if (!downloading.rows[0]) return;
-  const downloaded = await Promise.all(result.artifacts.map((artifact) => artifactDownload.downloadArtifact({
-    ownerUserId: job.owner_user_id,
-    imageJobId: job.id,
-    artifact,
-    timeoutMs: result.artifactDownloadTimeoutMs,
-    allowPrivateHosts: result.allowPrivateArtifactHosts,
-    maximumBytes: MAX_IMAGE_ARTIFACT_BYTES
-  })));
-  let completedArtifactCount = 0;
-  await withTransaction(pool, async (client) => {
-    if (job.generation_job_id) {
-      const parent = await client.query<{ status: string }>(
-        "SELECT status FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE",
-        [job.generation_job_id, job.owner_user_id]
-      );
-      if (!parent.rows[0] || !["assessing", "generating", "validating", "committing"].includes(parent.rows[0].status)) return;
-    }
-    const lease = await client.query<{ lease_owner: string | null; status: ImageJobRow["status"] }>(
-      `SELECT lease_owner, status
-         FROM image_jobs
-        WHERE id = $1 AND owner_user_id = $2
-        FOR UPDATE`,
-      [job.id, job.owner_user_id]
-    );
-    if (lease.rows[0]?.lease_owner !== workerId || lease.rows[0]?.status !== "downloading") return;
-    const rawRequestedVariantIndex = job.provider_request_metadata.targetVariantIndex;
-    const requestedVariantIndex = Number(rawRequestedVariantIndex);
-    const hasRequestedVariant = rawRequestedVariantIndex !== null
-      && rawRequestedVariantIndex !== undefined
-      && Boolean(job.segment_id)
-      && Number.isInteger(requestedVariantIndex)
-      && requestedVariantIndex >= 0
-      && requestedVariantIndex <= 1;
-    const persistedAssets: Array<Readonly<{ assetId: string }>> = [];
-    for (const [artifactIndex, image] of downloaded.entries()) {
-      const variantIndex = hasRequestedVariant ? requestedVariantIndex + artifactIndex : artifactIndex;
-      persistedAssets.push(job.target_type === "world_cover"
-        ? await assets.persistWorldCover({
-          database: client,
-          ownerUserId: job.owner_user_id,
-          worldId: job.world_id!,
-          imageJobId: job.id,
-          variantIndex,
-          bytes: image.bytes,
-          mimeType: image.mimeType
-        })
-        : await assets.persistTurnIllustration({
-          database: client,
-          ownerUserId: job.owner_user_id,
-          campaignId: job.campaign_id!,
-          turnId: job.turn_id,
-          imageJobId: job.id,
-          variantIndex,
-          bytes: image.bytes,
-          mimeType: image.mimeType
-        }));
-    }
-    const primary = persistedAssets[0]!;
-    const usageQuantity = Number(result.usage.quantity ?? result.usage.images ?? result.usage.image_count);
-    const persistedUsageQuantity = Number.isFinite(usageQuantity) && usageQuantity >= 0 ? usageQuantity : persistedAssets.length;
-    const usageUnit = String(result.usage.unit || "image").slice(0, 100);
-    const providerResponseId = String(result.metadata.responseId || job.remote_job_id || "");
-    const completed = await client.query<{ id: string }>(
-      `UPDATE image_jobs SET status = 'completed', asset_id = $3,
-         provider_response_id = COALESCE(NULLIF($10, ''), remote_job_id, provider_response_id),
-         response_metadata = $4, provider_result_metadata = $5, provider_progress = 100,
-         usage_quantity = $6, usage_unit = $7, reported_cost = $8, reported_currency = $9,
-         completed_at = now(), updated_at = now(), lease_owner = NULL, lease_expires_at = NULL,
-         next_poll_at = NULL, error_code = NULL, error_message = NULL
-       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $11 AND status = 'downloading'
-       RETURNING id`,
-      [job.id, job.owner_user_id, primary.assetId,
-        JSON.stringify({ usage: result.usage, provider: result.metadata, mimeType: downloaded[0]!.mimeType, byteLength: downloaded[0]!.bytes.length, assetIds: persistedAssets.map((asset) => asset.assetId) }),
-        JSON.stringify({ ...result.metadata, artifactCount: persistedAssets.length, assetIds: persistedAssets.map((asset) => asset.assetId) }),
-        persistedUsageQuantity, usageUnit, result.reportedCost?.amount ?? null, result.reportedCost?.currency ?? null,
-        providerResponseId, workerId]
-    );
-    if (!completed.rows[0]) return;
-    completedArtifactCount = persistedAssets.length;
-    if (job.segment_id) {
-      for (const [artifactIndex, asset] of persistedAssets.entries()) {
-        const variantIndex = hasRequestedVariant ? requestedVariantIndex + artifactIndex : artifactIndex;
-        const bound = await assets.bindSegmentAsset({
-          database: client,
-          ownerUserId: job.owner_user_id,
-          campaignId: job.campaign_id!,
-          turnId: job.turn_id,
-          segmentId: job.segment_id,
-          imageJobId: job.id,
-          assetId: asset.assetId,
-          variantIndex
-        });
-        if (!bound) throw Object.assign(new Error("Segment illustration asset provenance changed before completion."), { code: "segment_asset_provenance_lost" });
-      }
-    }
-    if (job.campaign_id) {
-      await costs.recordIllustrationCost(client, {
-        ownerUserId: job.owner_user_id,
-        campaignId: job.campaign_id,
-        turnId: job.turn_id,
-        imageJobId: job.id,
-        providerProfileId: job.provider_profile_id,
-        providerType: job.provider_type || "unknown",
-        requestedModel: job.requested_model,
-        operation: "illustration",
-        usage: result.usage,
-        reportedCost: result.reportedCost,
-        responseId: providerResponseId
-      });
-    }
-    if (job.target_type === "world_cover") {
-      await client.query("UPDATE worlds SET cover_asset_id = $3, updated_at = now() WHERE id = $1 AND owner_user_id = $2", [job.world_id, job.owner_user_id, primary.assetId]);
-    } else if (!job.segment_id) {
-      await client.query("UPDATE turns SET image_url = $3 WHERE id = $1 AND owner_user_id = $2", [job.turn_id, job.owner_user_id, `/api/v1/assets/${primary.assetId}`]);
-    }
-    if (job.segment_id) {
-      await client.query(
-        `UPDATE turn_illustration_segments SET status = 'completed', updated_at = now()
-          WHERE id = $1 AND owner_user_id = $2`,
-        [job.segment_id, job.owner_user_id]
-      );
-      await client.query(
-        `UPDATE turn_illustration_sets sets
-            SET status = CASE
-              WHEN NOT EXISTS (SELECT 1 FROM turn_illustration_segments segments WHERE segments.illustration_set_id = sets.id AND segments.status <> 'completed') THEN 'completed'
-              WHEN EXISTS (SELECT 1 FROM turn_illustration_segments segments WHERE segments.illustration_set_id = sets.id AND segments.status = 'completed') THEN 'partial'
-              ELSE 'generating'
-            END,
-            completed_at = CASE WHEN NOT EXISTS (SELECT 1 FROM turn_illustration_segments segments WHERE segments.illustration_set_id = sets.id AND segments.status <> 'completed') THEN now() ELSE NULL END
-          WHERE sets.id = (SELECT illustration_set_id FROM turn_illustration_segments WHERE id = $1)
-            AND sets.owner_user_id = $2`,
-        [job.segment_id, job.owner_user_id]
-      );
-    }
-    await client.query(
-      `UPDATE illustration_resolution_jobs
-          SET status = 'completed', reason_code = 'generated', completed_at = now(), updated_at = now()
-        WHERE image_job_id = $1 AND owner_user_id = $2 AND status = 'generation_queued'`,
-      [job.id, job.owner_user_id]
-    );
-  });
-  logger.info({
-    event: "image_provider_completed", imageJobId: job.id, providerType: job.provider_type,
-    remoteJobId: job.remote_job_id, stage: "completed", progress: 100, artifactCount: completedArtifactCount
   });
 }
 

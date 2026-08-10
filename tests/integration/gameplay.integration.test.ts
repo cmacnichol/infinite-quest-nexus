@@ -484,8 +484,9 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(unchangedSync).toMatchObject({ turnWindowMode: "unchanged", turns: null, campaign: { id: campaignId } });
     const initialPayloadBytes = Buffer.byteLength(initialSyncResponse.body);
     const unchangedPayloadBytes = Buffer.byteLength(unchangedSyncResponse.body);
-    // Measured against this deterministic 55-turn fixture: 18,002 B initial and 3,109 B unchanged.
-    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 18_002, unchangedPayloadBytes: 3_109 });
+    // Measured against this deterministic 55-turn fixture after the provider and
+    // portable-authority cutovers: 17,102 B initial and 2,209 B unchanged.
+    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 17_102, unchangedPayloadBytes: 2_209 });
     expect(unchangedPayloadBytes).toBeLessThan(initialPayloadBytes);
 
     replies.push({ content: validStory("A replacement changes the current history boundary.") });

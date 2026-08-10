@@ -24,13 +24,15 @@
     "test": "pnpm test:unit && pnpm test:integration",
     "test:unit": "vitest run tests/unit",
     "test:watch": "vitest",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:integration": "node scripts/run-isolated-integration.mjs",
     "test:e8:integration": "node scripts/run-e8-isolated-integration.mjs",
+    "test:e3f:integration": "node scripts/run-e3f-isolated-integration.mjs",
     "test:sogni-live": "vitest run tests/live/sogni-sdk-durability.live.test.ts"
   },
   "dependencies": {
     "@fastify/multipart": "^10.1.0",
     "@fastify/static": "^10.1.2",
+    "@infinite-quest/contracts": "workspace:*",
     "@sogni-ai/sogni-client": "5.2.0",
     "@types/archiver": "^8.0.0",
     "archiver": "^8.0.0",
@@ -49,7 +51,7 @@
   },
   "devDependencies": {
     "@babel/parser": "7.29.7",
-    "@infinite-quest/contracts": "workspace:*",
+    "@playwright/test": "^1.62.1",
     "@types/node": "^24.3.0",
     "@types/pg": "^8.15.5",
     "@types/unzipper": "0.10.11",

@@ -121,6 +121,7 @@ export type PublishedAssetRead = Readonly<{
 }>;
 
 export type PortableArchiveFilesystemAdapter = Readonly<{
+  close(): Promise<void>;
   stagingPort: PortableArchiveStagingPort;
   issueOwnerBoundUpload(
     owner: ImportOwnerScope,
@@ -837,6 +838,12 @@ export function createPortableArchiveFilesystemAdapter(
   const activeStagedRecords = new Map<PortableStagedInput, ActiveStagedRecord>();
   const publicationLifecycle = createSafeDurableFilesystemLifecycle(options.persistence.journal);
 
+  async function close(): Promise<void> {
+    const records = [...activeStagedRecords.values()];
+    activeStagedRecords.clear();
+    await Promise.all(records.map((record) => releaseAnchoredStagedArchive(record.staged)));
+  }
+
   async function loadStagedRecord(
     owner: ImportOwnerScope,
     stagedInput: PortableStagedInput,
@@ -941,6 +948,7 @@ export function createPortableArchiveFilesystemAdapter(
   };
 
   return {
+    close,
     stagingPort,
     issueOwnerBoundUpload,
 

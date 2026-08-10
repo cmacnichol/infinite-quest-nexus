@@ -803,7 +803,10 @@ integration("world campaign Fastify production application cutover", () => {
     });
     expect(imported.statusCode).toBe(201);
     expect(imported.json()).toMatchObject({ kind: "world", duplicate: false });
-    trackWorld(imported.json().worldId, title);
+
+    // A committed portable import deliberately retains durable operation and
+    // result authority. Let this file's isolated database teardown own that
+    // graph instead of routing it through ordinary world-deletion cleanup.
 
     await expect(worldCampaign.getWorld(worldScope(imported.json().worldId))).resolves.toMatchObject({
       id: imported.json().worldId,

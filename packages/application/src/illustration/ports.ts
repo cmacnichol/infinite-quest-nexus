@@ -246,42 +246,6 @@ export interface IllustrationCostPort {
   }>): Promise<string | null>;
 }
 
-/** Temporary 14a -> 14e binding for durable asset persistence. */
-export interface IllustrationAssetPort {
-  persistTurnIllustration(input: Readonly<{
-    /** Caller-owned transaction; asset and image-job completion must commit atomically. */
-    database: IllustrationTransactionContext;
-    ownerUserId: string;
-    campaignId: string;
-    turnId: string | null;
-    imageJobId: string;
-    variantIndex: number;
-    bytes: Uint8Array;
-    mimeType: string;
-  }>): Promise<Readonly<{ assetId: string }>>;
-  persistWorldCover(input: Readonly<{
-    /** Caller-owned transaction; asset and image-job completion must commit atomically. */
-    database: IllustrationTransactionContext;
-    ownerUserId: string;
-    worldId: string;
-    imageJobId: string;
-    variantIndex: number;
-    bytes: Uint8Array;
-    mimeType: string;
-  }>): Promise<Readonly<{ assetId: string }>>;
-  bindSegmentAsset(input: Readonly<{
-    /** Caller-owned transaction; segment provenance follows the final job transition. */
-    database: IllustrationTransactionContext;
-    ownerUserId: string;
-    campaignId: string;
-    turnId: string | null;
-    segmentId: string;
-    imageJobId: string;
-    assetId: string;
-    variantIndex: number;
-  }>): Promise<boolean>;
-}
-
 export interface IllustrationArtifactDownloadPort {
   downloadArtifact(input: Readonly<{
     ownerUserId: string;
@@ -300,7 +264,6 @@ export type IllustrationWorkerPorts = Readonly<{
   imageProvider: IllustrationImageProviderPort;
   promptRefinement: IllustrationPromptRefinementPort;
   artifactDownload: IllustrationArtifactDownloadPort;
-  assets: IllustrationAssetPort;
   /** Temporary runtime binding; Task 14d owns the provider/cost replacement. */
   costs: IllustrationCostPort;
 }>;
@@ -321,5 +284,4 @@ export interface IllustrationWorkerApplication
     IllustrationWorkerStateMachinePort,
     IllustrationImageProviderPort,
     IllustrationPromptRefinementPort,
-    IllustrationArtifactDownloadPort,
-    IllustrationAssetPort {}
+    IllustrationArtifactDownloadPort {}

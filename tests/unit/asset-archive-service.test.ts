@@ -13,7 +13,7 @@ import {
   runAssetMetadataBackfill,
   type FilesystemAssetStore,
   verifyOriginalImage
-} from "../../services/api/src/asset-service.js";
+} from "../legacy-api/src/asset-service.js";
 import {
   ArchiveAssetPersistenceError,
   cleanupUnreferencedCreatedPaths,
@@ -26,10 +26,10 @@ import {
   type ArchiveAssetSourceRow,
   type ArchiveIdMap,
   type ValidatedArchiveAssetSet
-} from "../../services/api/src/asset-archive-service.js";
+} from "../legacy-api/src/asset-archive-service.js";
 import { sanitizePortableMetadata, type ArchiveAssetBinding, type ArchiveAssetRecord } from "../../packages/contracts/src/archives.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
-import { importLegacyStory, legacyWorldContent } from "../../services/api/src/import-service.js";
+import { importLegacyStory, legacyWorldContent } from "../legacy-api/src/import-service.js";
 import { ArchiveError, createArchiveStagingDirectory } from "../../services/api/src/archive-io.js";
 import type { MemoryGenerationTransactionPort } from "../../packages/application/src/memory/index.js";
 

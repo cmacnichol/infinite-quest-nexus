@@ -1,6 +1,6 @@
 import type { IllustrationApplication, MemoryApplication } from "../../packages/application/src/index.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
-import type { FilesystemAssetStore } from "../../services/api/src/asset-service.js";
+import type { FilesystemAssetStore } from "../legacy-api/src/asset-service.js";
 import { createApiGenerationApplication as composeApiGeneration } from "../../services/runtime/src/generation-api-composition.js";
 import { createWorkerGenerationApplication as composeWorkerGeneration } from "../../services/runtime/src/generation-worker-composition.js";
 import {
@@ -45,7 +45,6 @@ export function createWorkerIllustrationApplication(
 ) {
   return composeWorkerIllustration(
     pool,
-    store,
     workerProviderGraph(pool, credentialSecret).illustration,
   );
 }

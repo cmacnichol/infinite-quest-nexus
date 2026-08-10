@@ -6,7 +6,7 @@ import {
 } from "../../packages/domain/src/infinite-worlds.js";
 import { infiniteWorldsImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { WORLD_CONTENT_SCHEMA_VERSION } from "../../packages/contracts/src/world-library.js";
-import { previewInfiniteWorldsImport } from "../../services/api/src/infinite-worlds-import-service.js";
+import { previewInfiniteWorldsImport } from "../legacy-api/src/infinite-worlds-import-service.js";
 
 const unusedPortableWorld = {
   async exportWorld(): Promise<never> {

@@ -18,7 +18,7 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-Replace the example database password. Set `CREDENTIAL_ENCRYPTION_KEY` to a long random value before storing provider API keys. Losing or changing this key makes stored provider credentials unreadable.
+Replace the example database password. Docker Compose generates and persists a local credential-encryption key on first start. Set `CREDENTIAL_ENCRYPTION_KEY` only when restoring an existing local deployment; losing or changing that key makes stored provider credentials unreadable.
 
 ## 2. Start Nexus
 

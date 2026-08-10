@@ -131,6 +131,20 @@ describe("Task 14e3d portable composition boundaries", () => {
     ]));
   });
 
+  it("allows only the named e3g API composition to consume portable authority", () => {
+    const canonical = {
+      file: "services/runtime/src/portable-import-export-composition.ts",
+      text: "export function createPortableImportExportComposition() { return {}; }"
+    };
+    const apiComposition = {
+      file: "services/runtime/src/api-portable-import-export-composition.ts",
+      text: `import { createPortableImportExportComposition } from "./portable-import-export-composition.js";
+        export function createApiPortableImportExportComposition() { return createPortableImportExportComposition(); }`
+    };
+    expect(checkPortableCompositionBoundaries(apiComposition.file, apiComposition.text)).toEqual([]);
+    expect(checkPortableCompositionInventory([canonical, apiComposition])).toEqual([]);
+  });
+
   it("keeps the shipped composition private and free of forbidden authority", async () => {
     const files = [
       "services/runtime/src/portable-import-export-composition.ts",

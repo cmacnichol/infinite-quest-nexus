@@ -118,6 +118,16 @@ integration("Task 14e3e7 private asset-maintenance composition", () => {
        VALUES ($1,$2,'filesystem',$3,'image/png',$4) RETURNING id`,
       [ownerUserId, contentHash, relativePath, bytes.byteLength],
     );
+    // This fixture exercises only durable filesystem recovery. Its bytes are
+    // deliberately not a decodable image, so retain the terminal metadata
+    // outcome that a prior backfill attempt would have recorded instead of
+    // letting live discovery divert the scheduler into unrelated work.
+    await pool.query(
+      `INSERT INTO asset_metadata_backfill_jobs (
+         owner_user_id,asset_id,status,diagnostic_code,attempts,next_attempt_at
+       ) VALUES ($1,$2,'failed','asset_unsupported_media',1,clock_timestamp())`,
+      [ownerUserId, asset.rows[0]!.id],
+    );
     const inode = await stat(join(assetRoot, relativePath), { bigint: true });
     const descriptor: PrivateStorageDescriptor = Object.freeze({
       relativePath,

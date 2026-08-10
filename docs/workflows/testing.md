@@ -16,6 +16,17 @@ Tests must verify that rejected or incomplete generations do not mutate campaign
 Tests must also cover images disabled, image endpoint unavailable, incompatible image models, independent image retries, and successful story completion when illustration generation fails.
 Identity tests must verify initial-user bootstrap idempotency, automatic ownership of pre-auth content, import ownership, rejection of caller-supplied identity spoofing, cross-user query isolation, and explicit OIDC linking to the existing initial user without changing its internal UUID.
 
+## Generation Notification Verification
+
+Run `tests/integration/generation-events.integration.test.ts` against real
+PostgreSQL to verify commit visibility, notification-before-subscribe races,
+deduplication, listener reconnect, reconciliation, bounded subscriber pool use,
+and terminal SSE delivery. The Task 14f rerun on 2026-08-10 passed 4/4 cases.
+Its 20-sample notification-to-frame evidence measured 3.930 ms minimum, 5.557
+ms median, 7.680 ms p95, and 8.513 ms maximum, well inside the 500 ms budget;
+23 authoritative job reads covered initial/reconciliation plus delivered
+transitions without restoring the retired 350 ms polling loop.
+
 ## Worker-Concurrency Verification and Benchmark
 
 Changes to worker scheduling or generation concurrency must retain automated coverage for all of these invariants:
@@ -60,6 +71,14 @@ Task 12's reference C0 run on 2026-08-04 produced:
 | 4 | 83.736372 / 85.421612 | 7.6185% | 140.479 | 60.035 / 136.239 | 8 / 8 | 4 | 1 / 1 / 1 |
 
 Concurrency `1` and `2` stayed below the 5% rerun threshold. Concurrency `4` measured 7.6185% in its first batch, so the benchmark ran three batches and selected batch `0` by median throughput; the selected batch's CV remaining above 5% is reported rather than concealed. Every selected batch completed 360 generation jobs and 90 jobs in each optional lane, respected the configured provider and lane limits, and passed the duplicate-turn guard. These numbers are a regression reference for the stated fixture, not a universal production capacity promise; repeat the benchmark against the intended deployment provider and database before raising concurrency there.
+
+The Task 14f C0 rerun on 2026-08-10 used Node 24.19.0, PostgreSQL 18.4,
+2 vCPU, 4 GiB, and the same 5/30 fixture. Throughput was
+27.759385/51.782043/91.014247 jobs/s at concurrency 1/2/4; queue p95 was
+417.061/227.380/112.584 ms; coefficient of variation was
+2.8478%/4.6603%/4.2923%. Every point completed 360 story jobs and 90 jobs in
+each optional lane, preserved lane peaks of 1, and passed the duplicate-turn
+guard.
 
 ## Play-Loop Read Verification and Benchmark
 
@@ -170,3 +189,17 @@ another turn or generation-job index at these cardinalities would impose write
 amplification on every accepted turn/job without removing a demonstrated slow
 scan. Consequently no index or rollback migration was added; rerun this profile
 against production-scale cardinalities before revisiting that decision.
+
+The Task 14f C0 rerun on 2026-08-10 used Node 24.19.0 and PostgreSQL 18.4
+with the same 5/30 small/200/2,000-turn fixtures. All routes had zero errors;
+first, middle, last, and initial-sync windows remained bounded at 50 turns.
+Current post-B5 application-composition query counts are 3 campaign-list, 4
+dashboard, 8 replacement-sync, 3 unchanged-sync, 5 per history page, 1
+generation poll, 2 generation result, and 11 initial hydration; the executable
+performance regression asserts these counts. Corresponding p95 values were
+3.542, 4.898, 13.864, 5.364, 3.738/4.933/3.631, 0.585, 1.160, and 10.786 ms.
+The four summarized plans reported zero shared reads/writes and zero temporary
+blocks; execution times were 0.870 ms campaign-list, 0.273 ms sync-status,
+0.765 ms history fingerprint, and 0.123 ms history page. These figures replace
+the pre-B5 route-composition counts as the current regression reference without
+changing the frozen public payload contracts.

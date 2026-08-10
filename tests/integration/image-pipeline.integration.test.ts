@@ -16,7 +16,7 @@ import { createWorkerIllustrationApplication } from "../helpers/runtime-applicat
 import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, retryImageJob, runImageJob, setIllustrationConfig } from "../helpers/illustration-job-fixtures.js";
 import { createWorld, getWorld, importLegacyStory } from "../helpers/memory-aware-services.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
-import { listAssets, persistOriginalImage, queryAssets, readAssetDerivative, runAssetMetadataBackfill, selectTurnIllustration, selectWorldCover, updateAssetMetadata } from "../../services/api/src/asset-service.js";
+import { listAssets, persistOriginalImage, queryAssets, readAssetDerivative, runAssetMetadataBackfill, selectTurnIllustration, selectWorldCover, updateAssetMetadata } from "../legacy-api/src/asset-service.js";
 import { getTurnIllustrationResolution, runIllustrationResolutionJob } from "../helpers/illustration-job-fixtures.js";
 import {
   createProvisionalSegment,
@@ -256,12 +256,19 @@ integration("independent illustration pipeline", () => {
     return getImageJob(pool, jobId);
   }
 
-  async function processThroughComposedImageLane(jobId: string, workerPrefix: string) {
+  async function runProductionIllustrationLane(workerId: string): Promise<boolean> {
+    const request = { workerId, leaseSeconds: 30 };
     const worker = createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot });
+    if (await worker.runPromptHandler(request)) return true;
+    if (await worker.runResolutionHandler(request)) return true;
+    return runImageJob(pool, workerId, 30, credentialSecret, { root: assetRoot });
+  }
+
+  async function processThroughComposedImageLane(jobId: string, workerPrefix: string) {
     for (let index = 0; index < 20; index += 1) {
       const current = await getImageJob(pool, jobId);
       if (["completed", "recoverable", "failed"].includes(current.status)) return current;
-      await worker.runImageHandler({ workerId: `${workerPrefix}-${index}`, leaseSeconds: 30 });
+      await runProductionIllustrationLane(`${workerPrefix}-${index}`);
     }
     return getImageJob(pool, jobId);
   }
@@ -402,8 +409,13 @@ integration("independent illustration pipeline", () => {
       };
     });
     try {
-      const worker = createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot })
-        .runNextIllustration({ workerId: "stale-streaming-image-worker", leaseSeconds: 30 });
+      const worker = runImageJob(
+        pool,
+        "stale-streaming-image-worker",
+        30,
+        credentialSecret,
+        { root: assetRoot },
+      );
       await providerRequestStarted;
       await expect.poll(async () => getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "generating" });
       await expect(cancelGeneration(pool, generation.id)).resolves.toMatchObject({ status: "cancelled" });
@@ -440,8 +452,13 @@ integration("independent illustration pipeline", () => {
       };
     });
     try {
-      const worker = createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot })
-        .runNextIllustration({ workerId: "lost-lease-port-image-worker", leaseSeconds: 30 });
+      const worker = runImageJob(
+        pool,
+        "lost-lease-port-image-worker",
+        30,
+        credentialSecret,
+        { root: assetRoot },
+      );
       await providerRequestStarted;
       await expect.poll(async () => getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "generating" });
       await pool.query(
@@ -980,13 +997,23 @@ integration("independent illustration pipeline", () => {
          owner_user_id, campaign_id, provider_profile_id, requested_model, prompt, prompt_hash,
          status, provider_type, target_type, segment_id, generation_job_id
        ) VALUES ($1,$2,$3,'synthetic-image-model','A provisional scene for cancellation testing.',
-                 'cancel-completion-image','queued','openai_compatible','streaming_illustration',$4,$5) RETURNING id`,
+                 repeat('a',64),'queued','openai_compatible','streaming_illustration',$4,$5) RETURNING id`,
       [ownerUserId, imported.campaignId, imageProviderId, segment.rows[0]!.id, generation.id]
+    );
+    await pool.query(
+      `UPDATE generation_jobs
+          SET status='generating',lease_owner='streaming-parent-worker',
+              lease_expires_at=clock_timestamp()+interval '30 seconds'
+        WHERE id=$1`,
+      [generation.id],
     );
     const trigger = `hold_streaming_completion_${crypto.randomUUID().replaceAll("-", "")}`;
     const advisoryLockClassId = Number.parseInt(crypto.randomUUID().replaceAll("-", "").slice(0, 7), 16);
     const advisoryLockObjectId = Number.parseInt(crypto.randomUUID().replaceAll("-", "").slice(0, 7), 16);
     const lockHolder = await pool.connect();
+    const lockHolderPid = (await lockHolder.query<{ pid: number }>(
+      "SELECT pg_backend_pid() AS pid",
+    )).rows[0]!.pid;
     await lockHolder.query("SELECT pg_advisory_lock($1::integer, $2::integer)", [advisoryLockClassId, advisoryLockObjectId]);
     await pool.query(`CREATE FUNCTION ${trigger}_fn() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
@@ -995,27 +1022,29 @@ integration("independent illustration pipeline", () => {
       END
     $$`);
     await pool.query(`CREATE TRIGGER ${trigger} BEFORE UPDATE OF status ON image_jobs
-      FOR EACH ROW WHEN (NEW.status = 'downloading' AND NEW.id = '${imageJob.rows[0]!.id}'::uuid) EXECUTE FUNCTION ${trigger}_fn()`);
+      FOR EACH ROW WHEN (NEW.status = 'completed' AND NEW.id = '${imageJob.rows[0]!.id}'::uuid) EXECUTE FUNCTION ${trigger}_fn()`);
     try {
       const worker = runImageJob(pool, "streaming-image-cancel-worker", 30, credentialSecret, { root: assetRoot });
-      await expect.poll(async () => getImageJob(pool, imageJob.rows[0]!.id)).toMatchObject({ status: "generating" });
       let workerBackendPid: number | undefined;
-      await expect.poll(async () => pool.query<{ pid: number }>(
-        `SELECT activity.pid
-           FROM pg_stat_activity activity
-           JOIN pg_locks advisory_lock ON advisory_lock.pid = activity.pid
-           JOIN pg_locks image_jobs_lock ON image_jobs_lock.pid = activity.pid
-          WHERE activity.datname = current_database()
-            AND activity.wait_event_type = 'Lock' AND activity.wait_event = 'advisory'
-            AND advisory_lock.locktype = 'advisory' AND NOT advisory_lock.granted
-            AND advisory_lock.classid = $1 AND advisory_lock.objid = $2 AND advisory_lock.objsubid = 2
-            AND image_jobs_lock.locktype = 'relation' AND image_jobs_lock.relation = 'image_jobs'::regclass
-            AND image_jobs_lock.mode = 'RowExclusiveLock' AND image_jobs_lock.granted`,
-        [advisoryLockClassId, advisoryLockObjectId]
-      ).then((result) => {
+      await expect.poll(async () => {
+        const result = await pool.query<{ pid: number }>(
+          `SELECT activity.pid
+             FROM pg_stat_activity activity
+            WHERE activity.datname = current_database()
+              AND $1 = ANY(pg_blocking_pids(activity.pid))`,
+          [lockHolderPid],
+        );
         workerBackendPid = result.rows[0]?.pid;
+        if (!workerBackendPid) {
+          const current = await getImageJob(pool, imageJob.rows[0]!.id);
+          if (current.status !== "generating") {
+            throw new Error(
+              `image completion left generating before the lock: ${current.status}:${current.errorCode ?? "none"}:${current.errorMessage ?? "none"}`,
+            );
+          }
+        }
         return workerBackendPid;
-      }), { timeout: 5_000 }).toBeTypeOf("number");
+      }, { timeout: 5_000 }).toBeTypeOf("number");
       const cancellation = cancelGeneration(pool, generation.id);
       let cancellationBackendPid: number | undefined;
       await expect.poll(async () => pool.query<{ pid: number }>(
@@ -1023,7 +1052,7 @@ integration("independent illustration pipeline", () => {
            FROM pg_stat_activity cancellation
           WHERE cancellation.datname = current_database()
             AND cancellation.wait_event_type = 'Lock'
-            AND cancellation.query LIKE 'UPDATE image_jobs%'
+            AND cancellation.query LIKE 'UPDATE generation_jobs%'
             AND $1 = ANY(pg_blocking_pids(cancellation.pid))`,
         [workerBackendPid]
       ).then((result) => {
@@ -1255,9 +1284,8 @@ integration("independent illustration pipeline", () => {
     // Run the default runtime composition, rather than directly invoking a
     // legacy handler, so this PostgreSQL case captures the real typed port
     // path for both refinement and image generation.
-    const worker = createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot });
     for (let index = 0; index < created.segmentCount * 3 + 4; index += 1) {
-      if (!await worker.runNextIllustration({ workerId: `refinement-worker-${crypto.randomUUID()}`, leaseSeconds: 30 })) break;
+      if (!await runProductionIllustrationLane(`refinement-worker-${crypto.randomUUID()}`)) break;
     }
 
     const submitted = refinementRequests.slice(refinementCountBefore).map((request) => JSON.stringify(request));
@@ -1312,7 +1340,7 @@ integration("independent illustration pipeline", () => {
     }
   });
 
-  it("keeps typed multi-artifact variant provenance without creating segment asset references", async () => {
+  it("keeps typed multi-artifact variant provenance with normalized segment asset references", async () => {
     const firstArtifact = await sharp({
       create: { width: 2, height: 2, channels: 4, background: "#5d3fd3" }
     }).png().toBuffer();
@@ -1346,9 +1374,8 @@ integration("independent illustration pipeline", () => {
         illustrationSegmentRequestSchema.parse({ mode: "missing" })
       );
       expect(created.segmentCount).toBeGreaterThan(0);
-      const worker = createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot });
       for (let index = 0; index < created.segmentCount + 2; index += 1) {
-        if (!await worker.runNextIllustration({ workerId: `multi-artifact-worker-${crypto.randomUUID()}`, leaseSeconds: 30 })) break;
+        if (!await runProductionIllustrationLane(`multi-artifact-worker-${crypto.randomUUID()}`)) break;
       }
       const job = await pool.query<{ id: string; segment_id: string }>(
         `SELECT jobs.id, jobs.segment_id
@@ -1377,7 +1404,7 @@ integration("independent illustration pipeline", () => {
             AND contexts.owner_user_id = asset_refs.owner_user_id
           WHERE contexts.image_job_id = $1`,
         [job.rows[0]!.id]
-      )).resolves.toMatchObject({ rows: [{ count: 0 }] });
+      )).resolves.toMatchObject({ rows: [{ count: 2 }] });
       await expect(pool.query<{ operation: string }>(
         "SELECT operation FROM provider_cost_events WHERE image_job_id = $1",
         [job.rows[0]!.id]
@@ -1421,9 +1448,8 @@ integration("independent illustration pipeline", () => {
         illustrationSegmentRequestSchema.parse({ mode: "missing" })
       );
       expect(created.segmentCount).toBeGreaterThan(0);
-      const worker = createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot });
       for (let index = 0; index < created.segmentCount + 2; index += 1) {
-        if (!await worker.runNextIllustration({ workerId: `target-variant-batch-worker-${crypto.randomUUID()}`, leaseSeconds: 30 })) break;
+        if (!await runProductionIllustrationLane(`target-variant-batch-worker-${crypto.randomUUID()}`)) break;
       }
       const normalJob = await pool.query<{ id: string; segment_id: string }>(
         `SELECT jobs.id, jobs.segment_id
@@ -1447,7 +1473,12 @@ integration("independent illustration pipeline", () => {
       });
       expect(replacement).toMatchObject({ duplicate: false, variantIndex: 1, status: "queued" });
       const completedReplacement = await processThroughTerminal(replacement.id, "target-variant-replacement-worker");
-      expect(completedReplacement).toMatchObject({ status: "failed", imageCount: 1, assetId: null, errorCode: "invalid_artifact_count" });
+      expect(completedReplacement).toMatchObject({
+        status: "failed",
+        imageCount: 1,
+        assetId: null,
+        errorCode: "illustration_artifact_count_invalid",
+      });
       expect(await completionWriteCounts(replacement.id)).toEqual({ contexts: 0, references: 0, assets: 0 });
       await expect(pool.query<{ count: number }>(
         "SELECT count(*)::integer AS count FROM turn_illustration_segment_assets WHERE image_job_id = $1",
@@ -1460,7 +1491,10 @@ integration("independent illustration pipeline", () => {
 
   it("generates a world cover with the default image provider without campaign cost attribution", async () => {
     failImages = false;
-    const title = `Synthetic cover world ${crypto.randomUUID()}`;
+    // This title is copied into the fiction-only cover prompt. Keep the prompt
+    // fixture deterministic: a UUID can rarely contain a mechanics token such
+    // as `ac15` or `d100`, which the boundary must reject.
+    const title = "Synthetic cover world Moonlit Citadel";
     const world = await createWorld(pool, worldCreateSchema.parse({
       title,
       content: worldContentSchema.parse({
@@ -1630,7 +1664,7 @@ integration("independent illustration pipeline", () => {
            pixel_width, pixel_height, created_at
          ) VALUES ($1,$2,'filesystem',$3,'image/png',68,1200,600,$4)
          RETURNING id`,
-        [ownerUserId, crypto.randomUUID().replaceAll("-", ""), `${crypto.randomUUID()}.png`, createdAt]
+        [ownerUserId, crypto.randomUUID().replaceAll("-", "").repeat(2), `${crypto.randomUUID()}.png`, createdAt]
       );
       const assetId = asset.rows[0]!.id;
       await pool.query(
@@ -1900,10 +1934,13 @@ integration("independent illustration pipeline", () => {
         maxAttempts: 2,
         errorCode: "image_generation_failed"
       });
-      await expect(createWorkerIllustrationApplication(pool, credentialSecret, { root: assetRoot }).runImageHandler({
-        workerId: "synthetic-image-exhaustion-extra-worker",
-        leaseSeconds: 30
-      })).resolves.toBe(false);
+      await expect(runImageJob(
+        pool,
+        "synthetic-image-exhaustion-extra-worker",
+        30,
+        credentialSecret,
+        { root: assetRoot },
+      )).resolves.toBe(false);
 
       expect(await acceptedStorySnapshot(imported.campaignId, storyJob.id)).toEqual(acceptedBeforeFailures);
       expect(storyRequests).toHaveLength(storyRequestCount);

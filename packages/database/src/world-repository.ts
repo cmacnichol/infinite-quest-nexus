@@ -169,6 +169,10 @@ function blockerNames(counts: Record<string, number>): string[] {
 }
 
 const PRIVATE_EXACT_WORLD_TARGET_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const PRIVATE_EXACT_WORLD_SOURCE_HASH_PREFIXES = Object.freeze([
+  "portable-campaign-world:",
+  "portable-legacy-story-world:"
+] as const);
 
 /** Private portable-import execution seam; target IDs are server-planned, never caller input. */
 export async function importPrivatePortableWorldAtExactTarget(
@@ -186,7 +190,7 @@ export async function importPrivatePortableWorldAtExactTarget(
   if (!validPortableWorldContent(request.worldExport.content)
     || !PRIVATE_EXACT_WORLD_TARGET_PATTERN.test(target.worldId)
     || !PRIVATE_EXACT_WORLD_TARGET_PATTERN.test(target.worldVersionId)
-    || !target.sourceHash.startsWith("portable-campaign-world:")
+    || !PRIVATE_EXACT_WORLD_SOURCE_HASH_PREFIXES.some((prefix) => target.sourceHash.startsWith(prefix))
     || target.sourceHash.length > 200) {
     return failure("invalid_transition");
   }

@@ -6,6 +6,7 @@ import type {
 } from "../../packages/contracts/src/generation.js";
 import { apiProviderGraph } from "./provider-application-fixtures.js";
 import { createIllustrationWorkerPorts } from "../../services/runtime/src/illustration-composition.js";
+import { createPrivateIllustrationAssetPublicationComposition } from "../../services/runtime/src/illustration-asset-publication-composition.js";
 import {
   enqueueAcceptedTurnIllustration as enqueueAcceptedTurnIllustrationRuntime,
   enqueueIllustration as enqueueIllustrationRuntime,
@@ -35,12 +36,23 @@ export async function runImageJob(
   store: Readonly<{ root: string }>,
 ) {
   const collaborator = providers(pool, credentialSecret);
-  return runImageJobRuntime(
+  const ports = createIllustrationWorkerPorts(pool, collaborator);
+  const publication = await createPrivateIllustrationAssetPublicationComposition(
     pool,
-    workerId,
-    leaseSeconds,
-    createIllustrationWorkerPorts(pool, store, collaborator),
+    { archiveRoot: store.root, assetRoot: store.root },
+    { downloadArtifact: (input) => ports.artifactDownload.downloadArtifact(input) },
   );
+  try {
+    return await runImageJobRuntime(
+      pool,
+      workerId,
+      leaseSeconds,
+      ports,
+      publication.coordinator,
+    );
+  } finally {
+    await publication.close();
+  }
 }
 
 export async function runIllustrationPromptJob(
@@ -50,7 +62,7 @@ export async function runIllustrationPromptJob(
   credentialSecret: string,
 ) {
   const collaborator = providers(pool, credentialSecret);
-  const ports = createIllustrationWorkerPorts(pool, { root: "/tmp/unused-illustration-fixture" }, collaborator);
+  const ports = createIllustrationWorkerPorts(pool, collaborator);
   return runIllustrationPromptJobRuntime(
     pool, workerId, leaseSeconds, ports.promptRefinement, ports.costs, collaborator,
   );

@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
+import { finished } from "node:stream/promises";
 import unzipper from "unzipper";
+import { z } from "zod";
 import {
   archiveAssetRecordSchema,
   archiveManifestSchema,
@@ -19,6 +21,7 @@ import {
   infiniteWorldsStoryToLegacyStory,
   parseInfiniteWorldsStory
 } from "../../../packages/domain/src/infinite-worlds.js";
+import { legacyWorldContent } from "../../../packages/domain/src/legacy-story-world.js";
 import { extractCyoaLayers, parseCyoaExport, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
 import {
   bindPrivateBoundedStreamLimits,
@@ -39,6 +42,7 @@ import {
   type PrivatePortableFamilyPreviewPort,
   type PrivatePortableFamilyTargetPlan
 } from "../../../packages/application/src/imports/private-portable-composition.js";
+import type { ImportProgressScope } from "../../../packages/application/src/imports/progress.js";
 import type { PrivatePortableNormalizedAssetInput } from "../../../packages/application/src/imports/private-normalized-portable-publication.js";
 import {
   toPortableImportedRecordId,
@@ -47,7 +51,8 @@ import {
   PortableImportPreviewCommand,
   type PortableImportPreviewView,
   type PortablePreviewDestination,
-  type PortablePreviewHandle
+  type PortablePreviewHandle,
+  type PortableTemplateProviderSelection
 } from "../../../packages/application/src/imports/types.js";
 import { createPostgresPortableImportAuthorityRepository } from "../../../packages/database/src/portable-import-family-repository.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "../../../packages/database/src/pool.js";
@@ -55,6 +60,7 @@ import type { WorldRepositoryPort } from "../../../packages/application/src/worl
 import { createPostgresPortableFamilyMutationRepository } from "../../../packages/database/src/portable-import-family-repository.js";
 import { createPrivatePortableNormalizedAssetPublicationComposition } from "./portable-normalized-asset-publication-composition.js";
 import { inspectPrivateImageArtifact } from "./private-image-normalization.js";
+import { containsMechanicsLanguage } from "../../../packages/story-engine/src/index.js";
 
 const MAX_INPUT_BYTES = 64 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 256;
@@ -73,11 +79,28 @@ export interface PortableProviderWorldConversionPort {
   convertTemplate(input: Readonly<{
     ownerUserId: string;
     template: TemplateWorldInput;
+    providerSelection?: PortableTemplateProviderSelection;
+    progress?: ImportProgressScope;
   }>): Promise<Readonly<{
     world: Readonly<{ format: "infinite-quest-world"; formatVersion: 1; title: string; content: WorldContent }>;
     providerConfigurationFingerprint: string;
   }>>;
+  enrichStoryFinalTurn?(input: Readonly<{
+    ownerUserId: string;
+    sourceName: string;
+    story: z.infer<typeof legacyStorySchema>;
+    providerSelection: PortableTemplateProviderSelection;
+  }>): Promise<Readonly<{
+    metadata: unknown;
+    providerConfigurationFingerprint: string;
+  }>>;
 }
+
+const portableFinalTurnMetadataSchema = z.object({
+  choices: z.array(z.string().trim().min(1).max(1000)).max(4).default([]),
+  custom_action_suggestion: z.string().trim().max(1000).default(""),
+  image_prompt: z.string().trim().max(20_000).default("")
+});
 
 export interface PortableTargetWorldReaderPort {
   readTargetWorldVersion(input: Readonly<{
@@ -140,6 +163,14 @@ function asJson(value: unknown): PortableJsonValue {
 
 function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function portableArchiveAssetHash(bytes: Uint8Array): string {
+  return sha256(Buffer.from(bytes).toString("base64"));
+}
+
+function matchesPortableArchiveAssetHash(bytes: Uint8Array, expectedHash: string): boolean {
+  return sha256(bytes) === expectedHash || portableArchiveAssetHash(bytes) === expectedHash;
 }
 
 function authority(
@@ -517,7 +548,7 @@ async function verifyCurrentAsset(
   record: ArchiveAssetRecord,
   bytes: Uint8Array,
 ): Promise<number> {
-  if (bytes.byteLength !== record.byteLength || sha256(bytes) !== record.contentHash) {
+  if (bytes.byteLength !== record.byteLength || !matchesPortableArchiveAssetHash(bytes, record.contentHash)) {
     throw new Error("archive_unavailable");
   }
   const inspected = await inspectPrivateImageArtifact({
@@ -539,7 +570,10 @@ async function campaignZip(
   includeAssetBytes: boolean,
 ): Promise<DecodedCampaignZip> {
   const inspector = new ZipCentralDirectoryInspector();
-  const parser = Readable.from(boundedArchiveSource(source, inspector)).pipe(unzipper.Parse({ forceStream: true }));
+  const archiveSource = Readable.from(boundedArchiveSource(source, inspector));
+  const sourceSettled = finished(archiveSource).then(() => undefined, () => undefined);
+  const parser = archiveSource.pipe(unzipper.Parse({ forceStream: true }));
+  const parserSettled = finished(parser).then(() => undefined, () => undefined);
   let entryCount = 0;
   let expandedBytes = 0;
   let decodedPixelCount = 0;
@@ -637,10 +671,17 @@ async function campaignZip(
     inspector.verify(entryPaths);
     if (deferredArchiveError) throw deferredArchiveError;
   } catch (error) {
+    archiveSource.unpipe(parser);
     parser.destroy();
+    archiveSource.destroy();
+    await Promise.all([parserSettled, sourceSettled]);
     if (error instanceof Error && error.message.startsWith("archive_")) throw error;
     throw new Error("archive_truncated");
   }
+  archiveSource.unpipe(parser);
+  parser.destroy();
+  archiveSource.destroy();
+  await Promise.all([parserSettled, sourceSettled]);
   const manifestBytes = files.get("manifest.json");
   if (!manifestBytes) {
     if (!story) throw new Error("archive_format_invalid");
@@ -691,7 +732,7 @@ async function campaignZip(
       chronicle: null,
       manifest: null,
       assets,
-      warnings: []
+      warnings: ["This legacy ZIP had no archive manifest or source checksums; the payload was adapted for compatibility."]
     };
   }
   const manifest = archiveManifestSchema.parse(jsonText(manifestBytes));
@@ -758,7 +799,7 @@ async function campaignZip(
       entryName: representative.archivePath,
       mimeType: representative.mimeType,
       byteLength: representative.byteLength,
-      contentHash: representative.contentHash,
+      contentHash: sha256(bytes),
       ...(includeAssetBytes ? { bytes } : {})
     });
   }
@@ -1305,12 +1346,13 @@ export function createPortableFamilyPreviewAdapter(
               worldVersionId: command.destination.worldVersionId
             },
           providerDataIncluded: false,
-          warnings: []
+          warnings: [...decoded.warnings]
         }
       };
     },
     async previewLegacyStory(source, command, companions = []) {
       const story = legacyStorySchema.parse(jsonText(await boundedBytes(source, MAX_JSON_BYTES)));
+      const sourceName = command.sourceName ?? "legacy.story";
       const inlineAssets = await legacyInlineAssetInventory(story, false);
       const companionAssets = await legacyCompanionAssetInventory(story, companions);
       const groupedRecords = new Map<string, ArchiveAssetRecord[]>();
@@ -1336,16 +1378,27 @@ export function createPortableFamilyPreviewAdapter(
         : candidateRecords;
       return {
         authority: authority(command, {
-          sourceName: "legacy.story",
+          sourceName,
           story: asJson(story),
+          ...(command.destination.kind === "create_world" ? {
+            embeddedWorldImportRequest: asJson(worldImportRequestSchema.parse({
+              sourceName,
+              worldExport: {
+                format: "infinite-quest-world",
+                formatVersion: 1,
+                title: story.world.title?.trim() || "Imported adventure",
+                content: legacyWorldContent(story, command.selectedCharacterId)
+              }
+            }))
+          } : {}),
           assetRecords: exactPortableAssetAuthority(assetRecords)
-        }),
+        }, null, command.selectedCharacterId ?? null),
         projection: legacyProjection(story)
       };
     },
     async previewInfiniteWorlds(source, command) {
       const world = convertInfiniteWorldsWorld(jsonText(await boundedBytes(source, MAX_JSON_BYTES)));
-      const request = worldImportRequestSchema.parse({ sourceName: "infinite-worlds.json", worldExport: world });
+      const request = worldImportRequestSchema.parse({ sourceName: command.sourceName ?? "infinite-worlds.json", worldExport: world });
       return {
         authority: authority(command, { worldImportRequest: asJson(request) }),
         projection: worldProjection(world)
@@ -1355,9 +1408,13 @@ export function createPortableFamilyPreviewAdapter(
       const parsed = parseCyoaExport(text(await boundedBytes(source, MAX_JSON_BYTES)));
       const converted = await provider.convertTemplate({
         ownerUserId: command.ownerUserId,
-        template: extractCyoaLayers(parsed, "cyoa.json")
+        template: extractCyoaLayers(parsed, "cyoa.json"),
+        ...(command.progressKey === undefined ? {} : {
+          progress: { owner: { ownerUserId: command.ownerUserId }, key: command.progressKey }
+        }),
+        ...(command.providerSelection === undefined ? {} : { providerSelection: command.providerSelection })
       });
-      const request = worldImportRequestSchema.parse({ sourceName: "cyoa.json", worldExport: converted.world });
+      const request = worldImportRequestSchema.parse({ sourceName: command.sourceName ?? "cyoa.json", worldExport: converted.world });
       return {
         authority: authority(command, { worldImportRequest: asJson(request) }, converted.providerConfigurationFingerprint),
         projection: {
@@ -1375,7 +1432,7 @@ export function createPortableFamilyPreviewAdapter(
     },
     async previewWorldJson(source, command) {
       const world = portableWorldSchema.parse(jsonText(await boundedBytes(source, MAX_JSON_BYTES)));
-      const request = worldImportRequestSchema.parse({ sourceName: "world.json", worldExport: world });
+      const request = worldImportRequestSchema.parse({ sourceName: command.sourceName ?? "world.json", worldExport: world });
       return {
         authority: authority(command, { worldImportRequest: asJson(request) }),
         projection: worldProjection(world)
@@ -1393,9 +1450,13 @@ export function createPortableFamilyPreviewAdapter(
           keywords: [],
           excerpts: [],
           prompt: sourceText
-        }
+        },
+        ...(command.progressKey === undefined ? {} : {
+          progress: { owner: { ownerUserId: command.ownerUserId }, key: command.progressKey }
+        }),
+        ...(command.providerSelection === undefined ? {} : { providerSelection: command.providerSelection })
       });
-      const request = worldImportRequestSchema.parse({ sourceName: "world.txt", worldExport: converted.world });
+      const request = worldImportRequestSchema.parse({ sourceName: command.sourceName ?? "world.txt", worldExport: converted.world });
       return {
         authority: authority(command, { worldImportRequest: asJson(request) }, converted.providerConfigurationFingerprint),
         projection: {
@@ -1413,6 +1474,7 @@ export function createPortableFamilyPreviewAdapter(
     async previewStoryText(source, command) {
       const sourceText = text(await boundedBytes(source, MAX_JSON_BYTES));
       const parsed = parseInfiniteWorldsStory(sourceText);
+      const sourceName = command.sourceName ?? "story.txt";
       const target = portableRecord(command.destination as unknown as PortableJsonValue);
       const loaded = await targets.readTargetWorldVersion({
         owner: { ownerUserId: command.ownerUserId },
@@ -1434,12 +1496,36 @@ export function createPortableFamilyPreviewAdapter(
       if (!selectedCharacterId || !characters.some((character) => character.id === selectedCharacterId)) {
         throw new Error("portable_story_character_required");
       }
-      const story = infiniteWorldsStoryToLegacyStory(parsed, loaded.content, "story.txt", selectedCharacterId);
+      const story = infiniteWorldsStoryToLegacyStory(parsed, loaded.content, sourceName, selectedCharacterId);
+      let providerConfigurationFingerprint: string | null = null;
+      const finalTurn = story.turns.at(-1);
+      if (command.enrichFinalTurn
+        && finalTurn
+        && (!Array.isArray(finalTurn.choices) || finalTurn.choices.length === 0)) {
+        if (command.providerSelection === undefined || provider.enrichStoryFinalTurn === undefined) {
+          throw new Error("portable_story_enrichment_provider_required");
+        }
+        const enriched = await provider.enrichStoryFinalTurn({
+          ownerUserId: command.ownerUserId,
+          sourceName,
+          story,
+          providerSelection: command.providerSelection
+        });
+        const metadata = portableFinalTurnMetadataSchema.parse(enriched.metadata);
+        finalTurn.choices = metadata.choices.filter((choice) => !containsMechanicsLanguage(choice));
+        if (!containsMechanicsLanguage(metadata.custom_action_suggestion)) {
+          finalTurn.customActionSuggestion = metadata.custom_action_suggestion;
+        }
+        if (!containsMechanicsLanguage(metadata.image_prompt)) {
+          finalTurn.imagePrompt = metadata.image_prompt;
+        }
+        providerConfigurationFingerprint = enriched.providerConfigurationFingerprint;
+      }
       return {
         authority: authority(
           command,
-          { sourceName: "story.txt", story: asJson(story), target: asJson(target) },
-          null,
+          { sourceName, story: asJson(story), target: asJson(target) },
+          providerConfigurationFingerprint,
           selectedCharacterId,
         ),
         projection: {
@@ -2005,25 +2091,33 @@ export async function createPortableImportExportComposition(
       : null;
     let assetArtifacts: Awaited<ReturnType<PrivatePortableFamilyPreviewPort["extractCampaignZipAssets"]>> = [];
     if (assetBackedImport && !duplicateBeforeReservation) {
-      const session = await storage.adapter.openPreviewInputSession<PortablePreviewDestination>({
-        owner: owner(command.ownerUserId),
-        kind: command.kind,
-        previewHandle: command.previewHandle as PortablePreviewHandle<PortablePreviewDestination>,
-        claim: { leaseOwner: options.leaseOwner, leaseSeconds },
-        limits: inputLimits()
-      });
       try {
-        assetArtifacts = command.kind === "campaign_zip"
-          ? await families.extractCampaignZipAssets(session.chunks, previewAuthority.authority)
-          : await families.extractLegacyStoryAssets(
-            session.chunks,
-            previewAuthority.authority,
-            legacyStoryCompanions,
-          );
-        await session.finalize("eof");
+        const session = await storage.adapter.openPreviewInputSession<PortablePreviewDestination>({
+          owner: owner(command.ownerUserId),
+          kind: command.kind,
+          previewHandle: command.previewHandle as PortablePreviewHandle<PortablePreviewDestination>,
+          claim: { leaseOwner: options.leaseOwner, leaseSeconds },
+          limits: inputLimits()
+        });
+        try {
+          assetArtifacts = command.kind === "campaign_zip"
+            ? await families.extractCampaignZipAssets(session.chunks, previewAuthority.authority)
+            : await families.extractLegacyStoryAssets(
+              session.chunks,
+              previewAuthority.authority,
+              legacyStoryCompanions,
+            );
+          await session.finalize("eof");
+        } catch (error) {
+          await session.finalize("read_failure").catch(() => undefined);
+          throw error;
+        }
       } catch (error) {
-        await session.finalize("read_failure").catch(() => undefined);
-        throw error;
+        await authority.abort(
+          owner(command.ownerUserId),
+          command.previewHandle.token,
+        ).catch(() => undefined);
+        throw new Error(safeDiagnostic(error));
       }
     }
     const commitIdempotencyKeyHash = sha256(command.idempotencyKey);
@@ -2141,7 +2235,14 @@ export async function createPortableImportExportComposition(
                 ...(assetArtifacts[index]!.legacyTurnBindings
                   ? { legacyTurnBindings: assetArtifacts[index]!.legacyTurnBindings }
                   : {}),
-                records: assetArtifacts[index]!.records.map(({ archivePath: _archivePath, ...record }) => record),
+                records: assetArtifacts[index]!.records.map(({ archivePath: _archivePath, ...record }) => ({
+                  ...record,
+                  // Source archives may use the established base64-derived
+                  // checksum convention. Publication identity is always the
+                  // normalized raw-byte digest, while source-record identity
+                  // above continues to retain the exact imported metadata.
+                  contentHash: result.contentHash
+                })),
                 result,
                 normalizedChildren: plannedAssets[index]!.children
               }));
@@ -2165,14 +2266,26 @@ export async function createPortableImportExportComposition(
           );
           mutation = attached.value;
         } else {
-          mutation = command.kind === "story_text"
-            ? await mutations.commitStoryText(database, mutationInput)
-            : await mutations.commitWorld(database, {
+          if (command.kind === "campaign_zip") {
+            mutation = await mutations.commitCampaignZip(database, {
+              ...mutationInput,
+              publishedAssets: [],
+            });
+          } else if (command.kind === "legacy_story") {
+            mutation = await mutations.commitLegacyStory(database, {
+              ...mutationInput,
+              publishedAssets: [],
+            });
+          } else if (command.kind === "story_text") {
+            mutation = await mutations.commitStoryText(database, mutationInput);
+          } else {
+            mutation = await mutations.commitWorld(database, {
               owner: mutationInput.owner,
-              kind: command.kind as "infinite_worlds" | "cyoa" | "world_json" | "world_text",
+              kind: command.kind,
               authorityFingerprint: mutationInput.authorityFingerprint,
               payload: mutationInput.payload
             });
+          }
         }
         claim = await authority.updateProgress(database, claim, {
           phase: "committing",

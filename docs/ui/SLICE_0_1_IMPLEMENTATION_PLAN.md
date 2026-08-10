@@ -56,8 +56,9 @@ contradictory.
 
 ## Completion status
 
-Runtime implementation reviewed through `57147c7` and Task 12 operational
-documentation aligned through `8593e3e` on branch `wip/main-uncommitted`.
+Runtime implementation is complete through the Task 14f backend audit on branch
+`wip/main-uncommitted`. Task 15/U1 is explicitly authorized; later Track U
+tasks remain ordered by their own dependencies.
 None of Track C is merged to `main` yet; `main` is at `ad73dc1` and does not
 contain this plan.
 
@@ -90,9 +91,23 @@ contain this plan.
 | Task 14b | B5b — Chronicle memory and embeddings (removes 1) | **Complete** | `3e0dc8b` through `d32cefb`; 14b1–14b4 contracts, direct bindings, PostgreSQL matrix, atomic cutover, and completion audit independently approved; the current controller evidence is 1,228 unit/271 integration/check/build/diff/precheck passed |
 | Task 14c | B5c — worlds, versions, campaign management (removes none) | **Complete** | `dc1de51` through `7919741`; contracts, PostgreSQL adapters, atomic route/runtime cutover, legacy removal, and parity audit independently approved |
 | Task 14d | B5d — providers and prompt configuration (removes none) | **Complete** | `9ecc654` through `6197b14`; contracts, PostgreSQL adapters, atomic API/worker cutover, legacy removal, and parity/security completion audit independently approved |
-| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **In progress** | 14e1 through 14e3d complete; 14e3e illustration/import writers and worker composition is next |
-| Task 14f | Backend completion audit / UI authorization | Not started | — |
-| Task 15–20 | U1-U6 — replacement UI | Blocked on Task 14f | — |
+| Task 14e | B5e — imports, exports, archives, assets (removes 1) | **Complete** | 14e1 through 14e4 accepted; final 147-file/1,568-unit and 58-file/635-integration verification, zero skips |
+| Task 14f | Backend completion audit / UI authorization | **Complete** | `docs/review/2026-08-10-backend-completion-audit.md`; zero cross-role/temporary inventories, C0 benchmarks, rendered manifests, same-image role smoke, rollback/recovery evidence |
+| Task 15–20 | U1-U6 — replacement UI | **Task 15/U1 authorized** | Backend gate passed 2026-08-10; Tasks 16–20 retain their declared Track U order |
+
+**Current Task 14f verification (2026-08-10, complete; backend audit
+approved).** The complete backend inventory has zero cross-role allowlist
+entries, zero retired authority imports/files, zero temporary runtime
+collaborators, and zero private-composition/capacity violations. Current C0
+evidence records B2 p95 7.680 ms, B3 concurrency 1/2/4 throughput
+27.759385/51.782043/91.014247 jobs/s with the duplicate-turn guard passing,
+and zero-error bounded B4b routes/plans. Compose and Swarm render; one clean
+production image passes all/API/worker role smoke and initial-owner bootstrap.
+Final verification passed `pnpm check`, `pnpm build`, 147 files / 1,568 unit
+tests, 58 isolated files / 635 PostgreSQL integration tests, zero skips,
+`git diff --check`, and projectmem precheck. The named audit is
+`docs/review/2026-08-10-backend-completion-audit.md`. **Task 15/U1 is
+authorized.**
 
 **Current Task 11 verification (2026-08-04, complete; scoped review
 approved).** Commit `d76beb8395b2f437cd21bb9718922d41e654c091`
@@ -9493,12 +9508,251 @@ individually blocked from normalized reuse.
 Only after every e8a–e8d matrix passes may Task 14e3f add production-composed
 parity; Task 14e3g remains the sole atomic live switch.
 
-**14e3f — production-composed parity before switch.** With legacy bindings
-still active, add real-Fastify, real-worker, and real-PostgreSQL matrices for
-each route family, local owner/cross-owner behavior, idempotency,
-preview/commit atomicity, restart original/thumbnail delivery, image rollback,
-backfill/reaper races, archive limits, export streaming cleanup, and safe error
-projection.
+**14e3f — production-composed parity before switch.** This is the final
+evidence checkpoint before the one atomic binding change in e3g. It is
+test/fixture/diagnostic work only: the legacy Fastify and worker bindings stay
+active throughout this task, while the named e3e0–e3e7 compositions are
+constructed independently against the same real PostgreSQL and temporary
+filesystem fixtures. Do not add a route option, environment flag, default
+factory substitution, hidden test-only runtime branch, public barrel, worker
+lane, deployment setting, or compatibility callback that can cause a request
+or worker tick to select the new graph. e3g remains the sole place that may
+modify `server.ts`, `archive-routes.ts`, `runtime-role.ts`, `main.ts`,
+`illustration-composition.ts`, `illustration-platform-*`, `worker.ts`, pool
+formulas, or deployment manifests.
+
+The parity oracle is not equality of implementation-private IDs, paths,
+requests, leases, or byte-for-byte ZIP artifacts. For each family, compare the
+observable HTTP/worker outcome and the authoritative database/filesystem
+projection: status and response schema; accepted duplicate/idempotency result;
+owner/world/version/campaign/turn scope; committed versus no-op/rolled-back
+row counts and references; delivery bytes and MIME/ETag where applicable; and
+only allowlisted safe error code/details. Assert the named private composition
+separately satisfies the corresponding durable lifecycle invariant; never
+reroute a Fastify handler or live worker lane to obtain the comparison. Use one
+fresh fixture per side or a reproducible snapshot/reset so the active legacy
+write cannot become the private composition's setup state.
+
+Implement and independently review all of the following before e3g:
+
+1. **e3f-a — freeze the active binding and route inventory.** Add an
+   executable inventory based on a real `buildServer` instance and the real
+   `runWorker`/`defaultOptionalLanes` construction path. It must name the
+   current active authorities: `asset-service.ts` asset read/library-selection
+   and API metadata/backfill helpers; `asset-archive-service.ts`,
+   `campaign-archive-service.ts`, `import-service.ts`, and
+   `infinite-worlds-import-service.ts`; the legacy illustration asset adapter;
+   and the worker's `runAssetMetadataBackfill` optional lane. It must also name
+   the nine private e3e0–e3e7 entry points frozen by e8 (secure storage,
+   normalized publication, illustration publication, portable-normalized
+   publication, portable import/export, metadata backfill, filesystem
+   recovery, scheduler, and maintenance composition). Assert that no private
+   factory is invoked by the real API/all/worker role during this task, no
+   private contract reaches a public response, and the e8 boundary/budget
+   guard still rejects an added live consumer.
+
+   The Fastify inventory must exercise—not merely search source for—the active
+   import/archive/asset/illustration surfaces that e3g will cut over:
+
+   - `POST /api/v1/imports/legacy-story/preview`, `POST
+     /api/v1/imports/legacy-story`, Campaign ZIP preview and JSON commit, and
+     `GET /api/v1/campaigns/:campaignId/export`;
+   - `POST /api/v1/imports/world/preview`, `POST /api/v1/imports/world`,
+     Infinite Worlds preview/commit, and progress projection when the existing
+     asynchronous import contract exposes it;
+   - original and thumbnail delivery, asset listing/facets, library metadata,
+     world-cover selection, and turn-illustration selection; and
+   - every illustration config, enqueue/read/retry, cover, turn-image,
+     segment, backfill preview/commit, resolution, and rematch route registered
+     by `server.ts`.
+
+   For each endpoint, capture only its stable public contract (method, path,
+   status categories, validated input boundary, and response schema/header
+   requirements). The test must fail if a protected endpoint is silently
+   dropped, replaced by an unlisted route, or starts exposing a path, storage
+   descriptor, bearer grant, credential, raw provider/archive error, private
+   handle, or browser-supplied owner identity.
+
+2. **e3f-b — real Fastify legacy-contract matrix.** Use real Fastify
+   `app.inject`, the normal multipart plugin, a real PostgreSQL pool, and a
+   temporary anchored asset/archive filesystem. Do not call route handlers
+   directly or replace active services with mocks. Establish same-owner
+   create/read/retry/duplicate behavior and a foreign-user database fixture for
+   every resource-bearing family; requests must remain bound to the resolved
+   initial owner even if body, query, or headers contain a different `user_id`,
+   owner-like field, or imported source-installation ID. Foreign campaign,
+   world/version, turn, image job, asset, archive preview token, and import
+   progress state must return the existing safe denial/not-found projection and
+   never create a reference, mapping, file, or readable delivery grant.
+
+   Prove preview/commit discipline for Legacy Story, Campaign ZIP, World JSON,
+   and Infinite Worlds: malformed/expired/superseded/foreign preview state
+   cannot commit; an accepted commit creates its exact scoped result once;
+   same idempotency/fingerprint replay returns the public duplicate result;
+   altered destination, payload, or owner cannot reuse the token/key; and a
+   commit fault leaves no partial world/campaign/turn/context/reference/asset
+   mutation. Cover inline and companion image inputs, safe external optional
+   image omission, malformed/oversize/decode-rejected optional-image omission,
+   and required archive image failure with the same public warning/error
+   semantics as the active route.
+
+   Exercise archive containment and lifecycle through multipart traffic:
+   body/file/field limits, compressed/uncompressed/entry/ratio/JSON/original
+   image limits, duplicate and malformed container errors, staging cleanup after
+   preview failure, preview expiry cleanup, and export stream close/error/abort
+   cleanup. Successful export must remain a private, no-store attachment with
+   valid bytes and the expected content-disposition/type headers; its generated
+   artifact must be removed or retried according to the active cleanup policy.
+   Assert route errors use the API envelope and allowlisted diagnostic details
+   only, including a forced filesystem/archive/provider-style failure.
+
+3. **e3f-c — active worker parity and production-role lifecycle.** Start the
+   real worker loop with a real pool, normal `RuntimeConfig`, real worker
+   illustration/generation/memory applications or their existing deterministic
+   provider fixtures, and the unmodified default optional-lane path. The test
+   must prove the active asset lane is still the legacy
+   `runAssetMetadataBackfill` authority and that no e5/e6/e7 private factory is
+   constructed or scheduled before e3g. It must also prove bounded lane
+   concurrency, poll/no-work behavior, fault isolation, SIGINT/AbortSignal
+   drain, and restart behavior without changing the live worker's scheduling
+   contract.
+
+   In adjacent, separately constructed private-composition fixtures, execute
+   the equivalent durable work that e3g will later route into the worker:
+   original metadata/thumbnail backfill, attached finalization, cleanup-pending
+   recovery, and capacity-one scheduler rotation/abort/drain. Compare only the
+   authoritative completion/rollback/retry projection. Cover fresh-process
+   restart after (a) an original is attached before finalization, (b) a
+   thumbnail is attached before finalization, (c) cleanup is claimed but not
+   completed, and (d) a worker/scheduler unit is aborted. A completed image or
+   import must not be decoded, downloaded, published, or domain-mutated again
+   solely to finish durable finalization or cleanup.
+
+4. **e3f-d — cross-composition race, rollback, and delivery matrix.** With
+   two real pools/independent composition instances and a controlled temporary
+   filesystem, run adversarial interleavings rather than only sequential happy
+   paths. Cover same-key concurrent publication/import, same-content different
+   owners, foreign or stale request/operation/claim/finalization identifiers,
+   lease expiry and claim handoff, post-commit finalization fault, rollback
+   after one of several assets is prepared, and reaper/recovery racing an active
+   attach/finalize. Assert there is one logical result per owner-scoped request,
+   content retention remains safe for globally shared physical bytes, canonical
+   owner-library data is not overwritten by a later request, no losing/expired
+   operation gains a durable mapping/reference/derivative, and no cleanup
+   deletes a still-referenced path.
+
+   Verify delivery after a fresh construction for original and thumbnail bytes:
+   correct owner can receive the expected bytes/MIME/ETag once the durable
+   lifecycle permits it; foreign owner, stale/expired grant, missing derivative,
+   and pre-finalized attachment cannot receive bytes or a raw locator. Image
+   publication rollback must leave the image job/turn/segment/world-cover state
+   in its prior durable state while an illustration failure never reverses an
+   otherwise accepted story turn. Include backfill-versus-reaper and
+   import-versus-recovery races explicitly; a generic assertion that a focused
+   e5/e6 suite previously passed is not enough.
+
+5. **e3f-e — deployment, pool, and safe-boundary parity proof.** Build the
+   API, worker, and all-role graphs through the same role dispatch used by
+   production, with an observed supplied pool. Verify there is no second pool,
+   no retained checked-out client across Fastify request success/failure/abort,
+   active worker lane success/fault/drain, or adjacent private recovery work;
+   preserve the e8 executable `generation + 4` worker and `generation + 8`
+   all-role budgets. Re-run the exact e8 graph/capacity guard against
+   `config.ts`, worker, Compose, and Swarm and add hostile probes proving a
+   private factory import, extra maintenance lane, changed pool formula, or
+   manifest-only connection change is rejected. The e3f fixture may observe
+   these production graphs but must not alter their defaults.
+
+   Use a checked-in `test:e3f:integration` runner that launches each named
+   real-PostgreSQL Fastify/worker/private-race matrix in a separate
+   config-driven Vitest process and isolated database or schema. It must fail
+   the whole command if a child fails and include the e8 isolated private matrix
+   as an adjacent prerequisite, not conflate fixture interference with product
+   parity. Required evidence is the focused e3f runner, relevant existing
+   e3e0–e8 matrices, unit/boundary guards, `pnpm check`, `pnpm build`,
+   `git diff --check`, and `pjm precheck`; record unavailable integration
+   infrastructure or cross-file fixture collisions separately.
+
+**e3f next-agent handoff — reviewed 2026-08-09.** The worktree remains on the
+pre-e3g legacy production bindings. e3f-a's executable production-binding
+inventory and export-abort guard are implemented, and the focused boundary
+suite passes 8/8. e3f-b and e3f-c have substantial real-Fastify,
+default-worker, private-recovery, restart, delivery, and supplied-pool coverage
+in the isolated runner, but remain partial until the complete runner and final
+independent review pass. e3f-e is complete on the evidence recorded below.
+
+The interrupted e3f-d work has progressed past the original defect. The
+two-pool same-key case now returns one logical duplicate result and proves one
+request, one canonical asset, and one filesystem operation; projectmem issue
+`#0773` is closed. The delivery-oracle mismatch is also resolved without an
+e3g production-binding change:
+
+- `#0774` is complete. Privately published content correctly uses the
+  extensionless content-addressed path `assets/content/<hash>`; the pre-e3g
+  legacy Fastify `readAsset` path remains extension-dependent and is therefore
+  not the oracle for this asset. The fresh
+  `createAssetImportStorageComposition(pool, roots)` finalized-delivery and
+  secure-session path now verifies a safe descriptor (ETag and length), grant
+  redemption, owner-only access, MIME type, bytes, bounded-session
+  finalization, and foreign-owner denial. No extension was added, no legacy
+  `readAsset` behavior was relaxed, and no live route was switched; e3g still
+  owns that cutover.
+
+`#0775` is complete: the malformed-finalization negative probe now explicitly
+brands its test-only random value as `PrivateNormalizedAssetFinalizationHandle`,
+and `pnpm check` passes without weakening the production port type.
+
+Independent review on 2026-08-09 initially rejected e3f completion without
+identifying a live-binding change. The resulting gaps are now covered: the
+live-binding guard includes `illustration-platform-adapter.ts` and
+`illustration-platform-bindings.ts`; the runner invokes the live e8
+graph/capacity boundary suite; real Fastify World JSON preview/commit/replay,
+altered-input, foreign-owner, rollback, and import-progress projections are
+exercised; and the e3f-d matrix contains durable Campaign ZIP
+import-versus-recovery and thumbnail backfill-versus-recovery interleavings.
+
+The thumbnail physical-finalization interleaving exposed projectmem `#0777`:
+an e5 claim could reuse an e6-finalized derivative and complete the job while
+leaving its publication projection attached. The completion transaction now
+publishes the matching attached projection before marking the job complete. Its
+focused real PostgreSQL regression, `pnpm check`, `pnpm build`,
+`git diff --check`, and `pjm precheck` pass.
+
+**14e3f — accepted (2026-08-09).** The final independent e3f-a–e3f-e review
+accepted the complete matrix. `#0777` closes the thumbnail
+physical-finalization projection race; `#0778` closes same-key Campaign ZIP
+replay cleanup against the winner's attached/finalizing or published
+reservation. The focused regressions, full e3e4 prerequisite, full
+`test:e3f:integration`, `pnpm check`, `pnpm build`, `git diff --check`, and
+`pjm precheck` pass. No e3g-owned production binding changed. `#0776` and
+`#0761` are closed.
+
+**Next agent: begin 14e3g only.** Make the one reviewed atomic production
+binding switch described below, preserving Fastify parsing/validation,
+server-resolved ownership, response mapping, and worker scheduling. Do not
+start e3h legacy removal or e4 work until the e3g switch has its own complete
+test and review evidence.
+
+**e3f-e status — complete (2026-08-09).** The checked-in runner constructs
+the API, worker, and all-role graphs with observed supplied pools. It records
+native idle/waiter/budget counters after active Fastify success/safe failure,
+legacy worker fault/success AbortSignal drain, and separately constructed
+private-recovery fault/restart success; it does not alter a production default.
+The active e8 prerequisite and e3f hostile cases reject a private live import,
+extra live maintenance lane, `generation + 5`/`+9` pool-formula drift, and
+connection-only regressions in both Compose and Swarm. Two complete isolated
+`test:e3f:integration` runs passed after this proof. The later independent
+review accepted the complete e3f-a–e3f-e gate, including the adversarial
+publication/import/reaper matrix and its #0777/#0778 regressions.
+
+**Acceptance boundary:** e3f is complete only when an independent review can
+trace every active route/worker family to an executable legacy-contract case
+and every corresponding named private lifecycle to a separately executable
+durable-parity case, with the inventory proving neither graph became live. A
+passing direct-private suite, mocked Fastify handler, source-text-only route
+list, or worker test that injects all optional lanes is insufficient. The
+review must verify the complete e3f diff did not change a production binding;
+if it did, revert that binding from this task and defer it to e3g.
 
 **14e3g — one atomic production binding switch.** In one reviewed commit,
 migrate `server.ts`, `archive-routes.ts`, runtime illustration composition, and
@@ -9508,6 +9762,21 @@ scheduling. Remove the worker-to-API `asset-service` import and its
 `CROSS_ROLE_IMPORT_ALLOWLIST` entry. No anonymous compatibility callback or
 browser-supplied owner may remain.
 
+**14e3g — accepted (2026-08-10).** The API asset, World JSON, Legacy Story,
+Infinite Worlds, Campaign Archive, progress, export-stream, illustration
+publication, and worker-maintenance bindings now use their named PostgreSQL and
+runtime compositions. Fastify retains transport validation and server-resolved
+ownership; the worker retains capacity-one lane scheduling and no longer
+imports API asset authority. The focused production-binding suites pass 15/15
+unit and 1/1 real-PostgreSQL cases. The isolated `test:e3f:integration` runner,
+including its e8 graph prerequisite and 17-case composed parity matrix, passes
+after closing metadata-discovery fixture issues `#0810`, `#0813`, `#0814`, and
+`#0815`. `pnpm check`, `pnpm build`, `git diff --check`, complete cutover-diff
+review, and `pjm precheck` pass. Repowise flags the expected high-churn
+`server.ts`/worker surface and lacks coverage mapping for new untracked files;
+the named e3g unit/integration suites and executable boundary guards provide
+the direct evidence. Begin 14e3h only.
+
 **14e3h — legacy authority removal and inventory.** After 14e3f/14e3g tests,
 delete or reduce `asset-service.ts`, `asset-archive-service.ts`,
 `campaign-archive-service.ts`, `import-service.ts`,
@@ -9516,6 +9785,20 @@ consumer to documented transport/runtime work. Re-run consumer/function/import
 inventory and assert no old callable authority, temporary runtime binding,
 cross-role exception, raw path, or raw filesystem error is reachable. This
 closes #0446; only then may 14e4 begin.
+
+**14e3h — accepted (2026-08-10).** The six retired API authority files are
+absent from `services/api`; their pre-cutover regression oracles are isolated
+under `tests/legacy-api` and no application, package, service, runtime script,
+or benchmark imports them. `check-legacy-authority-removal.mjs` is part of the
+repository boundary command and rejects either a restored retired file or any
+static, dynamic, re-export, or CommonJS edge to its former path. The cross-role
+allowlist is empty. Campaign Archive export now uses the named owner-scoped
+PostgreSQL/runtime composition, serializes queries on its one repeatable-read
+transaction client, validates raw and legacy image identities, and consumes a
+bounded private asset session. Focused legacy-oracle and replacement tests,
+the complete isolated `test:e3f:integration` runner, `pnpm check`, `pnpm build`,
+`git diff --check`, `pjm precheck`, and the minimal documented play-loop
+benchmark all pass. Begin 14e4 only.
 
 **14e4 — parity, security, and completion audit.** Re-measure the complete
 function/import/allowlist inventory and prove each old callable authority is
@@ -9532,7 +9815,7 @@ suites plus check, build, diff, precheck, and independent review. Record the
 remaining cross-role allowlist count (it must be zero) and the exact safe
 diagnostic behavior for Task 14f.
 
-- [ ] Treat each numbered domain and its four frozen checkpoints as a
+- [x] Treat each numbered domain and its four frozen checkpoints as a
   separately briefed/reviewed commit series. Re-measure route/function/import
   counts at checkpoint start and record drift, but do not defer architecture or
   file ownership to a future planning task.
@@ -9547,9 +9830,21 @@ diagnostic behavior for Task 14f.
 - [x] Provider extraction never shares text/image secrets or silently falls back
   between roles. Import/export extraction assigns imports to the server-resolved
   user and treats portable source IDs as provenance only, never authorization.
-- [ ] Every domain adds pure use-case tests, adapter contract tests, real-
+- [x] Every domain adds pure use-case tests, adapter contract tests, real-
   PostgreSQL transaction/isolation tests where applicable, and no-cross-role
   import assertions before the previous service implementation is removed.
+
+**14e4 — accepted (2026-08-10).** The final inventory scans 246 production
+candidates with zero retired-authority, private-composition, capacity, or
+client-boundary violations; all six retired API authority files are absent and
+the asserted cross-role allowlist count is zero. Pure/application, adapter,
+Fastify, and PostgreSQL matrices cover ownership, provenance-only source IDs,
+archive/asset limits and attacks, rollback/retry/expiry/crash recovery,
+metadata backfill, and independent image failure. Safe archive and asset
+diagnostics are closed allowlists and raw paths/errors never cross the boundary.
+Repository data safety, full 147-file/1,568-unit and 58-file/635-integration
+suites, check, build, diff, and scoped architecture review pass with zero skips.
+Task 14e is complete; proceed only to Task 14f.
 
 **Backend modularity completion criteria:**
 
@@ -9570,46 +9865,46 @@ diagnostic behavior for Task 14f.
 It audits the complete backend result; it does not implement framework routes,
 components, styles, browser visual tests, or any other `apps/web-next` UI work.
 
-- [ ] Verify API and worker roles have no implementation imports from one
+- [x] Verify API and worker roles have no implementation imports from one
   another across every extracted domain; record the exact boundary command and
   reviewed exceptions (normally none).
-- [ ] Prove both cleanup inventories reach zero: the one remaining Task 14
+- [x] Prove both cleanup inventories reach zero: the one remaining Task 14
   cross-role asset allowlist entry and every temporary runtime collaborator
   recorded by 10d or Tasks 14a-14c. Run the boundary scanner, search runtime
   composition for each recorded legacy symbol, and fail the audit on any
   anonymous replacement callback or unowned exception.
-- [ ] For every current business source named in the 14a-14e inventories, record
+- [x] For every current business source named in the 14a-14e inventories, record
   one disposition: deleted, reduced to a transport adapter, or replaced by a
   named application/database/runtime module. Verify no old and new callable
   implementations remain reachable. Infrastructure-only `request-security.ts`,
   `archive-routes.ts`, `archive-io.ts`, `admission-service.ts`, and
   `app-metadata.ts` may remain only within their documented transport/runtime
   responsibilities.
-- [ ] **Assert `CROSS_ROLE_IMPORT_ALLOWLIST` is empty.** This is the crisp,
+- [x] **Assert `CROSS_ROLE_IMPORT_ALLOWLIST` is empty.** This is the crisp,
   machine-checkable form of the criterion above. The list holds the one
   Task-14e worker-to-API asset entry today; 14e must remove it. If it is
   non-empty at this gate, some domain is incomplete
   regardless of what its report claims. Add a test asserting emptiness so the
   condition cannot regress after the audit.
-- [ ] Re-run all pure application, adapter contract, real-PostgreSQL,
+- [x] Re-run all pure application, adapter contract, real-PostgreSQL,
   ownership/isolation, generation-integrity, image-independence, import
   ownership, migration, and deployment smoke suites required by the repository
   specification.
-- [ ] Re-run and record B2 notification query/latency evidence, B3 concurrency
+- [x] Re-run and record B2 notification query/latency evidence, B3 concurrency
   1/2/4 throughput and fairness evidence, and B4b query-plan/payload/p95 evidence
   on the documented test profile. Do not authorize UI work from unit tests alone.
-- [ ] Review each B5a-B5e completion report for exact route/worker/transaction/
+- [x] Review each B5a-B5e completion report for exact route/worker/transaction/
   ownership coverage and confirm old cross-role implementations were removed
   only after replacements passed.
-- [ ] Reconcile architecture, deployment, operations, configuration/secrets,
+- [x] Reconcile architecture, deployment, operations, configuration/secrets,
   migration/rollback, and testing documentation with the shipped backend. Keep
   text/image provider secrets and runtime settings independent in all manifests.
-- [ ] Render Compose and Swarm manifests, run the same-image API/worker/all-role
+- [x] Render Compose and Swarm manifests, run the same-image API/worker/all-role
   smoke, rehearse rollback across any new online migration, and verify listener
   reconnect, worker drain/forced-stop lease recovery, initial-owner bootstrap,
   and separate text/image secret wiring. No UI route, component, style, or
   browser visual artifact may change in this backend audit range.
-- [ ] Run `pnpm check`, `pnpm build`, `pnpm test:unit`,
+- [x] Run `pnpm check`, `pnpm build`, `pnpm test:unit`,
   `pnpm test:integration`, `git diff --check`, complete-diff review, and
   `pjm precheck`; record a named backend audit report with command results,
   exact pass/fail/skip counts, benchmark links, Node/pnpm/PostgreSQL versions,
@@ -9617,7 +9912,7 @@ components, styles, browser visual tests, or any other `apps/web-next` UI work.
   tests to the pre-Task10 baseline; any new skip needs a named blocking issue
   and cannot be used to authorize UI work.
 
-- [ ] **Record the authorization in this plan, not only in the audit report.**
+- [x] **Record the authorization in this plan, not only in the audit report.**
   Flip the Task 14f completion row, add its `Current Task 14f verification`
   block, and state in **Completion status** that Task 15/U1 is authorized. Task
   7d already demonstrated the failure mode: it produced a correct Track C exit

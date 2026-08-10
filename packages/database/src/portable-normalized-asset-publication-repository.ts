@@ -469,7 +469,6 @@ export function createPostgresPortableNormalizedAssetPublicationRepository(
     const authorized = (reason: PrivatePortableNormalizedRetirementReason): boolean => {
       if (reason === "duplicate") {
         return operationRow.status === "committed"
-          && operationRow.result_projection?.duplicate === true
           && operationRow.completed_import
           && ["running", "recoverable", "completed"].includes(workRow.status);
       }
@@ -631,7 +630,6 @@ export function createPostgresPortableNormalizedAssetPublicationRepository(
     const work = selectedWork.rows[0];
     const authorized = input.reason === "duplicate"
       ? operation.status === "committed"
-        && operation.result_projection?.duplicate === true
         && operation.completed_import
         && ["running", "recoverable", "completed"].includes(work?.status ?? "")
       : input.reason === "abandoned"
@@ -660,16 +658,33 @@ export function createPostgresPortableNormalizedAssetPublicationRepository(
         FOR UPDATE`,
       [input.operationId, input.ownerUserId],
     );
-    const initialStates = input.reason === "duplicate"
-      ? ["reserved", "retirement_pending", "retired"]
-      : ["reservation_intent", "reserved", "retirement_pending", "retired"];
-    if (selected.rows.some((row) => !initialStates.includes(row.publication_state)
-      || row.import_kind !== operation.import_kind
+    if (selected.rows.some((row) => row.import_kind !== operation.import_kind
       || row.authority_fingerprint !== operation.authority_fingerprint
       || (input.scope
         && row.commit_idempotency_key_hash !== input.scope.commitIdempotencyKeyHash)
       || (["retirement_pending", "retired"].includes(row.publication_state)
         && row.retirement_reason !== input.reason))) {
+      throw stableError("portable_normalized_publication_retirement_unavailable");
+    }
+
+    // A same-key contender can reserve the winner's request after the winner
+    // releases its physical-content lock, including before finalization
+    // completes. That handle owns no unpublished candidate, so its duplicate
+    // cleanup must retain the winner's durable projection rather than retire
+    // it.
+    if (input.reason === "duplicate"
+      && selected.rows.length > 0
+      && selected.rows.every((row) => (
+        row.publication_state === "committed_finalization_pending"
+        || row.publication_state === "published"
+      ))) {
+      return;
+    }
+
+    const initialStates = input.reason === "duplicate"
+      ? ["reserved", "retirement_pending", "retired"]
+      : ["reservation_intent", "reserved", "retirement_pending", "retired"];
+    if (selected.rows.some((row) => !initialStates.includes(row.publication_state))) {
       throw stableError("portable_normalized_publication_retirement_unavailable");
     }
 

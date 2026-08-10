@@ -172,7 +172,7 @@ function hasRuntimeImport(source: string, apiFilePath: string): boolean {
 }
 
 describe("createApiIllustrationApplication", () => {
-  it("14a3: keeps production API TypeScript free of runtime imports except the audited compatibility re-export", async () => {
+  it("keeps API-to-runtime imports confined to the audited e3g composition roots", async () => {
     const apiRoot = dirname(new URL("../../services/api/src/illustration-application-adapter.ts", import.meta.url).pathname);
     const productionFiles = await productionTypeScriptFiles(apiRoot);
 
@@ -194,8 +194,8 @@ describe("createApiIllustrationApplication", () => {
     expect(sources.filter(({ file, path, source }) => (
       file !== "portable-archive-filesystem-adapter.ts"
       && hasRuntimeImport(source, path)
-    )))
-      .toEqual([]);
+    )).map(({ file }) => file).sort())
+      .toEqual(["archive-routes.ts", "server.ts"]);
   });
 
   it("recognizes every TypeScript import form that resolves from API source into runtime", () => {
@@ -236,7 +236,7 @@ describe("createApiIllustrationApplication", () => {
         () => reject(new Error("runtime import scan did not terminate")),
         250,
       )),
-    ])).resolves.toBe(false);
+    ])).resolves.toBe(true);
   });
 
   it("14a3: exposes no callable retired API illustration job service", async () => {
@@ -330,7 +330,7 @@ describe("createWorkerIllustrationApplication", () => {
     expect(source).not.toContain('from "../../api/src/illustration-application-adapter.js"');
   });
 
-  it("binds concrete provider, artifact, and asset ports into the separate worker application", () => {
+  it("binds provider and artifact ports without the retired asset writer", () => {
     const pool = {} as DatabasePool;
     const store = { root: "/var/lib/infinitequest/assets" };
     const lanes = {} as IllustrationWorkerLanes;
@@ -338,12 +338,7 @@ describe("createWorkerIllustrationApplication", () => {
     const ports = {
       imageProvider: { executeImage: vi.fn() },
       promptRefinement: { refinePrompt: vi.fn() },
-      artifactDownload: { downloadArtifact: vi.fn() },
-      assets: {
-        persistTurnIllustration: vi.fn(),
-        persistWorldCover: vi.fn(),
-        bindSegmentAsset: vi.fn()
-      }
+      artifactDownload: { downloadArtifact: vi.fn() }
     };
     const state = {} as IllustrationWorkerStateMachinePort;
     const application = {} as IllustrationWorkerApplication;
@@ -358,12 +353,11 @@ describe("createWorkerIllustrationApplication", () => {
 
     expect(createWorkerIllustrationApplication(
       pool,
-      store,
       providers,
       factories
     )).toBe(application);
     expect((factories as unknown as { createPorts: ReturnType<typeof vi.fn> }).createPorts)
-      .toHaveBeenCalledWith(pool, store, providers);
+      .toHaveBeenCalledWith(pool, providers);
     // The default execution lanes must receive the same typed ports exposed
     // by the worker application; otherwise those adapters are test-only
     // delegation while legacy handlers bypass them in production.

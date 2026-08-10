@@ -11,6 +11,7 @@ import {
   checkPortableCompositionBoundaries,
   checkPortableCompositionInventory
 } from "./check-portable-composition-boundaries.mjs";
+import { checkLegacyAuthorityRemoval } from "./check-legacy-authority-removal.mjs";
 
 const output = execFileSync(
   "git",
@@ -29,9 +30,8 @@ const LEGACY_MIGRATION_ALLOWLIST = [
   "apps/web/public/nexus.js",
   "packages/contracts/src/imports.ts",
   "packages/domain/src/infinite-worlds.ts",
+  "packages/domain/src/legacy-story-world.ts",
   "services/api/src/archive-routes.ts",
-  "services/api/src/import-service.ts",
-  "services/api/src/infinite-worlds-import-service.ts",
   "services/api/src/server.ts",
   "packages/database/src/portable-import-family-repository.ts",
   "services/runtime/src/portable-import-export-composition.ts"
@@ -135,6 +135,7 @@ for (const file of files) {
 violations.push(...checkAssetImportStorageCompositionInventory(sourceInventory));
 violations.push(...checkPrivateAssetMaintenanceBoundaries(sourceInventory));
 violations.push(...checkPortableCompositionInventory(sourceInventory));
+violations.push(...checkLegacyAuthorityRemoval(sourceInventory));
 
 for (const migrationFile of LEGACY_MIGRATION_ALLOWLIST) {
   if (!files.includes(migrationFile)) {

@@ -1,3 +1,4 @@
+/** Frozen pre-14e3g import regression oracle; never production authority. */
 import { randomUUID } from "node:crypto";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
@@ -7,20 +8,19 @@ import { campaignArchiveCommitRequestSchema, campaignArchiveDestinationSchema, c
 import { storyLengthProfileFromUnknown } from "../../../packages/contracts/src/story-settings.js";
 import { buildTurnFictionMemory, formatLegacySummary, turnNarration } from "../../../packages/story-engine/src/chronicle.js";
 import { estimateTokens, removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
+import { legacyWorldContent } from "../../../packages/domain/src/legacy-story-world.js";
 import { campaignCharacterSeed, campaignProfileFromCharacter, characterSnapshot } from "../../../packages/domain/src/world-characters.js";
 import { buildScopedEntityCatalog, resolveEntityMetadata } from "../../../packages/domain/src/entity-references.js";
 import type { MemoryGenerationTransactionPort } from "../../../packages/application/src/memory/index.js";
 import { normalizeCampaignStateSnapshot, normalizeCampaignTrackers } from "../../../packages/domain/src/campaign-trackers.js";
 import {
-  canonicalizeWorldContent,
   playableCharacterSchema,
   worldContentSchema,
-  WORLD_CONTENT_SCHEMA_VERSION,
   type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
 import { cleanupUnreferencedCreatedPaths, persistArchiveAssets, restoreAssetBindings, type ArchiveIdMap } from "./asset-archive-service.js";
 import { detectMimeType, lockOriginalImages, parseDataImage, persistTurnImage, persistWorldCover, importTurnImage, safeExternalImageUrl, type FilesystemAssetStore } from "./asset-service.js";
-import { ArchiveError, rehydratePersistedStagedArchive } from "./archive-io.js";
+import { ArchiveError, rehydratePersistedStagedArchive } from "../../../services/api/src/archive-io.js";
 import { campaignArchiveApplicationVersion, cleanupArchivePreviewStaging, cleanupExpiredArchivePreviews, decodeCampaignArchive, portableWorldContentHash, type ArchiveCleanupLogger, type DecodedCampaignArchive } from "./campaign-archive-service.js";
 
 export type CampaignArchiveImportResult = {
@@ -216,41 +216,7 @@ function campaignTitle(story: LegacyStory): string {
   return story.campaign?.title?.trim() || worldTitle(story);
 }
 
-export function legacyWorldContent(story: LegacyStory, requestedSelectedCharacterId?: string): WorldContent {
-  const provenance = story.storyImportProvenance && typeof story.storyImportProvenance === "object" && !Array.isArray(story.storyImportProvenance)
-    ? story.storyImportProvenance as Record<string, unknown>
-    : {};
-  const provenanceCharacterId = typeof provenance.selectedCharacterId === "string" ? provenance.selectedCharacterId.trim() : "";
-  const characterText = String(story.world.character || "").trim();
-  const characterName = (typeof provenance.selectedCharacterName === "string" && provenance.selectedCharacterName.trim()
-    ? provenance.selectedCharacterName.trim()
-    : characterText.split(/\r?\n/).find((line) => line.trim())?.trim() || "Default character").slice(0, 200);
-  const selectedCharacterId = requestedSelectedCharacterId?.trim() || provenanceCharacterId || `legacy-import-character-${sha256(stableStringify({
-    characterText,
-    rpgStats: story.rpgStats ?? [],
-    defaultTriggers: story.defaultTriggers ?? story.baseTrackersAtStart ?? []
-  })).slice(0, 24)}`;
-  const world = { ...story.world, title: worldTitle(story) };
-  delete world.character;
-  return canonicalizeWorldContent({
-    schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
-    world,
-    playableCharacters: [{
-      id: selectedCharacterId,
-      name: characterName,
-      characterText,
-      rpgStats: story.rpgStats ?? [],
-      defaultTriggers: story.defaultTriggers ?? story.baseTrackersAtStart ?? [],
-      source: {
-        type: provenanceCharacterId ? "nexus-campaign-export" : "legacy-campaign-import"
-      }
-    }],
-    rpgStats: [],
-    defaultTriggers: [],
-    eventTriggers: story.eventTriggers ?? [],
-    importedFromLegacyStory: true
-  });
-}
+export { legacyWorldContent };
 
 function sanitizedStoryForHash(story: LegacyStory): Record<string, unknown> {
   const settings = removeProviderSecrets(story.settings);

@@ -44,7 +44,7 @@ const valid: readonly Source[] = [
 ];
 
 describe("Task 14e3e7 maintenance boundaries", () => {
-  it("accepts the named private e5/e6-only composition while it remains unbound", () => {
+  it("accepts the named private e5/e6-only composition and its worker binding", () => {
     expect(check(valid)).toEqual([]);
   });
 
@@ -55,7 +55,7 @@ describe("Task 14e3e7 maintenance boundaries", () => {
       .toEqual(expect.arrayContaining([expect.stringContaining("scheduler contract is missing")]));
   });
 
-  it("rejects direct private scheduler and composition imports outside the named private composition", () => {
+  it("rejects direct private scheduler and composition imports outside their named consumers", () => {
     const privateScheduler = "../../../packages/application/src/assets/private-asset-maintenance-scheduler.js";
     const privateComposition = "../../runtime/src/private-asset-maintenance-composition.js";
     const cases = [
@@ -102,22 +102,17 @@ describe("Task 14e3e7 maintenance boundaries", () => {
       {
         file: "services/api/src/asset-service.ts",
         text: `import { createPrivateAssetMaintenanceComposition } from "${privateComposition}";`,
-        message: "composition must remain unbound until e3g",
-      },
-      {
-        file: "services/worker/src/worker.ts",
-        text: `import { createPrivateAssetMaintenanceComposition } from "${privateComposition}";`,
-        message: "composition must remain unbound until e3g",
+        message: "composition may be consumed only by services/worker/src/worker.ts",
       },
       {
         file: "services/runtime/src/generation-worker-composition.ts",
         text: `import { createPrivateAssetMaintenanceComposition } from "./private-asset-maintenance-composition.js";`,
-        message: "composition must remain unbound until e3g",
+        message: "composition may be consumed only by services/worker/src/worker.ts",
       },
       {
         file: "packages/application/src/index.ts",
         text: `export * from "../../../services/runtime/src/private-asset-maintenance-composition.js";`,
-        message: "composition must remain unbound until e3g",
+        message: "composition may be consumed only by services/worker/src/worker.ts",
       },
       {
         file: "services/runtime/src/private-asset-maintenance-composition.ts",

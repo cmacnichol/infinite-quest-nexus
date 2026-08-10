@@ -1,3 +1,4 @@
+/** Frozen pre-14e3g Infinite Worlds regression oracle; never production authority. */
 import { z } from "zod";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";

@@ -5,6 +5,7 @@ const PRODUCTION_SOURCE = /^(?:apps|packages|services)\//u;
 const JAVASCRIPT_TYPESCRIPT_SOURCE = /\.(?:cjs|cts|js|jsx|mjs|mts|ts|tsx)$/u;
 const STORAGE_COMPOSITION_FILE = "services/runtime/src/asset-import-composition.ts";
 const STORAGE_COMPOSITION_FACTORY = "createAssetImportStorageComposition";
+const API_ASSET_COMPOSITION_FILE = "services/runtime/src/api-asset-composition.ts";
 const ASSET_PUBLICATION_COMPOSITION_FACTORY = "createAssetPublicationComposition";
 const PORTABLE_COMPOSITION_FILE = "services/runtime/src/portable-import-export-composition.ts";
 const NORMALIZED_PUBLICATION_REPOSITORY_FILE = "packages/database/src/normalized-asset-publication-repository.ts";
@@ -21,6 +22,7 @@ const PORTABLE_NORMALIZED_PUBLICATION_CONTRACT_FILE = "packages/application/src/
 const ILLUSTRATION_PUBLICATION_REPOSITORY_FILE = "packages/database/src/illustration-asset-publication-repository.ts";
 const ILLUSTRATION_PUBLICATION_COMPOSITION_FILE = "services/runtime/src/illustration-asset-publication-composition.ts";
 const ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY = "createPrivateIllustrationAssetPublicationComposition";
+const E3G_ILLUSTRATION_CONSUMER = "services/worker/src/worker.ts";
 const ILLUSTRATION_PUBLICATION_CONTRACT_FILE = "packages/application/src/illustration/private-illustration-asset-publication.ts";
 const ILLUSTRATION_LEGACY_RUNTIME_FILES = new Set([
   "services/runtime/src/illustration-image-job-adapter.ts",
@@ -342,8 +344,9 @@ export function checkPrivateStorageBoundaries(file, text) {
       add(node, `private illustration publication repository may be consumed only by ${ILLUSTRATION_PUBLICATION_COMPOSITION_FILE}`);
     }
     if (targetsIllustrationPublicationComposition(normalized, moduleTarget(node))
-      && normalized !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE) {
-      add(node, "illustration publication composition must remain unbound from production consumers");
+      && normalized !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE
+      && normalized !== E3G_ILLUSTRATION_CONSUMER) {
+      add(node, `illustration publication composition may be consumed only by ${E3G_ILLUSTRATION_CONSUMER}`);
     }
     if (isApplicationPublicBarrelFile(normalized)
       && (targetsNormalizedPublicationContract(normalized, moduleTarget(node))
@@ -400,7 +403,7 @@ export function checkPrivateStorageBoundaries(file, text) {
         if ([STORAGE_COMPOSITION_FACTORY, ASSET_PUBLICATION_COMPOSITION_FACTORY].includes(name)
           && normalized !== STORAGE_COMPOSITION_FILE
           && !(name === STORAGE_COMPOSITION_FACTORY
-            && [NORMALIZED_PUBLICATION_COMPOSITION_FILE, METADATA_BACKFILL_COMPOSITION_FILE, FILESYSTEM_RECOVERY_COMPOSITION_FILE].includes(normalized))) {
+            && [NORMALIZED_PUBLICATION_COMPOSITION_FILE, METADATA_BACKFILL_COMPOSITION_FILE, FILESYSTEM_RECOVERY_COMPOSITION_FILE, API_ASSET_COMPOSITION_FILE].includes(normalized))) {
           add(specifier, "private storage composition must remain unconsumed before its named later checkpoint");
         }
         if (name === PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY
@@ -475,8 +478,9 @@ export function checkPrivateStorageBoundaries(file, text) {
         add(node, `portable normalized publication composition may be consumed only by ${PORTABLE_COMPOSITION_FILE} and ${FILESYSTEM_RECOVERY_COMPOSITION_FILE}`);
       }
       if (targetsIllustrationPublicationComposition(normalized, target)
-        && normalized !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE) {
-        add(node, "illustration publication composition must remain unbound from production consumers");
+        && normalized !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE
+        && normalized !== E3G_ILLUSTRATION_CONSUMER) {
+        add(node, `illustration publication composition may be consumed only by ${E3G_ILLUSTRATION_CONSUMER}`);
       }
     }
     if (node.type === "Identifier" && RETIRED_IDENTIFIERS.has(node.name)) {
@@ -492,7 +496,7 @@ export function checkPrivateStorageBoundaries(file, text) {
       if ([STORAGE_COMPOSITION_FACTORY, ASSET_PUBLICATION_COMPOSITION_FACTORY].includes(member.name)
         && normalized !== STORAGE_COMPOSITION_FILE
         && !(member.name === STORAGE_COMPOSITION_FACTORY
-          && [NORMALIZED_PUBLICATION_COMPOSITION_FILE, METADATA_BACKFILL_COMPOSITION_FILE, FILESYSTEM_RECOVERY_COMPOSITION_FILE].includes(normalized))) {
+          && [NORMALIZED_PUBLICATION_COMPOSITION_FILE, METADATA_BACKFILL_COMPOSITION_FILE, FILESYSTEM_RECOVERY_COMPOSITION_FILE, API_ASSET_COMPOSITION_FILE].includes(normalized))) {
         add(member.node, "private storage composition must remain unconsumed before its named later checkpoint");
       }
       if (member.name === PORTABLE_NORMALIZED_PUBLICATION_REPOSITORY_FACTORY
@@ -830,7 +834,8 @@ export function checkAssetImportStorageCompositionInventory(sources) {
   }
   const compositionImports = imports.get(STORAGE_COMPOSITION_FACTORY);
   const compositionCalls = calls.get(STORAGE_COMPOSITION_FACTORY);
-  const storageConsumers = [NORMALIZED_PUBLICATION_COMPOSITION_FILE, METADATA_BACKFILL_COMPOSITION_FILE, FILESYSTEM_RECOVERY_COMPOSITION_FILE];
+  const privateStorageConsumers = [NORMALIZED_PUBLICATION_COMPOSITION_FILE, METADATA_BACKFILL_COMPOSITION_FILE, FILESYSTEM_RECOVERY_COMPOSITION_FILE];
+  const storageConsumers = [...privateStorageConsumers, API_ASSET_COMPOSITION_FILE];
   if (compositionImports.length !== storageConsumers.length
     || storageConsumers.some((consumer) => !compositionImports.some((entry) => (
       entry.file === consumer
@@ -838,9 +843,9 @@ export function checkAssetImportStorageCompositionInventory(sources) {
       && entry.local === STORAGE_COMPOSITION_FACTORY
     )))
     || unsafeExposures.get(STORAGE_COMPOSITION_FACTORY).length !== 0
-    || compositionCalls.filter((file) => file !== STORAGE_COMPOSITION_FILE).length !== storageConsumers.length
-    || storageConsumers.some((consumer) => !compositionCalls.includes(consumer))) {
-    violations.push(`${STORAGE_COMPOSITION_FACTORY} must be consumed directly and exactly once by each named private composition`);
+    || compositionCalls.filter((file) => file !== STORAGE_COMPOSITION_FILE).length !== privateStorageConsumers.length
+    || privateStorageConsumers.some((consumer) => !compositionCalls.includes(consumer))) {
+    violations.push(`${STORAGE_COMPOSITION_FACTORY} must be consumed directly and exactly once by each named private composition and once through the API composition factory`);
   }
   const assetPublicationCompositionDefinitions = definitions.get(ASSET_PUBLICATION_COMPOSITION_FACTORY);
   if (assetPublicationCompositionDefinitions.length !== 1
@@ -929,11 +934,16 @@ export function checkAssetImportStorageCompositionInventory(sources) {
     || illustrationDefinitions[0] !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE) {
     violations.push(`${ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY} must be defined exactly once in ${ILLUSTRATION_PUBLICATION_COMPOSITION_FILE}`);
   }
-  if (illustrationImports.length !== 0
-    || illustrationCalls.length !== 0
-    || illustrationInboundEdges.length !== 0
+  if (illustrationImports.length !== 1
+    || illustrationImports[0]?.file !== E3G_ILLUSTRATION_CONSUMER
+    || illustrationImports[0]?.target !== ILLUSTRATION_PUBLICATION_COMPOSITION_FILE
+    || illustrationImports[0]?.local !== ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY
+    || illustrationCalls.length !== 1
+    || illustrationCalls[0] !== E3G_ILLUSTRATION_CONSUMER
+    || illustrationInboundEdges.length !== 1
+    || illustrationInboundEdges[0] !== E3G_ILLUSTRATION_CONSUMER
     || unsafeExposures.get(ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY).length !== 0) {
-    violations.push(`${ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY} must remain unbound from production consumers`);
+    violations.push(`${ILLUSTRATION_PUBLICATION_COMPOSITION_FACTORY} must be consumed directly and exactly once by ${E3G_ILLUSTRATION_CONSUMER}`);
   }
   return violations;
 }

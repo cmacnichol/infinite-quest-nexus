@@ -13,7 +13,7 @@ import { createPostgresAssetRepositories } from "../../packages/database/src/ass
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
-import { queryAssets as queryLegacyAssets } from "../../services/api/src/asset-service.js";
+import { queryAssets as queryLegacyAssets } from "../legacy-api/src/asset-service.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;

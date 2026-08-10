@@ -39,7 +39,7 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-Set a database password and a long random `CREDENTIAL_ENCRYPTION_KEY`. The encryption key is required before Nexus can safely store provider credentials.
+Set a database password. Docker Compose generates and persists a local credential-encryption key on its first start. You may set `CREDENTIAL_ENCRYPTION_KEY` explicitly when restoring an existing local deployment; keep that key backed up because changing or losing it makes saved provider credentials unreadable.
 
 Start the application and PostgreSQL:
 

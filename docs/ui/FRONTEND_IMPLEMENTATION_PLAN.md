@@ -4,6 +4,14 @@ No dates or effort estimates are given — the repository contains nothing
 (no velocity history, no story-pointed backlog) to support them, per the
 audit template's constraint.
 
+> **Amended by [`CLIENT_CORE_BOUNDARY.md`](./CLIENT_CORE_BOUNDARY.md).**
+> That document adds a framework-agnostic `packages/client-core` package and
+> a **Slice 0** that precedes Slice 1 below. It exists because foundations 2
+> and 3 in this plan ("shared API client", "job-status state machine
+> component/hook") place business logic *inside* the frontend package, which
+> does not meet the goal that the UI be replaceable without rewriting
+> business logic. Everything else in this plan stands unchanged.
+
 ## Recommended frontend architecture
 
 **Component-based SPA with TypeScript, built with Vite, added as a new

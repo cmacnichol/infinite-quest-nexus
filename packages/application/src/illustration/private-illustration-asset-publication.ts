@@ -21,6 +21,12 @@ export type PrivateIllustrationFinalizationRecoveryCommand = Readonly<{
   leaseSeconds: number;
 }>;
 
+/** Scheduler ingress carries no browser identity; the repository selects durable pending work. */
+export type PrivateIllustrationFinalizationSweepCommand = Readonly<{
+  workerId: string;
+  leaseSeconds: number;
+}>;
+
 export type PrivatePublishedIllustrationAsset = Readonly<{
   variantIndex: number;
   assetId: string;
@@ -72,5 +78,8 @@ export interface PrivateIllustrationAssetPublicationCoordinator {
   ): Promise<PrivateIllustrationCompletionOutcome>;
   recoverFinalization(
     command: PrivateIllustrationFinalizationRecoveryCommand,
+  ): Promise<PrivateIllustrationFinalizationRecoveryOutcome>;
+  recoverNextFinalization(
+    command: PrivateIllustrationFinalizationSweepCommand,
   ): Promise<PrivateIllustrationFinalizationRecoveryOutcome>;
 }

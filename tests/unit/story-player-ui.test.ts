@@ -38,6 +38,12 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('modalBaselines.get(dialog) !== modalFormSnapshot(dialog)');
   });
 
+  it("routes Escape through the managed dismissal policy", () => {
+    expect(storyScript).toContain('import { handleStoryEscape } from "./story-keyboard.js";');
+    expect(storyScript).toContain('handleStoryEscape(event, { document, requestModalDismissal, closeNavigationMenus });');
+    expect(storyScript).not.toContain('document.querySelectorAll("dialog[open]").forEach');
+  });
+
   it("shows turn costs to four decimal places without a generated label", () => {
     expect(storyScript).toContain("minimumFractionDigits: 4");
     expect(storyScript).toContain("maximumFractionDigits: 4");
@@ -288,11 +294,19 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(events).toEqual(["clear-pending", "restore-display", "reload:campaign-1"]);
   });
 
-  it("reloads authoritative campaign state without reusing a stale pre-generation response", () => {
-    expect(storyScript).toContain('await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });');
-    expect(storyScript).toContain('result.resultTurnId && !state.turns.some((turn) => turn.id === result.resultTurnId)');
-    expect(storyScript).toContain('const completedTurn = { ...result, id: result.resultTurnId };');
-    expect(storyScript).toContain("renderTurnInput();");
+  it("reconciles an accepted generation result without reloading the campaign view", () => {
+    const finalizeStart = storyScript.indexOf("async function finalizeCompletedGeneration(result)");
+    const finalizeEnd = storyScript.indexOf("\nasync function observeGenerationRun", finalizeStart);
+    const finalize = storyScript.slice(finalizeStart, finalizeEnd);
+    const reconcileStart = storyScript.indexOf("async function reconcileCompletedGeneration(result)");
+    const reconcileEnd = storyScript.indexOf("\nasync function observeGenerationRun", reconcileStart);
+    const reconcile = storyScript.slice(reconcileStart, reconcileEnd);
+
+    expect(finalize).toContain("replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport)");
+    expect(finalize).toContain("void reconcileCompletedGeneration(result);");
+    expect(finalize).toContain("if (!replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport)) {");
+    expect(finalize).toContain("await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });");
+    expect(reconcile).not.toContain("loadCampaign(");
   });
 
   it("renders streaming narration full-width in the same scene structure as a completed turn", () => {
@@ -307,15 +321,15 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("hides prior turn controls during generation and restores them only after resolution", () => {
     expect(storyScript).toContain("function beginGenerationDisplay(action)");
     expect(storyScript).toContain("function restoreGenerationDisplay()");
-    expect(storyScript).toContain("function commitGenerationDisplay()");
+    expect(storyScript).toContain("function commitGenerationDisplay(removeStreamingPreview = true)");
     expect(storyScript).toContain("function renderTurnInput()");
     expect(storyScript).toContain('const shouldShowInput = !state.generationDisplayActive && isLatest;');
     expect(storyScript).toContain('inputPanel.classList.toggle("hidden", !shouldShowInput);');
     expect(storyScript).toContain("container.replaceChildren();");
     expect(storyScript).toContain("beginGenerationDisplay(action);");
     expect(storyScript).toContain("restoreGenerationDisplay();");
-    expect(storyScript).toContain("commitGenerationDisplay();");
-    expect(storyScript).toContain("await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });\n  renderTurnInput();");
+    expect(storyScript).toContain("commitGenerationDisplay(false);");
+    expect(storyScript).toContain("if (!replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport)) {");
     expect(storyScript).toContain("state.generationDisplayActive");
   });
 
@@ -338,7 +352,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain("if (options.autoScroll !== false) scrollToView();");
     expect(storyScript).toContain("async function finalizeCompletedGeneration(result)");
     expect(storyScript).toContain('const preserveViewport = Boolean($("streamingPreviewCard")) && !state.streamingAutoFollow;');
-    expect(storyScript).toContain("await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });");
+    expect(storyScript).toContain("if (!replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport)) {");
     expect(storyScript).toContain("window.requestAnimationFrame(() => {");
     expect(storyScript).toContain('window.scrollTo({ ...viewport, behavior: "auto" });');
     expect(storyScript).toContain('onCompleted: finalizeCompletedGeneration');

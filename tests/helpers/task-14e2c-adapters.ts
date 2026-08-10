@@ -53,7 +53,7 @@ import {
 import {
   adaptLegacyCampaignZip,
   type DecodedCampaignArchive
-} from "../../services/api/src/campaign-archive-service.js";
+} from "../legacy-api/src/campaign-archive-service.js";
 
 type PortableReservation = Readonly<{
   kind: "staged" | "export";

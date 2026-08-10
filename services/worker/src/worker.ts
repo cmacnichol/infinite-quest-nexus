@@ -7,7 +7,15 @@ import type {
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { logger } from "../../../packages/logger/src/index.js";
-import { runAssetMetadataBackfill } from "../../api/src/asset-service.js";
+import {
+  createPrivateAssetMaintenanceComposition,
+  type PrivateAssetMaintenanceComposition
+} from "../../runtime/src/private-asset-maintenance-composition.js";
+import {
+  createPrivateIllustrationAssetPublicationComposition,
+  type PrivateIllustrationAssetPublicationComposition
+} from "../../runtime/src/illustration-asset-publication-composition.js";
+import { runImageJob } from "../../runtime/src/illustration-image-job-adapter.js";
 
 export type WorkerDependencies = Readonly<{
   generation: GenerationWorkerApplication;
@@ -93,19 +101,38 @@ function defaultOptionalLanes(
   config: RuntimeConfig,
   workerId: string,
   illustration: IllustrationWorkerApplication,
-  memory: MemoryWorkerApplication
+  memory: MemoryWorkerApplication,
+  maintenance: PrivateAssetMaintenanceComposition,
+  illustrationPublication: PrivateIllustrationAssetPublicationComposition,
+  signal: AbortSignal,
 ): WorkerOptionalLanes {
   return {
-    illustration: () => illustration.runNextIllustration({
-      workerId,
-      leaseSeconds: config.workerLeaseSeconds
-    }),
+    illustration: async () => {
+      const request = { workerId, leaseSeconds: config.workerLeaseSeconds };
+      const recovered = await illustrationPublication.coordinator.recoverNextFinalization(request);
+      if (recovered.outcome !== "noop") return true;
+      if (await illustration.runPromptHandler(request)) return true;
+      if (await illustration.runResolutionHandler(request)) return true;
+      return runImageJob(pool, workerId, config.workerLeaseSeconds, {
+        imageProvider: illustration,
+        promptRefinement: illustration,
+        artifactDownload: illustration,
+        costs: { recordIllustrationCost: async () => null }
+      }, illustrationPublication.coordinator);
+    },
     chronicle: () => memory.runNextChronicle({
       workerId,
       leaseSeconds: config.workerLeaseSeconds,
       retrieval: { batchLimit: 100 }
     }),
-    asset: () => runAssetMetadataBackfill(pool, { root: config.assetStorageRoot })
+    asset: async () => {
+      const result = await maintenance.scheduler.tick({
+        workerId,
+        leaseSeconds: config.workerLeaseSeconds,
+        signal
+      });
+      return result.completed > 0;
+    }
   };
 }
 
@@ -140,16 +167,39 @@ export async function runWorker(
   const workerId = `${hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
   logger.info({ event: "worker_started", workerId });
 
+  const maintenance = injectedOptionalLanes
+    ? undefined
+    : await createPrivateAssetMaintenanceComposition(pool, {
+      archiveRoot: config.archiveStorageRoot,
+      assetRoot: config.assetStorageRoot
+    });
+  const illustrationPublication = injectedOptionalLanes
+    ? undefined
+    : await createPrivateIllustrationAssetPublicationComposition(
+      pool,
+      { archiveRoot: config.archiveStorageRoot, assetRoot: config.assetStorageRoot },
+      { downloadArtifact: (input) => illustration.downloadArtifact(input) }
+    );
   const activeGeneration = new Set<Promise<boolean>>();
   let generationNextEligibleAt = 0;
-  const optionalLanes = injectedOptionalLanes ?? defaultOptionalLanes(pool, config, workerId, illustration, memory);
+  const optionalLanes = injectedOptionalLanes ?? defaultOptionalLanes(
+    pool,
+    config,
+    workerId,
+    illustration,
+    memory,
+    maintenance!,
+    illustrationPublication!,
+    signal,
+  );
   const lanes: ActiveLane[] = [
     { name: "illustration", active: new Set(), nextEligibleAt: 0, run: optionalLanes.illustration },
     { name: "chronicle", active: new Set(), nextEligibleAt: 0, run: optionalLanes.chronicle },
     { name: "asset", active: new Set(), nextEligibleAt: 0, run: optionalLanes.asset }
   ];
 
-  while (!signal.aborted) {
+  try {
+    while (!signal.aborted) {
     const now = Date.now();
 
     // Generation is visited once per rotation and receives at most one claim
@@ -248,19 +298,23 @@ export async function runWorker(
       // and other replicas are not starved by an all-microtask refill loop.
       if (!signal.aborted) await wait(0, signal);
     }
-  }
+    }
 
-  const draining = lanePromises(activeGeneration, lanes);
-  if (draining.length > 0) {
-    logger.info({
-      event: "worker_draining_jobs",
-      workerId,
-      generationJobs: activeGeneration.size,
-      illustrationJobs: lanes[0]!.active.size,
-      chronicleJobs: lanes[1]!.active.size,
-      assetJobs: lanes[2]!.active.size
-    });
-    await Promise.allSettled(draining);
+    const draining = lanePromises(activeGeneration, lanes);
+    if (draining.length > 0) {
+      logger.info({
+        event: "worker_draining_jobs",
+        workerId,
+        generationJobs: activeGeneration.size,
+        illustrationJobs: lanes[0]!.active.size,
+        chronicleJobs: lanes[1]!.active.size,
+        assetJobs: lanes[2]!.active.size
+      });
+      await Promise.allSettled(draining);
+    }
+  } finally {
+    await illustrationPublication?.close();
+    await maintenance?.close();
+    logger.info({ event: "worker_stopped", workerId });
   }
-  logger.info({ event: "worker_stopped", workerId });
 }

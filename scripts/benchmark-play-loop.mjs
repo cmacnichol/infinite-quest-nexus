@@ -214,15 +214,29 @@ async function insertProvider(pool, ownerUserId) {
   return id;
 }
 
-async function seedCampaign({ pool, importLegacyStory, memory, storyTemplate, ownerUserId, providerProfileId, label, shape }) {
+async function seedCampaign({ pool, worldCampaign, legacyWorldContent, storyTemplate, ownerUserId, providerProfileId, label, shape }) {
   const identity = randomBytes(8).toString("hex");
   const story = structuredClone(storyTemplate);
   story.world.title = `Play Loop ${label} ${identity}`;
-  const imported = await importLegacyStory(pool, {
-    sourceName: `play-loop-${label}-${identity}.json`,
-    story
-  }, memory.generation);
-  const { campaignId, worldId, worldVersionId } = imported;
+  const content = legacyWorldContent(story);
+  const world = await worldCampaign.createWorld({ ownerUserId }, {
+    title: story.world.title,
+    content,
+  });
+  const published = await worldCampaign.publishWorld({ ownerUserId, worldId: world.id }, {
+    expectedRevision: world.draftRevision,
+    releaseNotes: "Play-loop benchmark fixture",
+  });
+  const campaign = await worldCampaign.createCampaign({ ownerUserId }, {
+    title: `Play Loop ${label} campaign ${identity}`,
+    worldVersionId: published.worldVersionId,
+    selectedCharacterId: content.playableCharacters[0].id,
+    storyLengthProfile: "standard",
+    turnControlStyle: "flexible_auto",
+  });
+  const campaignId = campaign.id;
+  const worldId = world.id;
+  const worldVersionId = published.worldVersionId;
 
   const client = await pool.connect();
   try {
@@ -336,13 +350,13 @@ async function seedFixtures(pool, dependencies, providers) {
   const ownerUserId = await dependencies.initialOwnerId(pool);
   const providerProfileId = await insertProvider(pool, ownerUserId);
   const storyTemplate = JSON.parse(readFileSync(resolve("tests/fixtures/legacy-story.json"), "utf8"));
-  const memory = dependencies.createApiMemoryApplication(pool, providers.chronicle);
+  const worldCampaign = dependencies.createApiWorldCampaignApplication(pool, providers);
   const campaigns = {};
   for (const [label, shape] of Object.entries(FIXTURE_SHAPES)) {
     campaigns[label] = await seedCampaign({
       pool,
-      importLegacyStory: dependencies.importLegacyStory,
-      memory,
+      worldCampaign,
+      legacyWorldContent: dependencies.legacyWorldContent,
       storyTemplate,
       ownerUserId,
       providerProfileId,
@@ -622,7 +636,7 @@ export async function runPlayLoopBenchmark(options = {}) {
   const [
     poolModule,
     migrateModule,
-    importModule,
+    legacyStoryModule,
     serverModule,
     compositionModule,
     memoryCompositionModule,
@@ -634,7 +648,7 @@ export async function runPlayLoopBenchmark(options = {}) {
   ] = await Promise.all([
     import("../packages/database/src/pool.ts"),
     import("../packages/database/src/migrate.ts"),
-    import("../services/api/src/import-service.ts"),
+    import("../packages/domain/src/legacy-story-world.ts"),
     import("../services/api/src/server.ts"),
     import("../services/runtime/src/generation-api-composition.ts"),
     import("../services/runtime/src/memory-composition.ts"),
@@ -656,7 +670,7 @@ export async function runPlayLoopBenchmark(options = {}) {
     await migrateModule.migrateDatabase(pool, resolve("database/migrations"));
     const measured = await benchmarkDatabase(pool, benchmarkUrl.toString(), { warmups, samples }, {
       initialOwnerId: poolModule.initialOwnerId,
-      importLegacyStory: importModule.importLegacyStory,
+      legacyWorldContent: legacyStoryModule.legacyWorldContent,
       buildServer: serverModule.buildServer,
       createApiGenerationApplication: compositionModule.createApiGenerationApplication,
       createApiMemoryApplication: memoryCompositionModule.createApiMemoryApplication,

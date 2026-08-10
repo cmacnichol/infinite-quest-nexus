@@ -6,6 +6,7 @@ import {
 
 const MAINTENANCE_COMPOSITION = "services/runtime/src/private-asset-maintenance-composition.ts";
 const MAINTENANCE_SCHEDULER = "packages/application/src/assets/private-asset-maintenance-scheduler.ts";
+const E3G_MAINTENANCE_CONSUMER = "services/worker/src/worker.ts";
 const LEGACY_BACKFILL = "runAssetMetadataBackfill";
 const CREATE_DATABASE_POOL = "createDatabasePool";
 
@@ -42,9 +43,8 @@ function walk(node, visit) {
 }
 
 /**
- * Executable Task 14e3e7 graph guard. It keeps the new scheduler additive:
- * its only authority is the private e5/e6 graph, and no live role or public
- * application surface may consume it before e3g.
+ * Executable Task 14e3e7/e3g graph guard. Its only authority is the private
+ * e5/e6 graph, and only the named worker composition root may consume it.
  */
 export function checkPrivateAssetMaintenanceBoundaries(sources) {
   const normalized = new Map();
@@ -79,8 +79,10 @@ export function checkPrivateAssetMaintenanceBoundaries(sources) {
   }
 
   for (const [file, targets] of edges) {
-    if (file !== MAINTENANCE_COMPOSITION && targets.has(MAINTENANCE_COMPOSITION)) {
-      violations.push(`${file}: private asset-maintenance composition must remain unbound until e3g`);
+    if (file !== MAINTENANCE_COMPOSITION
+      && file !== E3G_MAINTENANCE_CONSUMER
+      && targets.has(MAINTENANCE_COMPOSITION)) {
+      violations.push(`${file}: private asset-maintenance composition may be consumed only by ${E3G_MAINTENANCE_CONSUMER}`);
     }
     if (file !== MAINTENANCE_COMPOSITION && targets.has(MAINTENANCE_SCHEDULER)) {
       violations.push(`${file}: private asset-maintenance scheduler may be consumed only by the named private runtime composition`);

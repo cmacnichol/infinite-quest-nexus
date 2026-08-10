@@ -93,6 +93,12 @@ export type PortablePreviewDestination =
   | ExistingWorldVersionPreviewDestination
   | CreateWorldPreviewDestination;
 
+/** Caller-validated provider selection for conversion previews; it never contains credentials. */
+export type PortableTemplateProviderSelection = Readonly<{
+  providerProfileId: string;
+  model?: string;
+}>;
+
 /**
  * The opaque token and its safe destination binding are inseparable. The
  * destination parameter prevents a preview handle from being redeemed for a
@@ -107,6 +113,8 @@ export type PortablePreviewHandle<Destination extends PortablePreviewDestination
 type PortableImportPreviewBase<Destination extends PortablePreviewDestination> = ImportOwnerScope & Readonly<{
   stagedInput: PortableStagedInput;
   destination: Destination;
+  providerSelection?: PortableTemplateProviderSelection;
+  sourceName?: string;
   sourceInstallationId?: PortableSourceInstallationId;
   importedRecordId?: PortableImportedRecordId;
 }>;
@@ -114,15 +122,26 @@ type PortableImportPreviewBase<Destination extends PortablePreviewDestination> =
 export type PortableImportPreviewCommand =
   | (PortableImportPreviewBase<Extract<CampaignZipPreviewDestination, { kind: "embedded" }>> & Readonly<{ kind: "campaign_zip" }>)
   | (PortableImportPreviewBase<ExistingWorldVersionPreviewDestination> & Readonly<{ kind: "campaign_zip" }>)
-  | (PortableImportPreviewBase<ExistingWorldVersionPreviewDestination> & Readonly<{ kind: "legacy_story" }>)
+  | (PortableImportPreviewBase<ExistingWorldVersionPreviewDestination | CreateWorldPreviewDestination> & Readonly<{
+    kind: "legacy_story";
+    selectedCharacterId?: string;
+    characterStrategy?: "preserve_source" | "map_to_target";
+  }>)
   | (PortableImportPreviewBase<ExistingWorldVersionPreviewDestination> & Readonly<{
     kind: "story_text";
     selectedCharacterId?: string;
+    enrichFinalTurn?: boolean;
   }>)
   | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "infinite_worlds" }>)
-  | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "cyoa" }>)
+  | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{
+    kind: "cyoa";
+    progressKey?: string;
+  }>)
   | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "world_json" }>)
-  | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{ kind: "world_text" }>);
+  | (PortableImportPreviewBase<CreateWorldPreviewDestination> & Readonly<{
+    kind: "world_text";
+    progressKey?: string;
+  }>);
 
 /** Reuses the live route schema while replacing its raw token with our opaque handle. */
 export type CampaignZipPreviewProjection = Readonly<

@@ -814,6 +814,29 @@ integration("standard database migration runner", () => {
         [ownerOne, hash("staged-handle"), stagingOperationId, hash("staged-content")]
       )).rows[0]!.id;
 
+      await client.query(
+        `INSERT INTO portable_import_operations (
+           owner_user_id,staged_input_id,import_kind,preview_token_hash,content_fingerprint,
+           destination_fingerprint,destination_kind,preview_projection,expires_at
+         ) VALUES ($1,$2,'legacy_story',$3,$4,$5,'create_world',$6::jsonb,now()+interval '1 hour')`,
+        [
+          ownerOne,
+          stagedInputId,
+          hash("legacy-create-world-token"),
+          hash("legacy-create-world-content"),
+          hash("legacy-create-world-destination"),
+          JSON.stringify({
+            kind: "campaign",
+            valid: true,
+            title: "Portable Legacy Story",
+            duplicate: false,
+            existingCampaignId: null,
+            counts: { turns: 0, completeHistoryCharacters: 0, estimatedHistoryTokens: 0 },
+            warnings: []
+          })
+        ]
+      );
+
       const worldOne = (await client.query<{ id: string }>(
         "INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Portable world one') RETURNING id",
         [ownerOne]
@@ -1179,7 +1202,11 @@ integration("standard database migration runner", () => {
         "0062_portable_import_asset_publications",
         "0063_portable_legacy_story_asset_publications",
         "0064_normalized_asset_publication_requests",
-        "0065_illustration_asset_publications"
+        "0065_illustration_asset_publications",
+        "0066_portable_normalized_asset_publications",
+        "0067_asset_metadata_backfill_executor",
+        "0068_portable_legacy_story_create_world",
+        "0069_import_progress_status"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(

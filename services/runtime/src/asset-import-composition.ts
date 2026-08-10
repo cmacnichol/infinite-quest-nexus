@@ -379,7 +379,7 @@ export async function createAssetPublicationComposition(
         async () => {
           // A concurrent same-key publication may have committed while this
           // caller waited for the shared physical-content locks.
-          const lockedIdentity = await publication.prepareIdentity(snapshot);
+          const lockedIdentity = await publication.prepareIdentityUnderContentLock(snapshot);
           if (lockedIdentity.lifecycle === "published") {
             if (!lockedIdentity.result) throw new Error("asset_publication_result_invalid");
             return lockedIdentity.result;

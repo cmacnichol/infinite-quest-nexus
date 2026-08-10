@@ -20,12 +20,20 @@ function diagnosticFor(error: unknown): AssetFilesystemDiagnosticCode {
   if (/size|byte|too_large|limit/u.test(message)) return "asset_too_large";
   if (/signature|mime|decode|dimensions|unsupported/u.test(message)) return "asset_unsupported_media";
   if (/containment|link|path|identity|race/u.test(message)) return "filesystem_containment_denied";
-  if (/delivery|storage|stream|filesystem/u.test(message)) return "asset_storage_unavailable";
+  if (/ENOENT|no such file|delivery|storage|stream|filesystem/u.test(message)) return "asset_storage_unavailable";
   return "asset_metadata_unavailable";
 }
 
 function leaseExpiry(leaseSeconds: number): string {
   return new Date(Date.now() + Math.max(2, leaseSeconds) * 1000).toISOString();
+}
+
+function matchesStoredOriginalHash(bytes: Uint8Array, expectedContentHash: string): boolean {
+  const rawHash = createHash("sha256").update(bytes).digest("hex");
+  if (rawHash === expectedContentHash) return true;
+  const source = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const legacyHash = createHash("sha256").update(source.toString("base64")).digest("hex");
+  return legacyHash === expectedContentHash;
 }
 
 async function readBoundedOriginal(
@@ -65,8 +73,9 @@ async function readBoundedOriginal(
     bytes.set(part, offset);
     offset += part.byteLength;
   }
-  const hash = createHash("sha256").update(bytes).digest("hex");
-  if (hash !== claim.expectedContentHash) throw new Error("asset_metadata_backfill_hash_invalid");
+  if (!matchesStoredOriginalHash(bytes, claim.expectedContentHash)) {
+    throw new Error("asset_metadata_backfill_hash_invalid");
+  }
   return bytes;
 }
 
@@ -147,7 +156,7 @@ export async function createPrivateAssetMetadataBackfillComposition(
       if (!decoded) return { outcome: "lease_lost", assetId: claim.assetId };
       claim = decoded.claim;
       const normalized = decoded.normalized;
-      if (normalized.original.contentHash !== claim.expectedContentHash
+      if (!matchesStoredOriginalHash(normalized.original.bytes, claim.expectedContentHash)
         || normalized.original.byteLength !== claim.expectedByteLength
         || normalized.original.mimeType !== claim.expectedMimeType) {
         throw new Error("asset_metadata_backfill_identity_invalid");
@@ -220,6 +229,10 @@ export async function createPrivateAssetMetadataBackfillComposition(
   return Object.freeze({
     executor: Object.freeze({
       async processOne(request: PrivateAssetMetadataBackfillExecutionRequest): Promise<PrivateAssetMetadataBackfillOutcome> {
+        // Migration 0053 seeded pre-existing originals. The active worker must
+        // also discover legacy originals written after startup so the durable
+        // executor preserves the former continuous backfill behavior.
+        await repository.enqueueMissing(100);
         const claimed = await repository.claimNext(request);
         return claimed ? processClaim(claimed, request.leaseSeconds) : { outcome: "idle" as const };
       }

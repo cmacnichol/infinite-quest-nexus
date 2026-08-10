@@ -38,8 +38,8 @@ export type PrivateNormalizedIllustrationArtifact = Readonly<{
   thumbnail: PrivateNormalizedAssetDerivative;
 }>;
 
-function stableError(code: string): Error {
-  return new Error(code);
+function stableError(code: string): Error & Readonly<{ code: string; permanent: true }> {
+  return Object.assign(new Error(code), { code, permanent: true as const });
 }
 
 function sha256(bytes: Uint8Array): string {
@@ -517,6 +517,14 @@ export async function createPrivateIllustrationAssetPublicationComposition(
       command: Parameters<PrivateIllustrationAssetPublicationCoordinator["recoverFinalization"]>[0],
     ) {
       return finalizedOutcome(command.imageJobId, command.workerId, command.leaseSeconds);
+    },
+    async recoverNextFinalization(
+      command: Parameters<PrivateIllustrationAssetPublicationCoordinator["recoverNextFinalization"]>[0],
+    ) {
+      const pending = await repository.findPendingFinalization();
+      return pending
+        ? finalizedOutcome(pending.imageJobId, command.workerId, command.leaseSeconds)
+        : Object.freeze({ outcome: "noop" as const });
     }
   });
 

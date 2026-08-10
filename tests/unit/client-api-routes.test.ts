@@ -38,6 +38,7 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
+import { legacyDashboardRouteContracts, legacyStoryRouteContracts } from "../helpers/legacy-ui-route-contracts.js";
 
 const OWNER_ID = "00000000-0000-4000-8000-000000000001";
 const CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
@@ -605,6 +606,29 @@ describe("client API route contracts without PostgreSQL", () => {
 
   afterAll(async () => {
     await rm(storageRoot, { recursive: true, force: true });
+  });
+
+  it("registers every route consumed by the legacy UI", async () => {
+    const routes = [...legacyDashboardRouteContracts, ...legacyStoryRouteContracts];
+    const routeKeys = routes.map((route) => `${route.surface}:${route.method}:${route.url}`);
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool() }));
+    try {
+      expect(new Set(routeKeys).size).toBe(routeKeys.length);
+      expect(new Set(routes.map((route) => route.owner))).toEqual(new Set([
+        "direct",
+        "typed-client",
+        "illustration-adapter",
+        "asset-url"
+      ]));
+      for (const route of routes) {
+        expect(
+          app.hasRoute({ method: route.method, url: route.url }),
+          `${route.surface} ${route.method} ${route.url}`
+        ).toBe(true);
+      }
+    } finally {
+      await app.close();
+    }
   });
 
   it("delegates unchanged campaign sync without transport-owned business SQL", async () => {

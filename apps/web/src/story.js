@@ -27,6 +27,7 @@ import {
   presentGenerationEvents,
   resumeActiveGenerationConflict
 } from "./story-generation-monitor.js";
+import { handleStoryEscape } from "./story-keyboard.js";
 
 "use strict";
 
@@ -1040,11 +1041,11 @@ function restoreGenerationDisplay() {
   renderTurnInput();
 }
 
-function commitGenerationDisplay() {
+function commitGenerationDisplay(removeStreamingPreview = true) {
   state.generationDisplayActive = false;
   state.generationDisplayAction = "";
   state.generationJobId = null;
-  $("streamingPreviewCard")?.remove();
+  if (removeStreamingPreview) $("streamingPreviewCard")?.remove();
 }
 
 async function cancelActiveGeneration() {
@@ -1172,22 +1173,14 @@ async function finalizeCompletedGeneration(result) {
 
   clearPendingSubmission();
   state.pendingGeneration = null;
-  commitGenerationDisplay();
+  commitGenerationDisplay(false);
   recordActivity("success", "Turn generated", `Turn ${result.turnNumber || ""} completed.`);
-  clearStreamingPreview();
-  await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });
-  renderTurnInput();
-  if (result.resultTurnId && !state.turns.some((turn) => turn.id === result.resultTurnId)) {
-    const completedTurn = { ...result, id: result.resultTurnId };
-    state.turns = state.turns
-      .filter((turn) => Number(turn.turnNumber) !== Number(result.turnNumber))
-      .concat(completedTurn)
-      .sort((left, right) => Number(left.turnNumber) - Number(right.turnNumber));
-    state.viewIndex = -1;
-    renderAllScenes({ autoScroll: !preserveViewport });
-    renderTurnInput();
-    recordActivity("system", "Completed turn applied from generation result", `Turn ${result.turnNumber || ""} was applied while campaign state caught up.`);
+  if (!replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport)) {
+    clearStreamingPreview();
+    await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });
+    return;
   }
+  void reconcileCompletedGeneration(result);
 
   if (viewport) {
     window.requestAnimationFrame(() => {
@@ -1197,6 +1190,58 @@ async function finalizeCompletedGeneration(result) {
 
   pollImageJobs();
   if (result.resultTurnId) void pollIllustrationResolution(result.resultTurnId).catch(() => undefined);
+}
+
+function replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport) {
+  const preview = $("streamingPreviewCard");
+  if (!preview || !result.resultTurnId) return false;
+
+  const completedTurn = { ...result, id: result.resultTurnId };
+  state.turns = state.turns
+    .filter((turn) => turn.id !== result.resultTurnId && Number(turn.turnNumber) !== Number(result.turnNumber))
+    .concat(completedTurn)
+    .sort((left, right) => Number(left.turnNumber) - Number(right.turnNumber));
+  const completedTurnIndex = state.turns.findIndex((turn) => turn.id === result.resultTurnId);
+  if (completedTurnIndex < 0) return false;
+
+  state.viewIndex = -1;
+  preview.replaceWith(renderScene(completedTurn, completedTurnIndex));
+  state.streamingAutoFollow = true;
+  state.streamingExpectedScrollY = null;
+  renderStoryIllustration();
+  renderTurnInput();
+  if (!preserveViewport) $("scene-" + completedTurnIndex)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  return true;
+}
+
+async function reconcileCompletedGeneration(result) {
+  try {
+    const syncData = await apiClient.generation.syncStatus(state.campaignId);
+    state.campaign = syncData.campaign || syncData;
+    state.world = syncData.world || state.campaign.world || null;
+    state.playerConfig = syncData.playerConfig || state.campaign.playerConfig || null;
+    state.pendingGeneration = syncData.pendingGeneration || null;
+    syncTurnInputModeFromCampaign();
+    state.runtimeState = await apiClient.campaigns.state(state.campaignId);
+    try {
+      state.illustrationConfig = await illustrationApi.config(state.campaignId);
+      const segmentData = await illustrationApi.segments(state.campaignId);
+      state.illustrationSegments = segmentData.segments || [];
+    } catch (_) {
+      state.illustrationConfig = { enabled: false, sourcePolicy: "off" };
+      state.illustrationSegments = [];
+    }
+
+    const titleEl = $("storyTitle");
+    const name = state.campaign.title || state.world?.title || "Untitled Campaign";
+    if (titleEl) titleEl.textContent = name;
+    document.title = `${name} — Infinite Quest`;
+    renderStoryIllustration();
+    updateStatusBar();
+    renderTurnInput();
+  } catch (error) {
+    recordActivity("error", "Completed turn reconciliation failed", error.message);
+  }
 }
 
 async function observeGenerationRun(run, action, retryFirst = false) {
@@ -2316,9 +2361,6 @@ function initializeNavigationMenus() {
   document.addEventListener("pointerdown", (event) => {
     if (!(event.target instanceof Element) || !event.target.closest(".nav-menu")) closeNavigationMenus();
   });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeNavigationMenus();
-  });
 }
 
 // ── Initialization ────────────────────────────────────────────
@@ -2693,12 +2735,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnEditResponseClose = $("btnEditResponseClose");
   if (btnEditResponseClose) btnEditResponseClose.addEventListener("click", () => { const d = $("editResponseDialog"); if (d && d.close) d.close(); });
 
-  // Keyboard: Escape closes dialogs and returns navigation to its compact state.
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      document.querySelectorAll("dialog[open]").forEach(d => { if (d.close) d.close(); });
-      closeNavigationMenus();
-    }
+  // Keyboard: Escape respects unsaved changes and only dismisses the topmost dialog.
+  document.addEventListener("keydown", (event) => {
+    handleStoryEscape(event, { document, requestModalDismissal, closeNavigationMenus });
   });
 
   // Start

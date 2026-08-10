@@ -83,9 +83,11 @@ const ASSIGNMENT_OPERATOR_KINDS = new Set([
 
 // These worker imports predate packages/application. Each exception is narrow
 // and names the work package that removes it; new cross-role imports fail.
-const CROSS_ROLE_IMPORT_ALLOWLIST = new Map([
-  ["services/worker/src/worker.ts -> services/api/src/asset-service.js", "Task 14 (B5)"]
-]);
+const CROSS_ROLE_IMPORT_ALLOWLIST = new Map();
+
+export function crossRoleImportAllowlistCount() {
+  return CROSS_ROLE_IMPORT_ALLOWLIST.size;
+}
 
 function normalizedPath(file) {
   return file.replaceAll("\\", "/");

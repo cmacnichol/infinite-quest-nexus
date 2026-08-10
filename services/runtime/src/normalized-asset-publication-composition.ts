@@ -181,6 +181,22 @@ function preparedIdentity(
   }) as PrivateAssetPublicationIdentity;
 }
 
+/**
+ * Attachment commits before durable filesystem finalization. A same-key
+ * replay that was already waiting on the physical-content lock may therefore
+ * observe the exact request in its attached state. It must not prepare or
+ * mutate the canonical identity again, but it may retain a handle whose
+ * attach/finalize path reads and reconciles that durable result.
+ */
+function isReplayableReservation(
+  reservation: PrivateNormalizedAssetPublicationReservation,
+): boolean {
+  return reservation.outcome === "reserved"
+    || (reservation.lifecycle === "attached"
+      && (reservation.canonicalIdentityLifecycle === "attached"
+        || reservation.canonicalIdentityLifecycle === "published"));
+}
+
 export type PrivateNormalizedAssetPublicationComposition = Readonly<{
   publication: PrivateNormalizedAssetPublicationPort;
   portableStorage: Readonly<{
@@ -243,7 +259,7 @@ export async function createPrivateNormalizedAssetPublicationComposition(
       const initialReservations: PrivateNormalizedAssetPublicationReservation[] = [];
       for (const { request } of commands) {
         const initialReservation = await requestRepository.reserveRequest(request);
-        if (initialReservation.outcome !== "reserved") {
+        if (!isReplayableReservation(initialReservation)) {
           throw stableError("normalized_asset_publication_reservation_recoverable");
         }
         initialReservations.push(initialReservation);
@@ -262,7 +278,7 @@ export async function createPrivateNormalizedAssetPublicationComposition(
       for (const [index, { request }] of commands.entries()) {
         const initialReservation = initialReservations[index]!;
         const reservation = await requestRepository.refreshReservedRequest(request);
-        if (reservation.outcome !== "reserved"
+        if (!isReplayableReservation(reservation)
           || reservation.requestId !== initialReservation.requestId
           || reservation.ownerUserId !== initialReservation.ownerUserId
           || reservation.canonicalAssetId !== initialReservation.canonicalAssetId
@@ -276,7 +292,8 @@ export async function createPrivateNormalizedAssetPublicationComposition(
             preparedIdentity(reservation),
           );
           preparedPublications.push(prepared);
-        } else if (reservation.canonicalIdentityLifecycle !== "published") {
+        } else if (reservation.canonicalIdentityLifecycle !== "attached"
+          && reservation.canonicalIdentityLifecycle !== "published") {
           throw stableError("normalized_asset_publication_reservation_recoverable");
         }
         const handle = opaqueReservationHandle();
@@ -508,6 +525,14 @@ export async function createPrivateNormalizedAssetPublicationComposition(
     const state = reservations.get(reservationHandle);
     if (!state) {
       throw stableError("normalized_asset_publication_reservation_unavailable");
+    }
+    if (state.prepared === null
+      && (state.reservation.lifecycle === "attached" || state.reservation.lifecycle === "published")
+      && (state.reservation.canonicalIdentityLifecycle === "attached"
+        || state.reservation.canonicalIdentityLifecycle === "published")) {
+      state.discarded = true;
+      await releaseReservationLock(state);
+      return;
     }
     if (!state.discarded) await discardAfterRollback(reservationHandle);
     try {

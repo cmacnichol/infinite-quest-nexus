@@ -15,6 +15,9 @@ const METADATA = "services/runtime/src/private-asset-metadata-backfill-compositi
 const RECOVERY = "services/runtime/src/private-filesystem-recovery-composition.ts";
 const SCHEDULER = "packages/application/src/assets/private-asset-maintenance-scheduler.ts";
 const MAINTENANCE = "services/runtime/src/private-asset-maintenance-composition.ts";
+const API_ASSETS = "services/runtime/src/api-asset-composition.ts";
+const API_PORTABLE = "services/runtime/src/api-portable-import-export-composition.ts";
+const WORKER = "services/worker/src/worker.ts";
 const CAPACITY_SOURCE_FILES = Object.freeze([
   "packages/database/src/config.ts",
   "services/worker/src/worker.ts",
@@ -23,15 +26,15 @@ const CAPACITY_SOURCE_FILES = Object.freeze([
 ]);
 
 const PRIVATE_ENTRY_POINTS = Object.freeze([
-  Object.freeze({ file: STORAGE, factory: "createAssetImportStorageComposition", consumers: Object.freeze([NORMALIZED, METADATA, RECOVERY]) }),
+  Object.freeze({ file: STORAGE, factory: "createAssetImportStorageComposition", consumers: Object.freeze([NORMALIZED, METADATA, RECOVERY, API_ASSETS]) }),
   Object.freeze({ file: NORMALIZED, factory: "createPrivateNormalizedAssetPublicationComposition", consumers: Object.freeze([ILLUSTRATION, PORTABLE_NORMALIZED, RECOVERY]) }),
-  Object.freeze({ file: ILLUSTRATION, factory: "createPrivateIllustrationAssetPublicationComposition", consumers: Object.freeze([]) }),
+  Object.freeze({ file: ILLUSTRATION, factory: "createPrivateIllustrationAssetPublicationComposition", consumers: Object.freeze([WORKER]) }),
   Object.freeze({ file: PORTABLE_NORMALIZED, factory: "createPrivatePortableNormalizedAssetPublicationComposition", consumers: Object.freeze([PORTABLE, RECOVERY]) }),
-  Object.freeze({ file: PORTABLE, factory: "createPortableImportExportComposition", consumers: Object.freeze([]) }),
+  Object.freeze({ file: PORTABLE, factory: "createPortableImportExportComposition", consumers: Object.freeze([API_PORTABLE]) }),
   Object.freeze({ file: METADATA, factory: "createPrivateAssetMetadataBackfillComposition", consumers: Object.freeze([MAINTENANCE]) }),
   Object.freeze({ file: RECOVERY, factory: "createPrivateFilesystemRecoveryComposition", consumers: Object.freeze([MAINTENANCE]) }),
   Object.freeze({ file: SCHEDULER, factory: "createPrivateAssetMaintenanceScheduler", consumers: Object.freeze([MAINTENANCE]) }),
-  Object.freeze({ file: MAINTENANCE, factory: "createPrivateAssetMaintenanceComposition", consumers: Object.freeze([]) }),
+  Object.freeze({ file: MAINTENANCE, factory: "createPrivateAssetMaintenanceComposition", consumers: Object.freeze([WORKER]) }),
 ]);
 
 const LEGACY_RUNTIME_MODULES = new Set([
@@ -207,7 +210,7 @@ export function readPrivateCompositionCapacitySources(root) {
   })));
 }
 
-/** Freezes the existing worker pool budget and excludes an e7 maintenance lane from live manifests. */
+/** Freezes the worker pool budget while ensuring private maintenance stays out of deployment manifests. */
 export function collectPrivateCompositionCapacityViolations(sources) {
   const byFile = new Map(sources.map((source) => [source.file.replaceAll("\\", "/"), source.text]));
   const violations = new Set();
@@ -221,9 +224,6 @@ export function collectPrivateCompositionCapacityViolations(sources) {
     if (!evidence.all) violations.add("packages/database/src/config.ts: all-process pool budget must remain executable generation + 8");
   }
   if (!worker) violations.add("services/worker/src/worker.ts: required live worker source is missing");
-  else if (/createPrivateAssetMaintenance(?:Composition|Scheduler)|private-asset-maintenance/u.test(worker)) {
-    violations.add("services/worker/src/worker.ts: e8 private maintenance must not create a live worker lane");
-  }
   const manifestRequirements = Object.freeze([
     Object.freeze({ file: "compose.yaml", role: "all", increment: 8, description: "all-process" }),
     Object.freeze({ file: "deploy/swarm/stack.yaml", role: "worker", increment: 4, description: "worker" }),
@@ -244,9 +244,9 @@ export function collectPrivateCompositionCapacityViolations(sources) {
 }
 
 /**
- * Executable Task 14e3e8 boundary inventory. It deliberately makes private
- * consumers exact before the e3g production binding switch: additions require
- * a plan change instead of silently becoming reachable through a directory.
+ * Executable e3g boundary inventory. Each private capability has one reviewed
+ * production composition consumer; additions require a plan change rather
+ * than silently becoming reachable through a directory.
  */
 export function collectPrivateCompositionParityViolations(sources) {
   const parsed = new Map();
@@ -272,7 +272,7 @@ export function collectPrivateCompositionParityViolations(sources) {
     const inbound = [...edges.values()].flat().filter((edge) => edge.target === entry.file);
     for (const edge of inbound) {
       if (!entry.consumers.includes(edge.file)) {
-        violations.add(`${edge.file}: ${entry.factory} must remain unconsumed before e3g`);
+        violations.add(`${edge.file}: ${entry.factory} must not bypass its named e3g composition consumer`);
         continue;
       }
       const exactFactoryImport = edge.kind === "ImportDeclaration"

@@ -7,12 +7,12 @@ import { mapWorldCampaignTransitionFailure, type PortableWorldApplicationPort } 
 import {
   importLegacyStory as importLegacyStoryApplication,
   importLegacyStoryWithClient as importLegacyStoryWithClientApplication
-} from "../../services/api/src/import-service.js";
+} from "../legacy-api/src/import-service.js";
 import {
   importInfiniteWorlds as importInfiniteWorldsApplication,
   importInfiniteWorldsWithClient as importInfiniteWorldsWithClientApplication,
   type InfiniteWorldsApiProviders
-} from "../../services/api/src/infinite-worlds-import-service.js";
+} from "../legacy-api/src/infinite-worlds-import-service.js";
 import {
   createOwnerBoundPortableWorldApplicationPort,
   createWorldCampaignApplicationAdapter

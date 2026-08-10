@@ -431,11 +431,30 @@ integration("generation job notification delivery", () => {
         );
         await client.query(
           `INSERT INTO portable_import_asset_publications (
-             operation_id,owner_user_id,import_id,asset_id
-           ) VALUES ($1,$2,gen_random_uuid(),gen_random_uuid())`,
+             operation_id,owner_user_id,import_id,asset_id,request_id
+           ) VALUES ($1,$2,gen_random_uuid(),gen_random_uuid(),gen_random_uuid())`,
           [legacyOperationId, legacyOwnerId],
         );
         await client.query("SET session_replication_role = 'origin'");
+        const newerReverted = await runner({
+          dbClient: client,
+          dir: resolve("database/migrations"),
+          direction: "down",
+          count: 6,
+          migrationsTable: "schema_migrations",
+          checkOrder: true,
+          singleTransaction: true,
+          verbose: false,
+          logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
+        });
+        expect(newerReverted.map((migration) => migration.name)).toEqual([
+          "0069_import_progress_status",
+          "0068_portable_legacy_story_create_world",
+          "0067_asset_metadata_backfill_executor",
+          "0066_portable_normalized_asset_publications",
+          "0065_illustration_asset_publications",
+          "0064_normalized_asset_publication_requests"
+        ]);
         await expect(runner({
           dbClient: client,
           dir: resolve("database/migrations"),
@@ -551,7 +570,13 @@ integration("generation job notification delivery", () => {
           "0060_asset_publication_identities",
           "0061_portable_import_composition",
           "0062_portable_import_asset_publications",
-          "0063_portable_legacy_story_asset_publications"
+          "0063_portable_legacy_story_asset_publications",
+          "0064_normalized_asset_publication_requests",
+          "0065_illustration_asset_publications",
+          "0066_portable_normalized_asset_publications",
+          "0067_asset_metadata_backfill_executor",
+          "0068_portable_legacy_story_create_world",
+          "0069_import_progress_status"
         ]);
       await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
          `SELECT (

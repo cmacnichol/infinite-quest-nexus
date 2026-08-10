@@ -489,6 +489,7 @@ function boundedReadSession(input: Readonly<{
   descriptor: Readonly<{ contentHash: string; byteLength: number }>;
   initialStat: BigIntStat;
   limits: PrivateBoundedStreamLimits;
+  allowLegacyBase64Hash?: boolean;
   onClosed?: () => void;
   afterClose: (reason: PrivateStreamTerminalReason) => Promise<void>;
 }>): PrivateBoundedStreamSession {
@@ -531,6 +532,8 @@ function boundedReadSession(input: Readonly<{
   const chunks = (async function* (): AsyncGenerator<Uint8Array> {
     let reason: PrivateStreamTerminalReason = "abort";
     const hash = createHash("sha256");
+    const legacyHash = input.allowLegacyBase64Hash ? createHash("sha256") : undefined;
+    let legacyRemainder = Buffer.alloc(0);
     let position = 0;
     try {
       while (position < input.descriptor.byteLength) {
@@ -549,6 +552,16 @@ function boundedReadSession(input: Readonly<{
         if (bytesRead !== requested) throw new Error("filesystem_stream_partial");
         const chunk = buffer.subarray(0, bytesRead);
         hash.update(chunk);
+        if (legacyHash) {
+          const pending = legacyRemainder.byteLength === 0
+            ? chunk
+            : Buffer.concat([legacyRemainder, chunk]);
+          const completeLength = pending.byteLength - (pending.byteLength % 3);
+          if (completeLength > 0) {
+            legacyHash.update(pending.subarray(0, completeLength).toString("base64"));
+          }
+          legacyRemainder = Buffer.from(pending.subarray(completeLength));
+        }
         position += bytesRead;
         yield Uint8Array.from(chunk);
       }
@@ -570,7 +583,13 @@ function boundedReadSession(input: Readonly<{
         || final.byteLength !== input.descriptor.byteLength) {
         throw new Error("filesystem_stream_identity_changed");
       }
-      if (hash.digest("hex") !== input.descriptor.contentHash) {
+      const rawDigest = hash.digest("hex");
+      if (legacyHash && legacyRemainder.byteLength > 0) {
+        legacyHash.update(legacyRemainder.toString("base64"));
+      }
+      const legacyDigest = legacyHash?.digest("hex");
+      if (rawDigest !== input.descriptor.contentHash
+        && legacyDigest !== input.descriptor.contentHash) {
         throw new Error("filesystem_stream_hash_mismatch");
       }
       reason = "eof";
@@ -1262,6 +1281,7 @@ export async function createSecureFilesystemAdapter(
         descriptor: value,
         initialStat,
         limits: input.limits,
+        allowLegacyBase64Hash: resolution.kind === "legacy_retained",
         onClosed: unregister,
         afterClose: async () => undefined
       });
@@ -1492,7 +1512,11 @@ export async function createSecureFilesystemAdapter(
       return Object.freeze({ outcome: cleanup.outcome === "already_cleaned" ? "cleaned" : cleanup.outcome });
     } catch (error) {
       const diagnosticCode: AssetFilesystemDiagnosticCode = recoveryDiagnostic(error);
-      await cleanupDiagnostic(diagnosticCode);
+      // An attached operation selected for post-commit finalization already
+      // has a durable asset reference. A transient finalization fault must
+      // leave that attached state available to a fresh fenced recovery; only
+      // cleanup recovery may convert an operation into cleanup_pending.
+      if (recovery.action === "cleanup") await cleanupDiagnostic(diagnosticCode);
       return Object.freeze({ outcome: "recoverable", diagnosticCode });
     }
   };

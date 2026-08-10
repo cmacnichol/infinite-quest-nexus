@@ -175,6 +175,7 @@ export type PostgresIllustrationAssetPublicationRepository = Readonly<{
     metadata: PrivateIllustrationCompletionMetadata,
   ): Promise<void>;
   loadFinalizations(imageJobId: string): Promise<readonly PrivatePendingIllustrationFinalization[]>;
+  findPendingFinalization(): Promise<Readonly<{ imageJobId: string }> | null>;
   recordFinalizationRecoverable(input: PrivatePendingIllustrationFinalization): Promise<void>;
   markFinalizationPublished(input: PrivatePendingIllustrationFinalization): Promise<void>;
   readPublishedAssets(imageJobId: string): Promise<readonly PrivatePublishedIllustrationAsset[] | null>;
@@ -481,6 +482,21 @@ export function createPostgresIllustrationAssetPublicationRepository(
         result: Object.freeze(row.safe_result),
         publicationState: row.publication_state
       })));
+    },
+
+    async findPendingFinalization() {
+      const result = await pool.query<Readonly<{ image_job_id: string }>>(
+        `SELECT mapping.image_job_id
+           FROM image_job_asset_publications mapping
+           JOIN image_jobs job
+             ON job.id=mapping.image_job_id AND job.owner_user_id=mapping.owner_user_id
+          WHERE job.status='completed'
+            AND mapping.publication_state='committed_finalization_pending'
+          ORDER BY mapping.last_attempt_at NULLS FIRST,mapping.created_at,mapping.image_job_id
+          LIMIT 1`,
+      );
+      const row = result.rows[0];
+      return row ? Object.freeze({ imageJobId: row.image_job_id }) : null;
     },
 
     async recordFinalizationRecoverable(input) {

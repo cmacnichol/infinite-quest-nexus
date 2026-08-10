@@ -92,11 +92,19 @@ describe("browser platform adapters", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("uses secure random UUIDs and rejects unavailable secure generation", () => {
+  it("uses secure random UUIDs and falls back to secure random bytes when randomUUID is unavailable", () => {
     const randomUUID = vi.fn(() => "11111111-1111-4111-8111-111111111111");
     vi.stubGlobal("crypto", { randomUUID });
     expect(createBrowserIdFactory().create()).toBe("11111111-1111-4111-8111-111111111111");
     expect(randomUUID).toHaveBeenCalledTimes(1);
+
+    vi.stubGlobal("crypto", {
+      getRandomValues(bytes: Uint8Array) {
+        bytes.fill(0);
+        return bytes;
+      }
+    });
+    expect(createBrowserIdFactory().create()).toBe("00000000-0000-4000-8000-000000000000");
 
     vi.stubGlobal("crypto", undefined);
     expect(() => createBrowserIdFactory().create()).toThrow("Secure UUID generation is unavailable");

@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { PrivateAssetPublicationCommand } from "../../packages/application/src/assets/private-asset-publication.js";
 import { bindPrivateBoundedStreamLimits } from "../../packages/application/src/assets/private-secure-storage.js";
 import { toAssetMutationIdempotencyKey } from "../../packages/application/src/assets/types.js";
+import { createPostgresAssetPublicationRepository } from "../../packages/database/src/asset-publication-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import {
   createDatabasePool,
@@ -639,6 +640,21 @@ integration("Task 14e3c asset-publication composition", () => {
       ...command(undefined, `:unexpected-operation:${crypto.randomUUID()}`),
       expiresAt: new Date(Date.now() + 30_000).toISOString()
     };
+    const publication = createPostgresAssetPublicationRepository(pool, composition.storage.candidate);
+    const identity = await publication.prepareIdentity(request);
+    const unexpected = await composition.storage.journal.reserve(
+      { resourceKind: "asset", ownerUserId, assetId: identity.assetId },
+      {
+        purpose: "asset_derivative",
+        leaseOwner: "14e3c-unexpected-operation",
+        expiresAt: request.expiresAt
+      },
+    );
+    await expect(composition.storage.journal.markCleanup(
+      unexpected.operation,
+      unexpected.claim,
+      { cause: "rollback" },
+    )).resolves.toEqual({ outcome: "cleanup_pending" });
     await pool.query(
       `CREATE FUNCTION task_14e3c_unexpected_operation_fault() RETURNS trigger
        LANGUAGE plpgsql AS $fault$
@@ -667,19 +683,7 @@ integration("Task 14e3c asset-publication composition", () => {
       [ownerUserId, sha256(request.idempotencyKey)],
     );
     const assetId = attached.rows[0]!.asset_id;
-    const unexpected = await composition.storage.journal.reserve(
-      { resourceKind: "asset", ownerUserId, assetId },
-      {
-        purpose: "asset_derivative",
-        leaseOwner: "14e3c-unexpected-operation",
-        expiresAt: request.expiresAt
-      },
-    );
-    await expect(composition.storage.journal.markCleanup(
-      unexpected.operation,
-      unexpected.claim,
-      { cause: "rollback" },
-    )).resolves.toEqual({ outcome: "cleanup_pending" });
+    expect(assetId).toBe(identity.assetId);
     await pool.query(
       `UPDATE durable_filesystem_operations
           SET lease_expires_at=clock_timestamp()-interval '1 second'

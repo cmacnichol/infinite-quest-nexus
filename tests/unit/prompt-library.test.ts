@@ -11,7 +11,7 @@ import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../
 import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
 import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
 import type { PromptSnapshot } from "../../packages/contracts/src/index.js";
-import { infiniteWorldsPromptSet } from "../../services/api/src/infinite-worlds-import-service.js";
+import { infiniteWorldsPromptSet } from "../legacy-api/src/infinite-worlds-import-service.js";
 
 describe("Prompt Library catalog", () => {
   it("separates world seeds from complete generated character profiles", () => {

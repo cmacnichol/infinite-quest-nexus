@@ -86,26 +86,28 @@ backend-only concern.
 
 **What was searched:** `server.ts:842-878` (both endpoint families exist
 and are live), ADR 0025 and 0033 (describe the newer segmented model as the
-current design direction), but the frontend research pass did not
-conclusively trace whether `story.js` still calls the legacy
-single-illustration endpoints anywhere.
+current design direction). The initial frontend research pass did not
+conclusively trace whether the then-legacy `story.js` called the
+single-illustration endpoints.
 
-**Current evidence:** Inconclusive from static reading alone — both API
-routes are registered and neither is marked deprecated in code or docs.
+**Current evidence at initial review:** Inconclusive from static reading alone
+— both API routes were registered and neither was marked deprecated in code or
+docs.
 
 **Recommended default assumption:** Design the replacement UI around the
 segmented illustration model only (matches current product direction per
 ADR 0025/0033); do not build UI for the legacy single-image path unless a
 runtime/grep pass confirms it's still called from `story.js`.
 
-**Who should answer:** The maintainer, via `grep -n "illustration-asset\|/illustrations\"" apps/web/public/story.js`.
+**Who should answer:** Resolved; the historical check searched the legacy Story
+Player for `illustration-asset` and `/illustrations` calls.
 
-**RESOLVED (2026-07-31):** Vestigial — the legacy path is not reachable
-from the UI. `story.js` still defines `regenerateIllustration()` (calls
+**RESOLVED (2026-07-31):** Vestigial — the legacy path was not reachable
+from the UI. At the time, `story.js` defined `regenerateIllustration()` (calls
 `POST /turns/:turnId/illustrations`) and `removeIllustration()` (calls
 `PUT /turns/:turnId/illustration-asset`), wired to click-handlers for
-`data-action="regenerate-image"`/`"remove-image"` at `story.js:2783,2786`.
-But no button anywhere in the render templates
+`data-action="regenerate-image"`/`"remove-image"`. But no button anywhere in
+the render templates
 (`renderScene`, `segmentIllustrationMarkup`, `renderStoryIllustration`)
 ever emits those `data-action` values — only segmented-model actions
 (`regenerate-segment-image`, `edit-segment-image-prompt`,
@@ -143,6 +145,13 @@ endpoints returning hundreds+ of items.
 
 **Who should answer:** The product owner/maintainer, based on real
 deployment data (or their own usage expectations).
+
+**RESOLVED (2026-07-31):** Maintainer confirmed the recommended default.
+Re-checked `server.ts:387` (`GET /api/v1/worlds`) and `server.ts:479`
+(`GET /api/v1/campaigns`) — neither has pagination or query parameters.
+**Action:** keep client-side substring filtering for the initial
+replacement; revisit server-side search as a fast-follow only if real
+usage shows list endpoints returning hundreds+ of items.
 
 ---
 
@@ -212,6 +221,19 @@ just a straightforward migration).
 **Who should answer:** The maintainer, via a runtime pass through Campaign
 detail / settings areas in the current Nexus app.
 
+**RESOLVED (2026-07-31):** One consolidated section, not scattered, but
+also not a dedicated top-level screen today. `index.html:288`
+(`#campaignContextSection`, class `chronicle-settings-section`, labelled
+"Chronicle") holds the semantic-memory health badge, embedding provider
+selector, compression setting, "Rebuild memory" (reindex) button, and
+"View context preview" disclosure all together, inside the single
+Campaign Management screen (`nexus.js`). Backed by
+`GET .../memory/context-preview` and `POST .../memory/reindex`
+(`nexus.js:4618,4638`). **Action:** proceed with CHRONICLE-HEALTH as a new
+elevated/consolidated screen as recommended — the current state is
+already grouped, so this is a straightforward migration/elevation, not a
+recovery from scattered panels.
+
 ---
 
 ### Q6 — Is there a cross-campaign "needs attention" indicator anywhere in the current UI (e.g., on the dashboard) for recoverable/failed jobs?
@@ -238,6 +260,13 @@ new one.
 **Who should answer:** The maintainer, via reading `dashboard-service.ts`
 in full or a runtime pass on the current dashboard with a deliberately
 induced `recoverable` job.
+
+**RESOLVED (2026-07-31):** Confirmed absent. Read `dashboard-service.ts`
+in full — `getDashboardStats()` returns only world/campaign/turn counts
+and provider cost totals; there is no field anywhere in the response
+shape for recoverable/failed jobs. **Action:** design NEX-DASH to include
+a "needs attention" summary as a genuine new improvement, as recommended
+— this is not a retained requirement, since nothing like it exists today.
 
 ---
 
@@ -267,6 +296,14 @@ finalizing the illustration recovery flow.
 the intended pattern or whether a dedicated discard endpoint should be
 added.
 
+**RESOLVED (2026-07-31):** Maintainer confirmed the recommended default.
+Re-checked the full `image-jobs` inventory in `server.ts`: only
+`GET /campaigns/:campaignId/image-jobs`, `GET /image-jobs/:jobId`, and
+`POST /image-jobs/:jobId/retry` exist — no discard endpoint. **Action:**
+treat `DELETE /illustration-segments/:segmentId/images/:variantIndex` as
+the practical discard equivalent for image jobs in the replacement UI; no
+new backend endpoint is needed.
+
 ---
 
 ### Q8 — Should the replacement UI support a light theme, or remain dark-only by design?
@@ -290,5 +327,13 @@ decision, not an implicit requirement of this migration.
 
 **Who should answer:** The product owner/maintainer — a product/brand
 decision, not a technical one.
+
+**RESOLVED (2026-07-31):** Maintainer decided to plan for light theme
+support — this overrides the recommended default (dark-only). **Action:**
+`DESIGN_SYSTEM.md` and the replacement token set (successor to
+`tokens.css`) should define both dark and light color roles from the
+start, rather than treating light theme as out-of-scope for this
+migration. Confirm with the maintainer whether light should ship at
+initial launch or as a fast-follow within the same design-system scope.
 
 ---

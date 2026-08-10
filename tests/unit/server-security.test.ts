@@ -121,7 +121,13 @@ function multipartFieldUpload(fieldName: string, value: string) {
 }
 
 describe("API server security and CORS headers", () => {
-  const mockPool = { query: async () => ({ rows: [] }) } as unknown as DatabasePool;
+  const mockPool = {
+    query: async (sql: string) => ({
+      rows: sql.includes("system_key = 'initial-owner'")
+        ? [{ id: "11111111-1111-4111-8111-111111111111" }]
+        : [],
+    }),
+  } as unknown as DatabasePool;
 
   it("exposes public application metadata without querying the database", async () => {
     const config = makeConfig();

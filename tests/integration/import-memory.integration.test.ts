@@ -12,7 +12,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
-import { exportCampaign } from "../../services/api/src/campaign-archive-service.js";
+import { exportCampaign } from "../legacy-api/src/campaign-archive-service.js";
 import {
   buildContextPreview,
   enqueueChronicleReindex,

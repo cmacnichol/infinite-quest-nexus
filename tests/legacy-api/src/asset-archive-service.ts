@@ -1,3 +1,4 @@
+/** Frozen pre-14e3g archive regression oracle; never production authority. */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
@@ -5,7 +6,7 @@ import { sha256 } from "../../../packages/domain/src/text.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "../../../packages/database/src/pool.js";
 import { archiveAssetRecordSchema, sanitizePortableMetadata, type ArchiveAssetBinding, type ArchiveAssetRecord, type ArchiveEntry, type ArchiveManifest } from "../../../packages/contracts/src/archives.js";
 import { imageExtensionForMimeType, lockOriginalAsset, persistOriginalImage, verifyOriginalImage, type FilesystemAssetStore } from "./asset-service.js";
-import { preflightArchivePath, removeArchivePath } from "./archive-io.js";
+import { preflightArchivePath, removeArchivePath } from "../../../services/api/src/archive-io.js";
 
 export type ArchiveAssetSourceRow = {
   id: string; owner_user_id: string; content_hash: string; mime_type: "image/png" | "image/jpeg" | "image/webp" | "image/gif";

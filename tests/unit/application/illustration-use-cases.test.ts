@@ -4,7 +4,6 @@ import {
   createIllustrationWorkerApplication,
   type IllustrationApplication,
   type IllustrationArtifactDownloadPort,
-  type IllustrationAssetPort,
   type IllustrationConfigRepository,
   type IllustrationImageProviderPort,
   type IllustrationJobRepository,
@@ -355,11 +354,6 @@ describe("illustration application use cases", () => {
       },
       promptRefinement: { refinePrompt: async () => { throw new Error("not invoked"); } },
       artifactDownload: { downloadArtifact: async () => { throw new Error("not invoked"); } },
-      assets: {
-        persistTurnIllustration: async () => { throw new Error("not invoked"); },
-        persistWorldCover: async () => { throw new Error("not invoked"); },
-        bindSegmentAsset: async () => { throw new Error("not invoked"); }
-      },
       costs: { recordIllustrationCost: async () => null }
     } as Parameters<typeof createIllustrationWorkerApplication>[0]["ports"];
     const application = createIllustrationWorkerApplication({
@@ -390,10 +384,7 @@ describe("illustration application use cases", () => {
     expect(application).toMatchObject({
       executeImage: expect.any(Function),
       refinePrompt: expect.any(Function),
-      downloadArtifact: expect.any(Function),
-      persistTurnIllustration: expect.any(Function),
-      persistWorldCover: expect.any(Function),
-      bindSegmentAsset: expect.any(Function)
+      downloadArtifact: expect.any(Function)
     });
   });
 
@@ -475,11 +466,6 @@ describe("illustration application use cases", () => {
       imageProvider: { executeImage: async () => ({}) as never },
       promptRefinement: { refinePrompt: async () => ({}) as never },
       artifactDownload: { downloadArtifact: async () => ({}) as never },
-      assets: {
-        persistTurnIllustration: async () => ({ assetId: jobId }),
-        persistWorldCover: async () => ({ assetId: jobId }),
-        bindSegmentAsset: async () => false
-      },
       costs: { recordIllustrationCost: async () => null }
     } as Parameters<typeof createIllustrationWorkerApplication>[0]["ports"];
     const worker = createIllustrationWorkerApplication({ executor, ports, state });
@@ -634,33 +620,11 @@ describe("illustration application use cases", () => {
       allowPrivateHosts: true,
       maximumBytes: 20 * 1024 * 1024
     };
-    const provisionalBinding: Parameters<IllustrationAssetPort["bindSegmentAsset"]>[0] = {
-      database: {},
-      ownerUserId,
-      campaignId,
-      turnId: null,
-      segmentId,
-      imageJobId: jobId,
-      assetId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      variantIndex: 0
-    };
-    const provisionalAsset: Parameters<IllustrationAssetPort["persistTurnIllustration"]>[0] = {
-      database: {},
-      ownerUserId,
-      campaignId,
-      turnId: null,
-      imageJobId: jobId,
-      variantIndex: 0,
-      bytes: new Uint8Array([1, 2, 3]),
-      mimeType: "image/png"
-    };
     expectTypeOf(imagePort).not.toEqualTypeOf(refinementPort);
     expect(provisionalRefinement.turnId).toBeNull();
     expect(imageExecution.remoteJobId).toBe("remote-image-job");
     expect(pendingExecution.status).toBe("pending");
     expect(urlArtifactDownload.artifact.source).toBe("url");
     expect(base64ArtifactDownload.artifact.source).toBe("base64");
-    expect(provisionalBinding.turnId).toBeNull();
-    expect(provisionalAsset.turnId).toBeNull();
   });
 });

@@ -19,9 +19,9 @@ import {
   supportsSecureGeneratedArchiveStaging,
   type ArchiveLimits
 } from "../../services/api/src/archive-io.js";
-import { persistOriginalImage } from "../../services/api/src/asset-service.js";
-import { captureCampaignArchiveSnapshot, cleanupExpiredArchivePreviews, exportCampaign, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
-import { importCampaignArchive } from "../../services/api/src/import-service.js";
+import { persistOriginalImage } from "../legacy-api/src/asset-service.js";
+import { captureCampaignArchiveSnapshot, cleanupExpiredArchivePreviews, exportCampaign, previewCampaignArchive } from "../legacy-api/src/campaign-archive-service.js";
+import { importCampaignArchive } from "../legacy-api/src/import-service.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { serverOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
@@ -1336,12 +1336,11 @@ integration("campaign archive export", () => {
     await expect(stat(staged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  secureGeneratedStagingIt("[secure generated staging] preview cleanup marks failed commits failed and removes staging plus newly persisted archive originals", async () => {
+  secureGeneratedStagingIt("[secure generated staging] failed commit cleanup preserves a globally retained source original", async () => {
     const staged = await stagedExport();
     const sourceAsset = await pool.query<{ storage_path: string }>("SELECT storage_path FROM assets WHERE id=$1", [requiredAssetId]);
     const originalPath = resolve(root, sourceAsset.rows[0]!.storage_path);
     await pool.query("DELETE FROM asset_references WHERE asset_id=$1", [requiredAssetId]);
-    await pool.query("DELETE FROM assets WHERE id=$1", [requiredAssetId]);
     await unlink(originalPath);
     const destination = await createCompatibleDestination("Rollback destination");
     const before = await pool.query<{ assets: string; worlds: string; campaigns: string; imports: string }>(
@@ -1377,7 +1376,7 @@ integration("campaign archive export", () => {
               (SELECT count(*)::text FROM imports) AS imports`
     );
     expect(after.rows[0]).toEqual(before.rows[0]);
-    await expect(stat(originalPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await stat(originalPath)).size).toBeGreaterThan(0);
     expect((await stat(staged.absolutePath)).isFile()).toBe(true);
     await expect(previewRow(failedPreviewToken)).resolves.toMatchObject({
       status: "failed",

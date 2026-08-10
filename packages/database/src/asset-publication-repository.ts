@@ -330,6 +330,7 @@ export function createPostgresAssetPublicationRepository(
   const prepareIdentityWithClient = async (
     client: DatabaseClient,
     command: PrivateAssetPublicationCommand,
+    contentLockAlreadyHeld = false,
   ): Promise<PrivateAssetPublicationIdentity> => {
     validatePrivateAssetPublicationCommand(command);
     const requestFingerprint = fingerprint(command);
@@ -341,9 +342,11 @@ export function createPostgresAssetPublicationRepository(
     // publication and normalized request reservation.  A legacy prepare must
     // establish its canonical arbitration before another writer can publish a
     // second owner-scoped logical asset for the same bytes.
-    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
-      `infinite-quest-nexus:asset-content:${command.original.contentHash}`,
-    ]);
+    if (!contentLockAlreadyHeld) {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `infinite-quest-nexus:asset-content:${command.original.contentHash}`,
+      ]);
+    }
     const existing = await client.query<IdentityRow>(
         `SELECT asset_id,owner_user_id,request_fingerprint,lifecycle,result,pending_finalization
           FROM asset_publication_identities
@@ -415,6 +418,9 @@ export function createPostgresAssetPublicationRepository(
   const prepareIdentity: PrivateAssetPublicationIdentityPort["prepareIdentity"] = (command) => (
     withTransaction(pool, (client) => prepareIdentityWithClient(client, command))
   );
+  const prepareIdentityUnderContentLock: PrivateAssetPublicationIdentityPort["prepareIdentityUnderContentLock"] = (
+    command,
+  ) => withTransaction(pool, (client) => prepareIdentityWithClient(client, command, true));
   const prepareIdentityInTransaction: PrivateAssetPublicationIdentityPort["prepareIdentityInTransaction"] = async (
     database,
     command,
@@ -828,6 +834,7 @@ export function createPostgresAssetPublicationRepository(
 
   return Object.freeze({
     prepareIdentity,
+    prepareIdentityUnderContentLock,
     prepareIdentityInTransaction,
     discardPreparedIdentityInTransaction,
     readPublicationIdentities,

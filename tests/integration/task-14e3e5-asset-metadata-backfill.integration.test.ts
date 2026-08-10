@@ -488,6 +488,10 @@ integration("Task 14e3e5 private asset metadata backfill", () => {
     await expect(readFile(join(assetRoot, "assets", "content", thumbnail.contentHash)))
       .resolves.toEqual(Buffer.from(thumbnail.bytes));
     await storage.close();
+    await pool.query(
+      "DELETE FROM assets WHERE owner_user_id=$1 AND content_hash=$2",
+      [otherOwnerId, thumbnail.contentHash],
+    );
   });
 
   it("retains attached finalization evidence when post-commit filesystem finalization fails", async () => {

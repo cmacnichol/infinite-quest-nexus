@@ -14,14 +14,11 @@ import {
   createPostgresIllustrationRepositories
 } from "../../../packages/database/src/illustration-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import type { FilesystemAssetStore } from "../../api/src/asset-service.js";
 import {
   createIllustrationArtifactDownloadAdapter,
-  createIllustrationAssetAdapter,
   createIllustrationImageProviderAdapter,
   createIllustrationPromptRefinementAdapter
 } from "./illustration-platform-adapter.js";
-import { runImageJob } from "./illustration-image-job-adapter.js";
 import { runIllustrationResolutionJob } from "./illustration-resolution-job-adapter.js";
 import { runIllustrationPromptJob } from "./illustration-segment-job-adapter.js";
 import { createIllustrationPlatformBindings } from "./illustration-platform-bindings.js";
@@ -70,10 +67,16 @@ export function createIllustrationWorkerExecutor(
   };
 }
 
+async function retiredDirectImageLane(): Promise<boolean> {
+  // Image jobs are executed only by worker.ts with the normalized publication
+  // coordinator. Keeping the state machine's third lane closed prevents the
+  // retired transaction-scoped asset writer from remaining callable.
+  return false;
+}
+
 export type WorkerIllustrationCompositionFactories = Readonly<{
   createPorts(
     pool: DatabasePool,
-    store: FilesystemAssetStore,
     providers: IllustrationProviderCollaborators,
   ): IllustrationWorkerPorts;
   createLanes(
@@ -88,10 +91,9 @@ export type WorkerIllustrationCompositionFactories = Readonly<{
 
 export function createIllustrationWorkerPorts(
   pool: DatabasePool,
-  store: FilesystemAssetStore,
   providers: IllustrationProviderCollaborators,
 ): IllustrationWorkerPorts {
-  const bindings = createIllustrationPlatformBindings(pool, store, providers);
+  const bindings = createIllustrationPlatformBindings(pool, providers);
   return {
     imageProvider: createIllustrationImageProviderAdapter(
       pool,
@@ -102,7 +104,6 @@ export function createIllustrationWorkerPorts(
       bindings.promptRefinement,
     ),
     artifactDownload: createIllustrationArtifactDownloadAdapter(bindings.artifactDownload),
-    assets: createIllustrationAssetAdapter(pool, store, bindings.assets),
     costs: bindings.costs
   };
 }
@@ -124,12 +125,7 @@ const workerFactories: WorkerIllustrationCompositionFactories = {
       request.leaseSeconds,
       providers,
     ),
-    image: (request) => runImageJob(
-      pool,
-      request.workerId,
-      request.leaseSeconds,
-      ports,
-    )
+    image: retiredDirectImageLane
   }),
   createState: createIllustrationWorkerStateMachine,
   createExecutor: createIllustrationWorkerExecutor,
@@ -138,13 +134,12 @@ const workerFactories: WorkerIllustrationCompositionFactories = {
 
 export function createWorkerIllustrationApplication(
   pool: DatabasePool,
-  store: FilesystemAssetStore,
   providers: IllustrationProviderCollaborators,
   factories: WorkerIllustrationCompositionFactories = workerFactories,
 ): IllustrationWorkerApplication {
   const ports = factories === workerFactories
-    ? createIllustrationWorkerPorts(pool, store, providers)
-    : factories.createPorts(pool, store, providers);
+    ? createIllustrationWorkerPorts(pool, providers)
+    : factories.createPorts(pool, providers);
   const lanes = factories.createLanes(pool, ports, providers);
   const state = factories.createState(pool, lanes);
   const executor = factories.createExecutor(state);

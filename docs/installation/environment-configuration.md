@@ -27,6 +27,8 @@ The application supports the following runtime settings, but a deployment manife
 
 Direct secret environment values take precedence over `_FILE` values.
 
+For the root local `compose.yaml`, when neither form is supplied, the startup bootstrap creates a random credential-encryption key once in a private named volume and reuses it on later starts. Docker Swarm does not bootstrap this value; it requires the operator-provisioned external secret.
+
 World-generation progress is stored as short-lived, owner-scoped PostgreSQL state so API replicas can serve polling requests interchangeably. Generation logs record operational metadata but omit prompt bodies, imported lore, raw model output, private reasoning, and credentials.
 
 ::: warning Compose-effective values

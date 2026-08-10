@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { legacyStorySchema } from "../../packages/contracts/src/imports.js";
 import { WORLD_CONTENT_SCHEMA_VERSION } from "../../packages/contracts/src/world-library.js";
-import { legacyWorldContent } from "../../services/api/src/import-service.js";
+import { legacyWorldContent } from "../legacy-api/src/import-service.js";
 
 describe("legacy campaign world conversion", () => {
   it("converts unstructured character guidance into a deterministic roster entry", () => {
@@ -54,7 +54,7 @@ describe("legacy campaign world conversion", () => {
   });
 
   it("preserves relative asset URLs in safeExternalImageUrl and detects image mime types from signatures", async () => {
-    const { safeExternalImageUrl, detectMimeType } = await import("../../services/api/src/asset-service.js");
+    const { safeExternalImageUrl, detectMimeType } = await import("../legacy-api/src/asset-service.js");
     expect(safeExternalImageUrl("/api/v1/assets/9a3f2b1d-8e4c-4a31-b657-123456789abc")).toBe("/api/v1/assets/9a3f2b1d-8e4c-4a31-b657-123456789abc");
     expect(safeExternalImageUrl("assets/9a3f2b1d-8e4c-4a31-b657-123456789abc.png")).toBe("assets/9a3f2b1d-8e4c-4a31-b657-123456789abc.png");
     expect(safeExternalImageUrl("https://example.com/photo.jpg")).toBe("https://example.com/photo.jpg");

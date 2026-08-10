@@ -67,29 +67,33 @@ describe("durable asynchronous image jobs", () => {
     expect(source).toContain("export async function enqueueWorldCover");
     expect(source).toContain("export async function getLatestWorldCoverJob");
     expect(source).toContain('targetType: "world_cover"');
-    expect(source).toContain("persistWorldCover");
-    expect(source).toContain("if (job.campaign_id)");
+    expect(source).toContain("publication.completeClaimedImageJob");
+    expect(source).not.toContain("persistWorldCover");
   });
 
   it("derives segment-scoped image work without mutating accepted turns", async () => {
     const migration = await readFile(resolve("database/migrations/0033_segmented_turn_illustrations.sql"), "utf8");
     const imageService = await readFile(resolve("services/runtime/src/illustration-image-job-adapter.ts"), "utf8");
     const segmentService = await readFile(resolve("services/runtime/src/illustration-segment-job-adapter.ts"), "utf8");
+    const publication = await readFile(
+      resolve("services/runtime/src/illustration-asset-publication-composition.ts"),
+      "utf8",
+    );
 
     expect(migration).toContain("CREATE TABLE turn_illustration_sets");
     expect(migration).toContain("CREATE TABLE turn_illustration_segments");
     expect(migration).toContain("CREATE TABLE turn_illustration_segment_assets");
     expect(migration).toContain("CREATE TABLE illustration_prompt_jobs");
     expect(migration).toContain("image_jobs_one_active_segment_idx");
-    expect(imageService).toContain("if (job.segment_id)");
+    expect(imageService).toContain("if (job.segment_id &&");
     expect(segmentService).toContain("enqueueAcceptedTurnIllustrationSegments");
     expect(segmentService).toContain("illustration_prompt_refinement");
     expect(segmentService).toContain("export async function regenerateSegmentIllustration");
     expect(segmentService).toContain("export async function removeSegmentIllustrationVariant");
     expect(segmentService).toContain("turns.turn_number = campaigns.active_turn_number");
     expect(segmentService).toContain("targetVariantIndex: request.variantIndex");
-    expect(imageService).toContain("hasRequestedVariant");
-    expect(imageService).toContain("provider_request_metadata.targetVariantIndex");
+    expect(publication).toContain("job.providerRequestMetadata.targetVariantIndex");
+    expect(publication).toContain("firstVariantIndex + index");
     expect(segmentService).not.toContain("UPDATE turns SET");
   });
 
