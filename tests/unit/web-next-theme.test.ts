@@ -150,10 +150,23 @@ describe("web theme integration", () => {
     expect(toggleRule).toMatch(/min-height:\s*44px/);
     expect(toggleRule).toMatch(/border-radius:\s*0/);
     expect(css).toMatch(/\.theme-toggle:focus-visible\s*\{[^}]*outline:/);
-    expect(iconRule).toMatch(/width:\s*24px/);
-    expect(iconRule).toMatch(/height:\s*24px/);
+    expect(iconRule).toMatch(/width:\s*20px/);
+    expect(iconRule).toMatch(/height:\s*20px/);
     expect(visibleThemeIcons(css, "light")).toEqual(["theme-icon-sun"]);
     expect(visibleThemeIcons(css, "dark")).toEqual(["theme-icon-moon"]);
+  });
+
+  it("defines reusable light and dark semantic theme tokens", () => {
+    const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+    for (const token of [
+      "--surface-page", "--surface-entry", "--surface-inverse",
+      "--text-primary", "--text-secondary", "--text-inverse",
+      "--rule", "--rule-strong", "--accent", "--accent-hover", "--accent-soft"
+    ]) expect(css).toContain(token);
+    expect(css).toContain(':root[data-theme="dark"]');
+    expect(css).toContain(".theme-toggle");
+    expect(css).toContain(".theme-icon-moon");
+    expect(css).toContain(".theme-icon-sun");
   });
 });
 

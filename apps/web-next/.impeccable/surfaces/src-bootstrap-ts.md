@@ -15,7 +15,7 @@ Creative-fiction and RPG readers browse and search a populated library to recogn
 Search is primary. Each world exposes cover art, title, a short description, and campaign count. Results come from the authoritative `/api/v1/worlds` endpoint; application source contains no sample worlds or campaigns.
 
 ## Direction
-Constructed Atlas Grid: a visible modular grid paired with restrained literary display typography, cobalt focus states, and a recurring diagonal slash. World cover art remains the richest visual material. Search reorganizes results by whole grid cells without layout shifts.
+Constructed Atlas Grid: a visible modular grid paired with restrained literary display typography, semantic accent focus states, and a recurring diagonal slash. Light and dark themes preserve artwork priority, the visible grid structure, and compact browsing density; user-provided world cover art remains the richest visual material and is not recolored or replaced by theme changes. Search reorganizes results by whole grid cells without layout shifts.
 
 ## Constraints
-Overview only. Editing, creation, publication, versions, archives, import/export, and campaign management remain in dedicated sections. Support keyboard and screen-reader operation, reduced motion, and responsive one/two/multi-column layouts.
+Overview only. Editing, creation, publication, versions, archives, import/export, and campaign management remain in dedicated sections. Support keyboard and screen-reader operation, reduced motion, responsive one/two/multi-column layouts, and a 44px-minimum theme toggle that stays in the top mobile header row while all four navigation destinations remain unclipped in the second row. Consume the shared semantic theme tokens; do not couple future surfaces to World Library selectors or literal theme colors.

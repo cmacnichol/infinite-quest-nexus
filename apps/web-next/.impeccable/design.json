@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-11T03:02:00Z",
+  "generatedAt": "2026-08-11T05:39:58.268Z",
   "title": "Design System: Infinite Quest Nexus",
   "extensions": {
     "colorMeta": {
@@ -9,29 +9,29 @@
         "displayName": "Atlas Ink",
         "canonical": "#101418",
         "tonalRamp": [
-          "oklch(15% 0.0103 248.4)",
-          "oklch(27% 0.0103 248.4)",
-          "oklch(39% 0.0103 248.4)",
-          "oklch(51% 0.0103 248.4)",
-          "oklch(63% 0.0103 248.4)",
-          "oklch(75% 0.0103 248.4)",
-          "oklch(87% 0.0103 248.4)",
-          "oklch(95% 0.0103 248.4)"
+          "oklch(15% 0.012 248)",
+          "oklch(27% 0.012 248)",
+          "oklch(39% 0.012 248)",
+          "oklch(51% 0.012 248)",
+          "oklch(63% 0.012 248)",
+          "oklch(75% 0.012 248)",
+          "oklch(87% 0.012 248)",
+          "oklch(95% 0.012 248)"
         ]
       },
       "muted": {
         "role": "neutral",
         "displayName": "Operational Gray",
-        "canonical": "#525c66",
+        "canonical": "#46515c",
         "tonalRamp": [
-          "oklch(15% 0.0205 248.3)",
-          "oklch(27% 0.0205 248.3)",
-          "oklch(39% 0.0205 248.3)",
-          "oklch(51% 0.0205 248.3)",
-          "oklch(63% 0.0205 248.3)",
-          "oklch(75% 0.0205 248.3)",
-          "oklch(87% 0.0205 248.3)",
-          "oklch(95% 0.0205 248.3)"
+          "oklch(15% 0.022 248)",
+          "oklch(27% 0.022 248)",
+          "oklch(39% 0.022 248)",
+          "oklch(51% 0.022 248)",
+          "oklch(63% 0.022 248)",
+          "oklch(75% 0.022 248)",
+          "oklch(87% 0.022 248)",
+          "oklch(95% 0.022 248)"
         ]
       },
       "paper": {
@@ -39,14 +39,14 @@
         "displayName": "Paper White",
         "canonical": "#f8fafb",
         "tonalRamp": [
-          "oklch(15% 0.0025 228.8)",
-          "oklch(27% 0.0025 228.8)",
-          "oklch(39% 0.0025 228.8)",
-          "oklch(51% 0.0025 228.8)",
-          "oklch(63% 0.0025 228.8)",
-          "oklch(75% 0.0025 228.8)",
-          "oklch(87% 0.0025 228.8)",
-          "oklch(95% 0.0025 228.8)"
+          "oklch(15% 0.003 229)",
+          "oklch(27% 0.003 229)",
+          "oklch(39% 0.003 229)",
+          "oklch(51% 0.003 229)",
+          "oklch(63% 0.003 229)",
+          "oklch(75% 0.003 229)",
+          "oklch(87% 0.003 229)",
+          "oklch(95% 0.003 229)"
         ]
       },
       "canvas": {
@@ -67,91 +67,106 @@
       "atmosphere": {
         "role": "secondary",
         "displayName": "Atmosphere Plane",
-        "canonical": "#cbdcff",
+        "canonical": "#bdcbea",
         "tonalRamp": [
-          "oklch(15% 0.07 260)",
-          "oklch(27% 0.07 260)",
-          "oklch(39% 0.07 260)",
-          "oklch(51% 0.07 260)",
-          "oklch(63% 0.07 260)",
-          "oklch(75% 0.07 260)",
-          "oklch(87% 0.07 260)",
-          "oklch(95% 0.07 260)"
+          "oklch(15% 0.055 262)",
+          "oklch(27% 0.055 262)",
+          "oklch(39% 0.055 262)",
+          "oklch(51% 0.055 262)",
+          "oklch(63% 0.055 262)",
+          "oklch(75% 0.055 262)",
+          "oklch(87% 0.055 262)",
+          "oklch(95% 0.055 262)"
         ]
       },
       "grid": {
         "role": "neutral",
         "displayName": "Construction Grid",
-        "canonical": "#ccd6df",
+        "canonical": "#b8c5d0",
         "tonalRamp": [
-          "oklch(15% 0.0165 245.1)",
-          "oklch(27% 0.0165 245.1)",
-          "oklch(39% 0.0165 245.1)",
-          "oklch(51% 0.0165 245.1)",
-          "oklch(63% 0.0165 245.1)",
-          "oklch(75% 0.0165 245.1)",
-          "oklch(87% 0.0165 245.1)",
-          "oklch(95% 0.0165 245.1)"
+          "oklch(15% 0.019 245)",
+          "oklch(27% 0.019 245)",
+          "oklch(39% 0.019 245)",
+          "oklch(51% 0.019 245)",
+          "oklch(63% 0.019 245)",
+          "oklch(75% 0.019 245)",
+          "oklch(87% 0.019 245)",
+          "oklch(95% 0.019 245)"
         ]
       },
       "grid-strong": {
         "role": "neutral",
         "displayName": "Strong Construction Grid",
-        "canonical": "#9aa9b7",
+        "canonical": "#8798a8",
         "tonalRamp": [
-          "oklch(15% 0.0264 246.3)",
-          "oklch(27% 0.0264 246.3)",
-          "oklch(39% 0.0264 246.3)",
-          "oklch(51% 0.0264 246.3)",
-          "oklch(63% 0.0264 246.3)",
-          "oklch(75% 0.0264 246.3)",
-          "oklch(87% 0.0264 246.3)",
-          "oklch(95% 0.0264 246.3)"
+          "oklch(15% 0.03 246)",
+          "oklch(27% 0.03 246)",
+          "oklch(39% 0.03 246)",
+          "oklch(51% 0.03 246)",
+          "oklch(63% 0.03 246)",
+          "oklch(75% 0.03 246)",
+          "oklch(87% 0.03 246)",
+          "oklch(95% 0.03 246)"
         ]
       },
-      "cobalt": {
+      "indigo": {
         "role": "primary",
-        "displayName": "Signal Cobalt",
-        "canonical": "#064ef5",
+        "displayName": "Editorial Indigo",
+        "canonical": "#2346a8",
         "tonalRamp": [
-          "oklch(15% 0.2549 263.2)",
-          "oklch(27% 0.2549 263.2)",
-          "oklch(39% 0.2549 263.2)",
-          "oklch(51% 0.2549 263.2)",
-          "oklch(63% 0.2549 263.2)",
-          "oklch(75% 0.2549 263.2)",
-          "oklch(87% 0.2549 263.2)",
-          "oklch(95% 0.2549 263.2)"
+          "oklch(15% 0.15 264)",
+          "oklch(27% 0.15 264)",
+          "oklch(39% 0.15 264)",
+          "oklch(51% 0.15 264)",
+          "oklch(63% 0.15 264)",
+          "oklch(75% 0.15 264)",
+          "oklch(87% 0.15 264)",
+          "oklch(95% 0.15 264)"
         ]
       },
-      "cobalt-dark": {
+      "indigo-dark": {
         "role": "primary",
-        "displayName": "Deep Cobalt",
-        "canonical": "#003bbd",
+        "displayName": "Deep Editorial Indigo",
+        "canonical": "#17327f",
         "tonalRamp": [
-          "oklch(15% 0.2092 262.8)",
-          "oklch(27% 0.2092 262.8)",
-          "oklch(39% 0.2092 262.8)",
-          "oklch(51% 0.2092 262.8)",
-          "oklch(63% 0.2092 262.8)",
-          "oklch(75% 0.2092 262.8)",
-          "oklch(87% 0.2092 262.8)",
-          "oklch(95% 0.2092 262.8)"
+          "oklch(15% 0.12 264)",
+          "oklch(27% 0.12 264)",
+          "oklch(39% 0.12 264)",
+          "oklch(51% 0.12 264)",
+          "oklch(63% 0.12 264)",
+          "oklch(75% 0.12 264)",
+          "oklch(87% 0.12 264)",
+          "oklch(95% 0.12 264)"
         ]
       },
-      "white": {
+      "indigo-soft": {
+        "role": "secondary",
+        "displayName": "Soft Editorial Indigo",
+        "canonical": "#c8d5f2",
+        "tonalRamp": [
+          "oklch(15% 0.045 264)",
+          "oklch(27% 0.045 264)",
+          "oklch(39% 0.045 264)",
+          "oklch(51% 0.045 264)",
+          "oklch(63% 0.045 264)",
+          "oklch(75% 0.045 264)",
+          "oklch(87% 0.045 264)",
+          "oklch(95% 0.045 264)"
+        ]
+      },
+      "inverse-text": {
         "role": "neutral",
-        "displayName": "Pure White",
-        "canonical": "#ffffff",
+        "displayName": "Inverse Text",
+        "canonical": "#f5f7fb",
         "tonalRamp": [
-          "oklch(15% 0 0)",
-          "oklch(27% 0 0)",
-          "oklch(39% 0 0)",
-          "oklch(51% 0 0)",
-          "oklch(63% 0 0)",
-          "oklch(75% 0 0)",
-          "oklch(87% 0 0)",
-          "oklch(95% 0 0)"
+          "oklch(15% 0.006 264)",
+          "oklch(27% 0.006 264)",
+          "oklch(39% 0.006 264)",
+          "oklch(51% 0.006 264)",
+          "oklch(63% 0.006 264)",
+          "oklch(75% 0.006 264)",
+          "oklch(87% 0.006 264)",
+          "oklch(95% 0.006 264)"
         ]
       }
     },
@@ -180,12 +195,12 @@
     "shadows": [
       {
         "name": "search-focus",
-        "value": "0 8px 24px rgba(6, 78, 245, 0.13)",
-        "purpose": "Concentrates attention on the active primary query field."
+        "value": "0 8px 24px var(--focus-shadow)",
+        "purpose": "Concentrates attention on the active primary query field in either theme."
       },
       {
         "name": "cell-focus-inset",
-        "value": "inset 0 0 0 3px #064ef5",
+        "value": "inset 0 0 0 3px var(--accent)",
         "purpose": "Bounds a complete clickable cell for keyboard focus without shifting layout."
       }
     ],
@@ -220,7 +235,47 @@
         "name": "medium",
         "value": "1000px"
       }
-    ]
+    ],
+    "themePalettes": {
+      "light": {
+        "--surface-page": "{colors.canvas}",
+        "--surface-paper": "rgba(248, 250, 251, 0.84)",
+        "--surface-entry": "rgba(248, 250, 251, 0.96)",
+        "--surface-entry-hover": "#ffffff",
+        "--surface-muted": "#e6ebf0",
+        "--surface-inverse": "{colors.ink}",
+        "--surface-atmosphere": "{colors.atmosphere}",
+        "--text-primary": "{colors.ink}",
+        "--text-secondary": "{colors.muted}",
+        "--text-inverse": "{colors.inverse-text}",
+        "--rule": "{colors.grid}",
+        "--rule-strong": "{colors.grid-strong}",
+        "--accent": "{colors.indigo}",
+        "--accent-hover": "{colors.indigo-dark}",
+        "--accent-soft": "{colors.indigo-soft}",
+        "--focus-shadow": "rgba(35, 70, 168, 0.2)",
+        "--artwork-fallback": "#e1e7ec"
+      },
+      "dark": {
+        "--surface-page": "#111821",
+        "--surface-paper": "rgba(17, 24, 33, 0.9)",
+        "--surface-entry": "rgba(24, 33, 44, 0.96)",
+        "--surface-entry-hover": "#202c3a",
+        "--surface-muted": "#263342",
+        "--surface-inverse": "#080d13",
+        "--surface-atmosphere": "#1b2b4f",
+        "--text-primary": "#edf2f7",
+        "--text-secondary": "#b7c2cd",
+        "--text-inverse": "#edf2f7",
+        "--rule": "#39495a",
+        "--rule-strong": "#5b6c7e",
+        "--accent": "#8eabff",
+        "--accent-hover": "#b5c7ff",
+        "--accent-soft": "#243760",
+        "--focus-shadow": "rgba(142, 171, 255, 0.24)",
+        "--artwork-fallback": "#25313d"
+      }
+    }
   },
   "components": [
     {
@@ -228,23 +283,23 @@
       "kind": "custom",
       "description": "The compact product signature for persistent app navigation.",
       "html": "<a class=\"ds-brand\" href=\"#\" aria-label=\"Infinite Quest Nexus home\"><span class=\"ds-brand-mark\" aria-hidden=\"true\"><i></i><i></i><i></i><i></i><i></i></span><span>Infinite Quest <b>Nexus</b></span></a>",
-      "css": ".ds-brand { display: inline-flex; align-items: center; gap: 12px; color: var(--ink, #101418); font-family: 'Chakra Petch', sans-serif; font-size: 0.92rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; text-decoration: none; } .ds-brand:focus-visible { outline: 3px solid var(--cobalt, #064ef5); outline-offset: 4px; } .ds-brand-mark { width: 27px; height: 24px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; align-items: end; } .ds-brand-mark i { display: block; height: 100%; background: var(--ink, #101418); } .ds-brand-mark i:nth-child(2), .ds-brand-mark i:nth-child(4) { height: 48%; background: var(--cobalt, #064ef5); } .ds-brand-mark i:nth-child(3) { height: 72%; } .ds-brand b { color: var(--cobalt, #064ef5); font-weight: inherit; }"
+      "css": ".ds-brand { display: inline-flex; align-items: center; gap: 12px; color: var(--text-primary, #101418); font-family: 'Chakra Petch', sans-serif; font-size: 0.92rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; text-decoration: none; } .ds-brand:focus-visible { outline: 3px solid var(--accent, #2346a8); outline-offset: 4px; } .ds-brand-mark { width: 27px; height: 24px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; align-items: end; } .ds-brand-mark i { display: block; height: 100%; background: var(--text-primary, #101418); } .ds-brand-mark i:nth-child(2), .ds-brand-mark i:nth-child(4) { height: 48%; background: var(--accent, #2346a8); } .ds-brand-mark i:nth-child(3) { height: 72%; } .ds-brand b { color: var(--accent, #2346a8); font-weight: inherit; }"
     },
     {
       "name": "Navigation Item",
       "kind": "nav",
       "refersTo": "navigation-item",
-      "description": "An operational destination marked by a growing cobalt baseline.",
+      "description": "An operational destination marked by a growing accent baseline.",
       "html": "<a class=\"ds-nav-item\" href=\"#\" aria-current=\"page\">World Library</a>",
-      "css": ".ds-nav-item { position: relative; min-height: 48px; display: inline-flex; align-items: center; padding: 0 20px; color: #39434c; font-family: 'Geologica', sans-serif; font-size: 0.79rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.055em; text-decoration: none; } .ds-nav-item::after { position: absolute; right: 0; bottom: 0; left: 0; height: 3px; content: ''; background: var(--cobalt, #064ef5); transform: scaleX(0); transform-origin: left; transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1); } .ds-nav-item:hover, .ds-nav-item:focus-visible, .ds-nav-item[aria-current='page'] { color: var(--ink, #101418); outline: none; } .ds-nav-item:hover::after, .ds-nav-item:focus-visible::after, .ds-nav-item[aria-current='page']::after { transform: scaleX(1); } .ds-nav-item:active { color: var(--cobalt-dark, #003bbd); }"
+      "css": ".ds-nav-item { position: relative; min-height: 48px; display: inline-flex; align-items: center; padding: 0 20px; color: var(--text-secondary, #46515c); font-family: 'Geologica', sans-serif; font-size: 0.79rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.055em; text-decoration: none; } .ds-nav-item::after { position: absolute; right: 0; bottom: 0; left: 0; height: 3px; content: ''; background: var(--accent, #2346a8); transform: scaleX(0); transform-origin: left; transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1); } .ds-nav-item:hover, .ds-nav-item:focus-visible, .ds-nav-item[aria-current='page'] { color: var(--text-primary, #101418); outline: none; } .ds-nav-item:hover::after, .ds-nav-item:focus-visible::after, .ds-nav-item[aria-current='page']::after { transform: scaleX(1); } .ds-nav-item:active { color: var(--accent-hover, #17327f); }"
     },
     {
       "name": "Primary Button",
       "kind": "button",
       "refersTo": "button-primary",
-      "description": "A square cobalt action for retry and other decisive operations.",
+      "description": "A square accent action for retry and other decisive operations.",
       "html": "<button class=\"ds-btn-primary\" type=\"button\">Try again</button>",
-      "css": ".ds-btn-primary { padding: 12px 18px; color: var(--white, #ffffff); background: var(--cobalt, #064ef5); border: 1px solid var(--cobalt, #064ef5); border-radius: 0; cursor: pointer; font-family: 'Chakra Petch', sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; transition: background-color 180ms ease, border-color 180ms ease; } .ds-btn-primary:hover { background: var(--cobalt-dark, #003bbd); border-color: var(--cobalt-dark, #003bbd); } .ds-btn-primary:focus-visible { background: var(--cobalt-dark, #003bbd); outline: 3px solid var(--ink, #101418); outline-offset: 3px; } .ds-btn-primary:active { background: var(--ink, #101418); border-color: var(--ink, #101418); }"
+      "css": ".ds-btn-primary { padding: 12px 18px; color: var(--text-inverse, #f5f7fb); background: var(--accent, #2346a8); border: 1px solid var(--accent, #2346a8); border-radius: 0; cursor: pointer; font-family: 'Chakra Petch', sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; transition: background-color 180ms ease, border-color 180ms ease; } .ds-btn-primary:hover { background: var(--accent-hover, #17327f); border-color: var(--accent-hover, #17327f); } .ds-btn-primary:focus-visible { background: var(--accent-hover, #17327f); outline: 3px solid var(--text-primary, #101418); outline-offset: 3px; } .ds-btn-primary:active { background: var(--surface-inverse, #101418); border-color: var(--surface-inverse, #101418); }"
     },
     {
       "name": "Search Field",
@@ -252,7 +307,7 @@
       "refersTo": "search-field",
       "description": "The focused query control with the system's only lifted shadow.",
       "html": "<label class=\"ds-search\" for=\"ds-search-input\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"11\" cy=\"11\" r=\"6.5\"></circle><path d=\"m16 16 4 4\"></path></svg><span class=\"ds-visually-hidden\">Search worlds</span><input id=\"ds-search-input\" type=\"search\" placeholder=\"Search by title or description\"><kbd aria-hidden=\"true\">/</kbd></label>",
-      "css": ".ds-search { width: min(100%, 620px); height: 52px; display: flex; align-items: center; color: var(--ink, #101418); background: var(--paper, #f8fafb); border: 1px solid var(--ink, #101418); border-radius: 0; transition: border-color 180ms ease, box-shadow 180ms ease; } .ds-search:focus-within { border-color: var(--cobalt, #064ef5); box-shadow: 0 8px 24px rgba(6, 78, 245, 0.13); } .ds-search svg { width: 22px; height: 22px; margin-left: 18px; fill: none; stroke: var(--cobalt, #064ef5); stroke-width: 1.8; stroke-linecap: square; stroke-linejoin: miter; } .ds-search input { min-width: 0; flex: 1; height: 100%; padding: 0 18px; color: var(--ink, #101418); background: transparent; border: 0; outline: 0; font-family: 'Geologica', sans-serif; font-size: 1rem; } .ds-search input::placeholder { color: #5b6570; opacity: 1; } .ds-search kbd { margin-right: 14px; padding: 4px 8px; color: #39434c; background: #e6ebf0; border: 1px solid #a9b4be; border-radius: 0; font-family: 'Geologica', sans-serif; font-size: 0.72rem; } .ds-visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }"
+      "css": ".ds-search { width: min(100%, 620px); height: 52px; display: flex; align-items: center; color: var(--text-primary, #101418); background: var(--surface-entry, rgba(248, 250, 251, 0.96)); border: 1px solid var(--text-primary, #101418); border-radius: 0; transition: border-color 180ms ease, box-shadow 180ms ease; } .ds-search:focus-within { border-color: var(--accent, #2346a8); box-shadow: 0 8px 24px var(--focus-shadow, rgba(35, 70, 168, 0.2)); } .ds-search svg { width: 22px; height: 22px; margin-left: 18px; fill: none; stroke: var(--accent, #2346a8); stroke-width: 1.8; stroke-linecap: square; stroke-linejoin: miter; } .ds-search input { min-width: 0; flex: 1; height: 100%; padding: 0 18px; color: var(--text-primary, #101418); background: transparent; border: 0; outline: 0; font-family: 'Geologica', sans-serif; font-size: 1rem; } .ds-search input::placeholder { color: var(--text-secondary, #46515c); opacity: 1; } .ds-search kbd { margin-right: 14px; padding: 4px 8px; color: var(--text-secondary, #46515c); background: var(--surface-muted, #e6ebf0); border: 1px solid var(--rule, #b8c5d0); border-radius: 0; font-family: 'Geologica', sans-serif; font-size: 0.72rem; } .ds-visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }"
     },
     {
       "name": "Indexed Content Entry",
@@ -260,7 +315,7 @@
       "refersTo": "indexed-entry",
       "description": "A complete clickable atlas cell pairing distinctive media with concise evidence.",
       "html": "<a class=\"ds-entry\" href=\"#\" aria-label=\"Open The Glass Frontier, 3 campaigns\"><span class=\"ds-entry-cover\"><span class=\"ds-entry-glyph\" aria-hidden=\"true\">G</span><span class=\"ds-coordinate\" aria-hidden=\"true\">01 / W</span></span><span class=\"ds-entry-copy\"><strong>The Glass Frontier</strong><span class=\"ds-entry-description\">A durable world of contested passages and impossible horizons.</span><span class=\"ds-entry-meta\"><span>3 campaigns</span><span class=\"ds-entry-action\">Open world <svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M7 17 17 7M8 7h9v9\"></path></svg></span></span></span></a>",
-      "css": ".ds-entry { width: min(100%, 390px); display: grid; grid-template-rows: auto 1fr; padding: clamp(13px, 1.33vw, 21px); color: var(--ink, #101418); background: color-mix(in srgb, var(--paper, #f8fafb) 96%, transparent); border: 1px solid var(--grid-strong, #9aa9b7); border-radius: 0; text-decoration: none; transition: background-color 180ms ease; } .ds-entry:hover, .ds-entry:focus-visible { background: var(--white, #ffffff); outline: none; } .ds-entry:focus-visible { box-shadow: inset 0 0 0 3px var(--cobalt, #064ef5); } .ds-entry:active { background: var(--paper, #f8fafb); } .ds-entry-cover { position: relative; aspect-ratio: 16 / 9; overflow: hidden; display: grid; place-items: center; color: var(--cobalt, #064ef5); background-color: #e9edf0; background-image: linear-gradient(to right, rgba(6, 78, 245, 0.16) 1px, transparent 1px), linear-gradient(to bottom, rgba(6, 78, 245, 0.16) 1px, transparent 1px); background-size: 18px 18px; border-bottom: 1px solid var(--ink, #101418); clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 0 100%); } .ds-entry-glyph { font-family: 'Chakra Petch', sans-serif; font-size: 5rem; font-weight: 600; line-height: 1; } .ds-coordinate { position: absolute; right: 0; bottom: 0; padding: 7px 10px; color: var(--white, #ffffff); background: var(--cobalt, #064ef5); font-family: 'Chakra Petch', sans-serif; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; } .ds-entry-copy { min-height: 166px; display: flex; flex-direction: column; padding-top: 18px; } .ds-entry-copy strong { margin-bottom: 0.7rem; font-family: 'Literata', Georgia, serif; font-size: 1.5rem; font-weight: 600; line-height: 1.08; letter-spacing: -0.02em; } .ds-entry-description { margin-bottom: 1.6rem; color: #49535d; font-family: 'Geologica', sans-serif; font-size: 0.9rem; line-height: 1.55; } .ds-entry-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: auto; padding-top: 14px; border-top: 1px solid var(--grid, #ccd6df); color: #303a43; font-family: 'Geologica', sans-serif; font-size: 0.75rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.055em; } .ds-entry-action { display: inline-flex; align-items: center; gap: 7px; color: var(--cobalt-dark, #003bbd); font-family: 'Chakra Petch', sans-serif; font-weight: 600; } .ds-entry-action svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: square; stroke-linejoin: miter; transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); } .ds-entry:hover .ds-entry-action svg, .ds-entry:focus-visible .ds-entry-action svg { transform: translate(3px, -3px); }"
+      "css": ".ds-entry { width: min(100%, 390px); display: grid; grid-template-rows: auto 1fr; padding: clamp(13px, 1.33vw, 21px); color: var(--text-primary, #101418); background: var(--surface-entry, rgba(248, 250, 251, 0.96)); border: 1px solid var(--rule-strong, #8798a8); border-radius: 0; text-decoration: none; transition: background-color 180ms ease; } .ds-entry:hover, .ds-entry:focus-visible { background: var(--surface-entry-hover, #ffffff); outline: none; } .ds-entry:focus-visible { box-shadow: inset 0 0 0 3px var(--accent, #2346a8); } .ds-entry:active { background: var(--surface-entry, rgba(248, 250, 251, 0.96)); } .ds-entry-cover { position: relative; aspect-ratio: 16 / 9; overflow: hidden; display: grid; place-items: center; color: var(--accent, #2346a8); background-color: var(--artwork-fallback, #e1e7ec); background-image: linear-gradient(to right, color-mix(in srgb, var(--accent, #2346a8) 16%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in srgb, var(--accent, #2346a8) 16%, transparent) 1px, transparent 1px); background-size: 18px 18px; border-bottom: 1px solid var(--text-primary, #101418); clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 0 100%); } .ds-entry-glyph { font-family: 'Chakra Petch', sans-serif; font-size: 5rem; font-weight: 600; line-height: 1; } .ds-coordinate { position: absolute; right: 0; bottom: 0; padding: 7px 10px; color: var(--text-inverse, #f5f7fb); background: var(--accent, #2346a8); font-family: 'Chakra Petch', sans-serif; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; } .ds-entry-copy { min-height: 166px; display: flex; flex-direction: column; padding-top: 18px; } .ds-entry-copy strong { margin-bottom: 0.7rem; font-family: 'Literata', Georgia, serif; font-size: 1.5rem; font-weight: 600; line-height: 1.08; letter-spacing: -0.02em; } .ds-entry-description { margin-bottom: 1.6rem; color: var(--text-secondary, #46515c); font-family: 'Geologica', sans-serif; font-size: 0.9rem; line-height: 1.55; } .ds-entry-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: auto; padding-top: 14px; border-top: 1px solid var(--rule, #b8c5d0); color: var(--text-secondary, #46515c); font-family: 'Geologica', sans-serif; font-size: 0.75rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.055em; } .ds-entry-action { display: inline-flex; align-items: center; gap: 7px; color: var(--accent-hover, #17327f); font-family: 'Chakra Petch', sans-serif; font-weight: 600; } .ds-entry-action svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: square; stroke-linejoin: miter; transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); } .ds-entry:hover .ds-entry-action svg, .ds-entry:focus-visible .ds-entry-action svg { transform: translate(3px, -3px); }"
     },
     {
       "name": "Coordinate Chip",
@@ -268,14 +323,22 @@
       "refersTo": "coordinate-chip",
       "description": "A square index marker attached to visual content.",
       "html": "<span class=\"ds-coordinate-chip\">04 / W</span>",
-      "css": ".ds-coordinate-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 7px 10px; color: var(--white, #ffffff); background: var(--cobalt, #064ef5); border: 1px solid var(--cobalt, #064ef5); border-radius: 0; font-family: 'Chakra Petch', sans-serif; font-size: 0.72rem; font-weight: 600; line-height: 1; letter-spacing: 0.08em; text-transform: uppercase; }"
+      "css": ".ds-coordinate-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 7px 10px; color: var(--text-inverse, #f5f7fb); background: var(--accent, #2346a8); border: 1px solid var(--accent, #2346a8); border-radius: 0; font-family: 'Chakra Petch', sans-serif; font-size: 0.72rem; font-weight: 600; line-height: 1; letter-spacing: 0.08em; text-transform: uppercase; }"
+    },
+    {
+      "name": "Theme Toggle",
+      "kind": "button",
+      "refersTo": "theme-toggle",
+      "description": "A reusable semantic-theme control with one visible authored icon and a 44px minimum target.",
+      "html": "<button class=\"ds-theme-toggle\" type=\"button\" aria-label=\"Use dark theme\" title=\"Use dark theme\"><svg class=\"ds-theme-icon ds-theme-icon-sun\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"3.5\"></circle></svg><svg class=\"ds-theme-icon ds-theme-icon-moon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z\"></path></svg></button>",
+      "css": ".ds-theme-toggle { width: 48px; min-width: 44px; min-height: 44px; display: grid; place-items: center; padding: 0; color: var(--accent, #2346a8); background: transparent; border: 0; border-left: 1px solid var(--rule-strong, #8798a8); border-radius: 0; cursor: pointer; } .ds-theme-toggle:hover { color: var(--accent-hover, #17327f); background: var(--accent-soft, #c8d5f2); } .ds-theme-toggle:focus-visible { outline: 3px solid var(--accent, #2346a8); outline-offset: -3px; } .ds-theme-icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; } .ds-theme-icon-moon, :root[data-theme=\"dark\"] .ds-theme-icon-sun { display: none; } :root[data-theme=\"dark\"] .ds-theme-icon-moon { display: block; }"
     }
   ],
   "narrative": {
     "northStar": "Constructed Atlas Grid",
-    "overview": "Infinite Quest Nexus should feel like an atlas being actively indexed: precise, durable, and visibly assembled from paper, ink, cobalt marks, and measured cells. The system makes story records feel authored and persistent without imitating a fantasy manuscript; its confidence comes from modernist construction, disciplined information labels, and artwork given room to remain the richest material.\n\nThe interface is flat, operational, and intentionally square. Grid lines expose the underlying structure instead of hiding it, while a restrained diagonal slash, clipped corner, or cobalt state creates recognition without turning every surface into decoration. Responsive changes preserve complete cells and complete content units rather than squeezing desktop fragments into narrow columns.",
+    "overview": "Infinite Quest Nexus should feel like an atlas being actively indexed: precise, durable, and visibly assembled from paper, ink, editorial indigo marks, and measured cells. The system makes story records feel authored and persistent without imitating a fantasy manuscript; its confidence comes from modernist construction, disciplined information labels, and artwork given room to remain the richest material.\n\nThe interface is flat, operational, and intentionally square. Grid lines expose the underlying structure instead of hiding it, while a restrained diagonal slash, clipped corner, or semantic accent state creates recognition without turning every surface into decoration. Responsive changes preserve complete cells and complete content units rather than squeezing desktop fragments into narrow columns.",
     "keyCharacteristics": [
-      "Paper-white fields, near-black ink, cool construction rules, and sparing cobalt signals.",
+      "Paper-white fields, near-black ink, cool construction rules, and sparing editorial indigo signals.",
       "Visible modular cells and square divisions that explain the layout.",
       "Literata for a restrained literary display voice that connects the interface to reading and writing.",
       "Geologica for readable prose and Chakra Petch for operational hierarchy.",
@@ -284,13 +347,18 @@
     ],
     "rules": [
       {
-        "name": "The Cobalt Signal Rule",
-        "body": "Cobalt is a state and orientation color, not a general surface fill; preserve its authority by using it sparingly.",
+        "name": "The Indigo Signal Rule",
+        "body": "Editorial indigo is a state and orientation color, not a general surface fill; preserve its authority by using it sparingly.",
         "section": "colors"
       },
       {
         "name": "The Artwork Priority Rule",
-        "body": "Full-color world artwork may exceed the restrained interface palette, but surrounding UI must remain quiet enough for the artwork to lead.",
+        "body": "Full-color user-provided world artwork may exceed the restrained interface palette; theme changes never recolor, replace, bundle, or otherwise alter it.",
+        "section": "colors"
+      },
+      {
+        "name": "The Semantic Theme Rule",
+        "body": "Future pages and reusable components consume semantic tokens rather than World Library selectors, obsolete aliases, or literal light and dark colors.",
         "section": "colors"
       },
       {
@@ -330,7 +398,7 @@
       }
     ],
     "dos": [
-      "Do build hierarchy with paper, ink, cobalt signals, visible rules, and complete modular cells.",
+      "Do build hierarchy with semantic surfaces, text roles, editorial indigo signals, visible rules, and complete modular cells.",
       "Do use Literata at a restrained scale for major spaces, world names, and literary identity moments.",
       "Do keep Geologica for explanatory prose and Chakra Petch for operational labels and actions.",
       "Do preserve square controls, one-pixel construction rules, clipped media corners, and clear keyboard focus.",
@@ -339,7 +407,7 @@
     ],
     "donts": [
       "Don't introduce rounded-card dashboard styling, pill controls, or soft floating panels.",
-      "Don't spread cobalt across large passive surfaces or use it as decoration without state or wayfinding value.",
+      "Don't spread the accent across large passive surfaces or use it as decoration without state or wayfinding value.",
       "Don't add ambient card shadows; reserve the focused shadow for active search or an equivalent primary query field.",
       "Don't make literary display type oversized, ornamental, or faux-antique; it should support reading and creative writing without becoming costume.",
       "Don't shrink a multi-column composition until its controls and copy become cramped; switch the whole-cell arrangement instead.",
