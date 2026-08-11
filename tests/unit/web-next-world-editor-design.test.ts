@@ -6,22 +6,46 @@ const webNextRoot = path.resolve(import.meta.dirname, "../../apps/web-next");
 const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
 
 function rule(selector: string): string {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
+  const normalizedSelector = selector.replace(/\s+/g, " ").trim();
+  for (const match of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (match[1].replace(/\s+/g, " ").trim() === normalizedSelector) return match[2];
+  }
+  return "";
+}
+
+function mediaBlock(maxWidth: number): string {
+  const start = css.search(new RegExp(`@media\\s*\\(max-width:\\s*${maxWidth}px\\)`));
+  if (start < 0) return "";
+  const next = css.indexOf("@media", start + 1);
+  return css.slice(start, next < 0 ? undefined : next);
 }
 
 describe("World Editor design contract", () => {
   it("composes the Draft Ledger workspace for desktop and compact screens", () => {
+    const compact = mediaBlock(720);
+
     expect(css).toMatch(/\.editor-command-row\s*\{/);
     expect(css).toMatch(/\.draft-ledger\s*\{/);
     expect(css).toMatch(/\.editor-section-index[^}]*min-height:\s*44px/s);
-    expect(css).toMatch(/@media\s*\(max-width:\s*720px\)/);
+    expect(compact).not.toBe("");
     expect(rule(".editor-workspace")).toMatch(/grid-template-columns:/);
     expect(rule(".draft-ledger-details")).toMatch(/grid-template-columns:/);
+    expect(compact).toMatch(/\.editor-save-cell\s*\{[^}]*grid-row:\s*1[^}]*grid-column:\s*2/s);
+    expect(compact).toMatch(/\.editor-section-index\s*\{[^}]*flex-direction:\s*row[^}]*overflow-x:\s*auto/s);
+    expect(compact).toMatch(/\.draft-ledger-details\s*\{[^}]*grid-template-columns:\s*1fr/s);
+  });
+
+  it("gives disclosure and cover choices explicit aligned touch targets", () => {
+    expect(rule(".advanced-json summary")).toMatch(/min-height:\s*(?:44px|[3-9]\dpx)/);
+    expect(rule(".advanced-json summary")).toMatch(/display:\s*flex/);
+    expect(rule(".advanced-json summary")).toMatch(/align-items:\s*center/);
+    expect(rule(".cover-editor fieldset label")).toMatch(/min-height:\s*(?:44px|[3-9]\dpx)/);
+    expect(rule(".cover-editor fieldset label")).toMatch(/display:\s*flex/);
+    expect(rule(".cover-editor fieldset label")).toMatch(/align-items:\s*center/);
   });
 
   it("uses semantic colors and a theme-invariant overlay throughout editor selectors", () => {
-    const editorRules = [...css.matchAll(/([^{}]*(?:editor|draft-ledger|collection|cover-artwork)[^{}]*)\{([^{}]*)\}/g)];
+    const editorRules = [...css.matchAll(/([^{}]*(?:editor|draft-ledger|collection|cover-artwork|field-error|advanced-json|structured-fields|save-conflict)[^{}]*)\{([^{}]*)\}/g)];
     const literalColors = editorRules.flatMap(([, selector, declarations]) =>
       [...declarations.matchAll(/#[\da-f]{3,8}\b|\brgba?\s*\(|\bcolor-mix\s*\(/gi)]
         .map((match) => `${selector.trim()}: ${match[0]}`)
@@ -33,18 +57,29 @@ describe("World Editor design contract", () => {
   });
 
   it("makes section, drawer, collection, and invalid field states visible", () => {
+    const focusedEditorFields = rule(".editor-field input:focus-visible, .editor-field textarea:focus-visible");
+    const focusedInvalidFields = rule([
+      '.editor-field input[aria-invalid="true"]:focus-visible',
+      '.editor-field textarea[aria-invalid="true"]:focus-visible',
+      '.advanced-json textarea[aria-invalid="true"]:focus-visible',
+      '.cover-editor input[aria-invalid="true"]:focus-visible'
+    ].join(", "));
+
     expect(css).toMatch(/\.editor-section-index button:focus-visible/);
     expect(css).toMatch(/\.draft-ledger button:focus-visible/);
     expect(css).toMatch(/\.collection-(?:toolbar|master|detail)[^{}]*:focus-visible/s);
     expect(css).toMatch(/\[aria-invalid="true"\][^{]*\{[^}]*border-color:\s*var\(--status-error\)/s);
     expect(css).toMatch(/\.field-error\s*\{[^}]*color:\s*var\(--status-error\)/s);
+    expect(focusedEditorFields).toMatch(/outline:\s*3px solid var\(--accent\)/);
+    expect(focusedEditorFields).toMatch(/box-shadow:\s*none/);
+    expect(focusedInvalidFields).toMatch(/outline:\s*3px solid var\(--accent\)/);
   });
 
   it("removes drawer motion when reduced motion is requested", () => {
     const reducedMotion = css.match(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{([\s\S]*)$/)?.[1] ?? "";
 
     expect(rule(".draft-ledger-details")).toMatch(/transition:/);
-    expect(reducedMotion).toMatch(/\.draft-ledger-details/);
+    expect(reducedMotion).toMatch(/\.draft-ledger-details\s*\{[^}]*transition:\s*none/s);
   });
 
   it("persists the editor patterns and selected surface direction", () => {

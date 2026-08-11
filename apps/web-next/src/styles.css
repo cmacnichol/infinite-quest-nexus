@@ -942,7 +942,9 @@ footer p:first-child {
 .editor-field input:focus-visible,
 .editor-field textarea:focus-visible {
   border-color: var(--accent);
-  box-shadow: 0 8px 24px var(--focus-shadow);
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: none;
 }
 
 .editor-field textarea[rows="6"],
@@ -1231,6 +1233,9 @@ footer p:first-child {
 }
 
 .advanced-json summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
   margin-bottom: 12px;
   color: var(--accent-hover);
   cursor: pointer;
@@ -1323,6 +1328,14 @@ footer p:first-child {
   border: 1px solid var(--rule-strong);
 }
 
+.cover-editor fieldset label {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
 .cover-editor legend {
   padding: 0 6px;
   font-family: "Chakra Petch", sans-serif;
@@ -1345,6 +1358,14 @@ footer p:first-child {
 .editor-section-index button:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: -3px;
+}
+
+.editor-field input[aria-invalid="true"]:focus-visible,
+.editor-field textarea[aria-invalid="true"]:focus-visible,
+.advanced-json textarea[aria-invalid="true"]:focus-visible,
+.cover-editor input[aria-invalid="true"]:focus-visible {
+  outline: 3px solid var(--accent);
+  box-shadow: inset 3px 0 0 var(--status-error);
 }
 
 @keyframes loading-sweep {
@@ -1414,6 +1435,11 @@ footer p:first-child {
 
   .editor-command-row {
     grid-template-columns: minmax(0, 1fr) minmax(120px, 34vw);
+  }
+
+  .editor-save-cell {
+    grid-row: 1;
+    grid-column: 2;
   }
 
   .editor-identity {
