@@ -3,6 +3,37 @@ import { describe, expect, it, vi } from "vitest";
 import { WorldCreationApiError } from "../../apps/web-next/src/world-creation-api.js";
 import { mountWorldCreationPage } from "../../apps/web-next/src/world-creation-page.js";
 
+const createdWorld = {
+  id: "22222222-2222-4222-8222-222222222222",
+  title: "Glass Atlas",
+  status: "draft" as const,
+  imageUrl: "",
+  draftRevision: 1,
+  draftContent: {
+    schemaVersion: 5,
+    world: {
+      title: "Glass Atlas",
+      genre: "",
+      tone: "",
+      premise: "",
+      backgroundStory: "",
+      firstAction: "",
+      rules: ""
+    },
+    playableCharacters: [],
+    entities: [],
+    relationships: [],
+    rpgStats: [],
+    defaultTriggers: [],
+    eventTriggers: [],
+    assets: [],
+    defaults: {}
+  },
+  draftBasedOnWorldVersionId: null,
+  createdAt: "2026-08-11T12:00:00.000Z",
+  updatedAt: "2026-08-11T12:00:00.000Z"
+};
+
 const generatedPreview = {
   title: "Glass Atlas",
   content: {
@@ -80,6 +111,16 @@ function inputValue(document: Document, window: Window, selector: string, value:
   if (!control) throw new Error(`The input ${selector} is missing.`);
   control.value = value;
   control.dispatchEvent(new window.Event("input", { bubbles: true }));
+}
+
+function advanceManualWizardToCover(document: Document, window: Window): void {
+  chooseMethod(document, window, "manual");
+  document.querySelector<HTMLButtonElement>('[data-action="continue-manual"]')?.click();
+  inputValue(document, window, '[name="world.title"]', "Glass Atlas");
+  document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+  document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+  document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+  expect(document.querySelector('[data-creation-stage="cover"]')).not.toBeNull();
 }
 
 describe("World Creation Method stage", () => {
@@ -348,6 +389,217 @@ describe("World Creation Method stage", () => {
     expect(document.querySelector('[data-generation-status]')?.textContent).toContain("unavailable");
     expect(document.querySelector<HTMLAnchorElement>('[data-generation-status] a[href="/nexus/?view=setup"]')?.textContent)
       .toContain("Provider Setup");
+  });
+});
+
+describe("World Creation Cover and Review stages", () => {
+  it("defaults to no cover and validates only the selected retained or generated input", () => {
+    const { document, root, window } = creationFixture();
+    mountWorldCreationPage(root);
+    advanceManualWizardToCover(document, window as unknown as Window);
+
+    const none = document.querySelector<HTMLInputElement>('[name="coverMode"][value="none"]');
+    expect(none?.checked).toBe(true);
+    expect(document.querySelector('[data-cover-guidance]')?.textContent).toContain("optional");
+
+    const retained = document.querySelector<HTMLInputElement>('[name="coverMode"][value="retained_asset"]');
+    retained!.checked = true;
+    retained!.dispatchEvent(new window.Event("change", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    const assetId = document.querySelector<HTMLInputElement>('[name="cover.assetId"]');
+    expect(assetId?.getAttribute("aria-invalid")).toBe("true");
+    expect(document.activeElement).toBe(assetId);
+    inputValue(document, window as unknown as Window, '[name="cover.assetId"]', "asset-1");
+
+    const generated = document.querySelector<HTMLInputElement>('[name="coverMode"][value="generated"]');
+    generated!.checked = true;
+    generated!.dispatchEvent(new window.Event("change", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    const prompt = document.querySelector<HTMLTextAreaElement>('[name="cover.prompt"]');
+    expect(prompt?.getAttribute("aria-invalid")).toBe("true");
+    expect(document.activeElement).toBe(prompt);
+    expect(document.querySelector('[data-cover-provider-guidance]')?.textContent).toContain("world can still be created");
+  });
+
+  it("reviews provenance, readiness, factual counts, warnings, and serialized zero characters", () => {
+    const { document, root, window } = creationFixture();
+    mountWorldCreationPage(root);
+    advanceManualWizardToCover(document, window as unknown as Window);
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+
+    expect(document.querySelector('[data-creation-stage="review"]')).not.toBeNull();
+    expect(document.querySelector('[data-review-provenance]')?.textContent).toContain("Manual");
+    expect(document.querySelector('[data-review-readiness]')?.textContent).toContain("Ready");
+    expect(document.querySelector('[data-review-warning]')?.textContent).toContain("No cover");
+    expect(document.querySelector('[data-review-count="entities"]')?.textContent).toContain("0");
+    expect(document.querySelector('[data-review-count="relationships"]')?.textContent).toContain("0");
+    expect(document.querySelector('[data-review-count="stats"]')?.textContent).toContain("0");
+    expect(document.querySelector('[data-review-count="triggers"]')?.textContent).toContain("0");
+    expect(document.querySelector('[data-review-count="assets"]')?.textContent).toContain("0");
+    expect(document.querySelector('[data-review-count="characters"]')?.textContent).toContain("0");
+    const serialized = document.querySelector<HTMLElement>('[data-review-serialized]')?.textContent ?? "";
+    expect(JSON.parse(serialized).playableCharacters).toEqual([]);
+  });
+
+  it("preserves every cover field when moving back from Review", () => {
+    const { document, root, window } = creationFixture();
+    mountWorldCreationPage(root);
+    advanceManualWizardToCover(document, window as unknown as Window);
+    const generated = document.querySelector<HTMLInputElement>('[name="coverMode"][value="generated"]');
+    generated!.checked = true;
+    generated!.dispatchEvent(new window.Event("change", { bubbles: true }));
+    inputValue(document, window as unknown as Window, '[name="cover.prompt"]', "Moonlit glass towers");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="back-stage"]')?.click();
+
+    expect(document.querySelector<HTMLInputElement>('[name="coverMode"][value="generated"]')?.checked).toBe(true);
+    expect(document.querySelector<HTMLTextAreaElement>('[name="cover.prompt"]')?.value).toBe("Moonlit glass towers");
+  });
+});
+
+describe("World Creation authoritative creation", () => {
+  it("creates from one snapshot exactly once, disables duplicate activation, and navigates only after success", async () => {
+    const { document, root, window } = creationFixture();
+    const pending = deferred<typeof createdWorld>();
+    const createWorld = vi.fn(() => pending.promise);
+    const navigate = vi.fn();
+    mountWorldCreationPage(root, { createWorld, navigate });
+    advanceManualWizardToCover(document, window as unknown as Window);
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    const create = document.querySelector<HTMLButtonElement>('[data-action="create-world"]');
+
+    create?.click();
+    create?.click();
+
+    expect(createWorld).toHaveBeenCalledTimes(1);
+    expect(createWorld).toHaveBeenCalledWith(expect.objectContaining({
+      world: expect.objectContaining({ title: "Glass Atlas" }),
+      playableCharacters: []
+    }), expect.any(AbortSignal));
+    expect(document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.disabled).toBe(true);
+    expect(navigate).not.toHaveBeenCalled();
+
+    pending.resolve(createdWorld);
+    await settle();
+    expect(navigate).toHaveBeenCalledWith(`/app/worlds/${createdWorld.id}`);
+  });
+
+  it("preserves all local state and focuses the error summary when creation fails", async () => {
+    const { document, root, window } = creationFixture();
+    const createWorld = vi.fn().mockRejectedValue(new WorldCreationApiError("network", "offline", null));
+    const navigate = vi.fn();
+    mountWorldCreationPage(root, { createWorld, navigate });
+    advanceManualWizardToCover(document, window as unknown as Window);
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+
+    document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
+    await settle();
+
+    expect(createWorld).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
+    const error = document.querySelector<HTMLElement>('[data-creation-error]');
+    expect(error?.textContent).toContain("not created");
+    expect(document.activeElement).toBe(error);
+    expect(document.querySelector('[data-review-serialized]')?.textContent).toContain("Glass Atlas");
+    expect(document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.disabled).toBe(false);
+  });
+
+  it("creates once before attaching a retained cover and navigates after both succeed", async () => {
+    const { document, root, window } = creationFixture();
+    const createWorld = vi.fn().mockResolvedValue(createdWorld);
+    const attachCreatedWorldCover = vi.fn().mockResolvedValue({ assetUrl: "/covers/asset-1" });
+    const navigate = vi.fn();
+    mountWorldCreationPage(root, { createWorld, attachCreatedWorldCover, navigate });
+    advanceManualWizardToCover(document, window as unknown as Window);
+    const retained = document.querySelector<HTMLInputElement>('[name="coverMode"][value="retained_asset"]');
+    retained!.checked = true;
+    retained!.dispatchEvent(new window.Event("change", { bubbles: true }));
+    inputValue(document, window as unknown as Window, '[name="cover.assetId"]', "asset-1");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+
+    document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
+    await settle();
+
+    expect(createWorld).toHaveBeenCalledTimes(1);
+    expect(attachCreatedWorldCover).toHaveBeenCalledWith(createdWorld.id, "asset-1", expect.any(AbortSignal));
+    expect(attachCreatedWorldCover.mock.invocationCallOrder[0]).toBeGreaterThan(createWorld.mock.invocationCallOrder[0]!);
+    expect(navigate).toHaveBeenCalledWith(`/app/worlds/${createdWorld.id}`);
+  });
+
+  it("does not repeat or roll back creation when cover fails, and retry calls only the cover endpoint", async () => {
+    const { document, root, window } = creationFixture();
+    const createWorld = vi.fn().mockResolvedValue(createdWorld);
+    const generateCreatedWorldCover = vi.fn()
+      .mockRejectedValueOnce(new WorldCreationApiError("unavailable", "Image provider unavailable", 503))
+      .mockResolvedValueOnce({
+        id: "cover-job", worldId: createdWorld.id, targetType: "world_cover", status: "queued", duplicate: false
+      });
+    const navigate = vi.fn();
+    mountWorldCreationPage(root, { createWorld, generateCreatedWorldCover, navigate });
+    advanceManualWizardToCover(document, window as unknown as Window);
+    const generated = document.querySelector<HTMLInputElement>('[name="coverMode"][value="generated"]');
+    generated!.checked = true;
+    generated!.dispatchEvent(new window.Event("change", { bubbles: true }));
+    inputValue(document, window as unknown as Window, '[name="cover.prompt"]', "Moonlit glass towers");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+
+    document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
+    await settle();
+
+    expect(createWorld).toHaveBeenCalledTimes(1);
+    expect(generateCreatedWorldCover).toHaveBeenCalledTimes(1);
+    expect(generateCreatedWorldCover.mock.invocationCallOrder[0]).toBeGreaterThan(createWorld.mock.invocationCallOrder[0]!);
+    expect(navigate).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-cover-error]')?.textContent).toContain("Provider Setup");
+    expect(document.querySelector<HTMLButtonElement>('[data-action="open-created-world"]')?.textContent).toBe("Open world");
+
+    document.querySelector<HTMLButtonElement>('[data-action="retry-cover"]')?.click();
+    await settle();
+
+    expect(createWorld).toHaveBeenCalledTimes(1);
+    expect(generateCreatedWorldCover).toHaveBeenCalledTimes(2);
+    expect(generateCreatedWorldCover).toHaveBeenLastCalledWith(
+      createdWorld.id, "Moonlit glass towers", expect.any(AbortSignal)
+    );
+  });
+
+  it("guards navigation only while local work exists and keeps listeners across persisted pagehide", () => {
+    const { document, root, window } = creationFixture();
+    const mounted = mountWorldCreationPage(root);
+    const clean = new window.Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(clean);
+    expect(clean.defaultPrevented).toBe(false);
+
+    chooseMethod(document, window as unknown as Window, "manual");
+    const dirty = new window.Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(dirty);
+    expect(dirty.defaultPrevented).toBe(true);
+
+    const persistedHide = new window.Event("pagehide");
+    Object.defineProperty(persistedHide, "persisted", { value: true });
+    window.dispatchEvent(persistedHide);
+    const stillDirty = new window.Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(stillDirty);
+    expect(stillDirty.defaultPrevented).toBe(true);
+    mounted.dispose();
+  });
+
+  it("aborts creation on disposal and ignores stale completion without navigating", async () => {
+    const { document, root, window } = creationFixture();
+    const pending = deferred<typeof createdWorld>();
+    const createWorld = vi.fn(() => pending.promise);
+    const navigate = vi.fn();
+    const mounted = mountWorldCreationPage(root, { createWorld, navigate });
+    advanceManualWizardToCover(document, window as unknown as Window);
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
+    const signal = createWorld.mock.calls[0]?.[1] as AbortSignal;
+
+    mounted.dispose();
+    expect(signal.aborted).toBe(true);
+    pending.resolve(createdWorld);
+    await settle();
+    expect(navigate).not.toHaveBeenCalled();
   });
 });
 

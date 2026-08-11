@@ -1,4 +1,4 @@
-import { canonicalizeWorldCreationDraft } from "./world-creation-model";
+import { canonicalizeWorldCreationDraft, worldCreationSubmissionSnapshot } from "./world-creation-model";
 import { parseEditableWorldDraft, type EditableWorldDraft } from "./world-editor-model";
 
 export type WorldCreationApiErrorKind =
@@ -69,13 +69,6 @@ export interface GeneratedWorldCoverResponse {
   duplicate: boolean;
 }
 
-const FORBIDDEN_DRAFT_IDENTITY_KEYS = new Set([
-  "user_id",
-  "userId",
-  "owner_user_id",
-  "ownerUserId"
-]);
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -86,13 +79,6 @@ function isPositiveInteger(value: unknown): value is number {
 
 function canonicalDraft(value: unknown): EditableWorldDraft {
   return canonicalizeWorldCreationDraft(parseEditableWorldDraft(value));
-}
-
-function ownerSafeDraftContent(draft: EditableWorldDraft): EditableWorldDraft {
-  const safe = Object.fromEntries(
-    Object.entries(draft).filter(([key]) => !FORBIDDEN_DRAFT_IDENTITY_KEYS.has(key))
-  );
-  return canonicalDraft(safe);
 }
 
 async function fetchJson(url: string, init: RequestInit): Promise<{ response: Response; value: unknown }> {
@@ -250,7 +236,7 @@ export async function createWorld(
   draft: EditableWorldDraft,
   signal?: AbortSignal
 ): Promise<CreatedWorldResponse> {
-  const content = ownerSafeDraftContent(draft);
+  const content = canonicalDraft(worldCreationSubmissionSnapshot(draft));
   const { response, value } = await fetchJson("/api/v1/worlds", {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },

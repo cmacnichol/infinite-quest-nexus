@@ -1,8 +1,14 @@
 import { initializeAppTheme, renderAppShell } from "./app-shell";
 import {
+  attachCreatedWorldCover as attachCreatedWorldCoverRequest,
+  createWorld as createWorldRequest,
+  generateCreatedWorldCover as generateCreatedWorldCoverRequest,
   generateWorldPreview as generateWorldPreviewRequest,
   loadWorldGenerationProgress as loadWorldGenerationProgressRequest,
   WorldCreationApiError,
+  type CreatedWorldCoverResponse,
+  type CreatedWorldResponse,
+  type GeneratedWorldCoverResponse,
   type WorldGenerationPreviewRequest,
   type WorldGenerationPreviewResponse,
   type WorldGenerationProgressResponse
@@ -10,16 +16,22 @@ import {
 import {
   addCreationCollectionItem,
   applyGeneratedPreview,
+  beginCreation,
+  completeCreation,
   createWorldCreationState,
   creationStageProgress,
+  creationReview,
   editCreationDraft,
+  failCreation,
   hasLocalWorldCreationContent,
   removeCreationCollectionItem,
   restoreCreationCollectionItem,
   selectCreationMethod,
+  setCreationCoverIntent,
   setCreationStage,
   updateCreationCollectionItem,
   validateCreationStage,
+  worldCreationSubmissionSnapshot,
   type CreationCollectionName,
   type CreationStage,
   type WorldCreationState
@@ -47,6 +59,18 @@ export interface WorldCreationPageDependencies {
   writeClipboardText?: (value: string) => Promise<void>;
   confirmGeneratedReplacement?: () => boolean;
   generationPollIntervalMs?: number;
+  createWorld?: (draft: WorldCreationState["draft"], signal?: AbortSignal) => Promise<CreatedWorldResponse>;
+  attachCreatedWorldCover?: (
+    worldId: string,
+    assetId: string,
+    signal?: AbortSignal
+  ) => Promise<CreatedWorldCoverResponse>;
+  generateCreatedWorldCover?: (
+    worldId: string,
+    prompt: string,
+    signal?: AbortSignal
+  ) => Promise<GeneratedWorldCoverResponse>;
+  navigate?: (path: string) => void;
 }
 
 type EditableStage = "canon" | "mechanics";
@@ -228,6 +252,10 @@ export function mountWorldCreationPage(
 
   const generateWorldPreview = dependencies.generateWorldPreview ?? generateWorldPreviewRequest;
   const loadWorldGenerationProgress = dependencies.loadWorldGenerationProgress ?? loadWorldGenerationProgressRequest;
+  const createWorld = dependencies.createWorld ?? createWorldRequest;
+  const attachCreatedWorldCover = dependencies.attachCreatedWorldCover ?? attachCreatedWorldCoverRequest;
+  const generateCreatedWorldCover = dependencies.generateCreatedWorldCover ?? generateCreatedWorldCoverRequest;
+  const navigate = dependencies.navigate ?? ((path: string) => pageView.location.assign(path));
   const pollInterval = Math.max(50, dependencies.generationPollIntervalMs ?? 500);
   const confirmGeneratedReplacement = dependencies.confirmGeneratedReplacement ?? (() => pageView.confirm(
     "Replace the fields already entered with the generated draft?"
@@ -246,10 +274,26 @@ export function mountWorldCreationPage(
   let disposed = false;
   let generationSequence = 0;
   let generationController: AbortController | null = null;
+  let creationController: AbortController | null = null;
+  let createdWorld: CreatedWorldResponse | null = null;
+  let coverError: WorldCreationApiError | Error | null = null;
+  let unloadInstalled = false;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let activeCollection: EditableCollection = "entities";
   const selectedIndexes = new Map<EditableCollection, number>();
   const searches = new Map<EditableCollection, string>();
+
+  const beforeUnload = (event: Event) => event.preventDefault();
+
+  function setDirtyGuard(dirty: boolean): void {
+    if (dirty && !unloadInstalled) {
+      pageView.addEventListener("beforeunload", beforeUnload);
+      unloadInstalled = true;
+    } else if (!dirty && unloadInstalled) {
+      pageView.removeEventListener("beforeunload", beforeUnload);
+      unloadInstalled = false;
+    }
+  }
 
   function button(action: string, label: string): HTMLButtonElement {
     const result = document.createElement("button");
@@ -493,12 +537,164 @@ export function mountWorldCreationPage(
     editingStage.append(stageActions());
   }
 
-  function renderUnsupportedStage(): void {
+  function renderCover(): void {
     editingStage.replaceChildren();
+    const header = document.createElement("header");
     const heading = document.createElement("h2");
-    heading.id = `${state.stage}-heading`;
-    heading.textContent = state.stage === "cover" ? "Cover" : "Review";
-    editingStage.append(heading, stageActions());
+    heading.id = "cover-heading";
+    heading.textContent = "Cover";
+    const guidance = document.createElement("p");
+    guidance.dataset.coverGuidance = "";
+    guidance.textContent = "Cover work is optional and runs independently after the world draft is created.";
+    header.append(heading, guidance);
+
+    const modes = document.createElement("fieldset");
+    const legend = document.createElement("legend");
+    legend.textContent = "Cover choice";
+    modes.append(legend);
+    for (const [mode, labelText] of [
+      ["none", "No cover"],
+      ["retained_asset", "Use a retained asset"],
+      ["generated", "Generate a cover"]
+    ] as const) {
+      const label = document.createElement("label");
+      const control = document.createElement("input");
+      control.type = "radio";
+      control.name = "coverMode";
+      control.value = mode;
+      control.checked = state.coverIntent.mode === mode;
+      label.append(control, document.createTextNode(labelText));
+      modes.append(label);
+    }
+    editingStage.append(header, modes);
+
+    if (state.coverIntent.mode === "retained_asset") {
+      const control = document.createElement("input");
+      control.name = "cover.assetId";
+      control.value = state.coverIntent.assetId;
+      control.id = "creation-cover-asset";
+      const error = document.createElement("small");
+      error.className = "field-error";
+      error.dataset.fieldError = "cover.assetId";
+      error.id = "creation-cover-asset-error";
+      control.setAttribute("aria-describedby", error.id);
+      const field = labelledControl("Retained asset ID", control);
+      field.append(error);
+      editingStage.append(field);
+    } else if (state.coverIntent.mode === "generated") {
+      const control = document.createElement("textarea");
+      control.name = "cover.prompt";
+      control.value = state.coverIntent.prompt;
+      control.rows = 5;
+      control.id = "creation-cover-prompt";
+      const error = document.createElement("small");
+      error.className = "field-error";
+      error.dataset.fieldError = "cover.prompt";
+      error.id = "creation-cover-prompt-error";
+      control.setAttribute("aria-describedby", `${error.id} creation-cover-provider-guidance`);
+      const field = labelledControl("Fiction-only cover prompt", control);
+      field.append(error);
+      const providerGuidance = document.createElement("p");
+      providerGuidance.id = "creation-cover-provider-guidance";
+      providerGuidance.dataset.coverProviderGuidance = "";
+      providerGuidance.textContent = "If the image provider is unavailable, the world can still be created and the cover can be retried.";
+      editingStage.append(field, providerGuidance);
+    }
+    editingStage.append(stageActions());
+  }
+
+  function stageForIssue(path: string): CreationStage {
+    if (path === "method") return "method";
+    if (path === "world" || path.startsWith("world.")) return "foundation";
+    if (path === "entities" || path === "relationships") return "canon";
+    if (["rpgStats", "defaultTriggers", "eventTriggers", "defaults"].includes(path)) return "mechanics";
+    return "cover";
+  }
+
+  function renderReview(): void {
+    editingStage.replaceChildren();
+    const review = creationReview(state);
+    const heading = document.createElement("h2");
+    heading.id = "review-heading";
+    heading.textContent = "Review";
+    const provenance = document.createElement("p");
+    provenance.dataset.reviewProvenance = "";
+    provenance.textContent = `${review.provenance === "ai" ? "AI-assisted" : "Manual"} creation`;
+    const readiness = document.createElement("p");
+    readiness.dataset.reviewReadiness = "";
+    readiness.textContent = review.ready ? "Ready to create" : "Needs attention before creation";
+    editingStage.append(heading, provenance, readiness);
+
+    const validation = validateCreationStage(state, "review");
+    if (validation.issues.length > 0) {
+      const summary = document.createElement("nav");
+      summary.dataset.reviewErrors = "";
+      summary.setAttribute("aria-label", "Creation errors");
+      const list = document.createElement("ul");
+      for (const issue of validation.issues) {
+        const item = document.createElement("li");
+        const link = document.createElement("a");
+        const issueStage = stageForIssue(issue.path);
+        link.href = `#${issueStage}-heading`;
+        link.dataset.reviewIssueStage = issueStage;
+        link.dataset.reviewIssuePath = issue.path;
+        link.textContent = issue.message;
+        item.append(link);
+        list.append(item);
+      }
+      summary.append(list);
+      editingStage.append(summary);
+    }
+
+    for (const warningText of review.warnings) {
+      const warning = document.createElement("p");
+      warning.dataset.reviewWarning = "";
+      warning.textContent = warningText;
+      editingStage.append(warning);
+    }
+    if (state.creationError) {
+      const error = document.createElement("div");
+      error.dataset.creationError = "";
+      error.tabIndex = -1;
+      error.setAttribute("role", "alert");
+      error.textContent = `The world was not created. ${state.creationError.message} Your local work is unchanged; try again.`;
+      editingStage.append(error);
+    }
+    if (createdWorld && coverError) {
+      const error = document.createElement("div");
+      error.dataset.coverError = "";
+      error.tabIndex = -1;
+      error.setAttribute("role", "alert");
+      if (state.coverIntent.mode === "generated" && coverError instanceof WorldCreationApiError && coverError.kind === "unavailable") {
+        error.innerHTML = 'The world was created, but the image provider is unavailable. Check <a href="/nexus/?view=setup">Provider Setup</a> or retry the cover.';
+      } else {
+        error.textContent = "The world was created, but its cover could not be completed. Retry the cover or open the world.";
+      }
+      editingStage.append(error);
+    }
+    const counts = document.createElement("dl");
+    for (const [name, count] of Object.entries(review.counts)) {
+      const term = document.createElement("dt");
+      term.textContent = name[0]!.toUpperCase() + name.slice(1);
+      const value = document.createElement("dd");
+      value.dataset.reviewCount = name;
+      value.textContent = String(count);
+      counts.append(term, value);
+    }
+    const serialized = document.createElement("pre");
+    serialized.dataset.reviewSerialized = "";
+    serialized.textContent = JSON.stringify(review.draft, null, 2);
+    const actions = document.createElement("div");
+    actions.className = "creation-stage-actions";
+    if (createdWorld) {
+      actions.append(button("open-created-world", "Open world"));
+      if (coverError) actions.append(button("retry-cover", "Retry cover"));
+    } else {
+      const create = button("create-world", state.status === "creating" ? "Creating world…" : "Create world");
+      create.disabled = state.status === "creating" || !review.ready;
+      actions.append(button("back-stage", "Back"), create);
+    }
+    editingStage.append(counts, serialized, actions);
   }
 
   function renderStage(): void {
@@ -508,7 +704,8 @@ export function mountWorldCreationPage(
     renderStageIndex();
     if (state.stage === "foundation") renderFoundation();
     else if (state.stage === "canon" || state.stage === "mechanics") renderCollectionEditor();
-    else if (state.stage !== "method") renderUnsupportedStage();
+    else if (state.stage === "cover") renderCover();
+    else if (state.stage === "review") renderReview();
     canvas.setAttribute("aria-labelledby", state.stage === "method" ? "method-heading" : `${state.stage}-heading`);
   }
 
@@ -670,6 +867,83 @@ export function mountWorldCreationPage(
     }
   }
 
+  async function performCover(
+    world: CreatedWorldResponse,
+    intent: WorldCreationState["coverIntent"],
+    controller: AbortController
+  ): Promise<boolean> {
+    try {
+      if (intent.mode === "retained_asset") {
+        await attachCreatedWorldCover(world.id, intent.assetId, controller.signal);
+      } else if (intent.mode === "generated") {
+        await generateCreatedWorldCover(world.id, intent.prompt, controller.signal);
+      }
+      if (disposed || creationController !== controller || controller.signal.aborted) return false;
+      coverError = null;
+      return true;
+    } catch (error) {
+      if (disposed || creationController !== controller || controller.signal.aborted) return false;
+      coverError = error instanceof Error ? error : new Error("Cover operation failed.");
+      renderReview();
+      editingStage.querySelector<HTMLElement>("[data-cover-error]")?.focus();
+      return false;
+    }
+  }
+
+  async function submitCreation(): Promise<void> {
+    if (creationController || createdWorld) return;
+    const validation = validateCreationStage(state, "review");
+    if (validation.issues.length > 0) {
+      renderReview();
+      editingStage.querySelector<HTMLElement>("[data-review-errors] a")?.focus();
+      return;
+    }
+
+    const snapshot = worldCreationSubmissionSnapshot(state.draft);
+    const coverIntent = structuredClone(state.coverIntent);
+    const controller = new AbortController();
+    creationController = controller;
+    state = beginCreation(state);
+    renderReview();
+    try {
+      const result = await createWorld(snapshot, controller.signal);
+      if (disposed || creationController !== controller || controller.signal.aborted) return;
+      createdWorld = result;
+      state = completeCreation(state, result.id);
+      setDirtyGuard(false);
+      if (coverIntent.mode === "none" || await performCover(result, coverIntent, controller)) {
+        if (!disposed && creationController === controller && !controller.signal.aborted) {
+          navigate(`/app/worlds/${result.id}`);
+        }
+      }
+    } catch (error) {
+      if (disposed || creationController !== controller || controller.signal.aborted || createdWorld) return;
+      const kind = error instanceof WorldCreationApiError ? error.kind : "request_failed";
+      const message = error instanceof Error ? error.message : "World creation failed.";
+      state = failCreation(state, kind, message);
+      renderReview();
+      editingStage.querySelector<HTMLElement>("[data-creation-error]")?.focus();
+    } finally {
+      if (creationController === controller) creationController = null;
+    }
+  }
+
+  async function retryCover(): Promise<void> {
+    if (!createdWorld || creationController || state.coverIntent.mode === "none") return;
+    const controller = new AbortController();
+    creationController = controller;
+    coverError = null;
+    renderReview();
+    try {
+      if (await performCover(createdWorld, structuredClone(state.coverIntent), controller) &&
+        !disposed && creationController === controller && !controller.signal.aborted) {
+        navigate(`/app/worlds/${createdWorld.id}`);
+      }
+    } finally {
+      if (creationController === controller) creationController = null;
+    }
+  }
+
   function validateAndContinue(): void {
     const validation = validateCreationStage(state);
     if (validation.issues.length > 0) {
@@ -782,6 +1056,20 @@ export function mountWorldCreationPage(
       updateStructuredField(target);
       return;
     }
+    if (target.name === "cover.assetId" && state.coverIntent.mode === "retained_asset") {
+      state = setCreationCoverIntent(state, { mode: "retained_asset", assetId: target.value });
+      target.removeAttribute("aria-invalid");
+      const error = editingStage.querySelector<HTMLElement>('[data-field-error="cover.assetId"]');
+      if (error) error.textContent = "";
+      return;
+    }
+    if (target.name === "cover.prompt" && state.coverIntent.mode === "generated") {
+      state = setCreationCoverIntent(state, { mode: "generated", prompt: target.value });
+      target.removeAttribute("aria-invalid");
+      const error = editingStage.querySelector<HTMLElement>('[data-field-error="cover.prompt"]');
+      if (error) error.textContent = "";
+      return;
+    }
     const match = /^world\.(.+)$/.exec(target.name);
     if (match?.[1]) {
       state = editCreationDraft(state, ["world", match[1]], target.value);
@@ -793,13 +1081,32 @@ export function mountWorldCreationPage(
 
   function onChange(event: Event): void {
     const target = event.target;
-    if (!(target instanceof pageView.HTMLInputElement) || target.name !== "creationMethod" || !target.checked) return;
-    if (target.value === "manual" || target.value === "ai") updateMethod(target.value);
+    if (!(target instanceof pageView.HTMLInputElement) || !target.checked) return;
+    if (target.name === "creationMethod" && (target.value === "manual" || target.value === "ai")) {
+      updateMethod(target.value);
+    } else if (target.name === "coverMode") {
+      if (target.value === "none") state = setCreationCoverIntent(state, { mode: "none" });
+      else if (target.value === "retained_asset") state = setCreationCoverIntent(state, { mode: "retained_asset", assetId: "" });
+      else if (target.value === "generated") state = setCreationCoverIntent(state, { mode: "generated", prompt: "" });
+      renderCover();
+    }
   }
 
   function onClick(event: Event): void {
     const target = event.target;
     if (!(target instanceof pageView.Element)) return;
+    const issueLink = target.closest<HTMLAnchorElement>("[data-review-issue-stage]");
+    if (issueLink?.dataset.reviewIssueStage) {
+      event.preventDefault();
+      state = setCreationStage(state, issueLink.dataset.reviewIssueStage as CreationStage);
+      renderStage();
+      const issuePath = issueLink.dataset.reviewIssuePath;
+      const focusTarget = issuePath
+        ? editingStage.querySelector<HTMLElement>(`[name="${issuePath}"]`)
+        : null;
+      (focusTarget ?? root.querySelector<HTMLElement>(`#${state.stage}-heading`))?.focus();
+      return;
+    }
     const actionButton = target.closest<HTMLButtonElement>("[data-action]");
     const action = actionButton?.dataset.action;
     if (action === "expand-prompt") openDialog();
@@ -814,6 +1121,9 @@ export function mountWorldCreationPage(
       renderStage();
     } else if (action === "continue-stage") validateAndContinue();
     else if (action === "back-stage") goBack();
+    else if (action === "create-world") void submitCreation();
+    else if (action === "retry-cover") void retryCover();
+    else if (action === "open-created-world" && createdWorld) navigate(`/app/worlds/${createdWorld.id}`);
     else if (action === "switch-collection" && actionButton?.dataset.collectionTarget) {
       activeCollection = actionButton.dataset.collectionTarget as EditableCollection;
       renderCollectionEditor();
@@ -847,9 +1157,22 @@ export function mountWorldCreationPage(
     trapDialogFocus(keyboardEvent);
   }
 
-  root.addEventListener("input", onInput);
-  root.addEventListener("change", onChange);
-  root.addEventListener("click", onClick);
+  const onRootInput = (event: Event) => {
+    onInput(event);
+    setDirtyGuard(state.navigationDirty);
+  };
+  const onRootChange = (event: Event) => {
+    onChange(event);
+    setDirtyGuard(state.navigationDirty);
+  };
+  const onRootClick = (event: Event) => {
+    onClick(event);
+    setDirtyGuard(state.navigationDirty);
+  };
+
+  root.addEventListener("input", onRootInput);
+  root.addEventListener("change", onRootChange);
+  root.addEventListener("click", onRootClick);
   document.addEventListener("keydown", onKeyDown);
   renderStage();
 
@@ -860,9 +1183,12 @@ export function mountWorldCreationPage(
       clearPollTimer();
       generationController?.abort(new DOMException("World creation closed", "AbortError"));
       generationController = null;
-      root.removeEventListener("input", onInput);
-      root.removeEventListener("change", onChange);
-      root.removeEventListener("click", onClick);
+      creationController?.abort(new DOMException("World creation closed", "AbortError"));
+      creationController = null;
+      setDirtyGuard(false);
+      root.removeEventListener("input", onRootInput);
+      root.removeEventListener("change", onRootChange);
+      root.removeEventListener("click", onRootClick);
       document.removeEventListener("keydown", onKeyDown);
       theme.dispose();
     }

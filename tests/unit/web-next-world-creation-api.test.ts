@@ -171,6 +171,15 @@ describe("World Creation API boundary", () => {
     await expect(pending).rejects.toBe(reason);
   });
 
+  it("rejects a malformed creation snapshot before making an authoritative request", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse(createdResponse, 201));
+    vi.stubGlobal("fetch", fetch);
+    const malformed = { ...structuredClone(draft), entities: {} } as unknown as EditableWorldDraft;
+
+    await expect(createWorld(malformed)).rejects.toThrow("unexpected world response");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("creates with only title and owner-safe canonical content while forcing characters empty", async () => {
     const adversarial = {
       ...structuredClone(draft),
@@ -180,7 +189,11 @@ describe("World Creation API boundary", () => {
       ownerUserId: "attacker-4",
       importedLore: { ownerUserId: "nested-provenance" }
     } as EditableWorldDraft;
-    const fetch = vi.fn().mockResolvedValue(jsonResponse(createdResponse, 201));
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({
+      ...createdResponse,
+      ownerUserId: "server-only-owner",
+      internalGenerationMetadata: { hidden: true }
+    }, 201));
     vi.stubGlobal("fetch", fetch);
 
     const result = await createWorld(adversarial);

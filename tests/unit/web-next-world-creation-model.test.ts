@@ -7,6 +7,7 @@ import {
   createWorldCreationState,
   creationReadiness,
   creationStageProgress,
+  creationReview,
   editCreationDraft,
   failCreation,
   hasLocalWorldCreationContent,
@@ -14,6 +15,7 @@ import {
   removeCreationCollectionItem,
   restoreCreationCollectionItem,
   selectCreationMethod,
+  setCreationCoverIntent,
   setCreationStage,
   updateCreationCollectionItem,
   validateCreationStage,
@@ -206,7 +208,7 @@ describe("World Creation local workflow", () => {
     const dirty = selectCreationMethod(createWorldCreationState(), "ai");
     const creating = beginCreation(dirty);
     const failed = failCreation(creating, "request_failed", "Creation failed.");
-    const complete = completeCreation(beginCreation(failed));
+    const complete = completeCreation(beginCreation(failed), "world-1");
 
     expect(creating.status).toBe("creating");
     expect(creating.navigationDirty).toBe(true);
@@ -216,6 +218,49 @@ describe("World Creation local workflow", () => {
     expect(complete.status).toBe("created");
     expect(complete.navigationDirty).toBe(false);
     expect(complete.creationError).toBeNull();
+    expect(complete.createdWorldId).toBe("world-1");
+  });
+
+  it("defaults cover to none and validates only fields required by the selected cover mode", () => {
+    const initial = createWorldCreationState();
+    expect(initial.coverIntent).toEqual({ mode: "none" });
+    expect(validateCreationStage(initial, "cover").issues).toEqual([]);
+
+    const retained = setCreationCoverIntent(initial, { mode: "retained_asset", assetId: " " });
+    expect(validateCreationStage(retained, "cover").issues).toEqual([
+      { path: "cover.assetId", message: "Choose a retained cover asset." }
+    ]);
+    const generated = setCreationCoverIntent(retained, { mode: "generated", prompt: " " });
+    expect(validateCreationStage(generated, "cover").issues).toEqual([
+      { path: "cover.prompt", message: "Describe the cover to generate." }
+    ]);
+    expect(setCreationCoverIntent(generated, { mode: "none" }).coverIntent).toEqual({ mode: "none" });
+  });
+
+  it("builds a factual review with provenance, readiness, warnings, counts, and no characters", () => {
+    let state = selectCreationMethod(createWorldCreationState(), "ai");
+    state = editCreationDraft(state, ["world", "title"], "Glass Atlas");
+    state = editCreationDraft(state, ["entities"], [{ name: "City" }, { name: "Star" }]);
+    state = editCreationDraft(state, ["relationships"], [{ source: "City", target: "Star" }]);
+    state = editCreationDraft(state, ["rpgStats"], [{ name: "Resolve" }]);
+    state = editCreationDraft(state, ["defaultTriggers"], [{ name: "Dusk" }]);
+    state = editCreationDraft(state, ["eventTriggers"], [{ name: "Alarm" }]);
+    state = editCreationDraft(state, ["assets"], [{ id: "asset-1" }]);
+
+    const review = creationReview(state);
+
+    expect(review.provenance).toBe("ai");
+    expect(review.ready).toBe(true);
+    expect(review.warnings).toEqual(["No cover will be attached."]);
+    expect(review.counts).toEqual({
+      entities: 2,
+      relationships: 1,
+      stats: 1,
+      triggers: 2,
+      assets: 1,
+      characters: 0
+    });
+    expect(review.draft.playableCharacters).toEqual([]);
   });
 
   it("reports current and completed editing stages without treating future stages as complete", () => {

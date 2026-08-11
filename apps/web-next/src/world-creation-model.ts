@@ -9,6 +9,10 @@ export const WORLD_CREATION_PATH = "/app/worlds/new";
 export type CreationMethod = "manual" | "ai";
 export type CreationStage = "method" | "foundation" | "canon" | "mechanics" | "cover" | "review";
 export type CreationStatus = "pristine" | "unsaved" | "creating" | "created" | "error";
+export type CreationCoverIntent =
+  | { mode: "none" }
+  | { mode: "retained_asset"; assetId: string }
+  | { mode: "generated"; prompt: string };
 export type CreationCollectionName =
   | "entities"
   | "relationships"
@@ -49,12 +53,14 @@ export interface WorldCreationState {
   method: CreationMethod | null;
   draft: EditableWorldDraft;
   provenance: CreationMethod | null;
+  coverIntent: CreationCoverIntent;
   status: CreationStatus;
   navigationDirty: boolean;
   pendingRemovals: CreationPendingRemoval[];
   nextRemovalSequence: number;
   generationReplacement: GenerationReplacement | null;
   creationError: CreationError | null;
+  createdWorldId: string | null;
 }
 
 export interface GeneratedWorldPreview {
@@ -73,6 +79,21 @@ export interface CreationReadiness {
 export interface CreationStageProgress {
   stage: CreationStage;
   state: "completed" | "current" | "upcoming";
+}
+
+export interface CreationReview {
+  provenance: CreationMethod | null;
+  ready: boolean;
+  warnings: string[];
+  counts: {
+    entities: number;
+    relationships: number;
+    stats: number;
+    triggers: number;
+    assets: number;
+    characters: 0;
+  };
+  draft: EditableWorldDraft;
 }
 
 const CREATION_STAGES: readonly CreationStage[] = [
@@ -95,6 +116,12 @@ export function canonicalizeWorldCreationDraft(draft: EditableWorldDraft): Edita
   result.schemaVersion = 5;
   result.playableCharacters = [];
   return result;
+}
+
+export function worldCreationSubmissionSnapshot(draft: EditableWorldDraft): EditableWorldDraft {
+  const forbidden = new Set(["user_id", "userId", "owner_user_id", "ownerUserId"]);
+  const safe = Object.fromEntries(Object.entries(draft).filter(([key]) => !forbidden.has(key)));
+  return canonicalizeWorldCreationDraft(safe as unknown as EditableWorldDraft);
 }
 
 const canonicalDraft = canonicalizeWorldCreationDraft;
@@ -157,12 +184,14 @@ export function createWorldCreationState(): WorldCreationState {
     method: null,
     draft: createEmptyWorldDraft(),
     provenance: null,
+    coverIntent: { mode: "none" },
     status: "pristine",
     navigationDirty: false,
     pendingRemovals: [],
     nextRemovalSequence: 1,
     generationReplacement: null,
-    creationError: null
+    creationError: null,
+    createdWorldId: null
   };
 }
 
@@ -198,6 +227,19 @@ export function editCreationDraft(
   };
 }
 
+export function setCreationCoverIntent(
+  state: WorldCreationState,
+  coverIntent: CreationCoverIntent
+): WorldCreationState {
+  return {
+    ...state,
+    coverIntent: clone(coverIntent),
+    status: "unsaved",
+    navigationDirty: true,
+    creationError: null
+  };
+}
+
 export function validateCreationStage(
   state: WorldCreationState,
   stage: CreationStage = state.stage
@@ -217,6 +259,13 @@ export function validateCreationStage(
       if (typeof title !== "string" || !title.trim()) {
         issues.push({ path: "world.title", message: "World title is required." });
       }
+    }
+  }
+  if (stage === "cover" || stage === "review") {
+    if (state.coverIntent.mode === "retained_asset" && !state.coverIntent.assetId.trim()) {
+      issues.push({ path: "cover.assetId", message: "Choose a retained cover asset." });
+    } else if (state.coverIntent.mode === "generated" && !state.coverIntent.prompt.trim()) {
+      issues.push({ path: "cover.prompt", message: "Describe the cover to generate." });
     }
   }
   if (["canon", "mechanics", "cover", "review"].includes(stage)) {
@@ -250,6 +299,24 @@ export function creationReadiness(state: WorldCreationState): CreationReadiness 
       const issues = validateCreationStage(state, stage).issues;
       return { stage, ready: issues.length === 0, issueCount: issues.length };
     })
+  };
+}
+
+export function creationReview(state: WorldCreationState): CreationReview {
+  const draft = canonicalDraft(state.draft);
+  return {
+    provenance: state.provenance,
+    ready: validateCreationStage(state, "review").issues.length === 0,
+    warnings: state.coverIntent.mode === "none" ? ["No cover will be attached."] : [],
+    counts: {
+      entities: draft.entities.length,
+      relationships: draft.relationships.length,
+      stats: draft.rpgStats.length,
+      triggers: draft.defaultTriggers.length + draft.eventTriggers.length,
+      assets: draft.assets.length,
+      characters: 0
+    },
+    draft
   };
 }
 
@@ -381,14 +448,15 @@ export function beginCreation(state: WorldCreationState): WorldCreationState {
   };
 }
 
-export function completeCreation(state: WorldCreationState): WorldCreationState {
+export function completeCreation(state: WorldCreationState, createdWorldId: string | null = state.createdWorldId): WorldCreationState {
   return {
     ...state,
     draft: canonicalDraft(state.draft),
     status: "created",
     navigationDirty: false,
     pendingRemovals: [],
-    creationError: null
+    creationError: null,
+    createdWorldId
   };
 }
 
