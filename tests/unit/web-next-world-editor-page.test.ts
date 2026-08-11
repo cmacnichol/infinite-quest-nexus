@@ -67,6 +67,16 @@ function savedResponse(content = draft, revision = 9): WorldDraftSaveResponse {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("World Editor Overview page", () => {
   it("renders the routed shell and loading state before the aggregate arrives", () => {
     const { document, root } = editorFixture();
@@ -94,6 +104,18 @@ describe("World Editor Overview page", () => {
     for (const field of ["tone", "premise", "backgroundStory", "firstAction", "rules"] as const) {
       expect(document.querySelector<HTMLTextAreaElement>(`[name="world.${field}"]`)?.value).toBe(draft.world[field]);
     }
+    expect([...document.querySelectorAll(".overview-form label > span")].map((label) => label.textContent)).toEqual([
+      "Title",
+      "Genre",
+      "Tone",
+      "Premise",
+      "Background story",
+      "First action",
+      "Rules"
+    ]);
+    const finalCommandCell = document.querySelector(".editor-command-row > :last-child");
+    expect(finalCommandCell?.classList.contains("editor-save-cell")).toBe(true);
+    expect(finalCommandCell?.querySelector("button")?.textContent).toBe("Save draft");
     expect(document.querySelectorAll('[data-section-index] [aria-current="page"]')).toHaveLength(1);
     expect(document.querySelector('[data-draft-ledger]')?.textContent).toContain("Revision 8");
     expect(document.querySelector('[data-draft-ledger]')?.textContent).toContain("Ready");
@@ -131,7 +153,7 @@ describe("World Editor Overview page", () => {
     expect(document.querySelector('a[href="/app/"]')).not.toBeNull();
   });
 
-  it("initializes a blank Overview when the aggregate has no draft", async () => {
+  it("blocks editing when the aggregate has no editable draft", async () => {
     const { document, root } = editorFixture();
     mountWorldEditorPage(root, worldId, {
       loadWorld: vi.fn().mockResolvedValue({ ...world, draftRevision: null, draftContent: null, draftUpdatedAt: null })
@@ -139,9 +161,13 @@ describe("World Editor Overview page", () => {
 
     await settle();
 
-    expect(document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("");
+    expect(document.querySelector('[data-no-editable-draft]')?.textContent).toContain("No editable draft is available");
+    expect(document.querySelector('[data-no-editable-draft]')?.textContent).toContain("cannot be edited");
+    expect(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(".overview-form input, .overview-form textarea")
+      .every((field) => field.disabled)).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.disabled).toBe(true);
     expect(document.querySelector('[data-draft-ledger]')?.textContent).toContain("Not created");
-    expect(document.querySelector('[data-editor-state]')?.textContent).toContain("Start the first draft");
+    expect(document.querySelector('[data-editor-state]')?.textContent).toContain("No editable draft");
   });
 
   it("makes archived worlds read-only while preserving their Overview", async () => {
@@ -193,6 +219,36 @@ describe("World Editor Overview page", () => {
     expect(document.querySelector('[data-save-announcement]')?.textContent).toContain("World title is required");
   });
 
+  it("keeps dirty protection and editing locks active until a pending save is adopted", async () => {
+    const { document, root, window } = editorFixture();
+    const pendingSave = deferred<WorldDraftSaveResponse>();
+    const saveWorldDraft = vi.fn().mockReturnValue(pendingSave.promise);
+    mountWorldEditorPage(root, worldId, { loadWorld: vi.fn().mockResolvedValue(world), saveWorldDraft });
+    await settle();
+    const title = document.querySelector<HTMLInputElement>('[name="world.title"]');
+    if (!title) throw new Error("Title field missing.");
+    title.value = "Locked local title";
+    title.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+    document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+
+    const pendingUnload = new window.Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(pendingUnload);
+    expect(pendingUnload.defaultPrevented).toBe(true);
+    expect(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(".overview-form input, .overview-form textarea")
+      .every((field) => field.disabled)).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.disabled).toBe(true);
+
+    pendingSave.resolve(savedResponse({ ...structuredClone(draft), world: { ...draft.world, title: "Adopted title" } }));
+    await settle();
+
+    expect(title.value).toBe("Adopted title");
+    expect(title.disabled).toBe(false);
+    const cleanUnload = new window.Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(cleanUnload);
+    expect(cleanUnload.defaultPrevented).toBe(false);
+  });
+
   it("saves exactly once and adopts the returned revision and content", async () => {
     const { document, root, window } = editorFixture();
     const savedDraft = { ...structuredClone(draft), world: { ...draft.world, title: "Server-normalized title" } };
@@ -234,7 +290,13 @@ describe("World Editor Overview page", () => {
     await settle();
 
     expect(premise.value).toBe("Local work survives.");
+    expect(premise.disabled).toBe(false);
+    expect(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(".overview-form input, .overview-form textarea")
+      .every((field) => !field.disabled)).toBe(true);
     expect(document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.disabled).toBe(false);
+    const dirtyUnload = new window.Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(dirtyUnload);
+    expect(dirtyUnload.defaultPrevented).toBe(true);
     expect(document.querySelector('[data-save-announcement]')?.textContent).toContain("try again");
   });
 
@@ -288,6 +350,54 @@ describe("World Editor Overview page", () => {
     expect(loadWorld).toHaveBeenCalledTimes(2);
     expect(title.value).toBe("Authoritative title");
     expect(document.querySelector('[data-save-conflict]')).toBeNull();
+  });
+
+  it("ignores a stale load response even when the dependency ignores abort", async () => {
+    const { document, root, window } = editorFixture();
+    const firstReload = deferred<WorldAggregate>();
+    const secondReload = deferred<WorldAggregate>();
+    const loadWorld = vi.fn()
+      .mockResolvedValueOnce(world)
+      .mockReturnValueOnce(firstReload.promise)
+      .mockReturnValueOnce(secondReload.promise);
+    const saveWorldDraft = vi.fn().mockRejectedValue(
+      new WorldEditorApiError("conflict", "The draft changed elsewhere.", 409)
+    );
+    mountWorldEditorPage(root, worldId, {
+      loadWorld,
+      saveWorldDraft,
+      confirmReload: () => true
+    });
+    await settle();
+    const title = document.querySelector<HTMLInputElement>('[name="world.title"]');
+    if (!title) throw new Error("Title field missing.");
+    title.value = "Unsaved title";
+    title.dispatchEvent(new window.Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+
+    const reload = document.querySelector<HTMLButtonElement>('[data-action="reload-authoritative-draft"]');
+    reload?.click();
+    reload?.click();
+    const newestWorld = {
+      ...world,
+      draftRevision: 10,
+      draftContent: { ...structuredClone(draft), world: { ...draft.world, title: "Newest title" } }
+    };
+    secondReload.resolve(newestWorld);
+    await settle();
+    expect(title.value).toBe("Newest title");
+
+    firstReload.resolve({
+      ...world,
+      draftRevision: 9,
+      draftContent: { ...structuredClone(draft), world: { ...draft.world, title: "Stale title" } }
+    });
+    await settle();
+
+    expect(loadWorld).toHaveBeenCalledTimes(3);
+    expect(title.value).toBe("Newest title");
+    expect(document.querySelector('[data-draft-ledger]')?.textContent).toContain("Revision 10");
   });
 
   it("expands the ledger drawer and aborts active requests when disposed", async () => {

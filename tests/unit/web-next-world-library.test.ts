@@ -74,7 +74,7 @@ describe("World Library overview", () => {
     consoleError.mockRestore();
   });
 
-  it("routes bootstrap to one editor page and disposes it on non-persisted pagehide", async () => {
+  it("keeps the mounted editor and theme control through BFCache transitions, then disposes on non-persisted pagehide", async () => {
     const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
     window.location = { pathname: "/app/worlds/22222222-2222-4222-8222-222222222222" } as Location;
     Object.defineProperty(window, "localStorage", { configurable: true, value: null });
@@ -95,9 +95,21 @@ describe("World Library overview", () => {
       expect(window.document.querySelectorAll('[data-page="world-editor"]')).toHaveLength(1);
       expect(window.document.querySelector('[data-page="world-library"]')).toBeNull();
 
-      const pageHide = new window.Event("pagehide");
-      Object.defineProperty(pageHide, "persisted", { value: false });
-      window.dispatchEvent(pageHide);
+      const persistedHide = new window.Event("pagehide");
+      Object.defineProperty(persistedHide, "persisted", { value: true });
+      window.dispatchEvent(persistedHide);
+      const persistedShow = new window.Event("pageshow");
+      Object.defineProperty(persistedShow, "persisted", { value: true });
+      window.dispatchEvent(persistedShow);
+
+      expect(requestSignal?.aborted).toBe(false);
+      expect(window.document.querySelectorAll('[data-page="world-editor"]')).toHaveLength(1);
+      window.document.querySelector<HTMLButtonElement>(".theme-toggle")?.click();
+      expect(window.document.documentElement.dataset.theme).toBe("dark");
+
+      const finalPageHide = new window.Event("pagehide");
+      Object.defineProperty(finalPageHide, "persisted", { value: false });
+      window.dispatchEvent(finalPageHide);
       expect(requestSignal?.aborted).toBe(true);
     } finally {
       for (const [name, descriptor] of previousGlobals) {

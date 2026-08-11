@@ -202,17 +202,24 @@ export function mountWorldEditorPage(
     });
   }
 
-  function renderFields(): void {
+  function renderFieldAvailability(): void {
     if (!state) return;
     const readOnly = authoritativeStatus === "archived";
-    for (const definition of fieldDefinitions) {
-      const field = form.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[name="world.${definition.name}"]`);
-      if (!field) continue;
-      field.value = state.draft.world[definition.name];
-      field.disabled = false;
+    const disabled = state.revision === null || state.status === "saving";
+    for (const field of fields()) {
+      field.disabled = disabled;
       field.readOnly = readOnly;
       field.setAttribute("aria-readonly", String(readOnly));
     }
+  }
+
+  function renderFields(): void {
+    if (!state) return;
+    for (const definition of fieldDefinitions) {
+      const field = form.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[name="world.${definition.name}"]`);
+      if (field) field.value = state.draft.world[definition.name];
+    }
+    renderFieldAvailability();
   }
 
   function renderLedger(): void {
@@ -242,14 +249,16 @@ export function mountWorldEditorPage(
     if (!state) return;
     const readOnly = authoritativeStatus === "archived";
     if (readOnly) editorState.textContent = "Archived worlds are read-only.";
-    else if (state.revision === null && state.status === "saved") editorState.textContent = "Start the first draft by completing the Overview.";
+    else if (state.revision === null) editorState.textContent = "No editable draft is available.";
     else if (state.status === "saving") editorState.textContent = "Saving draft…";
     else if (state.status === "unsaved" || state.status === "error") editorState.textContent = "Unsaved changes";
     else editorState.textContent = "Draft saved";
     const canSave = state.status === "unsaved" ||
       (state.status === "error" && state.saveError?.kind !== "conflict");
     saveButton.disabled = readOnly || state.revision === null || !canSave;
-    setDirtyGuard(!readOnly && (state.status === "unsaved" || state.status === "error"));
+    setDirtyGuard(!readOnly && state.revision !== null &&
+      (state.status === "unsaved" || state.status === "saving" || state.status === "error"));
+    renderFieldAvailability();
     renderLedger();
   }
 
@@ -258,6 +267,16 @@ export function mountWorldEditorPage(
     state = createWorldEditorState(world);
     main.setAttribute("aria-busy", "false");
     loadState.replaceChildren();
+    if (world.draftRevision === null) {
+      const blockedState = document.createElement("section");
+      blockedState.dataset.noEditableDraft = "";
+      const heading = document.createElement("h2");
+      heading.textContent = "No editable draft is available";
+      const guidance = document.createElement("p");
+      guidance.textContent = "This world cannot be edited because Nexus has no draft revision to update.";
+      blockedState.append(heading, guidance);
+      loadState.append(blockedState);
+    }
     conflictHost.replaceChildren();
     announcement.textContent = "";
     renderFields();
@@ -290,15 +309,16 @@ export function mountWorldEditorPage(
 
   async function requestWorld(): Promise<void> {
     loadController?.abort(new DOMException("World request replaced", "AbortError"));
-    loadController = new AbortController();
+    const controller = new AbortController();
+    loadController = controller;
     main.setAttribute("aria-busy", "true");
     editorState.textContent = "Loading world editor…";
     loadState.replaceChildren();
     try {
-      const world = await loadWorld(worldId, loadController.signal);
-      if (!disposed && !loadController.signal.aborted) adoptWorld(world);
+      const world = await loadWorld(worldId, controller.signal);
+      if (!disposed && loadController === controller && !controller.signal.aborted) adoptWorld(world);
     } catch (error) {
-      if (!disposed && !loadController.signal.aborted) renderLoadError(error);
+      if (!disposed && loadController === controller && !controller.signal.aborted) renderLoadError(error);
     }
   }
 
@@ -350,17 +370,18 @@ export function mountWorldEditorPage(
     announcement.textContent = "Saving draft…";
     renderStatus();
     saveController?.abort(new DOMException("Draft save replaced", "AbortError"));
-    saveController = new AbortController();
+    const controller = new AbortController();
+    saveController = controller;
     try {
-      const result = await saveWorldDraft(worldId, expectedRevision, state.draft, saveController.signal);
-      if (disposed || saveController.signal.aborted) return;
+      const result = await saveWorldDraft(worldId, expectedRevision, state.draft, controller.signal);
+      if (disposed || saveController !== controller || controller.signal.aborted) return;
       state = completeDraftSave(state, { revision: result.revision, content: result.content });
       conflictHost.replaceChildren();
       renderFields();
       renderStatus();
       announcement.textContent = "Draft saved.";
     } catch (error) {
-      if (disposed || saveController.signal.aborted) return;
+      if (disposed || saveController !== controller || controller.signal.aborted) return;
       const kind = error instanceof WorldEditorApiError ? error.kind : "request_failed";
       const message = error instanceof Error ? error.message : "The draft could not be saved.";
       state = failDraftSave(state, kind, message);
@@ -375,7 +396,7 @@ export function mountWorldEditorPage(
   }
 
   const onInput = (event: Event) => {
-    if (!state || authoritativeStatus === "archived") return;
+    if (!state || authoritativeStatus === "archived" || state.revision === null || state.status === "saving") return;
     const target = event.target;
     if (!(target instanceof view.HTMLInputElement) && !(target instanceof view.HTMLTextAreaElement)) return;
     const match = /^world\.(.+)$/.exec(target.name);
