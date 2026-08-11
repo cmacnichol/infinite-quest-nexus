@@ -1,5 +1,9 @@
 import "./styles.css";
-import { initializeThemeControl, resolveThemeMediaQuery } from "./theme-control";
+import {
+  initializeThemeControl,
+  installThemeControlLifecycle,
+  resolveThemeMediaQuery
+} from "./theme-control";
 import {
   filterWorlds,
   installArtworkFallback,
@@ -108,7 +112,7 @@ const themeControl = initializeThemeControl(themeToggle, {
   storage: themeStorage,
   mediaQuery: themeMediaQuery
 });
-window.addEventListener("pagehide", () => themeControl.dispose(), { once: true });
+installThemeControlLifecycle(window, themeControl);
 
 const searchField = searchInput;
 const countOutput = resultCount;

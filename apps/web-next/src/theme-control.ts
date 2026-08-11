@@ -19,6 +19,11 @@ interface ThemeControl {
   removeEventListener(type: "click", listener: () => void): void;
 }
 
+interface ThemeLifecycleTarget {
+  addEventListener(type: "pagehide", listener: (event: { persisted: boolean }) => void): void;
+  removeEventListener(type: "pagehide", listener: (event: { persisted: boolean }) => void): void;
+}
+
 export function resolveThemeMediaQuery(source: ThemeMediaSource): ThemeMediaQuery | null {
   let matchMedia: ThemeMediaSource["matchMedia"] = null;
   try {
@@ -37,6 +42,18 @@ export function resolveThemeMediaQuery(source: ThemeMediaSource): ThemeMediaQuer
 
 export function themeActionLabel(theme: Theme): string {
   return theme === "light" ? "Use dark theme" : "Use light theme";
+}
+
+export function installThemeControlLifecycle(
+  target: ThemeLifecycleTarget,
+  controller: Pick<ThemeController, "dispose">
+): void {
+  const onPageHide = (event: { persisted: boolean }) => {
+    if (event.persisted) return;
+    target.removeEventListener("pagehide", onPageHide);
+    controller.dispose();
+  };
+  target.addEventListener("pagehide", onPageHide);
 }
 
 export function initializeThemeControl(

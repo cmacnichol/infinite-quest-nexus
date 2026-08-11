@@ -5,6 +5,7 @@ import { parseHTML } from "linkedom";
 import { describe, expect, it } from "vitest";
 import {
   initializeThemeControl,
+  installThemeControlLifecycle,
   resolveThemeMediaQuery
 } from "../../apps/web-next/src/theme-control.js";
 import {
@@ -101,8 +102,15 @@ function mediaQuery(matches: boolean) {
     emit(nextMatches: boolean) {
       this.matches = nextMatches;
       listeners.forEach((listener) => listener({ matches: nextMatches }));
-    }
+    },
+    listenerCount: () => listeners.size
   };
+}
+
+function dispatchPageTransition(target: Window, EventConstructor: typeof Event, type: "pagehide" | "pageshow", persisted: boolean) {
+  const event = new EventConstructor(type);
+  Object.defineProperty(event, "persisted", { value: persisted });
+  target.dispatchEvent(event);
 }
 
 describe("web theme integration", () => {
@@ -127,7 +135,7 @@ describe("web theme integration", () => {
     expect(source).toContain('class="theme-icon theme-icon-sun"');
     expect(source).toContain('class="theme-icon theme-icon-moon"');
     expect(source).toContain("const themeControl = initializeThemeControl");
-    expect(source).toMatch(/addEventListener\("pagehide",\s*\(\) => themeControl\.dispose\(\)/);
+    expect(source).toContain("installThemeControlLifecycle(window, themeControl)");
   });
 
   it("keeps a valid stored choice authoritative when matchMedia access throws", () => {
@@ -308,6 +316,62 @@ describe("web theme integration", () => {
 });
 
 describe("web theme control integration", () => {
+  it("preserves one working control across repeated persisted page-cache cycles", () => {
+    const { document, Event, window } = parseHTML("<html><body><button type=\"button\"></button></body></html>").window;
+    const button = document.querySelector("button");
+    if (!button) throw new Error("Button fixture is missing.");
+    const media = mediaQuery(false);
+    let writes = 0;
+    const control = initializeThemeControl(button, {
+      root: document.documentElement,
+      storage: {
+        getItem: () => null,
+        setItem: () => { writes += 1; }
+      },
+      mediaQuery: media
+    });
+    installThemeControlLifecycle(window, control);
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      dispatchPageTransition(window, Event, "pagehide", true);
+      dispatchPageTransition(window, Event, "pageshow", true);
+    }
+
+    expect(media.listenerCount()).toBe(1);
+    media.emit(true);
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    media.emit(false);
+    expect(document.documentElement.dataset.theme).toBe("light");
+    button.dispatchEvent(new Event("click"));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(writes).toBe(1);
+  });
+
+  it("disposes control listeners on non-persisted pagehide", () => {
+    const { document, Event, window } = parseHTML("<html><body><button type=\"button\"></button></body></html>").window;
+    const button = document.querySelector("button");
+    if (!button) throw new Error("Button fixture is missing.");
+    const media = mediaQuery(false);
+    let writes = 0;
+    const control = initializeThemeControl(button, {
+      root: document.documentElement,
+      storage: {
+        getItem: () => null,
+        setItem: () => { writes += 1; }
+      },
+      mediaQuery: media
+    });
+    installThemeControlLifecycle(window, control);
+
+    dispatchPageTransition(window, Event, "pagehide", false);
+
+    expect(media.listenerCount()).toBe(0);
+    media.emit(true);
+    button.dispatchEvent(new Event("click"));
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(writes).toBe(0);
+  });
+
   it("removes click and system listeners on disposal before safe reinitialization", () => {
     const { document, Event } = parseHTML("<html><body><button type=\"button\"></button></body></html>").window;
     const button = document.querySelector("button");
