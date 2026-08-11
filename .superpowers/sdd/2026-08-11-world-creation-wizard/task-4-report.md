@@ -54,3 +54,13 @@ The brief names `tests/unit/web-request-security.test.ts`, which does not exist 
 
 - The full repository suite requires a Linux-compatible environment for its secure-filesystem tests; targeted Task 4 verification is green on this host.
 - Projectmem was explicitly unavailable for this task, so no projectmem workflow calls or event records were made.
+
+## Fix Round 1 Evidence
+
+- Added a generated-cover status matrix covering accepted pending states (`queued`, `generating`, `provider_pending`, `downloading`), `completed`, and resolved failure states (`recoverable`, `failed`, `cancelled`, `expired`). Pending/success states expose truthful status copy before navigation; resolved failures preserve the created world and retry/open actions.
+- Kept **Create world** enabled on an invalid Review. Activation now makes zero creation requests, renders and focuses the complete error summary, and each summary link returns to the exact invalid stage control.
+- Expanded creation-failure regression coverage to verify preservation of AI provenance, generated-cover intent and prompt, every collection family, world defaults, and overview fields.
+- Added lifecycle regressions for disposal during the initial generated-cover request and during a cover-only retry. Both abort their signal and ignore stale completion without navigation or stale cover messaging.
+- Round 1 RED: `pnpm exec vitest run tests/unit/web-next-world-creation-page.test.ts` failed 13 tests before implementation (invalid Review behavior, state hydration/preservation, and all nine generated-cover status rows).
+- Round 1 GREEN: `pnpm exec vitest run tests/unit/web-next-world-creation-model.test.ts tests/unit/web-next-world-creation-api.test.ts tests/unit/web-next-world-creation-page.test.ts tests/unit/request-security.test.ts` passed 4 files / 77 tests.
+- Round 1 type check: `pnpm --filter @infinite-quest/web-next check` passed.

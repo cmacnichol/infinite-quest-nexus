@@ -71,6 +71,7 @@ export interface WorldCreationPageDependencies {
     signal?: AbortSignal
   ) => Promise<GeneratedWorldCoverResponse>;
   navigate?: (path: string) => void;
+  initialState?: WorldCreationState;
 }
 
 type EditableStage = "canon" | "mechanics";
@@ -269,7 +270,9 @@ export function mountWorldCreationPage(
     await pageView.navigator.clipboard.writeText(value);
   });
 
-  let state = createWorldCreationState();
+  let state = dependencies.initialState
+    ? structuredClone(dependencies.initialState)
+    : createWorldCreationState();
   let concept = "";
   let disposed = false;
   let generationSequence = 0;
@@ -277,6 +280,7 @@ export function mountWorldCreationPage(
   let creationController: AbortController | null = null;
   let createdWorld: CreatedWorldResponse | null = null;
   let coverError: WorldCreationApiError | Error | null = null;
+  let coverStatus: string | null = null;
   let unloadInstalled = false;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let activeCollection: EditableCollection = "entities";
@@ -629,6 +633,7 @@ export function mountWorldCreationPage(
     if (validation.issues.length > 0) {
       const summary = document.createElement("nav");
       summary.dataset.reviewErrors = "";
+      summary.tabIndex = -1;
       summary.setAttribute("aria-label", "Creation errors");
       const list = document.createElement("ul");
       for (const issue of validation.issues) {
@@ -671,6 +676,12 @@ export function mountWorldCreationPage(
         error.textContent = "The world was created, but its cover could not be completed. Retry the cover or open the world.";
       }
       editingStage.append(error);
+    } else if (createdWorld && coverStatus) {
+      const status = document.createElement("p");
+      status.dataset.coverStatus = "";
+      status.setAttribute("role", "status");
+      status.textContent = coverStatus;
+      editingStage.append(status);
     }
     const counts = document.createElement("dl");
     for (const [name, count] of Object.entries(review.counts)) {
@@ -691,7 +702,7 @@ export function mountWorldCreationPage(
       if (coverError) actions.append(button("retry-cover", "Retry cover"));
     } else {
       const create = button("create-world", state.status === "creating" ? "Creating world…" : "Create world");
-      create.disabled = state.status === "creating" || !review.ready;
+      create.disabled = state.status === "creating";
       actions.append(button("back-stage", "Back"), create);
     }
     editingStage.append(counts, serialized, actions);
@@ -875,14 +886,31 @@ export function mountWorldCreationPage(
     try {
       if (intent.mode === "retained_asset") {
         await attachCreatedWorldCover(world.id, intent.assetId, controller.signal);
+        if (disposed || creationController !== controller || controller.signal.aborted) return false;
+        coverStatus = "The retained cover was attached successfully.";
       } else if (intent.mode === "generated") {
-        await generateCreatedWorldCover(world.id, intent.prompt, controller.signal);
+        const result = await generateCreatedWorldCover(world.id, intent.prompt, controller.signal);
+        if (disposed || creationController !== controller || controller.signal.aborted) return false;
+        if (["recoverable", "failed", "cancelled", "expired"].includes(result.status)) {
+          coverStatus = null;
+          coverError = new Error(`Cover generation ended with status ${result.status}.`);
+          renderReview();
+          editingStage.querySelector<HTMLElement>("[data-cover-error]")?.focus();
+          return false;
+        }
+        coverStatus = result.status === "completed"
+          ? "Cover generation completed successfully."
+          : result.status === "queued"
+            ? "Cover generation was queued and will continue in the background."
+            : "Cover generation is in progress and will continue in the background.";
       }
       if (disposed || creationController !== controller || controller.signal.aborted) return false;
       coverError = null;
+      renderReview();
       return true;
     } catch (error) {
       if (disposed || creationController !== controller || controller.signal.aborted) return false;
+      coverStatus = null;
       coverError = error instanceof Error ? error : new Error("Cover operation failed.");
       renderReview();
       editingStage.querySelector<HTMLElement>("[data-cover-error]")?.focus();
@@ -895,7 +923,7 @@ export function mountWorldCreationPage(
     const validation = validateCreationStage(state, "review");
     if (validation.issues.length > 0) {
       renderReview();
-      editingStage.querySelector<HTMLElement>("[data-review-errors] a")?.focus();
+      editingStage.querySelector<HTMLElement>("[data-review-errors]")?.focus();
       return;
     }
 
@@ -933,6 +961,7 @@ export function mountWorldCreationPage(
     const controller = new AbortController();
     creationController = controller;
     coverError = null;
+    coverStatus = null;
     renderReview();
     try {
       if (await performCover(createdWorld, structuredClone(state.coverIntent), controller) &&
@@ -1098,12 +1127,28 @@ export function mountWorldCreationPage(
     const issueLink = target.closest<HTMLAnchorElement>("[data-review-issue-stage]");
     if (issueLink?.dataset.reviewIssueStage) {
       event.preventDefault();
+      const issuePath = issueLink.dataset.reviewIssuePath ?? "";
+      if (issuePath === "entities" || issuePath === "relationships" ||
+          issuePath === "rpgStats" || issuePath === "defaultTriggers" || issuePath === "eventTriggers") {
+        activeCollection = issuePath;
+      }
       state = setCreationStage(state, issueLink.dataset.reviewIssueStage as CreationStage);
       renderStage();
-      const issuePath = issueLink.dataset.reviewIssuePath;
-      const focusTarget = issuePath
-        ? editingStage.querySelector<HTMLElement>(`[name="${issuePath}"]`)
-        : null;
+      let focusTarget: HTMLElement | null = null;
+      if (issuePath === "method") {
+        focusTarget = root.querySelector<HTMLElement>('[name="creationMethod"]:checked, [name="creationMethod"]');
+      } else if (issuePath === "world") {
+        focusTarget = root.querySelector<HTMLElement>('[name="world.title"]');
+      } else if (issuePath === "entities" || issuePath === "relationships" ||
+          issuePath === "rpgStats" || issuePath === "defaultTriggers" || issuePath === "eventTriggers") {
+        focusTarget = root.querySelector<HTMLElement>(`[data-collection-target="${issuePath}"]`);
+      } else if (issuePath === "defaults") {
+        focusTarget = root.querySelector<HTMLElement>("[data-defaults-json]");
+      } else if (issuePath === "assets") {
+        focusTarget = root.querySelector<HTMLElement>('[name="coverMode"]:checked, [name="coverMode"]');
+      } else if (issuePath) {
+        focusTarget = root.querySelector<HTMLElement>(`[name="${issuePath}"]`);
+      }
       (focusTarget ?? root.querySelector<HTMLElement>(`#${state.stage}-heading`))?.focus();
       return;
     }

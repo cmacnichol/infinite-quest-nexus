@@ -1,6 +1,14 @@
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
 import { WorldCreationApiError } from "../../apps/web-next/src/world-creation-api.js";
+import {
+  createWorldCreationState,
+  editCreationDraft,
+  selectCreationMethod,
+  setCreationCoverIntent,
+  setCreationStage,
+  type WorldCreationState
+} from "../../apps/web-next/src/world-creation-model.js";
 import { mountWorldCreationPage } from "../../apps/web-next/src/world-creation-page.js";
 
 const createdWorld = {
@@ -121,6 +129,15 @@ function advanceManualWizardToCover(document: Document, window: Window): void {
   document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
   document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
   expect(document.querySelector('[data-creation-stage="cover"]')).not.toBeNull();
+}
+
+function reviewedState(method: "manual" | "ai" = "manual"): WorldCreationState {
+  let state = selectCreationMethod(createWorldCreationState(), method);
+  state = editCreationDraft(state, ["world", "title"], "Glass Atlas");
+  for (const stage of ["foundation", "canon", "mechanics", "cover", "review"] as const) {
+    state = setCreationStage(state, stage);
+  }
+  return state;
 }
 
 describe("World Creation Method stage", () => {
@@ -455,6 +472,41 @@ describe("World Creation Cover and Review stages", () => {
     expect(document.querySelector<HTMLInputElement>('[name="coverMode"][value="generated"]')?.checked).toBe(true);
     expect(document.querySelector<HTMLTextAreaElement>('[name="cover.prompt"]')?.value).toBe("Moonlit glass towers");
   });
+
+  it("keeps invalid Review creation actionable, makes no request, and focuses the complete error summary", () => {
+    const { document, root } = creationFixture();
+    let state = setCreationCoverIntent(reviewedState(), { mode: "generated", prompt: "" });
+    state = editCreationDraft(state, ["world", "title"], "");
+    const createWorld = vi.fn();
+    mountWorldCreationPage(root, { initialState: state, createWorld });
+
+    const create = document.querySelector<HTMLButtonElement>('[data-action="create-world"]');
+    expect(create?.disabled).toBe(false);
+    create?.click();
+
+    const summary = document.querySelector<HTMLElement>("[data-review-errors]");
+    expect(createWorld).not.toHaveBeenCalled();
+    expect(summary?.querySelectorAll("a")).toHaveLength(2);
+    expect(summary?.textContent).toContain("World title is required");
+    expect(summary?.textContent).toContain("Describe the cover to generate");
+    expect(document.activeElement).toBe(summary);
+  });
+
+  it.each([
+    ["world.title", "foundation", '[name="world.title"]'],
+    ["cover.prompt", "cover", '[name="cover.prompt"]']
+  ])("moves Review issue %s to its exact %s control", (path, stage, selector) => {
+    const { document, root } = creationFixture();
+    let state = setCreationCoverIntent(reviewedState(), { mode: "generated", prompt: "" });
+    state = editCreationDraft(state, ["world", "title"], "");
+    mountWorldCreationPage(root, { initialState: state, createWorld: vi.fn() });
+
+    document.querySelector<HTMLAnchorElement>(`[data-review-issue-path="${path}"]`)?.click();
+
+    const control = document.querySelector<HTMLElement>(selector);
+    expect(document.querySelector(`[data-creation-stage="${stage}"]`)).not.toBeNull();
+    expect(document.activeElement).toBe(control);
+  });
 });
 
 describe("World Creation authoritative creation", () => {
@@ -484,24 +536,39 @@ describe("World Creation authoritative creation", () => {
     expect(navigate).toHaveBeenCalledWith(`/app/worlds/${createdWorld.id}`);
   });
 
-  it("preserves all local state and focuses the error summary when creation fails", async () => {
-    const { document, root, window } = creationFixture();
+  it("preserves provenance, cover intent, collections, defaults, and overview when creation fails", async () => {
+    const { document, root } = creationFixture();
+    let state = reviewedState("ai");
+    state = setCreationCoverIntent(state, { mode: "generated", prompt: "Moonlit glass towers" });
+    state = editCreationDraft(state, ["world", "genre"], "Science fantasy");
+    state = editCreationDraft(state, ["world", "premise"], "A city follows a migrating star.");
+    state = editCreationDraft(state, ["entities"], [{ id: "city", name: "Glass City" }]);
+    state = editCreationDraft(state, ["relationships"], [{ source: "city", target: "star" }]);
+    state = editCreationDraft(state, ["rpgStats"], [{ name: "Resolve", value: 3 }]);
+    state = editCreationDraft(state, ["defaultTriggers"], [{ name: "Dusk" }]);
+    state = editCreationDraft(state, ["eventTriggers"], [{ name: "Alarm" }]);
+    state = editCreationDraft(state, ["assets"], [{ id: "atlas-map" }]);
+    state = editCreationDraft(state, ["defaults"], { difficulty: "heroic" });
+    const expectedDraft = structuredClone(state.draft);
     const createWorld = vi.fn().mockRejectedValue(new WorldCreationApiError("network", "offline", null));
     const navigate = vi.fn();
-    mountWorldCreationPage(root, { createWorld, navigate });
-    advanceManualWizardToCover(document, window as unknown as Window);
-    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    mountWorldCreationPage(root, { initialState: state, createWorld, navigate });
 
     document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
     await settle();
 
-    expect(createWorld).toHaveBeenCalledTimes(1);
+    expect(createWorld).toHaveBeenCalledWith(expectedDraft, expect.any(AbortSignal));
     expect(navigate).not.toHaveBeenCalled();
     const error = document.querySelector<HTMLElement>('[data-creation-error]');
     expect(error?.textContent).toContain("not created");
     expect(document.activeElement).toBe(error);
-    expect(document.querySelector('[data-review-serialized]')?.textContent).toContain("Glass Atlas");
+    expect(document.querySelector('[data-review-provenance]')?.textContent).toContain("AI-assisted");
+    expect(JSON.parse(document.querySelector('[data-review-serialized]')?.textContent ?? "null")).toEqual(expectedDraft);
     expect(document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.disabled).toBe(false);
+
+    document.querySelector<HTMLButtonElement>('[data-action="back-stage"]')?.click();
+    expect(document.querySelector<HTMLInputElement>('[name="coverMode"][value="generated"]')?.checked).toBe(true);
+    expect(document.querySelector<HTMLTextAreaElement>('[name="cover.prompt"]')?.value).toBe("Moonlit glass towers");
   });
 
   it("creates once before attaching a retained cover and navigates after both succeed", async () => {
@@ -524,6 +591,46 @@ describe("World Creation authoritative creation", () => {
     expect(attachCreatedWorldCover).toHaveBeenCalledWith(createdWorld.id, "asset-1", expect.any(AbortSignal));
     expect(attachCreatedWorldCover.mock.invocationCallOrder[0]).toBeGreaterThan(createWorld.mock.invocationCallOrder[0]!);
     expect(navigate).toHaveBeenCalledWith(`/app/worlds/${createdWorld.id}`);
+  });
+
+  it.each([
+    ["queued", true, "queued"],
+    ["generating", true, "in progress"],
+    ["provider_pending", true, "in progress"],
+    ["downloading", true, "in progress"],
+    ["completed", true, "completed"],
+    ["recoverable", false, "could not be completed"],
+    ["failed", false, "could not be completed"],
+    ["cancelled", false, "could not be completed"],
+    ["expired", false, "could not be completed"]
+  ] as const)("classifies resolved generated-cover status %s", async (status, navigates, message) => {
+    const { document, root, window } = creationFixture();
+    const createWorld = vi.fn().mockResolvedValue(createdWorld);
+    const generateCreatedWorldCover = vi.fn().mockResolvedValue({
+      id: "cover-job", worldId: createdWorld.id, targetType: "world_cover", status, duplicate: false
+    });
+    const navigate = vi.fn();
+    mountWorldCreationPage(root, { createWorld, generateCreatedWorldCover, navigate });
+    advanceManualWizardToCover(document, window as unknown as Window);
+    const generated = document.querySelector<HTMLInputElement>('[name="coverMode"][value="generated"]');
+    generated!.checked = true;
+    generated!.dispatchEvent(new window.Event("change", { bubbles: true }));
+    inputValue(document, window as unknown as Window, '[name="cover.prompt"]', "Moonlit glass towers");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+
+    document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
+    await settle();
+
+    expect(createWorld).toHaveBeenCalledTimes(1);
+    expect(generateCreatedWorldCover).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("[data-cover-status], [data-cover-error]")?.textContent).toContain(message);
+    if (navigates) {
+      expect(navigate).toHaveBeenCalledWith(`/app/worlds/${createdWorld.id}`);
+    } else {
+      expect(navigate).not.toHaveBeenCalled();
+      expect(document.querySelector<HTMLButtonElement>('[data-action="open-created-world"]')).not.toBeNull();
+      expect(document.querySelector<HTMLButtonElement>('[data-action="retry-cover"]')).not.toBeNull();
+    }
   });
 
   it("does not repeat or roll back creation when cover fails, and retry calls only the cover endpoint", async () => {
@@ -600,6 +707,71 @@ describe("World Creation authoritative creation", () => {
     pending.resolve(createdWorld);
     await settle();
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("ignores stale initial-cover completion after disposal without navigation or cover messaging", async () => {
+    const { document, root, window } = creationFixture();
+    const pendingCover = deferred<{ id: string; worldId: string; targetType: "world_cover"; status: "completed"; duplicate: false }>();
+    const generateCreatedWorldCover = vi.fn(() => pendingCover.promise);
+    const navigate = vi.fn();
+    const mounted = mountWorldCreationPage(root, {
+      createWorld: vi.fn().mockResolvedValue(createdWorld),
+      generateCreatedWorldCover,
+      navigate
+    });
+    advanceManualWizardToCover(document, window as unknown as Window);
+    const generated = document.querySelector<HTMLInputElement>('[name="coverMode"][value="generated"]');
+    generated!.checked = true;
+    generated!.dispatchEvent(new window.Event("change", { bubbles: true }));
+    inputValue(document, window as unknown as Window, '[name="cover.prompt"]', "Moonlit glass towers");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
+    await settle();
+    const signal = generateCreatedWorldCover.mock.calls[0]?.[2] as AbortSignal;
+
+    mounted.dispose();
+    expect(signal.aborted).toBe(true);
+    pendingCover.resolve({
+      id: "cover-job", worldId: createdWorld.id, targetType: "world_cover", status: "completed", duplicate: false
+    });
+    await settle();
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-cover-status], [data-cover-error]")).toBeNull();
+  });
+
+  it("ignores stale cover-only retry completion after disposal without navigation or cover messaging", async () => {
+    const { document, root, window } = creationFixture();
+    const pendingRetry = deferred<{ id: string; worldId: string; targetType: "world_cover"; status: "completed"; duplicate: false }>();
+    const generateCreatedWorldCover = vi.fn()
+      .mockRejectedValueOnce(new Error("cover failed"))
+      .mockImplementationOnce(() => pendingRetry.promise);
+    const navigate = vi.fn();
+    const mounted = mountWorldCreationPage(root, {
+      createWorld: vi.fn().mockResolvedValue(createdWorld),
+      generateCreatedWorldCover,
+      navigate
+    });
+    advanceManualWizardToCover(document, window as unknown as Window);
+    const generated = document.querySelector<HTMLInputElement>('[name="coverMode"][value="generated"]');
+    generated!.checked = true;
+    generated!.dispatchEvent(new window.Event("change", { bubbles: true }));
+    inputValue(document, window as unknown as Window, '[name="cover.prompt"]', "Moonlit glass towers");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-action="retry-cover"]')?.click();
+    const signal = generateCreatedWorldCover.mock.calls[1]?.[2] as AbortSignal;
+
+    mounted.dispose();
+    expect(signal.aborted).toBe(true);
+    pendingRetry.resolve({
+      id: "cover-job", worldId: createdWorld.id, targetType: "world_cover", status: "completed", duplicate: false
+    });
+    await settle();
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-cover-status], [data-cover-error]")).toBeNull();
   });
 });
 
